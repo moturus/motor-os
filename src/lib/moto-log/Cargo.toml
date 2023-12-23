@@ -1,0 +1,14 @@
+[package]
+name = "moto-log"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+moto-ipc = "0.1.0"
+moto-sys = "0.1.0"
+log = { path = "../../third_party/log", features = ["std"] }
+spin = { path = "../../third_party/spin"}
+
+[features]

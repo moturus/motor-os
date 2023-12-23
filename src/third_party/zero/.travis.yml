@@ -1,0 +1,10 @@
+dist: xenial
+language: rust
+rust: stable
+
+git:
+  depth: 1
+
+script:
+  - cargo check --verbose
+  - cargo test --verbose

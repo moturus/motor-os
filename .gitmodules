@@ -1,0 +1,3 @@
+[submodule "src/bin/rush"]
+	path = src/bin/rush
+	url = https://github.com/moturus/rush.git

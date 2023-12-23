@@ -1,0 +1,18 @@
+[package]
+name = "mbr"
+authors = [
+  "Philipp Oppermann <dev@phil-opp.com>",
+  "The Moturus Project Developers",
+  ]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = false
+overflow-checks = false

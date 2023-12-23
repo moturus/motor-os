@@ -1,0 +1,24 @@
+[package]
+name = "systest"
+description = "Moturus OS systest."
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+moto-runtime = { version = "0.1.0", features = ["rt-api"] }
+moto-ipc = "0.1.0"
+moto-sys = "0.1.0"
+
+[features]
+test_sse = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

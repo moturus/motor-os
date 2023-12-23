@@ -1,0 +1,18 @@
+[package]
+name = "zero"
+version = "0.1.2"
+authors = ["Nick Cameron <ncameron@mozilla.com>"]
+description = "A Rust library for zero-allocation parsing of binary data."
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/nrc/zero"
+readme = "README.md"
+
+[dependencies]
+core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
+compiler_builtins = { version = "0.1", optional = true }
+
+[features]
+rustc-dep-of-std = [
+    "compiler_builtins",
+    "core",
+]

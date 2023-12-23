@@ -1,0 +1,254 @@
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+CARGO_TARGET_DIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/build/obj"
+BIN_BASE = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/build/bin"
+
+[tasks.default]
+script = '''
+echo "\nplease specify the task to make\n"
+'''
+
+[tasks.build]
+disabled = true
+
+[tasks.clear]
+script = '''
+rm -rf build
+rm -rf vm_images
+'''
+
+[tasks.all]
+dependencies = [
+  "boot_img",
+  "boot_img_release",
+]
+
+[tasks.boot_img]
+dependencies = [
+  "setup_dirs_debug",
+  "x64_mbr_debug",
+  "x64_boot_debug",
+  "x64_kloader_debug",
+  "kernel_debug",
+  "sys_io_debug",
+  "sys_init_debug",
+  "sys_log_debug",
+  "sys_tty_debug",
+  "sysbox_debug",
+  "systest_debug",
+  "rush_debug",
+  "httpd_debug",
+  "make_img_debug",
+]
+
+[tasks.boot_img_release]
+dependencies = [
+  "setup_dirs_release",
+  "x64_mbr_release",
+  "x64_boot_release",
+  "x64_kloader_release",
+  "kernel_release",
+  "sys_io_release",
+  "sys_init_release",
+  "sys_log_release",
+  "sys_tty_release",
+  "sysbox_release",
+  "systest_release",
+  "rush_release",
+  "httpd_release",
+  "make_img_release",
+]
+
+[tasks.setup_dirs_debug]
+env = { "MOTO_BIN" = "${BIN_BASE}/debug" }
+script = '''
+mkdir -p "${MOTO_BIN}"
+'''
+
+[tasks.setup_dirs_release]
+env = { "MOTO_BIN" = "${BIN_BASE}/release" }
+script = '''
+mkdir -p "${MOTO_BIN}"
+'''
+
+[tasks.x64_mbr_debug]
+cwd = "./src/bin/x64.mbr"
+script = '''
+./build.sh
+'''
+
+# Need a different debug|release tasks because the output dirs differ.
+[tasks.x64_mbr_release]
+cwd = "./src/bin/x64.mbr"
+script = '''
+./build.sh
+'''
+
+[tasks.x64_boot_debug]
+cwd = "./src/bin/x64.boot"
+script = '''
+./build.sh
+'''
+
+# Need a different debug|release tasks because the output dirs differ.
+[tasks.x64_boot_release]
+cwd = "./src/bin/x64.boot"
+script = '''
+./build.sh
+'''
+
+[tasks.x64_kloader_debug]
+cwd = "./src/bin/x64.kloader"
+script = '''
+./build.sh
+'''
+
+[tasks.x64_kloader_release]
+cwd = "./src/bin/x64.kloader"
+script = '''
+./build.sh --release
+'''
+
+[tasks.kernel_debug]
+cwd = "./src/bin/kernel"
+script = '''
+./build.sh
+'''
+
+[tasks.kernel_release]
+cwd = "./src/bin/kernel"
+script = '''
+./build.sh --release
+'''
+
+[tasks.sys_io_debug]
+cwd = "./src/bin/sys-io"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/sys-io" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-io"
+'''
+
+[tasks.sys_io_release]
+cwd = "./src/bin/sys-io"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-io" "${MOTO_BIN}/sys-io"
+'''
+
+[tasks.sys_init_debug]
+cwd = "./src/bin/sys-init"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/sys-init" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-init"
+'''
+
+[tasks.sys_init_release]
+cwd = "./src/bin/sys-init"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-init" "${MOTO_BIN}/sys-init"
+'''
+
+[tasks.sys_log_debug]
+cwd = "./src/bin/sys-log"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/sys-log" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-log"
+'''
+
+[tasks.sys_log_release]
+cwd = "./src/bin/sys-log"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-log" "${MOTO_BIN}/sys-log"
+'''
+
+[tasks.sys_tty_debug]
+cwd = "./src/bin/sys-tty"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/sys-tty" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-tty"
+'''
+
+[tasks.sys_tty_release]
+cwd = "./src/bin/sys-tty"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-tty" "${MOTO_BIN}/sys-tty"
+'''
+
+[tasks.sysbox_debug]
+cwd = "./src/bin/sysbox"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/sysbox" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sysbox"
+'''
+
+[tasks.sysbox_release]
+cwd = "./src/bin/sysbox"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sysbox" "${MOTO_BIN}/sysbox"
+'''
+
+[tasks.systest_debug]
+cwd = "./src/bin/systest"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/systest" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/systest"
+'''
+
+[tasks.systest_release]
+cwd = "./src/bin/systest"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/systest" "${MOTO_BIN}/systest"
+'''
+
+[tasks.rush_debug]
+cwd = "./src/bin/rush"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/rush" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/rush"
+'''
+
+[tasks.rush_release]
+cwd = "./src/bin/rush"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/rush" "${MOTO_BIN}/rush"
+'''
+
+[tasks.httpd_debug]
+cwd = "./src/bin/httpd"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/httpd" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/httpd"
+'''
+
+[tasks.httpd_release]
+cwd = "./src/bin/httpd"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/httpd" "${MOTO_BIN}/httpd"
+'''
+
+[tasks.make_img_debug]
+cwd = "./src/imager"
+script = '''
+cargo run --release -- ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY} debug
+cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/src/vm_scripts/"* \
+   "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/vm_images/debug/"
+'''
+
+[tasks.make_img_release]
+cwd = "./src/imager"
+script = '''
+cargo run --release -- ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY} release
+cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/src/vm_scripts/"* \
+   "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/vm_images/release/"
+'''
+

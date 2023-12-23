@@ -1,0 +1,32 @@
+[package]
+name = "sys-io"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4.20"
+spin = { path = "../../third_party/spin" }
+
+flatfs       = "0.2.0"
+moto-runtime = { version = "0.1.0", features = ["rt-api"] }
+moto-ipc     = "0.1.0"
+moto-sys     = "0.1.0"
+moto-virtio  = { path = "../../lib/virtio"    }
+
+srfs         = "0.1"
+
+configparser = { version = "3.0.2", default_features = false }
+ipnetwork = { version = "0.20.0", default_features = false }
+smoltcp = "0.9.1"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
+

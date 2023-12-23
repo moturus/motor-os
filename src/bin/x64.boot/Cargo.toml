@@ -1,0 +1,18 @@
+[package]
+name = "boot"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mbr-nostd = "0.1.0"
+byteorder = { version = "1.4.3", default-features = false }
+
+[profile.release]
+panic = "abort"
+lto = false
+opt-level = "s"
+codegen-units = 1
+debug = false
+overflow-checks = true

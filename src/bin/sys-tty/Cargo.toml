@@ -1,0 +1,23 @@
+[package]
+name = "sys-tty"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+moto-ipc = "0.1.0"
+moto-log = { path = "../../lib/moto-log" }
+moto-sys = "0.1.0"
+log = { path = "../../third_party/log", features = ["std"] }
+x86_64 = { path = "../../third_party/x86_64"}  # Used for port I/O.
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
+

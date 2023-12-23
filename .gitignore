@@ -1,0 +1,6 @@
+/build
+/target
+/vm_images
+/.vscode
+*.swp
+

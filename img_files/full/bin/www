@@ -1,0 +1,5 @@
+#!/bin/rush
+
+/bin/httpd 10.0.2.15:5542 /www
+
+

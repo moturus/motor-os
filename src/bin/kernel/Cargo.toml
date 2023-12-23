@@ -1,0 +1,33 @@
+[package]
+name = "kernel"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+# internal dependencies
+moto-sys = { version = "0.1.0", default-features = false }
+frusa = "0.1.0"
+
+# external dependencies
+bitflags = { path = "../../third_party/bitflags" }
+elfloader = { path = "../../third_party/elfloader" }
+intrusive-collections = { path = "../../third_party/intrusive-rs" }
+log = { path = "../../third_party/log" }
+x86 = { path = "../../third_party/x86" }
+x86_64 = { path = "../../third_party/x86_64" }
+
+xsave = "2.0.2"
+
+[features]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

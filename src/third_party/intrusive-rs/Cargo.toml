@@ -1,0 +1,26 @@
+[package]
+name = "intrusive-collections"
+version = "0.9.6"
+authors = ["Amanieu d'Antras <amanieu@gmail.com>"]
+description = "Intrusive collections for Rust (linked list and red-black tree)"
+documentation = "https://docs.rs/intrusive-collections"
+license = "Apache-2.0/MIT"
+repository = "https://github.com/Amanieu/intrusive-rs"
+readme = "README.md"
+keywords = ["intrusive", "no_std", "list", "rbtree"]
+categories = ["data-structures", "no-std"]
+edition = "2018"
+
+[features]
+nightly = []
+alloc = []
+default = ["alloc"]
+
+[dependencies]
+# memoffset = "0.9"
+memoffset = { path = "../memoffset" }
+
+[dev-dependencies]
+rand = "0.8.4"
+typed-arena = "2.0.1"
+rand_xorshift = "0.3.0"

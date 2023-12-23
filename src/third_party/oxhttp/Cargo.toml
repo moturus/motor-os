@@ -1,0 +1,34 @@
+[package]
+name = "oxhttp"
+version = "0.2.0-alpha.1"
+authors = ["Tpt <thomas@pellissier-tanon.fr>"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/oxhttp"
+keywords = ["HTTP"]
+repository = "https://github.com/oxigraph/oxhttp"
+description = """
+Very simple implementation of HTTP 1.1 (both client and server)
+"""
+edition = "2021"
+rust-version = "1.70"
+
+[dependencies]
+flate2 = { version = "1.0.27", optional = true }
+httparse = "1.8.0"
+native-tls = { version = "0.2.11", optional = true }
+rustls = { version = "0.21.7", optional = true }
+rustls-native-certs = { version = "0.6.3", optional = true }
+webpki-roots = { version = "0.25", optional = true }
+url = "2.4.0"
+
+[features]
+default = ["client", "server"]
+rustls-native = ["rustls", "rustls-native-certs"]
+rustls-webpki = ["rustls", "webpki-roots"]
+client = []
+server = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

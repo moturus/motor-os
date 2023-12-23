@@ -1,0 +1,12 @@
+[package]
+name = "imager"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flatfs = "0.2.0"
+mbrman = "0.5.2"
+srfs = "0.1"
+
