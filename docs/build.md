@@ -85,7 +85,7 @@ $ cargo make boot_img_release
 
 ## Run Motūrus OS
 
-If of the above completed successfully, you can now
+If all of the above completed successfully, you can now do
 
 ```
 $ sudo apt install qemu-system
