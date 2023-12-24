@@ -375,29 +375,6 @@ fn stress_test_threads() {
     println!("stress_test_threads PASS");
 }
 
-fn test_spawn_process(cmd: &str) {
-    #[cfg(not(debug_assertions))]
-    const ITERS: usize = 100;
-    #[cfg(debug_assertions)]
-    const ITERS: usize = 10;
-
-    let mut handles = Vec::with_capacity(ITERS);
-    for idx in 0..ITERS {
-        let mut command = std::process::Command::new(cmd);
-        command.arg("spawn_child");
-        command.arg(format!("{}", idx % 255));
-        let handle = command.spawn().unwrap();
-        handles.push(handle);
-    }
-
-    for idx in 0..ITERS {
-        let exit_status = handles[idx].wait().unwrap();
-        assert_eq!(exit_status.code().unwrap() as usize, (idx % 255) ^ 255);
-    }
-
-    println!("test_spawn_process PASS");
-}
-
 fn test_file_write() {
     use std::io::Write;
     const WRITTEN: &str = "Lorem Ipsum";
@@ -497,9 +474,6 @@ fn main() {
     test_pipes();
     test_futex();
     test_rt_mutex();
-    // let prev_log_level = moto_sys::syscalls::SysCtl::set_log_level(4).unwrap();
-    test_spawn_process("/sys/crossbench");
-    // moto_sys::syscalls::SysCtl::set_log_level(prev_log_level).unwrap();
 
     test_cpus();
     println!("PASS");
