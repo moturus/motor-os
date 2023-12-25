@@ -63,9 +63,9 @@ checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
 
 [[package]]
 name = "frusa"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94a279318a9f0b526068e12c7fd66d4b3eeaad11049efe8b1c0a70ce5e6f8ec9"
+checksum = "df8680f10c30a6998367079d1a8cfd39af85ac9a10d6bc83a7066ad767cbb411"
 
 [[package]]
 name = "hashbrown"

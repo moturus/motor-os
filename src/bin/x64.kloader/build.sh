@@ -20,6 +20,9 @@ cargo build --target kloader.json \
 objcopy -I elf64-x86-64 -O binary "${TARGET_DIR}/kloader/debug/kloader" \
     "${BIN_DIR}/kloader.bin"
 
+# The elf file is used by cloud-hypervisor as the bootloader.
+cp "${TARGET_DIR}/kloader/debug/kloader" "${BIN_DIR}/kloader"
+
 elif [[ $# != 1 ]] ; then
 
 echo "kloader build.sh takes no or a single '--release' parameter"
@@ -43,10 +46,11 @@ cargo build --release --no-default-features --target kloader.json \
 # The binary is used inside initd.
 objcopy -I elf64-x86-64 -O binary "${TARGET_DIR}/kloader/release/kloader" \
     "${BIN_DIR}/kloader.bin"
-fi
 
 # The elf file is used by cloud-hypervisor as the bootloader.
 cp "${TARGET_DIR}/kloader/release/kloader" "${BIN_DIR}/kloader"
+
+fi
 
 echo "kloader done"
 

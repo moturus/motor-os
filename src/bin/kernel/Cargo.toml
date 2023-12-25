@@ -9,7 +9,7 @@ edition = "2021"
 
 # internal dependencies
 moto-sys = { version = "0.1.0", default-features = false }
-frusa = "0.1.0"
+frusa = "0.1.1"
 
 # external dependencies
 bitflags = { path = "../../third_party/bitflags" }
