@@ -5,6 +5,8 @@ Motūrus project builds a simple, fast, and secure operating system (Motūrus OS
 In more specific terms, Motūrus OS (sometimes called Motor OS),
 is a new operating system targeting virtual machine-based workloads such as web serving, "serverless", edge caching, etc.
 
+[Screenshot](docs/screenshot.md)
+
 ## Why?
 
 At the moment, most virtualized production workloads run Linux.
