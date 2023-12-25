@@ -5,6 +5,7 @@ skip_core_tasks = true
 [env]
 CARGO_TARGET_DIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/build/obj"
 BIN_BASE = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/build/bin"
+RDIR = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
 
 [tasks.default]
 script = '''
@@ -18,6 +19,11 @@ disabled = true
 script = '''
 rm -rf build
 rm -rf vm_images
+cd "${RDIR}/src/imager"
+cargo clean
+cd "${RDIR}/src/bin/sys-io"
+cargo clean
+
 '''
 
 [tasks.all]
