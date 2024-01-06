@@ -4,7 +4,7 @@ mod subcommand;
 mod tcp;
 
 use std::{
-    io::Read,
+    io::{Read, Write},
     sync::{
         atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
         Arc,
@@ -88,6 +88,14 @@ fn test_rt_mutex() {
 
     assert_eq!(THREADS, *COUNTER.lock() as u16);
     println!("test_rt_mutex PASS");
+}
+
+fn test_reentrant_mutex() {
+    let _lock1 = std::io::stdout().lock();
+    let mut lock2 = std::io::stdout().lock();
+    lock2
+        .write("test_reentrant_stdout lock PASS\n".as_bytes())
+        .unwrap();
 }
 
 fn test_cpus() {
@@ -376,7 +384,6 @@ fn stress_test_threads() {
 }
 
 fn test_file_write() {
-    use std::io::Write;
     const WRITTEN: &str = "Lorem Ipsum";
 
     let mut path = std::env::temp_dir();
@@ -460,6 +467,7 @@ fn main() {
     spawn_wait_kill::test();
 
     // tcp::test_web_server();
+    test_reentrant_mutex();
     tcp::test_tcp_loopback();
     // tcp::test_wget();
     channel_test::test_io_channel();

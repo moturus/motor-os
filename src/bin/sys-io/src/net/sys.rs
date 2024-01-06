@@ -590,7 +590,8 @@ impl NetSys {
 
         self.devices[device_idx].tcp_stream_shutdown(&local_addr, &remote_addr, shut_rd, shut_wr);
 
-        None
+        sqe.status = ErrorCode::Ok.into();
+        return Some(sqe);
     }
 
     fn tcp_stream_drop(
@@ -622,26 +623,17 @@ impl NetSys {
             .unwrap()
             .remove(&tcp_id));
 
-        if stream.state() == TcpState::Closed {
-            assert_eq!(stream.device(), usize::MAX);
-            sqe.status = ErrorCode::Ok.into();
-            return Some(sqe);
+        if stream.state() != TcpState::Closed {
+            stream.set_state(TcpState::Closed);
         }
-
-        stream.set_state(TcpState::Closed);
 
         let device_idx = stream.device();
         let local_addr = *stream.local_addr();
         let remote_addr = *stream.remote_addr();
 
-        // #[cfg(debug_assertions)]
-        // moto_log!(
-        //     "sys-io: TCP connection {:?} - {:?} dropped (locally).",
-        //     local_addr,
-        //     remote_addr
-        // );
-
-        self.devices[device_idx].tcp_stream_drop(&local_addr, &remote_addr);
+        if device_idx != usize::MAX {
+            self.devices[device_idx].tcp_stream_drop(&local_addr, &remote_addr);
+        }
 
         sqe.status = ErrorCode::Ok.into();
         return Some(sqe);
