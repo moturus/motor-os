@@ -262,13 +262,11 @@ impl KernelBootupInfo {
 static AP_STARTED: AtomicU32 = AtomicU32::new(0);
 
 fn start_bsp(arg: u64) -> ! {
+    // The raw_log!() below makes random kvm_clock init failures go away. Why?
+    crate::raw_log!("\n");
     crate::arch::init_kvm_clock();
 
-    let boot_info = unsafe {
-        (arg as usize as *const KernelBootupInfo)
-            .as_ref()
-            .unwrap()
-    };
+    let boot_info = unsafe { (arg as usize as *const KernelBootupInfo).as_ref().unwrap() };
 
     let boot_info = *boot_info;
 
@@ -371,15 +369,13 @@ fn cpu_main(this_cpu: u64) -> ! {
 fn print_boot_logo() {
     crate::raw_log!("\nMOTOR OS\n");
 
-    // TODO: enable ASCII graphics below. For some reason if the code below
-    // is uncommented, kvm clock fails to initialize ?!
-
     // crate::raw_log!(" ███╗   ███╗ ██████╗ ████████╗ ██████╗ ██████╗      ██████╗  █████╗ ");
     // crate::raw_log!(" ████╗ ████║██╔═══██╗╚══██╔══╝██╔═══██╗██╔══██╗    ██╔═══██╗██╔═══╝ ");
     // crate::raw_log!(" ██╔████╔██║██║   ██║   ██║   ██║   ██║██████╔╝    ██║   ██║╚█████╗ ");
     // crate::raw_log!(" ██║╚██╔╝██║██║   ██║   ██║   ██║   ██║██╔══██╗    ██║   ██║╚════██║");
     // crate::raw_log!(" ██║ ╚═╝ ██║╚██████╔╝   ██║   ╚██████╔╝██║  ██║    ╚██████╔╝██████╔╝");
     // crate::raw_log!(" ╚═╝     ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═╝     ╚═════╝ ╚═════╝ ");
+    // crate::raw_log!("\n");
 
     // crate::raw_log!(" ###    ###  ######  ########  ######  ######       ######   #####  ");
     // crate::raw_log!(" ####  #### ##    ##    ##    ##    ## ##   ##     ##    ## ##      ");
