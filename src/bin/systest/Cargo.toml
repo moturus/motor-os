@@ -7,9 +7,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-moto-runtime = { version = "0.1.0", features = ["rt-api"] }
-moto-ipc = "0.1.0"
-moto-sys = "0.1.0"
+moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
+moto-ipc     = { path = "../../lib/moto-ipc"    }
+moto-sys     = { path = "../../lib/moto-sys"    }
+
+[patch.crates-io]
+moto-ipc     = { path = "../../lib/moto-ipc"    }
+moto-sys     = { path = "../../lib/moto-sys"    }
 
 [features]
 test_sse = []

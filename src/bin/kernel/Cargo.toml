@@ -8,8 +8,8 @@ edition = "2021"
 [dependencies]
 
 # internal dependencies
-moto-sys = { version = "0.1.0", default-features = false }
-frusa = "0.1.1"
+moto-sys = { path = "../../lib/moto-sys", default-features = false }
+frusa    = { path = "../../lib/frusa" }
 
 # external dependencies
 bitflags = { path = "../../third_party/bitflags" }

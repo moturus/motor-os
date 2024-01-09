@@ -24,10 +24,8 @@ dependencies = [
 [[package]]
 name = "moto-ipc"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d253e1ccedfb03e15d1cf49023e9278ff2c130532186ad11b8d97834d3bf098e"
 dependencies = [
- "moto-sys",
+ "moto-sys 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -36,9 +34,13 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-sys",
+ "moto-sys 0.1.0",
  "spin",
 ]
+
+[[package]]
+name = "moto-sys"
+version = "0.1.0"
 
 [[package]]
 name = "moto-sys"
@@ -61,7 +63,7 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
- "moto-sys",
+ "moto-sys 0.1.0",
  "x86_64",
 ]
 

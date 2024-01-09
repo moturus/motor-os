@@ -7,10 +7,15 @@ edition = "2021"
 
 [dependencies]
 log          = { path = "../../third_party/log" }
-moto-runtime = { version = "0.1.0", features = ["rt-api"] }
-moto-ipc     = "0.1.0"
-moto-sys     = "0.1.0"
-moto-log     = { path = "../../lib/moto-log" }
+moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
+moto-ipc     = { path = "../../lib/moto-ipc"    }
+moto-sys     = { path = "../../lib/moto-sys"    }
+moto-log     = { path = "../../lib/moto-log"    }
+
+[patch.crates-io]
+moto-ipc     = { path = "../../lib/moto-ipc"    }
+moto-sys     = { path = "../../lib/moto-sys"    }
+moto-log     = { path = "../../lib/moto-log"    }
 
 [profile.dev]
 panic = "abort"

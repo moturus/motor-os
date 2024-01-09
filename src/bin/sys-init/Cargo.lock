@@ -16,8 +16,6 @@ dependencies = [
 [[package]]
 name = "moto-ipc"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d253e1ccedfb03e15d1cf49023e9278ff2c130532186ad11b8d97834d3bf098e"
 dependencies = [
  "moto-sys",
 ]
@@ -35,8 +33,6 @@ dependencies = [
 [[package]]
 name = "moto-runtime"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e092ab76032ab8dda1d907470bcadc23d5e12b12c8b15459827f43cc35fcdf7b"
 dependencies = [
  "moto-ipc",
  "moto-sys",
@@ -45,8 +41,6 @@ dependencies = [
 [[package]]
 name = "moto-sys"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e30bfaa9cb6aa322abbfe965101964148b8a7edee0c3d053ec5f9843c7b292bb"
 
 [[package]]
 name = "spin"

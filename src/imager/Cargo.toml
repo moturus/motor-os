@@ -6,7 +6,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-flatfs = "0.2.0"
+flatfs = { path = "../lib/flatfs" }
 mbrman = "0.5.2"
-srfs = "0.1"
+srfs = { path = "../lib/srfs" }
 

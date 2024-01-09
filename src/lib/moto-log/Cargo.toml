@@ -6,9 +6,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-moto-ipc = "0.1.0"
-moto-sys = "0.1.0"
-log = { path = "../../third_party/log", features = ["std"] }
+moto-ipc = { path = "../../lib/moto-ipc" }
+moto-sys = { path = "../../lib/moto-sys" }
+log  = { path = "../../third_party/log", features = ["std"] }
 spin = { path = "../../third_party/spin"}
 
 [features]

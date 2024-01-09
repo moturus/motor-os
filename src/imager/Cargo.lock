@@ -70,9 +70,7 @@ checksum = "4939f9ed1444bd8c896d37f3090012fa6e7834fe84ef8c9daa166109515732f9"
 
 [[package]]
 name = "flatfs"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "116df3566805ac0ddb3b1bb6a8cfedf8729bedcbbab1880bd5fd0a63e2e3e702"
+version = "0.2.1"
 
 [[package]]
 name = "funty"
@@ -188,9 +186,7 @@ dependencies = [
 
 [[package]]
 name = "srfs"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32d0ff95a436a6f283abbc543b097d822b6b3239078f8ae1585bad337db5ab17"
+version = "0.1.2"
 dependencies = [
  "bitflags",
  "log",
