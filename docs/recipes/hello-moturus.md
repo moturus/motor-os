@@ -15,7 +15,7 @@ $ cargo new hello
 $ cd hello
 ```
 
-Replace ```src.main.rs``` with this:
+Replace ```src/main.rs``` with this:
 
 ```Rust
 use hello::ThreadPool;
