@@ -105,6 +105,10 @@ More specifically:
 
 See [docs/build.md](docs/build.md).
 
+## Examples and recipes.
+
+see [docs/recipes/index.md](docs/recipes/index.md).
+
 ## Thanks
 
 Big thanks to Philipp Oppermann for his great [Writing an OS in Rust](https://os.phil-opp.com/) blog series - it has inspired a lot of people to experiment in this space.
