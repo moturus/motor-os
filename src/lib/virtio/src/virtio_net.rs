@@ -142,13 +142,8 @@ impl NetDev {
             .as_ref()
             .unwrap();
 
-        let mac_0_4: u32 = cfg_bar.read_u32(device_cfg.offset as u64 + 0);
-        let mac_4_6: u16 = cfg_bar.read_u16(device_cfg.offset as u64 + 4);
-        for idx in 0..4 {
-            self.mac[idx] = unsafe { *(((&mac_0_4 as *const _ as usize) + idx) as *const u8) };
-        }
-        for idx in 4..6 {
-            self.mac[idx] = unsafe { *(((&mac_4_6 as *const _ as usize) + idx - 4) as *const u8) };
+        for (index, b) in self.mac.iter_mut().enumerate() {
+            *b = cfg_bar.readb(device_cfg.offset as u64 + index as u64);
         }
 
         #[cfg(debug_assertions)]
