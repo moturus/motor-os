@@ -49,7 +49,7 @@ Check out Rust sources with Motūrus target added:
 
 ```
 $ cd $MOTORH
-$ git clone -b moturus-2024-01-11 https://github.com/moturus/rust.git
+$ git clone -b moturus-2024-01-13 https://github.com/moturus/rust.git
 ```
 
 Build Rust Motūrus target/toolchain:
