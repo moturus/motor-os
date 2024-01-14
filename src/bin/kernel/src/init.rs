@@ -262,8 +262,6 @@ impl KernelBootupInfo {
 static AP_STARTED: AtomicU32 = AtomicU32::new(0);
 
 fn start_bsp(arg: u64) -> ! {
-    // The raw_log!() below makes random kvm_clock init failures go away. Why?
-    crate::raw_log!("\n");
     crate::arch::init_kvm_clock();
 
     let boot_info = unsafe { (arg as usize as *const KernelBootupInfo).as_ref().unwrap() };

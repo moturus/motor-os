@@ -169,27 +169,31 @@ fn rdtsc() -> u64 {
 // see https://www.kernel.org/doc/Documentation/virt/kvm/msr.rst
 // see https://www.kernel.org/doc/html/latest/virt/kvm/cpuid.html
 pub fn init_pvclock() {
-    // If we don't trigger a VM exit like below, the host KVM sometimes
-    // does not update system time.
-    // crate::raw_log!(".");
-
     // Enable KVM wall clock: this is a global setting, not per-cpu.
     let ptr_wc: *const PvClockWallClock = &GLOBALS.wall_clock as *const _;
     let addr_wc = crate::arch::paging::virt_to_phys(ptr_wc as usize as u64).unwrap();
     assert_eq!(addr_wc % 4, 0);
 
     const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b564d00;
-    super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc as u64);
 
     // The global clock is updated by kvm only once, so we read the value only once.
     let (mut sec, mut nsec): (u32, u32);
 
     let mut iters = 0_u64;
     loop {
-        iters += 1;
         if iters > 1_000_000 {
             panic!("init_pvclock() looping.");
         }
+        if iters % 10_000 == 0 {
+            super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc as u64);
+            if iters > 0 {
+                // If we don't trigger a VM exit, the host KVM sometimes
+                // does not update system time. Which is a bug on their side, as
+                // wrmsr above should trigger a VM exit.
+                crate::raw_log!("\n");
+            }
+        }
+        iters += 1;
         let ver = GLOBALS.wall_clock.version.load(Ordering::Acquire);
         if (ver == 0) || (ver & 1 != 0) {
             continue;
