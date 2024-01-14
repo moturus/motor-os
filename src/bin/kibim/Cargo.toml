@@ -1,0 +1,23 @@
+# Note: kibim has been forked from https://github.com/ilai-deutel/kibi/,
+# as we plan to add features here and we don't care much about the
+# number of lines, which is what kibi is mostly about.
+#
+# Also it appears that kibi not really actively developed, as the
+# project has an open PR that has been there for several months.
+
+[package]
+name = "kibim"
+version = "0.1.0"
+authors = ["Ilaï Deutel", "The Moturus Project Developers"]
+description = "Kibi for Motūrus OS"
+license = "MIT OR Apache-2.0"
+edition = "2018"
+
+[dependencies]
+unicode-width = "0.1.11"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

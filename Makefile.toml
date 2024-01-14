@@ -47,6 +47,7 @@ dependencies = [
   "systest_debug",
   "rush_debug",
   "httpd_debug",
+  "kibim_debug",
   "make_img_debug",
 ]
 
@@ -65,6 +66,7 @@ dependencies = [
   "systest_release",
   "rush_release",
   "httpd_release",
+  "kibim_release",
   "make_img_release",
 ]
 
@@ -240,6 +242,20 @@ cwd = "./src/bin/httpd"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/httpd" "${MOTO_BIN}/httpd"
+'''
+
+[tasks.kibim_debug]
+cwd = "./src/bin/kibim"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/kibim" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/kibim"
+'''
+
+[tasks.kibim_release]
+cwd = "./src/bin/kibim"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/kibim" "${MOTO_BIN}/kibim"
 '''
 
 [tasks.make_img_debug]

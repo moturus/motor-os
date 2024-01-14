@@ -74,6 +74,8 @@ More specifically, these things work:
     will cross-compile for Motūrus OS and run, subject to
     "what does not work" below
   * a simple [unix-like shell](https://github.com/moturus/rush) in the serial console
+  * a simple [httpd](https://github.com/moturus/motor-os/tree/main/src/bin/httpd)
+  * a simle [text editor](https://github.com/moturus/motor-os/tree/main/src/bin/kibim)
 
 ### What does not work
 
