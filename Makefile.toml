@@ -21,9 +21,19 @@ rm -rf build
 rm -rf vm_images
 cd "${RDIR}/src/imager"
 cargo clean
+rm -rf target
 cd "${RDIR}/src/bin/sys-io"
 cargo clean
-
+rm -rf target
+cd "${RDIR}/src/bin/rush"
+cargo clean
+rm -rf target
+cd "${RDIR}/src/bin/kibim"
+cargo clean
+rm -rf target
+cd "${RDIR}/src/lib/moto-runtime"
+cargo clean
+rm -rf target
 '''
 
 [tasks.all]
