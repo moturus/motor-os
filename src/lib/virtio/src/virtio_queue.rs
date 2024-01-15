@@ -299,7 +299,11 @@ impl Virtqueue {
         loop {
             let descriptor = self.get_descriptor(idx);
             if (descriptor.flags & VIRTQ_DESC_F_NEXT) != 0 {
-                idx = descriptor.next;
+                // TODO: fix below.
+                #[allow(unused_assignments)]
+                {
+                    idx = descriptor.next;
+                }
             } else {
                 assert!(descriptor.next == self.head_idx);
                 self.head_idx = idx;

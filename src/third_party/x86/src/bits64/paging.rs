@@ -1101,12 +1101,15 @@ pub const PML4_SLOT_SIZE: usize = HUGE_PAGE_SIZE * 512;
 pub const CACHE_LINE_SIZE: usize = 64;
 
 /// A type wrapping a base page with a 4 KiB buffer.
+#[allow(dead_code)]
 pub struct Page([u8; BASE_PAGE_SIZE]);
 
 /// A type wrapping a large page with a 2 MiB buffer.
+#[allow(dead_code)]
 pub struct LargePage([u8; LARGE_PAGE_SIZE]);
 
 /// A type wrapping a huge page with a 1 GiB buffer.
+#[allow(dead_code)]
 pub struct HugePage([u8; HUGE_PAGE_SIZE]);
 
 /// MAXPHYADDR, which is at most 52; (use CPUID for finding system value).

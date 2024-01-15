@@ -1034,9 +1034,11 @@ pub const LARGE_PAGE_SIZE: usize = 1024 * 1024 * 4;
 pub const CACHE_LINE_SIZE: usize = 64;
 
 /// A type wrapping a base page with a 4 KiB buffer.
+#[allow(dead_code)]
 pub struct Page([u8; BASE_PAGE_SIZE]);
 
 /// A type wrapping a large page with a 4 MiB buffer.
+#[allow(dead_code)]
 pub struct LargePage([u8; LARGE_PAGE_SIZE]);
 
 /// Mask to find the physical address of an entry in a page-table.

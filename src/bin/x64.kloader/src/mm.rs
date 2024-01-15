@@ -172,19 +172,20 @@ pub fn init(pvh: &'static PvhStartInfo) {
     static mut L3_TABLE_DIRECT_MAP: HwPageTable = HwPageTable::new();
 
     unsafe {
+        #[allow(static_mut_ref)]
         set_l3_table_for_direct_map(0, max_addr, &mut L3_TABLE_DIRECT_MAP);
 
         let idx_l4 = idx_l4(PAGING_DIRECT_MAP_OFFSET);
         assert_eq!(idx_l4, idx_l4 & ((1 << 9) - 1));
 
-        let mut pte = &L3_TABLE_DIRECT_MAP as *const _ as usize as u64;
+        let mut pte = core::ptr::addr_of!(L3_TABLE_DIRECT_MAP) as usize as u64;
         assert_eq!(0, pte & ((1 << 12) - 1));
 
         pte |= PTE::PRESENT | PTE::WRITABLE;
         L4_TABLE.set(idx_l4, PTE::from_u64(pte));
 
         // validate.
-        let l4_addr = &L4_TABLE as *const _ as usize;
+        let l4_addr = core::ptr::addr_of!(L4_TABLE) as usize;
         assert_eq!(
             (l4_addr as *const u64).as_ref().unwrap(),
             ((l4_addr + (PAGING_DIRECT_MAP_OFFSET as usize)) as *const u64)

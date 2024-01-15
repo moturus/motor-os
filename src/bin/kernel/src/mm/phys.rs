@@ -567,7 +567,7 @@ impl PhysicalMemory {
     // };
 
     fn inst() -> &'static Self {
-        let addr = unsafe { core::ptr::read_volatile(&PHYS_MEM as *const usize) };
+        let addr = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize) };
         assert_ne!(addr, 0);
         unsafe { (addr as *const Self).as_ref().unwrap_unchecked() }
     }
@@ -699,7 +699,7 @@ impl PhysicalMemory {
 
     fn init(available: &[MemorySegment], in_use: &[MemorySegment]) {
         assert_eq!(0, unsafe {
-            core::ptr::read_volatile(&PHYS_MEM as *const usize)
+            core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize)
         });
 
         let mut total_size: u64 = 0;
@@ -722,7 +722,7 @@ impl PhysicalMemory {
         let ptr = self_ as *mut PhysicalMemory;
         let ptr = ptr as usize;
         unsafe {
-            core::ptr::write_volatile(&mut PHYS_MEM as *mut usize, ptr);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!(PHYS_MEM) as *mut usize, ptr);
         }
 
         PhysicalMemory::assign_pages_to_area(available, &mut self_.small_pages);

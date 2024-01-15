@@ -718,7 +718,7 @@ unsafe fn lapic_init() {
         // crate::mm::phys::phys_deallocate_frameless(LAPIC_BASE, crate::mm::PageType::SmallPage);
         let mapping = crate::mm::mmio::mmio_map(LAPIC_BASE, 1).unwrap();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(&mut LAPIC_VIRT_ADDR as *mut u64, mapping.virt_addr);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(LAPIC_VIRT_ADDR) as *mut u64, mapping.virt_addr);
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
@@ -785,7 +785,7 @@ unsafe fn ioapic_init() {
     if cpu == super::bsp() {
         let mapping = crate::mm::mmio::mmio_map(IOAPIC_BASE, 1).unwrap();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(&mut IOAPIC_VIRT_ADDR as *mut u64, mapping.virt_addr);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(IOAPIC_VIRT_ADDR) as *mut u64, mapping.virt_addr);
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 

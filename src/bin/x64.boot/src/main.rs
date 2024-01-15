@@ -100,6 +100,7 @@ fn start(disk_number: u16, partition_table_start: *const u8) -> ! {
     let initrd_start = INITRD_ADDR as usize;
     let initrd_len = (initrd_partition.sector_count * 512) as usize;
 
+    #[allow(static_mut_ref)]
     let disk_buffer = unsafe { &mut DISK_BUFFER };
 
     let mut sector_pos = 0_usize;
