@@ -11,6 +11,13 @@ use crate::serial::write_serial_raw;
 
 mod serial;
 
+#[no_mangle]
+pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
+    // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
+    // don't have stdio, so they will override this function to log via SysMem::log().
+    true
+}
+
 fn _putc(c: u8) {
     serial::write_serial_raw(std::slice::from_ref(&c));
 }

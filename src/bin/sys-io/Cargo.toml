@@ -15,7 +15,6 @@ moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-virtio  = { path = "../../lib/virtio"      }
 srfs         = { path = "../../lib/srfs"        }
-
 configparser = { version = "3.0.2", default_features = false }
 ipnetwork = { version = "0.20.0", default_features = false }
 smoltcp = "0.9.1"

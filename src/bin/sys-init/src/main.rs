@@ -5,6 +5,13 @@ use moto_runtime::moturus_log;
 // use moto_sys::caps::{CAP_IO_MANAGER, CAP_LOG, CAP_SHARE, CAP_SPAWN};
 use moto_sys::syscalls::*;
 
+#[no_mangle]
+pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
+    // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
+    // don't have stdio, so they will override this function to log via SysMem::log().
+    true
+}
+
 #[derive(Debug)]
 struct Config {
     pub tty: String,

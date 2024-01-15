@@ -1,0 +1,15 @@
+[package]
+name = "rnetbench"
+description = "Network benchmark."
+version = "0.1.0"
+edition = "2021"
+authors = ["U. Lasiotus"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

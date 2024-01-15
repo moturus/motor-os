@@ -1,0 +1,135 @@
+use std::io::ErrorKind;
+use std::io::Read;
+use std::io::Result;
+use std::io::Write;
+use std::net::SocketAddr;
+use std::net::TcpStream;
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(1);
+
+pub fn run(host_port: &str) -> ! {
+    match do_run(host_port) {
+        Ok(_) => std::process::exit(0),
+        Err(err) => {
+            eprintln!("{} error: {:?}", crate::binary_name(), err);
+            std::process::exit(1)
+        }
+    }
+}
+
+fn do_run(host_port: &str) -> Result<()> {
+    use std::net::ToSocketAddrs;
+    eprintln!("{}:{}", file!(), line!());
+    let addrs = host_port.to_socket_addrs()?;
+
+    eprintln!("{}:{}", file!(), line!());
+    for addr in addrs {
+        // return try_addr(addr, crate::CMD_TCP_THROUGHPUT);
+        if try_addr(addr, crate::CMD_TCP_RR).is_ok() {
+            return try_addr(addr, crate::CMD_TCP_THROUGHPUT);
+        }
+    }
+
+    Err(ErrorKind::HostUnreachable.into())
+}
+
+fn try_addr(addr: SocketAddr, cmd: u64) -> Result<()> {
+    let mut buf: [u8; 1500] = [0; 1500];
+    eprintln!("{}:{} {}", file!(), line!(), cmd);
+    let mut tcp_stream = TcpStream::connect_timeout(&addr, TIMEOUT)?;
+    eprintln!("{}:{}", file!(), line!());
+    tcp_stream.set_nodelay(true).unwrap();
+    // tcp_stream.set_read_timeout(Some(TIMEOUT))?;
+    // tcp_stream.set_write_timeout(Some(TIMEOUT))?;
+    eprintln!("{}:{}", file!(), line!());
+
+    tcp_stream.write_all(crate::MAGIC_BYTES_CLIENT)?;
+    tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_SERVER.len()])?;
+    eprintln!("{}:{}", file!(), line!());
+
+    if crate::MAGIC_BYTES_SERVER != &buf[0..crate::MAGIC_BYTES_SERVER.len()] {
+        eprintln!("{} error: bad remote reply.", crate::binary_name());
+        std::process::exit(1);
+    }
+
+    let buf: &[u8] =
+        unsafe { core::slice::from_raw_parts(&cmd as *const u64 as usize as *const u8, 8) };
+    tcp_stream.write_all(buf)?;
+
+    match cmd {
+        crate::CMD_TCP_RR => {
+            do_rr(tcp_stream)?;
+        }
+        crate::CMD_TCP_THROUGHPUT => {
+            do_throughput(tcp_stream)?;
+        }
+        _ => {
+            panic!("unrecognized command: {}", cmd);
+        }
+    }
+
+    Ok(())
+}
+
+fn do_rr(mut stream: TcpStream) -> Result<()> {
+    let mut buf: [u8; 1500] = [0; 1500];
+    const RR_DURATION_SECS: u64 = 30;
+    println!(
+        "{}: starting TCP round-robin test (64 byte buffers)...",
+        crate::binary_name()
+    );
+    let mut rr_iters = 0_u64;
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(RR_DURATION_SECS) {
+        rr_iters += 1;
+
+        stream.write_all(&buf[0..64])?;
+        stream.read_exact(&mut buf[0..64])?;
+    }
+    let stop = std::time::Instant::now();
+
+    stream.shutdown(std::net::Shutdown::Both)?;
+    core::mem::drop(stream);
+
+    let iters_per_sec = (rr_iters as f64) / ((stop - start).as_secs_f64());
+    println!(
+        "\tRR done: {} iterations/sec; {:.3} usec/iteration.",
+        iters_per_sec as u64,
+        1_000_000_f64 / iters_per_sec
+    );
+
+    Ok(())
+}
+
+fn do_throughput(mut stream: TcpStream) -> std::io::Result<()> {
+    let data = [0u8; 1024]; // Sample data buffer
+    let mut total_bytes_sent = 0usize;
+    let time_limit = Duration::new(3, 0); // Run for 10 seconds
+    println!(
+        "{}: starting TCP throughput test (1k buffers)...",
+        crate::binary_name()
+    );
+    let start_time = std::time::Instant::now();
+
+    for _ in 0..120 {
+        // while start_time.elapsed() < time_limit {
+        match stream.write(&data) {
+            Ok(bytes_sent) => total_bytes_sent += bytes_sent,
+            Err(e) => {
+                eprintln!("Failed to write to socket: {}", e);
+                return Ok(());
+            }
+        }
+    }
+
+    stream.flush().unwrap();
+
+    let duration = start_time.elapsed();
+    println!(
+        "\tThroughput done: {:.2?} bytes/sec.",
+        total_bytes_sent as f64 / duration.as_secs_f64()
+    );
+
+    Ok(())
+}

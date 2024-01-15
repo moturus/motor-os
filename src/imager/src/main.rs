@@ -20,10 +20,11 @@ use std::io::{self, Seek, SeekFrom};
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
-static BIN_FULL: [&'static str; 8] = [
+static BIN_FULL: [&'static str; 9] = [
     "bin/httpd",
     "bin/kibim",
     "bin/rush",
+    "sys/rnetbench",
     "sys/sys-init",
     "sys/sys-log",
     "sys/sys-tty",

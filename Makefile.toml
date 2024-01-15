@@ -34,6 +34,9 @@ rm -rf target
 cd "${RDIR}/src/lib/moto-runtime"
 cargo clean
 rm -rf target
+cd "${RDIR}/src/bin/rnetbench"
+cargo clean
+rm -rf target
 '''
 
 [tasks.all]
@@ -58,6 +61,7 @@ dependencies = [
   "rush_debug",
   "httpd_debug",
   "kibim_debug",
+  "rnetbench_debug",
   "make_img_debug",
 ]
 
@@ -77,6 +81,7 @@ dependencies = [
   "rush_release",
   "httpd_release",
   "kibim_release",
+  "rnetbench_release",
   "make_img_release",
 ]
 
@@ -266,6 +271,20 @@ cwd = "./src/bin/kibim"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/kibim" "${MOTO_BIN}/kibim"
+'''
+
+[tasks.rnetbench_debug]
+cwd = "./src/bin/rnetbench"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/rnetbench" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/rnetbench"
+'''
+
+[tasks.rnetbench_release]
+cwd = "./src/bin/rnetbench"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/rnetbench" "${MOTO_BIN}/rnetbench"
 '''
 
 [tasks.make_img_debug]
