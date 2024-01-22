@@ -149,6 +149,20 @@ impl IoRuntime {
             }
 
             match sqe.command {
+                io_channel::CMD_NOOP_OK => {
+                    let mut cqe = sqe;
+                    cqe.status = ErrorCode::Ok.into();
+                    if let Err(err) = proc.conn().complete_sqe(cqe) {
+                        #[cfg(debug_assertions)]
+                        moto_log!("complete_sqe() failed");
+                        debug_assert_eq!(err, ErrorCode::NotReady);
+                        self.pending_completions.push_back(PendingCompletion {
+                            cqe: sqe,
+                            endpoint_handle: handle,
+                        });
+                    }
+                    wake_conn = true;
+                }
                 rt_api::net::CMD_MIN..=rt_api::net::CMD_MAX => {
                     if let Some(cqe) = self.net.process_sqe(proc, sqe) {
                         debug_assert_ne!(cqe.status(), ErrorCode::NotReady);
@@ -165,6 +179,7 @@ impl IoRuntime {
                     }
                 }
                 _ => {
+                    moto_log!("bad command: 0x{:x}", sqe.command);
                     sqe.status = ErrorCode::InvalidArgument.into();
                     if let Err(err) = proc.conn().complete_sqe(sqe) {
                         debug_assert_eq!(err, ErrorCode::NotReady);
@@ -207,9 +222,9 @@ impl IoRuntime {
     }
 
     fn process_wakeups(&mut self, handles: Vec<SysHandle>, timeout_wakeup: bool) {
-        for handle in handles {
-            if handle != SysHandle::NONE {
-                self.process_wakeup(handle, timeout_wakeup);
+        for handle in &handles {
+            if *handle != SysHandle::NONE {
+                self.process_wakeup(*handle, timeout_wakeup);
             }
         }
     }
@@ -266,6 +281,8 @@ impl IoRuntime {
 
         self_mut.update_handles();
 
+        SysCpu::affine_to_cpu(Some(0)).unwrap();
+
         #[cfg(debug_assertions)]
         crate::moto_log!("{}:{} affine the IO thread to CPU0", file!(), line!());
 
@@ -284,6 +301,7 @@ impl IoRuntime {
     fn io_thread(&mut self) -> ! {
         self.spawn_listeners_if_needed();
 
+        let mut busy_polling_iter = 0_u32;
         loop {
             let mut had_work = false;
             loop {
@@ -297,37 +315,72 @@ impl IoRuntime {
             }
 
             had_work |= self.process_completions();
-            had_work |= self.cache_wakee(SysHandle::NONE); // Trigger a pending wakeup, if any.
 
-            if !had_work {
-                let mut handles = self.all_handles.clone();
-
-                let timeout: core::time::Duration = self.wait_timeout();
-                if timeout.is_zero() {
+            // process_wakeups() below polls new SQEs and new client connections.
+            //
+            // Note: while it may seem useful to track which connections submitted SQEs
+            // and then poll them (call process_wakeup()) directly instead of doing
+            // SysCpu::wait() first, it is unsafe, as polling a disconnected client leads to #PF.
+            // The #PF issue should probably be fixed, but it is present at the moment...
+            //
+            // In addition, tracking "active" clients seems to be no less expensive
+            // than doing a non-blocking syscall (this is an I/O thread and is treated
+            // specially in the kernel).
+            let mut handles = self.all_handles.clone();
+            match SysCpu::wait(
+                &mut handles[..],
+                SysHandle::NONE,
+                SysHandle::NONE,
+                Some(moto_sys::time::Instant::nan()),
+            ) {
+                Ok(()) => {
+                    if !handles.is_empty() {
+                        // This polls for incoming SQEs.
+                        self.process_wakeups(handles, false);
+                    }
+                }
+                Err(_) => {
+                    self.process_errors(handles);
                     continue;
                 }
+            }
 
-                core::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-                core::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-                let result = SysCpu::wait(
-                    &mut handles[..],
-                    SysHandle::NONE,
-                    SysHandle::NONE,
-                    Some(moto_sys::time::Instant::now() + timeout),
-                );
-                core::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-                core::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-                match result {
-                    Ok(()) => self.process_wakeups(handles, false),
-                    Err(err) => {
-                        if err == ErrorCode::TimedOut {
-                            // #[cfg(debug_assertions)]
-                            // crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
-                            // self.process_wakeups(self.all_handles.clone(), true);
-                            self.process_wakeups(handles, true);
-                        } else {
-                            self.process_errors(handles);
-                        }
+            had_work |= self.cache_wakee(SysHandle::NONE); // Trigger a pending wakeup, if any.
+
+            if had_work {
+                busy_polling_iter = 0;
+                continue;
+            } else {
+                busy_polling_iter += 1;
+                if busy_polling_iter < 16 {
+                    continue;
+                }
+            }
+
+            // Go to sleep.
+            let mut handles = self.all_handles.clone();
+
+            let timeout: core::time::Duration = self.wait_timeout();
+            if timeout.is_zero() {
+                continue;
+            }
+
+            let result = SysCpu::wait(
+                &mut handles[..],
+                SysHandle::NONE,
+                SysHandle::NONE,
+                Some(moto_sys::time::Instant::now() + timeout),
+            );
+            match result {
+                Ok(()) => self.process_wakeups(handles, false),
+                Err(err) => {
+                    if err == ErrorCode::TimedOut {
+                        // #[cfg(debug_assertions)]
+                        // crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
+                        // self.process_wakeups(self.all_handles.clone(), true);
+                        self.process_wakeups(handles, true);
+                    } else {
+                        self.process_errors(handles);
                     }
                 }
             }

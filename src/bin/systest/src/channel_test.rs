@@ -1,11 +1,14 @@
 use moto_ipc::io_channel::*;
-use std::sync::{atomic::*, Arc};
+use moto_sys::SysHandle;
+use std::{
+    sync::{atomic::*, Arc},
+    time::Duration,
+};
 
 const CHANNEL_TEST_ITERS: u64 = 1000;
 
 fn client_loop(client: &mut Client) {
     use moto_sys::syscalls::SysCpu;
-    use moto_sys::syscalls::SysHandle;
     use moto_sys::ErrorCode;
 
     let mut values_sent: u64 = 0;
@@ -95,7 +98,6 @@ fn client_loop(client: &mut Client) {
 
 fn server_loop(server: &mut Server) {
     use moto_sys::syscalls::SysCpu;
-    use moto_sys::syscalls::SysHandle;
     use moto_sys::ErrorCode;
 
     'outer: loop {
@@ -161,7 +163,6 @@ fn client_thread(server_watcher: Arc<AtomicBool>) {
 
 fn server_thread(server_started: Arc<AtomicBool>) {
     use moto_sys::syscalls::SysCpu;
-    use moto_sys::syscalls::SysHandle;
 
     // Listen.
     let mut server = Server::create("systest_channel").unwrap();
@@ -201,5 +202,102 @@ pub fn test_io_channel() {
 
     server_thread.join().unwrap();
     client_thread.join().unwrap();
-    println!("channel_test() PASS");
+    println!("test_io_channel() PASS");
+}
+
+fn do_test_io_throughput(io_size: usize) {
+    let mut io_client = match Client::connect("sys-io") {
+        Ok(client) => client,
+        Err(err) => {
+            panic!("Failed to connect to sys-io: {:?}", err);
+        }
+    };
+
+    let (num_blocks, batch_size) = match io_size {
+        0 => (0, 32),
+        1024 => (2, 32),
+        4096 => (8, 8),
+        _ => panic!(),
+    };
+    const DURATION: Duration = Duration::from_millis(1000);
+
+    moto_sys::syscalls::SysCpu::affine_to_cpu(Some(1)).unwrap();
+
+    let mut iterations = 0_u64;
+    let start = std::time::Instant::now();
+    while start.elapsed() < DURATION {
+        iterations += 1;
+        for step in 0..batch_size {
+            let mut sqe = QueueEntry::new();
+            sqe.command = CMD_NOOP_OK;
+            sqe.id = step as u64;
+            if num_blocks > 0 {
+                let buff = io_client.alloc_buffer(num_blocks).unwrap();
+                let buf = io_client.buffer_bytes(buff).unwrap();
+                let buf_u64 = unsafe {
+                    core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, buf.len() / 8)
+                };
+                for b in buf_u64 {
+                    *b ^= 0x12345678;
+                }
+                sqe.payload.buffers_mut()[0] = buff;
+            }
+            io_client.submit_sqe(sqe).unwrap();
+        }
+
+        for step in 0..batch_size {
+            loop {
+                match io_client.get_cqe() {
+                    Ok(cqe) => {
+                        assert_eq!(cqe.id, step as u64);
+                        if num_blocks > 0 {
+                            io_client.free_buffer(cqe.payload.buffers()[0]).unwrap();
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        assert_eq!(err, moto_sys::ErrorCode::NotReady);
+                        moto_sys::syscalls::SysCpu::wait(
+                            &mut [io_client.server_handle()],
+                            SysHandle::NONE,
+                            io_client.server_handle(),
+                            None,
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let mut cpu_usage: [f32; 16] = [0.0; 16];
+    moto_sys::stats::get_cpu_usage(&mut cpu_usage).unwrap();
+
+    let iops = ((iterations * batch_size) as f64) / elapsed.as_secs_f64();
+
+    println!(
+        "test_io_throughput: {} iterations of {} IO size (in batches of {}) over {:?}: {:.3} million IOPS.",
+        iterations * batch_size,
+        io_size,
+        batch_size,
+        elapsed,
+        iops / (1000.0 * 1000.0)
+    );
+    if io_size > 0 {
+        println!(
+            "I/O throughput: {:.3} MiB/sec",
+            iops * (io_size as f64) / (1024.0 * 1024.0)
+        );
+    }
+    println!(
+        "cpu usage: {:.3} {:.3} {:.3} {:.3}",
+        cpu_usage[0], cpu_usage[1], cpu_usage[2], cpu_usage[3]
+    );
+}
+
+pub fn test_io_throughput() {
+    do_test_io_throughput(0);
+    do_test_io_throughput(1024);
+    do_test_io_throughput(4096);
 }

@@ -6,6 +6,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-moto-sys = "0.1.0"
+moto-sys = "0.2.0"
 log = { path = "../../third_party/log" }
 spin = { path = "../../third_party/spin" }

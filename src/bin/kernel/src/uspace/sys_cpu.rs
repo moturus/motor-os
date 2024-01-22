@@ -1,7 +1,10 @@
 use alloc::vec::Vec;
 use core::sync::atomic::*;
+use moto_sys::caps::CAP_IO_MANAGER;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+
+use crate::config::uCpus;
 
 use super::syscall::*;
 
@@ -185,7 +188,12 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     // We always deschedule the thread here, even if it has wakers; this is WAI, as
     // wait is at least a yield(). If this is not what the userspace wants, it should
     // use shared memory and avoid syscalls altogether.
-    let (timed_out, wakers) = curr.wait();
+    // (This is not necessarily true for I/O threads).
+    let (timed_out, wakers) = if (timeout == 0) && (curr.capabilities() & CAP_IO_MANAGER != 0) {
+        (false, curr.take_wakers())
+    } else {
+        curr.wait()
+    };
 
     if wakers.len() > 6 {
         todo!()
@@ -366,6 +374,36 @@ fn sys_cpu_usage_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> 
     ResultBuilder::ok()
 }
 
+fn sys_affine_cpu(curr: &super::process::Thread, args: &mut SyscallArgs) -> SyscallResult {
+    if args.version > 0 {
+        return ResultBuilder::version_too_high();
+    }
+    if args.flags != 0 {
+        return ResultBuilder::invalid_argument();
+    }
+
+    let arg0 = args.args[0];
+    let cpu = if arg0 == u64::MAX {
+        None
+    } else {
+        if arg0 >= (crate::arch::num_cpus() as u64) {
+            return ResultBuilder::invalid_argument();
+        } else {
+            Some(arg0 as uCpus)
+        }
+    };
+
+    if let Some(0) = cpu {
+        if (curr.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
+            return ResultBuilder::result(ErrorCode::NotAllowed);
+        }
+    }
+
+    curr.set_cpu_affinity(cpu);
+
+    ResultBuilder::ok()
+}
+
 pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> SyscallResult {
     match args.operation {
         SysCpu::OP_WAIT => sys_wait_impl(curr, args),
@@ -373,6 +411,7 @@ pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs
         SysCpu::OP_KILL => sys_kill_impl(curr, args),
         SysCpu::OP_SPAWN => sys_spawn_impl(curr, args),
         SysCpu::OP_USAGE => sys_cpu_usage_impl(curr, args),
+        SysCpu::OP_AFFINE_CPU => sys_affine_cpu(curr, args),
         // Note: curr.exit() below does not return, and the compiler puts ud2 after call,
         //       so if we get INVALID_OPCODE interrupt, we screwed up in syscall_exit_asm().
         SysCpu::OP_EXIT => curr.exit(args.args[0]),

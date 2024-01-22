@@ -9,7 +9,7 @@ edition = "2021"
 log = "0.4.20"
 spin = { path = "../../third_party/spin" }
 
-moto-runtime = { path = "../../lib/moto-runtime", version = "0.1.0", features = ["rt-api"] }
+moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 flatfs       = { path = "../../lib/flatfs"      }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }

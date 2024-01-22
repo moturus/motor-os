@@ -320,6 +320,7 @@ impl VirtioNetDev {
     }
 
     fn do_tcp_listener_bind(&mut self, addr: &std::net::SocketAddr) {
+        crate::moto_log!("{}:{} - bind {:?}", file!(), line!(), addr);
         assert!(!self.tcp_listeners_by_addr.contains_key(addr));
 
         if !addr.ip().is_unspecified() {

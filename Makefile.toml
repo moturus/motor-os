@@ -31,7 +31,19 @@ rm -rf target
 cd "${RDIR}/src/bin/kibim"
 cargo clean
 rm -rf target
+cd "${RDIR}/src/bin/kernel"
+cargo clean
+rm -rf target
+cd "${RDIR}/src/bin/systest"
+cargo clean
+rm -rf target
+cd "${RDIR}/src/lib/moto-ipc"
+cargo clean
+rm -rf target
 cd "${RDIR}/src/lib/moto-runtime"
+cargo clean
+rm -rf target
+cd "${RDIR}/src/lib/moto-sys"
 cargo clean
 rm -rf target
 cd "${RDIR}/src/bin/rnetbench"

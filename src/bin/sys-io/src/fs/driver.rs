@@ -87,7 +87,7 @@ impl Driver {
 
     fn run() -> ! {
         // VirtIO interrupts are affined to CPU 0.
-        moto_sys::syscalls::SysCtl::set_cpu_affinity(SysHandle::CURR, Some(0)).unwrap();
+        moto_sys::syscalls::SysCpu::affine_to_cpu(Some(0)).unwrap();
 
         let self_ = Self::get();
         let mut swap_target = SysHandle::NONE;

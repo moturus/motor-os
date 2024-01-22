@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "moto-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "moto-sys",
 ]
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "spin"

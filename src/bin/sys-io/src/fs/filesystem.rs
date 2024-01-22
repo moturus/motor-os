@@ -106,6 +106,11 @@ pub fn init() {
         panic!("Couldn't find a data partition.");
     }
 
-    unsafe { core::mem::swap(&mut FS, &mut fs) };
+    unsafe {
+        core::mem::swap(
+            std::ptr::addr_of_mut!(FS).as_mut().unwrap_unchecked(),
+            &mut fs,
+        )
+    };
     assert!(fs.is_none());
 }

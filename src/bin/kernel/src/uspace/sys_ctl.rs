@@ -5,7 +5,6 @@ use super::syscall::*;
 use super::SysObject;
 use alloc::sync::Arc;
 use alloc::{borrow::ToOwned, string::String};
-use moto_sys::caps::CAP_IO_MANAGER;
 use moto_sys::stats::ProcessStatsV1;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
@@ -54,10 +53,8 @@ fn sys_handle_create(
                 };
 
                 let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
-                let sys_object = SysObject::new_owned(
-                    Arc::new(moto_sys::url_decode(debug_name)),
-                    address_space,
-                );
+                let sys_object =
+                    SysObject::new_owned(Arc::new(moto_sys::url_decode(debug_name)), address_space);
                 log::debug!("created {}", url);
                 return Ok(thread.owner().add_object(sys_object));
             }
@@ -465,32 +462,6 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
             _ => ResultBuilder::invalid_argument(),
         },
-        SysCtl::OP_SET_CPU_AFFINITY => {
-            if args.flags != 0 || args.version != 1 {
-                return ResultBuilder::invalid_argument();
-            }
-
-            if args.args[0] != SysHandle::CURR.as_u64() {
-                return ResultBuilder::invalid_argument();
-            }
-
-            if (thread.capabilities() & CAP_IO_MANAGER) == 0 {
-                return ResultBuilder::result(ErrorCode::NotAllowed);
-            }
-
-            let cpu = args.args[1];
-            if cpu == u64::MAX {
-                thread.set_cpu_affinity(None);
-            } else {
-                if cpu >= (crate::arch::num_cpus() as u64) {
-                    return ResultBuilder::invalid_argument();
-                } else {
-                    thread.set_cpu_affinity(Some(cpu as crate::config::uCpus));
-                }
-            }
-
-            ResultBuilder::ok()
-        }
         SysCtl::OP_SET_LOG_LEVEL => {
             if args.version > 0 {
                 return ResultBuilder::version_too_high();

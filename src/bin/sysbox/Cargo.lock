@@ -4,14 +4,14 @@ version = 3
 
 [[package]]
 name = "moto-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "moto-sys",
 ]
 
 [[package]]
 name = "moto-runtime"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "moto-ipc",
  "moto-sys",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "sysbox"

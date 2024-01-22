@@ -517,15 +517,18 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
             crate::sched::local_wake();
             crate::uspace::serial_console::on_irq(); // Console.
             eoi();
+            if uspace {
+                ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
+            }
         }
         64..=79 => {
             crate::sched::on_custom_irq(irq_num as u8);
             if uspace {
                 // These are I/O IRQs, make sure the driver is running.
-                if !ThreadControlBlock::io_thread() {
-                    eoi();
-                    ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
-                }
+                //if !ThreadControlBlock::io_thread() {
+                eoi();
+                ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
+                                                                           //}
             }
             eoi();
         }
@@ -718,7 +721,10 @@ unsafe fn lapic_init() {
         // crate::mm::phys::phys_deallocate_frameless(LAPIC_BASE, crate::mm::PageType::SmallPage);
         let mapping = crate::mm::mmio::mmio_map(LAPIC_BASE, 1).unwrap();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(LAPIC_VIRT_ADDR) as *mut u64, mapping.virt_addr);
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(LAPIC_VIRT_ADDR) as *mut u64,
+            mapping.virt_addr,
+        );
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
@@ -785,7 +791,10 @@ unsafe fn ioapic_init() {
     if cpu == super::bsp() {
         let mapping = crate::mm::mmio::mmio_map(IOAPIC_BASE, 1).unwrap();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!(IOAPIC_VIRT_ADDR) as *mut u64, mapping.virt_addr);
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(IOAPIC_VIRT_ADDR) as *mut u64,
+            mapping.virt_addr,
+        );
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 

@@ -1107,6 +1107,40 @@ impl Thread {
         }
     }
 
+    fn clear_wait_objects_on_wake(&self) {
+        // Note: we consciously drop all wait objects on wakeup below and
+        // require a full list of wait objects on each new wait. While it
+        // may seem that requiring a full list of wait objects on each wait
+        // is wasteful and does not scale, this is done consciously so that
+        // we avoid synchronous designs (where many wait objects are needed).
+        let wait_objects = core::mem::take(&mut *self.sys_wait_objects.lock(line!()));
+        for obj in &wait_objects {
+            obj.sys_object.remove_waiting_thread(self);
+        }
+        core::mem::drop(wait_objects); // Must drop before resuming the thread.
+    }
+
+    // Called for IO threads on non-blocking waits.
+    pub fn take_wakers(&self) -> Vec<SysHandle> {
+        self.clear_wait_objects_on_wake();
+
+        self.wakes_taken
+            .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.timed_out.store(false, Ordering::Relaxed);
+        let mut wakers = core::mem::take(&mut *self.wakers.lock(line!()));
+
+        if wakers.len() > 1 {
+            wakers.sort_unstable();
+            wakers.dedup();
+        }
+
+        for waker in &wakers {
+            self.owner().process_wake(waker);
+        }
+
+        wakers
+    }
+
     // Returns true if the wait timed out, and/or a list of waker handles.
     pub fn wait(&self) -> (bool, Vec<SysHandle>) {
         let (timed_out, mut wakers) = {
@@ -1130,6 +1164,8 @@ impl Thread {
             }
             // else: have queued wakes.
 
+            self.wakes_taken
+                .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
             (
                 self.timed_out.swap(false, Ordering::AcqRel),
                 core::mem::take(&mut *self.wakers.lock(line!())),
@@ -1145,10 +1181,6 @@ impl Thread {
             self.owner().process_wake(waker);
         }
 
-        // Even if new wakes have arrived since we last checked, we take
-        // all of them, as this is a syscall return path.
-        self.wakes_taken
-            .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
         (timed_out, wakers)
     }
 
@@ -1195,17 +1227,7 @@ impl Thread {
         // @self is not currently running. So we don't check its status; it will
         // be checked when it is resumed in Self::wait().
         self.cancel_timeout();
-
-        // Note: we consciously drop all wait objects on wakeup below and
-        // require a full list of wait objects on each new wait. While it
-        // may seem that requiring a full list of wait objects on each wait
-        // is wasteful and does not scale, this is done consciously so that
-        // we avoid synchronous designs (where many wait objects are needed).
-        let wait_objects = core::mem::take(&mut *self.sys_wait_objects.lock(line!()));
-        for obj in &wait_objects {
-            obj.sys_object.remove_waiting_thread(self);
-        }
-        core::mem::drop(wait_objects); // Must drop before resuming the thread.
+        self.clear_wait_objects_on_wake();
 
         self.on_thread_descheduled(
             /*
