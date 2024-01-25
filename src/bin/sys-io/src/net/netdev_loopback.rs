@@ -2,12 +2,14 @@
 
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use moto_sys::{ErrorCode, SysHandle};
 
 use super::netdev::{NetDev, NetEvent, NetInterface};
 use super::IoBuf;
+
+const IPV4_LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
 struct LoopbackTcpStream {
     tx_queue: Option<VecDeque<IoBuf>>,
@@ -107,6 +109,15 @@ impl Loopback {
                 self.events.push_back(NetEvent::TcpRx((addr1, addr2, rx)));
             }
         }
+
+        #[cfg(debug_assertions)]
+        crate::moto_log!(
+            "{}:{} dropped stream {:?} {:?}",
+            file!(),
+            line!(),
+            addr1,
+            addr2
+        );
     }
 
     fn shut_stream(&mut self, addr1: SocketAddr, addr2: SocketAddr, shut_rd: bool, shut_wr: bool) {
@@ -133,6 +144,13 @@ impl Loopback {
 
             if maybe_rx.is_none() && maybe_tx.is_none() {
                 self.tcp_streams.remove(&(addr1, addr2));
+                crate::moto_log!(
+                    "{}:{} shut stream {:?} {:?}",
+                    file!(),
+                    line!(),
+                    addr1,
+                    addr2
+                );
             }
 
             self.events
@@ -154,7 +172,12 @@ impl NetInterface for Loopback {
         panic!() // No wakeups for loopback.
     }
 
-    fn tcp_stream_connect(&mut self, local_addr: &SocketAddr, remote_addr: &SocketAddr) {
+    fn tcp_stream_connect(
+        &mut self,
+        local_addr: &SocketAddr,
+        remote_addr: &SocketAddr,
+        _: Option<moto_sys::time::Instant>,
+    ) {
         if self.listeners.contains(remote_addr) {
             self.tcp_streams.insert(
                 (*local_addr, *remote_addr),
@@ -172,6 +195,15 @@ impl NetInterface for Loopback {
                 *remote_addr,
                 ErrorCode::Ok,
             )));
+
+            #[cfg(debug_assertions)]
+            crate::moto_log!(
+                "{}:{} new loopback connection {:?} {:?}",
+                file!(),
+                line!(),
+                local_addr,
+                remote_addr
+            );
         } else {
             self.events.push_back(NetEvent::OutgoingTcpConnect((
                 *local_addr,
@@ -199,7 +231,10 @@ impl NetInterface for Loopback {
             }
         }
 
-        let reader = self.tcp_streams.get(&(*remote_addr, *local_addr)).unwrap();
+        let reader = self
+            .tcp_streams
+            .get(&(*remote_addr, *local_addr))
+            .expect(format!("missing stream {:?} {:?}", remote_addr, local_addr).as_str());
 
         while let Some(event) = Self::read_write(reader, writer, remote_addr, local_addr) {
             self.events.push_back(event)
@@ -241,7 +276,16 @@ impl NetInterface for Loopback {
     }
 
     fn tcp_listener_bind(&mut self, addr: &SocketAddr) {
-        assert!(self.listeners.insert(*addr));
+        if addr.ip().is_unspecified() {
+            let local_addr: SocketAddr = SocketAddr::new(IPV4_LOOPBACK, addr.port());
+            if self.listeners.contains(&local_addr) {
+                return;
+            }
+            assert!(self.listeners.insert(local_addr));
+        } else {
+            assert_eq!(addr.ip(), IPV4_LOOPBACK);
+            assert!(self.listeners.insert(*addr));
+        }
     }
 
     fn tcp_stream_drop(&mut self, local_addr: &SocketAddr, remote_addr: &SocketAddr) {
@@ -265,15 +309,22 @@ impl NetInterface for Loopback {
     }
 
     fn tcp_listener_drop(&mut self, addr: &SocketAddr) {
-        assert!(self.listeners.remove(addr));
+        self.hard_drop_tcp_listener(addr)
     }
 
     fn hard_drop_tcp_listener(&mut self, addr: &SocketAddr) {
-        self.listeners.remove(addr);
+        if addr.ip().is_unspecified() {
+            let local_addr: SocketAddr = SocketAddr::new(IPV4_LOOPBACK, addr.port());
+            assert!(self.listeners.remove(&local_addr));
+        } else {
+            assert!(self.listeners.remove(addr));
+        }
     }
 
     fn hard_drop_tcp_stream(&mut self, local_addr: &SocketAddr, remote_addr: &SocketAddr) {
-        self.tcp_streams.remove(&(*local_addr, *remote_addr));
+        self.tcp_streams
+            .remove(&(*local_addr, *remote_addr))
+            .expect("missing tcp stream");
     }
 
     fn tcp_stream_set_read_timeout(
@@ -311,7 +362,7 @@ impl NetInterface for Loopback {
 pub(super) fn init() -> Box<NetDev> {
     let mut ips = Vec::new();
     ips.push(super::config::IpCidr {
-        addr: std::net::Ipv4Addr::new(127, 0, 0, 1).into(),
+        addr: IPV4_LOOPBACK,
         prefix: 24,
     });
     Box::new(NetDev::new(

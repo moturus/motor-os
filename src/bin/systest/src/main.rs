@@ -464,10 +464,10 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    channel_test::test_io_latency();
     spawn_wait_kill::test();
 
     channel_test::test_io_throughput();
-    // tcp::test_web_server();
     test_reentrant_mutex();
     tcp::test_tcp_loopback();
     // tcp::test_wget();

@@ -320,7 +320,6 @@ impl VirtioNetDev {
     }
 
     fn do_tcp_listener_bind(&mut self, addr: &std::net::SocketAddr) {
-        crate::moto_log!("{}:{} - bind {:?}", file!(), line!(), addr);
         assert!(!self.tcp_listeners_by_addr.contains_key(addr));
 
         if !addr.ip().is_unspecified() {
@@ -365,6 +364,7 @@ impl VirtioNetDev {
         socket.register_send_waker(&waker);
 
         socket.listen((addr.ip(), addr.port())).unwrap();
+        crate::moto_log!("{}:{} - bind {:?}", file!(), line!(), addr);
     }
 
     fn shutdown_tcp_stream(
@@ -539,6 +539,7 @@ impl VirtioNetDev {
             }
 
             smoltcp::socket::tcp::State::CloseWait => {}
+            smoltcp::socket::tcp::State::Closed => {}
             _ => todo!("socket state: {:?}", state),
         }
 
@@ -591,7 +592,10 @@ impl VirtioNetDev {
                     ..
                 } = self;
                 if !iface.poll(smoltcp::time::Instant::now(), adapter, sockets) {
-                    assert_eq!(0, self.woken_sockets.borrow().len());
+                    if self.woken_sockets.borrow().len() > 0 {
+                        // This sometimes happen, not clear why.
+                        continue;
+                    }
                     return did_work;
                 }
             }
@@ -739,6 +743,7 @@ impl NetInterface for VirtioNetDev {
         &mut self,
         local_addr: &std::net::SocketAddr,
         remote_addr: &std::net::SocketAddr,
+        timeout: Option<moto_sys::time::Instant>,
     ) {
         // 1. validate the local addr matches self
         // #[cfg(debug_assertions)]
@@ -768,6 +773,20 @@ impl NetInterface for VirtioNetDev {
         let socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
         socket.register_recv_waker(&waker);
         socket.register_send_waker(&waker);
+
+        if let Some(timeout) = timeout {
+            let nanos = timeout.as_u64();
+            let now = moto_sys::time::Instant::now().as_u64();
+            if nanos <= now {
+                // We check this upon receiving sqe; the thread got preempted or something.
+                // Just use an arbitrary small timeout.
+                socket.set_timeout(Some(smoltcp::time::Duration::from_micros(10)));
+            } else {
+                socket.set_timeout(Some(smoltcp::time::Duration::from_micros(
+                    (nanos + 999 - now) / 1000,
+                )));
+            }
+        }
 
         // 3. call connect
         socket

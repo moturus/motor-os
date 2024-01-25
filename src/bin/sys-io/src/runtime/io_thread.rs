@@ -27,13 +27,16 @@ struct IoRuntime {
 
 impl IoRuntime {
     const MIN_LISTENERS: usize = 3;
-    const MAX_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
+    const MAX_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(6);
 
     fn drop_process(&mut self, handle: SysHandle) {
         if let Some(mut proc) = self.processes.remove(&handle) {
             self.net.on_process_drop(&mut proc);
 
             self.update_handles();
+            if self.cached_wakee == handle {
+                self.cached_wakee = SysHandle::NONE;
+            }
 
             #[cfg(debug_assertions)]
             crate::moto_log!(
@@ -221,12 +224,16 @@ impl IoRuntime {
         self.poll_endpoint(handle, timeout_wakeup);
     }
 
-    fn process_wakeups(&mut self, handles: Vec<SysHandle>, timeout_wakeup: bool) {
+    fn process_wakeups(&mut self, handles: Vec<SysHandle>, timeout_wakeup: bool) -> bool {
+        let mut had_work = false;
         for handle in &handles {
             if *handle != SysHandle::NONE {
                 self.process_wakeup(*handle, timeout_wakeup);
+                had_work = true;
             }
         }
+
+        had_work
     }
 
     fn process_completions(&mut self) -> bool {
@@ -282,10 +289,7 @@ impl IoRuntime {
         self_mut.update_handles();
 
         SysCpu::affine_to_cpu(Some(0)).unwrap();
-
-        #[cfg(debug_assertions)]
-        crate::moto_log!("{}:{} affine the IO thread to CPU0", file!(), line!());
-
+        std::thread::sleep(core::time::Duration::from_micros(10));
         self_mut.io_thread();
     }
 
@@ -302,17 +306,22 @@ impl IoRuntime {
         self.spawn_listeners_if_needed();
 
         let mut busy_polling_iter = 0_u32;
+        let mut debug_timed_out = false;
         loop {
             let mut had_work = false;
             loop {
                 match self.net.poll() {
                     Some(p_c) => {
                         had_work = true;
+                        if debug_timed_out {
+                            crate::moto_log!("{}:{} ERROR: net poll on timeout", file!(), line!());
+                        }
                         self.pending_completions.push_back(p_c);
                     }
                     None => break,
                 }
             }
+            debug_timed_out = false;
 
             had_work |= self.process_completions();
 
@@ -325,7 +334,7 @@ impl IoRuntime {
             //
             // In addition, tracking "active" clients seems to be no less expensive
             // than doing a non-blocking syscall (this is an I/O thread and is treated
-            // specially in the kernel).
+            // specially in the kernel) if the number of clients is small.
             let mut handles = self.all_handles.clone();
             match SysCpu::wait(
                 &mut handles[..],
@@ -336,7 +345,7 @@ impl IoRuntime {
                 Ok(()) => {
                     if !handles.is_empty() {
                         // This polls for incoming SQEs.
-                        self.process_wakeups(handles, false);
+                        had_work |= self.process_wakeups(handles, false);
                     }
                 }
                 Err(_) => {
@@ -372,14 +381,19 @@ impl IoRuntime {
                 Some(moto_sys::time::Instant::now() + timeout),
             );
             match result {
-                Ok(()) => self.process_wakeups(handles, false),
+                Ok(()) => {
+                    debug_timed_out = false;
+                    self.process_wakeups(handles, false);
+                }
                 Err(err) => {
                     if err == ErrorCode::TimedOut {
-                        // #[cfg(debug_assertions)]
-                        // crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
-                        // self.process_wakeups(self.all_handles.clone(), true);
-                        self.process_wakeups(handles, true);
+                        debug_timed_out = true;
+                        #[cfg(debug_assertions)]
+                        crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
+                        debug_assert!(self.pending_completions.is_empty());
+                        self.process_wakeups(self.all_handles.clone(), true);
                     } else {
+                        debug_timed_out = false;
                         self.process_errors(handles);
                     }
                 }

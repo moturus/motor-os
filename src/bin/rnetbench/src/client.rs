@@ -6,8 +6,6 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(1);
-
 pub fn run(host_port: &str) -> ! {
     match do_run(host_port) {
         Ok(_) => std::process::exit(0),
@@ -20,13 +18,11 @@ pub fn run(host_port: &str) -> ! {
 
 fn do_run(host_port: &str) -> Result<()> {
     use std::net::ToSocketAddrs;
-    eprintln!("{}:{}", file!(), line!());
     let addrs = host_port.to_socket_addrs()?;
 
-    eprintln!("{}:{}", file!(), line!());
     for addr in addrs {
-        // return try_addr(addr, crate::CMD_TCP_THROUGHPUT);
         if try_addr(addr, crate::CMD_TCP_RR).is_ok() {
+            std::thread::sleep(Duration::from_millis(100));
             return try_addr(addr, crate::CMD_TCP_THROUGHPUT);
         }
     }
@@ -36,17 +32,11 @@ fn do_run(host_port: &str) -> Result<()> {
 
 fn try_addr(addr: SocketAddr, cmd: u64) -> Result<()> {
     let mut buf: [u8; 1500] = [0; 1500];
-    eprintln!("{}:{} {}", file!(), line!(), cmd);
-    let mut tcp_stream = TcpStream::connect_timeout(&addr, TIMEOUT)?;
-    eprintln!("{}:{}", file!(), line!());
+    let mut tcp_stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
     tcp_stream.set_nodelay(true).unwrap();
-    // tcp_stream.set_read_timeout(Some(TIMEOUT))?;
-    // tcp_stream.set_write_timeout(Some(TIMEOUT))?;
-    eprintln!("{}:{}", file!(), line!());
 
     tcp_stream.write_all(crate::MAGIC_BYTES_CLIENT)?;
     tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_SERVER.len()])?;
-    eprintln!("{}:{}", file!(), line!());
 
     if crate::MAGIC_BYTES_SERVER != &buf[0..crate::MAGIC_BYTES_SERVER.len()] {
         eprintln!("{} error: bad remote reply.", crate::binary_name());
@@ -74,14 +64,14 @@ fn try_addr(addr: SocketAddr, cmd: u64) -> Result<()> {
 
 fn do_rr(mut stream: TcpStream) -> Result<()> {
     let mut buf: [u8; 1500] = [0; 1500];
-    const RR_DURATION_SECS: u64 = 30;
+    const RR_DURATION: Duration = Duration::from_secs(3);
     println!(
         "{}: starting TCP round-robin test (64 byte buffers)...",
         crate::binary_name()
     );
     let mut rr_iters = 0_u64;
     let start = std::time::Instant::now();
-    while start.elapsed() < Duration::from_secs(RR_DURATION_SECS) {
+    while start.elapsed() < RR_DURATION {
         rr_iters += 1;
 
         stream.write_all(&buf[0..64])?;
@@ -105,15 +95,15 @@ fn do_rr(mut stream: TcpStream) -> Result<()> {
 fn do_throughput(mut stream: TcpStream) -> std::io::Result<()> {
     let data = [0u8; 1024]; // Sample data buffer
     let mut total_bytes_sent = 0usize;
-    let time_limit = Duration::new(3, 0); // Run for 10 seconds
+    const TP_DURATION: Duration = Duration::from_secs(3);
     println!(
         "{}: starting TCP throughput test (1k buffers)...",
         crate::binary_name()
     );
-    let start_time = std::time::Instant::now();
 
-    for _ in 0..120 {
-        // while start_time.elapsed() < time_limit {
+    // for _ in 0..120 {
+    let start = std::time::Instant::now();
+    while start.elapsed() < TP_DURATION {
         match stream.write(&data) {
             Ok(bytes_sent) => total_bytes_sent += bytes_sent,
             Err(e) => {
@@ -125,11 +115,9 @@ fn do_throughput(mut stream: TcpStream) -> std::io::Result<()> {
 
     stream.flush().unwrap();
 
-    let duration = start_time.elapsed();
-    println!(
-        "\tThroughput done: {:.2?} bytes/sec.",
-        total_bytes_sent as f64 / duration.as_secs_f64()
-    );
+    let duration = start.elapsed();
+    let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+    println!("\tThroughput done: {:.2?} MiB/sec.", rate);
 
     Ok(())
 }

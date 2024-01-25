@@ -136,12 +136,12 @@ impl NetSys {
         };
         assert!(proc_listeners.insert(new_id));
 
-        // #[cfg(debug_assertions)]
-        // moto_log!(
-        //     "sys-io: new tcp listener on {:?}, conn: 0x{:x}",
-        //     socket_addr,
-        //     proc.handle().as_u64()
-        // );
+        #[cfg(debug_assertions)]
+        moto_log!(
+            "sys-io: new tcp listener on {:?}, conn: 0x{:x}",
+            socket_addr,
+            proc.handle().as_u64()
+        );
 
         match device_idx {
             None => {
@@ -307,6 +307,18 @@ impl NetSys {
             }
         };
 
+        let timeout = match sqe.payload.args_64()[3] {
+            u64::MAX => None,
+            t => {
+                let timo = moto_sys::time::Instant::from_u64(t);
+                if timo <= moto_sys::time::Instant::now() {
+                    sqe.status = ErrorCode::TimedOut.into();
+                    return Some(sqe);
+                }
+                Some(timo)
+            }
+        };
+
         #[cfg(debug_assertions)]
         moto_log!(
             "sys-io: 0x{:x}: tcp connect to {:?}",
@@ -357,7 +369,7 @@ impl NetSys {
         // );
 
         let stream = self.tcp_streams.get(&new_id).unwrap();
-        self.devices[device_idx].tcp_stream_connect(stream);
+        self.devices[device_idx].tcp_stream_connect(stream, timeout);
 
         None
     }
@@ -729,7 +741,16 @@ impl NetSys {
             };
             // Unwrap below is justified, as devices are not allowed to surface
             // incoming connections without listeners.
-            dev.tcp_listener_find(&socket_addr).unwrap()
+            dev.tcp_listener_find(&socket_addr).expect(
+                format!(
+                    "{}:{} missing listener for {} {:?}",
+                    file!(),
+                    line!(),
+                    device_idx,
+                    socket_addr
+                )
+                .as_str(),
+            )
         };
 
         let (proc_handle, maybe_cqe) = {
@@ -925,9 +946,8 @@ impl IoSubsystem for NetSys {
     }
 
     fn poll(&mut self) -> Option<PendingCompletion> {
-        let prev = self.pending_completions.pop_front();
-        if prev.is_some() {
-            return prev;
+        if let Some(prev) = self.pending_completions.pop_front() {
+            return Some(prev);
         }
 
         for device_idx in 0..self.devices.len() {

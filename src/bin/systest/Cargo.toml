@@ -11,6 +11,8 @@ moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 
+futures = "0.3"
+
 [patch.crates-io]
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }

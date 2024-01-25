@@ -6,10 +6,8 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
-use std::time::Duration;
 use std::time::Instant;
 
-const TIMEOUT: Duration = Duration::from_secs(1);
 pub fn run(port: u16) -> ! {
     match do_run(port) {
         Ok(_) => std::process::exit(0),
@@ -41,8 +39,6 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
     println!("{}: got a connection.", crate::binary_name());
     tcp_stream.set_nodelay(true).unwrap();
     let mut buf: [u8; 1500] = [0; 1500];
-    // tcp_stream.set_read_timeout(Some(TIMEOUT))?;
-    // tcp_stream.set_write_timeout(Some(TIMEOUT))?;
 
     // "Authenticate" the client.
     tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_CLIENT.len()])?;
@@ -114,7 +110,10 @@ fn do_throughput(mut stream: TcpStream) -> Result<()> {
     let mut total_bytes_read = 0usize;
 
     loop {
-        let bytes_read = stream.read(&mut buffer)?;
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
         if bytes_read == 0 {
             break;
         }
@@ -122,14 +121,8 @@ fn do_throughput(mut stream: TcpStream) -> Result<()> {
     }
 
     let duration = start_time.elapsed();
-    println!(
-        "Throughput done: received {} bytes over {:.2?};",
-        total_bytes_read, duration
-    );
-    println!(
-        "\t{:.2?} bytes/sec.\n",
-        total_bytes_read as f64 / duration.as_secs_f64()
-    );
+    let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+    println!("\tThroughput done: {:.2?} MiB/sec.", rate);
 
     Ok(())
 }

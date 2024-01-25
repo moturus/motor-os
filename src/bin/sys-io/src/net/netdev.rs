@@ -24,7 +24,12 @@ pub(super) trait NetInterface {
     fn tcp_listener_bind(&mut self, addr: &SocketAddr);
     fn tcp_listener_drop(&mut self, addr: &SocketAddr);
 
-    fn tcp_stream_connect(&mut self, local_addr: &SocketAddr, remote_addr: &SocketAddr);
+    fn tcp_stream_connect(
+        &mut self,
+        local_addr: &SocketAddr,
+        remote_addr: &SocketAddr,
+        timeout: Option<moto_sys::time::Instant>,
+    );
     fn tcp_stream_write(
         &mut self,
         local_addr: &SocketAddr,
@@ -132,13 +137,17 @@ impl NetDev {
         self.iface.tcp_listener_drop(&addr);
     }
 
-    pub fn tcp_stream_connect(&mut self, stream: &TcpStream) {
+    pub fn tcp_stream_connect(
+        &mut self,
+        stream: &TcpStream,
+        timeout: Option<moto_sys::time::Instant>,
+    ) {
         assert!(self
             .tcp_streams
             .insert((*stream.local_addr(), *stream.remote_addr()), stream.id())
             .is_none());
         self.iface
-            .tcp_stream_connect(stream.local_addr(), stream.remote_addr());
+            .tcp_stream_connect(stream.local_addr(), stream.remote_addr(), timeout);
     }
 
     pub fn tcp_stream_new_incoming(
@@ -239,8 +248,9 @@ impl NetDev {
     }
 
     pub fn hard_drop_tcp_listener(&mut self, addr: &SocketAddr) {
-        self.tcp_listeners.remove(addr);
+        self.tcp_listeners.remove(addr).expect("missing listener");
         self.iface.hard_drop_tcp_listener(addr);
+        crate::moto_log!("{}:{} drop listener {:?}", file!(), line!(), addr);
     }
 
     pub fn hard_drop_tcp_stream(&mut self, addr1: &SocketAddr, addr2: &SocketAddr) {

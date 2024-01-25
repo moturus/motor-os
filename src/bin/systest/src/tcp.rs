@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
+use std::net::ToSocketAddrs;
 use std::sync::{atomic::*, Arc};
+use std::time::Duration;
 
 fn handle_client(mut stream: std::net::TcpStream) {
     let mut data = [0 as u8; 17];
@@ -46,7 +48,10 @@ fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
 }
 
 fn client_iter() {
-    let mut stream = std::net::TcpStream::connect("localhost:3333").unwrap();
+    let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
+    assert_eq!(addrs.len(), 1);
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(100)).unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     stream.write(&tx).unwrap();
 
@@ -60,6 +65,29 @@ fn client_iter() {
             panic!()
         }
     }
+}
+
+fn test_io_latency() {
+    let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
+    assert_eq!(addrs.len(), 1);
+    let stream =
+        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(100)).unwrap();
+
+    // set_nodelay() is a good way to measure local I/O latency, as for the loopback
+    // device it is a NOOP.
+    let mut iters = 0_u64;
+    const DUR: Duration = Duration::from_millis(500);
+    let start = std::time::Instant::now();
+    while start.elapsed() < DUR {
+        stream.set_nodelay(true).unwrap();
+        iters += 1;
+    }
+
+    let elapsed = start.elapsed();
+    println!(
+        "IO latency of TcpStream::set_nodelay(): {:.3} usec/IO",
+        elapsed.as_secs_f64() * 1000.0 * 1000.0 / (iters as f64)
+    );
 }
 
 pub fn test_tcp_loopback() {
@@ -77,6 +105,7 @@ pub fn test_tcp_loopback() {
     client_iter();
     client_iter();
     client_iter();
+    test_io_latency();
 
     stop.store(true, Ordering::Release);
     // Kick the listener.
@@ -87,39 +116,6 @@ pub fn test_tcp_loopback() {
     std::thread::sleep(std::time::Duration::from_millis(10));
     println!("test_tcp() PASS");
     std::thread::sleep(std::time::Duration::from_millis(10));
-}
-
-pub fn _test_web_server() {
-    let listener = std::net::TcpListener::bind("10.0.2.15:5542").unwrap();
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                print!("got stream! will read");
-                let mut data = [0 as u8; 17];
-                while match stream.read(&mut data) {
-                    Ok(size) => {
-                        for idx in 0..size {
-                            print!("test_web_server: got bytes: ");
-                            print!("0x{:x}", data[idx]);
-                        }
-                        stream.write("foo".as_bytes()).unwrap();
-                        true
-                    }
-                    Err(_) => {
-                        stream.shutdown(std::net::Shutdown::Both).unwrap();
-                        false
-                    }
-                } {}
-            }
-            Err(e) => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                println!("Error: ----------- {} ----------------", e);
-                panic!("{}", e)
-                /* connection failed */
-            }
-        }
-    }
 }
 
 // pub fn test_wget() {

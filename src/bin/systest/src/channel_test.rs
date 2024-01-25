@@ -205,7 +205,7 @@ pub fn test_io_channel() {
     println!("test_io_channel() PASS");
 }
 
-fn do_test_io_throughput(io_size: usize) {
+fn do_test_io_throughput(io_size: usize, batch_size: u64) {
     let mut io_client = match Client::connect("sys-io") {
         Ok(client) => client,
         Err(err) => {
@@ -213,12 +213,8 @@ fn do_test_io_throughput(io_size: usize) {
         }
     };
 
-    let (num_blocks, batch_size) = match io_size {
-        0 => (0, 32),
-        1024 => (2, 32),
-        4096 => (8, 8),
-        _ => panic!(),
-    };
+    let num_blocks = io_size / 512;
+
     const DURATION: Duration = Duration::from_millis(1000);
 
     moto_sys::syscalls::SysCpu::affine_to_cpu(Some(1)).unwrap();
@@ -232,7 +228,7 @@ fn do_test_io_throughput(io_size: usize) {
             sqe.command = CMD_NOOP_OK;
             sqe.id = step as u64;
             if num_blocks > 0 {
-                let buff = io_client.alloc_buffer(num_blocks).unwrap();
+                let buff = io_client.alloc_buffer(num_blocks as u16).unwrap();
                 let buf = io_client.buffer_bytes(buff).unwrap();
                 let buf_u64 = unsafe {
                     core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, buf.len() / 8)
@@ -277,27 +273,98 @@ fn do_test_io_throughput(io_size: usize) {
     let iops = ((iterations * batch_size) as f64) / elapsed.as_secs_f64();
 
     println!(
-        "test_io_throughput: {} iterations of {} IO size (in batches of {}) over {:?}: {:.3} million IOPS.",
-        iterations * batch_size,
+        "test_io_throughput: {: >4} bytes {: >2} batches: {:.3} million IOPS {:.3} usec/IO.",
         io_size,
         batch_size,
-        elapsed,
-        iops / (1000.0 * 1000.0)
+        iops / (1000.0 * 1000.0),
+        (1000.0 * 1000.0) / iops,
     );
     if io_size > 0 {
         println!(
-            "I/O throughput: {:.3} MiB/sec",
+            "\tI/O throughput: {:.3} MiB/sec",
             iops * (io_size as f64) / (1024.0 * 1024.0)
         );
     }
     println!(
-        "cpu usage: {:.3} {:.3} {:.3} {:.3}",
+        "\tcpu usage: {:.3} {:.3} {:.3} {:.3}",
         cpu_usage[0], cpu_usage[1], cpu_usage[2], cpu_usage[3]
     );
 }
 
 pub fn test_io_throughput() {
-    do_test_io_throughput(0);
-    do_test_io_throughput(1024);
-    do_test_io_throughput(4096);
+    do_test_io_throughput(0, 1);
+    do_test_io_throughput(0, 32);
+    do_test_io_throughput(1024, 32);
+    do_test_io_throughput(4096, 8);
+}
+
+async fn single_iter(id: u64, buf_alloc: bool) {
+    use moto_runtime::io_executor;
+    // We emulate an async write 
+    let io_buffer = if buf_alloc {
+        Some(io_executor::get_io_buffer(4).await)
+    } else {
+        None
+    };
+    let mut sqe = QueueEntry::new();
+    sqe.id = id;
+    sqe.command = CMD_NOOP_OK;
+    let cqe = io_executor::submit(sqe).await;
+    if !cqe.status().is_ok() {
+        panic!("status: {:?}", cqe.status());
+    }
+    assert!(cqe.status().is_ok());
+    if buf_alloc {
+        io_executor::put_io_buffer(io_buffer.unwrap()).await;
+    }
+}
+
+async fn async_io_iter(batch_size: u64, buf_alloc: bool) {
+    let mut futs = vec![];
+    for id in 0..batch_size {
+        futs.push(single_iter(id, buf_alloc));
+    }
+
+    futures::future::join_all(futs).await;
+}
+
+fn io_iter(batch_size: u64, buf_alloc: bool) {
+    moto_runtime::io_executor::block_on(async_io_iter(batch_size, buf_alloc))
+}
+
+pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool) {
+    const DUR: Duration = Duration::from_millis(500);
+    io_iter(batch_size, buf_alloc);  // Make sure the IO thread is up and running.
+
+    let mut iters = 0_u64;
+    let start = std::time::Instant::now();
+    while start.elapsed() < DUR {
+        io_iter(batch_size, buf_alloc);
+        iters += 1;
+    }
+
+    let elapsed = start.elapsed();
+    println!("IO Latency: batch sz: {: >2} {:.3} usec/IO; buf alloc: {}.", batch_size,
+        elapsed.as_secs_f64() * 1000.0 * 1000.0 / ((iters * batch_size) as f64), buf_alloc);
+}
+
+pub fn test_io_latency() {
+    do_test_io_latency(1, false);
+    do_test_io_latency(1, true);
+    do_test_io_latency(2, false);
+    do_test_io_latency(2, true);
+    do_test_io_latency(4, false);
+    do_test_io_latency(4, true);
+    do_test_io_latency(8, false);
+    do_test_io_latency(8, true);
+    do_test_io_latency(16, false);
+    do_test_io_latency(16, true);
+    do_test_io_latency(20, false);
+    do_test_io_latency(20, true);
+    do_test_io_latency(24, false);
+    do_test_io_latency(24, true);
+    do_test_io_latency(28, false);
+    do_test_io_latency(28, true);
+    do_test_io_latency(32, false);
+    do_test_io_latency(32, true);
 }

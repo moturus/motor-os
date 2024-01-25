@@ -169,6 +169,7 @@ strip -o "${MOTO_BIN}/sys-io" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/
 [tasks.sys_io_release]
 cwd = "./src/bin/sys-io"
 script = '''
+# CARGO_LOG=cargo::core::compiler::fingerprint=info \
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-io" "${MOTO_BIN}/sys-io"
 '''
