@@ -217,7 +217,7 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
 
     const DURATION: Duration = Duration::from_millis(1000);
 
-    moto_sys::syscalls::SysCpu::affine_to_cpu(Some(1)).unwrap();
+    moto_sys::syscalls::SysCpu::affine_to_cpu(Some(2)).unwrap();
 
     let mut iterations = 0_u64;
     let start = std::time::Instant::now();
@@ -267,8 +267,7 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
     }
 
     let elapsed = start.elapsed();
-    let mut cpu_usage: [f32; 16] = [0.0; 16];
-    moto_sys::stats::get_cpu_usage(&mut cpu_usage).unwrap();
+    let cpu_usage = moto_runtime::util::get_cpu_usage();
 
     let iops = ((iterations * batch_size) as f64) / elapsed.as_secs_f64();
 
@@ -285,10 +284,11 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
             iops * (io_size as f64) / (1024.0 * 1024.0)
         );
     }
-    println!(
-        "\tcpu usage: {:.3} {:.3} {:.3} {:.3}",
-        cpu_usage[0], cpu_usage[1], cpu_usage[2], cpu_usage[3]
-    );
+    print!("\tcpu usage: ");
+    for n in &cpu_usage {
+        print!("{: >5.1}% ", (*n) * 100.0);
+    }
+    println!();
 }
 
 pub fn test_io_throughput() {
@@ -298,9 +298,9 @@ pub fn test_io_throughput() {
     do_test_io_throughput(4096, 8);
 }
 
-async fn single_iter(id: u64, buf_alloc: bool) {
+async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     use moto_runtime::io_executor;
-    // We emulate an async write 
+    // We emulate an async write
     let io_buffer = if buf_alloc {
         Some(io_executor::get_io_buffer(4).await)
     } else {
@@ -308,7 +308,11 @@ async fn single_iter(id: u64, buf_alloc: bool) {
     };
     let mut sqe = QueueEntry::new();
     sqe.id = id;
-    sqe.command = CMD_NOOP_OK;
+    sqe.command = if local_io {
+        io_executor::CMD_LOCAL_NOOP_OK
+    } else {
+        CMD_NOOP_OK
+    };
     let cqe = io_executor::submit(sqe).await;
     if !cqe.status().is_ok() {
         panic!("status: {:?}", cqe.status());
@@ -319,52 +323,78 @@ async fn single_iter(id: u64, buf_alloc: bool) {
     }
 }
 
-async fn async_io_iter(batch_size: u64, buf_alloc: bool) {
+async fn async_io_iter(batch_size: u64, buf_alloc: bool, local_io: bool) {
     let mut futs = vec![];
     for id in 0..batch_size {
-        futs.push(single_iter(id, buf_alloc));
+        futs.push(single_iter(id, buf_alloc, local_io));
     }
 
     futures::future::join_all(futs).await;
 }
 
-fn io_iter(batch_size: u64, buf_alloc: bool) {
-    moto_runtime::io_executor::block_on(async_io_iter(batch_size, buf_alloc))
+fn io_iter(batch_size: u64, buf_alloc: bool, local_io: bool) {
+    if batch_size == 32 {
+        moto_runtime::io_executor::block_on(futures::future::join(
+            async_io_iter(16, buf_alloc, local_io),
+            async_io_iter(16, buf_alloc, local_io),
+        ));
+    }
+    moto_runtime::io_executor::block_on(async_io_iter(batch_size, buf_alloc, local_io))
 }
 
-pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool) {
-    const DUR: Duration = Duration::from_millis(500);
-    io_iter(batch_size, buf_alloc);  // Make sure the IO thread is up and running.
+pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool, local_io: bool) {
+    const DUR: Duration = Duration::from_millis(1000);
+    io_iter(batch_size, buf_alloc, local_io); // Make sure the IO thread is up and running.
 
     let mut iters = 0_u64;
     let start = std::time::Instant::now();
     while start.elapsed() < DUR {
-        io_iter(batch_size, buf_alloc);
+        io_iter(batch_size, buf_alloc, local_io);
         iters += 1;
     }
 
     let elapsed = start.elapsed();
-    println!("IO Latency: batch sz: {: >2} {:.3} usec/IO; buf alloc: {}.", batch_size,
-        elapsed.as_secs_f64() * 1000.0 * 1000.0 / ((iters * batch_size) as f64), buf_alloc);
+    let cpu_usage = moto_runtime::util::get_cpu_usage();
+    println!(
+        "IO Latency: batch sz: {: >2} {: >6.3} usec/IO; {:.3} mIOPS; local: {: >5}; buf alloc: {: >5}.",
+        batch_size,
+        elapsed.as_secs_f64() * 1000.0 * 1000.0 / ((iters * batch_size) as f64),
+        ((batch_size * iters) as f64) / (1000.0 * 1000.0),
+        local_io,
+        buf_alloc
+    );
+    print!("\tcpu usage: ");
+    for n in &cpu_usage {
+        print!("{: >5.1}% ", (*n) * 100.0);
+    }
+    println!();
 }
 
 pub fn test_io_latency() {
-    do_test_io_latency(1, false);
-    do_test_io_latency(1, true);
-    do_test_io_latency(2, false);
-    do_test_io_latency(2, true);
-    do_test_io_latency(4, false);
-    do_test_io_latency(4, true);
-    do_test_io_latency(8, false);
-    do_test_io_latency(8, true);
-    do_test_io_latency(16, false);
-    do_test_io_latency(16, true);
-    do_test_io_latency(20, false);
-    do_test_io_latency(20, true);
-    do_test_io_latency(24, false);
-    do_test_io_latency(24, true);
-    do_test_io_latency(28, false);
-    do_test_io_latency(28, true);
-    do_test_io_latency(32, false);
-    do_test_io_latency(32, true);
+    do_test_io_latency(1, false, true);
+    do_test_io_latency(2, false, true);
+    do_test_io_latency(4, false, true);
+    do_test_io_latency(8, false, true);
+    do_test_io_latency(16, false, true);
+    do_test_io_latency(32, false, true);
+    do_test_io_latency(64, false, true);
+
+    do_test_io_latency(1, false, false);
+    do_test_io_latency(1, true, true);
+    do_test_io_latency(2, false, true);
+    do_test_io_latency(2, true, true);
+    do_test_io_latency(4, false, true);
+    do_test_io_latency(4, true, true);
+    do_test_io_latency(8, false, true);
+    do_test_io_latency(8, true, true);
+    do_test_io_latency(16, false, true);
+    do_test_io_latency(16, true, true);
+    do_test_io_latency(20, false, true);
+    do_test_io_latency(20, true, true);
+    do_test_io_latency(24, false, true);
+    do_test_io_latency(24, true, true);
+    do_test_io_latency(28, false, true);
+    do_test_io_latency(28, true, true);
+    do_test_io_latency(32, false, true);
+    do_test_io_latency(32, true, true);
 }

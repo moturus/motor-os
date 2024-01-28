@@ -31,6 +31,9 @@ rm -rf target
 cd "${RDIR}/src/bin/kibim"
 cargo clean
 rm -rf target
+cd "${RDIR}/src/bin/httpd"
+cargo clean
+rm -rf target
 cd "${RDIR}/src/bin/kernel"
 cargo clean
 rm -rf target

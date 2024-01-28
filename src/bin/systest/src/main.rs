@@ -464,7 +464,6 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
-    channel_test::test_io_latency();
     spawn_wait_kill::test();
 
     channel_test::test_io_throughput();
@@ -472,6 +471,7 @@ fn main() {
     tcp::test_tcp_loopback();
     // tcp::test_wget();
     channel_test::test_io_channel();
+    channel_test::test_io_latency();
     // test_stdio();
     test_file_write();
 
