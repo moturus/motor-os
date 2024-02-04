@@ -1,12 +1,6 @@
 [submodule "src/bin/rush"]
 	path = src/bin/rush
 	url = https://github.com/moturus/rush.git
-[submodule "src/lib/moto-runtime"]
-	path = src/lib/moto-runtime
-	url = https://github.com/moturus/moto-runtime.git
-[submodule "src/lib/moto-ipc"]
-	path = src/lib/moto-ipc
-	url = https://github.com/moturus/moto-ipc.git
 [submodule "src/lib/moto-sys"]
 	path = src/lib/moto-sys
 	url = https://github.com/moturus/moto-sys.git
