@@ -1,0 +1,13 @@
+[package]
+name = "flatfs"
+version = "0.2.1"
+edition = "2021"
+description = "A readonly filesystem."
+repository = "https://github.com/moturus/flatfs"
+keywords = ["filesystem", "no_std"]
+categories = ["filesystem", "no-std"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+

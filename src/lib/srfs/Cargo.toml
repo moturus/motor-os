@@ -1,0 +1,15 @@
+[package]
+name = "srfs"
+version = "0.1.2"
+edition = "2021"
+repository = "https://github.com/moturus/srfs"
+description = "Simple Rust File System"
+keywords = ["filesystem"]
+categories = ["filesystem"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bitflags = "2.4.*"
+log = "0.4.20"
+lru = "0.12.0"
+srfs-core = { version="0.1", features=["std"] }

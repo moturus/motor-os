@@ -1,0 +1,20 @@
+[package]
+name = "moto-sys"
+version = "0.2.0"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+keywords = ["moturus", "motor-os"]
+readme = "README.md"
+repository = "https://github.com/moturus/moto-sys"
+description = "Motor OS system crate."
+edition = "2021"
+
+[dependencies]
+alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
+compiler_builtins = { version = "0.1", optional = true }
+core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
+
+[features]
+default = ["userspace"]
+rustc-dep-of-std = [ "alloc", "compiler_builtins", "core", "userspace" ]
+userspace = []
