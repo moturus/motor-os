@@ -12,7 +12,6 @@
 #![feature(btreemap_alloc)]
 #![feature(core_intrinsics)]
 #![feature(naked_functions)]
-#![feature(offset_of)]
 #![feature(concat_idents)]
 #![feature(get_mut_unchecked)]
 
