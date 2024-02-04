@@ -180,10 +180,11 @@ impl Scheduler {
             return;
         }
 
-        if (now.as_u64() - self.load_tick.as_u64()) > Self::LOAD_PERIOD {
+        if (now.as_u64() - self.load_tick.as_u64()) > 24 * Self::LOAD_PERIOD {
             // The VM was preempted or sleeping.
             self.load_tick = now;
             self.load_prev.store(0, Ordering::Relaxed);
+            self.load_curr = 0;
             return;
         }
         let mut load_prev = self.load_prev.load(Ordering::Relaxed);
@@ -222,7 +223,7 @@ impl Scheduler {
             load_prev >>= 1;
         }
 
-        self.load_prev.store(load_prev, Ordering::Relaxed);
+        self.load_prev.store(load_prev, Ordering::Release);
         self.load_tick = now;
     }
 
