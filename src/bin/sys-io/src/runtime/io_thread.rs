@@ -154,13 +154,16 @@ impl IoRuntime {
             match sqe.command {
                 io_channel::CMD_NOOP_OK => {
                     let mut cqe = sqe;
+                    if cqe.flags == io_channel::FLAG_CMD_NOOP_OK_TIMESTAMP {
+                        cqe.payload.args_64_mut()[3] = moto_sys::time::Instant::now().as_u64();
+                    }
                     cqe.status = ErrorCode::Ok.into();
                     if let Err(err) = proc.conn().complete_sqe(cqe) {
                         #[cfg(debug_assertions)]
                         moto_log!("complete_sqe() failed");
                         debug_assert_eq!(err, ErrorCode::NotReady);
                         self.pending_completions.push_back(PendingCompletion {
-                            cqe: sqe,
+                            cqe: cqe,
                             endpoint_handle: handle,
                         });
                     }
@@ -174,7 +177,7 @@ impl IoRuntime {
                             moto_log!("complete_sqe() failed");
                             debug_assert_eq!(err, ErrorCode::NotReady);
                             self.pending_completions.push_back(PendingCompletion {
-                                cqe: sqe,
+                                cqe: cqe,
                                 endpoint_handle: handle,
                             });
                         }
@@ -387,11 +390,16 @@ impl IoRuntime {
                 }
                 Err(err) => {
                     if err == ErrorCode::TimedOut {
-                        debug_timed_out = true;
-                        #[cfg(debug_assertions)]
-                        crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
-                        debug_assert!(self.pending_completions.is_empty());
-                        self.process_wakeups(self.all_handles.clone(), true);
+                        if timeout >= core::time::Duration::from_millis(20) {
+                            debug_timed_out = true;
+                            #[cfg(debug_assertions)]
+                            crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
+                            debug_assert!(self.pending_completions.is_empty());
+                            self.process_wakeups(self.all_handles.clone(), true);
+                        } else {
+                            debug_timed_out = false;
+                            self.process_wakeups(handles, false);
+                        }
                     } else {
                         debug_timed_out = false;
                         self.process_errors(handles);

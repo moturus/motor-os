@@ -147,8 +147,7 @@ impl NetDev {
         }
 
         #[cfg(debug_assertions)]
-        moto_sys::syscalls::SysMem::log(alloc::format!("NET MAC: {:02x?}", self.mac).as_str())
-            .ok();
+        moto_sys::syscalls::SysMem::log(alloc::format!("NET MAC: {:02x?}", self.mac).as_str()).ok();
 
         Ok(())
     }
@@ -317,6 +316,6 @@ pub fn tx_wait_handle() -> crate::WaitHandle {
     wait_handle(NetDev::VIRTQ_TX)
 }
 
-pub fn header_len() -> usize {
+pub const fn header_len() -> usize {
     core::mem::size_of::<Header>()
 }

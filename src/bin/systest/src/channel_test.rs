@@ -298,14 +298,23 @@ pub fn test_io_throughput() {
     do_test_io_throughput(4096, 8);
 }
 
+static TRACING_1: AtomicU64 = AtomicU64::new(0);
+static TRACING_2: AtomicU64 = AtomicU64::new(0);
+static TRACING_3: AtomicU64 = AtomicU64::new(0);
+static TRACING_4: AtomicU64 = AtomicU64::new(0);
+
 async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     use moto_runtime::io_executor;
+
+    let ts_0 = moto_sys::time::Instant::now().as_u64();
     // We emulate an async write
     let io_buffer = if buf_alloc {
         Some(io_executor::get_io_buffer(4).await)
     } else {
         None
     };
+
+    let ts_1 = moto_sys::time::Instant::now().as_u64();
     let mut sqe = QueueEntry::new();
     sqe.id = id;
     sqe.command = if local_io {
@@ -313,14 +322,26 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     } else {
         CMD_NOOP_OK
     };
+    sqe.flags = FLAG_CMD_NOOP_OK_TIMESTAMP;
     let cqe = io_executor::submit(sqe).await;
     if !cqe.status().is_ok() {
         panic!("status: {:?}", cqe.status());
     }
     assert!(cqe.status().is_ok());
+    fence(Ordering::Acquire);
+    let ts_2 = cqe.payload.args_64()[3];
+    assert_ne!(ts_2, 0);
+
+    let ts_3 = moto_sys::time::Instant::now().as_u64();
     if buf_alloc {
         io_executor::put_io_buffer(io_buffer.unwrap()).await;
     }
+    let ts_4 = moto_sys::time::Instant::now().as_u64();
+
+    TRACING_1.fetch_add(ts_1 - ts_0, Ordering::Relaxed);
+    TRACING_2.fetch_add(ts_2 - ts_1, Ordering::Relaxed);
+    TRACING_3.fetch_add(ts_3 - ts_2, Ordering::Relaxed);
+    TRACING_4.fetch_add(ts_4 - ts_3, Ordering::Relaxed);
 }
 
 async fn async_io_iter(batch_size: u64, buf_alloc: bool, local_io: bool) {
@@ -346,6 +367,11 @@ pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool, local_io: bool) {
     const DUR: Duration = Duration::from_millis(1000);
     io_iter(batch_size, buf_alloc, local_io); // Make sure the IO thread is up and running.
 
+    TRACING_1.store(0, Ordering::Release);
+    TRACING_2.store(0, Ordering::Release);
+    TRACING_3.store(0, Ordering::Release);
+    TRACING_4.store(0, Ordering::Release);
+
     let mut iters = 0_u64;
     let start = std::time::Instant::now();
     while start.elapsed() < DUR {
@@ -368,33 +394,39 @@ pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool, local_io: bool) {
         print!("{: >5.1}% ", (*n) * 100.0);
     }
     println!();
+
+    println!("\ttracing: t1: {:.3} t2: {:.3} t3: {:.3} t4: {:.3}",
+        (TRACING_1.load(Ordering::Acquire) as f64) / (iters as f64),
+        (TRACING_2.load(Ordering::Acquire) as f64) / (iters as f64),
+        (TRACING_3.load(Ordering::Acquire) as f64) / (iters as f64),
+        (TRACING_4.load(Ordering::Acquire) as f64) / (iters as f64),
+    );
 }
 
 pub fn test_io_latency() {
-    do_test_io_latency(1, false, true);
-    do_test_io_latency(2, false, true);
-    do_test_io_latency(4, false, true);
-    do_test_io_latency(8, false, true);
-    do_test_io_latency(16, false, true);
-    do_test_io_latency(32, false, true);
-    do_test_io_latency(64, false, true);
-
     do_test_io_latency(1, false, false);
+    do_test_io_latency(1, false, true);
+    do_test_io_latency(1, true, false);
     do_test_io_latency(1, true, true);
+
+    do_test_io_latency(2, false, false);
     do_test_io_latency(2, false, true);
+    do_test_io_latency(2, true, false);
     do_test_io_latency(2, true, true);
-    do_test_io_latency(4, false, true);
-    do_test_io_latency(4, true, true);
-    do_test_io_latency(8, false, true);
-    do_test_io_latency(8, true, true);
-    do_test_io_latency(16, false, true);
-    do_test_io_latency(16, true, true);
-    do_test_io_latency(20, false, true);
-    do_test_io_latency(20, true, true);
-    do_test_io_latency(24, false, true);
-    do_test_io_latency(24, true, true);
-    do_test_io_latency(28, false, true);
-    do_test_io_latency(28, true, true);
-    do_test_io_latency(32, false, true);
-    do_test_io_latency(32, true, true);
+
+    // do_test_io_latency(4, false, true);
+    // do_test_io_latency(4, true, true);
+    // do_test_io_latency(8, false, true);
+    // do_test_io_latency(8, true, true);
+    // do_test_io_latency(16, false, true);
+    // do_test_io_latency(16, true, true);
+    // do_test_io_latency(20, false, true);
+    // do_test_io_latency(20, true, true);
+    // do_test_io_latency(24, false, true);
+    // do_test_io_latency(24, true, true);
+
+    // do_test_io_latency(28, false, true);
+    // do_test_io_latency(28, true, true);
+    // do_test_io_latency(32, false, true);
+    // do_test_io_latency(32, true, true);
 }
