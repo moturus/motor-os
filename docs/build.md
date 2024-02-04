@@ -36,14 +36,18 @@ $ rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
 $ cargo install --force cargo-make
 ```
 
-## Build Motūrus OS target for Rust
-
-Prepare the directory
+## Clone the Motor OS repo:
 
 ```
 $ export MOTORH=$HOME/motorh
 $ mkdir $MOTORH
+$ cd $MOTORH
+$ git clone https://github.com/moturus/motor-os.git
+$ cd motor-os
+$ git submodule update --init --recursive
 ```
+
+## Build Motūrus OS target for Rust
 
 Check out Rust sources with Motūrus target added:
 
@@ -68,16 +72,6 @@ $ rustup toolchain link dev-x86_64-unknown-moturus \
 
 ## Build Motūrus OS
 
-Clone the Motor OS repo:
-
-```
-$ cd $MOTORH
-$ git clone https://github.com/moturus/motor-os.git
-$ cd motor-os
-$ git submodule update --init --recursive
-```
-
-Build:
 ```
 $ cd $MOTORH/motor-os
 $ cargo make boot_img_release
