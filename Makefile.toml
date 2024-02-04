@@ -22,36 +22,10 @@ rm -rf vm_images
 cd "${RDIR}/src/imager"
 cargo clean
 rm -rf target
-cd "${RDIR}/src/bin/sys-io"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/bin/rush"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/bin/kibim"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/bin/httpd"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/bin/kernel"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/bin/systest"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/lib/moto-ipc"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/lib/moto-runtime"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/lib/moto-sys"
-cargo clean
-rm -rf target
-cd "${RDIR}/src/bin/rnetbench"
-cargo clean
-rm -rf target
+cd "${RDIR}/src/bin"
+rm -rf */target
+cd "${RDIR}/src/lib"
+rm -rf */target
 '''
 
 [tasks.all]
@@ -87,6 +61,44 @@ dependencies = [
   "x64_boot_release",
   "x64_kloader_release",
   "kernel_release",
+  "sys_io_release",
+  "sys_init_release",
+  "sys_log_release",
+  "sys_tty_release",
+  "sysbox_release",
+  "systest_release",
+  "rush_release",
+  "httpd_release",
+  "kibim_release",
+  "rnetbench_release",
+  "make_img_release",
+]
+
+# Cargo is confused when building kernel and the userspace binaries
+# and rebuilds them. If working only with userspace, this task
+# can be used to reduce compile/build time.
+[tasks.u_dbg]
+dependencies = [
+  "setup_dirs_debug",
+  "sys_io_debug",
+  "sys_init_debug",
+  "sys_log_debug",
+  "sys_tty_debug",
+  "sysbox_debug",
+  "systest_debug",
+  "rush_debug",
+  "httpd_debug",
+  "kibim_debug",
+  "rnetbench_debug",
+  "make_img_debug",
+]
+
+# Cargo is confused when building kernel and the userspace binaries
+# and rebuilds them. If working only with userspace, this task
+# can be used to reduce compile/build time.
+[tasks.u_rel]
+dependencies = [
+  "setup_dirs_release",
   "sys_io_release",
   "sys_init_release",
   "sys_log_release",
