@@ -121,15 +121,7 @@ name = "moto-mpmc"
 version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
- "moto-runtime 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "moto-sys",
-]
-
-[[package]]
-name = "moto-runtime"
-version = "0.2.2"
-dependencies = [
- "moto-ipc",
+ "moto-runtime 0.2.2",
  "moto-sys",
 ]
 
@@ -138,6 +130,14 @@ name = "moto-runtime"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f9f2eb8cfd6912f1e896924da40fda056c4c992240d4d45b935d19db285253b"
+dependencies = [
+ "moto-ipc",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-runtime"
+version = "0.2.3"
 dependencies = [
  "moto-ipc",
  "moto-sys",
@@ -204,7 +204,7 @@ dependencies = [
  "futures",
  "moto-ipc",
  "moto-mpmc",
- "moto-runtime 0.2.2",
+ "moto-runtime 0.2.3",
  "moto-sys",
 ]
 

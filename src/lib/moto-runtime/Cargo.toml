@@ -1,0 +1,31 @@
+[package]
+name = "moto-runtime"
+version = "0.2.3"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+keywords = ["moturus", "motor-os"]
+readme = "README.md"
+repository = "https://github.com/moturus/moto-runtime"
+description = "Motor OS Runtime."
+edition = "2021"
+
+[dependencies]
+alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
+core  = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
+compiler_builtins = { version = "0.1", optional = true }
+moto-ipc = { version = "0.2.1", path = "../moto-ipc", optional = true }
+moto-sys = { version = "0.2.0", optional = true }
+frusa    = { version = "0.1.1", optional = true }
+
+[features]
+rustc-dep-of-std = [
+    "alloc", "core",
+    "compiler_builtins",
+    "moto-ipc/rustc-dep-of-std",
+    "moto-sys/rustc-dep-of-std",
+    "frusa/rustc-dep-of-std",
+]
+rt-api = [
+    "moto-ipc",
+    "moto-sys/userspace",
+]

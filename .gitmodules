@@ -1,18 +1,3 @@
 [submodule "src/bin/rush"]
 	path = src/bin/rush
 	url = https://github.com/moturus/rush.git
-[submodule "src/lib/moto-sys"]
-	path = src/lib/moto-sys
-	url = https://github.com/moturus/moto-sys.git
-[submodule "src/lib/frusa"]
-	path = src/lib/frusa
-	url = https://github.com/moturus/frusa.git
-[submodule "src/lib/flatfs"]
-	path = src/lib/flatfs
-	url = https://github.com/moturus/flatfs.git
-[submodule "src/lib/srfs-core"]
-	path = src/lib/srfs-core
-	url = https://github.com/moturus/srfs-core.git
-[submodule "src/lib/srfs"]
-	path = src/lib/srfs
-	url = https://github.com/moturus/srfs.git
