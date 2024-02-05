@@ -250,6 +250,7 @@ impl NetDev {
     pub fn hard_drop_tcp_listener(&mut self, addr: &SocketAddr) {
         self.tcp_listeners.remove(addr).expect("missing listener");
         self.iface.hard_drop_tcp_listener(addr);
+        #[cfg(debug_assertions)]
         crate::moto_log!("{}:{} drop listener {:?}", file!(), line!(), addr);
     }
 

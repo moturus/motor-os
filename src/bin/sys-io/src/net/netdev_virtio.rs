@@ -88,8 +88,8 @@ impl TxToken for VirtioTxToken {
         self.dev().have_tx = true;
         let buf = self.dev().tx_buf_mut();
         assert!(buf.len() >= len);
-        let buf = &mut buf[0..len];
-        let res = f(buf);
+        let packet = &mut buf[0..len];
+        let res = f(packet);
 
         #[cfg(debug_assertions)]
         crate::moto_log!(
@@ -98,7 +98,7 @@ impl TxToken for VirtioTxToken {
             line!(),
             len
         );
-        moto_virtio::virtio_net::post_send(self.dev().tx_header(), buf).unwrap();
+        moto_virtio::virtio_net::post_send(self.dev().tx_header(), packet).unwrap();
         res
     }
 }
@@ -142,7 +142,6 @@ impl smoltcp::phy::Device for VirtioDeviceAdapter {
 
     // Note: this is called from smoltcp::iface::Interface::poll() if smoltcp has bytes to send.
     fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
-        self.dev().poll_virtio_tx();
         Some(VirtioTxToken { dev: self.dev })
     }
 
@@ -150,7 +149,7 @@ impl smoltcp::phy::Device for VirtioDeviceAdapter {
         let mut caps = DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ethernet;
         caps.max_transmission_unit = 1500;
-        caps.max_burst_size = Some(1);
+        // caps.max_burst_size = Some(1);
 
         caps
     }
@@ -264,7 +263,6 @@ impl VirtioNetDev {
 
         net_dev.adapter.dev = net_dev.as_mut() as *mut _;
         moto_virtio::virtio_net::post_receive(net_dev.rx_buf_mut()).unwrap();
-        // net_dev.rx_bytes = moto_virtio::virtio_net::consume_receive();
 
         net_dev
     }
@@ -314,6 +312,8 @@ impl VirtioNetDev {
             } else {
                 return;
             }
+        } else {
+            assert_eq!(0, self.pending_tx.len());
         }
 
         if let Some(packet) = self.pending_tx.pop_front() {
@@ -384,6 +384,7 @@ impl VirtioNetDev {
         socket.register_send_waker(&waker);
 
         socket.listen((addr.ip(), addr.port())).unwrap();
+        #[cfg(debug_assertions)]
         crate::moto_log!("{}:{} - bind {:?}", file!(), line!(), addr);
     }
 
@@ -467,8 +468,8 @@ impl VirtioNetDev {
         let socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
 
         // Without these, remotely dropped sockets may hang around indefinitely.
-        socket.set_timeout(Some(smoltcp::time::Duration::from_millis(100)));
-        socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(1000)));
+        socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
+        socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
 
         let local_addr =
             super::smoltcp_helpers::socket_addr_from_endpoint(socket.local_endpoint().unwrap());
@@ -499,12 +500,6 @@ impl VirtioNetDev {
     }
 
     fn cancel_tcp_rx(&mut self, handle: SocketHandle) {
-        // let socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-        // let local_addr =
-        //     super::smoltcp_helpers::socket_addr_from_endpoint(socket.local_endpoint().unwrap());
-        // let remote_addr =
-        //     super::smoltcp_helpers::socket_addr_from_endpoint(socket.remote_endpoint().unwrap());
-
         let mut stream = self
             .tcp_streams_by_handle
             .get_mut(&handle)
@@ -521,12 +516,6 @@ impl VirtioNetDev {
     }
 
     fn cancel_tcp_tx(&mut self, handle: SocketHandle) {
-        // let socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
-        // let local_addr =
-        //     super::smoltcp_helpers::socket_addr_from_endpoint(socket.local_endpoint().unwrap());
-        // let remote_addr =
-        //     super::smoltcp_helpers::socket_addr_from_endpoint(socket.remote_endpoint().unwrap());
-
         let mut stream = self
             .tcp_streams_by_handle
             .get_mut(&handle)
@@ -570,11 +559,11 @@ impl VirtioNetDev {
             }
 
             smoltcp::socket::tcp::State::CloseWait => {
-                // #[cfg(debug_assertions)]
+                #[cfg(debug_assertions)]
                 crate::moto_log!("{}:{} socket CloseWait", file!(), line!());
             }
             smoltcp::socket::tcp::State::Closed => {
-                // #[cfg(debug_assertions)]
+                #[cfg(debug_assertions)]
                 crate::moto_log!("{}:{} socket Closed", file!(), line!());
             }
             _ => todo!("socket state: {:?}", state),
@@ -615,6 +604,10 @@ impl VirtioNetDev {
 
     fn do_poll(&mut self) -> bool {
         let mut did_work = false;
+
+        if self.have_tx {
+            self.poll_virtio_tx();
+        }
 
         loop {
             did_work |= self.process_polled_sockets();
@@ -943,7 +936,7 @@ impl NetInterface for VirtioNetDev {
         } else {
             panic!()
         }
-        // #[cfg(debug_assertions)]
+        #[cfg(debug_assertions)]
         crate::moto_log!("{}:{} hard_drop_tcp_stream", file!(), line!());
     }
 

@@ -102,8 +102,8 @@ fn do_throughput(mut stream: TcpStream) -> std::io::Result<()> {
     );
 
     let start = std::time::Instant::now();
-    for _ in 0..1000 {
-        // while start.elapsed() < TP_DURATION {
+    // for _ in 0..1000 {
+    while start.elapsed() < TP_DURATION {
         match stream.write(&data) {
             Ok(bytes_sent) => total_bytes_sent += bytes_sent,
             Err(e) => {
@@ -118,7 +118,11 @@ fn do_throughput(mut stream: TcpStream) -> std::io::Result<()> {
 
     let duration = start.elapsed();
     let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-    println!("\tThroughput done: {:.2?} MiB/sec.", rate);
+    println!(
+        "\tThroughput done: {:.2}MB sent; {:.2?} MiB/sec.",
+        (total_bytes_sent as f64) / (1024.0 * 1024.0),
+        rate
+    );
 
     Ok(())
 }

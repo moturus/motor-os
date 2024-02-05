@@ -36,7 +36,7 @@ fn do_run(port: u16) -> Result<()> {
 }
 
 fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
-    println!("{}: got a connection.", crate::binary_name());
+    println!("\n{}: got a connection.", crate::binary_name());
     tcp_stream.set_nodelay(true).unwrap();
     let mut buf: [u8; 1500] = [0; 1500];
 
@@ -96,7 +96,7 @@ fn do_rr(mut stream: TcpStream) -> Result<()> {
     );
     let iters_per_sec = (total_iterations as f64) / (duration.as_secs_f64());
     println!(
-        "\t{} iterations/sec; {:.3} usec/iteration.\n",
+        "\t{} iterations/sec; {:.3} usec/iteration.",
         iters_per_sec as u64,
         1_000_000_f64 / iters_per_sec
     );
@@ -105,7 +105,7 @@ fn do_rr(mut stream: TcpStream) -> Result<()> {
 }
 
 fn do_throughput(mut stream: TcpStream) -> Result<()> {
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; 2048];
     let start_time = Instant::now();
     let mut total_bytes_read = 0usize;
 
@@ -122,7 +122,11 @@ fn do_throughput(mut stream: TcpStream) -> Result<()> {
 
     let duration = start_time.elapsed();
     let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-    println!("\tThroughput done: {:.2?} MiB/sec.", rate);
+    println!(
+        "Throughput done: {:.2}MB received; {:.2?} MiB/sec.",
+        total_bytes_read as f64 / (1024.0 * 1024.0),
+        rate
+    );
 
     Ok(())
 }
