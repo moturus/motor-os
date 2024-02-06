@@ -320,6 +320,7 @@ impl IoRuntime {
                             crate::moto_log!("{}:{} ERROR: net poll on timeout", file!(), line!());
                         }
                         self.pending_completions.push_back(p_c);
+                        self.process_completions();
                     }
                     None => break,
                 }

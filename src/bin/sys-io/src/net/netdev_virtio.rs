@@ -416,6 +416,8 @@ impl VirtioNetDev {
         }
 
         if shut_wr {
+            let handle = stream.socket_handle;
+            let socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
             while let Some(mut tx_buf) = stream.tx_bufs.pop_front() {
                 tx_buf.consumed = 0;
                 tx_buf.status = ErrorCode::Ok;
@@ -424,6 +426,11 @@ impl VirtioNetDev {
                     remote_addr.clone(),
                     tx_buf,
                 )));
+            }
+            if shut_rd {
+                socket.abort();
+            } else {
+                socket.close();
             }
         }
     }
@@ -745,8 +752,13 @@ impl NetInterface for VirtioNetDev {
     }
 
     fn poll(&mut self) -> Option<super::netdev::NetEvent> {
-        while self.do_poll() {}
-        self.events.pop_front()
+        match self.events.pop_front() {
+            Some(event) => Some(event),
+            None => {
+                while self.do_poll() {}
+                self.events.pop_front()
+            }
+        }
     }
 
     fn wait_timeout(&mut self) -> Option<core::time::Duration> {
@@ -782,8 +794,8 @@ impl NetInterface for VirtioNetDev {
         // }
 
         // 2. create socket
-        let rx_buffer = SocketBuffer::new(vec![0; 4000]);
-        let tx_buffer = SocketBuffer::new(vec![0; 4000]);
+        let rx_buffer = SocketBuffer::new(vec![0; 8192]);
+        let tx_buffer = SocketBuffer::new(vec![0; 8192]);
         let socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
         let handle = self.sockets.add(socket);
 

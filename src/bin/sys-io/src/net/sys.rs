@@ -577,30 +577,56 @@ impl NetSys {
             return Some(sqe);
         }
 
-        if shut_rd && shut_wr {
-            stream.set_state(TcpState::Closed);
-        } else if shut_rd {
-            if stream.state() == TcpState::ReadWrite {
-                stream.set_state(TcpState::WriteOnly);
-            } else {
-                assert_eq!(stream.state(), TcpState::ReadOnly);
-                stream.set_state(TcpState::Closed);
-            }
-        } else {
-            assert!(shut_wr);
-            if stream.state() == TcpState::ReadWrite {
-                stream.set_state(TcpState::ReadOnly);
-            } else {
-                assert_eq!(stream.state(), TcpState::WriteOnly);
-                stream.set_state(TcpState::Closed);
-            }
-        }
-
         let device_idx = stream.device();
         let local_addr = *stream.local_addr();
         let remote_addr = *stream.remote_addr();
 
-        self.devices[device_idx].tcp_stream_shutdown(&local_addr, &remote_addr, shut_rd, shut_wr);
+        match stream.state() {
+            TcpState::Connecting => unreachable!(), // We eliminated this option above.
+            TcpState::ReadWrite => {
+                if shut_rd && shut_wr {
+                    stream.set_state(TcpState::Closed);
+                } else if shut_rd {
+                    stream.set_state(TcpState::WriteOnly);
+                } else {
+                    assert!(shut_wr);
+                    stream.set_state(TcpState::ReadOnly);
+                }
+                self.devices[device_idx].tcp_stream_shutdown(
+                    &local_addr,
+                    &remote_addr,
+                    shut_rd,
+                    shut_wr,
+                );
+            }
+            TcpState::ReadOnly => {
+                if shut_wr {
+                    stream.set_state(TcpState::Closed);
+                    // Net to forward both flags down to the device so that
+                    // it can properly close the socket.
+                    self.devices[device_idx].tcp_stream_shutdown(
+                        &local_addr,
+                        &remote_addr,
+                        true,
+                        true,
+                    );
+                }
+            }
+            TcpState::WriteOnly => {
+                if shut_rd {
+                    stream.set_state(TcpState::Closed);
+                    // Net to forward both flags down to the device so that
+                    // it can properly close the socket.
+                    self.devices[device_idx].tcp_stream_shutdown(
+                        &local_addr,
+                        &remote_addr,
+                        true,
+                        true,
+                    );
+                }
+            }
+            TcpState::Closed => {}
+        }
 
         sqe.status = ErrorCode::Ok.into();
         return Some(sqe);
