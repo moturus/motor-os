@@ -342,10 +342,12 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     }
     let ts_4 = moto_sys::time::Instant::now().as_u64();
 
-    TRACING_1.fetch_add(ts_1 - ts_0, Ordering::Relaxed);
-    TRACING_2.fetch_add(ts_2 - ts_1, Ordering::Relaxed);
-    TRACING_3.fetch_add(ts_3 - ts_2, Ordering::Relaxed);
-    TRACING_4.fetch_add(ts_4 - ts_3, Ordering::Relaxed);
+    if !skip_tracing {
+        TRACING_1.fetch_add(ts_1 - ts_0, Ordering::Relaxed);
+        TRACING_2.fetch_add(ts_2 - ts_1, Ordering::Relaxed);
+        TRACING_3.fetch_add(ts_3 - ts_2, Ordering::Relaxed);
+        TRACING_4.fetch_add(ts_4 - ts_3, Ordering::Relaxed);
+    }
 }
 
 async fn async_io_iter(batch_size: u64, buf_alloc: bool, local_io: bool) {
