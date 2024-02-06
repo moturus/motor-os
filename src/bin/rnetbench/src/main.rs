@@ -16,7 +16,8 @@ mod server;
 static MAGIC_BYTES_CLIENT: &[u8] = b"rnetbench_magic_client";
 static MAGIC_BYTES_SERVER: &[u8] = b"rnetbench_magic_server";
 const CMD_TCP_RR: u64 = 1;
-const CMD_TCP_THROUGHPUT: u64 = 2;
+const CMD_TCP_THROUGHPUT_OUT: u64 = 2;
+const CMD_TCP_THROUGHPUT_IN: u64 = 3;
 
 fn binary_name() -> String {
     std::path::Path::new(std::env::args().next().unwrap().as_str())

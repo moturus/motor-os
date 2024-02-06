@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::time::Duration;
 use std::time::Instant;
 
 pub fn run(port: u16) -> ! {
@@ -58,8 +59,11 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
         crate::CMD_TCP_RR => {
             do_rr(tcp_stream)?;
         }
-        crate::CMD_TCP_THROUGHPUT => {
-            do_throughput(tcp_stream)?;
+        crate::CMD_TCP_THROUGHPUT_OUT => {
+            do_throughput_out(tcp_stream)?;
+        }
+        crate::CMD_TCP_THROUGHPUT_IN => {
+            do_throughput_in(tcp_stream)?;
         }
         _ => {
             panic!("unrecognized command: {}", cmd);
@@ -104,7 +108,7 @@ fn do_rr(mut stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
-fn do_throughput(mut stream: TcpStream) -> Result<()> {
+fn do_throughput_out(mut stream: TcpStream) -> Result<()> {
     let mut buffer = [0; 2048];
     let start_time = Instant::now();
     let mut total_bytes_read = 0usize;
@@ -123,8 +127,38 @@ fn do_throughput(mut stream: TcpStream) -> Result<()> {
     let duration = start_time.elapsed();
     let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
     println!(
-        "Throughput done: {:.2}MB received; {:.2?} MiB/sec.",
+        "Throughput client => server done: {:.2}MB received; {:.2?} MiB/sec.",
         total_bytes_read as f64 / (1024.0 * 1024.0),
+        rate
+    );
+
+    Ok(())
+}
+
+fn do_throughput_in(mut stream: TcpStream) -> std::io::Result<()> {
+    let data = [0u8; 1024]; // Sample data buffer
+    let mut total_bytes_sent = 0usize;
+    const TP_DURATION: Duration = Duration::from_secs(3);
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < TP_DURATION {
+        match stream.write(&data) {
+            Ok(bytes_sent) => total_bytes_sent += bytes_sent,
+            Err(e) => {
+                eprintln!("Failed to write to socket: {}", e);
+                return Ok(());
+            }
+        }
+    }
+
+    stream.flush().unwrap();
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+
+    let duration = start.elapsed();
+    let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+    println!(
+        "Throughput server => client done: {:.2}MB sent; {:.2?} MiB/sec.",
+        (total_bytes_sent as f64) / (1024.0 * 1024.0),
         rate
     );
 
