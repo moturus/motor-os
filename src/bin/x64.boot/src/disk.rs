@@ -48,12 +48,12 @@ pub struct AlignedArrayBuffer<const LEN: usize> {
 }
 
 pub trait AlignedBuffer {
-    fn slice(&self) -> &[u8];
+    fn _slice(&self) -> &[u8];
     fn slice_mut(&mut self) -> &mut [u8];
 }
 
 impl<const LEN: usize> AlignedBuffer for AlignedArrayBuffer<LEN> {
-    fn slice(&self) -> &[u8] {
+    fn _slice(&self) -> &[u8] {
         &self.buffer[..]
     }
     fn slice_mut(&mut self) -> &mut [u8] {

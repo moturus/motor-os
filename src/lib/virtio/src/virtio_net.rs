@@ -4,6 +4,7 @@ use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 
 // Feature bits.
+const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
 const VIRTIO_NET_F_MAC: u64 = 1_u64 << 5;
 #[allow(unused)]
 const VIRTIO_NET_F_STATUS: u64 = 1_u64 << 16;
@@ -24,38 +25,6 @@ pub(super) struct NetDev {
     dev: alloc::boxed::Box<VirtioDevice>,
     mac: [u8; 6],
 }
-
-/*
-#[repr(C, align(2))]
-pub struct RxBuffer {
-    virtio_net_hdr: Header,
-    buf: [u8; 1514],
-}
-
-unsafe impl Sync for RxBuffer {}
-unsafe impl Send for RxBuffer {}
-
-impl RxBuffer {
-    pub fn new() -> Self {
-        Self {
-            virtio_net_hdr: Header::default(),
-            buf: [0; 1514], // TODO: use MakeUninit to avoid zeroing the buffer out.
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.virtio_net_hdr = Header::default();
-    }
-
-    pub fn bytes(&self) -> &[u8; 1514] {
-        &self.buf
-    }
-
-    pub fn bytes_mut(&mut self) -> &mut [u8; 1514] {
-        &mut self.buf
-    }
-}
-*/
 
 // Because rx and tx happen in concurrent threads, we cannot guard Net by a mutex.
 static NET: AtomicPtr<NetDev> = AtomicPtr::new(core::ptr::null_mut());
@@ -134,6 +103,30 @@ impl NetDev {
         */
 
         let features_acked = super::virtio_device::VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC; // | VIRTIO_NET_F_STATUS;
+        if (features_available & VIRTIO_NET_F_CSUM) == VIRTIO_NET_F_CSUM {
+            // Note: in VirtIO 1.1. spec, section 5.1.6.2, it says:
+            /*
+                If the driver negotiated VIRTIO_NET_F_CSUM, it can skip checksumming the packet:
+                • flags has the VIRTIO_NET_HDR_F_NEEDS_CSUM set,
+                • csum_start is set to the offset within the packet to begin checksumming, and
+                • csum_offset indicates how many bytes after the csum_start the new (16 bit ones’ complement)
+                checksum is placed by the device.
+                • The TCP checksum field in the packet is set to the sum of the TCP pseudo header, so that replacing
+                it by the ones’ complement checksum of the TCP header and body will give the correct result.
+                Note: For example, consider a partially checksummed TCP (IPv4) packet. It will have a 14 byte ether-
+                net header and 20 byte IP header followed by the TCP header (with the TCP checksum field 16
+                bytes into that header). csum_start will be 14+20 = 34 (the TCP checksum includes the header),
+                and csum_offset will be 16.
+            */
+            // Basically, that means that the header should be populated with the knowledge of the packet structure,
+            // i.e. passed in; but smoltcp does not expose this capability, so we can't offload checksums at the moment.
+            #[cfg(debug_assertions)]
+            moto_sys::syscalls::SysMem::log(
+                alloc::format!("{}:{} - VIRTIO_NET_F_CSUM.", file!(), line!()).as_str(),
+            )
+            .ok();
+        }
+
         self.dev.write_enabled_features(features_acked);
         self.dev.confirm_features()?;
 

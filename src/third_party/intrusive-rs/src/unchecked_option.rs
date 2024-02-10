@@ -15,6 +15,7 @@ pub trait UncheckedOptionExt<T> {
     ///
     /// It is up to the caller to guarantee that the `Option<T>` is `Some(v)`.
     /// Calling this when it is `None` causes undefined behavior.
+    #[allow(unused)]
     unsafe fn unwrap_unchecked(self) -> T;
 }
 

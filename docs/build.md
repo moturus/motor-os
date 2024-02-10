@@ -31,10 +31,13 @@ $ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```
-$ rustup default nightly
-$ rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+$ rustup default nightly-2024-02-01
+$ rustup component add rust-src --toolchain nightly-2024-02-01-x86_64-unknown-linux-gnu
 $ cargo install --force cargo-make
 ```
+
+(Note: we pin to a specific nightly version due to a
+[compile error](https://github.com/tkaitchuck/aHash/issues/200) of one of the dependencies.)
 
 ## Clone the Motor OS repo:
 
@@ -77,6 +80,14 @@ $ cd $MOTORH/motor-os
 $ cargo make boot_img_release
 ```
 
+## Create a tap device that our VMs will use
+
+```
+$ sudo ip tuntap add mode tap moto-tap
+$ sudo ip addr add 192.168.4.1/24 dev moto-tap
+$ sudo ip link set moto-tap up
+```
+
 ## Run Motūrus OS
 
 If all of the above completed successfully, you can now do
@@ -88,5 +99,5 @@ $ cd $MOTORH/motor-os/vm_images/release
 $ ./run-qemu-web.sh
 ```
 
-to run the minimal image with a web server, which you can access from the host at http://localhost:10023. To run the full image
+to run the minimal image with a web server, which you can access from the host at http://192.168.4.2. To run the full image
 with serial console, use ```./run-qemu-full.sh```
