@@ -1,5 +1,3 @@
-use core::sync::atomic::*;
-
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 
@@ -21,17 +19,21 @@ pub struct Header {
     num_buffers: u16,
 }
 
-pub(super) struct NetDev {
+pub struct NetDev {
     dev: alloc::boxed::Box<VirtioDevice>,
     mac: [u8; 6],
 }
 
-// Because rx and tx happen in concurrent threads, we cannot guard Net by a mutex.
-static NET: AtomicPtr<NetDev> = AtomicPtr::new(core::ptr::null_mut());
+static NET_DEVICES: spin::Mutex<alloc::vec::Vec<alloc::sync::Arc<NetDev>>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
 
 impl NetDev {
     const VIRTQ_RX: usize = 0;
     const VIRTQ_TX: usize = 1;
+
+    pub fn mac(&self) -> &[u8; 6] {
+        &self.mac
+    }
 
     fn self_init(&mut self) -> Result<(), ()> {
         self.dev.acknowledge_driver(); // Step 3
@@ -42,25 +44,18 @@ impl NetDev {
     }
 
     pub(super) fn init(dev: alloc::boxed::Box<VirtioDevice>) {
-        if !NET.load(Ordering::Acquire).is_null() {
-            log::info!("Skipping a Virtio NET device because already have one.");
-            dev.mark_failed();
-            return;
-        }
-
         if dev.device_cfg.is_none() {
             log::warn!("Skiping Virtio NET device without device configuration.");
             return;
         }
 
-        let mut net = alloc::boxed::Box::new(NetDev { dev, mac: [0; 6] });
+        let mut net = NetDev { dev, mac: [0; 6] };
 
         if net.self_init().is_ok() {
             log::info!("Initialized Virtio NET device {:?}.", net.dev.pci_device.id,);
             #[cfg(debug_assertions)]
             moto_sys::syscalls::SysMem::log("Initialized Virtio NET device.").ok();
-            let prev = NET.swap(alloc::boxed::Box::leak(net), Ordering::AcqRel);
-            assert!(prev.is_null());
+            NET_DEVICES.lock().push(alloc::sync::Arc::new(net));
         } else {
             moto_sys::syscalls::SysMem::log("Failed to initialize Virtio NET device.").ok();
             net.dev.mark_failed();
@@ -120,11 +115,7 @@ impl NetDev {
             */
             // Basically, that means that the header should be populated with the knowledge of the packet structure,
             // i.e. passed in; but smoltcp does not expose this capability, so we can't offload checksums at the moment.
-            #[cfg(debug_assertions)]
-            moto_sys::syscalls::SysMem::log(
-                alloc::format!("{}:{} - VIRTIO_NET_F_CSUM.", file!(), line!()).as_str(),
-            )
-            .ok();
+            log::debug!("{}:{} - VIRTIO_NET_F_CSUM.", file!(), line!());
         }
 
         self.dev.write_enabled_features(features_acked);
@@ -139,14 +130,24 @@ impl NetDev {
             *b = cfg_bar.readb(device_cfg.offset as u64 + index as u64);
         }
 
-        #[cfg(debug_assertions)]
-        moto_sys::syscalls::SysMem::log(alloc::format!("NET MAC: {:02x?}", self.mac).as_str()).ok();
+        log::debug!("NET MAC: {:02x?}", self.mac);
 
         Ok(())
     }
 
+    pub fn wait_handles(&self) -> alloc::vec::Vec<crate::WaitHandle> {
+        let mut result = alloc::vec::Vec::new();
+        for q in &self.dev.virtqueues {
+            for h in &*q.lock().wait_handles() {
+                result.push(*h);
+            }
+        }
+
+        result
+    }
+
     #[inline(never)]
-    fn post_receive(&self, buf: &mut [u8]) -> Result<(), ()> {
+    pub fn post_receive(&self, buf: &mut [u8]) -> Result<(), ()> {
         use super::virtio_queue::UserData;
         let user_data = UserData {
             addr: buf.as_mut_ptr() as usize as u64,
@@ -171,7 +172,7 @@ impl NetDev {
     }
 
     #[inline(never)]
-    fn consume_receive(&self) -> u32 {
+    pub fn consume_receive(&self) -> u32 {
         assert_eq!(self.dev.virtqueues.len(), 2);
         let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_RX].lock();
 
@@ -179,7 +180,7 @@ impl NetDev {
     }
 
     #[inline(never)]
-    fn post_send(&self, header: &mut Header, buf: &[u8]) -> Result<(), ()> {
+    pub fn post_send(&self, header: &mut Header, buf: &[u8]) -> Result<(), ()> {
         use super::virtio_queue::UserData;
 
         *header = Header::default();
@@ -213,7 +214,7 @@ impl NetDev {
     }
 
     #[inline(never)]
-    fn poll_send(&self) -> bool {
+    pub fn poll_send(&self) -> bool {
         assert_eq!(self.dev.virtqueues.len(), 2);
         let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_TX].lock();
 
@@ -226,89 +227,16 @@ impl NetDev {
     }
 }
 
-/*
-pub fn ___receive(buf: &mut RxBuffer) -> Result<(), ()> {
-    let netdev = NET.load(Ordering::Relaxed);
-    if netdev.is_null() {
-        return Err(());
-    }
-
-    unsafe { (*netdev).receive(buf) }
-}
-*/
-
-pub fn post_receive(buf: &mut [u8]) -> Result<(), ()> {
-    let netdev = NET.load(Ordering::Relaxed);
-    if netdev.is_null() {
-        return Err(());
-    }
-
-    unsafe { (*netdev).post_receive(buf) }
-}
-
-pub fn consume_receive() -> u32 {
-    let netdev = NET.load(Ordering::Relaxed);
-    if netdev.is_null() {
-        return 0;
-    }
-
-    unsafe { (*netdev).consume_receive() }
-}
-
-pub fn post_send(header: &mut Header, buf: &[u8]) -> Result<(), ()> {
-    let netdev = NET.load(Ordering::Relaxed);
-    if netdev.is_null() {
-        return Err(());
-    }
-
-    unsafe { (*netdev).post_send(header, buf) }
-}
-
-pub fn poll_send() -> bool {
-    let netdev = NET.load(Ordering::Relaxed);
-    if netdev.is_null() {
-        return false;
-    }
-
-    unsafe { (*netdev).poll_send() }
-}
-
-pub fn ok() -> bool {
-    !NET.load(Ordering::Relaxed).is_null()
-}
-
-pub fn mac() -> Option<[u8; 6]> {
-    let netdev = NET.load(Ordering::Relaxed) as *const NetDev;
-    if netdev.is_null() {
-        return None;
-    }
-
-    unsafe { Some((*netdev).mac) }
-}
-
-fn wait_handle(queue_idx: usize) -> crate::WaitHandle {
-    let netdev = NET.load(Ordering::Relaxed) as *const NetDev;
-    if netdev.is_null() {
-        panic!()
-    }
-
-    let netdev = unsafe { netdev.as_ref() }.unwrap();
-
-    let queue = netdev.dev.virtqueues[queue_idx].lock();
-    let handles = queue.wait_handles();
-    assert_eq!(handles.len(), 1);
-
-    handles[0]
-}
-
-pub fn rx_wait_handle() -> crate::WaitHandle {
-    wait_handle(NetDev::VIRTQ_RX)
-}
-
-pub fn tx_wait_handle() -> crate::WaitHandle {
-    wait_handle(NetDev::VIRTQ_TX)
-}
-
 pub const fn header_len() -> usize {
     core::mem::size_of::<Header>()
+}
+
+pub fn find_by_mac(mac: &[u8; 6]) -> Option<alloc::sync::Arc<NetDev>> {
+    for dev in &*NET_DEVICES.lock() {
+        if dev.mac == *mac {
+            return Some(dev.clone());
+        }
+    }
+
+    None
 }
