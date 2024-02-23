@@ -5,7 +5,7 @@
 //! between the kernel and a userspace process.
 //!
 //! Also simpler than io_uring. More specifically, SQE and CQE have the same layout.
-use core::sync::atomic::*;
+use core::{fmt::Debug, sync::atomic::*};
 
 use moto_sys::{syscalls::*, ErrorCode, SysHandle};
 
@@ -116,6 +116,12 @@ pub struct QueueEntry {
 }
 
 const _QE_SIZE: () = assert!(core::mem::size_of::<QueueEntry>() == 64);
+
+impl Debug for QueueEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("QueueEntry").field("id", &self.id).finish()
+    }
+}
 
 impl QueueEntry {
     pub fn new() -> Self {
