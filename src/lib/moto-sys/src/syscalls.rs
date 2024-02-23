@@ -65,6 +65,18 @@ impl SysHandle {
     }
 }
 
+impl From<u64> for SysHandle {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&u64> for SysHandle {
+    fn from(value: &u64) -> Self {
+        Self(*value)
+    }
+}
+
 /// Same as SysHandle, but calls SysCtl::put on drop.
 #[cfg(feature = "userspace")]
 pub struct RaiiHandle(u64);
