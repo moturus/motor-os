@@ -1,0 +1,9 @@
+loopback = false
+
+[devices.net0]
+mac = "a4:a1:c2:00:00:01"
+cidrs = ["192.168.4.2/24"]
+
+[[devices.net0.routes]]
+ip_network = "0.0.0.0/0"  # The default gateway.
+gateway = "192.168.4.1"
