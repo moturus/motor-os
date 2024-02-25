@@ -5,9 +5,9 @@
 
 use core::ptr::copy_nonoverlapping;
 
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::borrow::ToOwned;
 
 use crate::block_cache::BlockCache;
 
@@ -362,11 +362,7 @@ impl SyncFileSystem {
     }
 
     /// Get a specific directory entry (child).
-    pub fn get_directory_entry(
-        &mut self,
-        parent: EntryId,
-        pos: u64,
-    ) -> Result<DirEntry, FsError> {
+    pub fn get_directory_entry(&mut self, parent: EntryId, pos: u64) -> Result<DirEntry, FsError> {
         self.error?;
         let parent_block = self.blockcache.read(parent.block_no)?;
         let meta = unsafe { parent_block.block().get::<EntryMetadata>() };

@@ -128,38 +128,16 @@ impl PvhStartInfo {
     }
 }
 
-pub fn start_userspace_processes() {
-    let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
-    let sys_io_bytes = unsafe {
-        core::slice::from_raw_parts(
-            SYS_IO_ELF_START.load(Ordering::Relaxed) as *const u8,
-            SYS_IO_ELF_SIZE.load(Ordering::Relaxed),
-        )
-    };
+fn print_boot_logo() {
+    crate::arch::arch_write_serial!("\nMOTOR OS ... ");
 
-    let result = crate::util::loader::load_elf(sys_io_bytes, address_space.as_ref());
-    if result.is_err() {
-        core::mem::drop(address_space);
-        panic!("failed to load sys-io");
-    }
-    let entry_point = result.unwrap();
-
-    let process = crate::uspace::Process::new(
-        crate::stats::kernel_stats(),
-        address_space,
-        entry_point,
-        0xffff_ffff_ffff_ffff, // All possible caps.
-        alloc::string::String::from("sys-io"),
-    )
-    .unwrap();
-
-    assert_eq!(process.pid().as_u64(), moto_sys::stats::PID_SYS_IO);
-
-    // crate::util::tracing::start();
-    log::debug!("starting sys-io");
-    process.start();
-    log::set_max_level(log::LevelFilter::Info);
-    let _ = alloc::sync::Arc::into_raw(process);
+    // crate::raw_log!(" ███╗   ███╗ ██████╗ ████████╗ ██████╗ ██████╗      ██████╗  █████╗ ");
+    // crate::raw_log!(" ████╗ ████║██╔═══██╗╚══██╔══╝██╔═══██╗██╔══██╗    ██╔═══██╗██╔═══╝ ");
+    // crate::raw_log!(" ██╔████╔██║██║   ██║   ██║   ██║   ██║██████╔╝    ██║   ██║╚█████╗ ");
+    // crate::raw_log!(" ██║╚██╔╝██║██║   ██║   ██║   ██║   ██║██╔══██╗    ██║   ██║╚════██║");
+    // crate::raw_log!(" ██║ ╚═╝ ██║╚██████╔╝   ██║   ╚██████╔╝██║  ██║    ╚██████╔╝██████╔╝");
+    // crate::raw_log!(" ╚═╝     ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═╝     ╚═════╝ ╚═════╝ ");
+    // crate::raw_log!("\n");
 }
 
 pub fn init_exited(init: &crate::uspace::Process) -> ! {
@@ -364,25 +342,6 @@ fn cpu_main(this_cpu: u64) -> ! {
     }
 }
 
-fn print_boot_logo() {
-    crate::raw_log!("\nMOTOR OS\n");
-
-    // crate::raw_log!(" ███╗   ███╗ ██████╗ ████████╗ ██████╗ ██████╗      ██████╗  █████╗ ");
-    // crate::raw_log!(" ████╗ ████║██╔═══██╗╚══██╔══╝██╔═══██╗██╔══██╗    ██╔═══██╗██╔═══╝ ");
-    // crate::raw_log!(" ██╔████╔██║██║   ██║   ██║   ██║   ██║██████╔╝    ██║   ██║╚█████╗ ");
-    // crate::raw_log!(" ██║╚██╔╝██║██║   ██║   ██║   ██║   ██║██╔══██╗    ██║   ██║╚════██║");
-    // crate::raw_log!(" ██║ ╚═╝ ██║╚██████╔╝   ██║   ╚██████╔╝██║  ██║    ╚██████╔╝██████╔╝");
-    // crate::raw_log!(" ╚═╝     ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═╝     ╚═════╝ ╚═════╝ ");
-    // crate::raw_log!("\n");
-
-    // crate::raw_log!(" ###    ###  ######  ########  ######  ######       ######   #####  ");
-    // crate::raw_log!(" ####  #### ##    ##    ##    ##    ## ##   ##     ##    ## ##      ");
-    // crate::raw_log!(" ## #### ## ##    ##    ##    ##    ## ######      ##    ##  #####  ");
-    // crate::raw_log!(" ##  ##  ## ##    ##    ##    ##    ## ##   ##     ##    ##      ## ");
-    // crate::raw_log!(" ##      ##  ######     ##     ######  ##   ##      ######  ######  ");
-    // crate::raw_log!("\n");
-}
-
 pub fn start_cpu(arg: u64) -> ! {
     let this_cpu = crate::arch::cpu_id();
     if this_cpu == 0 {
@@ -390,4 +349,48 @@ pub fn start_cpu(arg: u64) -> ! {
     } else {
         start_ap(this_cpu)
     }
+}
+
+pub fn start_userspace_processes() {
+    let mem_size = crate::mm::phys::PhysStats::get().total_size as f64 / (1024.0 * 1024.0);
+    let tm = crate::arch::time::system_start_time().elapsed();
+
+    let millis = tm.as_millis();
+    crate::arch::arch_write_serial!(
+        "kernel up at {:03}ms. {:.02} MiB RAM available, {} CPUs.\n",
+        millis,
+        mem_size,
+        crate::config::num_cpus()
+    );
+    let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
+    let sys_io_bytes = unsafe {
+        core::slice::from_raw_parts(
+            SYS_IO_ELF_START.load(Ordering::Relaxed) as *const u8,
+            SYS_IO_ELF_SIZE.load(Ordering::Relaxed),
+        )
+    };
+
+    let result = crate::util::loader::load_elf(sys_io_bytes, address_space.as_ref());
+    if result.is_err() {
+        core::mem::drop(address_space);
+        panic!("failed to load sys-io");
+    }
+    let entry_point = result.unwrap();
+
+    let process = crate::uspace::Process::new(
+        crate::stats::kernel_stats(),
+        address_space,
+        entry_point,
+        0xffff_ffff_ffff_ffff, // All possible caps.
+        alloc::string::String::from("sys-io"),
+    )
+    .unwrap();
+
+    assert_eq!(process.pid().as_u64(), moto_sys::stats::PID_SYS_IO);
+
+    // crate::util::tracing::start();
+    log::debug!("starting sys-io");
+    process.start();
+    log::set_max_level(log::LevelFilter::Info);
+    let _ = alloc::sync::Arc::into_raw(process);
 }

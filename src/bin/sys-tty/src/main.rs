@@ -43,7 +43,7 @@ fn main() {
 
     log::set_max_level(log::LevelFilter::Trace);
     #[cfg(debug_assertions)]
-    log::info!("sys-tty started");
+    log::debug!("sys-tty started");
 
     let config = read_config();
     let words: Vec<_> = config.trim().split_whitespace().collect();
@@ -54,6 +54,12 @@ fn main() {
     }
 
     let fname = words[0];
+    let millis = moto_sys::time::since_system_start().as_millis();
+    crate::serial::write_serial!(
+        "   ... all services up at {:03}ms. Starting {}.\n\n",
+        millis,
+        fname
+    );
 
     let console_wait_handle =
         moto_sys::syscalls::SysCtl::get(SysHandle::KERNEL, 0, "serial_console").unwrap();
