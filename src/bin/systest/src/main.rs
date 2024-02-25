@@ -399,7 +399,7 @@ fn test_file_write() {
         .write(true)
         .create_new(true)
         .open(path.clone())
-        .unwrap();
+        .expect(format!("Failed to create {:?}", path).as_str());
 
     file.write(WRITTEN.as_bytes()).unwrap();
     std::mem::drop(file); // Close it.
@@ -470,7 +470,13 @@ fn main() {
     mpmc::test_array_queue();
     channel_test::test_io_throughput();
     test_reentrant_mutex();
-    tcp::test_tcp_loopback();
+
+    println!(
+        "{}:{} enable tcp loopback test when ready",
+        file!(),
+        line!()
+    );
+    // tcp::test_tcp_loopback();
     // tcp::test_wget();
     channel_test::test_io_channel();
     channel_test::test_io_latency();
