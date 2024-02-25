@@ -7,8 +7,7 @@ use xmas_elf::dynamic::Tag;
 use xmas_elf::program::ProgramHeader::{self, Ph32, Ph64};
 use xmas_elf::program::{ProgramIter, SegmentData, Type};
 use xmas_elf::sections::SectionData;
-pub use xmas_elf::symbol_table::{Entry};
-use xmas_elf::ElfFile;
+pub use xmas_elf::symbol_table::Entry;
 use xmas_elf::*;
 
 /// Abstract representation of a loadable ELF binary.
@@ -244,8 +243,7 @@ impl<'s> ElfBinary<'s> {
             ($info:ident, $entry:ident, $tag:ident) => {
                 match $tag {
                     // Trace required libs
-                    Tag::Needed => {
-                    }
+                    Tag::Needed => {}
 
                     // Rel<T>
                     Tag::Rel => $info.rela = $entry.get_ptr()?.into(),
@@ -258,7 +256,7 @@ impl<'s> ElfBinary<'s> {
                         $info.flags1 =
                             unsafe { DynamicFlags1::from_bits_unchecked($entry.get_val()? as _) };
                     }
-                    _ => {},
+                    _ => {}
                 }
             };
         }

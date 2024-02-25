@@ -3,6 +3,7 @@
 //! Table 10-1 Local APIC Register Address Map
 //! the MMIO base values are found in this file.
 
+#[allow(unused_imports)]
 use bit_field::BitField;
 use core::fmt;
 

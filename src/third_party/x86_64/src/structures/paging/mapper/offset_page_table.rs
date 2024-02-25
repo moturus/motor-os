@@ -1,5 +1,6 @@
 #![cfg(target_pointer_width = "64")]
 
+#[allow(unused_imports)]
 use crate::structures::paging::{
     frame::PhysFrame, mapper::*, page::PageRangeInclusive, page_table::PageTable, FrameDeallocator,
     Page, PageTableFlags,

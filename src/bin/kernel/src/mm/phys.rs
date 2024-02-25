@@ -1,7 +1,6 @@
 use super::slab::*;
 use super::*;
 use alloc::vec;
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
@@ -567,7 +566,8 @@ impl PhysicalMemory {
     // };
 
     fn inst() -> &'static Self {
-        let addr = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize) };
+        let addr =
+            unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize) };
         assert_ne!(addr, 0);
         unsafe { (addr as *const Self).as_ref().unwrap_unchecked() }
     }

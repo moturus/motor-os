@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use crate::structures::paging::{
     frame::PhysFrame,
     frame_alloc::{FrameAllocator, FrameDeallocator},

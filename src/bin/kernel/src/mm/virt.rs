@@ -21,7 +21,6 @@ use super::slab::*;
 use super::virt_intrusive::SegmentMap;
 use super::virt_intrusive::VmemSegment;
 use super::*;
-use crate::arch::paging::PageTable;
 use crate::stats::MemStats;
 use crate::util::SpinLock;
 use crate::util::StaticRef;
@@ -29,7 +28,6 @@ use crate::util::UnsafeRef;
 
 use core::marker::PhantomPinned;
 use core::sync::atomic::AtomicU64;
-use core::sync::atomic::Ordering;
 
 use crate::arch::paging::PAGING_DIRECT_MAP_OFFSET;
 
@@ -771,10 +769,9 @@ impl UserAddressSpaceBase {
                 self.normal_memory
                     .allocate_user_fixed(vaddr_start, num_pages, mapping_options)
             }
-            moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => {
-                self.custom_memory
-                    .allocate_user_fixed(vaddr_start, num_pages, mapping_options)
-            }
+            moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => self
+                .custom_memory
+                .allocate_user_fixed(vaddr_start, num_pages, mapping_options),
             _ => Err(ErrorCode::InvalidArgument),
         }
     }

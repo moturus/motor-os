@@ -1,7 +1,9 @@
 //! x2APIC, the most recent APIC on x86 for large servers with more than 255 cores.
+#[allow(unused_imports)]
 use bit_field::BitField;
 
 use super::*;
+#[allow(unused_imports)]
 use crate::msr::{
     rdmsr, wrmsr, IA32_APIC_BASE, IA32_TSC_DEADLINE, IA32_X2APIC_APICID, IA32_X2APIC_EOI,
     IA32_X2APIC_ESR, IA32_X2APIC_ICR, IA32_X2APIC_LDR, IA32_X2APIC_LVT_LINT0,

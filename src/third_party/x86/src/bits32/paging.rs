@@ -2,7 +2,6 @@
 
 use bitflags::*;
 
-use core::convert::{From, Into};
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops;

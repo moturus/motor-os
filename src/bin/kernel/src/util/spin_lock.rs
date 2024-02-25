@@ -1,5 +1,5 @@
 use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut, Drop};
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub struct SpinLock<T: ?Sized> {

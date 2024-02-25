@@ -1,3 +1,6 @@
+#![allow(unused)]
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::sync::{atomic::*, Arc};

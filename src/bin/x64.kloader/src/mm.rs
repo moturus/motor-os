@@ -172,7 +172,7 @@ pub fn init(pvh: &'static PvhStartInfo) {
     static mut L3_TABLE_DIRECT_MAP: HwPageTable = HwPageTable::new();
 
     unsafe {
-        #[allow(static_mut_ref)]
+        #[allow(static_mut_refs)]
         set_l3_table_for_direct_map(0, max_addr, &mut L3_TABLE_DIRECT_MAP);
 
         let idx_l4 = idx_l4(PAGING_DIRECT_MAP_OFFSET);
