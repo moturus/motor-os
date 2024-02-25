@@ -24,8 +24,6 @@ macro_rules! moto_log {
     };
 }
 
-static ENABLE_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 fn _log_to_cloud_hypervisor(c: u8) {
     unsafe {
         core::arch::asm!(
@@ -57,10 +55,7 @@ pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
 }
 
 fn main() {
-    log::debug!("sys-io started.");
-
     runtime::start();
-    log::debug!("runtime init done");
 
     let mut cmd = std::process::Command::new("/sys/sys-init");
 

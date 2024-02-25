@@ -198,7 +198,7 @@ fn to_error_code(error: std::io::Error) -> ErrorCode {
         std::io::ErrorKind::AlreadyExists => ErrorCode::AlreadyInUse,
         std::io::ErrorKind::WouldBlock => todo!(),
         std::io::ErrorKind::InvalidInput => todo!(),
-        std::io::ErrorKind::InvalidData => todo!(),
+        std::io::ErrorKind::InvalidData => ErrorCode::UnknownError,
         std::io::ErrorKind::TimedOut => todo!(),
         std::io::ErrorKind::WriteZero => todo!(),
         // std::io::ErrorKind::Interrupted => todo!(),

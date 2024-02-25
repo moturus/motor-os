@@ -68,8 +68,6 @@ impl Driver {
         let prev = DRIVER_ADDRESS.swap(addr, Ordering::Relaxed);
         assert_eq!(prev, 0);
 
-        // std::thread::spawn(Self::run);
-
         std::thread::Builder::new()
             .stack_size(4096 * 256)
             .spawn(Self::run)
@@ -88,6 +86,9 @@ impl Driver {
     fn run() -> ! {
         // VirtIO interrupts are affined to CPU 0.
         moto_sys::syscalls::SysCpu::affine_to_cpu(Some(0)).unwrap();
+
+        super::STARTED.store(1, Ordering::Release);
+        moto_runtime::futex_wake(&super::STARTED);
 
         let self_ = Self::get();
         let mut swap_target = SysHandle::NONE;

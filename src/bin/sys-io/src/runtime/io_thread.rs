@@ -308,6 +308,9 @@ impl IoRuntime {
     fn io_thread(&mut self) -> ! {
         self.spawn_listeners_if_needed();
 
+        super::STARTED.store(1, std::sync::atomic::Ordering::Release);
+        moto_runtime::futex_wake(&super::STARTED);
+
         let mut busy_polling_iter = 0_u32;
         let mut debug_timed_out = false;
         loop {

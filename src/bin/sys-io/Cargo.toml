@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 log = "0.4.20"
 spin = { path = "../../third_party/spin" }
+serde = { version = "1.0.*", features = ["derive"] }
+toml = "0.8.10"
 
 moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 flatfs       = { path = "../../lib/flatfs"      }
@@ -16,8 +18,7 @@ moto-sys     = { path = "../../lib/moto-sys"    }
 moto-virtio  = { path = "../../lib/virtio"      }
 srfs         = { path = "../../lib/srfs"        }
 configparser = { version = "3.0.2", default_features = false }
-ipnetwork = { version = "0.20.0", default_features = false }
-# smoltcp = "0.9.1"
+ipnetwork = "0.20.0"
 smoltcp = "0.11.0"
 
 [patch.crates-io]
@@ -25,6 +26,7 @@ flatfs       = { path = "../../lib/flatfs"      }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-virtio  = { path = "../../lib/virtio"      }
+srfs-core    = { path = "../../lib/srfs-core"   }
 srfs         = { path = "../../lib/srfs"        }
 
 [profile.dev]

@@ -3,19 +3,21 @@ use moto_sys::ErrorCode;
 
 mod config;
 mod netdev;
-mod netdev_loopback;
-mod netdev_virtio;
 mod smoltcp_helpers;
+mod socket;
 mod sys;
-mod tcp;
-mod util;
+mod tcp_listener;
 
 pub fn init() -> Box<dyn crate::runtime::IoSubsystem> {
-    let config = config::load().ok();
-    if config.is_none() {
-        panic!("sys-net.cfg not available.");
-    }
-    Box::new(sys::NetSys::new(config.unwrap()))
+    let config = match config::load() {
+        Ok(cfg) => cfg,
+        Err(err) => panic!("Couldn't load sys-net.toml: {:?}", err),
+    };
+
+    #[cfg(debug_assertions)]
+    log::debug!("{}:{} net config: {:#?}", file!(), line!(), config);
+
+    sys::NetSys::new(config)
 }
 
 #[derive(Clone, Copy)]
