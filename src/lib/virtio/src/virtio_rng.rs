@@ -29,7 +29,7 @@ impl Rng {
         let mut rng = Rng { dev };
 
         if rng.self_init().is_ok() {
-            log::info!("Initialized Virtio RNG device {:?}.", rng.dev.pci_device.id);
+            log::debug!("Initialized Virtio RNG device {:?}.", rng.dev.pci_device.id);
             *guard = Some(rng);
         } else {
             rng.dev.mark_failed();

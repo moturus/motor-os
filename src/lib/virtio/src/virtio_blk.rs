@@ -61,7 +61,7 @@ impl Blk {
         };
 
         if blk.self_init().is_ok() {
-            log::info!(
+            log::debug!(
                 "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
                 blk.dev.pci_device.id,
                 blk.capacity,
@@ -77,6 +77,7 @@ impl Blk {
     // Step 4
     fn negotiate_features(&mut self) -> Result<(), ()> {
         let features_available = self.dev.get_available_features();
+        log::debug!("BLK devices features: 0x{:x}", features_available);
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
             log::warn!("Virtio BLK device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
@@ -127,7 +128,13 @@ impl Blk {
         const VIRTIO_BLK_S_IOERR: u8 = 1;
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
-        let mut status = AtomicU8::new(VIRTIO_BLK_S_UNSUPP);
+        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
+        let mut status_64 = 0_u64;
+        let status_addr = &mut status_64 as *mut _ as usize;
+        unsafe {
+            let status = status_addr as *mut u8;
+            status.write_volatile(VIRTIO_BLK_S_UNSUPP);
+        }
 
         use super::virtio_queue::UserData;
         let buffs: [UserData; 3] = [
@@ -140,7 +147,7 @@ impl Blk {
                 len: BLOCK_SIZE as u32,
             },
             UserData {
-                addr: &mut status as *mut _ as usize as u64,
+                addr: status_addr as u64,
                 len: 1,
             },
         ];
@@ -172,17 +179,21 @@ impl Blk {
                 }
             }
         }
-        virtqueue.reclaim_used();
+        let consumed = virtqueue.consume_used();
+        // Qemu indicates that 513 bytes were consumed, but CHV says 512.
+        assert!((consumed == 512) || (consumed == 513));
 
         // todo!("add vring_get_isr");
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        if status.load(Ordering::Acquire) == VIRTIO_BLK_S_OK {
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        let status = unsafe { (status_addr as *const u8).read_volatile() };
+        if status == VIRTIO_BLK_S_OK {
             Ok(())
-        } else if status.load(Ordering::Acquire) == VIRTIO_BLK_S_IOERR {
+        } else if status == VIRTIO_BLK_S_IOERR {
             log::error!("VirtioBlk read error");
             Err(())
         } else {
-            panic!("status: {}", status.load(Ordering::Relaxed))
+            panic!("status: {}", status)
         }
     }
 
@@ -207,7 +218,13 @@ impl Blk {
         const VIRTIO_BLK_S_IOERR: u8 = 1;
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
-        let mut status = AtomicU8::new(VIRTIO_BLK_S_UNSUPP);
+        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
+        let mut status_64 = 0_u64;
+        let status_addr = &mut status_64 as *mut _ as usize;
+        unsafe {
+            let status = status_addr as *mut u8;
+            status.write_volatile(VIRTIO_BLK_S_UNSUPP);
+        }
 
         use super::virtio_queue::UserData;
         let sg: [UserData; 3] = [
@@ -220,7 +237,7 @@ impl Blk {
                 len: BLOCK_SIZE as u32,
             },
             UserData {
-                addr: &mut status as *mut _ as usize as u64,
+                addr: status_addr as u64,
                 len: 1,
             },
         ];
@@ -258,13 +275,15 @@ impl Blk {
 
         // todo!("add vring_get_isr");
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        if status.load(Ordering::Acquire) == VIRTIO_BLK_S_OK {
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        let status = unsafe { (status_addr as *const u8).read_volatile() };
+        if status == VIRTIO_BLK_S_OK {
             Ok(())
-        } else if status.load(Ordering::Acquire) == VIRTIO_BLK_S_IOERR {
+        } else if status == VIRTIO_BLK_S_IOERR {
             log::error!("VirtioBlk write error");
             Err(())
         } else {
-            panic!("status: {}", status.load(Ordering::Relaxed))
+            panic!("status: {}", status)
         }
     }
 
@@ -392,6 +411,9 @@ impl super::BlockDevice for VirtioDrive {
             blk.read(start_block + idx, curr_buf)?;
             offset += BLOCK_SIZE;
         }
+
+        core::sync::atomic::fence(Ordering::Acquire);
+        core::sync::atomic::compiler_fence(Ordering::Acquire);
 
         Ok(())
     }

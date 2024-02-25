@@ -169,6 +169,9 @@ impl Virtqueue {
     }
 
     pub fn wait(&self) -> Result<(), ()> {
+        if self.more_used() {
+            return Ok(());
+        }
         if self.wait_handles.is_empty() {
             return Err(()); // Nothing to wait on.
         }
@@ -310,7 +313,7 @@ impl Virtqueue {
                 break;
             }
 
-            panic!("multiple descriptors not yet supported");
+            // panic!("multiple descriptors not yet supported");
         }
 
         if self.last_used_idx == u16::MAX {

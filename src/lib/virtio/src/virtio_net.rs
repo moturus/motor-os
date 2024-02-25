@@ -52,7 +52,7 @@ impl NetDev {
         let mut net = NetDev { dev, mac: [0; 6] };
 
         if net.self_init().is_ok() {
-            log::info!("Initialized Virtio NET device {:?}.", net.dev.pci_device.id,);
+            log::debug!("Initialized Virtio NET device {:?}.", net.dev.pci_device.id,);
             #[cfg(debug_assertions)]
             moto_sys::syscalls::SysMem::log("Initialized Virtio NET device.").ok();
             NET_DEVICES.lock().push(alloc::sync::Arc::new(net));

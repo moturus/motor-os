@@ -247,7 +247,7 @@ impl VirtioDevice {
         let status = cfg_bar.readb(
             common_cfg.offset as u64 + offset_of!(VirtioPciCommonCfgLayout, device_status) as u64,
         );
-        log::info!("Detected VirtIO device {:?} status: {}.", kind, status);
+        log::debug!("Detected VirtIO device {:?} status: {}.", kind, status);
 
         let mut device_cfg: Option<VirtioPciCap> = None;
         for cap in &virtio_caps {
@@ -734,8 +734,6 @@ pub fn init_virtio_devices(mapper: &'static dyn super::KernelAdapter) {
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok());
     log::debug!("initializing VirtIO");
-    #[cfg(debug_assertions)]
-    moto_sys::syscalls::SysMem::log("initializing VirtIO").ok();
 
     unsafe { MAPPER = Some(mapper) };
 
@@ -761,6 +759,5 @@ pub fn init_virtio_devices(mapper: &'static dyn super::KernelAdapter) {
         }
     }
     #[cfg(debug_assertions)]
-    moto_sys::syscalls::SysMem::log("done with VirtIO").ok();
     log::debug!("done initializing VirtIO");
 }
