@@ -5,7 +5,6 @@ struct MotoLogger;
 
 impl log::Log for MotoLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool {
-        // metadata.level() <= Level::Info
         true
     }
 

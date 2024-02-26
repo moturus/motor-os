@@ -10,6 +10,7 @@ pub trait File {
     fn read_offset(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, ErrorCode>;
 }
 
+#[allow(unused)]
 pub trait DirectoryEntry {
     fn is_directory(&self) -> bool;
     fn filename(&self) -> &str; // The filename without ancestors.

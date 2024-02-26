@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use moto_ipc::io_channel;
 use moto_runtime::rt_api;
 use moto_sys::syscalls::*;
-use moto_sys::{ErrorCode, SysHandle};
+use moto_sys::ErrorCode;
 
 use super::process::Process;
 use super::IoSubsystem;

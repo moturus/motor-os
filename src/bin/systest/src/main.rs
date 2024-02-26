@@ -470,13 +470,7 @@ fn main() {
     mpmc::test_array_queue();
     channel_test::test_io_throughput();
     test_reentrant_mutex();
-
-    println!(
-        "{}:{} enable tcp loopback test when ready",
-        file!(),
-        line!()
-    );
-    // tcp::test_tcp_loopback();
+    tcp::test_tcp_loopback();
     // tcp::test_wget();
     channel_test::test_io_channel();
     channel_test::test_io_latency();

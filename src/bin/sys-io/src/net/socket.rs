@@ -72,7 +72,12 @@ impl SocketWaker {
     }
 
     fn wake(&self) {
-        log::debug!("{}:{} socket wake", file!(), line!());
+        log::debug!(
+            "{}:{} socket wake 0x{:x}",
+            file!(),
+            line!(),
+            u64::from(self.socket_id)
+        );
         self.woken_sockets.borrow_mut().push_back(self.socket_id)
     }
 }

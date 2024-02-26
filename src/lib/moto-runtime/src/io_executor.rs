@@ -231,6 +231,10 @@ impl IoExecutorThread {
                 let max_num_blocks = qe.payload.args_16()[0];
                 let buf_ptr = qe.payload.args_64()[1] as usize as *const u8;
                 let buf_len = qe.payload.args_64()[2] as usize;
+                if buf_len == 0 {
+                    pqe.qe().status = ErrorCode::InvalidArgument.into();
+                    return Some(pqe);
+                }
                 let num_blocks = blocks_for_buf(max_num_blocks, buf_len);
 
                 match self.io_client.alloc_buffer(num_blocks) {

@@ -85,6 +85,17 @@ pub(super) struct DeviceCfg {
     pub routes: Vec<IpRoute>,
 }
 
+impl DeviceCfg {
+    pub fn new(mac: &str) -> Self {
+        use std::str::FromStr;
+        Self {
+            mac: MacAddress::from_str(mac).unwrap(),
+            cidrs: vec![],
+            routes: vec![],
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 pub(super) struct NetConfig {
     #[allow(unused)]

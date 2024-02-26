@@ -8,19 +8,23 @@ use std::time::Duration;
 
 fn handle_client(mut stream: std::net::TcpStream) {
     let mut data = [0 as u8; 17];
-    while match stream.read(&mut data) {
-        Ok(size) => {
-            for byte in &mut data {
-                *byte = 255 - *byte;
+    loop {
+        match stream.read(&mut data) {
+            Ok(size) => {
+                if size == 0 {
+                    break;
+                }
+                for byte in &mut data {
+                    *byte = 255 - *byte;
+                }
+                stream.write(&data[0..size]).unwrap();
             }
-            stream.write(&data[0..size]).unwrap();
-            true
+            Err(_) => {
+                break;
+            }
         }
-        Err(_) => {
-            stream.shutdown(std::net::Shutdown::Both).unwrap();
-            false
-        }
-    } {}
+    }
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
 }
 
 fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
@@ -28,10 +32,6 @@ fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
     assert!(std::net::TcpListener::bind("127.0.0.1:3333").is_err());
     start.store(true, Ordering::Release);
 
-    // accept connections and process them, spawning a new thread for each one
-
-    // let (stream, _) = listener.accept().unwrap();
-    // handle_client(stream);
     for stream in listener.incoming() {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -54,7 +54,7 @@ fn client_iter() {
     let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
     assert_eq!(addrs.len(), 1);
     let mut stream =
-        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(100)).unwrap();
+        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     stream.write(&tx).unwrap();
 

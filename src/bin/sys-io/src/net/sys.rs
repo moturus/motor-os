@@ -304,6 +304,17 @@ impl NetSys {
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
         smol_socket.abort();
+
+        // Remove the waker so that any polls on the socket from below don't trigger
+        // wakeups on the dropped socket.
+        self.wakers.remove(&socket_id);
+
+        // Poll the device to send the final RST. Otherwise smol_socket.abort() above
+        // does nothing, and the remote connection is kept alive/hanging until it times out.
+        // Need to poll all sockets on the device, not just the one being removed,
+        // as on loopback devices the peer won't get notified.
+        while self.devices[moto_socket.device_idx].poll() {}
+
         let smol_socket = match self.devices[moto_socket.device_idx]
             .sockets
             .remove(moto_socket.handle)
@@ -312,17 +323,16 @@ impl NetSys {
             _ => panic!(),
         };
 
-        self.wakers.remove(&socket_id);
         if let Some(port) = moto_socket.ephemeral_port.take() {
             self.devices[moto_socket.device_idx].free_ephemeral_port(port);
         }
 
         if let Some(listener_id) = moto_socket.listener_id.take() {
-            assert!(self
-                .tcp_listeners
-                .get_mut(&listener_id)
-                .unwrap()
-                .remove_listening_socket(socket_id));
+            // When handling drop_tcp_listener cmd, the listener is first removed,
+            // then its listening sockets are removed, so the next line will get None.
+            if let Some(listener) = self.tcp_listeners.get_mut(&listener_id) {
+                listener.remove_listening_socket(socket_id);
+            }
         }
 
         if let Some(mut cqe) = moto_socket.connect_sqe.take() {
@@ -337,7 +347,7 @@ impl NetSys {
 
         #[cfg(debug_assertions)]
         log::debug!(
-            "{}:{} droped tcp socket 0x{:x}; {} active sockets.",
+            "{}:{} dropped tcp socket 0x{:x}; {} active sockets.",
             file!(),
             line!(),
             u64::from(socket_id),
@@ -798,6 +808,12 @@ impl NetSys {
             Ok(s) => s,
             Err(err) => return Some(err),
         };
+        log::debug!(
+            "{}:{} tcp_stream_drop 0x{:x}",
+            file!(),
+            line!(),
+            u64::from(socket_id)
+        );
         // While there can still be outgoing writes that need completion,
         // we drop everything here: let the user-side worry about
         // not dropping connections before writes are complete.
@@ -882,9 +898,10 @@ impl NetSys {
         }
         #[cfg(debug_assertions)]
         log::debug!(
-            "{}:{} on_tcp_listener_connected: {:?}",
+            "{}:{} on_tcp_listener_connected 0x{:x} - {:?}",
             file!(),
             line!(),
+            u64::from(socket_id),
             remote_addr
         );
 
@@ -924,9 +941,10 @@ impl NetSys {
         });
 
         log::debug!(
-            "{}:{} on_socket_connected: {:?}",
+            "{}:{} on_socket_connected 0x{:x} - {:?}",
             file!(),
             line!(),
+            u64::from(socket_id),
             remote_addr
         );
     }
@@ -976,9 +994,10 @@ impl NetSys {
         let state = smol_socket.state();
 
         log::debug!(
-            "{}:{} on_tcp_socket_poll - state {:?}",
+            "{}:{} on_tcp_socket_poll 0x{:x} - {:?}",
             file!(),
             line!(),
+            u64::from(socket_id),
             state
         );
 

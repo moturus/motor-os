@@ -1,11 +1,14 @@
 use std::collections::VecDeque;
 use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 
 use moto_sys::SysHandle;
 use smoltcp::iface::{SocketHandle, SocketSet};
-// use smoltcp::phy::Loopback;
+use smoltcp::phy::Loopback;
 use smoltcp::phy::{RxToken, TxToken};
+
+use super::config::DeviceCfg;
 
 const PAGE_SIZE_SMALL: usize = moto_sys::syscalls::SysMem::PAGE_SIZE_SMALL as usize;
 
@@ -261,7 +264,6 @@ impl smoltcp::phy::Device for VirtioSmoltcpDevice {
 
 enum SmoltcpDevice {
     VirtIo(VirtioSmoltcpDevice),
-    #[allow(unused)]
     Loopback(smoltcp::phy::Loopback),
 }
 
@@ -429,11 +431,21 @@ impl NetDev {
 }
 
 pub(super) fn init(config: &super::config::NetConfig) -> Vec<NetDev> {
-    if config.devices.len() == 0 {
-        return vec![];
-    }
-
     let mut result = vec![];
+
+    if config.loopback {
+        let mut loopback_cfg = DeviceCfg::new("02:00:00:00:00:01");
+        loopback_cfg
+            .cidrs
+            .push(ipnetwork::IpNetwork::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8).unwrap());
+        let loopback_dev = Loopback::new(smoltcp::phy::Medium::Ethernet);
+        let dev = NetDev::new(
+            "loopback",
+            &loopback_cfg,
+            SmoltcpDevice::Loopback(loopback_dev),
+        );
+        result.push(dev);
+    }
 
     for (dev_name, dev_cfg) in &config.devices {
         if let Some(dev_inner) = VirtioSmoltcpDevice::new(dev_cfg) {

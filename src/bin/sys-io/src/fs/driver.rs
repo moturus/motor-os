@@ -3,7 +3,7 @@
 use core::sync::atomic::*;
 use moto_ipc::sync::*;
 use moto_runtime::rt_api::fs::*;
-use moto_sys::{ErrorCode, SysHandle};
+use moto_sys::SysHandle;
 
 use super::filesystem::fs;
 

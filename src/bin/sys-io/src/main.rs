@@ -19,7 +19,6 @@ macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
         moto_sys::syscalls::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
-        // log::info!("{}", alloc::format!($($arg)*));
         }
     };
 }

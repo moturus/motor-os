@@ -351,7 +351,7 @@ impl Client {
 
     pub fn alloc_buffer(&mut self, num_blocks: u16) -> Result<IoBuffer, ErrorCode> {
         // We do not deal with fragmentation: assume that num_blocks is always the same.
-        if num_blocks >= IoBuffer::MAX_NUM_BLOCKS {
+        if (num_blocks == 0) || (num_blocks >= IoBuffer::MAX_NUM_BLOCKS) {
             return Err(ErrorCode::InvalidArgument);
         }
 
