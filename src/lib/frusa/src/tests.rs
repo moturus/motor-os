@@ -301,13 +301,22 @@ static FRUSA: Frusa4K = Frusa4K::new(&BACK_END);
 enum UseAlloc {
     Frusa,
     System,
+    Talc,
 }
+
+static mut TALC_ARENA: [u8; 65536] = [0; 65536];
+
+static TALC: talc::Talck<spin::Mutex<()>, talc::ClaimOnOom> = talc::Talc::new(unsafe {
+    talc::ClaimOnOom::new(talc::Span::from_const_array(std::ptr::addr_of!(TALC_ARENA)))
+})
+.lock();
 
 impl UseAlloc {
     fn get(&self) -> &'static dyn GlobalAlloc {
         match self {
             Self::Frusa => &FRUSA,
             Self::System => &BACK_END,
+            Self::Talc => &TALC,
         }
     }
 }
@@ -375,4 +384,10 @@ fn concurrent_speed_test() {
     concurrent_speed_test_impl(UseAlloc::System, 2);
     concurrent_speed_test_impl(UseAlloc::System, 4);
     concurrent_speed_test_impl(UseAlloc::System, 8);
+
+    println!("\n------- Talc System Allocator ----------");
+    concurrent_speed_test_impl(UseAlloc::Talc, 1);
+    concurrent_speed_test_impl(UseAlloc::Talc, 2);
+    concurrent_speed_test_impl(UseAlloc::Talc, 4);
+    concurrent_speed_test_impl(UseAlloc::Talc, 8);
 }

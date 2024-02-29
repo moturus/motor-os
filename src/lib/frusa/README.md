@@ -39,15 +39,21 @@ $ cargo test --release concurrent_speed_test -- --nocapture
 [...]
 
 ------- FRUSA Allocator ---------------
-concurrent speed test: 1 threads:   38.85 ns per alloc/dealloc; throughput:  25.74 ops/usec
-concurrent speed test: 2 threads:  119.54 ns per alloc/dealloc; throughput:  16.73 ops/usec
-concurrent speed test: 4 threads:  234.18 ns per alloc/dealloc; throughput:  17.08 ops/usec
-concurrent speed test: 8 threads:  465.11 ns per alloc/dealloc; throughput:  17.20 ops/usec
+concurrent speed test: 1 threads:   59.48 ns per alloc/dealloc; throughput:  16.81 ops/usec
+concurrent speed test: 2 threads:  198.80 ns per alloc/dealloc; throughput:  10.06 ops/usec
+concurrent speed test: 4 threads:  465.11 ns per alloc/dealloc; throughput:   8.60 ops/usec
+concurrent speed test: 8 threads: 1339.12 ns per alloc/dealloc; throughput:   5.97 ops/usec
 
 ------- Rust System Allocator ----------
-concurrent speed test: 1 threads:   11.92 ns per alloc/dealloc; throughput:  83.90 ops/usec
-concurrent speed test: 2 threads:   12.01 ns per alloc/dealloc; throughput: 166.49 ops/usec
-concurrent speed test: 4 threads:   14.18 ns per alloc/dealloc; throughput: 282.07 ops/usec
-concurrent speed test: 8 threads:   18.74 ns per alloc/dealloc; throughput: 427.00 ops/usec
+concurrent speed test: 1 threads:   19.54 ns per alloc/dealloc; throughput:  51.17 ops/usec
+concurrent speed test: 2 threads:   22.67 ns per alloc/dealloc; throughput:  88.22 ops/usec
+concurrent speed test: 4 threads:   23.47 ns per alloc/dealloc; throughput: 170.44 ops/usec
+concurrent speed test: 8 threads:   26.92 ns per alloc/dealloc; throughput: 297.21 ops/usec
+
+------- Talc System Allocator ----------
+concurrent speed test: 1 threads:   41.85 ns per alloc/dealloc; throughput:  23.89 ops/usec
+concurrent speed test: 2 threads:  311.50 ns per alloc/dealloc; throughput:   6.42 ops/usec
+concurrent speed test: 4 threads:  697.42 ns per alloc/dealloc; throughput:   5.74 ops/usec
+concurrent speed test: 8 threads: 2196.38 ns per alloc/dealloc; throughput:   3.64 ops/usec
 
 ```

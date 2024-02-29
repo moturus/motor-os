@@ -1,9 +1,9 @@
 [package]
 name = "frusa"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A system allocator with reclaim."
-repository = "https://github.com/moturus/frusa"
+repository = "https://github.com/moturus/motor-os"
 keywords = ["allocator", "no_std", "global_allocator"]
 categories = ["no-std", "memory-management"]
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,8 @@ core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = tru
 
 [dev-dependencies]
 rand = "0.8"
+talc = "4.2.0"
+spin = "0.9.8"
 
 [features]
 rustc-dep-of-std = ["core", "compiler_builtins"]
