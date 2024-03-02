@@ -120,11 +120,13 @@ impl TcpStream {
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        let timestamp = moto_sys::time::Instant::now().as_u64();
+
         let num_blocks =
             io_executor::blocks_for_buf(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf.len());
         let io_buffer = io_executor::get_io_buffer(num_blocks).await;
 
-        let sqe = rt_api::net::tcp_stream_read_request(self.handle, io_buffer, buf.len());
+        let sqe = rt_api::net::tcp_stream_read_request(self.handle, io_buffer, buf.len(), timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
             io_executor::put_io_buffer(io_buffer).await;
@@ -139,10 +141,12 @@ impl TcpStream {
     }
 
     pub async fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        let timestamp = moto_sys::time::Instant::now().as_u64();
+
         let (buffer, sz) =
             io_executor::produce_io_buffer(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf).await;
 
-        let sqe = rt_api::net::tcp_stream_write_request(self.handle, buffer, sz);
+        let sqe = rt_api::net::tcp_stream_write_request(self.handle, buffer, sz, timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
             io_executor::put_io_buffer(buffer).await;

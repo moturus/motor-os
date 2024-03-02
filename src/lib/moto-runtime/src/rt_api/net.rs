@@ -88,12 +88,14 @@ pub fn tcp_stream_write_request(
     handle: u64,
     io_buffer: io_channel::IoBuffer,
     sz: usize,
+    timestamp: u64,
 ) -> io_channel::QueueEntry {
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_WRITE;
     qe.handle = handle;
     qe.payload.buffers_mut()[0] = io_buffer;
     qe.payload.args_64_mut()[1] = sz as u64;
+    qe.payload.args_64_mut()[2] = timestamp;
 
     qe
 }
@@ -102,12 +104,14 @@ pub fn tcp_stream_read_request(
     handle: u64,
     io_buffer: io_channel::IoBuffer,
     sz: usize,
+    timestamp: u64,
 ) -> io_channel::QueueEntry {
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_READ;
     qe.handle = handle;
     qe.payload.buffers_mut()[0] = io_buffer;
     qe.payload.args_64_mut()[1] = sz as u64;
+    qe.payload.args_64_mut()[2] = timestamp;
 
     qe
 }

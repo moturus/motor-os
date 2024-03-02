@@ -93,6 +93,50 @@ fn test_io_latency() {
     );
 }
 
+fn test_read_timeout() {
+    let started_here = Arc::new(AtomicBool::new(false));
+    let started_there = started_here.clone();
+    let server = std::thread::spawn(move || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:3333").unwrap();
+        assert!(std::net::TcpListener::bind("127.0.0.1:3333").is_err());
+        started_there.store(true, Ordering::Release);
+
+        let mut stream = listener.incoming().next().unwrap().unwrap();
+        // Read, don't write.
+        let mut data = [0 as u8; 64];
+        while stream.read(&mut data).unwrap() > 0 {}
+        stream.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+
+    while !started_here.load(Ordering::Relaxed) {
+        core::hint::spin_loop()
+    }
+
+    let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
+    assert_eq!(addrs.len(), 1);
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
+    let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    stream.write(&tx).unwrap();
+
+    let mut rx = [0 as u8; 8];
+    stream.set_read_timeout(Some(Duration::from_millis(600)));
+    let start = std::time::Instant::now();
+    match stream.read(&mut rx) {
+        Ok(_) => {
+            panic!("test_read_timeout: did read something")
+        }
+        Err(e) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+        }
+    }
+    let timo = std::time::Instant::now() - start;
+    assert!(timo.as_millis() >= 600);
+
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    server.join();
+}
+
 pub fn test_tcp_loopback() {
     assert!(std::net::TcpStream::connect("localhost:3333").is_err());
     let start = Arc::new(AtomicBool::new(false));
@@ -114,6 +158,9 @@ pub fn test_tcp_loopback() {
     // Kick the listener.
     let _ = std::net::TcpStream::connect("localhost:3333").unwrap();
     server.join().unwrap();
+
+    test_read_timeout();
+    // TODO: how can we test write timeout?
 
     // Wrap the output in sleeps to avoid debug console output mangling.
     std::thread::sleep(std::time::Duration::from_millis(10));

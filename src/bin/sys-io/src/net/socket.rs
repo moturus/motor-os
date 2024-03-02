@@ -35,9 +35,19 @@ pub(super) struct MotoSocket {
 
     pub ephemeral_port: Option<u16>,
 
+    // Both rx_bufs and tx_bufs are sorted below according to their arrival times
+    // (which _should_ be the same order as their timestamps, but this is not enforced).
+    // When set_read_timeout or set_write_timeout ops happen, we go
+    // through the appropriate x_bufs queue and expire any requests/bufs that need
+    // expiring.
     pub rx_bufs: VecDeque<super::IoBuf>,
     pub tx_bufs: VecDeque<super::IoBuf>,
+
     pub state: moto_runtime::rt_api::net::TcpState,
+
+    pub read_timeout: std::time::Duration,
+    pub write_timeout: std::time::Duration,
+    pub next_timeout: Option<moto_sys::time::Instant>,
 }
 
 impl Drop for MotoSocket {

@@ -7,7 +7,7 @@
 //! Also simpler than io_uring. More specifically, SQE and CQE have the same layout.
 use core::{fmt::Debug, sync::atomic::*};
 
-use moto_sys::{syscalls::*, ErrorCode, SysHandle};
+use moto_sys::{syscalls::*, ErrorCode};
 
 // Although client+server can use any value in QueueEntry::command, it is recommended
 // that they respect the ranges below.

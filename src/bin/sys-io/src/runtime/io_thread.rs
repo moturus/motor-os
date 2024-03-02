@@ -252,7 +252,6 @@ impl IoRuntime {
             };
 
             let wakee = completion.endpoint_handle;
-
             if let Err(err) = proc.conn().complete_sqe(completion.cqe) {
                 debug_assert_eq!(err, ErrorCode::NotReady);
                 self.pending_completions.push_back(completion);
@@ -320,7 +319,7 @@ impl IoRuntime {
                     Some(p_c) => {
                         had_work = true;
                         if debug_timed_out {
-                            crate::moto_log!("{}:{} ERROR: net poll on timeout", file!(), line!());
+                            log::debug!("net poll on timeout: {:?}", p_c.cqe.status());
                         }
                         self.pending_completions.push_back(p_c);
                         self.process_completions();
@@ -394,10 +393,10 @@ impl IoRuntime {
                 }
                 Err(err) => {
                     if err == ErrorCode::TimedOut {
-                        if timeout >= core::time::Duration::from_millis(20) {
+                        if timeout >= core::time::Duration::from_secs(1) {
                             debug_timed_out = true;
                             #[cfg(debug_assertions)]
-                            crate::moto_log!("{}:{} timeout wakeup", file!(), line!());
+                            log::debug!("timeout wakeup");
                             debug_assert!(self.pending_completions.is_empty());
                             self.process_wakeups(self.all_handles.clone(), true);
                         } else {

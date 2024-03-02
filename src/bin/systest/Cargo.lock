@@ -111,7 +111,7 @@ checksum = "523dc4f511e55ab87b694dc30d0f820d60906ef06413f93d4d7a1385599cc149"
 
 [[package]]
 name = "moto-ipc"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "moto-sys",
 ]
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "moto-runtime"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "moto-ipc",
  "moto-sys",
@@ -204,7 +204,7 @@ dependencies = [
  "futures",
  "moto-ipc",
  "moto-mpmc",
- "moto-runtime 0.2.4",
+ "moto-runtime 0.2.5",
  "moto-sys",
 ]
 

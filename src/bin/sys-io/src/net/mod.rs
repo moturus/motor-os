@@ -66,4 +66,14 @@ impl IoBuf {
     fn is_consumed(&self) -> bool {
         self.consumed == self.buf_len
     }
+
+    fn expires(&self, timeout: &std::time::Duration) -> moto_sys::time::Instant {
+        let timestamp = moto_sys::time::Instant::from_u64(self.sqe.payload.args_64()[2]);
+
+        timestamp + *timeout
+    }
+
+    fn expired(&self, timeout: &std::time::Duration, now: moto_sys::time::Instant) -> bool {
+        self.expires(timeout) <= now
+    }
 }

@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     rc::Rc,
 };
@@ -46,11 +46,17 @@ pub(super) struct NetSys {
     woken_sockets: Rc<RefCell<VecDeque<SocketId>>>,
     wakers: std::collections::HashMap<SocketId, std::task::Waker>,
 
+    // Read/write timeouts.
+    tcp_rw_timeouts: BTreeMap<moto_sys::time::Instant, Vec<SocketId>>,
+
     // config: config::NetConfig,
     config: super::config::NetConfig,
 }
 
 impl NetSys {
+    // If a timeout expires within TIMEOUT_GRANULARITY, we indicate no waiting.
+    const TIMEOUT_GRANULARITY: core::time::Duration = core::time::Duration::from_nanos(50);
+
     pub fn new(config: super::config::NetConfig) -> Box<Self> {
         #[cfg(debug_assertions)]
         log::debug!(
@@ -73,6 +79,7 @@ impl NetSys {
             process_tcp_sockets: HashMap::new(),
             woken_sockets: Rc::new(std::cell::RefCell::new(VecDeque::new())),
             wakers: HashMap::new(),
+            tcp_rw_timeouts: BTreeMap::new(),
             config,
         });
 
@@ -263,6 +270,9 @@ impl NetSys {
             tx_bufs: VecDeque::new(),
             rx_bufs: VecDeque::new(),
             state: TcpState::Closed,
+            read_timeout: std::time::Duration::MAX,
+            write_timeout: std::time::Duration::MAX,
+            next_timeout: None,
         })
     }
 
@@ -614,6 +624,7 @@ impl NetSys {
         }
         moto_socket.tx_bufs.push_back(IoBuf::new(sqe, bytes));
         self.do_tcp_tx(socket_id);
+        self.process_rw_timeout(socket_id, moto_sys::time::Instant::now());
 
         None
     }
@@ -671,6 +682,7 @@ impl NetSys {
         };
 
         self.do_tcp_rx_buf(socket_id, rx_buf);
+        self.process_rw_timeout(socket_id, moto_sys::time::Instant::now());
         None
     }
 
@@ -701,18 +713,19 @@ impl NetSys {
         if options == rt_api::net::TCP_OPTION_READ_TIMEOUT
             || options == rt_api::net::TCP_OPTION_WRITE_TIMEOUT
         {
-            // let smol_socket = self.devices[moto_socket.device_idx]
-            //     .sockets
-            //     .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+            let timo_ns = sqe.payload.args_64()[1];
+            let timo = if timo_ns == u64::MAX {
+                std::time::Duration::MAX
+            } else {
+                std::time::Duration::from_nanos(timo_ns)
+            };
 
-            // let dur_nanos = sqe.payload.args_64()[1];
-            // let duration = if dur_nanos == u64::MAX {
-            //     None
-            // } else {
-            //     Some(std::time::Duration::from_nanos(dur_nanos))
-            // };
+            if options == rt_api::net::TCP_OPTION_READ_TIMEOUT {
+                self.set_read_timeout(socket_id, timo);
+            } else {
+                self.set_write_timeout(socket_id, timo);
+            }
 
-            log::error!("{}:{} I/O timeout not impl", file!(), line!());
             sqe.status = ErrorCode::Ok.into();
             return Some(sqe);
         }
@@ -1259,6 +1272,137 @@ impl NetSys {
                 .push_back(Self::io_buf_to_pc(moto_socket.proc_handle, tx_buf));
         }
     }
+
+    fn add_socket_timeout(&mut self, socket_id: SocketId) {
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+
+        let next_read_timeout = if moto_socket.read_timeout != std::time::Duration::MAX {
+            moto_socket
+                .rx_bufs
+                .front()
+                .map(|x| x.expires(&moto_socket.read_timeout))
+        } else {
+            None
+        };
+        let next_write_timeout = if moto_socket.write_timeout != std::time::Duration::MAX {
+            moto_socket
+                .tx_bufs
+                .front()
+                .map(|x| x.expires(&moto_socket.write_timeout))
+        } else {
+            None
+        };
+
+        if next_read_timeout.is_none() && next_write_timeout.is_none() {
+            moto_socket.next_timeout = None;
+            return;
+        }
+
+        let timo = if let Some(r_timo) = next_read_timeout {
+            if let Some(w_timo) = next_write_timeout {
+                r_timo.min(w_timo)
+            } else {
+                r_timo
+            }
+        } else {
+            next_write_timeout.unwrap()
+        };
+
+        moto_socket.next_timeout = Some(timo);
+
+        if let Some(socks) = self.tcp_rw_timeouts.get_mut(&timo) {
+            socks.push(socket_id);
+        } else {
+            self.tcp_rw_timeouts.insert(timo, vec![socket_id]);
+        }
+    }
+
+    fn remove_socket_timeout(&mut self, socket_id: SocketId) {
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+
+        if let Some(timo) = moto_socket.next_timeout.take() {
+            if let Some(socks) = self.tcp_rw_timeouts.get_mut(&timo) {
+                for idx in 0..socks.len() {
+                    if socks[idx] == socket_id {
+                        socks.remove(idx);
+                        break;
+                    }
+                }
+                if socks.is_empty() {
+                    self.tcp_rw_timeouts.remove(&timo);
+                }
+            }
+        }
+    }
+
+    fn set_read_timeout(&mut self, socket_id: SocketId, timeout: core::time::Duration) {
+        let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
+        if moto_socket.read_timeout == timeout {
+            return;
+        }
+
+        self.remove_socket_timeout(socket_id);
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        moto_socket.read_timeout = timeout;
+
+        self.add_socket_timeout(socket_id);
+    }
+
+    fn set_write_timeout(&mut self, socket_id: SocketId, timeout: core::time::Duration) {
+        let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
+        if moto_socket.write_timeout == timeout {
+            return;
+        }
+
+        self.remove_socket_timeout(socket_id);
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        moto_socket.write_timeout = timeout;
+
+        self.add_socket_timeout(socket_id);
+    }
+
+    fn process_rw_timeout(&mut self, socket_id: SocketId, now: moto_sys::time::Instant) {
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+
+        let cutoff = now + Self::TIMEOUT_GRANULARITY;
+        if let Some(timo) = moto_socket.next_timeout.as_ref() {
+            if *timo > cutoff {
+                return;
+            }
+        }
+        // else: don't return, as when there are no rx/tx bufs, the socket doesn't have next_timeout.
+
+        if moto_socket.read_timeout != std::time::Duration::MAX {
+            while let Some(x_buf) = moto_socket.rx_bufs.front() {
+                if x_buf.expired(&moto_socket.read_timeout, cutoff) {
+                    let mut x_buf = moto_socket.rx_bufs.pop_front().unwrap();
+
+                    x_buf.status = ErrorCode::TimedOut;
+                    self.pending_completions
+                        .push_back(Self::io_buf_to_pc(moto_socket.proc_handle, x_buf));
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if moto_socket.write_timeout != std::time::Duration::MAX {
+            while let Some(x_buf) = moto_socket.tx_bufs.front() {
+                if x_buf.expired(&moto_socket.write_timeout, cutoff) {
+                    let mut x_buf = moto_socket.rx_bufs.pop_front().unwrap();
+
+                    x_buf.status = ErrorCode::TimedOut;
+                    self.pending_completions
+                        .push_back(Self::io_buf_to_pc(moto_socket.proc_handle, x_buf));
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.remove_socket_timeout(socket_id);
+        self.add_socket_timeout(socket_id);
+    }
 }
 
 impl IoSubsystem for NetSys {
@@ -1340,8 +1484,20 @@ impl IoSubsystem for NetSys {
     }
 
     fn poll(&mut self) -> Option<PendingCompletion> {
-        if let Some(prev) = self.pending_completions.pop_front() {
-            return Some(prev);
+        let now = moto_sys::time::Instant::now();
+
+        loop {
+            if let Some((timo, _)) = self.tcp_rw_timeouts.first_key_value() {
+                if now >= (*timo - Self::TIMEOUT_GRANULARITY) {
+                    let timo = *timo;
+                    let socks = self.tcp_rw_timeouts.remove(&timo).unwrap();
+                    for socket_id in socks {
+                        self.process_rw_timeout(socket_id, now);
+                    }
+                    continue;
+                }
+            }
+            break;
         }
 
         if let Some(prev) = self.pending_completions.pop_front() {
@@ -1369,6 +1525,16 @@ impl IoSubsystem for NetSys {
 
     fn wait_timeout(&mut self) -> Option<core::time::Duration> {
         let mut timeout = None;
+
+        if let Some((timo, _)) = self.tcp_rw_timeouts.first_key_value() {
+            let now = moto_sys::time::Instant::now();
+            if now >= (*timo - Self::TIMEOUT_GRANULARITY) {
+                return Some(core::time::Duration::ZERO);
+            }
+
+            timeout = Some(timo.duration_since(now));
+        }
+
         for device_idx in 0..self.devices.len() {
             let dev = self.devices.get_mut(device_idx).unwrap();
             if let Some(timo) = dev.wait_timeout() {

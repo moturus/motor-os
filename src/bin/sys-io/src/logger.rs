@@ -10,7 +10,13 @@ impl log::Log for MotoLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            crate::moto_log!("{} - {}", record.level(), record.args());
+            crate::moto_log!(
+                "{} {}:{}: {}",
+                record.level(),
+                record.file().unwrap_or("-"),
+                record.line().unwrap_or(0),
+                record.args()
+            );
         }
     }
 
