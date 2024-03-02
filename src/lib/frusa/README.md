@@ -9,7 +9,7 @@ Another implementation of core::alloc::GlobalAlloc (Rust)
 
 A system allocator should be reasonably fast, should be able to request more memory,
 and allow memory reclaim. I needed one at the beginning of 2023, and at this time
-none of the allocators I could find on crates.io matched the requirements. 
+none of the allocators I could find on crates.io matched the requirements.
 
 ## Goals
 
@@ -50,7 +50,7 @@ concurrent speed test: 2 threads:   22.67 ns per alloc/dealloc; throughput:  88.
 concurrent speed test: 4 threads:   23.47 ns per alloc/dealloc; throughput: 170.44 ops/usec
 concurrent speed test: 8 threads:   26.92 ns per alloc/dealloc; throughput: 297.21 ops/usec
 
-------- Talc System Allocator ----------
+------- Talc Allocator ----------
 concurrent speed test: 1 threads:   41.85 ns per alloc/dealloc; throughput:  23.89 ops/usec
 concurrent speed test: 2 threads:  311.50 ns per alloc/dealloc; throughput:   6.42 ops/usec
 concurrent speed test: 4 threads:  697.42 ns per alloc/dealloc; throughput:   5.74 ops/usec
