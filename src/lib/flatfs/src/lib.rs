@@ -261,7 +261,7 @@ fn test() {
     let flat_fs = writer.pack();
 
     let root_dir = unpack(&flat_fs).unwrap();
-    assert_eq!(root_dir.name, "/");
+    assert_eq!(root_dir.path, "");
 
     assert_eq!(root_dir.files.len(), 1);
     assert_eq!(root_dir.files.get("foo").unwrap(), b"foo");
