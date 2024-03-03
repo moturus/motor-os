@@ -119,8 +119,12 @@ fn test_read_timeout() {
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     stream.write(&tx).unwrap();
 
+    assert!(stream.read_timeout().unwrap().is_none());
+    stream
+        .set_read_timeout(Some(Duration::from_millis(600)))
+        .unwrap();
+
     let mut rx = [0 as u8; 8];
-    stream.set_read_timeout(Some(Duration::from_millis(600)));
     let start = std::time::Instant::now();
     match stream.read(&mut rx) {
         Ok(_) => {
@@ -132,6 +136,28 @@ fn test_read_timeout() {
     }
     let timo = std::time::Instant::now() - start;
     assert!(timo.as_millis() >= 600);
+
+    assert_eq!(stream.read_timeout().unwrap().unwrap().as_millis(), 600);
+    stream.set_read_timeout(None).unwrap();
+    assert!(stream.read_timeout().unwrap().is_none());
+
+    assert!(stream.write_timeout().unwrap().is_none());
+    stream
+        .set_write_timeout(Some(Duration::from_millis(2)))
+        .unwrap();
+    assert_eq!(stream.write_timeout().unwrap().unwrap().as_millis(), 2);
+    stream.set_write_timeout(None).unwrap();
+    assert!(stream.write_timeout().unwrap().is_none());
+
+    // Test nodelay get/set.
+    stream.set_nodelay(true).unwrap();
+    assert!(stream.nodelay().unwrap());
+    stream.set_nodelay(false).unwrap();
+    assert!(!stream.nodelay().unwrap());
+
+    // test TTL get/set.
+    stream.set_ttl(43).unwrap();
+    assert_eq!(43, stream.ttl().unwrap());
 
     stream.shutdown(std::net::Shutdown::Both).unwrap();
     server.join();

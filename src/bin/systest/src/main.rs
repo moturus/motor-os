@@ -460,6 +460,7 @@ fn main() {
     }
 
     println!("Systest starting...");
+
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
 

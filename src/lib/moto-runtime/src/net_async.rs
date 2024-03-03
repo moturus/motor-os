@@ -1,13 +1,11 @@
 use super::io_executor;
 use super::rt_api;
-use core::net::Ipv4Addr;
-use core::net::Ipv6Addr;
 use core::net::SocketAddr;
-use core::net::SocketAddrV4;
 use core::time::Duration;
 use moto_ipc::io_channel;
 use moto_sys::ErrorCode;
 
+#[derive(Debug)]
 pub struct TcpStream {
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
@@ -107,16 +105,63 @@ impl TcpStream {
         }
     }
 
-    pub fn read_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
+    pub async fn read_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_READ_TIMEOUT;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            let res = cqe.payload.args_64()[0];
+            if res == u64::MAX {
+                Ok(None)
+            } else {
+                Ok(Some(Duration::from_nanos(res)))
+            }
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn write_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
+    pub async fn write_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_WRITE_TIMEOUT;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            let res = cqe.payload.args_64()[0];
+            if res == u64::MAX {
+                Ok(None)
+            } else {
+                Ok(Some(Duration::from_nanos(res)))
+            }
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn peek(&self, _: &mut [u8]) -> Result<usize, ErrorCode> {
-        todo!()
+    pub async fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        let timestamp = moto_sys::time::Instant::now().as_u64();
+
+        let num_blocks =
+            io_executor::blocks_for_buf(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf.len());
+        let io_buffer = io_executor::get_io_buffer(num_blocks).await;
+
+        let sqe = rt_api::net::tcp_stream_peek_request(self.handle, io_buffer, buf.len(), timestamp);
+        let cqe = io_executor::submit(sqe).await;
+        if cqe.status().is_err() {
+            io_executor::put_io_buffer(io_buffer).await;
+            return Err(cqe.status());
+        }
+
+        assert_eq!(cqe.payload.buffers()[0], io_buffer);
+        let sz_read = cqe.payload.args_64()[1] as usize;
+        assert!(sz_read <= buf.len());
+        io_executor::consume_io_buffer(io_buffer, &mut buf[0..sz_read]).await;
+        Ok(sz_read)
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -190,14 +235,6 @@ impl TcpStream {
         }
     }
 
-    pub fn set_linger(&self, _: Option<Duration>) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
-    }
-
     pub async fn set_nodelay(&self, nodelay: bool) -> Result<(), ErrorCode> {
         let mut sqe = io_channel::QueueEntry::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
@@ -213,36 +250,76 @@ impl TcpStream {
         }
     }
 
-    pub fn nodelay(&self) -> Result<bool, ErrorCode> {
-        todo!()
+    pub async fn nodelay(&self) -> Result<bool, ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NODELAY;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            let res = cqe.payload.args_64()[0];
+            if res == 1 {
+                Ok(true)
+            } else if res == 0 {
+                Ok(false)
+            } else {
+                panic!("Unexpected nodelay value: {}", res)
+            }
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn set_ttl(&self, _: u32) -> Result<(), ErrorCode> {
-        todo!()
+    pub async fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
+        sqe.payload.args_32_mut()[2] = ttl;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            Ok(())
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn ttl(&self) -> Result<u32, ErrorCode> {
-        todo!()
+    pub async fn ttl(&self) -> Result<u32, ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            Ok(cqe.payload.args_32()[0])
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
-        todo!()
-    }
+    pub async fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NONBLOCKING;
+        sqe.payload.args_64_mut()[1] = if nonblocking { 1 } else { 0 };
+        let cqe = io_executor::submit(sqe).await;
 
-    pub fn set_nonblocking(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
+        if cqe.status().is_ok() {
+            Ok(())
+        } else {
+            Err(cqe.status())
+        }
     }
 }
 
-impl core::fmt::Debug for TcpStream {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
-    }
-}
-
+#[derive(Debug)]
 pub struct TcpListener {
-    socket_addr: SocketAddr,
-    handle: u64,
+    pub socket_addr: SocketAddr,
+    pub handle: u64,
 }
 
 impl TcpListener {
@@ -292,41 +369,52 @@ impl TcpListener {
         ))
     }
 
-    pub fn duplicate(&self) -> Result<TcpListener, ErrorCode> {
-        todo!()
+    pub async fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_LISTENER_SET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
+        sqe.payload.args_32_mut()[2] = ttl;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            Ok(())
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn set_ttl(&self, _: u32) -> Result<(), ErrorCode> {
-        todo!()
+    pub async fn ttl(&self) -> Result<u32, ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_LISTENER_GET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
+        let cqe = io_executor::submit(sqe).await;
+
+        if cqe.status().is_ok() {
+            Ok(sqe.payload.args_32()[0])
+        } else {
+            Err(cqe.status())
+        }
     }
 
-    pub fn ttl(&self) -> Result<u32, ErrorCode> {
-        todo!()
-    }
+    pub async fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
+        let mut sqe = io_channel::QueueEntry::new();
+        sqe.command = rt_api::net::CMD_TCP_LISTENER_SET_OPTION;
+        sqe.handle = self.handle;
+        sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NONBLOCKING;
+        sqe.payload.args_64_mut()[1] = if nonblocking { 1 } else { 0 };
+        let cqe = io_executor::submit(sqe).await;
 
-    pub fn set_only_v6(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn only_v6(&self) -> Result<bool, ErrorCode> {
-        todo!()
-    }
-
-    pub fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_nonblocking(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
+        if cqe.status().is_ok() {
+            Ok(())
+        } else {
+            Err(cqe.status())
+        }
     }
 }
 
-impl core::fmt::Debug for TcpListener {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
-    }
-}
-
+/*
 pub struct UdpSocket {}
 
 impl UdpSocket {
@@ -460,94 +548,4 @@ impl core::fmt::Debug for UdpSocket {
         todo!()
     }
 }
-
-pub struct LookupHost {
-    addr: SocketAddr,
-}
-
-impl LookupHost {
-    pub fn port(&self) -> u16 {
-        self.addr.port()
-    }
-}
-
-impl Iterator for LookupHost {
-    type Item = SocketAddr;
-    fn next(&mut self) -> Option<SocketAddr> {
-        Some(self.addr)
-    }
-}
-
-impl TryFrom<&str> for LookupHost {
-    type Error = ErrorCode;
-
-    fn try_from(v: &str) -> Result<LookupHost, ErrorCode> {
-        // Split the string by ':' and convert the second part to u16.
-        let (host, port_str) = v.rsplit_once(':').ok_or(ErrorCode::InvalidArgument)?;
-        let port: u16 = port_str.parse().map_err(|_| ErrorCode::InvalidArgument)?;
-        (host, port).try_into()
-    }
-}
-
-impl<'a> TryFrom<(&'a str, u16)> for LookupHost {
-    type Error = ErrorCode;
-
-    fn try_from(host_port: (&'a str, u16)) -> Result<LookupHost, ErrorCode> {
-        use core::str::FromStr;
-
-        let (host, port) = host_port;
-
-        if host == "localhost" {
-            Ok(LookupHost {
-                addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port)),
-            })
-        } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
-            Ok(LookupHost {
-                addr: SocketAddr::V4(SocketAddrV4::new(addr_v4, port)),
-            })
-        } else {
-            crate::util::moturus_log!(
-                "LookupHost::try_from: {}:{}: DNS lookup not implemented",
-                host,
-                port
-            );
-            Err(ErrorCode::NotImplemented)
-        }
-    }
-}
-
-#[allow(nonstandard_style)]
-pub mod netc {
-    pub const AF_INET: u8 = 0;
-    pub const AF_INET6: u8 = 1;
-    pub type sa_family_t = u8;
-
-    #[derive(Copy, Clone)]
-    pub struct in_addr {
-        pub s_addr: u32,
-    }
-
-    #[derive(Copy, Clone)]
-    pub struct sockaddr_in {
-        pub sin_family: sa_family_t,
-        pub sin_port: u16,
-        pub sin_addr: in_addr,
-    }
-
-    #[derive(Copy, Clone)]
-    pub struct in6_addr {
-        pub s6_addr: [u8; 16],
-    }
-
-    #[derive(Copy, Clone)]
-    pub struct sockaddr_in6 {
-        pub sin6_family: sa_family_t,
-        pub sin6_port: u16,
-        pub sin6_addr: in6_addr,
-        pub sin6_flowinfo: u32,
-        pub sin6_scope_id: u32,
-    }
-
-    #[derive(Copy, Clone)]
-    pub struct sockaddr {}
-}
+*/

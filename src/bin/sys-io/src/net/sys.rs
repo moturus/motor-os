@@ -749,6 +749,21 @@ impl NetSys {
             return Some(sqe);
         }
 
+        if options == rt_api::net::TCP_OPTION_TTL {
+            let ttl = sqe.payload.args_32()[2];
+            if ttl == 0 || ttl > 255 {
+                sqe.status = ErrorCode::InvalidArgument.into();
+                return Some(sqe);
+            };
+
+            let smol_socket = self.devices[moto_socket.device_idx]
+                .sockets
+                .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+            smol_socket.set_hop_limit(Some(ttl as u8));
+            sqe.status = ErrorCode::Ok.into();
+            return Some(sqe);
+        }
+
         let shut_rd =
             (options & rt_api::net::TCP_OPTION_SHUT_RD != 0) && moto_socket.state.can_read();
         options ^= rt_api::net::TCP_OPTION_SHUT_RD;
@@ -810,6 +825,78 @@ impl NetSys {
 
         sqe.status = ErrorCode::Ok.into();
         return Some(sqe);
+    }
+
+    fn tcp_stream_get_option(
+        &mut self,
+        proc: &mut Process,
+        mut sqe: io_channel::QueueEntry,
+    ) -> Option<io_channel::QueueEntry> {
+        let socket_id = match self.tcp_socket_from_sqe(proc.handle(), &sqe) {
+            Ok(s) => s,
+            Err(err) => return Some(err),
+        };
+
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+
+        if moto_socket.state == TcpState::Connecting {
+            log::debug!("{}:{} bad state", file!(), line!());
+            sqe.status = ErrorCode::InvalidArgument.into();
+            return Some(sqe);
+        }
+
+        let options = sqe.payload.args_64()[0];
+        if options == 0 {
+            sqe.status = ErrorCode::InvalidArgument.into();
+            return Some(sqe);
+        }
+
+        match options {
+            rt_api::net::TCP_OPTION_NODELAY => {
+                let smol_socket = self.devices[moto_socket.device_idx]
+                    .sockets
+                    .get::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+                let nodelay = !smol_socket.nagle_enabled();
+                sqe.payload.args_64_mut()[0] = if nodelay { 1 } else { 0 };
+                sqe.status = ErrorCode::Ok.into();
+            }
+            rt_api::net::TCP_OPTION_READ_TIMEOUT => {
+                sqe.payload.args_64_mut()[0] =
+                    if moto_socket.read_timeout == core::time::Duration::MAX {
+                        u64::MAX
+                    } else {
+                        moto_socket.read_timeout.as_nanos() as u64
+                    };
+                sqe.status = ErrorCode::Ok.into();
+            }
+            rt_api::net::TCP_OPTION_WRITE_TIMEOUT => {
+                sqe.payload.args_64_mut()[0] =
+                    if moto_socket.write_timeout == core::time::Duration::MAX {
+                        u64::MAX
+                    } else {
+                        moto_socket.write_timeout.as_nanos() as u64
+                    };
+                sqe.status = ErrorCode::Ok.into();
+            }
+            rt_api::net::TCP_OPTION_TTL => {
+                let smol_socket = self.devices[moto_socket.device_idx]
+                    .sockets
+                    .get::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+                let ttl = if let Some(hl) = smol_socket.hop_limit() {
+                    hl as u32
+                } else {
+                    64 // This is what smoltcp documentation implies.
+                };
+                sqe.payload.args_32_mut()[0] = ttl;
+                sqe.status = ErrorCode::Ok.into();
+            }
+            _ => {
+                log::debug!("Invalid option 0x{}", options);
+                sqe.status = ErrorCode::InvalidArgument.into();
+            }
+        }
+
+        Some(sqe)
     }
 
     fn tcp_stream_drop(
@@ -1438,6 +1525,7 @@ impl IoSubsystem for NetSys {
             rt_api::net::CMD_TCP_STREAM_WRITE => self.tcp_stream_write(proc, sqe),
             rt_api::net::CMD_TCP_STREAM_READ => self.tcp_stream_read(proc, sqe),
             rt_api::net::CMD_TCP_STREAM_SET_OPTION => self.tcp_stream_set_option(proc, sqe),
+            rt_api::net::CMD_TCP_STREAM_GET_OPTION => self.tcp_stream_get_option(proc, sqe),
             rt_api::net::CMD_TCP_STREAM_DROP => self.tcp_stream_drop(proc, sqe),
             _ => {
                 #[cfg(debug_assertions)]

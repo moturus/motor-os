@@ -55,15 +55,15 @@ impl TcpStream {
     }
 
     pub fn read_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
+        io_executor::block_on(self.async_inner.read_timeout())
     }
 
     pub fn write_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
+        io_executor::block_on(self.async_inner.write_timeout())
     }
 
-    pub fn peek(&self, _: &mut [u8]) -> Result<usize, ErrorCode> {
-        todo!()
+    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        io_executor::block_on(self.async_inner.peek(buf))
     }
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -93,12 +93,22 @@ impl TcpStream {
         })
     }
 
-    pub fn set_linger(&self, _: Option<Duration>) -> Result<(), ErrorCode> {
-        todo!()
+    pub fn set_linger(&self, dur: Option<Duration>) -> Result<(), ErrorCode> {
+        if let Some(dur) = dur {
+            if dur == Duration::ZERO {
+                return Ok(());
+            }
+        }
+
+        // At the moment, socket shutdown or drop drops all unsent bytes, which
+        // corresponds to SO_LINGER(0). This may or may not be what the user
+        // wants, but anything different requires changing sys-io code/logic,
+        // at there are higher-priority work to do.
+        Err(ErrorCode::NotImplemented)
     }
 
     pub fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
+        Ok(Some(Duration::ZERO)) // see set_linger() above.
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> Result<(), ErrorCode> {
@@ -106,29 +116,30 @@ impl TcpStream {
     }
 
     pub fn nodelay(&self) -> Result<bool, ErrorCode> {
-        todo!()
+        io_executor::block_on(self.async_inner.nodelay())
     }
 
-    pub fn set_ttl(&self, _: u32) -> Result<(), ErrorCode> {
-        todo!()
+    pub fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
+        io_executor::block_on(self.async_inner.set_ttl(ttl))
     }
 
     pub fn ttl(&self) -> Result<u32, ErrorCode> {
-        todo!()
+        io_executor::block_on(self.async_inner.ttl())
     }
 
     pub fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
-        todo!()
+        // We don't have this unixism.
+        Ok(None)
     }
 
-    pub fn set_nonblocking(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
+        io_executor::block_on(self.async_inner.set_nonblocking(nonblocking))
     }
 }
 
 impl core::fmt::Debug for TcpStream {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.async_inner.fmt(f)
     }
 }
 
@@ -163,37 +174,43 @@ impl TcpListener {
     }
 
     pub fn duplicate(&self) -> Result<TcpListener, ErrorCode> {
-        todo!()
+        Ok(TcpListener {
+            async_inner: net_async::TcpListener {
+                socket_addr: self.async_inner.socket_addr.clone(),
+                handle: self.async_inner.handle,
+            },
+        })
     }
 
-    pub fn set_ttl(&self, _: u32) -> Result<(), ErrorCode> {
-        todo!()
+    pub fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
+        io_executor::block_on(self.async_inner.set_ttl(ttl))
     }
 
     pub fn ttl(&self) -> Result<u32, ErrorCode> {
-        todo!()
+        io_executor::block_on(self.async_inner.ttl())
     }
 
     pub fn set_only_v6(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
+        Err(ErrorCode::NotImplemented) // This is deprected since Rust 1.16
     }
 
     pub fn only_v6(&self) -> Result<bool, ErrorCode> {
-        todo!()
+        Err(ErrorCode::NotImplemented) // This is deprected since Rust 1.16
     }
 
     pub fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
-        todo!()
+        // We don't have this unixism.
+        Ok(None)
     }
 
-    pub fn set_nonblocking(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
+        io_executor::block_on(self.async_inner.set_nonblocking(nonblocking))
     }
 }
 
 impl core::fmt::Debug for TcpListener {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.async_inner.fmt(f)
     }
 }
 
