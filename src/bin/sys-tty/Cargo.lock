@@ -34,7 +34,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-sys 0.2.1",
+ "moto-sys 0.2.2",
  "spin",
 ]
 
@@ -46,7 +46,7 @@ checksum = "6ec0d0c221db3c88113d13ad7b54482db776d7a453505d50d5b069791bd1cc8c"
 
 [[package]]
 name = "moto-sys"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "rustversion"
@@ -63,7 +63,7 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
- "moto-sys 0.2.1",
+ "moto-sys 0.2.2",
  "x86_64",
 ]
 

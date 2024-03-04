@@ -1,6 +1,6 @@
 [package]
 name = "moto-sys"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["The Moturus Project Developers"]
 license = "MIT OR Apache-2.0"
 keywords = ["moturus", "motor-os"]

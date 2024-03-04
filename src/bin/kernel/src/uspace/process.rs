@@ -107,14 +107,13 @@ pub struct Process {
     status: SpinLock<ProcessStatus>,
 
     // Protected by the status mutex.
-    threads: BTreeMap<u64, Arc<Thread>>,
+    threads: BTreeMap<ThreadId, Arc<Thread>>,
 
     // The index in the vector is SysHandle minus CUSTOM_HANDLE_OFFSET.
     // These are the objects that this process has opened handles to.
     wait_objects: SpinLock<BTreeMap<u64, WaitObject>>,
     next_wait_object_id: AtomicU64,
 
-    thread_counter: AtomicU64, // generates utids
     stats: Arc<KProcessStats>,
 }
 
@@ -134,7 +133,6 @@ impl Process {
      * have per-process numbers.
      */
     const MIN_WAIT_OBJECT_ID: u64 = 65536;
-    const MAX_UTID: u64 = 1 << 46;
 
     pub fn new(
         parent: Arc<KProcessStats>,
@@ -168,7 +166,6 @@ impl Process {
             wait_objects: SpinLock::new(BTreeMap::new()),
             next_wait_object_id: AtomicU64::new(Self::MIN_WAIT_OBJECT_ID),
             self_object: None,
-            thread_counter: AtomicU64::new(0),
             stats: KProcessStats::new(
                 parent,
                 ProcessId::new(),
@@ -186,15 +183,10 @@ impl Process {
             let ptr = Arc::as_ptr(&self_) as usize as *mut Process;
             ptr.as_mut().unwrap()
         };
-        self_mut.main_thread = Some(Thread::new(
-            self_.clone(),
-            user_stack,
-            self_mut.entry_point,
-            self_mut.thread_counter.fetch_add(1, Ordering::Relaxed),
-        ));
+        self_mut.main_thread = Some(Thread::new(self_.clone(), user_stack, self_mut.entry_point));
 
         let thread = self_mut.main_thread.as_ref().unwrap();
-        self_mut.threads.insert(thread.utid, thread.clone());
+        self_mut.threads.insert(thread.tid, thread.clone());
 
         self_mut.self_object = Some(SysObject::new_owned(
             Arc::new(alloc::format!("process:{}", self_mut.stats.pid().as_u64())),
@@ -355,16 +347,10 @@ impl Process {
         let num_pages = stack_size >> crate::mm::PAGE_SIZE_SMALL_LOG2;
         let stack = self.address_space.alloc_user_stack(num_pages)?;
 
-        let utid = self.thread_counter.fetch_add(1, Ordering::Relaxed);
-        if utid >= Self::MAX_UTID {
-            log::error!("process {}: reached MAX_UTID", self.debug_name());
-            return Err(ErrorCode::OutOfMemory);
-        }
         let thread = Thread::new(
             self.this.clone().upgrade().unwrap(),
             stack,
             thread_entry_point,
-            utid,
         );
         let mut error = None;
         'proc_lock: {
@@ -375,7 +361,7 @@ impl Process {
                 break 'proc_lock;
             }
 
-            self_mut.threads.insert(thread.utid, thread.clone());
+            self_mut.threads.insert(thread.tid, thread.clone());
         }
 
         if let Some(err) = error {
@@ -447,13 +433,13 @@ impl Process {
         }
     }
 
-    fn on_thread_exited(&self, utid: u64, thread_status: ThreadStatus) {
+    fn on_thread_exited(&self, tid: ThreadId, thread_status: ThreadStatus) {
         self.stats.on_thread_exited();
         #[cfg(debug_assertions)]
         log::debug!(
             "on_thread_exited: pid: {} tid: {}",
             self.pid().as_u64(),
-            utid
+            tid.as_u64()
         );
         let mut exited = false;
         {
@@ -468,7 +454,7 @@ impl Process {
             }
 
             {
-                let thread = self_mut.threads.remove(&utid).unwrap();
+                let thread = self_mut.threads.remove(&tid).unwrap();
                 thread.cleanup();
             }
 
@@ -483,7 +469,7 @@ impl Process {
                 // to exited now, we need to first get the exit status value
                 // from the main thread, and we would rather not have nested locks.
                 exited = true;
-            } else if self.main_thread.as_ref().unwrap().utid == utid {
+            } else if self.main_thread.as_ref().unwrap().tid == tid {
                 if !matches!(*status_lock, ProcessStatus::Exiting(_)) {
                     *status_lock = match thread_status {
                         ThreadStatus::Finished => ProcessStatus::Exiting(0),
@@ -514,7 +500,7 @@ impl Process {
                             "process {} '{}' killed: thread {} exited with status {}.",
                             self.pid().as_u64(),
                             self.debug_name(),
-                            utid,
+                            tid.as_u64(),
                             val
                         );
                         for thread in self_mut.threads.values() {
@@ -530,7 +516,7 @@ impl Process {
                             "process {} '{}' killed: thread {} killed.",
                             self.pid().as_u64(),
                             self.debug_name(),
-                            utid
+                            tid.as_u64()
                         );
                         for thread in self_mut.threads.values() {
                             thread.post_kill(ThreadKilledReason::ProcessKilled);
@@ -634,7 +620,6 @@ pub enum ThreadKilledReason {
 pub struct Thread {
     // Read-only fields:
     tid: ThreadId, // Used in SysObject (waiting threads). Must be globally unique.
-    utid: u64,     // Per-process "User Thread ID": more convenient this way.
     owner: Weak<Process>,
     this: Weak<Self>,
     thread_entry_point: u64,
@@ -678,13 +663,7 @@ impl Drop for Thread {
     fn drop(&mut self) {
         // Note: at this point the thread's process may be gone,
         // so we can't do much here. Use Thread::cleanup().
-        log::debug!(
-            "thread 0x{:x} 0x{:x} dropped.",
-            self.utid,
-            self.tid.as_u64()
-        );
-
-        // crate::arch::log_backtrace_pretty("thread dropped");
+        log::debug!("thread {} dropped.", self.tid.as_u64());
     }
 }
 
@@ -697,11 +676,9 @@ impl Thread {
         owner: Arc<Process>,
         user_stack: crate::mm::user::UserStack,
         thread_entry_point: u64,
-        utid: u64,
     ) -> Arc<Self> {
         let self_ = Arc::new(Self {
             tid: ThreadId::new(),
-            utid,
             tcb: ThreadControlBlock::new(),
             user_tcb_user_addr: 0,
             user_tcb_kernel_addr: 0,
@@ -731,7 +708,7 @@ impl Thread {
                 Arc::new(alloc::format!(
                     "thread:{}:{}",
                     owner.pid().as_u64(),
-                    self_mut.utid
+                    self_mut.tid.as_u64()
                 )),
                 self_.clone(),
             );
@@ -746,10 +723,6 @@ impl Thread {
 
     pub fn get(&self) -> Arc<Self> {
         self.this.upgrade().unwrap()
-    }
-
-    pub fn __utid(&self) -> u64 {
-        self.utid
     }
 
     pub fn user_tcb_user_addr(&self) -> u64 {
@@ -778,14 +751,16 @@ impl Thread {
             log::debug!(
                 "UTCB guard check failed: {}:{}",
                 self.owner().pid().as_u64(),
-                self.utid
+                self.tid.as_u64()
             );
             Err(())
         }
     }
 
     pub unsafe fn user_tcb_set_current_cpu(&self) {
-        self.user_tcb_mut().current_cpu = crate::arch::current_cpu() as u32;
+        self.user_tcb_mut()
+            .current_cpu
+            .store(crate::arch::current_cpu() as u32, Ordering::Relaxed);
     }
 
     pub fn get_weak(&self) -> Weak<Self> {
@@ -843,7 +818,7 @@ impl Thread {
 
     pub fn debug_name(&self) -> String {
         let parent = self.owner.upgrade().unwrap();
-        alloc::format!("{}:{:x}", parent.debug_name(), self.utid)
+        alloc::format!("{}:{}", parent.debug_name(), self.tid.as_u64())
     }
 
     pub fn capabilities(&self) -> u64 {
@@ -940,7 +915,7 @@ impl Thread {
             user_tcb.user_version = 0;
             user_tcb.self_handle = self.self_handle.as_u64();
             user_tcb.tls = 0;
-            user_tcb.current_cpu = 0;
+            user_tcb.current_cpu.store(0, Ordering::Relaxed);
             user_tcb.reserved0 = 0;
         }
     }
@@ -1447,7 +1422,7 @@ impl Thread {
         // on the handle, and we don't want to crash the kernel here.
         let _ = owner.put_object(&self_handle);
 
-        owner.on_thread_exited(self.utid, thread_status);
+        owner.on_thread_exited(self.tid, thread_status);
     }
 
     fn cleanup(&self) {

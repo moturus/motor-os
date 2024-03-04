@@ -48,26 +48,11 @@ pub fn url_decode(encoded: &str) -> String {
     cols.replace("&amp;", "&")
 }
 
-/*
-#[cfg(feature = "userspace")]
-pub fn utid() -> u64 {
-    let mut fsbase: u64;
-    unsafe {
-        core::arch::asm!("rdfsbase {}", out(reg) fsbase, options(nostack, preserves_flags));
-    }
-
-    fsbase
-}
-*/
-
-#[cfg(feature = "userspace")]
-pub fn __utid() -> u64 {
-    shared_mem::UserThreadControlBlock::__utid()
-}
-
 #[cfg(feature = "userspace")]
 pub fn current_cpu() -> u32 {
-    shared_mem::UserThreadControlBlock::get().current_cpu
+    shared_mem::UserThreadControlBlock::get()
+        .current_cpu
+        .load(core::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(feature = "userspace")]

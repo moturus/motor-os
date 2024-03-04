@@ -63,6 +63,13 @@ impl SysHandle {
     pub const fn is_none(&self) -> bool {
         self.as_u64() == Self::NONE.as_u64()
     }
+
+    #[cfg(feature = "userspace")]
+    pub fn this_thread() -> Self {
+        crate::shared_mem::UserThreadControlBlock::get()
+            .self_handle
+            .into()
+    }
 }
 
 impl From<u64> for SysHandle {

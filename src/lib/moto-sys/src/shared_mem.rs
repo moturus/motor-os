@@ -94,7 +94,7 @@ pub struct UserThreadControlBlock {
     pub user_version: u32,   // The userspace tells the kernel the version of the struct.
     pub self_handle: u64,    // Could be re-used.
     pub tls: usize,          // TLS. For userspace use.
-    pub current_cpu: u32,
+    pub current_cpu: core::sync::atomic::AtomicU32,
     pub reserved0: u32,
 }
 
@@ -113,11 +113,5 @@ impl UserThreadControlBlock {
     #[cfg(feature = "userspace")]
     pub fn get() -> &'static Self {
         Self::get_mut()
-    }
-
-    // A "user friendly thread ID.".
-    #[cfg(feature = "userspace")]
-    pub fn __utid() -> u64 {
-        u64::MAX - Self::get().self_handle
     }
 }

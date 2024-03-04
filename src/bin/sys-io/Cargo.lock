@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "moto-virtio"
