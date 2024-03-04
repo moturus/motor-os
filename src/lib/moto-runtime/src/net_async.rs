@@ -150,7 +150,8 @@ impl TcpStream {
             io_executor::blocks_for_buf(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf.len());
         let io_buffer = io_executor::get_io_buffer(num_blocks).await;
 
-        let sqe = rt_api::net::tcp_stream_peek_request(self.handle, io_buffer, buf.len(), timestamp);
+        let sqe =
+            rt_api::net::tcp_stream_peek_request(self.handle, io_buffer, buf.len(), timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
             io_executor::put_io_buffer(io_buffer).await;
@@ -171,7 +172,8 @@ impl TcpStream {
             io_executor::blocks_for_buf(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf.len());
         let io_buffer = io_executor::get_io_buffer(num_blocks).await;
 
-        let sqe = rt_api::net::tcp_stream_read_request(self.handle, io_buffer, buf.len(), timestamp);
+        let sqe =
+            rt_api::net::tcp_stream_read_request(self.handle, io_buffer, buf.len(), timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
             io_executor::put_io_buffer(io_buffer).await;

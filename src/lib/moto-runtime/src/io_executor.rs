@@ -429,7 +429,7 @@ impl IoExecutorThread {
                 }
                 CMD_LOCAL_NOOP_OK => {
                     if qe.flags == FLAG_CMD_NOOP_OK_TIMESTAMP {
-                        qe.payload.args_64_mut()[3] = moto_sys::time::Instant::now().as_u64();
+                        qe.payload.args_64_mut()[2] = moto_sys::time::Instant::now().as_u64();
                         fence(Ordering::Release);
                     }
                     qe.status = ErrorCode::Ok.into();

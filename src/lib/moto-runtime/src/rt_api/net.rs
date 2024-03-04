@@ -71,8 +71,8 @@ pub fn accept_tcp_listener_request(handle: u64) -> io_channel::QueueEntry {
 pub fn tcp_stream_connect_request(addr: &SocketAddr) -> io_channel::QueueEntry {
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_CONNECT;
+    qe.payload.args_32_mut()[5] = 0; // timeout
     put_socket_addr(&mut qe.payload, addr);
-    qe.payload.args_64_mut()[3] = u64::MAX; // timeout
 
     qe
 }
@@ -83,10 +83,24 @@ pub fn tcp_stream_connect_timeout_request(
 ) -> io_channel::QueueEntry {
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_CONNECT;
+
+    // We have only 32 bits for timeout. ~10ms granularity is fine.
+    let timeout = timeout.as_u64() >> 27;
+    assert!(timeout < (u32::MAX) as u64);
+    qe.payload.args_32_mut()[5] = timeout as u32;
     put_socket_addr(&mut qe.payload, addr);
-    qe.payload.args_64_mut()[3] = timeout.as_u64();
 
     qe
+}
+
+pub fn tcp_stream_connect_timeout(qe: &io_channel::QueueEntry) -> Option<moto_sys::time::Instant> {
+    let mut timeout = qe.payload.args_32()[5];
+    timeout &= u32::MAX - 1;
+    if timeout == 0 {
+        return None;
+    }
+    let timeout = (timeout as u64) << 27;
+    Some(moto_sys::time::Instant::from_u64(timeout))
 }
 
 pub fn tcp_stream_write_request(
@@ -138,19 +152,19 @@ pub fn tcp_stream_peek_request(
 }
 
 pub fn get_socket_addr(payload: &io_channel::Payload) -> Result<SocketAddr, ErrorCode> {
-    match payload.args_8()[20] {
-        4 => {
+    match payload.args_32()[5] & 1 {
+        0 => {
             let ip = Ipv4Addr::from(payload.args_32()[0]);
             let port = payload.args_16()[2];
             Ok(SocketAddr::new(IpAddr::V4(ip), port))
         }
-        6 => {
+        1 => {
             let octets: [u8; 16] = payload.args_8()[0..16].try_into().unwrap();
             let ip = Ipv6Addr::from(octets);
             let port = payload.args_16()[9];
             Ok(SocketAddr::new(IpAddr::V6(ip), port))
         }
-        _ => Err(ErrorCode::InvalidArgument),
+        _ => unreachable!(),
     }
 }
 
@@ -159,12 +173,12 @@ pub fn put_socket_addr(payload: &mut io_channel::Payload, addr: &SocketAddr) {
         IpAddr::V4(addr_v4) => {
             payload.args_32_mut()[0] = addr_v4.into();
             payload.args_16_mut()[2] = addr.port();
-            payload.args_8_mut()[20] = 4;
+            payload.args_32_mut()[5] &= u32::MAX - 1;
         }
         IpAddr::V6(addr_v6) => {
             payload.args_8_mut()[0..16].clone_from_slice(&addr_v6.octets());
             payload.args_16_mut()[9] = addr.port();
-            payload.args_8_mut()[20] = 6;
+            payload.args_32_mut()[5] |= 1;
         }
     }
 }

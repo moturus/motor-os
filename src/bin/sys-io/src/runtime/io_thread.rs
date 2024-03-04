@@ -155,7 +155,7 @@ impl IoRuntime {
                 io_channel::CMD_NOOP_OK => {
                     let mut cqe = sqe;
                     if cqe.flags == io_channel::FLAG_CMD_NOOP_OK_TIMESTAMP {
-                        cqe.payload.args_64_mut()[3] = moto_sys::time::Instant::now().as_u64();
+                        cqe.payload.args_64_mut()[2] = moto_sys::time::Instant::now().as_u64();
                     }
                     cqe.status = ErrorCode::Ok.into();
                     if let Err(err) = proc.conn().complete_sqe(cqe) {

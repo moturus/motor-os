@@ -461,15 +461,11 @@ impl NetSys {
             }
         };
 
-        let timeout = match sqe.payload.args_64()[3] {
-            u64::MAX => None,
-            t => {
-                let timo = moto_sys::time::Instant::from_u64(t);
-                if timo <= moto_sys::time::Instant::now() {
-                    sqe.status = ErrorCode::TimedOut.into();
-                    return Some(sqe);
-                }
-                Some(timo)
+        let timeout = rt_api::net::tcp_stream_connect_timeout(&sqe);
+        if let Some(timo) = timeout {
+            if timo <= moto_sys::time::Instant::now() {
+                sqe.status = ErrorCode::TimedOut.into();
+                return Some(sqe);
             }
         };
 

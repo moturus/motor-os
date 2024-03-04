@@ -77,10 +77,7 @@ fn client_loop(client: &mut Client) {
         }
     }
 
-    loop {
-        if client.is_empty() {
-            break;
-        }
+    while !client.is_empty() {
         SysCpu::wait(
             &mut [client.server_handle()],
             SysHandle::NONE,
@@ -91,9 +88,7 @@ fn client_loop(client: &mut Client) {
         process_completions(client);
     }
 
-    if values_sent != values_received {
-        assert_eq!(values_sent, values_received);
-    }
+    assert_eq!(values_sent, values_received);
 }
 
 fn server_loop(server: &mut Server) {
@@ -330,7 +325,7 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     }
     assert!(cqe.status().is_ok());
     fence(Ordering::Acquire);
-    let ts_2 = cqe.payload.args_64()[3];
+    let ts_2 = cqe.payload.args_64()[2];
     if ts_2 == 0 {
         skip_tracing = true;
         eprintln!("{}:{} - TODO: fix missing timestamp", file!(), line!());
@@ -401,7 +396,8 @@ pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool, local_io: bool) {
     }
     println!();
 
-    println!("\ttracing: t1: {:.3} t2: {:.3} t3: {:.3} t4: {:.3}",
+    println!(
+        "\ttracing: t1: {:.3} t2: {:.3} t3: {:.3} t4: {:.3}",
         (TRACING_1.load(Ordering::Acquire) as f64) / (iters as f64),
         (TRACING_2.load(Ordering::Acquire) as f64) / (iters as f64),
         (TRACING_3.load(Ordering::Acquire) as f64) / (iters as f64),
