@@ -3,7 +3,6 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use core::sync::atomic::*;
 use moto_sys::syscalls::SysMem;
-use moto_sys::ErrorCode;
 
 #[derive(Debug)]
 pub enum SeekFrom {

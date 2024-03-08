@@ -2,9 +2,7 @@
 // Inspired by spin::Mutex.
 
 use core::cell::UnsafeCell;
-use core::default::Default;
-use core::marker::Sync;
-use core::ops::{Deref, DerefMut, Drop};
+use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub struct Mutex<T: ?Sized> {
