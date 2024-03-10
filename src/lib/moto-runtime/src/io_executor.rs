@@ -33,10 +33,10 @@ macro_rules! pin_mut {
     )* }
 }
 
-const CMD_GET_IO_BUFFER: u16 = CMD_RESERVED_MIN_LOCAL;
-const CMD_WRITE_IO_BUFFER: u16 = CMD_GET_IO_BUFFER + 1;
-const CMD_CONSUME_IO_BUFFER: u16 = CMD_WRITE_IO_BUFFER + 1;
-pub const CMD_LOCAL_NOOP_OK: u16 = CMD_CONSUME_IO_BUFFER + 1;
+const CMD_GET_IO_PAGE: u16 = CMD_RESERVED_MIN_LOCAL;
+const CMD_WRITE_IO_PAGE: u16 = CMD_GET_IO_PAGE + 1;
+const CMD_CONSUME_IO_PAGE: u16 = CMD_WRITE_IO_PAGE + 1;
+pub const CMD_LOCAL_NOOP_OK: u16 = CMD_CONSUME_IO_PAGE + 1;
 
 // We use our own "pointer" because AtomicPtr<> is not Copy, and because
 // we want to implement Future.
@@ -197,13 +197,13 @@ impl IoExecutorThread {
         debug_assert_eq!(qe.status, ErrorCode::NotReady.into());
 
         match qe.command {
-            CMD_GET_IO_BUFFER => {
+            CMD_GET_IO_PAGE => {
                 if debug_log {
                     moturus_log!("io_thread: CMD_GET_IO_BUFFER");
                 }
-                match self.io_client.alloc_buffer(qe.payload.args_16()[0]) {
-                    Ok(buffer) => {
-                        qe.payload.buffers_mut()[0] = buffer;
+                match self.io_client.alloc_page() {
+                    Ok(idx) => {
+                        qe.payload.client_buffers_mut()[0] = idx;
                         compiler_fence(Ordering::Release);
                         fence(Ordering::Release);
                         qe.status = ErrorCode::Ok.into();
@@ -224,28 +224,25 @@ impl IoExecutorThread {
                     }
                 }
             }
-            CMD_WRITE_IO_BUFFER => {
+            CMD_WRITE_IO_PAGE => {
                 if debug_log {
                     moturus_log!("io_thread: CMD_WRITE_IO_BUFFER");
                 }
-                let max_num_blocks = qe.payload.args_16()[0];
-                let buf_ptr = qe.payload.args_64()[1] as usize as *const u8;
-                let buf_len = qe.payload.args_64()[2] as usize;
+                let buf_ptr = qe.payload.args_64()[0] as usize as *const u8;
+                let buf_len = qe.payload.args_64()[1] as usize;
                 if buf_len == 0 {
                     pqe.qe().status = ErrorCode::InvalidArgument.into();
                     return Some(pqe);
                 }
-                let num_blocks = blocks_for_buf(max_num_blocks, buf_len);
 
-                match self.io_client.alloc_buffer(num_blocks) {
-                    Ok(buffer) => {
-                        let slice = self.io_client.buffer_bytes(buffer).unwrap();
-                        let to_write: usize =
-                            buf_len.min((num_blocks as usize) << io_channel::BLOCK_SIZE.ilog2());
+                match self.io_client.alloc_page() {
+                    Ok(page_idx) => {
+                        let slice = self.io_client.buffer_bytes(page_idx).unwrap();
+                        let to_write: usize = buf_len.min(io_channel::PAGE_SIZE);
                         unsafe {
                             core::ptr::copy_nonoverlapping(buf_ptr, slice.as_mut_ptr(), to_write);
                         }
-                        qe.payload.buffers_mut()[0] = buffer;
+                        qe.payload.client_buffers_mut()[0] = page_idx;
                         qe.payload.args_64_mut()[1] = to_write as u64;
                         compiler_fence(Ordering::Release);
                         fence(Ordering::Release);
@@ -307,20 +304,20 @@ impl IoExecutorThread {
         }
     }
 
-    fn consume_io_buffer(&mut self, pqe: QueueEntryPointer) {
+    fn consume_io_page(&mut self, pqe: QueueEntryPointer) {
         let qe = pqe.qe();
-        let io_buffer = qe.payload.buffers()[0];
+        let io_page_idx = qe.payload.client_buffers()[0];
         let buf_len = qe.payload.args_64()[2] as usize;
 
         if buf_len != 0 {
             let buf_ptr = qe.payload.args_64()[1] as usize as *mut u8;
-            let slice = self.io_client.buffer_bytes(io_buffer).unwrap();
+            let slice = self.io_client.buffer_bytes(io_page_idx).unwrap();
             assert!(buf_len <= slice.len());
             unsafe {
                 core::ptr::copy_nonoverlapping(slice.as_ptr(), buf_ptr, buf_len);
             }
         }
-        self.io_client.free_buffer(io_buffer).unwrap();
+        self.io_client.free_client_page(io_page_idx).unwrap();
         self.io_buffers_available = true;
         qe.status = ErrorCode::Ok.into();
         compiler_fence(Ordering::Release);
@@ -398,7 +395,7 @@ impl IoExecutorThread {
             debug_assert_eq!(qe.status, ErrorCode::NotReady.into());
 
             match qe.command {
-                CMD_GET_IO_BUFFER | CMD_WRITE_IO_BUFFER => {
+                CMD_GET_IO_PAGE | CMD_WRITE_IO_PAGE => {
                     if self.io_buffer_queue.is_empty() && self.io_buffers_available {
                         if let Some(pqe) = self.process_pqe(pqe, false) {
                             self.io_buffer_queue.push_back(pqe);
@@ -408,7 +405,7 @@ impl IoExecutorThread {
                         self.io_buffer_queue.push_back(pqe);
                     }
                 }
-                CMD_CONSUME_IO_BUFFER => self.consume_io_buffer(pqe),
+                CMD_CONSUME_IO_PAGE => self.consume_io_page(pqe),
                 moto_ipc::io_channel::CMD_NOOP_OK => {
                     if self.submission_queue.is_empty() {
                         if let Some(pqe) = self.process_pqe(pqe, false) {
@@ -665,56 +662,51 @@ fn prepare_to_submit(mut sqe: QueueEntry) -> Result<QueueEntry, QueueEntry> {
     Ok(sqe)
 }
 
-pub async fn get_io_buffer(num_blocks: u16) -> IoBuffer {
-    assert!(num_blocks <= IoBuffer::MAX_NUM_BLOCKS);
+pub async fn get_io_page() -> u16 {
     let ex = IoExecutor::inst();
     let pqe = ex.get_free_pqe();
 
     let qe: &mut QueueEntry = pqe.qe();
     ex.init_qe(qe);
-    qe.command = CMD_GET_IO_BUFFER;
-    qe.payload.args_16_mut()[0] = num_blocks;
+    qe.command = CMD_GET_IO_PAGE;
     ex.add_to_queue(pqe).await;
     pqe.await;
 
     debug_assert!(qe.status().is_ok());
-    let buf = qe.payload.buffers()[0];
+    let buf = qe.payload.client_buffers()[0];
     ex.free_pqe(pqe);
     buf
 }
 
 // Gets an IoBuffer and writes buf into it. Returns the IoBuffer and the number of
 // bytes written.
-pub async fn produce_io_buffer(max_num_blocks: u16, buf: &[u8]) -> (IoBuffer, usize) {
-    assert!(max_num_blocks <= IoBuffer::MAX_NUM_BLOCKS);
-
+pub async fn produce_io_page(buf: &[u8]) -> (u16, usize) {
     let ex = IoExecutor::inst();
     let pqe = ex.get_free_pqe();
 
     let qe: &mut QueueEntry = pqe.qe();
     ex.init_qe(qe);
-    qe.command = CMD_WRITE_IO_BUFFER;
-    qe.payload.args_16_mut()[0] = max_num_blocks;
-    qe.payload.args_64_mut()[1] = buf.as_ptr() as usize as u64;
-    qe.payload.args_64_mut()[2] = buf.len() as u64;
+    qe.command = CMD_WRITE_IO_PAGE;
+    qe.payload.args_64_mut()[0] = buf.as_ptr() as usize as u64;
+    qe.payload.args_64_mut()[1] = buf.len() as u64;
     ex.add_to_queue(pqe).await;
     pqe.await;
 
     debug_assert!(qe.status().is_ok());
-    let buf = qe.payload.buffers()[0];
+    let buf = qe.payload.client_buffers()[0];
     let written = qe.payload.args_64()[1] as usize;
     ex.free_pqe(pqe);
     (buf, written)
 }
 
-pub async fn consume_io_buffer(io_buffer: IoBuffer, buf: &mut [u8]) {
+pub async fn consume_io_page(io_page_idx: u16, buf: &mut [u8]) {
     let ex = IoExecutor::inst();
     let pqe = ex.get_free_pqe();
 
     let qe: &mut QueueEntry = pqe.qe();
     ex.init_qe(qe);
-    qe.command = CMD_CONSUME_IO_BUFFER;
-    qe.payload.buffers_mut()[0] = io_buffer;
+    qe.command = CMD_CONSUME_IO_PAGE;
+    qe.payload.client_buffers_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = buf.as_ptr() as usize as u64;
     qe.payload.args_64_mut()[2] = buf.len() as u64;
     ex.add_to_queue(pqe).await;
@@ -724,14 +716,14 @@ pub async fn consume_io_buffer(io_buffer: IoBuffer, buf: &mut [u8]) {
     ex.free_pqe(pqe);
 }
 
-pub async fn put_io_buffer(io_buffer: IoBuffer) {
+pub async fn put_io_page(io_page_idx: u16) {
     let ex = IoExecutor::inst();
     let pqe = ex.get_free_pqe();
 
     let qe: &mut QueueEntry = pqe.qe();
     ex.init_qe(qe);
-    qe.command = CMD_CONSUME_IO_BUFFER;
-    qe.payload.buffers_mut()[0] = io_buffer;
+    qe.command = CMD_CONSUME_IO_PAGE;
+    qe.payload.client_buffers_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = 0;
     qe.payload.args_64_mut()[2] = 0;
     ex.add_to_queue(pqe).await;
@@ -838,16 +830,5 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
                 }
             }
         }
-    }
-}
-
-pub fn blocks_for_buf(max_num_blocks: u16, buf_len: usize) -> u16 {
-    assert!(max_num_blocks <= io_channel::IoBuffer::MAX_NUM_BLOCKS);
-
-    if buf_len >= ((max_num_blocks as usize) << io_channel::BLOCK_SIZE.ilog2()) {
-        max_num_blocks
-    } else {
-        let aligned = (buf_len + io_channel::BLOCK_SIZE - 1) & !(io_channel::BLOCK_SIZE - 1);
-        (aligned >> io_channel::BLOCK_SIZE.ilog2()) as u16
     }
 }

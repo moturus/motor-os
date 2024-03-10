@@ -1,3 +1,4 @@
+use crate::external::spin;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::marker::PhantomPinned;
@@ -5,7 +6,6 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
-use crate::external::spin;
 use moto_sys::syscalls::SysCpu;
 use moto_sys::syscalls::SysHandle;
 use moto_sys::ErrorCode;
@@ -162,7 +162,11 @@ static FUTEX_WAIT_QUEUES: spin::Mutex<BTreeMap<usize, Arc<WaitQueue>>> =
     spin::Mutex::new(BTreeMap::new());
 
 // Returns false on timeout.
-pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<moto_sys::time::Instant>) -> bool {
+pub fn futex_wait(
+    futex: &AtomicU32,
+    expected: u32,
+    timeout: Option<moto_sys::time::Instant>,
+) -> bool {
     let key = futex as *const _ as usize;
     loop {
         if futex.load(Ordering::Relaxed) != expected {

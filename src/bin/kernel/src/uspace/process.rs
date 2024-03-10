@@ -111,7 +111,7 @@ pub struct Process {
 
     // The index in the vector is SysHandle minus CUSTOM_HANDLE_OFFSET.
     // These are the objects that this process has opened handles to.
-    wait_objects: SpinLock<BTreeMap<u64, WaitObject>>,
+    wait_objects: SpinLock<BTreeMap<SysHandle, WaitObject>>,
     next_wait_object_id: AtomicU64,
 
     stats: Arc<KProcessStats>,
@@ -191,6 +191,7 @@ impl Process {
         self_mut.self_object = Some(SysObject::new_owned(
             Arc::new(alloc::format!("process:{}", self_mut.stats.pid().as_u64())),
             self_.clone(),
+            Arc::downgrade(&self_),
         ));
 
         Ok(self_)
@@ -248,36 +249,29 @@ impl Process {
 
     pub(super) fn add_object(&self, object: Arc<SysObject>) -> SysHandle {
         let wait_object = WaitObject::new(object);
-        let object_id = self.next_wait_object_id.fetch_add(1, Ordering::Relaxed);
+        let object_id = self
+            .next_wait_object_id
+            .fetch_add(1, Ordering::Relaxed)
+            .into();
         let mut objects = self.wait_objects.lock(line!());
         objects.insert(object_id, wait_object);
-        SysHandle::from_u64(object_id)
+        object_id
     }
 
     pub(super) fn get_object(&self, handle: &SysHandle) -> Option<WaitObject> {
-        let object_id = handle.as_u64();
-        if object_id < Self::MIN_WAIT_OBJECT_ID {
-            None
+        let objects = self.wait_objects.lock(line!());
+        if let Some(obj) = objects.get(handle) {
+            Some(obj.clone())
         } else {
-            let objects = self.wait_objects.lock(line!());
-            if let Some(obj) = objects.get(&object_id) {
-                Some(obj.clone())
-            } else {
-                None
-            }
+            None
         }
     }
 
     // TODO: put_object should not remove live threads, as they can self-ref.
     pub(super) fn put_object(&self, handle: &SysHandle) -> Result<(), ()> {
-        let object_id = handle.as_u64();
-        if object_id < Self::MIN_WAIT_OBJECT_ID {
-            return Err(());
-        }
-
         if let Some(obj) = {
             let mut objects = self.wait_objects.lock(line!());
-            objects.remove(&object_id).take()
+            objects.remove(handle).take()
         } {
             drop(obj);
             Ok(())
@@ -287,12 +281,8 @@ impl Process {
     }
 
     fn process_wake(&self, handle: &SysHandle) {
-        let object_id = handle.as_u64();
-        if object_id < Self::MIN_WAIT_OBJECT_ID {
-            return;
-        }
         let mut objects = self.wait_objects.lock(line!());
-        if let Some(obj) = objects.get_mut(&object_id) {
+        if let Some(obj) = objects.get_mut(handle) {
             obj.wake_count = obj.sys_object.wake_count();
         }
     }
@@ -711,6 +701,7 @@ impl Thread {
                     self_mut.tid.as_u64()
                 )),
                 self_.clone(),
+                Arc::downgrade(&owner),
             );
 
             self_mut.self_object = Some(self_object.clone());
@@ -808,7 +799,9 @@ impl Thread {
     }
 
     pub(super) fn add_waker(&self, waker: SysHandle) {
-        self.wakers.lock(line!()).push(waker);
+        if waker != SysHandle::NONE {
+            self.wakers.lock(line!()).push(waker);
+        }
     }
 
     unsafe fn get_mut(&self) -> (&mut Self, LockGuard<ThreadStatus>) {

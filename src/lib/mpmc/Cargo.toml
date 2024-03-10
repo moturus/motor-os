@@ -10,5 +10,5 @@ keywords = ["moturus", "motor-os"]
 
 [dependencies]
 crossbeam-utils = { version = "0.8.18", default-features = false }
-moto-sys = "0.2.0"
-moto-runtime = { version = "0.2.2", features = ["rt-api"] }
+moto-sys     = { path = "../moto-sys" }
+moto-runtime = { path = "../moto-runtime", features = ["rt-api"] }

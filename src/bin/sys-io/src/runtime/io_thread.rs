@@ -3,6 +3,7 @@ use core::intrinsics::{likely, unlikely};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use moto_ipc::io_channel;
+use moto_ipc::io_channel::CMD_NOOP_OK;
 use moto_runtime::rt_api;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
@@ -22,7 +23,8 @@ struct IoRuntime {
     all_handles: Vec<SysHandle>,
 
     pending_completions: VecDeque<PendingCompletion>,
-    cached_wakee: SysHandle,
+    cached_wakee_process: SysHandle,
+    cached_wakee_thread: SysHandle,
 }
 
 impl IoRuntime {
@@ -34,8 +36,9 @@ impl IoRuntime {
             self.net.on_process_drop(&mut proc);
 
             self.update_handles();
-            if self.cached_wakee == handle {
-                self.cached_wakee = SysHandle::NONE;
+            if self.cached_wakee_process == handle {
+                self.cached_wakee_process = SysHandle::NONE;
+                self.cached_wakee_thread = SysHandle::NONE;
             }
 
             #[cfg(debug_assertions)]
@@ -63,20 +66,37 @@ impl IoRuntime {
         core::mem::swap(&mut self.all_handles, &mut handles);
     }
 
-    fn cache_wakee(&mut self, wakee: SysHandle) -> bool {
+    fn cache_wakee(&mut self, wakee_process: SysHandle, wakee_thread: SysHandle) -> bool {
         let mut had_work = false;
 
-        if self.cached_wakee != wakee {
-            if likely(!self.cached_wakee.is_none()) {
-                if SysCpu::wake(self.cached_wakee).is_err() {
-                    #[cfg(debug_assertions)]
-                    moto_log!("dropping connection 0x{:x}", self.cached_wakee.as_u64());
-                    self.drop_process(self.cached_wakee);
+        if self.cached_wakee_process != wakee_process || self.cached_wakee_thread != wakee_thread {
+            if likely(!self.cached_wakee_process.is_none()) {
+                if self.cached_wakee_thread == SysHandle::NONE {
+                    if SysCpu::wake(self.cached_wakee_process).is_err() {
+                        #[cfg(debug_assertions)]
+                        moto_log!(
+                            "dropping connection 0x{:x}",
+                            self.cached_wakee_process.as_u64()
+                        );
+                        self.drop_process(self.cached_wakee_process);
+                    }
+                } else {
+                    if SysCpu::wake_thread(self.cached_wakee_process, self.cached_wakee_thread)
+                        .is_err()
+                    {
+                        #[cfg(debug_assertions)]
+                        moto_log!(
+                            "dropping connection 0x{:x}",
+                            self.cached_wakee_process.as_u64()
+                        );
+                        self.drop_process(self.cached_wakee_process);
+                    }
                 }
                 had_work = true;
             }
 
-            self.cached_wakee = wakee;
+            self.cached_wakee_process = wakee_process;
+            self.cached_wakee_thread = wakee_thread;
         }
 
         had_work
@@ -116,6 +136,7 @@ impl IoRuntime {
         debug_assert_eq!(proc.conn().status(), io_channel::ServerStatus::Connected);
 
         let mut wake_conn = false;
+        let mut wakee_threads: HashSet<SysHandle> = HashSet::new();
 
         loop {
             let mut sqe = match proc.conn().get_sqe() {
@@ -158,12 +179,13 @@ impl IoRuntime {
                         cqe.payload.args_64_mut()[2] = moto_sys::time::Instant::now().as_u64();
                     }
                     cqe.status = ErrorCode::Ok.into();
+                    wakee_threads.insert(cqe.wake_handle.into());
                     if let Err(err) = proc.conn().complete_sqe(cqe) {
                         #[cfg(debug_assertions)]
                         moto_log!("complete_sqe() failed");
                         debug_assert_eq!(err, ErrorCode::NotReady);
                         self.pending_completions.push_back(PendingCompletion {
-                            cqe: cqe,
+                            cqe,
                             endpoint_handle: handle,
                         });
                     }
@@ -177,7 +199,7 @@ impl IoRuntime {
                             moto_log!("complete_sqe() failed");
                             debug_assert_eq!(err, ErrorCode::NotReady);
                             self.pending_completions.push_back(PendingCompletion {
-                                cqe: cqe,
+                                cqe,
                                 endpoint_handle: handle,
                             });
                         }
@@ -201,7 +223,10 @@ impl IoRuntime {
         }
 
         if wake_conn {
-            self.cache_wakee(handle);
+            for wakee_t in wakee_threads {
+                self.cache_wakee(handle, wakee_t);
+            }
+            self.cache_wakee(handle, SysHandle::NONE);
         }
     }
 
@@ -251,13 +276,19 @@ impl IoRuntime {
                 None => continue, // Endpoint was dropped.
             };
 
-            let wakee = completion.endpoint_handle;
+            let wakee_p = completion.endpoint_handle;
+            let wakee_t = if completion.cqe.command == CMD_NOOP_OK {
+                completion.cqe.wake_handle.into()
+            } else {
+                SysHandle::NONE
+            };
+
             if let Err(err) = proc.conn().complete_sqe(completion.cqe) {
                 debug_assert_eq!(err, ErrorCode::NotReady);
                 self.pending_completions.push_back(completion);
             }
 
-            self.cache_wakee(wakee);
+            self.cache_wakee(wakee_p, wakee_t);
         }
 
         had_work
@@ -281,7 +312,8 @@ impl IoRuntime {
             all_handles: Vec::new(),
 
             pending_completions: VecDeque::new(),
-            cached_wakee: SysHandle::NONE,
+            cached_wakee_process: SysHandle::NONE,
+            cached_wakee_thread: SysHandle::NONE,
         };
 
         for handle in self_mut.net.wait_handles() {
@@ -360,7 +392,7 @@ impl IoRuntime {
                 }
             }
 
-            had_work |= self.cache_wakee(SysHandle::NONE); // Trigger a pending wakeup, if any.
+            had_work |= self.cache_wakee(SysHandle::NONE, SysHandle::NONE); // Trigger a pending wakeup, if any.
 
             if had_work {
                 busy_polling_iter = 0;

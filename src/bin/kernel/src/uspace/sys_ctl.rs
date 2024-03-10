@@ -53,8 +53,11 @@ fn sys_handle_create(
                 };
 
                 let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
-                let sys_object =
-                    SysObject::new_owned(Arc::new(moto_sys::url_decode(debug_name)), address_space);
+                let sys_object = SysObject::new_owned(
+                    Arc::new(moto_sys::url_decode(debug_name)),
+                    address_space,
+                    alloc::sync::Weak::new(),
+                );
                 log::debug!("created {}", url);
                 return Ok(thread.owner().add_object(sys_object));
             }
@@ -422,7 +425,9 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
 
             match sys_handle_get(thread, parent, &url) {
                 Ok(handle) => {
-                    if wake_peer && super::sys_cpu::do_wake(thread, handle, false).is_err() {
+                    if wake_peer
+                        && super::sys_cpu::do_wake(thread, handle, SysHandle::NONE, false).is_err()
+                    {
                         log::warn!(
                             "{}: failed to wake peer for url '{}'",
                             thread.debug_name(),

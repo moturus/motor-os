@@ -74,7 +74,7 @@ fn test_io_latency() {
     let addrs: Vec<_> = "localhost:3333".to_socket_addrs().unwrap().collect();
     assert_eq!(addrs.len(), 1);
     let stream =
-        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(100)).unwrap();
+        std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
 
     // set_nodelay() is a good way to measure local I/O latency, as for the loopback
     // device it is a NOOP.

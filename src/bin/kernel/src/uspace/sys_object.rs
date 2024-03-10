@@ -9,6 +9,7 @@ use moto_sys::syscalls::*;
 use crate::util::SpinLock;
 
 use super::process::{Thread, ThreadId};
+use super::Process;
 
 // Represents a system object that SysHandle points to.
 #[repr(align(8))]
@@ -24,6 +25,7 @@ pub struct SysObject {
 
     url: Arc<String>,
     owner: Arc<dyn Any + Sync + Send>,
+    process_owner: Weak<Process>,
 
     // A unique ID, otherwise it is hard to figure out if two refs point at the same obj:
     // Rust does not have equality by reference.
@@ -60,7 +62,11 @@ impl Drop for SysObject {
 }
 
 impl SysObject {
-    pub fn new_owned(url: Arc<String>, owner: Arc<dyn Any + Sync + Send>) -> Arc<Self> {
+    pub fn new_owned(
+        url: Arc<String>,
+        owner: Arc<dyn Any + Sync + Send>,
+        process_owner: Weak<Process>,
+    ) -> Arc<Self> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
         Arc::new(Self {
@@ -69,6 +75,7 @@ impl SysObject {
             wake_event_lock: AtomicBool::new(false),
             url,
             owner,
+            process_owner,
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             wake_counter: AtomicU64::new(0),
             sibling_dropped: AtomicBool::new(false),
@@ -77,7 +84,7 @@ impl SysObject {
     }
 
     pub fn new(url: Arc<String>) -> Arc<Self> {
-        Self::new_owned(url, Arc::<()>::new(()))
+        Self::new_owned(url, Arc::<()>::new(()), Weak::new())
     }
 
     pub fn id(&self) -> u64 {
@@ -90,6 +97,10 @@ impl SysObject {
 
     pub fn owner(&self) -> &Arc<dyn Any + Sync + Send> {
         &self.owner
+    }
+
+    pub fn process_owner(&self) -> &Weak<Process> {
+        &self.process_owner
     }
 
     pub fn on_sibling_dropped(&self) {
@@ -173,6 +184,20 @@ impl SysObject {
         self_.wake_event_lock.store(false, Ordering::Release);
     }
 
+    pub fn wake_thread(&self, wakee_thread: SysHandle, this_cpu: bool) -> Result<(), ()> {
+        if let Some(process) = self.process_owner().upgrade() {
+            if let Some(thread) = super::sys_object::object_from_handle::<super::process::Thread>(
+                &process,
+                wakee_thread,
+            ) {
+                thread.post_wake(this_cpu);
+                return Ok(());
+            }
+            return Err(());
+        }
+        return Err(());
+    }
+
     // NOT called from IRQ.
     pub fn wake(&self, this_cpu: bool) {
         self.wake_counter.fetch_add(1, Ordering::Release);
@@ -206,7 +231,7 @@ impl SysObject {
 }
 
 pub fn object_from_handle<T: Any + Send + Sync>(
-    process: &Arc<super::Process>,
+    process: &super::Process,
     handle: SysHandle,
 ) -> Option<Arc<T>> {
     match process.get_object(&handle) {

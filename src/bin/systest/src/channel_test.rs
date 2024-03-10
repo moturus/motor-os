@@ -18,12 +18,15 @@ fn client_loop(client: &mut Client) {
         match client.get_cqe() {
             Ok(cqe) => {
                 values_received += cqe.id;
-                let slice = client.buffer_bytes(cqe.payload.buffers()[0]).unwrap();
-                let num_blocks = (cqe.id & 0xFFFF) as u8;
+                let slice = client
+                    .buffer_bytes(cqe.payload.client_buffers()[0])
+                    .unwrap();
                 for idx in 0..slice.len() {
-                    assert_eq!(slice[idx], num_blocks ^ 0xFF);
+                    assert_eq!(slice[idx], ((idx & 0xFF) as u8) ^ 0xFF);
                 }
-                client.free_buffer(cqe.payload.buffers()[0]).unwrap();
+                client
+                    .free_client_page(cqe.payload.client_buffers()[0])
+                    .unwrap();
             }
             Err(err) => {
                 assert_eq!(err, ErrorCode::NotReady);
@@ -33,58 +36,39 @@ fn client_loop(client: &mut Client) {
     };
 
     for iter in 0..CHANNEL_TEST_ITERS {
-        for num_blocks in 1..11_u16 {
-            let buffer = loop {
-                match client.alloc_buffer(num_blocks) {
-                    Ok(buffer) => break buffer,
-                    Err(err) => {
-                        assert_eq!(err, ErrorCode::NotReady);
-                        process_completions(client);
-                        SysCpu::wait(
-                            &mut [client.server_handle()],
-                            SysHandle::NONE,
-                            client.server_handle(),
-                            None,
-                        )
-                        .unwrap();
-                    }
+        let page_idx = loop {
+            match client.alloc_page() {
+                Ok(buffer) => break buffer,
+                Err(err) => {
+                    assert_eq!(err, ErrorCode::NotReady);
+                    process_completions(client);
+                    SysCpu::wait(&mut [], SysHandle::NONE, client.server_handle(), None).unwrap();
                 }
-            };
-            let mut sqe = QueueEntry::new();
-            sqe.id = (iter << 32) + (num_blocks as u64);
-            let slice = client.buffer_bytes(buffer).unwrap();
-            for idx in 0..slice.len() {
-                slice[idx] = num_blocks as u8;
             }
-            sqe.payload.buffers_mut()[0] = buffer;
-            values_sent += sqe.id;
-            loop {
-                match client.submit_sqe(sqe) {
-                    Ok(()) => break,
-                    Err(err) => {
-                        assert_eq!(err, ErrorCode::NotReady);
-                        process_completions(client);
-                        SysCpu::wait(
-                            &mut [client.server_handle()],
-                            SysHandle::NONE,
-                            client.server_handle(),
-                            None,
-                        )
-                        .unwrap();
-                    }
+        };
+        let mut sqe = QueueEntry::new();
+        sqe.id = iter;
+        sqe.wake_handle = SysHandle::this_thread().into();
+        let slice = client.buffer_bytes(page_idx).unwrap();
+        for idx in 0..slice.len() {
+            slice[idx] = (idx & 0xFF) as u8;
+        }
+        sqe.payload.client_buffers_mut()[0] = page_idx;
+        values_sent += sqe.id;
+        loop {
+            match client.submit_sqe(sqe) {
+                Ok(()) => break,
+                Err(err) => {
+                    assert_eq!(err, ErrorCode::NotReady);
+                    process_completions(client);
+                    SysCpu::wait(&mut [], SysHandle::NONE, client.server_handle(), None).unwrap();
                 }
             }
         }
     }
 
     while !client.is_empty() {
-        SysCpu::wait(
-            &mut [client.server_handle()],
-            SysHandle::NONE,
-            client.server_handle(),
-            None,
-        )
-        .unwrap();
+        SysCpu::wait(&mut [], SysHandle::NONE, client.server_handle(), None).unwrap();
         process_completions(client);
     }
 
@@ -95,44 +79,60 @@ fn server_loop(server: &mut Server) {
     use moto_sys::syscalls::SysCpu;
     use moto_sys::ErrorCode;
 
+    let mut cached_wakee = None;
+
     'outer: loop {
         match server.get_sqe() {
-            Ok(mut sqe) => loop {
-                let buffer = sqe.payload.buffers()[0];
-                let slice = server.buffer_bytes(buffer).unwrap();
-                let num_blocks = (sqe.id & 0xFFFF) as u8;
-                assert_eq!(slice.len(), num_blocks as usize * 512);
+            Ok(mut sqe) => {
+                let client_page_idx = sqe.payload.client_buffers()[0];
+                let slice = server.buffer_bytes(client_page_idx).unwrap();
                 for idx in 0..slice.len() {
-                    assert_eq!(slice[idx], num_blocks);
-                    slice[idx] = num_blocks ^ 0xFF;
+                    if slice[idx] != (idx & 0xFF) as u8 {
+                        println!(
+                            "bad data: idx {} data {} page idx {} iter {}",
+                            idx, slice[idx], client_page_idx, sqe.id
+                        );
+                    }
+                    assert_eq!(slice[idx], (idx & 0xFF) as u8);
+                    slice[idx] ^= 0xFF;
                 }
 
                 sqe.status = ErrorCode::Ok.into();
+                cached_wakee = Some((server.wait_handle(), SysHandle::from_u64(sqe.wake_handle)));
 
-                match server.complete_sqe(sqe) {
-                    Ok(()) => break,
-                    Err(err) => {
-                        assert_eq!(err, ErrorCode::NotReady);
-                        if SysCpu::wait(
-                            &mut [server.wait_handle()],
-                            SysHandle::NONE,
-                            server.wait_handle(),
-                            None,
-                        )
-                        .is_err()
-                        {
-                            break 'outer;
+                loop {
+                    match server.complete_sqe(sqe) {
+                        Ok(()) => break,
+                        Err(err) => {
+                            assert_eq!(err, ErrorCode::NotReady);
+                            SysCpu::wake_thread(server.wait_handle(), sqe.wake_handle.into())
+                                .unwrap();
+                            if SysCpu::wait(
+                                &mut [server.wait_handle()],
+                                SysHandle::NONE,
+                                SysHandle::NONE, // server.wait_handle(),
+                                None,
+                            )
+                            .is_err()
+                            {
+                                break 'outer;
+                            }
+                            continue;
                         }
-                        continue;
                     }
                 }
-            },
+            }
             Err(err) => {
                 assert_eq!(err, ErrorCode::NotReady);
+                if let Some((a, b)) = cached_wakee {
+                    if SysCpu::wake_thread(a, b).is_err() {
+                        break 'outer;
+                    }
+                }
                 if SysCpu::wait(
                     &mut [server.wait_handle()],
                     SysHandle::NONE,
-                    server.wait_handle(),
+                    SysHandle::NONE, // server.wait_handle(),
                     None,
                 )
                 .is_err()
@@ -201,14 +201,12 @@ pub fn test_io_channel() {
 }
 
 fn do_test_io_throughput(io_size: usize, batch_size: u64) {
-    let mut io_client = match Client::connect("sys-io") {
+    let io_client = match Client::connect("sys-io") {
         Ok(client) => client,
         Err(err) => {
             panic!("Failed to connect to sys-io: {:?}", err);
         }
     };
-
-    let num_blocks = io_size / 512;
 
     const DURATION: Duration = Duration::from_millis(1000);
 
@@ -221,17 +219,18 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
         for step in 0..batch_size {
             let mut sqe = QueueEntry::new();
             sqe.command = CMD_NOOP_OK;
+            sqe.wake_handle = SysHandle::this_thread().into();
             sqe.id = step as u64;
-            if num_blocks > 0 {
-                let buff = io_client.alloc_buffer(num_blocks as u16).unwrap();
-                let buf = io_client.buffer_bytes(buff).unwrap();
+            if io_size > 0 {
+                let page_idx = io_client.alloc_page().unwrap();
+                let buf = io_client.buffer_bytes(page_idx).unwrap();
                 let buf_u64 = unsafe {
                     core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, buf.len() / 8)
                 };
                 for b in buf_u64 {
                     *b ^= 0x12345678;
                 }
-                sqe.payload.buffers_mut()[0] = buff;
+                sqe.payload.client_buffers_mut()[0] = page_idx;
             }
             io_client.submit_sqe(sqe).unwrap();
         }
@@ -241,15 +240,17 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
                 match io_client.get_cqe() {
                     Ok(cqe) => {
                         assert_eq!(cqe.id, step as u64);
-                        if num_blocks > 0 {
-                            io_client.free_buffer(cqe.payload.buffers()[0]).unwrap();
+                        if io_size > 0 {
+                            io_client
+                                .free_client_page(cqe.payload.client_buffers()[0])
+                                .unwrap();
                         }
                         break;
                     }
                     Err(err) => {
                         assert_eq!(err, moto_sys::ErrorCode::NotReady);
                         moto_sys::syscalls::SysCpu::wait(
-                            &mut [io_client.server_handle()],
+                            &mut [],
                             SysHandle::NONE,
                             io_client.server_handle(),
                             None,
@@ -288,9 +289,10 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
 
 pub fn test_io_throughput() {
     do_test_io_throughput(0, 1);
-    do_test_io_throughput(0, 32);
-    do_test_io_throughput(1024, 32);
+    do_test_io_throughput(0, 8);
+    do_test_io_throughput(4096, 1);
     do_test_io_throughput(4096, 8);
+    do_test_io_throughput(4096, 32);
 }
 
 static TRACING_1: AtomicU64 = AtomicU64::new(0);
@@ -304,8 +306,8 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
 
     let ts_0 = moto_sys::time::Instant::now().as_u64();
     // We emulate an async write
-    let io_buffer = if buf_alloc {
-        Some(io_executor::get_io_buffer(4).await)
+    let io_page_idx = if buf_alloc {
+        Some(io_executor::get_io_page().await)
     } else {
         None
     };
@@ -333,7 +335,7 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
 
     let ts_3 = moto_sys::time::Instant::now().as_u64();
     if buf_alloc {
-        io_executor::put_io_buffer(io_buffer.unwrap()).await;
+        io_executor::put_io_page(io_page_idx.unwrap()).await;
     }
     let ts_4 = moto_sys::time::Instant::now().as_u64();
 

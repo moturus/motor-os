@@ -31,28 +31,18 @@ pub const CMD_NOOP_OK: u16 = 1;
 // payload::args_64()[3].
 pub const FLAG_CMD_NOOP_OK_TIMESTAMP: u32 = 1;
 
-pub const BLOCK_SIZE: usize = 512;
+pub const PAGE_SIZE: usize = 4096;
 
-#[repr(C, align(512))]
-pub struct Block {
-    bytes: [u8; BLOCK_SIZE],
-}
-
-#[repr(C, align(4))]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct IoBuffer {
-    pub idx: u16, // The index of the block in the ring. u16::MAX => none.
-    pub len: u16, // The number of contiguous blocks.
-}
-
-impl IoBuffer {
-    pub const MAX_NUM_BLOCKS: u16 = 64;
+#[repr(C, align(4096))]
+pub struct Page {
+    bytes: [u8; PAGE_SIZE],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union Payload {
-    buffers: [IoBuffer; 6],
+    client_buffers: [u16; 12],
+    // server_buffers: [u16; 12],
     args_8: [u8; 24],
     args_16: [u16; 12],
     args_32: [u32; 6],
@@ -60,12 +50,12 @@ pub union Payload {
 }
 
 impl Payload {
-    pub fn buffers_mut(&mut self) -> &mut [IoBuffer; 6] {
-        unsafe { &mut self.buffers }
+    pub fn client_buffers_mut(&mut self) -> &mut [u16; 12] {
+        unsafe { &mut self.client_buffers }
     }
 
-    pub fn buffers(&self) -> &[IoBuffer; 6] {
-        unsafe { &self.buffers }
+    pub fn client_buffers(&self) -> &[u16; 12] {
+        unsafe { &self.client_buffers }
     }
 
     pub fn args_8_mut(&mut self) -> &mut [u8; 24] {
@@ -163,7 +153,7 @@ impl QueueEntry {
 
 const QUEUE_SIZE: u64 = 64;
 const QUEUE_MASK: u64 = QUEUE_SIZE - 1;
-const BLOCK_COUNT: usize = 111;
+const CHANNEL_PAGE_COUNT: usize = 128;
 
 #[repr(C, align(4096))]
 struct RawChannel {
@@ -180,18 +170,19 @@ struct RawChannel {
     // Pad to BLOCK_SIZE (512 bytes).
     _pad5: [u8; 256],
 
-    // offset: 512 = 1 block
+    // Pad to PAGE_SIZE
+    _pad6: [u8; 3584],
+
+    // offset: 4096 = 1 page
     submission_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
-    // offset: 4608 = 9 blocks
+    // offset: 8192 = 2 pages
     completion_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
-    // offset: 8704 = 17 blocks
-    buffers: [Block; BLOCK_COUNT],
+    client_buffers: [Page; CHANNEL_PAGE_COUNT],
 }
 
-// 16 pages of 4096.
-const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == 65536);
+pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == ((128 + 3) * 4096));
 
 impl RawChannel {
     fn is_empty(&self) -> bool {
@@ -199,17 +190,14 @@ impl RawChannel {
             == self.completion_queue_tail.load(Ordering::Acquire)
     }
 
-    pub fn buffer_bytes(&self, buffer: IoBuffer) -> Result<&mut [u8], ErrorCode> {
-        if buffer.len == 0 || buffer.idx + buffer.len > (BLOCK_COUNT as u16) {
+    pub fn client_buffer_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        if buffer_idx >= (CHANNEL_PAGE_COUNT as u16) {
             return Err(ErrorCode::InvalidArgument);
         }
 
-        let addr = &self.buffers[buffer.idx as usize] as *const _ as usize;
         unsafe {
-            Ok(core::slice::from_raw_parts_mut(
-                addr as *mut u8,
-                (buffer.len as usize) * BLOCK_SIZE,
-            ))
+            let addr = &self.client_buffers[buffer_idx as usize] as *const _ as usize;
+            Ok(core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_SIZE))
         }
     }
 }
@@ -217,7 +205,7 @@ impl RawChannel {
 pub struct Client {
     raw_channel: AtomicPtr<RawChannel>,
     server_handle: SysHandle,
-    blocks_in_use: [u64; 2],
+    blocks_in_use: [AtomicU64; 2],
 }
 
 impl Drop for Client {
@@ -234,7 +222,7 @@ impl Client {
             u64::MAX,
             u64::MAX,
             4096,
-            64,
+            (core::mem::size_of::<RawChannel>() >> 12) as u64,
         )?;
         let full_url = alloc::format!(
             "shared:url={};address={};page_type=small;page_num={}",
@@ -249,13 +237,10 @@ impl Client {
                 err
             })?;
 
-        let mut blocks_in_use: [u64; 2] = [0; 2];
-        blocks_in_use[1] = !((1_u64 << (BLOCK_COUNT - 64)) - 1);
-        debug_assert_eq!(128 - BLOCK_COUNT, blocks_in_use[1].leading_ones() as usize);
         let self_ = Self {
             raw_channel: AtomicPtr::new(addr as usize as *mut RawChannel),
             server_handle,
-            blocks_in_use,
+            blocks_in_use: [AtomicU64::new(0), AtomicU64::new(0)],
         };
 
         fence(Ordering::Acquire);
@@ -374,74 +359,73 @@ impl Client {
         Ok(cqe)
     }
 
-    fn alloc_buffer_in(
-        arena: &mut u64,
-        num_blocks: u16,
-        idx_offset: u16,
-    ) -> Result<IoBuffer, ErrorCode> {
-        let idx = arena.trailing_ones() as u16;
-        if (idx + num_blocks) < 64 {
-            let mut bits = 0_u64;
-            for _ in 0..num_blocks {
-                bits |= (bits << 1) + (1_u64 << idx);
-            }
-
-            if *arena & bits == 0 {
-                *arena |= bits;
-                return Ok(IoBuffer {
-                    idx: idx + idx_offset,
-                    len: num_blocks,
-                });
-            }
+    fn alloc_page_in(&self, arena_idx: usize) -> Result<u16, ErrorCode> {
+        let bitmap = self.blocks_in_use[arena_idx].load(Ordering::Relaxed);
+        let ones = bitmap.trailing_ones();
+        if ones == 64 {
+            // Nothing left.
+            return Err(ErrorCode::NotReady);
         }
-        Err(ErrorCode::NotReady)
+
+        let bit = 1u64 << ones;
+        assert_eq!(0, bitmap & bit);
+        // We cannot use fetch_xor here, because if a concurent xor succeeds, we may clear it,
+        // and another concurrent xor will succeed again, leading to double alloc.
+        if self.blocks_in_use[arena_idx]
+            .compare_exchange_weak(bitmap, bitmap | bit, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            // Contention.
+            return Err(ErrorCode::NotReady);
+        }
+
+        Ok(ones as u16)
     }
 
-    pub fn alloc_buffer(&mut self, num_blocks: u16) -> Result<IoBuffer, ErrorCode> {
-        // We do not deal with fragmentation: assume that num_blocks is always the same.
-        if (num_blocks == 0) || (num_blocks >= IoBuffer::MAX_NUM_BLOCKS) {
-            return Err(ErrorCode::InvalidArgument);
-        }
-
-        if let Ok(buffer) = Self::alloc_buffer_in(&mut self.blocks_in_use[0], num_blocks, 0) {
-            Ok(buffer)
+    pub fn alloc_page(&self) -> Result<u16, ErrorCode> {
+        if let Ok(idx) = self.alloc_page_in(0) {
+            Ok(idx)
         } else {
-            Self::alloc_buffer_in(&mut self.blocks_in_use[1], num_blocks, 64)
+            if let Ok(idx) = self.alloc_page_in(1) {
+                Ok(64 + idx)
+            } else {
+                Err(ErrorCode::NotReady)
+            }
         }
     }
 
-    pub fn free_buffer(&mut self, buffer: IoBuffer) -> Result<(), ErrorCode> {
-        if buffer.idx + buffer.len > (BLOCK_COUNT as u16) {
-            return Err(ErrorCode::InvalidArgument);
-        }
-
-        if buffer.len > 64 {
-            return Err(ErrorCode::InvalidArgument);
-        }
-
-        let mut bits = 0_u64;
-
-        let (idx, offset) = if buffer.idx < 64 {
-            (buffer.idx, 0)
+    fn free_client_page_in(&self, arena_idx: usize, page_idx: u16) -> Result<(), ErrorCode> {
+        let bitmap = &self.blocks_in_use[arena_idx];
+        let bit = 1u64 << page_idx;
+        if (bitmap.fetch_xor(bit, Ordering::Relaxed) & bit) == 0 {
+            // The page was not actually used.
+            panic!(
+                "io_channel: freeing unused page {} in arena {}; bitmap: 0x{:x}",
+                page_idx,
+                arena_idx,
+                bitmap.load(Ordering::Relaxed)
+            )
+            // let _ = bitmap.fetch_xor(bit, Ordering::Relaxed);
+            // return Err(ErrorCode::InvalidArgument);
         } else {
-            (buffer.idx - 64, 1)
-        };
-
-        for _ in 0..buffer.len {
-            bits |= (bits << 1) + (1_u64 << idx);
+            Ok(())
         }
+    }
 
-        if self.blocks_in_use[offset] & bits != bits {
+    pub fn free_client_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
+        if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
             return Err(ErrorCode::InvalidArgument);
         }
 
-        self.blocks_in_use[offset] ^= bits;
-
-        Ok(())
+        if page_idx < 64 {
+            self.free_client_page_in(0, page_idx)
+        } else {
+            self.free_client_page_in(1, page_idx - 64)
+        }
     }
 
-    pub fn buffer_bytes(&mut self, buffer: IoBuffer) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().buffer_bytes(buffer)
+    pub fn buffer_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        self.raw_channel().client_buffer_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {
@@ -485,7 +469,7 @@ impl Server {
             u64::MAX,
             u64::MAX,
             4096,
-            64,
+            (core::mem::size_of::<RawChannel>() >> 12) as u64,
         )?;
         let full_url = alloc::format!(
             "shared:url={};address={};page_type=small;page_num={}",
@@ -628,8 +612,8 @@ impl Server {
         self.wait_handle = SysHandle::NONE;
     }
 
-    pub fn buffer_bytes(&mut self, buffer: IoBuffer) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().buffer_bytes(buffer)
+    pub fn buffer_bytes(&mut self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        self.raw_channel().client_buffer_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {

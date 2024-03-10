@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "moto-runtime"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "moto-ipc",
  "moto-sys",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "moto-virtio"

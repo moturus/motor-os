@@ -146,62 +146,57 @@ impl TcpStream {
     pub async fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let timestamp = moto_sys::time::Instant::now().as_u64();
 
-        let num_blocks =
-            io_executor::blocks_for_buf(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf.len());
-        let io_buffer = io_executor::get_io_buffer(num_blocks).await;
+        let io_page_idx = io_executor::get_io_page().await;
 
         let sqe =
-            rt_api::net::tcp_stream_peek_request(self.handle, io_buffer, buf.len(), timestamp);
+            rt_api::net::tcp_stream_peek_request(self.handle, io_page_idx, buf.len(), timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
-            io_executor::put_io_buffer(io_buffer).await;
+            io_executor::put_io_page(io_page_idx).await;
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.buffers()[0], io_buffer);
+        assert_eq!(cqe.payload.client_buffers()[0], io_page_idx);
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
-        io_executor::consume_io_buffer(io_buffer, &mut buf[0..sz_read]).await;
+        io_executor::consume_io_page(io_page_idx, &mut buf[0..sz_read]).await;
         Ok(sz_read)
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let timestamp = moto_sys::time::Instant::now().as_u64();
 
-        let num_blocks =
-            io_executor::blocks_for_buf(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf.len());
-        let io_buffer = io_executor::get_io_buffer(num_blocks).await;
+        let io_page_idx = io_executor::get_io_page().await;
 
         let sqe =
-            rt_api::net::tcp_stream_read_request(self.handle, io_buffer, buf.len(), timestamp);
+            rt_api::net::tcp_stream_read_request(self.handle, io_page_idx, buf.len(), timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
-            io_executor::put_io_buffer(io_buffer).await;
+            io_executor::put_io_page(io_page_idx).await;
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.buffers()[0], io_buffer);
+        assert_eq!(cqe.payload.client_buffers()[0], io_page_idx);
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
-        io_executor::consume_io_buffer(io_buffer, &mut buf[0..sz_read]).await;
+        io_executor::consume_io_page(io_page_idx, &mut buf[0..sz_read]).await;
         Ok(sz_read)
     }
 
     pub async fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let timestamp = moto_sys::time::Instant::now().as_u64();
 
-        let (buffer, sz) =
-            io_executor::produce_io_buffer(io_channel::IoBuffer::MAX_NUM_BLOCKS >> 1, buf).await;
+        let (io_page_idx, sz) = io_executor::produce_io_page(buf).await;
 
-        let sqe = rt_api::net::tcp_stream_write_request(self.handle, buffer, sz, timestamp);
+        let sqe = rt_api::net::tcp_stream_write_request(self.handle, io_page_idx, sz, timestamp);
         let cqe = io_executor::submit(sqe).await;
         if cqe.status().is_err() {
-            io_executor::put_io_buffer(buffer).await;
+            io_executor::put_io_page(io_page_idx).await;
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.buffers()[0], buffer);
-        io_executor::put_io_buffer(buffer).await;
+        assert_eq!(cqe.payload.client_buffers()[0], io_page_idx);
+        io_executor::put_io_page(io_page_idx).await;
         Ok(cqe.payload.args_64()[1] as usize)
     }
 

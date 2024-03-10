@@ -84,6 +84,18 @@ impl From<&u64> for SysHandle {
     }
 }
 
+impl From<SysHandle> for u64 {
+    fn from(value: SysHandle) -> u64 {
+        value.0
+    }
+}
+
+impl From<&SysHandle> for u64 {
+    fn from(value: &SysHandle) -> u64 {
+        value.0
+    }
+}
+
 /// Same as SysHandle, but calls SysCtl::put on drop.
 #[cfg(feature = "userspace")]
 pub struct RaiiHandle(u64);
@@ -723,6 +735,29 @@ impl SysCpu {
             pack_nr_ver(SYS_CPU, Self::OP_WAKE, 0, 0),
             target.as_u64(),
             0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    // Wake a specific thread in a (remote) process.
+    #[cfg(feature = "userspace")]
+    pub fn wake_thread(
+        remote_target: SysHandle,
+        remote_thread: SysHandle,
+    ) -> Result<(), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_CPU, Self::OP_WAKE, 0, 0),
+            remote_target.as_u64(),
+            remote_thread.as_u64(),
             0,
             0,
             0,

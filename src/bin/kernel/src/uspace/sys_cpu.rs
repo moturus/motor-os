@@ -167,7 +167,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     }
 
     if wake_target != SysHandle::NONE {
-        match do_wake(curr, wake_target, wake_this_cpu) {
+        match do_wake(curr, wake_target, SysHandle::NONE, wake_this_cpu) {
             Err(err) => match err {
                 ErrorCode::BadHandle => return ResultBuilder::bad_handle(wake_target),
                 _ => return ResultBuilder::result(err),
@@ -224,31 +224,37 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
 
 pub(super) fn do_wake(
     waker: &super::process::Thread,
-    handle: SysHandle,
+    wake_target: SysHandle,
+    wakee_thread: SysHandle,
     this_cpu: bool,
 ) -> Result<(), ErrorCode> {
-    if let Some(obj) = waker.owner().get_object(&handle) {
-        if super::shared::try_wake(&obj.sys_object, this_cpu).is_ok() {
+    if wake_target == SysHandle::SELF && wakee_thread != SysHandle::NONE {
+        if let Some(thread) = super::sys_object::object_from_handle::<super::process::Thread>(
+            &waker.owner(),
+            wakee_thread,
+        ) {
+            thread.post_wake(this_cpu);
             return Ok(());
         }
-    }
-
-    let maybe_thread =
-        super::sys_object::object_from_handle::<super::process::Thread>(&waker.owner(), handle);
-
-    if maybe_thread.is_none() {
-        log::debug!(
-            "bad handle 0x{:x} for process {}",
-            handle.as_u64(),
-            &waker.owner().pid().as_u64()
-        );
         return Err(ErrorCode::BadHandle);
     }
 
-    let thread = maybe_thread.unwrap();
+    if let Some(obj) = waker.owner().get_object(&wake_target) {
+        if super::shared::try_wake(&obj.sys_object, wakee_thread, this_cpu).is_ok() {
+            return Ok(());
+        }
+    } else if wakee_thread != SysHandle::NONE {
+        return Err(ErrorCode::BadHandle);
+    }
 
-    thread.post_wake(this_cpu);
-    Ok(())
+    if let Some(thread) =
+        super::sys_object::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
+    {
+        thread.post_wake(this_cpu);
+        Ok(())
+    } else {
+        Err(ErrorCode::BadHandle)
+    }
 }
 
 fn sys_wake_impl(waker: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
@@ -260,7 +266,7 @@ fn sys_wake_impl(waker: &super::process::Thread, args: &SyscallArgs) -> SyscallR
         return ResultBuilder::invalid_argument();
     }
 
-    match do_wake(waker, SysHandle::from_u64(args.args[0]), false) {
+    match do_wake(waker, args.args[0].into(), args.args[1].into(), false) {
         Ok(()) => ResultBuilder::ok(),
         Err(err) => ResultBuilder::result(err),
     }

@@ -466,14 +466,14 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    tcp::test_tcp_loopback();
+    channel_test::test_io_channel();
     spawn_wait_kill::test();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
     channel_test::test_io_throughput();
     test_reentrant_mutex();
-    tcp::test_tcp_loopback();
     // tcp::test_wget();
-    channel_test::test_io_channel();
     channel_test::test_io_latency();
     // test_stdio();
     test_file_write();

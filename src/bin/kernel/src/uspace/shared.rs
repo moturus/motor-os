@@ -40,16 +40,22 @@ impl Drop for Shared {
 */
 
 impl Shared {
-    fn wake_other(&self, wakee_id: u64, this_cpu: bool) -> Result<(), ()> {
+    fn wake_other(&self, wakee_id: u64, wakee_thread: SysHandle, this_cpu: bool) -> Result<(), ()> {
         if let Some(sharer) = self.sharer.upgrade() {
             if sharer.id() == wakee_id {
                 let lock = self.sharee.lock(line!());
                 if let Some(sharee) = lock.upgrade() {
-                    SysObject::wake(&sharee, this_cpu);
+                    if wakee_thread != SysHandle::NONE {
+                        return sharee.wake_thread(wakee_thread, this_cpu);
+                    }
+                    sharee.wake(this_cpu);
                     return Ok(());
                 }
             } else {
-                SysObject::wake(&sharer, this_cpu);
+                if wakee_thread != SysHandle::NONE {
+                    return sharer.wake_thread(wakee_thread, this_cpu);
+                }
+                sharer.wake(this_cpu);
                 return Ok(());
             }
         }
@@ -108,7 +114,7 @@ pub(super) fn create(
         sharee: SpinLock::new(Weak::default()),
     });
 
-    let sharer = SysObject::new_owned(url.clone(), self_.clone());
+    let sharer = SysObject::new_owned(url.clone(), self_.clone(), Arc::downgrade(&owner));
     log::debug!("Created shared id: {} for '{}'", sharer.id(), url);
     // Safe because we just constructed self_ and all references to it are here.
     unsafe {
@@ -204,15 +210,23 @@ pub(super) fn get(
         SysObject::wake(listener.sharer.upgrade().as_ref().unwrap(), false);
         return Err(ErrorCode::InvalidArgument);
     }
-    let sharee = SysObject::new_owned(listener.url.clone(), listener.clone());
+    let sharee = SysObject::new_owned(
+        listener.url.clone(),
+        listener.clone(),
+        Arc::downgrade(&requestor),
+    );
     *listener.sharee.lock(line!()) = Arc::downgrade(&sharee);
 
     Ok(sharee)
 }
 
-pub(super) fn try_wake(maybe_shared: &Arc<SysObject>, this_cpu: bool) -> Result<(), ()> {
+pub(super) fn try_wake(
+    maybe_shared: &Arc<SysObject>,
+    wakee_thread: SysHandle,
+    this_cpu: bool,
+) -> Result<(), ()> {
     if let Some(shared) = super::sys_object::object_from_sysobject::<Shared>(maybe_shared) {
-        shared.wake_other(maybe_shared.id(), this_cpu)
+        shared.wake_other(maybe_shared.id(), wakee_thread, this_cpu)
     } else {
         Err(())
     }
@@ -258,14 +272,14 @@ pub(super) fn create_ipc_pair(
         sharee: SpinLock::new(Weak::new()),
     });
 
-    let obj1 = SysObject::new_owned(url.clone(), shared.clone());
+    let obj1 = SysObject::new_owned(url.clone(), shared.clone(), Arc::downgrade(&process1));
     // Safe because we just constructed shared and all references to it are here.
     unsafe {
         let ptr = Arc::as_ptr(&shared) as usize as *mut Shared;
         (*ptr).sharer = Arc::downgrade(&obj1);
     }
 
-    let obj2 = SysObject::new_owned(url.clone(), shared.clone());
+    let obj2 = SysObject::new_owned(url.clone(), shared.clone(), Arc::downgrade(&process2));
     *shared.sharee.lock(line!()) = Arc::downgrade(&obj2);
 
     log::debug!(
