@@ -134,9 +134,9 @@ struct IoExecutorThread {
     _cached_wakee: u64,
 
     // We always drain the executor's queue and put stuff in here, to help move
-    // remote submissions, which eventually free IO buffers.
-    io_buffer_queue: VecDeque<QueueEntryPointer>,
-    io_buffers_available: bool,
+    // remote submissions, which eventually free io pages.
+    io_page_queue: VecDeque<QueueEntryPointer>,
+    io_pagess_available: bool,
 
     submission_queue: VecDeque<QueueEntryPointer>,
 }
@@ -162,9 +162,9 @@ impl IoExecutorThread {
             io_client,
             wake_server: false,
             _cached_wakee: SysHandle::NONE.as_u64(),
-            io_buffer_queue: VecDeque::new(),
+            io_page_queue: VecDeque::new(),
             submission_queue: VecDeque::new(),
-            io_buffers_available: true,
+            io_pagess_available: true,
         };
 
         self_mut.io_thread();
@@ -199,11 +199,11 @@ impl IoExecutorThread {
         match qe.command {
             CMD_GET_IO_PAGE => {
                 if debug_log {
-                    moturus_log!("io_thread: CMD_GET_IO_BUFFER");
+                    moturus_log!("io_thread: CMD_GET_IO_PAGE");
                 }
                 match self.io_client.alloc_page() {
                     Ok(idx) => {
-                        qe.payload.client_buffers_mut()[0] = idx;
+                        qe.payload.client_pages_mut()[0] = idx;
                         compiler_fence(Ordering::Release);
                         fence(Ordering::Release);
                         qe.status = ErrorCode::Ok.into();
@@ -226,7 +226,7 @@ impl IoExecutorThread {
             }
             CMD_WRITE_IO_PAGE => {
                 if debug_log {
-                    moturus_log!("io_thread: CMD_WRITE_IO_BUFFER");
+                    moturus_log!("io_thread: CMD_WRITE_IO_PAGE");
                 }
                 let buf_ptr = qe.payload.args_64()[0] as usize as *const u8;
                 let buf_len = qe.payload.args_64()[1] as usize;
@@ -237,12 +237,12 @@ impl IoExecutorThread {
 
                 match self.io_client.alloc_page() {
                     Ok(page_idx) => {
-                        let slice = self.io_client.buffer_bytes(page_idx).unwrap();
+                        let slice = self.io_client.page_bytes(page_idx).unwrap();
                         let to_write: usize = buf_len.min(io_channel::PAGE_SIZE);
                         unsafe {
                             core::ptr::copy_nonoverlapping(buf_ptr, slice.as_mut_ptr(), to_write);
                         }
-                        qe.payload.client_buffers_mut()[0] = page_idx;
+                        qe.payload.client_pages_mut()[0] = page_idx;
                         qe.payload.args_64_mut()[1] = to_write as u64;
                         compiler_fence(Ordering::Release);
                         fence(Ordering::Release);
@@ -306,19 +306,19 @@ impl IoExecutorThread {
 
     fn consume_io_page(&mut self, pqe: QueueEntryPointer) {
         let qe = pqe.qe();
-        let io_page_idx = qe.payload.client_buffers()[0];
+        let io_page_idx = qe.payload.client_pages()[0];
         let buf_len = qe.payload.args_64()[2] as usize;
 
         if buf_len != 0 {
             let buf_ptr = qe.payload.args_64()[1] as usize as *mut u8;
-            let slice = self.io_client.buffer_bytes(io_page_idx).unwrap();
+            let slice = self.io_client.page_bytes(io_page_idx).unwrap();
             assert!(buf_len <= slice.len());
             unsafe {
                 core::ptr::copy_nonoverlapping(slice.as_ptr(), buf_ptr, buf_len);
             }
         }
         self.io_client.free_client_page(io_page_idx).unwrap();
-        self.io_buffers_available = true;
+        self.io_pagess_available = true;
         qe.status = ErrorCode::Ok.into();
         compiler_fence(Ordering::Release);
         fence(Ordering::Release);
@@ -356,14 +356,14 @@ impl IoExecutorThread {
         did_work
     }
 
-    fn process_buffer_requests(&mut self) -> bool {
+    fn process_page_requests(&mut self) -> bool {
         let mut did_work = false;
 
-        if self.io_buffers_available {
-            while let Some(pqe) = self.io_buffer_queue.pop_front() {
+        if self.io_pagess_available {
+            while let Some(pqe) = self.io_page_queue.pop_front() {
                 if let Some(pqe) = self.process_pqe(pqe, false) {
-                    self.io_buffer_queue.push_front(pqe);
-                    self.io_buffers_available = false;
+                    self.io_page_queue.push_front(pqe);
+                    self.io_pagess_available = false;
                     break;
                 }
                 did_work = true;
@@ -396,13 +396,13 @@ impl IoExecutorThread {
 
             match qe.command {
                 CMD_GET_IO_PAGE | CMD_WRITE_IO_PAGE => {
-                    if self.io_buffer_queue.is_empty() && self.io_buffers_available {
+                    if self.io_page_queue.is_empty() && self.io_pagess_available {
                         if let Some(pqe) = self.process_pqe(pqe, false) {
-                            self.io_buffer_queue.push_back(pqe);
-                            self.io_buffers_available = false;
+                            self.io_page_queue.push_back(pqe);
+                            self.io_pagess_available = false;
                         }
                     } else {
-                        self.io_buffer_queue.push_back(pqe);
+                        self.io_page_queue.push_back(pqe);
                     }
                 }
                 CMD_CONSUME_IO_PAGE => self.consume_io_page(pqe),
@@ -460,7 +460,7 @@ impl IoExecutorThread {
                 self.cache_wakee(SysHandle::NONE.as_u64());
             }
 
-            did_work |= self.process_buffer_requests();
+            did_work |= self.process_page_requests();
             if did_work && debug_timed_out {
                 moturus_log!("io_thread: lost wakeup #2");
                 debug_timed_out = false;
@@ -673,12 +673,12 @@ pub async fn get_io_page() -> u16 {
     pqe.await;
 
     debug_assert!(qe.status().is_ok());
-    let buf = qe.payload.client_buffers()[0];
+    let buf = qe.payload.client_pages()[0];
     ex.free_pqe(pqe);
     buf
 }
 
-// Gets an IoBuffer and writes buf into it. Returns the IoBuffer and the number of
+// Gets a page and writes buf into it. Returns the page idx and the number of
 // bytes written.
 pub async fn produce_io_page(buf: &[u8]) -> (u16, usize) {
     let ex = IoExecutor::inst();
@@ -693,7 +693,7 @@ pub async fn produce_io_page(buf: &[u8]) -> (u16, usize) {
     pqe.await;
 
     debug_assert!(qe.status().is_ok());
-    let buf = qe.payload.client_buffers()[0];
+    let buf = qe.payload.client_pages()[0];
     let written = qe.payload.args_64()[1] as usize;
     ex.free_pqe(pqe);
     (buf, written)
@@ -706,7 +706,7 @@ pub async fn consume_io_page(io_page_idx: u16, buf: &mut [u8]) {
     let qe: &mut QueueEntry = pqe.qe();
     ex.init_qe(qe);
     qe.command = CMD_CONSUME_IO_PAGE;
-    qe.payload.client_buffers_mut()[0] = io_page_idx;
+    qe.payload.client_pages_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = buf.as_ptr() as usize as u64;
     qe.payload.args_64_mut()[2] = buf.len() as u64;
     ex.add_to_queue(pqe).await;
@@ -723,7 +723,7 @@ pub async fn put_io_page(io_page_idx: u16) {
     let qe: &mut QueueEntry = pqe.qe();
     ex.init_qe(qe);
     qe.command = CMD_CONSUME_IO_PAGE;
-    qe.payload.client_buffers_mut()[0] = io_page_idx;
+    qe.payload.client_pages_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = 0;
     qe.payload.args_64_mut()[2] = 0;
     ex.add_to_queue(pqe).await;

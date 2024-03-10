@@ -18,14 +18,12 @@ fn client_loop(client: &mut Client) {
         match client.get_cqe() {
             Ok(cqe) => {
                 values_received += cqe.id;
-                let slice = client
-                    .buffer_bytes(cqe.payload.client_buffers()[0])
-                    .unwrap();
+                let slice = client.page_bytes(cqe.payload.client_pages()[0]).unwrap();
                 for idx in 0..slice.len() {
                     assert_eq!(slice[idx], ((idx & 0xFF) as u8) ^ 0xFF);
                 }
                 client
-                    .free_client_page(cqe.payload.client_buffers()[0])
+                    .free_client_page(cqe.payload.client_pages()[0])
                     .unwrap();
             }
             Err(err) => {
@@ -49,11 +47,11 @@ fn client_loop(client: &mut Client) {
         let mut sqe = QueueEntry::new();
         sqe.id = iter;
         sqe.wake_handle = SysHandle::this_thread().into();
-        let slice = client.buffer_bytes(page_idx).unwrap();
+        let slice = client.page_bytes(page_idx).unwrap();
         for idx in 0..slice.len() {
             slice[idx] = (idx & 0xFF) as u8;
         }
-        sqe.payload.client_buffers_mut()[0] = page_idx;
+        sqe.payload.client_pages_mut()[0] = page_idx;
         values_sent += sqe.id;
         loop {
             match client.submit_sqe(sqe) {
@@ -84,8 +82,8 @@ fn server_loop(server: &mut Server) {
     'outer: loop {
         match server.get_sqe() {
             Ok(mut sqe) => {
-                let client_page_idx = sqe.payload.client_buffers()[0];
-                let slice = server.buffer_bytes(client_page_idx).unwrap();
+                let client_page_idx = sqe.payload.client_pages()[0];
+                let slice = server.client_page_bytes(client_page_idx).unwrap();
                 for idx in 0..slice.len() {
                     if slice[idx] != (idx & 0xFF) as u8 {
                         println!(
@@ -223,14 +221,14 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
             sqe.id = step as u64;
             if io_size > 0 {
                 let page_idx = io_client.alloc_page().unwrap();
-                let buf = io_client.buffer_bytes(page_idx).unwrap();
+                let buf = io_client.page_bytes(page_idx).unwrap();
                 let buf_u64 = unsafe {
                     core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, buf.len() / 8)
                 };
                 for b in buf_u64 {
                     *b ^= 0x12345678;
                 }
-                sqe.payload.client_buffers_mut()[0] = page_idx;
+                sqe.payload.client_pages_mut()[0] = page_idx;
             }
             io_client.submit_sqe(sqe).unwrap();
         }
@@ -242,7 +240,7 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
                         assert_eq!(cqe.id, step as u64);
                         if io_size > 0 {
                             io_client
-                                .free_client_page(cqe.payload.client_buffers()[0])
+                                .free_client_page(cqe.payload.client_pages()[0])
                                 .unwrap();
                         }
                         break;

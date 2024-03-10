@@ -112,7 +112,7 @@ pub fn tcp_stream_write_request(
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_WRITE;
     qe.handle = handle;
-    qe.payload.client_buffers_mut()[0] = io_page_idx;
+    qe.payload.client_pages_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = sz as u64;
     qe.payload.args_64_mut()[2] = timestamp;
 
@@ -128,7 +128,7 @@ pub fn tcp_stream_read_request(
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_READ;
     qe.handle = handle;
-    qe.payload.client_buffers_mut()[0] = io_page_idx;
+    qe.payload.client_pages_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = sz as u64;
     qe.payload.args_64_mut()[2] = timestamp;
 
@@ -144,7 +144,7 @@ pub fn tcp_stream_peek_request(
     let mut qe = io_channel::QueueEntry::new();
     qe.command = CMD_TCP_STREAM_PEEK;
     qe.handle = handle;
-    qe.payload.client_buffers_mut()[0] = io_page_idx;
+    qe.payload.client_pages_mut()[0] = io_page_idx;
     qe.payload.args_64_mut()[1] = sz as u64;
     qe.payload.args_64_mut()[2] = timestamp;
 

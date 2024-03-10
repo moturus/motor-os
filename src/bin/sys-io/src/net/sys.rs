@@ -586,9 +586,9 @@ impl NetSys {
             return Some(sqe);
         }
 
-        let io_page_idx = sqe.payload.client_buffers()[0];
+        let io_page_idx = sqe.payload.client_pages()[0];
         let sz = sqe.payload.args_64()[1] as usize;
-        let bytes = match proc.conn().buffer_bytes(io_page_idx) {
+        let bytes = match proc.conn().client_page_bytes(io_page_idx) {
             Ok(val) => val,
             Err(err) => {
                 sqe.status = err.into();
@@ -635,9 +635,9 @@ impl NetSys {
             Err(err) => return Some(err),
         };
 
-        let io_page_idx = sqe.payload.client_buffers()[0];
+        let io_page_idx = sqe.payload.client_pages()[0];
         let sz = sqe.payload.args_64()[1] as usize;
-        let bytes = match proc.conn().buffer_bytes(io_page_idx) {
+        let bytes = match proc.conn().client_page_bytes(io_page_idx) {
             Ok(val) => val,
             Err(err) => {
                 sqe.status = err.into();

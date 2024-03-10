@@ -28,7 +28,7 @@ pub const CMD_RESERVED_MAX: u16 = CMD_RESERVED_MAX_LOCAL; // 0x1100
 pub const CMD_NOOP_OK: u16 = 1;
 
 // If this flag is set, the "server" will put its current timestamp (tsc) into
-// payload::args_64()[3].
+// payload::args_64()[2].
 pub const FLAG_CMD_NOOP_OK_TIMESTAMP: u32 = 1;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -41,8 +41,8 @@ pub struct Page {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union Payload {
-    client_buffers: [u16; 12],
-    // server_buffers: [u16; 12],
+    client_pages: [u16; 12],
+    // server_pages: [u16; 12],
     args_8: [u8; 24],
     args_16: [u16; 12],
     args_32: [u32; 6],
@@ -50,12 +50,12 @@ pub union Payload {
 }
 
 impl Payload {
-    pub fn client_buffers_mut(&mut self) -> &mut [u16; 12] {
-        unsafe { &mut self.client_buffers }
+    pub fn client_pages_mut(&mut self) -> &mut [u16; 12] {
+        unsafe { &mut self.client_pages }
     }
 
-    pub fn client_buffers(&self) -> &[u16; 12] {
-        unsafe { &self.client_buffers }
+    pub fn client_pages(&self) -> &[u16; 12] {
+        unsafe { &self.client_pages }
     }
 
     pub fn args_8_mut(&mut self) -> &mut [u8; 24] {
@@ -179,7 +179,7 @@ struct RawChannel {
     // offset: 8192 = 2 pages
     completion_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
-    client_buffers: [Page; CHANNEL_PAGE_COUNT],
+    client_pages: [Page; CHANNEL_PAGE_COUNT],
 }
 
 pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == ((128 + 3) * 4096));
@@ -190,13 +190,13 @@ impl RawChannel {
             == self.completion_queue_tail.load(Ordering::Acquire)
     }
 
-    pub fn client_buffer_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+    pub fn client_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
         if buffer_idx >= (CHANNEL_PAGE_COUNT as u16) {
             return Err(ErrorCode::InvalidArgument);
         }
 
         unsafe {
-            let addr = &self.client_buffers[buffer_idx as usize] as *const _ as usize;
+            let addr = &self.client_pages[buffer_idx as usize] as *const _ as usize;
             Ok(core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_SIZE))
         }
     }
@@ -424,8 +424,8 @@ impl Client {
         }
     }
 
-    pub fn buffer_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().client_buffer_bytes(buffer_idx)
+    pub fn page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        self.raw_channel().client_page_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {
@@ -612,8 +612,8 @@ impl Server {
         self.wait_handle = SysHandle::NONE;
     }
 
-    pub fn buffer_bytes(&mut self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().client_buffer_bytes(buffer_idx)
+    pub fn client_page_bytes(&mut self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        self.raw_channel().client_page_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {

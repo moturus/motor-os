@@ -156,7 +156,7 @@ impl TcpStream {
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_buffers()[0], io_page_idx);
+        assert_eq!(cqe.payload.client_pages()[0], io_page_idx);
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
         io_executor::consume_io_page(io_page_idx, &mut buf[0..sz_read]).await;
@@ -176,7 +176,7 @@ impl TcpStream {
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_buffers()[0], io_page_idx);
+        assert_eq!(cqe.payload.client_pages()[0], io_page_idx);
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
         io_executor::consume_io_page(io_page_idx, &mut buf[0..sz_read]).await;
@@ -195,7 +195,7 @@ impl TcpStream {
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_buffers()[0], io_page_idx);
+        assert_eq!(cqe.payload.client_pages()[0], io_page_idx);
         io_executor::put_io_page(io_page_idx).await;
         Ok(cqe.payload.args_64()[1] as usize)
     }
