@@ -39,56 +39,38 @@ static _USIZE_8_BYTES: () = assert!(core::mem::size_of::<usize>() == 8);
 const QUEUE_SIZE: usize = 256;
 
 pub struct IoPage {
-    client_idx: u16,
-    server_idx: u16,
+    page_idx: u16,
     io_executor: &'static IoExecutor,
 }
 
 impl Drop for IoPage {
     fn drop(&mut self) {
-        if self.client_idx != u16::MAX {
-            debug_assert_eq!(self.server_idx, u16::MAX);
+        if self.page_idx != u16::MAX {
             self.io_executor
                 .io_client()
-                .free_client_page(self.client_idx)
+                .free_page(self.page_idx)
                 .unwrap();
-        } else if self.server_idx != u16::MAX {
-            todo!()
         }
     }
 }
 
 impl IoPage {
     pub fn bytes(&self) -> &[u8] {
-        if self.client_idx != u16::MAX {
-            debug_assert_eq!(self.server_idx, u16::MAX);
-            self.io_executor
-                .io_client()
-                .page_bytes(self.client_idx)
-                .unwrap()
-        } else if self.server_idx != u16::MAX {
-            todo!()
-        } else {
-            panic!()
-        }
+        self.io_executor
+            .io_client()
+            .shared_page_bytes(self.page_idx)
+            .unwrap()
     }
 
     pub fn bytes_mut(&self) -> &mut [u8] {
-        if self.client_idx != u16::MAX {
-            debug_assert_eq!(self.server_idx, u16::MAX);
-            self.io_executor
-                .io_client()
-                .page_bytes(self.client_idx)
-                .unwrap()
-        } else if self.server_idx != u16::MAX {
-            todo!()
-        } else {
-            panic!()
-        }
+        self.io_executor
+            .io_client()
+            .shared_page_bytes(self.page_idx)
+            .unwrap()
     }
 
-    pub fn client_idx(&self) -> u16 {
-        self.client_idx
+    pub fn page_idx(&self) -> u16 {
+        self.page_idx
     }
 }
 
@@ -97,14 +79,11 @@ pub struct IoPageWaiter(IoPage);
 impl IoPageWaiter {
     fn take(&mut self) -> IoPage {
         let res = IoPage {
-            client_idx: self.0.client_idx,
-            server_idx: self.0.server_idx,
+            page_idx: self.0.page_idx,
             io_executor: self.0.io_executor,
         };
 
-        self.0.client_idx = u16::MAX;
-        self.0.server_idx = u16::MAX;
-
+        self.0.page_idx = u16::MAX;
         res
     }
 }
@@ -113,11 +92,11 @@ impl Future for IoPageWaiter {
     type Output = IoPage;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.0.client_idx != u16::MAX || self.0.server_idx != u16::MAX {
+        if self.0.page_idx != u16::MAX {
             panic!()
         } else {
             if let Ok(idx) = self.0.io_executor.io_client().alloc_page() {
-                self.0.client_idx = idx;
+                self.0.page_idx = idx;
                 core::task::Poll::Ready(self.take())
             } else {
                 let wake_handle = cx.waker().as_raw().data() as usize as u64;
@@ -326,16 +305,14 @@ impl IoExecutor {
 
     fn alloc_page(&'static self) -> IoPageWaiter {
         IoPageWaiter(IoPage {
-            client_idx: u16::MAX,
-            server_idx: u16::MAX,
+            page_idx: u16::MAX,
             io_executor: self,
         })
     }
 
     pub fn client_page(&'static self, idx: u16) -> IoPage {
         IoPage {
-            client_idx: idx,
-            server_idx: u16::MAX,
+            page_idx: idx,
             io_executor: self,
         }
     }

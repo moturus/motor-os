@@ -19,13 +19,13 @@ fn client_loop(client: &mut Client) {
         match client.get_cqe() {
             Ok(cqe) => {
                 values_received += cqe.id;
-                let slice = client.page_bytes(cqe.payload.client_pages()[0]).unwrap();
+                let slice = client
+                    .shared_page_bytes(cqe.payload.shared_pages()[0])
+                    .unwrap();
                 for idx in 0..slice.len() {
                     assert_eq!(slice[idx], ((idx & 0xFF) as u8) ^ 0xFF);
                 }
-                client
-                    .free_client_page(cqe.payload.client_pages()[0])
-                    .unwrap();
+                client.free_page(cqe.payload.shared_pages()[0]).unwrap();
             }
             Err(err) => {
                 assert_eq!(err, ErrorCode::NotReady);
@@ -48,11 +48,11 @@ fn client_loop(client: &mut Client) {
         let mut sqe = QueueEntry::new();
         sqe.id = iter;
         sqe.wake_handle = SysHandle::this_thread().into();
-        let slice = client.page_bytes(page_idx).unwrap();
+        let slice = client.shared_page_bytes(page_idx).unwrap();
         for idx in 0..slice.len() {
             slice[idx] = (idx & 0xFF) as u8;
         }
-        sqe.payload.client_pages_mut()[0] = page_idx;
+        sqe.payload.shared_pages_mut()[0] = page_idx;
         values_sent += sqe.id;
         loop {
             match client.submit_sqe(sqe) {
@@ -83,8 +83,8 @@ fn server_loop(server: &mut Server) {
     'outer: loop {
         match server.get_sqe() {
             Ok(mut sqe) => {
-                let client_page_idx = sqe.payload.client_pages()[0];
-                let slice = server.client_page_bytes(client_page_idx).unwrap();
+                let client_page_idx = sqe.payload.shared_pages()[0];
+                let slice = server.shared_page_bytes(client_page_idx).unwrap();
                 for idx in 0..slice.len() {
                     if slice[idx] != (idx & 0xFF) as u8 {
                         println!(
@@ -216,7 +216,7 @@ async fn throughput_iter(do_4k: bool, batch_size: u64) {
             for idx in 0..buf_u64.len() {
                 buf_u64[idx] = idx as u64;
             }
-            sqe.payload.client_pages_mut()[0] = io_page.client_idx();
+            sqe.payload.shared_pages_mut()[0] = io_page.page_idx();
             core::mem::forget(io_page);
         }
         let cqe = io_executor::submit(sqe).await;
@@ -226,7 +226,7 @@ async fn throughput_iter(do_4k: bool, batch_size: u64) {
     while let Some(cqe) = qe_vec.pop() {
         let cqe = cqe.await;
         if do_4k {
-            let io_page = io_executor::client_page(cqe.payload.client_pages()[0]);
+            let io_page = io_executor::client_page(cqe.payload.shared_pages()[0]);
             let buf = io_page.bytes();
             let buf_u64 =
                 unsafe { core::slice::from_raw_parts(buf.as_ptr() as *mut u64, buf.len() / 8) };
@@ -308,12 +308,12 @@ async fn io_latency_iter() {
     sqe.command = CMD_NOOP_OK;
     sqe.flags = FLAG_CMD_NOOP_OK_TIMESTAMP;
     sqe.handle = ts_0;
-    sqe.payload.client_pages_mut()[0] = io_page.client_idx();
+    sqe.payload.shared_pages_mut()[0] = io_page.page_idx();
     let completion = io_executor::submit(sqe).await;
     let cqe = completion.await;
     assert!(cqe.status().is_ok());
     assert_eq!(cqe.command, CMD_NOOP_OK);
-    assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
+    assert_eq!(cqe.payload.shared_pages()[0], io_page.page_idx());
     assert_eq!(cqe.handle, sqe.handle);
 
     let ts_2 = cqe.payload.args_64()[2];

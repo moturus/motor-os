@@ -41,8 +41,7 @@ pub struct Page {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union Payload {
-    client_pages: [u16; 12],
-    // server_pages: [u16; 12],
+    shared_pages: [u16; 12],
     args_8: [u8; 24],
     args_16: [u16; 12],
     args_32: [u32; 6],
@@ -52,12 +51,12 @@ pub union Payload {
 const _PAYLOAD_SIZE: () = assert!(core::mem::size_of::<Payload>() == 24);
 
 impl Payload {
-    pub fn client_pages_mut(&mut self) -> &mut [u16; 12] {
-        unsafe { &mut self.client_pages }
+    pub fn shared_pages_mut(&mut self) -> &mut [u16; 12] {
+        unsafe { &mut self.shared_pages }
     }
 
-    pub fn client_pages(&self) -> &[u16; 12] {
-        unsafe { &self.client_pages }
+    pub fn shared_pages(&self) -> &[u16; 12] {
+        unsafe { &self.shared_pages }
     }
 
     pub fn args_8_mut(&mut self) -> &mut [u8; 24] {
@@ -155,11 +154,16 @@ struct RawChannel {
     completion_queue_tail: AtomicU64,
     _pad4: [u64; 7],
 
+    shared_pages_in_use_0: AtomicU64,
+    _pad5: [u64; 7],
+    shared_pages_in_use_1: AtomicU64,
+    _pad6: [u64; 7],
+
     // Pad to BLOCK_SIZE (512 bytes).
-    _pad5: [u8; 256],
+    _pad7: [u8; 128],
 
     // Pad to PAGE_SIZE
-    _pad6: [u8; 3584],
+    _pad8: [u8; 3584],
 
     // offset: 4096 = 1 page
     submission_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
@@ -167,7 +171,7 @@ struct RawChannel {
     // offset: 8192 = 2 pages
     completion_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
-    client_pages: [Page; CHANNEL_PAGE_COUNT],
+    shared_pages: [Page; CHANNEL_PAGE_COUNT],
 }
 
 pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == ((128 + 3) * 4096));
@@ -178,14 +182,66 @@ impl RawChannel {
             == self.completion_queue_tail.load(Ordering::Acquire)
     }
 
-    fn client_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        if buffer_idx >= (CHANNEL_PAGE_COUNT as u16) {
+    fn shared_page_bytes(&self, page_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        if page_idx >= (CHANNEL_PAGE_COUNT as u16) {
             return Err(ErrorCode::InvalidArgument);
         }
 
         unsafe {
-            let addr = &self.client_pages[buffer_idx as usize] as *const _ as usize;
+            let addr = &self.shared_pages[page_idx as usize] as *const _ as usize;
             Ok(core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_SIZE))
+        }
+    }
+
+    fn alloc_page_in(&self, arena_idx: usize) -> Result<u16, ErrorCode> {
+        let bitmap_ref = if arena_idx == 0 {
+            &self.shared_pages_in_use_0
+        } else if arena_idx == 1 {
+            &self.shared_pages_in_use_1
+        } else {
+            panic!()
+        };
+        let bitmap = bitmap_ref.load(Ordering::Relaxed);
+        let ones = bitmap.trailing_ones();
+        if ones == 64 {
+            // Nothing left.
+            return Err(ErrorCode::NotReady);
+        }
+
+        let bit = 1u64 << ones;
+        assert_eq!(0, bitmap & bit);
+        // We cannot use fetch_xor here, because if a concurent xor succeeds, we may clear it,
+        // and another concurrent xor will succeed again, leading to double alloc.
+        if bitmap_ref
+            .compare_exchange_weak(bitmap, bitmap | bit, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            // Contention.
+            return Err(ErrorCode::NotReady);
+        }
+
+        Ok(ones as u16)
+    }
+
+    fn free_page_in(&self, arena_idx: usize, page_idx: u16) -> Result<(), ErrorCode> {
+        let bitmap = if arena_idx == 0 {
+            &self.shared_pages_in_use_0
+        } else if arena_idx == 1 {
+            &self.shared_pages_in_use_1
+        } else {
+            panic!()
+        };
+        let bit = 1u64 << page_idx;
+        if (bitmap.fetch_xor(bit, Ordering::Relaxed) & bit) == 0 {
+            // The page was not actually used.
+            panic!(
+                "io_channel: freeing unused page {} in arena {}; bitmap: 0x{:x}",
+                page_idx,
+                arena_idx,
+                bitmap.load(Ordering::Relaxed)
+            )
+        } else {
+            Ok(())
         }
     }
 
@@ -213,7 +269,6 @@ impl RawChannel {
 pub struct Client {
     raw_channel: AtomicPtr<RawChannel>,
     server_handle: SysHandle,
-    blocks_in_use: [AtomicU64; 2],
 }
 
 impl Drop for Client {
@@ -248,7 +303,6 @@ impl Client {
         let self_ = Self {
             raw_channel: AtomicPtr::new(addr as usize as *mut RawChannel),
             server_handle,
-            blocks_in_use: [AtomicU64::new(0), AtomicU64::new(0)],
         };
 
         fence(Ordering::Acquire);
@@ -362,34 +416,12 @@ impl Client {
         Ok(cqe)
     }
 
-    fn alloc_page_in(&self, arena_idx: usize) -> Result<u16, ErrorCode> {
-        let bitmap = self.blocks_in_use[arena_idx].load(Ordering::Relaxed);
-        let ones = bitmap.trailing_ones();
-        if ones == 64 {
-            // Nothing left.
-            return Err(ErrorCode::NotReady);
-        }
-
-        let bit = 1u64 << ones;
-        assert_eq!(0, bitmap & bit);
-        // We cannot use fetch_xor here, because if a concurent xor succeeds, we may clear it,
-        // and another concurrent xor will succeed again, leading to double alloc.
-        if self.blocks_in_use[arena_idx]
-            .compare_exchange_weak(bitmap, bitmap | bit, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            // Contention.
-            return Err(ErrorCode::NotReady);
-        }
-
-        Ok(ones as u16)
-    }
-
     pub fn alloc_page(&self) -> Result<u16, ErrorCode> {
-        if let Ok(idx) = self.alloc_page_in(0) {
+        // The client allocates first in 0, then 1. The server allocates first in 1, then 0.
+        if let Ok(idx) = self.raw_channel().alloc_page_in(0) {
             Ok(idx)
         } else {
-            if let Ok(idx) = self.alloc_page_in(1) {
+            if let Ok(idx) = self.raw_channel().alloc_page_in(1) {
                 Ok(64 + idx)
             } else {
                 Err(ErrorCode::NotReady)
@@ -397,38 +429,20 @@ impl Client {
         }
     }
 
-    fn free_client_page_in(&self, arena_idx: usize, page_idx: u16) -> Result<(), ErrorCode> {
-        let bitmap = &self.blocks_in_use[arena_idx];
-        let bit = 1u64 << page_idx;
-        if (bitmap.fetch_xor(bit, Ordering::Relaxed) & bit) == 0 {
-            // The page was not actually used.
-            panic!(
-                "io_channel: freeing unused page {} in arena {}; bitmap: 0x{:x}",
-                page_idx,
-                arena_idx,
-                bitmap.load(Ordering::Relaxed)
-            )
-            // let _ = bitmap.fetch_xor(bit, Ordering::Relaxed);
-            // return Err(ErrorCode::InvalidArgument);
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn free_client_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
+    pub fn free_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
         if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
             return Err(ErrorCode::InvalidArgument);
         }
 
         if page_idx < 64 {
-            self.free_client_page_in(0, page_idx)
+            self.raw_channel().free_page_in(0, page_idx)
         } else {
-            self.free_client_page_in(1, page_idx - 64)
+            self.raw_channel().free_page_in(1, page_idx - 64)
         }
     }
 
-    pub fn page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().client_page_bytes(buffer_idx)
+    pub fn shared_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        self.raw_channel().shared_page_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {
@@ -622,8 +636,33 @@ impl Server {
         self.wait_handle = SysHandle::NONE;
     }
 
-    pub fn client_page_bytes(&mut self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().client_page_bytes(buffer_idx)
+    pub fn alloc_page(&self) -> Result<u16, ErrorCode> {
+        // The client allocates first in 0, then 1. The server allocates first in 1, then 0.
+        if let Ok(idx) = self.raw_channel().alloc_page_in(1) {
+            Ok(idx + 64)
+        } else {
+            if let Ok(idx) = self.raw_channel().alloc_page_in(0) {
+                Ok(idx)
+            } else {
+                Err(ErrorCode::NotReady)
+            }
+        }
+    }
+
+    pub fn free_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
+        if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
+            return Err(ErrorCode::InvalidArgument);
+        }
+
+        if page_idx < 64 {
+            self.raw_channel().free_page_in(0, page_idx)
+        } else {
+            self.raw_channel().free_page_in(1, page_idx - 64)
+        }
+    }
+
+    pub fn shared_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+        self.raw_channel().shared_page_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {

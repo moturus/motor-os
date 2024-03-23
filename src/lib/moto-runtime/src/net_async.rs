@@ -154,7 +154,7 @@ impl TcpStream {
         let io_page = io_executor::alloc_page().await;
         let sqe = rt_api::net::tcp_stream_peek_request(
             self.handle,
-            io_page.client_idx(),
+            io_page.page_idx(),
             buf.len(),
             timestamp,
         );
@@ -163,7 +163,7 @@ impl TcpStream {
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
+        assert_eq!(cqe.payload.shared_pages()[0], io_page.page_idx());
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
         unsafe {
@@ -178,7 +178,7 @@ impl TcpStream {
         let io_page = io_executor::alloc_page().await;
         let sqe = rt_api::net::tcp_stream_read_request(
             self.handle,
-            io_page.client_idx(),
+            io_page.page_idx(),
             buf.len(),
             timestamp,
         );
@@ -187,7 +187,7 @@ impl TcpStream {
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
+        assert_eq!(cqe.payload.shared_pages()[0], io_page.page_idx());
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
         unsafe {
@@ -211,7 +211,7 @@ impl TcpStream {
 
         let sqe = rt_api::net::tcp_stream_write_request(
             self.handle,
-            io_page.client_idx(),
+            io_page.page_idx(),
             write_sz,
             timestamp,
         );
@@ -220,7 +220,7 @@ impl TcpStream {
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
+        assert_eq!(cqe.payload.shared_pages()[0], io_page.page_idx());
         Ok(cqe.payload.args_64()[1] as usize)
     }
 
