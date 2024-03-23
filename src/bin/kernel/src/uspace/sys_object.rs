@@ -208,11 +208,11 @@ impl SysObject {
         }
 
         if self.is_woken() {
+            self.wake_event_lock.store(false, Ordering::Release);
             return;
         }
 
         self.set_next_woken(0); // Mark woken.
-
         self.wake_event_lock.store(false, Ordering::Release);
 
         // See process_wake_events.
