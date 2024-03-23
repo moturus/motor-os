@@ -310,7 +310,7 @@ impl IoExecutor {
         })
     }
 
-    pub fn client_page(&'static self, idx: u16) -> IoPage {
+    pub fn shared_page(&'static self, idx: u16) -> IoPage {
         IoPage {
             page_idx: idx,
             io_executor: self,
@@ -478,8 +478,8 @@ pub fn alloc_page() -> IoPageWaiter {
     IoExecutor::inst().alloc_page()
 }
 
-pub fn client_page(idx: u16) -> IoPage {
-    IoExecutor::inst().client_page(idx)
+pub fn shared_page(idx: u16) -> IoPage {
+    IoExecutor::inst().shared_page(idx)
 }
 
 pub fn submit(sqe: QueueEntry) -> IoSubmission {

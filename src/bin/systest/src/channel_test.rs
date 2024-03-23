@@ -226,7 +226,7 @@ async fn throughput_iter(do_4k: bool, batch_size: u64) {
     while let Some(cqe) = qe_vec.pop() {
         let cqe = cqe.await;
         if do_4k {
-            let io_page = io_executor::client_page(cqe.payload.shared_pages()[0]);
+            let io_page = io_executor::shared_page(cqe.payload.shared_pages()[0]);
             let buf = io_page.bytes();
             let buf_u64 =
                 unsafe { core::slice::from_raw_parts(buf.as_ptr() as *mut u64, buf.len() / 8) };
