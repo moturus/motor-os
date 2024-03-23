@@ -3,7 +3,6 @@ use core::intrinsics::{likely, unlikely};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use moto_ipc::io_channel;
-use moto_ipc::io_channel::CMD_NOOP_OK;
 use moto_runtime::rt_api;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
@@ -11,7 +10,6 @@ use moto_sys::ErrorCode;
 use super::process::Process;
 use super::IoSubsystem;
 use super::PendingCompletion;
-use crate::moto_log;
 
 struct IoRuntime {
     net: Box<dyn IoSubsystem>,
@@ -41,16 +39,14 @@ impl IoRuntime {
                 self.cached_wakee_thread = SysHandle::NONE;
             }
 
-            #[cfg(debug_assertions)]
-            crate::moto_log!(
-                "{}:{} dropped process handle 0x{:x}",
-                file!(),
-                line!(),
-                handle.as_u64()
-            );
-        } else {
-            panic!("bad process handle 0x{:x}", handle.as_u64());
-        }
+            log::debug!("dropping client 0x{:x}", handle.as_u64());
+
+            // Ignore errors below because the target could be dead.
+            let _ = moto_sys::syscalls::SysCpu::kill_remote(handle);
+
+            // Note: process cleans the server on drop automagically,
+            //       we don't have to do anything here.
+        } // else: we may have deferred completions for dead process.
     }
 
     fn update_handles(&mut self) {
@@ -74,22 +70,25 @@ impl IoRuntime {
                 if self.cached_wakee_thread == SysHandle::NONE {
                     if SysCpu::wake(self.cached_wakee_process).is_err() {
                         #[cfg(debug_assertions)]
-                        moto_log!(
+                        log::debug!(
                             "dropping connection 0x{:x}",
                             self.cached_wakee_process.as_u64()
                         );
                         self.drop_process(self.cached_wakee_process);
                     }
                 } else {
-                    if SysCpu::wake_thread(self.cached_wakee_process, self.cached_wakee_thread)
-                        .is_err()
+                    if let Err(_err) =
+                        SysCpu::wake_thread(self.cached_wakee_process, self.cached_wakee_thread)
                     {
                         #[cfg(debug_assertions)]
-                        moto_log!(
-                            "dropping connection 0x{:x}",
-                            self.cached_wakee_process.as_u64()
+                        log::debug!(
+                            "error {:?} waking thread 0x{:x}:{:x}",
+                            _err,
+                            self.cached_wakee_process.as_u64(),
+                            self.cached_wakee_thread.as_u64()
                         );
-                        self.drop_process(self.cached_wakee_process);
+                        // Note: we don't drop the connection here because threads come and go,
+                        //       but the remote process is not necessarily gone.
                     }
                 }
                 had_work = true;
@@ -113,10 +112,8 @@ impl IoRuntime {
 
             self.all_handles.push(listener.wait_handle());
             #[cfg(debug_assertions)]
-            crate::moto_log!(
-                "{}:{} new listener handle 0x{:x}",
-                file!(),
-                line!(),
+            log::debug!(
+                "new listener handle 0x{:x}",
                 listener.wait_handle().as_u64()
             );
             self.listeners.insert(listener.wait_handle(), listener);
@@ -136,10 +133,14 @@ impl IoRuntime {
         debug_assert_eq!(proc.conn().status(), io_channel::ServerStatus::Connected);
 
         let mut wake_conn = false;
-        let mut wakee_threads: HashSet<SysHandle> = HashSet::new();
+
+        #[cfg(debug_assertions)]
+        if unlikely(timeout_wakeup) {
+            proc.conn().dump_state();
+        }
 
         loop {
-            let mut sqe = match proc.conn().get_sqe() {
+            let sqe = match proc.conn().get_sqe() {
                 Ok(sqe) => sqe,
                 Err(err) => {
                     assert_eq!(err, ErrorCode::NotReady);
@@ -148,28 +149,19 @@ impl IoRuntime {
             };
 
             if unlikely(timeout_wakeup) {
-                moto_log!(
-                    "{}:{} timeout wakeup: got sqe 0x{:x} for proc 0x{:x}",
-                    file!(),
-                    line!(),
+                log::info!(
+                    "timeout wakeup: got sqe 0x{:x} for proc 0x{:x}:{:x}",
                     sqe.id,
-                    proc.handle().as_u64()
+                    proc.handle().as_u64(),
+                    sqe.wake_handle
                 );
                 timeout_wakeup = false;
             }
 
             if sqe.status() != ErrorCode::NotReady {
-                sqe.status = ErrorCode::InvalidArgument.into();
-                if let Err(err) = proc.conn().complete_sqe(sqe) {
-                    debug_assert_eq!(err, ErrorCode::NotReady);
-                    self.pending_completions.push_back(PendingCompletion {
-                        cqe: sqe,
-                        endpoint_handle: handle,
-                    });
-                }
-
-                wake_conn = true;
-                continue;
+                log::info!("Dropping process 0x{:x} due to bad sqe.", handle.as_u64());
+                self.drop_process(handle);
+                return;
             }
 
             match sqe.command {
@@ -178,54 +170,34 @@ impl IoRuntime {
                     if cqe.flags == io_channel::FLAG_CMD_NOOP_OK_TIMESTAMP {
                         cqe.payload.args_64_mut()[2] = moto_sys::time::Instant::now().as_u64();
                     }
+
                     cqe.status = ErrorCode::Ok.into();
-                    wakee_threads.insert(cqe.wake_handle.into());
-                    if let Err(err) = proc.conn().complete_sqe(cqe) {
-                        #[cfg(debug_assertions)]
-                        moto_log!("complete_sqe() failed");
-                        debug_assert_eq!(err, ErrorCode::NotReady);
+                    self.pending_completions.push_back(PendingCompletion {
+                        cqe,
+                        endpoint_handle: handle,
+                    });
+                }
+                rt_api::net::CMD_MIN..=rt_api::net::CMD_MAX => {
+                    if let Some(cqe) = self.net.process_sqe(proc, sqe) {
+                        debug_assert_ne!(cqe.status(), ErrorCode::NotReady);
                         self.pending_completions.push_back(PendingCompletion {
                             cqe,
                             endpoint_handle: handle,
                         });
                     }
-                    wake_conn = true;
-                }
-                rt_api::net::CMD_MIN..=rt_api::net::CMD_MAX => {
-                    if let Some(cqe) = self.net.process_sqe(proc, sqe) {
-                        debug_assert_ne!(cqe.status(), ErrorCode::NotReady);
-                        if let Err(err) = proc.conn().complete_sqe(cqe) {
-                            #[cfg(debug_assertions)]
-                            moto_log!("complete_sqe() failed");
-                            debug_assert_eq!(err, ErrorCode::NotReady);
-                            self.pending_completions.push_back(PendingCompletion {
-                                cqe,
-                                endpoint_handle: handle,
-                            });
-                        }
-                        wake_conn = true;
-                    }
                 }
                 _ => {
-                    moto_log!("bad command: 0x{:x}", sqe.command);
-                    sqe.status = ErrorCode::InvalidArgument.into();
-                    if let Err(err) = proc.conn().complete_sqe(sqe) {
-                        debug_assert_eq!(err, ErrorCode::NotReady);
-                        self.pending_completions.push_back(PendingCompletion {
-                            cqe: sqe,
-                            endpoint_handle: handle,
-                        });
-                    }
-
-                    wake_conn = true;
+                    log::info!("Dropping process 0x{:x} due to bad sqe.", handle.as_u64());
+                    self.drop_process(handle);
+                    return;
                 }
             }
+            wake_conn = true;
         }
 
+        // Cannot cache wakee inline due to borrow checker rules, which is correct here:
+        // cache_wakee may drop the process we are working with.
         if wake_conn {
-            for wakee_t in wakee_threads {
-                self.cache_wakee(handle, wakee_t);
-            }
             self.cache_wakee(handle, SysHandle::NONE);
         }
     }
@@ -242,9 +214,11 @@ impl IoRuntime {
                 self.spawn_listeners_if_needed();
                 if unsafe { listener.accept() }.is_err() {
                     #[cfg(debug_assertions)]
-                    moto_log!("io_runtime: accept() failed.");
+                    log::debug!("io_runtime: accept() failed.");
                     return;
                 }
+                #[cfg(debug_assertions)]
+                log::debug!("io_runtime: new connection 0x{:x}.", handle.as_u64());
                 self.processes.insert(handle, Process::from_conn(listener));
             }
         }
@@ -277,11 +251,7 @@ impl IoRuntime {
             };
 
             let wakee_p = completion.endpoint_handle;
-            let wakee_t = if completion.cqe.command == CMD_NOOP_OK {
-                completion.cqe.wake_handle.into()
-            } else {
-                SysHandle::NONE
-            };
+            let wakee_t = completion.cqe.wake_handle.into();
 
             if let Err(err) = proc.conn().complete_sqe(completion.cqe) {
                 debug_assert_eq!(err, ErrorCode::NotReady);
@@ -428,7 +398,18 @@ impl IoRuntime {
                         if timeout >= core::time::Duration::from_secs(1) {
                             debug_timed_out = true;
                             #[cfg(debug_assertions)]
-                            log::debug!("timeout wakeup");
+                            {
+                                log::debug!("timeout wakeup");
+
+                                let cpu_usage = moto_runtime::util::get_cpu_usage();
+                                log::debug!("\tcpu usage: ");
+                                let mut s = String::new();
+                                for n in &cpu_usage {
+                                    s.push_str(std::format!("{: >5.1}% ", (*n) * 100.0).as_str());
+                                }
+                                log::debug!("{}", s);
+                            }
+
                             debug_assert!(self.pending_completions.is_empty());
                             self.process_wakeups(self.all_handles.clone(), true);
                         } else {

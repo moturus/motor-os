@@ -471,10 +471,10 @@ fn main() {
     spawn_wait_kill::test();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
+    channel_test::test_io_latency();
     channel_test::test_io_throughput();
     test_reentrant_mutex();
     // tcp::test_wget();
-    channel_test::test_io_latency();
     // test_stdio();
     test_file_write();
 

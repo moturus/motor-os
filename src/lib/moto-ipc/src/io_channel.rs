@@ -49,6 +49,8 @@ pub union Payload {
     args_64: [u64; 3],
 }
 
+const _PAYLOAD_SIZE: () = assert!(core::mem::size_of::<Payload>() == 24);
+
 impl Payload {
     pub fn client_pages_mut(&mut self) -> &mut [u16; 12] {
         unsafe { &mut self.client_pages }
@@ -95,7 +97,7 @@ impl Payload {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct QueueEntry {
-    pub id: u64,          // IN. See user_data in io_uring.pdf.
+    pub id: u64,          // IN. See user_data in io_uring.pdf. Used by client-side executor.
     pub handle: u64,      // IN/OUT. Like Windows handle, or Unix fd.
     pub command: u16,     // IN.
     pub status: u16,      // OUT.
@@ -130,20 +132,6 @@ impl QueueEntry {
 
     pub fn clear(&mut self) {
         *self = Self::new();
-    }
-
-    pub fn poll(&self) -> core::task::Poll<()> {
-        compiler_fence(Ordering::Acquire);
-        fence(Ordering::Acquire);
-        if self.status == ErrorCode::NotReady.into() {
-            core::task::Poll::Pending
-        } else {
-            core::task::Poll::Ready(())
-        }
-    }
-
-    pub fn wake_waiter(&self) -> Result<(), ErrorCode> {
-        SysCpu::wake(SysHandle::from_u64(self.wake_handle))
     }
 
     pub fn status(&self) -> ErrorCode {
@@ -190,7 +178,7 @@ impl RawChannel {
             == self.completion_queue_tail.load(Ordering::Acquire)
     }
 
-    pub fn client_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
+    fn client_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
         if buffer_idx >= (CHANNEL_PAGE_COUNT as u16) {
             return Err(ErrorCode::InvalidArgument);
         }
@@ -199,6 +187,26 @@ impl RawChannel {
             let addr = &self.client_pages[buffer_idx as usize] as *const _ as usize;
             Ok(core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_SIZE))
         }
+    }
+
+    fn may_submit(&self) -> bool {
+        self.submission_queue_head.load(Ordering::Relaxed)
+            < (self.submission_queue_tail.load(Ordering::Relaxed) + QUEUE_SIZE)
+    }
+
+    fn may_have_completions(&self) -> bool {
+        self.completion_queue_head.load(Ordering::Relaxed)
+            > self.completion_queue_tail.load(Ordering::Relaxed)
+    }
+
+    fn dump_state(&self) {
+        crate::moto_log!(
+            "RawChannel: sqh: {} sqt: {} cqh: {} cqt: {}",
+            self.submission_queue_head.load(Ordering::Relaxed),
+            self.submission_queue_tail.load(Ordering::Relaxed),
+            self.completion_queue_head.load(Ordering::Relaxed),
+            self.completion_queue_tail.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -327,15 +335,10 @@ impl Client {
         let mut slot: &mut QueueSlot;
         let mut pos = raw_channel.completion_queue_tail.load(Ordering::Relaxed);
 
-        let mut cnt = 0_u64;
         loop {
             slot = &mut raw_channel.completion_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
-            cnt += 1;
-            if cnt > 1000000 {
-                panic!("looping: {} {}", stamp, pos);
-            }
             if stamp == (pos + 1) {
                 match raw_channel.completion_queue_tail.compare_exchange_weak(
                     pos,
@@ -437,6 +440,18 @@ impl Client {
 
     pub fn is_empty(&self) -> bool {
         self.raw_channel().is_empty()
+    }
+
+    pub fn may_submit(&self) -> bool {
+        self.raw_channel().may_submit()
+    }
+
+    pub fn may_have_completions(&self) -> bool {
+        self.raw_channel().may_have_completions()
+    }
+
+    pub fn dump_state(&self) {
+        self.raw_channel().dump_state()
     }
 }
 
@@ -542,14 +557,9 @@ impl Server {
         let mut slot: &mut QueueSlot;
         let mut pos = raw_channel.completion_queue_head.load(Ordering::Relaxed);
 
-        let mut cnt = 0_u64;
         loop {
             slot = &mut raw_channel.completion_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
-            cnt += 1;
-            if cnt > 1000000 {
-                panic!("looping: {} {}", stamp, pos);
-            }
 
             if stamp == pos {
                 match raw_channel.completion_queue_head.compare_exchange_weak(
@@ -626,5 +636,9 @@ impl Server {
         unsafe {
             self.raw_channel.as_mut().unwrap_unchecked()
         }
+    }
+
+    pub fn dump_state(&self) {
+        self.raw_channel().dump_state()
     }
 }

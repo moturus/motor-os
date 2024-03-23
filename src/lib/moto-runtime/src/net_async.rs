@@ -3,6 +3,7 @@ use super::rt_api;
 use core::net::SocketAddr;
 use core::time::Duration;
 use moto_ipc::io_channel;
+use moto_ipc::io_channel::PAGE_SIZE;
 use moto_sys::ErrorCode;
 
 #[derive(Debug)]
@@ -18,14 +19,16 @@ impl TcpStream {
         let mut sqe = io_channel::QueueEntry::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_DROP;
         sqe.handle = self.handle;
-        let cqe = io_executor::submit(sqe).await;
-        assert!(cqe.status().is_ok());
+        let completer = io_executor::submit(sqe).await;
+        let qe = completer.await;
+        assert!(qe.status().is_ok());
         self.handle = 0;
     }
 
     pub async fn connect(socket_addr: &SocketAddr) -> Result<TcpStream, ErrorCode> {
         let sqe = rt_api::net::tcp_stream_connect_request(socket_addr);
-        let cqe = io_executor::submit(sqe).await;
+        let completer = io_executor::submit(sqe).await;
+        let cqe = completer.await;
         if cqe.status().is_err() {
             return Err(cqe.status());
         }
@@ -43,7 +46,8 @@ impl TcpStream {
     ) -> Result<TcpStream, ErrorCode> {
         let abs_timeout = moto_sys::time::Instant::now() + timeout;
         let sqe = rt_api::net::tcp_stream_connect_timeout_request(socket_addr, abs_timeout);
-        let cqe = io_executor::submit(sqe).await;
+        let completer = io_executor::submit(sqe).await;
+        let cqe = completer.await;
         if cqe.status().is_err() {
             return Err(cqe.status());
         }
@@ -71,7 +75,8 @@ impl TcpStream {
             }
             None => u64::MAX,
         };
-        let cqe = io_executor::submit(sqe).await;
+        let completer = io_executor::submit(sqe).await;
+        let cqe = completer.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -96,7 +101,7 @@ impl TcpStream {
             }
             None => u64::MAX,
         };
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -110,7 +115,7 @@ impl TcpStream {
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_READ_TIMEOUT;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             let res = cqe.payload.args_64()[0];
@@ -129,7 +134,7 @@ impl TcpStream {
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_WRITE_TIMEOUT;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             let res = cqe.payload.args_64()[0];
@@ -146,57 +151,76 @@ impl TcpStream {
     pub async fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let timestamp = moto_sys::time::Instant::now().as_u64();
 
-        let io_page_idx = io_executor::get_io_page().await;
-
-        let sqe =
-            rt_api::net::tcp_stream_peek_request(self.handle, io_page_idx, buf.len(), timestamp);
-        let cqe = io_executor::submit(sqe).await;
+        let io_page = io_executor::alloc_page().await;
+        let sqe = rt_api::net::tcp_stream_peek_request(
+            self.handle,
+            io_page.client_idx(),
+            buf.len(),
+            timestamp,
+        );
+        let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
-            io_executor::put_io_page(io_page_idx).await;
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_pages()[0], io_page_idx);
+        assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
-        io_executor::consume_io_page(io_page_idx, &mut buf[0..sz_read]).await;
+        unsafe {
+            core::ptr::copy_nonoverlapping(io_page.bytes().as_ptr(), buf.as_mut_ptr(), sz_read);
+        }
         Ok(sz_read)
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let timestamp = moto_sys::time::Instant::now().as_u64();
 
-        let io_page_idx = io_executor::get_io_page().await;
-
-        let sqe =
-            rt_api::net::tcp_stream_read_request(self.handle, io_page_idx, buf.len(), timestamp);
-        let cqe = io_executor::submit(sqe).await;
+        let io_page = io_executor::alloc_page().await;
+        let sqe = rt_api::net::tcp_stream_read_request(
+            self.handle,
+            io_page.client_idx(),
+            buf.len(),
+            timestamp,
+        );
+        let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
-            io_executor::put_io_page(io_page_idx).await;
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_pages()[0], io_page_idx);
+        assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
         let sz_read = cqe.payload.args_64()[1] as usize;
         assert!(sz_read <= buf.len());
-        io_executor::consume_io_page(io_page_idx, &mut buf[0..sz_read]).await;
+        unsafe {
+            core::ptr::copy_nonoverlapping(io_page.bytes().as_ptr(), buf.as_mut_ptr(), sz_read);
+        }
         Ok(sz_read)
     }
 
     pub async fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let timestamp = moto_sys::time::Instant::now().as_u64();
 
-        let (io_page_idx, sz) = io_executor::produce_io_page(buf).await;
+        let write_sz = buf.len().min(PAGE_SIZE);
+        let io_page = io_executor::alloc_page().await;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                io_page.bytes_mut().as_mut_ptr(),
+                write_sz,
+            );
+        }
 
-        let sqe = rt_api::net::tcp_stream_write_request(self.handle, io_page_idx, sz, timestamp);
-        let cqe = io_executor::submit(sqe).await;
+        let sqe = rt_api::net::tcp_stream_write_request(
+            self.handle,
+            io_page.client_idx(),
+            write_sz,
+            timestamp,
+        );
+        let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
-            io_executor::put_io_page(io_page_idx).await;
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.client_pages()[0], io_page_idx);
-        io_executor::put_io_page(io_page_idx).await;
+        assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
         Ok(cqe.payload.args_64()[1] as usize)
     }
 
@@ -223,7 +247,7 @@ impl TcpStream {
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = option;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -238,7 +262,7 @@ impl TcpStream {
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NODELAY;
         sqe.payload.args_64_mut()[1] = if nodelay { 1 } else { 0 };
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -252,7 +276,7 @@ impl TcpStream {
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NODELAY;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             let res = cqe.payload.args_64()[0];
@@ -274,7 +298,7 @@ impl TcpStream {
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
         sqe.payload.args_32_mut()[2] = ttl;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -288,7 +312,7 @@ impl TcpStream {
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(cqe.payload.args_32()[0])
@@ -303,7 +327,7 @@ impl TcpStream {
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NONBLOCKING;
         sqe.payload.args_64_mut()[1] = if nonblocking { 1 } else { 0 };
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -325,14 +349,14 @@ impl TcpListener {
         let mut sqe = io_channel::QueueEntry::new();
         sqe.command = rt_api::net::CMD_TCP_LISTENER_DROP;
         sqe.handle = self.handle;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
         assert!(cqe.status().is_ok());
         self.handle = 0;
     }
 
     pub async fn bind(socket_addr: &SocketAddr) -> Result<TcpListener, ErrorCode> {
         let sqe = rt_api::net::bind_tcp_listener_request(socket_addr);
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
             return Err(cqe.status());
         }
@@ -349,7 +373,7 @@ impl TcpListener {
 
     pub async fn accept(&self) -> Result<(TcpStream, SocketAddr), ErrorCode> {
         let sqe = rt_api::net::accept_tcp_listener_request(self.handle);
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
             return Err(cqe.status());
         }
@@ -372,7 +396,7 @@ impl TcpListener {
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
         sqe.payload.args_32_mut()[2] = ttl;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())
@@ -386,7 +410,7 @@ impl TcpListener {
         sqe.command = rt_api::net::CMD_TCP_LISTENER_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(sqe.payload.args_32()[0])
@@ -401,7 +425,7 @@ impl TcpListener {
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NONBLOCKING;
         sqe.payload.args_64_mut()[1] = if nonblocking { 1 } else { 0 };
-        let cqe = io_executor::submit(sqe).await;
+        let cqe = io_executor::submit(sqe).await.await;
 
         if cqe.status().is_ok() {
             Ok(())

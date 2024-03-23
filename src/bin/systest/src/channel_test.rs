@@ -1,4 +1,5 @@
 use moto_ipc::io_channel::*;
+use moto_runtime::io_executor;
 use moto_sys::SysHandle;
 use std::{
     sync::{atomic::*, Arc},
@@ -198,66 +199,52 @@ pub fn test_io_channel() {
     println!("test_io_channel() PASS");
 }
 
-fn do_test_io_throughput(io_size: usize, batch_size: u64) {
-    let io_client = match Client::connect("sys-io") {
-        Ok(client) => client,
-        Err(err) => {
-            panic!("Failed to connect to sys-io: {:?}", err);
+async fn throughput_iter(do_4k: bool, batch_size: u64) {
+    let mut qe_vec = vec![];
+
+    for step in 0..batch_size {
+        let mut sqe = QueueEntry::new();
+        sqe.command = CMD_NOOP_OK;
+        sqe.wake_handle = SysHandle::this_thread().into();
+        sqe.id = step as u64;
+        if do_4k {
+            let io_page = io_executor::alloc_page().await;
+            let buf = io_page.bytes_mut();
+            let buf_u64 = unsafe {
+                core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, buf.len() / 8)
+            };
+            for idx in 0..buf_u64.len() {
+                buf_u64[idx] = idx as u64;
+            }
+            sqe.payload.client_pages_mut()[0] = io_page.client_idx();
+            core::mem::forget(io_page);
         }
-    };
+        let cqe = io_executor::submit(sqe).await;
+        qe_vec.push(cqe);
+    }
 
+    while let Some(cqe) = qe_vec.pop() {
+        let cqe = cqe.await;
+        if do_4k {
+            let io_page = io_executor::client_page(cqe.payload.client_pages()[0]);
+            let buf = io_page.bytes();
+            let buf_u64 =
+                unsafe { core::slice::from_raw_parts(buf.as_ptr() as *mut u64, buf.len() / 8) };
+            for idx in 0..buf_u64.len() {
+                assert_eq!(buf_u64[idx], idx as u64);
+            }
+        }
+    }
+}
+
+fn do_test_io_throughput(io_size: usize, batch_size: u64) {
     const DURATION: Duration = Duration::from_millis(1000);
-
-    moto_sys::syscalls::SysCpu::affine_to_cpu(Some(2)).unwrap();
 
     let mut iterations = 0_u64;
     let start = std::time::Instant::now();
     while start.elapsed() < DURATION {
         iterations += 1;
-        for step in 0..batch_size {
-            let mut sqe = QueueEntry::new();
-            sqe.command = CMD_NOOP_OK;
-            sqe.wake_handle = SysHandle::this_thread().into();
-            sqe.id = step as u64;
-            if io_size > 0 {
-                let page_idx = io_client.alloc_page().unwrap();
-                let buf = io_client.page_bytes(page_idx).unwrap();
-                let buf_u64 = unsafe {
-                    core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u64, buf.len() / 8)
-                };
-                for b in buf_u64 {
-                    *b ^= 0x12345678;
-                }
-                sqe.payload.client_pages_mut()[0] = page_idx;
-            }
-            io_client.submit_sqe(sqe).unwrap();
-        }
-
-        for step in 0..batch_size {
-            loop {
-                match io_client.get_cqe() {
-                    Ok(cqe) => {
-                        assert_eq!(cqe.id, step as u64);
-                        if io_size > 0 {
-                            io_client
-                                .free_client_page(cqe.payload.client_pages()[0])
-                                .unwrap();
-                        }
-                        break;
-                    }
-                    Err(err) => {
-                        assert_eq!(err, moto_sys::ErrorCode::NotReady);
-                        moto_sys::syscalls::SysCpu::wait(
-                            &mut [],
-                            SysHandle::NONE,
-                            io_client.server_handle(),
-                            None,
-                        )
-                        .unwrap();
-                    }
-                }
-            }
-        }
+        io_executor::block_on(throughput_iter(io_size > 0, batch_size));
     }
 
     let elapsed = start.elapsed();
@@ -283,14 +270,24 @@ fn do_test_io_throughput(io_size: usize, batch_size: u64) {
         print!("{: >5.1}% ", (*n) * 100.0);
     }
     println!();
+    std::thread::sleep(Duration::from_millis(10));
 }
 
 pub fn test_io_throughput() {
     do_test_io_throughput(0, 1);
+    do_test_io_throughput(0, 2);
+    do_test_io_throughput(0, 4);
     do_test_io_throughput(0, 8);
+    do_test_io_throughput(0, 64);
     do_test_io_throughput(4096, 1);
+    do_test_io_throughput(4096, 2);
+    do_test_io_throughput(4096, 4);
     do_test_io_throughput(4096, 8);
+    do_test_io_throughput(4096, 16);
     do_test_io_throughput(4096, 32);
+    do_test_io_throughput(4096, 64);
+    // do_test_io_throughput(4096, 8);
+    // do_test_io_throughput(4096, 32);
 }
 
 static TRACING_1: AtomicU64 = AtomicU64::new(0);
@@ -298,33 +295,27 @@ static TRACING_2: AtomicU64 = AtomicU64::new(0);
 static TRACING_3: AtomicU64 = AtomicU64::new(0);
 static TRACING_4: AtomicU64 = AtomicU64::new(0);
 
-async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
-    use moto_runtime::io_executor;
+async fn io_latency_iter() {
     let mut skip_tracing = false;
 
     let ts_0 = moto_sys::time::Instant::now().as_u64();
-    // We emulate an async write
-    let io_page_idx = if buf_alloc {
-        Some(io_executor::get_io_page().await)
-    } else {
-        None
-    };
+
+    // We emulate an async read or write
+    let io_page = io_executor::alloc_page().await;
 
     let ts_1 = moto_sys::time::Instant::now().as_u64();
     let mut sqe = QueueEntry::new();
-    sqe.id = id;
-    sqe.command = if local_io {
-        io_executor::CMD_LOCAL_NOOP_OK
-    } else {
-        CMD_NOOP_OK
-    };
+    sqe.command = CMD_NOOP_OK;
     sqe.flags = FLAG_CMD_NOOP_OK_TIMESTAMP;
-    let cqe = io_executor::submit(sqe).await;
-    if !cqe.status().is_ok() {
-        panic!("status: {:?}", cqe.status());
-    }
+    sqe.handle = ts_0;
+    sqe.payload.client_pages_mut()[0] = io_page.client_idx();
+    let completion = io_executor::submit(sqe).await;
+    let cqe = completion.await;
     assert!(cqe.status().is_ok());
-    fence(Ordering::Acquire);
+    assert_eq!(cqe.command, CMD_NOOP_OK);
+    assert_eq!(cqe.payload.client_pages()[0], io_page.client_idx());
+    assert_eq!(cqe.handle, sqe.handle);
+
     let ts_2 = cqe.payload.args_64()[2];
     if ts_2 == 0 {
         skip_tracing = true;
@@ -332,9 +323,7 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     }
 
     let ts_3 = moto_sys::time::Instant::now().as_u64();
-    if buf_alloc {
-        io_executor::put_io_page(io_page_idx.unwrap()).await;
-    }
+    core::mem::drop(io_page);
     let ts_4 = moto_sys::time::Instant::now().as_u64();
 
     if !skip_tracing {
@@ -345,90 +334,99 @@ async fn single_iter(id: u64, buf_alloc: bool, local_io: bool) {
     }
 }
 
-async fn async_io_iter(batch_size: u64, buf_alloc: bool, local_io: bool) {
+async fn async_io_iter(batch_size: usize) {
+    if batch_size == 1 {
+        return io_latency_iter().await;
+    }
     let mut futs = vec![];
-    for id in 0..batch_size {
-        futs.push(single_iter(id, buf_alloc, local_io));
+    for _ in 0..batch_size {
+        futs.push(io_latency_iter());
     }
 
     futures::future::join_all(futs).await;
 }
 
-fn io_iter(batch_size: u64, buf_alloc: bool, local_io: bool) {
-    if batch_size == 32 {
-        moto_runtime::io_executor::block_on(futures::future::join(
-            async_io_iter(16, buf_alloc, local_io),
-            async_io_iter(16, buf_alloc, local_io),
-        ));
-    }
-    moto_runtime::io_executor::block_on(async_io_iter(batch_size, buf_alloc, local_io))
+fn io_iter(batch_size: usize) {
+    moto_runtime::io_executor::block_on(async_io_iter(batch_size));
 }
 
-pub fn do_test_io_latency(batch_size: u64, buf_alloc: bool, local_io: bool) {
-    const DUR: Duration = Duration::from_millis(1000);
-    io_iter(batch_size, buf_alloc, local_io); // Make sure the IO thread is up and running.
+pub fn do_test_io_latency(batch_size: usize, num_threads: usize) {
+    // const ITERS: usize = 50_000;
+    const ITERS: usize = 10_000;
+
+    io_iter(batch_size); // Make sure the IO thread is up and running.
 
     TRACING_1.store(0, Ordering::Release);
     TRACING_2.store(0, Ordering::Release);
     TRACING_3.store(0, Ordering::Release);
     TRACING_4.store(0, Ordering::Release);
 
-    let mut iters = 0_u64;
     let start = std::time::Instant::now();
-    while start.elapsed() < DUR {
-        io_iter(batch_size, buf_alloc, local_io);
-        iters += 1;
+
+    if num_threads == 1 {
+        for _ in 0..ITERS {
+            io_iter(batch_size);
+        }
+    } else {
+        let mut threads = vec![];
+        for _ in 0..num_threads {
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..ITERS {
+                    io_iter(batch_size);
+                }
+            }));
+        }
+
+        for t in threads {
+            t.join().unwrap();
+        }
     }
 
     let elapsed = start.elapsed();
-    let cpu_usage = moto_runtime::util::get_cpu_usage();
+    // let cpu_usage = moto_runtime::util::get_cpu_usage();
     println!(
-        "IO Latency: batch sz: {: >2} {: >6.3} usec/IO; {:.3} mIOPS; local: {: >5}; buf alloc: {: >5}.",
+        "IO Latency: num_threads: {} batch sz: {: >2} {: >6.3} usec/roundtrip.",
+        num_threads,
         batch_size,
-        elapsed.as_secs_f64() * 1000.0 * 1000.0 / ((iters * batch_size) as f64),
-        ((batch_size * iters) as f64) / (1000.0 * 1000.0),
-        local_io,
-        buf_alloc
+        elapsed.as_secs_f64() * 1000.0 * 1000.0 / (ITERS as f64),
     );
+
+    /*
     print!("\tcpu usage: ");
     for n in &cpu_usage {
         print!("{: >5.1}% ", (*n) * 100.0);
     }
     println!();
 
+    let tsc_to_nanos = |x: u64| -> Duration {
+        let zero = moto_sys::time::Instant::from_u64(0);
+        let ts = moto_sys::time::Instant::from_u64(x);
+        ts.duration_since(zero)
+    };
+
     println!(
-        "\ttracing: t1: {:.3} t2: {:.3} t3: {:.3} t4: {:.3}",
-        (TRACING_1.load(Ordering::Acquire) as f64) / (iters as f64),
-        (TRACING_2.load(Ordering::Acquire) as f64) / (iters as f64),
-        (TRACING_3.load(Ordering::Acquire) as f64) / (iters as f64),
-        (TRACING_4.load(Ordering::Acquire) as f64) / (iters as f64),
+        "\ttracing: alloc: {:?} submit there: {:?} submit back: {:?} dealloc: {:?}",
+        tsc_to_nanos(TRACING_1.load(Ordering::Acquire) / (ITERS as u64)),
+        tsc_to_nanos(TRACING_2.load(Ordering::Acquire) / (ITERS as u64)),
+        tsc_to_nanos(TRACING_3.load(Ordering::Acquire) / (ITERS as u64)),
+        tsc_to_nanos(TRACING_4.load(Ordering::Acquire) / (ITERS as u64)),
     );
+    */
 }
 
 pub fn test_io_latency() {
-    do_test_io_latency(1, false, false);
-    do_test_io_latency(1, false, true);
-    do_test_io_latency(1, true, false);
-    do_test_io_latency(1, true, true);
+    do_test_io_latency(1, 1);
+    do_test_io_latency(2, 1);
+    do_test_io_latency(4, 1);
+    do_test_io_latency(8, 1);
+    do_test_io_latency(1, 2);
+    do_test_io_latency(1, 3);
+    do_test_io_latency(2, 2);
+    do_test_io_latency(4, 2);
+    do_test_io_latency(12, 3);
 
-    do_test_io_latency(2, false, false);
-    do_test_io_latency(2, false, true);
-    do_test_io_latency(2, true, false);
-    do_test_io_latency(2, true, true);
-
-    // do_test_io_latency(4, false, true);
-    // do_test_io_latency(4, true, true);
-    // do_test_io_latency(8, false, true);
-    // do_test_io_latency(8, true, true);
-    // do_test_io_latency(16, false, true);
-    // do_test_io_latency(16, true, true);
-    // do_test_io_latency(20, false, true);
-    // do_test_io_latency(20, true, true);
-    // do_test_io_latency(24, false, true);
-    // do_test_io_latency(24, true, true);
-
-    // do_test_io_latency(28, false, true);
-    // do_test_io_latency(28, true, true);
-    // do_test_io_latency(32, false, true);
-    // do_test_io_latency(32, true, true);
+    // with batch_size > 31, futures::future::join_all() uses a different
+    // algorithm that misbehaves (corrupts memory?).
+    //
+    // do_test_io_latency(32, 1);
 }
