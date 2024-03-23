@@ -147,6 +147,9 @@ struct Scheduler {
 
     #[cfg(debug_assertions)]
     die_on_next_wake: AtomicBool,
+
+    #[cfg(debug_assertions)]
+    last_alive_check: AtomicU64,
 }
 
 impl Scheduler {
@@ -169,6 +172,8 @@ impl Scheduler {
 
             #[cfg(debug_assertions)]
             die_on_next_wake: AtomicBool::new(false),
+            #[cfg(debug_assertions)]
+            last_alive_check: AtomicU64::new(0),
         }
     }
 
@@ -275,6 +280,21 @@ impl Scheduler {
         self.wake();
     }
 
+    #[cfg(debug_assertions)]
+    fn alive(&self) {
+        let now = crate::arch::time::Instant::now().as_u64();
+        self.last_alive_check.store(now, Ordering::Relaxed);
+        let mut check = |_: uCpus, scheduler: &Scheduler| -> bool {
+            let last_check = scheduler.last_alive_check.load(Ordering::Relaxed);
+            if now > (last_check + 10_000_000_000) {
+                scheduler.die();
+                return true;
+            }
+            false
+        };
+        PERCPU_SCHEDULERS.for_each_cpu(&mut check);
+    }
+
     fn sched_loop(&mut self) -> ! {
         use x86_64::instructions::interrupts;
 
@@ -282,7 +302,17 @@ impl Scheduler {
 
         let mut curr_iteration = 0_u64;
         let mut last_job_iter = 0_u64;
+
+        #[cfg(debug_assertions)]
+        self.last_alive_check.store(
+            crate::arch::time::Instant::now().as_u64(),
+            Ordering::Relaxed,
+        );
+
         loop {
+            #[cfg(debug_assertions)]
+            self.alive();
+
             self.wake.store(false, Ordering::Relaxed);
             crate::uspace::process_wake_events(); // May add jobs to queues.
 

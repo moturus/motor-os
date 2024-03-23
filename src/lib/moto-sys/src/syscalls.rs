@@ -696,6 +696,9 @@ impl SysCpu {
     // If present, args[0] (if no timeout) or args[1] (if timeout) contains wake target.
     pub const F_WAKE_TARGET: u32 = 16;
 
+    // If present, OP_KILL kills the peer of the share handle.
+    pub const F_KILL_PEER: u32 = 1;
+
     #[cfg(feature = "userspace")]
     pub fn exit(code: u64) -> ! {
         do_syscall(
@@ -714,6 +717,25 @@ impl SysCpu {
     pub fn kill(target: SysHandle) -> Result<(), ErrorCode> {
         let result = do_syscall(
             pack_nr_ver(SYS_CPU, Self::OP_KILL, 0, 0),
+            target.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn kill_remote(target: SysHandle) -> Result<(), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_CPU, Self::OP_KILL, Self::F_KILL_PEER, 0),
             target.as_u64(),
             0,
             0,

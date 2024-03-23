@@ -33,11 +33,18 @@ impl<T> Mutex<T> {
 
 impl<T: ?Sized> Mutex<T> {
     fn obtain_lock(&self) {
+        const BUSY_LOOP_ITERS: i32 = 128;
+        let mut busy_loop_counter = 0;
         while self
             .lock
             .compare_exchange_weak(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            if busy_loop_counter < BUSY_LOOP_ITERS {
+                busy_loop_counter += 1;
+                core::hint::spin_loop();
+                continue;
+            }
             crate::futex_wait(&self.lock, LOCKED, None);
         }
     }

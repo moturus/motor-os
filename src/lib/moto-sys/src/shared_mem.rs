@@ -92,7 +92,7 @@ pub struct UserThreadControlBlock {
     pub guard: u64,          // For kernel use.
     pub kernel_version: u32, // The kernel tells the user the version of the struct.
     pub user_version: u32,   // The userspace tells the kernel the version of the struct.
-    pub self_handle: u64,    // Could be re-used.
+    pub self_handle: u64,    // Used to wake this thread.
     pub tls: usize,          // TLS. For userspace use.
     pub current_cpu: core::sync::atomic::AtomicU32,
     pub reserved0: u32,

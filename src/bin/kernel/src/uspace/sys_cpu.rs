@@ -236,6 +236,11 @@ pub(super) fn do_wake(
             thread.post_wake(this_cpu);
             return Ok(());
         }
+        log::debug!(
+            "{}: in-process wakee_thread 0x{:x} not found",
+            waker.debug_name(),
+            wakee_thread.as_u64()
+        );
         return Err(ErrorCode::BadHandle);
     }
 
@@ -244,6 +249,11 @@ pub(super) fn do_wake(
             return Ok(());
         }
     } else if wakee_thread != SysHandle::NONE {
+        log::debug!(
+            "{}: wakee thread 0x{:x} not found",
+            waker.debug_name(),
+            wakee_thread.as_u64()
+        );
         return Err(ErrorCode::BadHandle);
     }
 
@@ -253,6 +263,11 @@ pub(super) fn do_wake(
         thread.post_wake(this_cpu);
         Ok(())
     } else {
+        log::debug!(
+            "{}: wakee 0x{:x} not found",
+            waker.debug_name(),
+            wake_target.as_u64()
+        );
         Err(ErrorCode::BadHandle)
     }
 }
@@ -262,7 +277,7 @@ fn sys_wake_impl(waker: &super::process::Thread, args: &SyscallArgs) -> SyscallR
         return ResultBuilder::version_too_high();
     }
     if args.flags != 0 {
-        log::info!("bad flags: 0x{:x}", args.flags);
+        log::debug!("bad flags: 0x{:x}", args.flags);
         return ResultBuilder::invalid_argument();
     }
 
@@ -276,6 +291,26 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     if args.version > 0 {
         return ResultBuilder::version_too_high();
     }
+    let target = SysHandle::from_u64(args.args[0]);
+
+    if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PEER {
+        if (killer.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
+            return ResultBuilder::result(ErrorCode::NotAllowed);
+        }
+        if let Some(obj) = killer.owner().get_object(&target) {
+            if let Some(victim) = super::shared::peer_owner(killer.owner().pid(), &obj.sys_object) {
+                log::info!(
+                    "{} killing remote {}",
+                    killer.debug_name(),
+                    victim.debug_name()
+                );
+                victim.die();
+                return ResultBuilder::ok();
+            }
+        }
+        return ResultBuilder::result(ErrorCode::BadHandle);
+    }
+
     if args.flags != 0 {
         log::info!("bad flags: 0x{:x}", args.flags);
         return ResultBuilder::invalid_argument();

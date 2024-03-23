@@ -319,12 +319,8 @@ fn cpu_main(this_cpu: u64) -> ! {
         while CPUS_INITIALIZED.load(Ordering::Relaxed) != crate::config::num_cpus() {
             core::hint::spin_loop();
         }
-        crate::util::logger::init_logging();
 
-        #[cfg(debug_assertions)]
-        log::set_max_level(log::LevelFilter::Debug);
-        #[cfg(not(debug_assertions))]
-        log::set_max_level(log::LevelFilter::Info);
+        crate::util::logger::init_logging();
 
         crate::mm::init_mm_bsp_stage2();
         crate::stats::init();

@@ -358,7 +358,12 @@ impl Process {
             return Err(err);
         }
 
-        let thread_handle = thread.self_handle;
+        let thread_handle = thread.join_handle;
+        log::debug!(
+            "thread {:?} - {:x} created",
+            thread.debug_name(),
+            thread_handle.as_u64()
+        );
         thread.post_start(thread_arg);
         Ok(thread_handle)
     }
@@ -374,6 +379,7 @@ impl Process {
         {
             process
         } else {
+            log::info!("victim 0x{:x} not process", target.as_u64());
             return Err(ErrorCode::NotFound);
         };
 
@@ -398,6 +404,24 @@ impl Process {
         }
 
         Ok(())
+    }
+
+    pub(super) fn die(&self) {
+        let (target_mut, mut status_lock) = unsafe { self.get_mut() };
+        let do_kill = match *status_lock {
+            ProcessStatus::Created | ProcessStatus::Running => true,
+            ProcessStatus::Exiting(_)
+            | ProcessStatus::Exited(_)
+            | ProcessStatus::Error(_)
+            | ProcessStatus::Killed => false,
+        };
+
+        if do_kill {
+            *status_lock = ProcessStatus::Exiting(u64::MAX);
+            for thread in target_mut.threads.values() {
+                thread.post_kill(ThreadKilledReason::ProcessKilled);
+            }
+        }
     }
 
     unsafe fn get_mut(&self) -> (&mut Self, LockGuard<ProcessStatus>) {
@@ -615,10 +639,15 @@ pub struct Thread {
     thread_entry_point: u64,
     user_stack: crate::mm::user::UserStack,
 
-    // Self object points at self. When waited on, acts as a JoinHandle.
-    // When it is the target of wake(), it wakes this thread.
+    // Self object, points at self. Can be used to wake this thread either locally
+    // or remotely.
     self_object: Option<Arc<SysObject>>,
-    self_handle: SysHandle,  // The handle for self_object. Used in TCB.
+    self_handle: SysHandle, // The handle for self_object. Used in UserThreadControlBlock.
+
+    // Join object, used by other threads in the same process to "join" this thread.
+    join_object: Option<Arc<SysObject>>,
+    join_handle: SysHandle, // The handle for join_object.
+
     wakes_queued: AtomicU64, // Counts wakes for self wakes.
     wakes_taken: AtomicU64,
 
@@ -675,6 +704,8 @@ impl Thread {
             this: Weak::default(),
             self_object: None,
             self_handle: SysHandle::NONE,
+            join_object: None,
+            join_handle: SysHandle::NONE,
             wakes_queued: AtomicU64::new(0),
             wakes_taken: AtomicU64::new(0),
             owner: Arc::downgrade(&owner),
@@ -706,6 +737,19 @@ impl Thread {
 
             self_mut.self_object = Some(self_object.clone());
             self_mut.self_handle = owner.add_object(self_object);
+
+            let join_object = SysObject::new_owned(
+                Arc::new(alloc::format!(
+                    "thread_joiner:{}:{}",
+                    owner.pid().as_u64(),
+                    self_mut.tid.as_u64()
+                )),
+                self_.clone(),
+                Arc::downgrade(&owner),
+            );
+
+            self_mut.join_object = Some(join_object.clone());
+            self_mut.join_handle = owner.add_object(join_object);
         }
 
         owner.stats.on_thread_added();
@@ -787,7 +831,6 @@ impl Thread {
             let prev_id = self.timer_id.swap(timer.id(), Ordering::Relaxed);
             assert_eq!(0, prev_id);
             self.timer_cpu.store(cpu as u32, Ordering::Relaxed);
-            log::debug!("new_timeout {} for tread {}", timer.id(), self.debug_name());
             crate::sched::post_timer(timer);
         }
     }
@@ -1256,7 +1299,6 @@ impl Thread {
                 *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
 
                 self.timed_out.store(true, Ordering::Release);
-                log::debug!("{}: timed out", self.debug_name());
 
                 self.trace("thread::wake_by_timeout", 0, 0);
                 self.post_wake_locked(false);
@@ -1397,23 +1439,33 @@ impl Thread {
             (self_object, self_handle)
         };
 
-        SysObject::wake(&self_object, false);
         core::mem::drop(self_object);
+
+        let (join_object, join_handle) = {
+            let (self_mut, _lock) = unsafe { self.get_mut() };
+            let join_object = self_mut.join_object.take().unwrap();
+            let join_handle = self_mut.join_handle;
+            self_mut.join_handle = SysHandle::NONE;
+            (join_object, join_handle)
+        };
+
+        log::debug!(
+            "thread with join handle 0x{:x} exited",
+            join_handle.as_u64()
+        );
+        SysObject::wake(&join_object, false);
+        core::mem::drop(join_object);
 
         let owner = self.owner.upgrade().unwrap();
 
-        // thread.self_handle is used to wait for the thread to complete and
-        // to wake the thread. The userspace must not put() these handles
-        // because we do this below. We do this below because the userspace
-        // either holds to the handle until join() is called, in which case
-        // the handle must be around, or the JoinHandle object is dropped before
-        // join is called. But the userspace cannot drop the handle when the
-        // object is dropped because detached threads still hold the handle
-        // in TCB and can be waited/woken through that.
+        // self and join handles are used to wait for the thread to complete and
+        // to wake the thread. The userspace must not put() these handles,
+        // because they did not get() them.
         //
         // We ignore the result because the userspace may call put()
         // on the handle, and we don't want to crash the kernel here.
         let _ = owner.put_object(&self_handle);
+        let _ = owner.put_object(&join_handle);
 
         owner.on_thread_exited(self.tid, thread_status);
     }

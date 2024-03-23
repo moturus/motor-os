@@ -68,6 +68,15 @@ pub fn log_user(thread: &crate::uspace::process::Thread, msg: &str) {
 // Must be called after the global allocator has been set up.
 pub fn init_logging() {
     assert!(log::set_logger(&LOGGER).is_ok());
+
+    #[cfg(debug_assertions)]
+    log::set_max_level(log::LevelFilter::Debug);
+    #[cfg(not(debug_assertions))]
+    log::set_max_level(log::LevelFilter::Info);
+
+    // NOTE: init.rs sets max log level to INFO before starting
+    // the userspace, as otherwise the kernel spams the console too much.
+    // This can be overwritten via SysCtl from the userspace.
 }
 
 pub fn lock() -> super::LockGuard<'static, ()> {

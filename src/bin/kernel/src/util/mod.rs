@@ -1,4 +1,3 @@
-// pub mod elf;
 pub mod loader;
 pub mod logger;
 pub mod percpu;

@@ -1,6 +1,6 @@
+use core::sync::atomic::*;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
-use core::sync::atomic::*;
 
 pub fn spawn(
     stack_size: usize,
@@ -21,9 +21,26 @@ pub fn exit_self() -> ! {
 }
 
 pub fn join(handle: SysHandle) {
-    // wait() below will succeed if it is called while the thread is still running
-    // and will fail if the thread has exited.
-    let _ = SysCpu::wait(&mut [handle], SysHandle::NONE, SysHandle::NONE, None);
+    // wait() below will properly succeed if it is called while the joinee is still running
+    // and will fail if the joinee has exited. We need to be careful here:
+    // stdlib will panic if this join() returns while the joinee is still running,
+    // but in moturus OS any thread can be woken unconditionally via SysCpu::wake(),
+    // so we must make sure this thread is woken because the joinee has exited,
+    // not otherwise.
+    loop {
+        let mut handles = [handle];
+        match SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None) {
+            Ok(_) => {
+                if handles[0] == handle {
+                    break;
+                } // else => spurious wakeup.
+            }
+            Err(_) => {
+                assert_eq!(handles[0], handle);
+                break;
+            }
+        }
+    }
 }
 
 pub fn sleep(dur: core::time::Duration) {
@@ -50,22 +67,27 @@ pub struct Parker {
 
 impl Parker {
     pub fn new() -> Self {
-        Self { handle: AtomicU64::new(SysHandle::NONE.as_u64()) }
+        Self {
+            handle: AtomicU64::new(SysHandle::NONE.as_u64()),
+        }
     }
 
     pub fn park(&self, dur: Option<core::time::Duration>) {
         let tcb = moto_sys::UserThreadControlBlock::get();
         let self_handle = tcb.self_handle;
-        assert_eq!(SysHandle::NONE.as_u64(),
-            self.handle.swap(self_handle, Ordering::AcqRel));
+        assert_eq!(
+            SysHandle::NONE.as_u64(),
+            self.handle.swap(self_handle, Ordering::AcqRel)
+        );
 
         let stop = match dur {
             None => None,
-            Some(dur) => Some(moto_sys::time::Instant::now() + dur)
+            Some(dur) => Some(moto_sys::time::Instant::now() + dur),
         };
 
         let _ = SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, stop);
-        self.handle.store(SysHandle::NONE.as_u64(), Ordering::Release);
+        self.handle
+            .store(SysHandle::NONE.as_u64(), Ordering::Release);
     }
 
     pub fn unpark(&self) {

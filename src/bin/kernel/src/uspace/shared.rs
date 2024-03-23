@@ -232,6 +232,39 @@ pub(super) fn try_wake(
     }
 }
 
+pub(super) fn peer_owner(
+    this: super::process::ProcessId,
+    maybe_shared: &Arc<SysObject>,
+) -> Option<Arc<Process>> {
+    if let Some(shared) = super::sys_object::object_from_sysobject::<Shared>(maybe_shared) {
+        let sharer = shared
+            .sharer
+            .upgrade()
+            .map(|sharer| sharer.process_owner().upgrade())
+            .flatten();
+        let sharee = shared
+            .sharee
+            .lock(line!())
+            .upgrade()
+            .map(|sharee| sharee.process_owner().upgrade())
+            .flatten();
+
+        if let Some(sharer) = &sharer {
+            if sharer.pid() == this {
+                return sharee;
+            }
+        }
+
+        if let Some(sharee) = &sharee {
+            if sharee.pid() == this {
+                return sharer;
+            }
+        }
+    }
+
+    None
+}
+
 pub(super) fn on_drop(maybe_shared: &SysObject) {
     if let Ok(shared) = Arc::downcast::<Shared>(maybe_shared.owner().clone()) {
         shared.on_drop(maybe_shared);
