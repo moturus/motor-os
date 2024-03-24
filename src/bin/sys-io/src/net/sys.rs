@@ -586,17 +586,19 @@ impl NetSys {
             return Some(sqe);
         }
 
-        let io_page_idx = sqe.payload.shared_pages()[0];
-        let sz = sqe.payload.args_64()[1] as usize;
-        let bytes = match proc.conn().shared_page_bytes(io_page_idx) {
-            Ok(val) => val,
+        let page_idx = sqe.payload.shared_pages()[0];
+        let page = match proc.conn().shared_page(page_idx) {
+            Ok(page) => page,
             Err(err) => {
                 sqe.status = err.into();
                 return Some(sqe);
             }
         };
+        let sz = sqe.payload.args_64()[1] as usize;
+        let bytes = page.bytes();
         if sz > bytes.len() {
             sqe.status = ErrorCode::InvalidArgument.into();
+            page.forget();
             return Some(sqe);
         }
         let bytes = &bytes[0..sz];
@@ -614,11 +616,13 @@ impl NetSys {
                 );
                 // Unix/Linux expect a successful write with zero bytes written.
                 sqe.payload.args_64_mut()[1] = 0;
+                page.forget();
                 sqe.status = ErrorCode::Ok.into();
                 return Some(sqe);
             }
         }
         moto_socket.tx_bufs.push_back(IoBuf::new(sqe, bytes));
+        page.forget();
         self.do_tcp_tx(socket_id);
         self.process_rw_timeout(socket_id, moto_sys::time::Instant::now());
 
@@ -635,17 +639,19 @@ impl NetSys {
             Err(err) => return Some(err),
         };
 
-        let io_page_idx = sqe.payload.shared_pages()[0];
-        let sz = sqe.payload.args_64()[1] as usize;
-        let bytes = match proc.conn().shared_page_bytes(io_page_idx) {
-            Ok(val) => val,
+        let page_idx = sqe.payload.shared_pages()[0];
+        let page = match proc.conn().shared_page(page_idx) {
+            Ok(page) => page,
             Err(err) => {
                 sqe.status = err.into();
                 return Some(sqe);
             }
         };
+        let sz = sqe.payload.args_64()[1] as usize;
+        let bytes = page.bytes();
         if sz > bytes.len() {
             sqe.status = ErrorCode::InvalidArgument.into();
+            page.forget();
             return Some(sqe);
         }
         let bytes = &bytes[0..sz];
@@ -664,6 +670,7 @@ impl NetSys {
                 // Unix/Linux expect a successful read with zero bytes written.
                 sqe.payload.args_64_mut()[1] = 0;
                 sqe.status = ErrorCode::Ok.into();
+                page.forget();
                 return Some(sqe);
             }
         }
@@ -677,6 +684,7 @@ impl NetSys {
             }
         };
 
+        page.forget();
         self.do_tcp_rx_buf(socket_id, rx_buf);
         self.process_rw_timeout(socket_id, moto_sys::time::Instant::now());
         None

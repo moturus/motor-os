@@ -215,6 +215,7 @@ impl TcpStream {
             write_sz,
             timestamp,
         );
+        // io_page.forget();
         let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
             return Err(cqe.status());

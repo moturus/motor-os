@@ -19,13 +19,11 @@ fn client_loop(client: &mut Client) {
         match client.get_cqe() {
             Ok(cqe) => {
                 values_received += cqe.id;
-                let slice = client
-                    .shared_page_bytes(cqe.payload.shared_pages()[0])
-                    .unwrap();
+                let page = client.shared_page(cqe.payload.shared_pages()[0]);
+                let slice = page.bytes();
                 for idx in 0..slice.len() {
                     assert_eq!(slice[idx], ((idx & 0xFF) as u8) ^ 0xFF);
                 }
-                client.free_page(cqe.payload.shared_pages()[0]).unwrap();
             }
             Err(err) => {
                 assert_eq!(err, ErrorCode::NotReady);
@@ -35,7 +33,7 @@ fn client_loop(client: &mut Client) {
     };
 
     for iter in 0..CHANNEL_TEST_ITERS {
-        let page_idx = loop {
+        let page = loop {
             match client.alloc_page() {
                 Ok(buffer) => break buffer,
                 Err(err) => {
@@ -48,11 +46,12 @@ fn client_loop(client: &mut Client) {
         let mut sqe = QueueEntry::new();
         sqe.id = iter;
         sqe.wake_handle = SysHandle::this_thread().into();
-        let slice = client.shared_page_bytes(page_idx).unwrap();
+        let slice = page.bytes_mut();
         for idx in 0..slice.len() {
             slice[idx] = (idx & 0xFF) as u8;
         }
-        sqe.payload.shared_pages_mut()[0] = page_idx;
+        sqe.payload.shared_pages_mut()[0] = page.page_idx();
+        page.forget();
         values_sent += sqe.id;
         loop {
             match client.submit_sqe(sqe) {
@@ -83,18 +82,14 @@ fn server_loop(server: &mut Server) {
     'outer: loop {
         match server.get_sqe() {
             Ok(mut sqe) => {
-                let client_page_idx = sqe.payload.shared_pages()[0];
-                let slice = server.shared_page_bytes(client_page_idx).unwrap();
+                let page_idx = sqe.payload.shared_pages()[0];
+                let page = server.shared_page(page_idx).unwrap();
+                let slice = page.bytes_mut();
                 for idx in 0..slice.len() {
-                    if slice[idx] != (idx & 0xFF) as u8 {
-                        println!(
-                            "bad data: idx {} data {} page idx {} iter {}",
-                            idx, slice[idx], client_page_idx, sqe.id
-                        );
-                    }
                     assert_eq!(slice[idx], (idx & 0xFF) as u8);
                     slice[idx] ^= 0xFF;
                 }
+                page.forget(); // We send the same page back.
 
                 sqe.status = ErrorCode::Ok.into();
                 cached_wakee = Some((server.wait_handle(), SysHandle::from_u64(sqe.wake_handle)));

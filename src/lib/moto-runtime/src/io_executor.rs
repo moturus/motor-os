@@ -38,71 +38,20 @@ static _USIZE_8_BYTES: () = assert!(core::mem::size_of::<usize>() == 8);
 // TODO: what is the best size here? Should it be dynamic?
 const QUEUE_SIZE: usize = 256;
 
-pub struct IoPage {
-    page_idx: u16,
+pub struct IoPageWaiter {
     io_executor: &'static IoExecutor,
-}
-
-impl Drop for IoPage {
-    fn drop(&mut self) {
-        if self.page_idx != u16::MAX {
-            self.io_executor
-                .io_client()
-                .free_page(self.page_idx)
-                .unwrap();
-        }
-    }
-}
-
-impl IoPage {
-    pub fn bytes(&self) -> &[u8] {
-        self.io_executor
-            .io_client()
-            .shared_page_bytes(self.page_idx)
-            .unwrap()
-    }
-
-    pub fn bytes_mut(&self) -> &mut [u8] {
-        self.io_executor
-            .io_client()
-            .shared_page_bytes(self.page_idx)
-            .unwrap()
-    }
-
-    pub fn page_idx(&self) -> u16 {
-        self.page_idx
-    }
-}
-
-pub struct IoPageWaiter(IoPage);
-
-impl IoPageWaiter {
-    fn take(&mut self) -> IoPage {
-        let res = IoPage {
-            page_idx: self.0.page_idx,
-            io_executor: self.0.io_executor,
-        };
-
-        self.0.page_idx = u16::MAX;
-        res
-    }
 }
 
 impl Future for IoPageWaiter {
     type Output = IoPage;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.0.page_idx != u16::MAX {
-            panic!()
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Ok(page) = self.io_executor.io_client().alloc_page() {
+            core::task::Poll::Ready(page)
         } else {
-            if let Ok(idx) = self.0.io_executor.io_client().alloc_page() {
-                self.0.page_idx = idx;
-                core::task::Poll::Ready(self.take())
-            } else {
-                let wake_handle = cx.waker().as_raw().data() as usize as u64;
-                self.0.io_executor.add_waiter(wake_handle);
-                core::task::Poll::Pending
-            }
+            let wake_handle = cx.waker().as_raw().data() as usize as u64;
+            self.io_executor.add_waiter(wake_handle);
+            core::task::Poll::Pending
         }
     }
 }
@@ -304,17 +253,11 @@ impl IoExecutor {
     }
 
     fn alloc_page(&'static self) -> IoPageWaiter {
-        IoPageWaiter(IoPage {
-            page_idx: u16::MAX,
-            io_executor: self,
-        })
+        IoPageWaiter { io_executor: self }
     }
 
-    pub fn shared_page(&'static self, idx: u16) -> IoPage {
-        IoPage {
-            page_idx: idx,
-            io_executor: self,
-        }
+    pub fn shared_page(&'static self, page_idx: u16) -> IoPage {
+        self.io_client().shared_page(page_idx)
     }
 
     fn io_submission(&'static self, sqe: QueueEntry) -> IoSubmission {

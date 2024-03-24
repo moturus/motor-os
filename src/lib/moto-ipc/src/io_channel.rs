@@ -245,6 +245,18 @@ impl RawChannel {
         }
     }
 
+    fn free_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
+        if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
+            return Err(ErrorCode::InvalidArgument);
+        }
+
+        if page_idx < 64 {
+            self.free_page_in(0, page_idx)
+        } else {
+            self.free_page_in(1, page_idx - 64)
+        }
+    }
+
     fn may_submit(&self) -> bool {
         self.submission_queue_head.load(Ordering::Relaxed)
             < (self.submission_queue_tail.load(Ordering::Relaxed) + QUEUE_SIZE)
@@ -263,6 +275,37 @@ impl RawChannel {
             self.completion_queue_head.load(Ordering::Relaxed),
             self.completion_queue_tail.load(Ordering::Relaxed),
         );
+    }
+}
+
+pub struct IoPage {
+    page_idx: u16,
+    raw_channel: &'static RawChannel,
+}
+
+impl Drop for IoPage {
+    fn drop(&mut self) {
+        if self.page_idx != u16::MAX {
+            self.raw_channel.free_page(self.page_idx).unwrap();
+        }
+    }
+}
+
+impl IoPage {
+    pub fn bytes(&self) -> &[u8] {
+        self.raw_channel.shared_page_bytes(self.page_idx).unwrap()
+    }
+
+    pub fn bytes_mut(&self) -> &mut [u8] {
+        self.raw_channel.shared_page_bytes(self.page_idx).unwrap()
+    }
+
+    pub fn page_idx(&self) -> u16 {
+        self.page_idx
+    }
+
+    pub fn forget(mut self) {
+        self.page_idx = u16::MAX;
     }
 }
 
@@ -416,33 +459,31 @@ impl Client {
         Ok(cqe)
     }
 
-    pub fn alloc_page(&self) -> Result<u16, ErrorCode> {
+    pub fn alloc_page(&self) -> Result<IoPage, ErrorCode> {
         // The client allocates first in 0, then 1. The server allocates first in 1, then 0.
         if let Ok(idx) = self.raw_channel().alloc_page_in(0) {
-            Ok(idx)
+            Ok(IoPage {
+                page_idx: idx,
+                raw_channel: self.raw_channel(),
+            })
         } else {
             if let Ok(idx) = self.raw_channel().alloc_page_in(1) {
-                Ok(64 + idx)
+                Ok(IoPage {
+                    page_idx: idx + 64,
+                    raw_channel: self.raw_channel(),
+                })
             } else {
                 Err(ErrorCode::NotReady)
             }
         }
     }
 
-    pub fn free_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
-        if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
-            return Err(ErrorCode::InvalidArgument);
+    pub fn shared_page(&self, page_idx: u16) -> IoPage {
+        assert!(page_idx < CHANNEL_PAGE_COUNT as u16);
+        IoPage {
+            page_idx,
+            raw_channel: self.raw_channel(),
         }
-
-        if page_idx < 64 {
-            self.raw_channel().free_page_in(0, page_idx)
-        } else {
-            self.raw_channel().free_page_in(1, page_idx - 64)
-        }
-    }
-
-    pub fn shared_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().shared_page_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {
@@ -636,33 +677,34 @@ impl Server {
         self.wait_handle = SysHandle::NONE;
     }
 
-    pub fn alloc_page(&self) -> Result<u16, ErrorCode> {
+    pub fn alloc_page(&self) -> Result<IoPage, ErrorCode> {
         // The client allocates first in 0, then 1. The server allocates first in 1, then 0.
         if let Ok(idx) = self.raw_channel().alloc_page_in(1) {
-            Ok(idx + 64)
+            Ok(IoPage {
+                page_idx: idx + 64,
+                raw_channel: self.raw_channel(),
+            })
         } else {
             if let Ok(idx) = self.raw_channel().alloc_page_in(0) {
-                Ok(idx)
+                Ok(IoPage {
+                    page_idx: idx,
+                    raw_channel: self.raw_channel(),
+                })
             } else {
                 Err(ErrorCode::NotReady)
             }
         }
     }
 
-    pub fn free_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
-        if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
-            return Err(ErrorCode::InvalidArgument);
-        }
-
-        if page_idx < 64 {
-            self.raw_channel().free_page_in(0, page_idx)
+    pub fn shared_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+        if page_idx >= (CHANNEL_PAGE_COUNT as u16) {
+            Err(ErrorCode::InvalidArgument)
         } else {
-            self.raw_channel().free_page_in(1, page_idx - 64)
+            Ok(IoPage {
+                page_idx,
+                raw_channel: self.raw_channel(),
+            })
         }
-    }
-
-    pub fn shared_page_bytes(&self, buffer_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        self.raw_channel().shared_page_bytes(buffer_idx)
     }
 
     fn raw_channel(&self) -> &'static mut RawChannel {
