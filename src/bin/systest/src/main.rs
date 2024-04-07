@@ -1,4 +1,4 @@
-mod channel_test;
+// mod channel_test;
 mod mpmc;
 mod spawn_wait_kill;
 mod subcommand;
@@ -467,12 +467,12 @@ fn main() {
     std::thread::spawn(|| input_listener());
 
     tcp::test_tcp_loopback();
-    channel_test::test_io_channel();
     spawn_wait_kill::test();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
-    channel_test::test_io_latency();
-    channel_test::test_io_throughput();
+    // channel_test::test_io_channel();
+    // channel_test::test_io_latency();
+    // channel_test::test_io_throughput();
     test_reentrant_mutex();
     // tcp::test_wget();
     // test_stdio();

@@ -1,7 +1,7 @@
 use std::task::{RawWaker, RawWakerVTable};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-use moto_sys::SysHandle;
+use moto_ipc::io_channel;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub(super) struct SocketId(u64);
@@ -18,45 +18,40 @@ impl From<SocketId> for u64 {
     }
 }
 
-#[derive(Debug)]
 pub(super) struct MotoSocket {
     pub id: SocketId, // Unique across all devices.
     pub handle: smoltcp::iface::SocketHandle,
     pub device_idx: usize,
 
-    pub proc_handle: SysHandle,
+    // Listening sockets do not have a client connection.
+    pub conn: Option<Rc<io_channel::ServerConnection>>,
 
     // We need socket's original listener to let it know when a socket has been closed:
     // we cap the number of active sockets/streams allowed per listener.
     pub listener_id: Option<super::tcp_listener::TcpListenerId>,
 
-    // We also need to track the issuing connect sqe.
-    pub connect_sqe: Option<moto_ipc::io_channel::QueueEntry>,
+    // We also need to track the issuing connect request.
+    pub connect_req: Option<moto_ipc::io_channel::Msg>,
 
     pub ephemeral_port: Option<u16>,
 
-    // Both rx_bufs and tx_bufs are sorted below according to their arrival times
-    // (which _should_ be the same order as their timestamps, but this is not enforced).
-    // When set_read_timeout or set_write_timeout ops happen, we go
-    // through the appropriate x_bufs queue and expire any requests/bufs that need
-    // expiring.
-    pub rx_bufs: VecDeque<super::IoBuf>,
-    pub tx_bufs: VecDeque<super::IoBuf>,
+    pub tx_queue: VecDeque<super::TxBuf>,
+
+    pub rx_seq: u64,
+    pub rx_ack: u64,
 
     pub state: moto_runtime::rt_api::net::TcpState,
 
-    pub read_timeout: std::time::Duration,
-    pub write_timeout: std::time::Duration,
-    pub next_timeout: Option<moto_sys::time::Instant>,
+    // When the socket becomes CloseWait or Closed, sys-io notifies the client once.
+    pub rx_closed_notified: bool,
 }
 
 impl Drop for MotoSocket {
     fn drop(&mut self) {
         assert!(self.listener_id.is_none());
-        assert!(self.connect_sqe.is_none());
+        assert!(self.connect_req.is_none());
         assert!(self.ephemeral_port.is_none());
-        assert!(self.rx_bufs.is_empty());
-        assert!(self.tx_bufs.is_empty());
+        assert!(self.tx_queue.is_empty());
     }
 }
 

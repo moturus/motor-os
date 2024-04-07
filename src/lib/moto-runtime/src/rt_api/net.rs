@@ -16,14 +16,14 @@ pub const CMD_TCP_LISTENER_GET_OPTION: u16 = CMD_MIN + 3;
 pub const CMD_TCP_LISTENER_DROP: u16 = CMD_MIN + 4;
 
 pub const CMD_TCP_STREAM_CONNECT: u16 = CMD_MIN + 5;
-pub const CMD_TCP_STREAM_WRITE: u16 = CMD_MIN + 6;
-pub const CMD_TCP_STREAM_READ: u16 = CMD_MIN + 7;
-pub const CMD_TCP_STREAM_PEEK: u16 = CMD_MIN + 8;
+pub const CMD_TCP_STREAM_TX: u16 = CMD_MIN + 6;
+pub const CMD_TCP_STREAM_RX: u16 = CMD_MIN + 7;
+pub const CMD_TCP_STREAM_RX_ACK: u16 = CMD_MIN + 8;
 pub const CMD_TCP_STREAM_SET_OPTION: u16 = CMD_MIN + 9;
 pub const CMD_TCP_STREAM_GET_OPTION: u16 = CMD_MIN + 10;
 pub const CMD_TCP_STREAM_DROP: u16 = CMD_MIN + 11;
 
-pub const CMD_MAX: u16 = CMD_MIN + 11;
+pub const CMD_MAX: u16 = CMD_TCP_STREAM_DROP;
 
 pub const TCP_OPTION_SHUT_RD: u64 = 1 << 0;
 pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
@@ -33,8 +33,12 @@ pub const TCP_OPTION_NODELAY: u64 = 1 << 4;
 pub const TCP_OPTION_TTL: u64 = 1 << 5;
 pub const TCP_OPTION_NONBLOCKING: u64 = 1 << 6;
 
+pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum TcpState {
+    Listening,
+    PendingAccept,
     Connecting,
     ReadWrite,
     ReadOnly,
@@ -52,49 +56,49 @@ impl TcpState {
     }
 }
 
-pub fn bind_tcp_listener_request(addr: &SocketAddr) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_LISTENER_BIND;
-    put_socket_addr(&mut qe.payload, addr);
+pub fn bind_tcp_listener_request(addr: &SocketAddr) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = CMD_TCP_LISTENER_BIND;
+    put_socket_addr(&mut msg.payload, addr);
 
-    qe
+    msg
 }
 
-pub fn accept_tcp_listener_request(handle: u64) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_LISTENER_ACCEPT;
-    qe.handle = handle;
+pub fn accept_tcp_listener_request(handle: u64) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = CMD_TCP_LISTENER_ACCEPT;
+    msg.handle = handle;
 
-    qe
+    msg
 }
 
-pub fn tcp_stream_connect_request(addr: &SocketAddr) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_STREAM_CONNECT;
-    qe.payload.args_32_mut()[5] = 0; // timeout
-    put_socket_addr(&mut qe.payload, addr);
+pub fn tcp_stream_connect_request(addr: &SocketAddr) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = CMD_TCP_STREAM_CONNECT;
+    msg.payload.args_32_mut()[5] = 0; // timeout
+    put_socket_addr(&mut msg.payload, addr);
 
-    qe
+    msg
 }
 
 pub fn tcp_stream_connect_timeout_request(
     addr: &SocketAddr,
     timeout: moto_sys::time::Instant,
-) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_STREAM_CONNECT;
+) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = CMD_TCP_STREAM_CONNECT;
 
     // We have only 32 bits for timeout. ~10ms granularity is fine.
     let timeout = timeout.as_u64() >> 27;
     assert!(timeout < (u32::MAX) as u64);
-    qe.payload.args_32_mut()[5] = timeout as u32;
-    put_socket_addr(&mut qe.payload, addr);
+    msg.payload.args_32_mut()[5] = timeout as u32;
+    put_socket_addr(&mut msg.payload, addr);
 
-    qe
+    msg
 }
 
-pub fn tcp_stream_connect_timeout(qe: &io_channel::QueueEntry) -> Option<moto_sys::time::Instant> {
-    let mut timeout = qe.payload.args_32()[5];
+pub fn tcp_stream_connect_timeout(msg: &io_channel::Msg) -> Option<moto_sys::time::Instant> {
+    let mut timeout = msg.payload.args_32()[5];
     timeout &= u32::MAX - 1;
     if timeout == 0 {
         return None;
@@ -103,52 +107,40 @@ pub fn tcp_stream_connect_timeout(qe: &io_channel::QueueEntry) -> Option<moto_sy
     Some(moto_sys::time::Instant::from_u64(timeout))
 }
 
-pub fn tcp_stream_write_request(
+pub fn tcp_stream_tx_msg(
     handle: u64,
-    io_page_idx: u16,
+    io_page: io_channel::IoPage,
     sz: usize,
     timestamp: u64,
-) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_STREAM_WRITE;
-    qe.handle = handle;
-    qe.payload.shared_pages_mut()[0] = io_page_idx;
-    qe.payload.args_64_mut()[1] = sz as u64;
-    qe.payload.args_64_mut()[2] = timestamp;
+) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = CMD_TCP_STREAM_TX;
+    msg.handle = handle;
+    msg.payload.shared_pages_mut()[0] = io_page.page_idx();
+    msg.payload.args_64_mut()[1] = sz as u64;
+    msg.payload.args_64_mut()[2] = timestamp;
 
-    qe
+    io_page.forget();
+
+    msg
 }
 
-pub fn tcp_stream_read_request(
+pub fn tcp_stream_rx_msg(
     handle: u64,
-    io_page_idx: u16,
+    io_page: io_channel::IoPage,
     sz: usize,
-    timestamp: u64,
-) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_STREAM_READ;
-    qe.handle = handle;
-    qe.payload.shared_pages_mut()[0] = io_page_idx;
-    qe.payload.args_64_mut()[1] = sz as u64;
-    qe.payload.args_64_mut()[2] = timestamp;
+    rx_seq: u64,
+) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = CMD_TCP_STREAM_RX;
+    msg.handle = handle;
+    msg.payload.shared_pages_mut()[0] = io_page.page_idx();
+    msg.payload.args_64_mut()[1] = sz as u64;
+    msg.payload.args_64_mut()[2] = rx_seq;
 
-    qe
-}
+    io_page.forget();
 
-pub fn tcp_stream_peek_request(
-    handle: u64,
-    io_page_idx: u16,
-    sz: usize,
-    timestamp: u64,
-) -> io_channel::QueueEntry {
-    let mut qe = io_channel::QueueEntry::new();
-    qe.command = CMD_TCP_STREAM_PEEK;
-    qe.handle = handle;
-    qe.payload.shared_pages_mut()[0] = io_page_idx;
-    qe.payload.args_64_mut()[1] = sz as u64;
-    qe.payload.args_64_mut()[2] = timestamp;
-
-    qe
+    msg
 }
 
 pub fn get_socket_addr(payload: &io_channel::Payload) -> Result<SocketAddr, ErrorCode> {

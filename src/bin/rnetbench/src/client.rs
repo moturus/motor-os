@@ -22,6 +22,7 @@ fn do_run(host_port: &str) -> Result<()> {
     let addrs = host_port.to_socket_addrs()?;
 
     for addr in addrs {
+        // return try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN);
         if try_addr(addr, crate::CMD_TCP_RR).is_ok() {
             std::thread::sleep(Duration::from_millis(100));
             if try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT).is_ok() {

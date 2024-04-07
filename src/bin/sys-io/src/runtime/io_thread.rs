@@ -1,13 +1,13 @@
 // I/O manager/runtime. A single thread to avoid dealing with synchronization.
 use core::intrinsics::{likely, unlikely};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use moto_ipc::io_channel;
 use moto_runtime::rt_api;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
 
-use super::process::Process;
 use super::IoSubsystem;
 use super::PendingCompletion;
 
@@ -15,43 +15,39 @@ struct IoRuntime {
     net: Box<dyn IoSubsystem>,
     net_handles: HashSet<SysHandle>,
 
-    listeners: HashMap<SysHandle, io_channel::Server>,
-    processes: HashMap<SysHandle, Process>,
+    listeners: HashMap<SysHandle, io_channel::ServerConnection>,
+    connections: HashMap<SysHandle, Rc<io_channel::ServerConnection>>,
 
     all_handles: Vec<SysHandle>,
 
     pending_completions: VecDeque<PendingCompletion>,
-    cached_wakee_process: SysHandle,
-    cached_wakee_thread: SysHandle,
+    cached_wakee_connection: SysHandle,
 }
 
 impl IoRuntime {
     const MIN_LISTENERS: usize = 3;
     const MAX_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(6);
 
-    fn drop_process(&mut self, handle: SysHandle) {
-        if let Some(mut proc) = self.processes.remove(&handle) {
-            self.net.on_process_drop(&mut proc);
+    fn drop_connection(&mut self, handle: SysHandle) {
+        if let Some(conn) = self.connections.remove(&handle) {
+            self.net.on_connection_drop(handle);
+            assert_eq!(1, Rc::strong_count(&conn));
 
             self.update_handles();
-            if self.cached_wakee_process == handle {
-                self.cached_wakee_process = SysHandle::NONE;
-                self.cached_wakee_thread = SysHandle::NONE;
+            if self.cached_wakee_connection == handle {
+                self.cached_wakee_connection = SysHandle::NONE;
             }
 
             log::debug!("dropping client 0x{:x}", handle.as_u64());
 
             // Ignore errors below because the target could be dead.
             let _ = moto_sys::syscalls::SysCpu::kill_remote(handle);
-
-            // Note: process cleans the server on drop automagically,
-            //       we don't have to do anything here.
-        } // else: we may have deferred completions for dead process.
+        } // else: we may have deferred completions for dead connections.
     }
 
     fn update_handles(&mut self) {
         self.all_handles.clear();
-        let mut handles: Vec<SysHandle> = self.processes.keys().map(|h| *h).collect();
+        let mut handles: Vec<SysHandle> = self.connections.keys().map(|h| *h).collect();
         for handle in &self.net_handles {
             handles.push(*handle);
         }
@@ -62,40 +58,28 @@ impl IoRuntime {
         core::mem::swap(&mut self.all_handles, &mut handles);
     }
 
-    fn cache_wakee(&mut self, wakee_process: SysHandle, wakee_thread: SysHandle) -> bool {
+    fn cache_wakee(&mut self, wakee_connection: SysHandle) -> bool {
         let mut had_work = false;
 
-        if self.cached_wakee_process != wakee_process || self.cached_wakee_thread != wakee_thread {
-            if likely(!self.cached_wakee_process.is_none()) {
-                if self.cached_wakee_thread == SysHandle::NONE {
-                    if SysCpu::wake(self.cached_wakee_process).is_err() {
-                        #[cfg(debug_assertions)]
-                        log::debug!(
-                            "dropping connection 0x{:x}",
-                            self.cached_wakee_process.as_u64()
-                        );
-                        self.drop_process(self.cached_wakee_process);
-                    }
-                } else {
-                    if let Err(_err) =
-                        SysCpu::wake_thread(self.cached_wakee_process, self.cached_wakee_thread)
-                    {
-                        #[cfg(debug_assertions)]
-                        log::debug!(
-                            "error {:?} waking thread 0x{:x}:{:x}",
-                            _err,
-                            self.cached_wakee_process.as_u64(),
-                            self.cached_wakee_thread.as_u64()
-                        );
-                        // Note: we don't drop the connection here because threads come and go,
-                        //       but the remote process is not necessarily gone.
-                    }
+        if self.cached_wakee_connection != wakee_connection {
+            if likely(!self.cached_wakee_connection.is_none()) {
+                #[cfg(debug_assertions)]
+                log::debug!(
+                    "waking connection 0x{:x}",
+                    self.cached_wakee_connection.as_u64()
+                );
+                if SysCpu::wake(self.cached_wakee_connection).is_err() {
+                    #[cfg(debug_assertions)]
+                    log::debug!(
+                        "dropping connection 0x{:x}",
+                        self.cached_wakee_connection.as_u64()
+                    );
+                    self.drop_connection(self.cached_wakee_connection);
                 }
                 had_work = true;
             }
 
-            self.cached_wakee_process = wakee_process;
-            self.cached_wakee_thread = wakee_thread;
+            self.cached_wakee_connection = wakee_connection;
         }
 
         had_work
@@ -103,7 +87,7 @@ impl IoRuntime {
 
     fn spawn_listeners_if_needed(&mut self) {
         while self.listeners.len() < Self::MIN_LISTENERS {
-            let listener = match io_channel::Server::create("sys-io") {
+            let listener = match io_channel::ServerConnection::create("sys-io") {
                 Ok(server) => server,
                 Err(err) => {
                     panic!("Failed to spawn a sys-io listener: {:?}", err);
@@ -120,27 +104,27 @@ impl IoRuntime {
         }
     }
 
-    fn poll_endpoint(&mut self, handle: SysHandle, mut timeout_wakeup: bool) {
-        let proc = if unlikely(timeout_wakeup) {
-            if let Some(p) = self.processes.get_mut(&handle) {
+    fn poll_endpoint(&mut self, endpoint_handle: SysHandle, mut timeout_wakeup: bool) {
+        let conn = if unlikely(timeout_wakeup) {
+            if let Some(p) = self.connections.get_mut(&endpoint_handle) {
                 p
             } else {
                 return;
             }
         } else {
-            self.processes.get_mut(&handle).unwrap()
+            self.connections.get_mut(&endpoint_handle).unwrap()
         };
-        debug_assert_eq!(proc.conn().status(), io_channel::ServerStatus::Connected);
+        debug_assert_eq!(conn.status(), io_channel::ServerStatus::Connected);
 
         let mut wake_conn = false;
 
         #[cfg(debug_assertions)]
         if unlikely(timeout_wakeup) {
-            proc.conn().dump_state();
+            conn.dump_state();
         }
 
         loop {
-            let sqe = match proc.conn().get_sqe() {
+            let msg = match conn.recv() {
                 Ok(sqe) => sqe,
                 Err(err) => {
                     assert_eq!(err, ErrorCode::NotReady);
@@ -150,55 +134,82 @@ impl IoRuntime {
 
             if unlikely(timeout_wakeup) {
                 log::info!(
-                    "timeout wakeup: got sqe 0x{:x} for proc 0x{:x}:{:x}",
-                    sqe.id,
-                    proc.handle().as_u64(),
-                    sqe.wake_handle
+                    "timeout wakeup: got sqe 0x{:x} for conn 0x{:x}:{:x}",
+                    msg.id,
+                    conn.wait_handle().as_u64(),
+                    msg.wake_handle
                 );
                 timeout_wakeup = false;
             }
 
-            if sqe.status() != ErrorCode::NotReady {
-                log::info!("Dropping process 0x{:x} due to bad sqe.", handle.as_u64());
-                self.drop_process(handle);
+            if msg.status() != ErrorCode::NotReady {
+                log::info!(
+                    "Dropping conn 0x{:x} due to bad sqe.",
+                    endpoint_handle.as_u64()
+                );
+                self.drop_connection(endpoint_handle);
                 return;
             }
 
-            match sqe.command {
+            match msg.command {
                 io_channel::CMD_NOOP_OK => {
-                    let mut cqe = sqe;
+                    let mut cqe = msg;
                     if cqe.flags == io_channel::FLAG_CMD_NOOP_OK_TIMESTAMP {
                         cqe.payload.args_64_mut()[2] = moto_sys::time::Instant::now().as_u64();
                     }
 
                     cqe.status = ErrorCode::Ok.into();
-                    self.pending_completions.push_back(PendingCompletion {
-                        cqe,
-                        endpoint_handle: handle,
-                    });
-                }
-                rt_api::net::CMD_MIN..=rt_api::net::CMD_MAX => {
-                    if let Some(cqe) = self.net.process_sqe(proc, sqe) {
-                        debug_assert_ne!(cqe.status(), ErrorCode::NotReady);
+                    if let Err(err) = conn.send(cqe) {
+                        debug_assert_eq!(err, ErrorCode::NotReady);
                         self.pending_completions.push_back(PendingCompletion {
-                            cqe,
-                            endpoint_handle: handle,
+                            msg: cqe,
+                            endpoint_handle,
                         });
                     }
                 }
+                rt_api::net::CMD_MIN..=rt_api::net::CMD_MAX => {
+                    match self.net.process_sqe(conn, msg) {
+                        Ok(res) => {
+                            if let Some(cqe) = res {
+                                debug_assert_ne!(cqe.status(), ErrorCode::NotReady);
+                                if let Err(err) = conn.send(cqe) {
+                                    debug_assert_eq!(err, ErrorCode::NotReady);
+                                    self.pending_completions.push_back(PendingCompletion {
+                                        msg: cqe,
+                                        endpoint_handle,
+                                    });
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            log::info!(
+                                "Dropping conn 0x{:x} due to error in process_sqe.",
+                                endpoint_handle.as_u64()
+                            );
+                            self.drop_connection(endpoint_handle);
+                            return;
+                        }
+                    }
+                }
                 _ => {
-                    log::info!("Dropping process 0x{:x} due to bad sqe.", handle.as_u64());
-                    self.drop_process(handle);
+                    log::info!(
+                        "Dropping conn 0x{:x} due to bad sqe.",
+                        endpoint_handle.as_u64()
+                    );
+                    self.drop_connection(endpoint_handle);
                     return;
                 }
             }
+
+            // TODO: we don't need to wake conn here; only if/when the incoming
+            //       queue was full.
             wake_conn = true;
         }
 
         // Cannot cache wakee inline due to borrow checker rules, which is correct here:
-        // cache_wakee may drop the process we are working with.
+        // cache_wakee may drop the connection we are working with.
         if wake_conn {
-            self.cache_wakee(handle, SysHandle::NONE);
+            self.cache_wakee(endpoint_handle);
         }
     }
 
@@ -219,7 +230,7 @@ impl IoRuntime {
                 }
                 #[cfg(debug_assertions)]
                 log::debug!("io_runtime: new connection 0x{:x}.", handle.as_u64());
-                self.processes.insert(handle, Process::from_conn(listener));
+                self.connections.insert(handle, Rc::new(listener));
             }
         }
 
@@ -245,20 +256,19 @@ impl IoRuntime {
 
         for completion in completions {
             had_work = true;
-            let proc = match self.processes.get_mut(&completion.endpoint_handle) {
+            let conn = match self.connections.get_mut(&completion.endpoint_handle) {
                 Some(endpoint) => endpoint,
                 None => continue, // Endpoint was dropped.
             };
 
-            let wakee_p = completion.endpoint_handle;
-            let wakee_t = completion.cqe.wake_handle.into();
+            let wakee = completion.endpoint_handle;
 
-            if let Err(err) = proc.conn().complete_sqe(completion.cqe) {
+            if let Err(err) = conn.send(completion.msg) {
                 debug_assert_eq!(err, ErrorCode::NotReady);
                 self.pending_completions.push_back(completion);
             }
 
-            self.cache_wakee(wakee_p, wakee_t);
+            self.cache_wakee(wakee);
         }
 
         had_work
@@ -267,7 +277,7 @@ impl IoRuntime {
     fn process_errors(&mut self, bad_handles: Vec<SysHandle>) {
         for bad_handle in bad_handles {
             if bad_handle != SysHandle::NONE {
-                self.drop_process(bad_handle);
+                self.drop_connection(bad_handle);
             }
         }
     }
@@ -278,12 +288,11 @@ impl IoRuntime {
             net_handles: HashSet::new(),
 
             listeners: HashMap::new(),
-            processes: HashMap::new(),
+            connections: HashMap::new(),
             all_handles: Vec::new(),
 
             pending_completions: VecDeque::new(),
-            cached_wakee_process: SysHandle::NONE,
-            cached_wakee_thread: SysHandle::NONE,
+            cached_wakee_connection: SysHandle::NONE,
         };
 
         for handle in self_mut.net.wait_handles() {
@@ -321,7 +330,7 @@ impl IoRuntime {
                     Some(p_c) => {
                         had_work = true;
                         if debug_timed_out {
-                            log::debug!("net poll on timeout: {:?}", p_c.cqe.status());
+                            log::debug!("net poll on timeout: {:?}", p_c.msg.status());
                         }
                         self.pending_completions.push_back(p_c);
                         self.process_completions();
@@ -362,14 +371,14 @@ impl IoRuntime {
                 }
             }
 
-            had_work |= self.cache_wakee(SysHandle::NONE, SysHandle::NONE); // Trigger a pending wakeup, if any.
+            had_work |= self.cache_wakee(SysHandle::NONE); // Trigger a pending wakeup, if any.
 
             if had_work {
                 busy_polling_iter = 0;
                 continue;
             } else {
                 busy_polling_iter += 1;
-                if busy_polling_iter < 16 {
+                if busy_polling_iter < 8 {
                     continue;
                 }
             }

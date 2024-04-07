@@ -16,7 +16,7 @@ pub struct TcpStream {
 impl TcpStream {
     // Called by the enclosing sync TcpStream when it is dropped.
     pub async fn on_drop(&mut self) {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_DROP;
         sqe.handle = self.handle;
         let completer = io_executor::submit(sqe).await;
@@ -60,7 +60,7 @@ impl TcpStream {
     }
 
     pub async fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_READ_TIMEOUT;
@@ -86,7 +86,7 @@ impl TcpStream {
     }
 
     pub async fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_WRITE_TIMEOUT;
@@ -111,7 +111,7 @@ impl TcpStream {
     }
 
     pub async fn read_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_READ_TIMEOUT;
@@ -130,7 +130,7 @@ impl TcpStream {
     }
 
     pub async fn write_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_WRITE_TIMEOUT;
@@ -209,19 +209,16 @@ impl TcpStream {
             );
         }
 
-        let sqe = rt_api::net::tcp_stream_write_request(
-            self.handle,
-            io_page.page_idx(),
-            write_sz,
-            timestamp,
-        );
-        // io_page.forget();
+        // Note: the page is consumed if the request succeeds, otherwise
+        // it is up to the client to clear it.
+        let page_idx = io_page.page_idx();
+        let sqe = rt_api::net::tcp_stream_write_request(self.handle, io_page, write_sz, timestamp);
         let cqe = io_executor::submit(sqe).await.await;
         if cqe.status().is_err() {
+            let _ = io_executor::shared_page(page_idx); // Let it drop.
             return Err(cqe.status());
         }
 
-        assert_eq!(cqe.payload.shared_pages()[0], io_page.page_idx());
         Ok(cqe.payload.args_64()[1] as usize)
     }
 
@@ -244,7 +241,7 @@ impl TcpStream {
             option |= rt_api::net::TCP_OPTION_SHUT_WR;
         }
 
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = option;
@@ -258,7 +255,7 @@ impl TcpStream {
     }
 
     pub async fn set_nodelay(&self, nodelay: bool) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NODELAY;
@@ -273,7 +270,7 @@ impl TcpStream {
     }
 
     pub async fn nodelay(&self) -> Result<bool, ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NODELAY;
@@ -294,7 +291,7 @@ impl TcpStream {
     }
 
     pub async fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
@@ -309,7 +306,7 @@ impl TcpStream {
     }
 
     pub async fn ttl(&self) -> Result<u32, ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
@@ -323,7 +320,7 @@ impl TcpStream {
     }
 
     pub async fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_STREAM_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NONBLOCKING;
@@ -347,7 +344,7 @@ pub struct TcpListener {
 impl TcpListener {
     // Called by the enclosing sync TcpListener when it is dropped.
     pub async fn on_drop(&mut self) {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_LISTENER_DROP;
         sqe.handle = self.handle;
         let cqe = io_executor::submit(sqe).await.await;
@@ -392,7 +389,7 @@ impl TcpListener {
     }
 
     pub async fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_LISTENER_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
@@ -407,7 +404,7 @@ impl TcpListener {
     }
 
     pub async fn ttl(&self) -> Result<u32, ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_LISTENER_GET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
@@ -421,7 +418,7 @@ impl TcpListener {
     }
 
     pub async fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
-        let mut sqe = io_channel::QueueEntry::new();
+        let mut sqe = io_channel::Msg::new();
         sqe.command = rt_api::net::CMD_TCP_LISTENER_SET_OPTION;
         sqe.handle = self.handle;
         sqe.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NONBLOCKING;

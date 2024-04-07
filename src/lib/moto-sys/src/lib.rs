@@ -85,6 +85,7 @@ pub enum ErrorCode {
     NotADirectory = 17,
     BadHandle = 18,
     FileTooLarge = 19,
+    BufferFull = 20,
 
     MaxKernelError, // Must be last, so that from_u16() below works.
 }

@@ -35,9 +35,6 @@ macro_rules! pin_mut {
 // We cast usize to u64 a lot here.
 static _USIZE_8_BYTES: () = assert!(core::mem::size_of::<usize>() == 8);
 
-// TODO: what is the best size here? Should it be dynamic?
-const QUEUE_SIZE: usize = 256;
-
 pub struct IoPageWaiter {
     io_executor: &'static IoExecutor,
 }
@@ -56,23 +53,53 @@ impl Future for IoPageWaiter {
     }
 }
 
+pub struct IoSender {
+    msg: Msg,
+    io_executor: &'static IoExecutor,
+}
+
+impl Future for IoSender {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        match self.io_executor.io_client().send(self.msg) {
+            Ok(_) => {
+                let _ =
+                    moto_sys::syscalls::SysCpu::wake(self.io_executor.io_client().server_handle());
+                Poll::Ready(())
+            }
+            Err(err) => {
+                debug_assert_eq!(err, ErrorCode::NotReady);
+                let _ =
+                    moto_sys::syscalls::SysCpu::wake(self.io_executor.io_client().server_handle());
+                #[cfg(debug_assertions)]
+                crate::util::moturus_log!("{}:{} IoSubmission::poll() pending", file!(), line!());
+
+                let wake_handle = cx.waker().as_raw().data() as usize as u64;
+                self.io_executor.add_waiter(wake_handle);
+                Poll::Pending
+            }
+        }
+    }
+}
+
 struct TrackingEntry {
-    qe: QueueEntry,
+    msg: Msg,
     done: AtomicBool,
 }
 
 pub struct IoSubmission {
-    sqe: *const UnsafeCell<TrackingEntry>, // From Arc::into_raw
+    pmsg: *const UnsafeCell<TrackingEntry>, // From Arc::into_raw
     io_executor: &'static IoExecutor,
 }
 
 impl Drop for IoSubmission {
     fn drop(&mut self) {
-        if !self.sqe.is_null() {
+        if !self.pmsg.is_null() {
             unsafe {
                 // We either hold an additional reference, or none at all.
-                Arc::decrement_strong_count(self.sqe);
-                let arc = Arc::from_raw(self.sqe);
+                Arc::decrement_strong_count(self.pmsg);
+                let arc = Arc::from_raw(self.pmsg);
                 debug_assert_eq!(1, Arc::strong_count(&arc));
                 self.io_executor.cache_sqe(arc);
             }
@@ -82,32 +109,32 @@ impl Drop for IoSubmission {
 
 impl IoSubmission {
     fn qe(&self) -> &mut TrackingEntry {
-        debug_assert!(!self.sqe.is_null());
-        let p_sqe = self.sqe as usize as *mut UnsafeCell<TrackingEntry>;
+        debug_assert!(!self.pmsg.is_null());
+        let p_sqe = self.pmsg as usize as *mut UnsafeCell<TrackingEntry>;
         unsafe { (*p_sqe).get_mut() }
     }
 
     fn new(
         io_executor: &'static IoExecutor,
-        sqe: QueueEntry,
+        msg: Msg,
         cached: Option<Arc<UnsafeCell<TrackingEntry>>>,
     ) -> Self {
         let self_ = if let Some(cached) = cached {
             debug_assert_eq!(1, Arc::strong_count(&cached));
             let self_ = Self {
-                sqe: Arc::into_raw(cached),
+                pmsg: Arc::into_raw(cached),
                 io_executor,
             };
-            self_.qe().qe = sqe;
+            self_.qe().msg = msg;
             self_.qe().done.store(false, Ordering::Relaxed);
             self_
         } else {
             let sqe = Arc::new(UnsafeCell::new(TrackingEntry {
-                qe: sqe,
+                msg,
                 done: AtomicBool::new(false),
             }));
             Self {
-                sqe: Arc::into_raw(sqe),
+                pmsg: Arc::into_raw(sqe),
                 io_executor,
             }
         };
@@ -115,9 +142,9 @@ impl IoSubmission {
         // We need two refs: one is transferred to the server during submission,
         // one is transferred to IoCompletion.
         unsafe {
-            Arc::increment_strong_count(self_.sqe);
+            Arc::increment_strong_count(self_.pmsg);
         }
-        self_.qe().qe.id = self_.sqe as usize as u64;
+        self_.qe().msg.id = self_.pmsg as usize as u64;
         self_
     }
 }
@@ -126,18 +153,18 @@ impl Future for IoSubmission {
     type Output = IoCompletion;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoCompletion> {
-        if self.sqe.is_null() {
+        if self.pmsg.is_null() {
             #[cfg(debug_assertions)]
             crate::util::moturus_log!("{}:{} empty IoSubmission::poll()", file!(), line!());
-            Poll::Ready(IoCompletion::new(self.sqe, self.io_executor))
+            Poll::Ready(IoCompletion::new(self.pmsg, self.io_executor))
         } else {
             let wake_handle = cx.waker().as_raw().data() as usize as u64;
-            self.qe().qe.wake_handle = wake_handle;
-            match self.io_executor.io_client().submit_sqe(self.qe().qe) {
+            self.qe().msg.wake_handle = wake_handle;
+            match self.io_executor.io_client().send(self.qe().msg) {
                 Ok(_) => {
                     // Note that IoCompletion will wake the server.
-                    let out = IoCompletion::new(self.sqe, self.io_executor);
-                    self.sqe = core::ptr::null();
+                    let out = IoCompletion::new(self.pmsg, self.io_executor);
+                    self.pmsg = core::ptr::null();
                     Poll::Ready(out)
                 }
                 Err(err) => {
@@ -192,19 +219,19 @@ impl IoCompletion {
 }
 
 impl Future for IoCompletion {
-    type Output = QueueEntry;
+    type Output = Msg;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<QueueEntry> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Msg> {
         if self.cqe.is_null() {
             #[cfg(debug_assertions)]
             crate::util::moturus_log!("{}:{} empty IoSubmission::poll()", file!(), line!());
-            return Poll::Ready(QueueEntry::new());
+            return Poll::Ready(Msg::new());
         }
 
         let qe = self.qe();
 
         if self.done() {
-            let res = qe.qe;
+            let res = qe.msg;
 
             let arc = unsafe { Arc::from_raw(self.cqe) };
             self.cqe = core::ptr::null();
@@ -214,7 +241,7 @@ impl Future for IoCompletion {
         } else {
             self.io_executor.poll_completions();
             if self.done() {
-                let res = qe.qe;
+                let res = qe.msg;
 
                 let arc = unsafe { Arc::from_raw(self.cqe) };
                 self.cqe = core::ptr::null();
@@ -233,21 +260,21 @@ impl Future for IoCompletion {
 
 // This IoExecutor is shared between threads and so is only &self.
 struct IoExecutor {
-    sqe_cache: ArrayQueue<Arc<UnsafeCell<TrackingEntry>>>,
-    io_client: Option<io_channel::Client>,
+    pmsg_cache: ArrayQueue<Arc<UnsafeCell<TrackingEntry>>>,
+    io_client: Option<io_channel::ClientConnection>,
     waiters: crate::mutex::Mutex<(BTreeSet<u64>, VecDeque<u64>)>,
 }
 
 impl IoExecutor {
     fn new_zeroed() -> Self {
         Self {
-            sqe_cache: ArrayQueue::new(QUEUE_SIZE * 4),
+            pmsg_cache: ArrayQueue::new(io_channel::QUEUE_SIZE as usize),
             io_client: None,
             waiters: crate::mutex::Mutex::new((BTreeSet::new(), VecDeque::new())),
         }
     }
 
-    fn io_client(&self) -> &io_channel::Client {
+    fn io_client(&self) -> &io_channel::ClientConnection {
         // Safe because we never expose Self without io_client: see inst() below.
         unsafe { self.io_client.as_ref().unwrap_unchecked() }
     }
@@ -256,17 +283,17 @@ impl IoExecutor {
         IoPageWaiter { io_executor: self }
     }
 
-    pub fn shared_page(&'static self, page_idx: u16) -> IoPage {
-        self.io_client().shared_page(page_idx)
+    pub fn get_page(&'static self, page_idx: u16) -> IoPage {
+        self.io_client().get_page(page_idx)
     }
 
-    fn io_submission(&'static self, sqe: QueueEntry) -> IoSubmission {
-        IoSubmission::new(self, sqe, self.sqe_cache.pop())
+    fn io_submission(&'static self, sqe: Msg) -> IoSubmission {
+        IoSubmission::new(self, sqe, self.pmsg_cache.pop())
     }
 
     fn cache_sqe(&self, sqe: Arc<UnsafeCell<TrackingEntry>>) {
         if Arc::strong_count(&sqe) == 1 {
-            let _ = self.sqe_cache.push(sqe);
+            let _ = self.pmsg_cache.push(sqe);
         }
     }
 
@@ -288,7 +315,7 @@ impl IoExecutor {
             let new: *mut Self = Box::into_raw(Box::new(Self::new_zeroed()));
             match INST.compare_exchange(inst, new, Ordering::Release, Ordering::Relaxed) {
                 Ok(_) => unsafe {
-                    let io_client = match io_channel::Client::connect("sys-io") {
+                    let io_client = match io_channel::ClientConnection::connect("sys-io") {
                         Ok(client) => client,
                         Err(err) => {
                             panic!("Failed to connect to sys-io: {:?}", err);
@@ -340,14 +367,14 @@ impl IoExecutor {
 
     fn poll_completions(&self) {
         loop {
-            match self.io_client().get_cqe() {
+            match self.io_client().recv() {
                 Ok(cqe) => unsafe {
-                    let p_cqe = cqe.id as usize as *mut UnsafeCell<TrackingEntry>;
-                    (*p_cqe).get_mut().qe = cqe;
-                    (*p_cqe).get_mut().done.store(true, Ordering::Release);
+                    let pmsg = cqe.id as usize as *mut UnsafeCell<TrackingEntry>;
+                    (*pmsg).get_mut().msg = cqe;
+                    (*pmsg).get_mut().done.store(true, Ordering::Release);
 
                     let _ = moto_sys::syscalls::SysCpu::wake(cqe.wake_handle.into());
-                    let _ = Arc::from_raw(p_cqe); // To decrement ref count.
+                    let _ = Arc::from_raw(pmsg); // To decrement ref count.
 
                     if cqe.wake_handle != SysHandle::NONE.into() {
                         if cqe.wake_handle != this_thread_handle() {
@@ -422,11 +449,21 @@ pub fn alloc_page() -> IoPageWaiter {
 }
 
 pub fn shared_page(idx: u16) -> IoPage {
-    IoExecutor::inst().shared_page(idx)
+    IoExecutor::inst().get_page(idx)
 }
 
-pub fn submit(sqe: QueueEntry) -> IoSubmission {
+pub fn submit(sqe: Msg) -> IoSubmission {
     IoExecutor::inst().io_submission(sqe)
+}
+
+// We use IoSender (a future) instead of trying to send inline and queing into a local
+// queue and completing so that the order of sent messages is preserved (important
+// for things like TcpStream writes).
+pub fn send(msg: Msg) -> IoSender {
+    IoSender {
+        msg,
+        io_executor: &IoExecutor::inst(),
+    }
 }
 
 /*

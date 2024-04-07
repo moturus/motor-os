@@ -92,10 +92,9 @@ impl Payload {
     }
 }
 
-// QueueEntry is used for both the submission queue and the completion queue.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct QueueEntry {
+pub struct Msg {
     pub id: u64,          // IN. See user_data in io_uring.pdf. Used by client-side executor.
     pub handle: u64,      // IN/OUT. Like Windows handle, or Unix fd.
     pub command: u16,     // IN.
@@ -105,24 +104,24 @@ pub struct QueueEntry {
     pub payload: Payload, // IN/OUT.
 }
 
-const _QE_SIZE: () = assert!(core::mem::size_of::<QueueEntry>() == 56);
+const _MSG_SIZE: () = assert!(core::mem::size_of::<Msg>() == 56);
 
 // Cache-line aligned, cache-line sized.
 #[repr(C, align(64))]
-pub struct QueueSlot {
+struct MsgSlot {
     pub stamp: AtomicU64, // IN/OUT: same as stamp in crossbeam ArrayQueue, or sequence_ in Dmitry Vyukov's mpmc.
-    pub qe: QueueEntry,
+    pub msg: Msg,
 }
 
-const _QS_SIZE: () = assert!(core::mem::size_of::<QueueSlot>() == 64);
+const _SLOT_SIZE: () = assert!(core::mem::size_of::<MsgSlot>() == 64);
 
-impl Debug for QueueEntry {
+impl Debug for Msg {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("QueueEntry").field("id", &self.id).finish()
+        f.debug_struct("Msg").field("id", &self.id).finish()
     }
 }
 
-impl QueueEntry {
+impl Msg {
     pub fn new() -> Self {
         let mut result: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
         result.status = ErrorCode::NotReady.into();
@@ -138,20 +137,20 @@ impl QueueEntry {
     }
 }
 
-const QUEUE_SIZE: u64 = 64;
+pub const QUEUE_SIZE: u64 = 64;
 const QUEUE_MASK: u64 = QUEUE_SIZE - 1;
-const CHANNEL_PAGE_COUNT: usize = 128;
+pub const CHANNEL_PAGE_COUNT: usize = 128;
 
 #[repr(C, align(4096))]
 struct RawChannel {
     // First 4 cache lines.
-    submission_queue_head: AtomicU64,
+    client_queue_head: AtomicU64,
     _pad1: [u64; 7],
-    submission_queue_tail: AtomicU64,
+    client_queue_tail: AtomicU64,
     _pad2: [u64; 7],
-    completion_queue_head: AtomicU64,
+    server_queue_head: AtomicU64,
     _pad3: [u64; 7],
-    completion_queue_tail: AtomicU64,
+    server_queue_tail: AtomicU64,
     _pad4: [u64; 7],
 
     shared_pages_in_use_0: AtomicU64,
@@ -165,11 +164,11 @@ struct RawChannel {
     // Pad to PAGE_SIZE
     _pad8: [u8; 3584],
 
-    // offset: 4096 = 1 page
-    submission_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
+    // offset: 4096 = 1 page; client=>server queue.
+    client_queue: [MsgSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
-    // offset: 8192 = 2 pages
-    completion_queue: [QueueSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
+    // offset: 8192 = 2 pages; server=>client queue.
+    server_queue: [MsgSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
     shared_pages: [Page; CHANNEL_PAGE_COUNT],
 }
@@ -178,8 +177,8 @@ pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == 
 
 impl RawChannel {
     fn is_empty(&self) -> bool {
-        self.submission_queue_head.load(Ordering::Acquire)
-            == self.completion_queue_tail.load(Ordering::Acquire)
+        self.client_queue_head.load(Ordering::Acquire)
+            == self.server_queue_tail.load(Ordering::Acquire)
     }
 
     fn shared_page_bytes(&self, page_idx: u16) -> Result<&mut [u8], ErrorCode> {
@@ -257,23 +256,13 @@ impl RawChannel {
         }
     }
 
-    fn may_submit(&self) -> bool {
-        self.submission_queue_head.load(Ordering::Relaxed)
-            < (self.submission_queue_tail.load(Ordering::Relaxed) + QUEUE_SIZE)
-    }
-
-    fn may_have_completions(&self) -> bool {
-        self.completion_queue_head.load(Ordering::Relaxed)
-            > self.completion_queue_tail.load(Ordering::Relaxed)
-    }
-
     fn dump_state(&self) {
         crate::moto_log!(
             "RawChannel: sqh: {} sqt: {} cqh: {} cqt: {}",
-            self.submission_queue_head.load(Ordering::Relaxed),
-            self.submission_queue_tail.load(Ordering::Relaxed),
-            self.completion_queue_head.load(Ordering::Relaxed),
-            self.completion_queue_tail.load(Ordering::Relaxed),
+            self.client_queue_head.load(Ordering::Relaxed),
+            self.client_queue_tail.load(Ordering::Relaxed),
+            self.server_queue_head.load(Ordering::Relaxed),
+            self.server_queue_tail.load(Ordering::Relaxed),
         );
     }
 }
@@ -309,18 +298,18 @@ impl IoPage {
     }
 }
 
-pub struct Client {
+pub struct ClientConnection {
     raw_channel: AtomicPtr<RawChannel>,
     server_handle: SysHandle,
 }
 
-impl Drop for Client {
+impl Drop for ClientConnection {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
-impl Client {
+impl ClientConnection {
     pub fn connect(url: &str) -> Result<Self, ErrorCode> {
         let addr = SysMem::map(
             SysHandle::SELF,
@@ -351,26 +340,26 @@ impl Client {
         fence(Ordering::Acquire);
         self_
             .raw_channel()
-            .completion_queue_head
+            .server_queue_head
             .store(0, Ordering::Relaxed);
         self_
             .raw_channel()
-            .completion_queue_tail
+            .server_queue_tail
             .store(0, Ordering::Relaxed);
         self_
             .raw_channel()
-            .submission_queue_head
+            .client_queue_head
             .store(0, Ordering::Relaxed);
         self_
             .raw_channel()
-            .submission_queue_tail
+            .client_queue_tail
             .store(0, Ordering::Relaxed);
 
         for idx in 0..(QUEUE_SIZE) {
-            self_.raw_channel().submission_queue[idx as usize]
+            self_.raw_channel().client_queue[idx as usize]
                 .stamp
                 .store(idx, Ordering::Relaxed);
-            self_.raw_channel().completion_queue[idx as usize]
+            self_.raw_channel().server_queue[idx as usize]
                 .stamp
                 .store(idx, Ordering::Relaxed);
         }
@@ -393,17 +382,17 @@ impl Client {
     }
 
     // See enqueue() in mpmc.cc.
-    pub fn submit_sqe(&self, sqe: QueueEntry) -> Result<(), ErrorCode> {
+    pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut QueueSlot;
-        let mut pos = raw_channel.submission_queue_head.load(Ordering::Relaxed);
+        let mut slot: &mut MsgSlot;
+        let mut pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
         loop {
-            slot = &mut raw_channel.submission_queue[(pos & QUEUE_MASK) as usize];
+            slot = &mut raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             if stamp == pos {
-                match raw_channel.submission_queue_head.compare_exchange_weak(
+                match raw_channel.client_queue_head.compare_exchange_weak(
                     pos,
                     pos + 1,
                     Ordering::Relaxed,
@@ -416,28 +405,28 @@ impl Client {
                 return Err(ErrorCode::NotReady); // The queue is full.
             } else {
                 // We lost the race - continue.
-                pos = raw_channel.submission_queue_head.load(Ordering::Relaxed);
+                pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
             }
         }
 
-        slot.qe = sqe;
+        slot.msg = msg;
         slot.stamp.store(pos + 1, Ordering::Release);
         Ok(())
     }
 
     // See dequeue() in mpmc.cc.
-    pub fn get_cqe(&self) -> Result<QueueEntry, ErrorCode> {
+    pub fn recv(&self) -> Result<Msg, ErrorCode> {
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut QueueSlot;
-        let mut pos = raw_channel.completion_queue_tail.load(Ordering::Relaxed);
+        let mut slot: &mut MsgSlot;
+        let mut pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
 
         loop {
-            slot = &mut raw_channel.completion_queue[(pos & QUEUE_MASK) as usize];
+            slot = &mut raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             if stamp == (pos + 1) {
-                match raw_channel.completion_queue_tail.compare_exchange_weak(
+                match raw_channel.server_queue_tail.compare_exchange_weak(
                     pos,
                     pos + 1,
                     Ordering::Relaxed,
@@ -450,11 +439,11 @@ impl Client {
                 return Err(ErrorCode::NotReady); // The queue is empty.
             } else {
                 // We lost the race - continue.
-                pos = raw_channel.completion_queue_tail.load(Ordering::Relaxed);
+                pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
             }
         }
 
-        let cqe = slot.qe;
+        let cqe = slot.msg;
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
         Ok(cqe)
     }
@@ -478,7 +467,7 @@ impl Client {
         }
     }
 
-    pub fn shared_page(&self, page_idx: u16) -> IoPage {
+    pub fn get_page(&self, page_idx: u16) -> IoPage {
         assert!(page_idx < CHANNEL_PAGE_COUNT as u16);
         IoPage {
             page_idx,
@@ -497,14 +486,6 @@ impl Client {
         self.raw_channel().is_empty()
     }
 
-    pub fn may_submit(&self) -> bool {
-        self.raw_channel().may_submit()
-    }
-
-    pub fn may_have_completions(&self) -> bool {
-        self.raw_channel().may_have_completions()
-    }
-
     pub fn dump_state(&self) {
         self.raw_channel().dump_state()
     }
@@ -517,13 +498,13 @@ pub enum ServerStatus {
     Error(ErrorCode),
 }
 
-pub struct Server {
+pub struct ServerConnection {
     raw_channel: *mut RawChannel,
     wait_handle: SysHandle,
     status: ServerStatus,
 }
 
-impl Drop for Server {
+impl Drop for ServerConnection {
     fn drop(&mut self) {
         if !self.raw_channel.is_null() {
             self.clear();
@@ -531,7 +512,7 @@ impl Drop for Server {
     }
 }
 
-impl Server {
+impl ServerConnection {
     pub fn create(url: &str) -> Result<Self, ErrorCode> {
         let addr = SysMem::map(
             SysHandle::SELF,
@@ -565,21 +546,21 @@ impl Server {
     }
 
     // See dequeue() in mpmc.cc.
-    pub fn get_sqe(&mut self) -> Result<QueueEntry, ErrorCode> {
+    pub fn recv(&self) -> Result<Msg, ErrorCode> {
         if self.status != ServerStatus::Connected {
             return Err(ErrorCode::InvalidArgument);
         }
 
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut QueueSlot;
-        let mut pos = raw_channel.submission_queue_tail.load(Ordering::Relaxed);
+        let mut slot: &mut MsgSlot;
+        let mut pos = raw_channel.client_queue_tail.load(Ordering::Relaxed);
         loop {
-            slot = &mut raw_channel.submission_queue[(pos & QUEUE_MASK) as usize];
+            slot = &mut raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             if stamp == (pos + 1) {
-                match raw_channel.submission_queue_tail.compare_exchange_weak(
+                match raw_channel.client_queue_tail.compare_exchange_weak(
                     pos,
                     pos + 1,
                     Ordering::Relaxed,
@@ -592,32 +573,32 @@ impl Server {
                 return Err(ErrorCode::NotReady); // The queue is empty.
             } else {
                 // We lost the race - continue.
-                pos = raw_channel.submission_queue_tail.load(Ordering::Relaxed);
+                pos = raw_channel.client_queue_tail.load(Ordering::Relaxed);
             }
         }
 
-        let sqe = slot.qe;
+        let sqe = slot.msg;
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
         Ok(sqe)
     }
 
     // See enqueue() in mpmc.cc.
-    pub fn complete_sqe(&mut self, sqe: QueueEntry) -> Result<(), ErrorCode> {
+    pub fn send(&self, sqe: Msg) -> Result<(), ErrorCode> {
         if self.status != ServerStatus::Connected {
             return Err(ErrorCode::InvalidArgument);
         }
 
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut QueueSlot;
-        let mut pos = raw_channel.completion_queue_head.load(Ordering::Relaxed);
+        let mut slot: &mut MsgSlot;
+        let mut pos = raw_channel.server_queue_head.load(Ordering::Relaxed);
 
         loop {
-            slot = &mut raw_channel.completion_queue[(pos & QUEUE_MASK) as usize];
+            slot = &mut raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             if stamp == pos {
-                match raw_channel.completion_queue_head.compare_exchange_weak(
+                match raw_channel.server_queue_head.compare_exchange_weak(
                     pos,
                     pos + 1,
                     Ordering::Relaxed,
@@ -630,11 +611,11 @@ impl Server {
                 return Err(ErrorCode::NotReady); // The queue is full.
             } else {
                 // We lost the race - continue.
-                pos = raw_channel.completion_queue_head.load(Ordering::Relaxed);
+                pos = raw_channel.server_queue_head.load(Ordering::Relaxed);
             }
         }
 
-        slot.qe = sqe;
+        slot.msg = sqe;
         slot.stamp.store(pos + 1, Ordering::Release);
         Ok(())
     }
@@ -652,11 +633,11 @@ impl Server {
         fence(Ordering::Acquire);
 
         if (*self.raw_channel)
-            .completion_queue_head
+            .server_queue_head
             .load(Ordering::Relaxed)
             != 0
             || (*self.raw_channel)
-                .completion_queue_tail
+                .server_queue_tail
                 .load(Ordering::Relaxed)
                 != 0
         {
@@ -696,7 +677,7 @@ impl Server {
         }
     }
 
-    pub fn shared_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
         if page_idx >= (CHANNEL_PAGE_COUNT as u16) {
             Err(ErrorCode::InvalidArgument)
         } else {

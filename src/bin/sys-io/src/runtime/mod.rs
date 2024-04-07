@@ -2,10 +2,9 @@ use moto_ipc::io_channel;
 use moto_sys::SysHandle;
 
 mod io_thread;
-pub mod process;
 
 pub struct PendingCompletion {
-    pub cqe: io_channel::QueueEntry,
+    pub msg: io_channel::Msg,
     pub endpoint_handle: SysHandle,
 }
 
@@ -15,15 +14,15 @@ pub trait IoSubsystem {
     fn process_wakeup(&mut self, handle: SysHandle);
     fn process_sqe(
         &mut self,
-        proc: &mut process::Process,
-        sqe: io_channel::QueueEntry,
-    ) -> Option<io_channel::QueueEntry>;
+        conn: &std::rc::Rc<io_channel::ServerConnection>,
+        sqe: io_channel::Msg,
+    ) -> Result<Option<io_channel::Msg>, ()>;
 
     // Returns a completion for a process. If none, the device has nothing
     // to do and the IO thread may sleep.
     fn poll(&mut self) -> Option<PendingCompletion>;
 
-    fn on_process_drop(&mut self, proc: &mut process::Process);
+    fn on_connection_drop(&mut self, conn: SysHandle);
 
     // For how long the IO thread may sleep without calling poll.
     // This is particularly useful in networking, where TCP have various timers.

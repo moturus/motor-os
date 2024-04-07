@@ -68,11 +68,19 @@ impl TxToken for VirtioTxToken {
             if self.dev().have_tx {
                 let mut buffer = vec![0u8; len];
                 let result = f(&mut buffer);
+                self.dev().tx_queued += buffer.len();
                 self.dev().pending_tx.push_back(buffer);
+                // #[cfg(debug_assertions)]
+                // log::debug!("DEV: pending tx bytes: {}", self.dev().tx_queued);
 
+                // if self.dev().tx_queued > 6000 {
+                //     log::info!("DEV: pending tx bytes: {}", self.dev().tx_queued);
+                // }
                 return result;
             }
         }
+
+        assert!(self.dev().pending_tx.is_empty());
 
         self.dev().have_tx = true;
         let buf = self.dev().tx_buf_mut();
@@ -81,12 +89,7 @@ impl TxToken for VirtioTxToken {
         let res = f(packet);
 
         #[cfg(debug_assertions)]
-        crate::moto_log!(
-            "{}:{} enqueueing tx {} bytes into the NIC",
-            file!(),
-            line!(),
-            len
-        );
+        log::debug!("enqueueing tx {} bytes into the NIC (zero pending)", len);
         self.dev()
             .virtio_dev
             .post_send(self.dev().tx_header(), buf)
@@ -104,6 +107,7 @@ struct VirtioSmoltcpDevice {
     // Sometimes tx_page is busy, but smoltcp wants to send some bytes; we store
     // these bytes in here.
     pending_tx: VecDeque<Vec<u8>>,
+    tx_queued: usize,
 
     virtio_dev: std::sync::Arc<moto_virtio::virtio_net::NetDev>,
 }
@@ -129,6 +133,7 @@ impl VirtioSmoltcpDevice {
             rx_bytes: 0,
             have_tx: false,
             pending_tx: VecDeque::new(),
+            tx_queued: 0,
             virtio_dev,
         };
         self_.virtio_dev.post_receive(self_.rx_buf_mut()).unwrap();
@@ -170,12 +175,7 @@ impl VirtioSmoltcpDevice {
             self.rx_bytes = self.virtio_dev.consume_receive();
             if self.rx_bytes != 0 {
                 #[cfg(debug_assertions)]
-                crate::moto_log!(
-                    "{}:{} got {} RX bytes in the NIC",
-                    file!(),
-                    line!(),
-                    self.rx_bytes
-                );
+                log::debug!("got {} RX bytes in the NIC", self.rx_bytes);
             }
         }
     }
@@ -184,7 +184,7 @@ impl VirtioSmoltcpDevice {
         if self.have_tx {
             if self.virtio_dev.poll_send() {
                 #[cfg(debug_assertions)]
-                crate::moto_log!("TX completed");
+                log::debug!("TX completed");
                 self.have_tx = false;
             } else {
                 return;
@@ -195,6 +195,7 @@ impl VirtioSmoltcpDevice {
 
         if let Some(packet) = self.pending_tx.pop_front() {
             self.have_tx = true;
+            self.tx_queued -= packet.len();
 
             let buf = self.tx_buf_mut();
             assert!(buf.len() >= packet.len());
@@ -205,10 +206,11 @@ impl VirtioSmoltcpDevice {
 
             #[cfg(debug_assertions)]
             crate::moto_log!(
-                "{}:{} enqueueing tx {} bytes into the NIC",
+                "{}:{} enqueueing tx {} bytes into the NIC; pending: {}",
                 file!(),
                 line!(),
-                packet.len()
+                packet.len(),
+                self.tx_queued
             );
             self.virtio_dev.post_send(self.tx_header(), buf).unwrap();
         }

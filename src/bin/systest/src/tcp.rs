@@ -185,6 +185,7 @@ pub fn test_tcp_loopback() {
     let _ = std::net::TcpStream::connect("localhost:3333").unwrap();
     server.join().unwrap();
 
+    std::thread::sleep(std::time::Duration::from_millis(10));
     test_read_timeout();
     // TODO: how can we test write timeout?
 

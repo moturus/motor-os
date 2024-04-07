@@ -1,6 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
+    rc::Rc,
 };
 
 use moto_ipc::io_channel;
@@ -24,16 +25,16 @@ impl From<TcpListenerId> for u64 {
 }
 
 pub struct TcpListener {
-    proc_handle: SysHandle,
+    conn: Rc<io_channel::ServerConnection>,
     socket_addr: SocketAddr, // What the user gave us, can be 0.0.0.0:port.
 
     // If listener::accept() is called first, it's sqe will be added
     // to pending_accepts.
-    pending_accepts: VecDeque<io_channel::QueueEntry>,
+    pending_accepts: VecDeque<(io_channel::Msg, Rc<io_channel::ServerConnection>)>,
 
     // Connected sockets that did not yet emit the accept QE.
     // Note: connected_sockets below may contain dropped sockets.
-    connected_sockets: VecDeque<(SocketId, SocketAddr)>,
+    pending_sockets: VecDeque<(SocketId, SocketAddr)>,
 
     // Pure listening sockets. We need to track them to drop when the listener is dropped.
     listening_sockets: HashSet<SocketId>,
@@ -43,47 +44,52 @@ impl Drop for TcpListener {
     fn drop(&mut self) {
         assert!(
             self.pending_accepts.is_empty()
-                && self.connected_sockets.is_empty()
+                && self.pending_sockets.is_empty()
                 && self.listening_sockets.is_empty()
         );
     }
 }
 
 impl TcpListener {
-    pub fn new(proc_handle: SysHandle, socket_addr: SocketAddr) -> Self {
+    pub fn new(conn: std::rc::Rc<io_channel::ServerConnection>, socket_addr: SocketAddr) -> Self {
         Self {
-            proc_handle,
+            conn,
             socket_addr,
             pending_accepts: VecDeque::new(),
-            connected_sockets: VecDeque::new(),
+            pending_sockets: VecDeque::new(),
             listening_sockets: HashSet::new(),
         }
     }
 
-    pub fn proc_handle(&self) -> SysHandle {
-        self.proc_handle
+    pub fn conn_handle(&self) -> SysHandle {
+        self.conn.wait_handle()
     }
 
     pub fn socket_addr(&self) -> &SocketAddr {
         &self.socket_addr
     }
 
-    pub fn add_connected_socket(&mut self, id: SocketId, addr: SocketAddr) {
-        assert!(self.pending_accepts.is_empty());
+    pub fn add_pending_socket(&mut self, id: SocketId, addr: SocketAddr) {
         assert!(self.listening_sockets.remove(&id));
-        self.connected_sockets.push_back((id, addr));
+        self.pending_sockets.push_back((id, addr));
     }
 
-    pub fn get_connected_socket(&mut self) -> Option<(SocketId, SocketAddr)> {
-        self.connected_sockets.pop_front()
+    pub fn pop_pending_socket(&mut self) -> Option<(SocketId, SocketAddr)> {
+        self.pending_sockets.pop_front()
     }
 
-    pub fn add_pending_accept(&mut self, sqe: io_channel::QueueEntry) {
-        assert!(self.connected_sockets.is_empty());
-        self.pending_accepts.push_back(sqe);
+    pub fn add_pending_accept(
+        &mut self,
+        msg: io_channel::Msg,
+        conn: &Rc<io_channel::ServerConnection>,
+    ) {
+        assert!(self.pending_sockets.is_empty());
+        self.pending_accepts.push_back((msg, conn.clone()));
     }
 
-    pub fn get_pending_accept(&mut self) -> Option<io_channel::QueueEntry> {
+    pub fn get_pending_accept(
+        &mut self,
+    ) -> Option<(io_channel::Msg, Rc<io_channel::ServerConnection>)> {
         self.pending_accepts.pop_front()
     }
 

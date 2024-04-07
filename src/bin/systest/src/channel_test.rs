@@ -1,5 +1,5 @@
 use moto_ipc::io_channel::*;
-use moto_runtime::io_executor;
+// use moto_runtime::io_executor;
 use moto_sys::SysHandle;
 use std::{
     sync::{atomic::*, Arc},
@@ -8,18 +8,18 @@ use std::{
 
 const CHANNEL_TEST_ITERS: u64 = 1000;
 
-fn client_loop(client: &mut Client) {
+fn client_loop(client: &mut ClientConnection) {
     use moto_sys::syscalls::SysCpu;
     use moto_sys::ErrorCode;
 
     let mut values_sent: u64 = 0;
     let mut values_received: u64 = 0;
 
-    let mut process_completions = |client: &mut Client| loop {
-        match client.get_cqe() {
+    let mut process_completions = |client: &mut ClientConnection| loop {
+        match client.recv() {
             Ok(cqe) => {
                 values_received += cqe.id;
-                let page = client.shared_page(cqe.payload.shared_pages()[0]);
+                let page = client.get_page(cqe.payload.shared_pages()[0]);
                 let slice = page.bytes();
                 for idx in 0..slice.len() {
                     assert_eq!(slice[idx], ((idx & 0xFF) as u8) ^ 0xFF);
@@ -43,7 +43,7 @@ fn client_loop(client: &mut Client) {
                 }
             }
         };
-        let mut sqe = QueueEntry::new();
+        let mut sqe = Msg::new();
         sqe.id = iter;
         sqe.wake_handle = SysHandle::this_thread().into();
         let slice = page.bytes_mut();
@@ -54,7 +54,7 @@ fn client_loop(client: &mut Client) {
         page.forget();
         values_sent += sqe.id;
         loop {
-            match client.submit_sqe(sqe) {
+            match client.send(sqe) {
                 Ok(()) => break,
                 Err(err) => {
                     assert_eq!(err, ErrorCode::NotReady);
@@ -73,17 +73,17 @@ fn client_loop(client: &mut Client) {
     assert_eq!(values_sent, values_received);
 }
 
-fn server_loop(server: &mut Server) {
+fn server_loop(server: &mut ServerConnection) {
     use moto_sys::syscalls::SysCpu;
     use moto_sys::ErrorCode;
 
     let mut cached_wakee = None;
 
     'outer: loop {
-        match server.get_sqe() {
+        match server.recv() {
             Ok(mut sqe) => {
                 let page_idx = sqe.payload.shared_pages()[0];
-                let page = server.shared_page(page_idx).unwrap();
+                let page = server.get_page(page_idx).unwrap();
                 let slice = page.bytes_mut();
                 for idx in 0..slice.len() {
                     assert_eq!(slice[idx], (idx & 0xFF) as u8);
@@ -95,7 +95,7 @@ fn server_loop(server: &mut Server) {
                 cached_wakee = Some((server.wait_handle(), SysHandle::from_u64(sqe.wake_handle)));
 
                 loop {
-                    match server.complete_sqe(sqe) {
+                    match server.send(sqe) {
                         Ok(()) => break,
                         Err(err) => {
                             assert_eq!(err, ErrorCode::NotReady);
@@ -145,7 +145,7 @@ fn client_thread(server_watcher: Arc<AtomicBool>) {
     }
     server_watcher.store(false, Ordering::Release);
 
-    let mut client = Client::connect("systest_channel").unwrap();
+    let mut client = ClientConnection::connect("systest_channel").unwrap();
     client_loop(&mut client);
     core::mem::drop(client);
 }
@@ -154,7 +154,7 @@ fn server_thread(server_started: Arc<AtomicBool>) {
     use moto_sys::syscalls::SysCpu;
 
     // Listen.
-    let mut server = Server::create("systest_channel").unwrap();
+    let mut server = ServerConnection::create("systest_channel").unwrap();
     server_started.store(true, Ordering::Release);
 
     SysCpu::wait(
@@ -172,8 +172,8 @@ fn server_thread(server_started: Arc<AtomicBool>) {
 }
 
 pub fn test_io_channel() {
-    assert!(Client::connect("systest_channel").is_err());
-    if let Err(err) = Server::create("sys-io") {
+    assert!(ClientConnection::connect("systest_channel").is_err());
+    if let Err(err) = ServerConnection::create("sys-io") {
         assert_eq!(err, moto_sys::ErrorCode::NotAllowed);
     } else {
         panic!("Was able to create a sys-io server.");
@@ -198,7 +198,7 @@ async fn throughput_iter(do_4k: bool, batch_size: u64) {
     let mut qe_vec = vec![];
 
     for step in 0..batch_size {
-        let mut sqe = QueueEntry::new();
+        let mut sqe = Msg::new();
         sqe.command = CMD_NOOP_OK;
         sqe.wake_handle = SysHandle::this_thread().into();
         sqe.id = step as u64;
@@ -299,7 +299,7 @@ async fn io_latency_iter() {
     let io_page = io_executor::alloc_page().await;
 
     let ts_1 = moto_sys::time::Instant::now().as_u64();
-    let mut sqe = QueueEntry::new();
+    let mut sqe = Msg::new();
     sqe.command = CMD_NOOP_OK;
     sqe.flags = FLAG_CMD_NOOP_OK_TIMESTAMP;
     sqe.handle = ts_0;
