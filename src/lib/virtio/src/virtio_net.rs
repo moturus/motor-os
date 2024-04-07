@@ -65,11 +65,9 @@ impl NetDev {
     // Step 4
     fn negotiate_features(&mut self) -> Result<(), ()> {
         let features_available = self.dev.get_available_features();
+        // NOTE: neither CHV nor QEMU have VIRTIO_F_IN_ORDER available.
         #[cfg(debug_assertions)]
-        moto_sys::syscalls::SysMem::log(
-            alloc::format!("NET features available: 0x{:x}", features_available).as_str(),
-        )
-        .ok();
+        log::debug!("NET features available: 0x{:x}", features_available);
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
             log::warn!("Virtio NET device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
@@ -180,7 +178,7 @@ impl NetDev {
     }
 
     #[inline(never)]
-    pub fn post_send(&self, header: &mut Header, buf: &[u8]) -> Result<(), ()> {
+    pub fn post_send(&self, header: &mut Header, buf: &[u8]) -> Result<u16, ()> {
         use super::virtio_queue::UserData;
 
         *header = Header::default();
@@ -199,7 +197,7 @@ impl NetDev {
         assert_eq!(self.dev.virtqueues.len(), 2);
         let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_TX].lock();
 
-        virtqueue.add_buf(&buffs, 2, 0);
+        let res = virtqueue.add_buf(&buffs, 2, 0);
 
         // Notify
         let notify_cap = self.dev.notify_cfg.unwrap();
@@ -210,20 +208,15 @@ impl NetDev {
             + (notify_cap.notify_off_multiplier as u64 * virtqueue.queue_notify_off as u64);
 
         cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
-        Ok(())
+        Ok(res)
     }
 
     #[inline(never)]
-    pub fn poll_send(&self) -> bool {
+    pub fn poll_send(&self) -> Option<u16> {
         assert_eq!(self.dev.virtqueues.len(), 2);
         let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_TX].lock();
 
-        if virtqueue.more_used() {
-            virtqueue.reclaim_used();
-            true
-        } else {
-            false
-        }
+        virtqueue.reclaim_used()
     }
 }
 

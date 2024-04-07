@@ -54,6 +54,7 @@ const FAILED_STATUS_BIT: u8 = 128;
 pub const VIRTIO_F_RING_INDIRECT_DESC: u64 = 1u64 << 28;
 pub const VIRTIO_F_RING_EVENT_IDX: u64 = 1u64 << 29;
 pub const VIRTIO_F_VERSION_1: u64 = 1u64 << 32;
+pub const _VIRTIO_F_IN_ORDER: u64 = 1u64 << 35;
 
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]

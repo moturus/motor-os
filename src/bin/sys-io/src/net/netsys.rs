@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     rc::Rc,
 };
@@ -46,17 +46,11 @@ pub(super) struct NetSys {
     woken_sockets: Rc<RefCell<VecDeque<SocketId>>>,
     wakers: std::collections::HashMap<SocketId, std::task::Waker>,
 
-    // Read/write timeouts.
-    tcp_rw_timeouts: BTreeMap<moto_sys::time::Instant, Vec<SocketId>>,
-
     // config: config::NetConfig,
     config: super::config::NetConfig,
 }
 
 impl NetSys {
-    // If a timeout expires within TIMEOUT_GRANULARITY, we indicate no waiting.
-    const TIMEOUT_GRANULARITY: core::time::Duration = core::time::Duration::from_nanos(50);
-
     pub fn new(config: super::config::NetConfig) -> Box<Self> {
         #[cfg(debug_assertions)]
         log::debug!(
@@ -79,7 +73,6 @@ impl NetSys {
             conn_tcp_sockets: HashMap::new(),
             woken_sockets: Rc::new(std::cell::RefCell::new(VecDeque::new())),
             wakers: HashMap::new(),
-            tcp_rw_timeouts: BTreeMap::new(),
             config,
         });
 
@@ -1622,15 +1615,6 @@ impl IoSubsystem for NetSys {
 
     fn wait_timeout(&mut self) -> Option<core::time::Duration> {
         let mut timeout = None;
-
-        if let Some((timo, _)) = self.tcp_rw_timeouts.first_key_value() {
-            let now = moto_sys::time::Instant::now();
-            if now >= (*timo - Self::TIMEOUT_GRANULARITY) {
-                return Some(core::time::Duration::ZERO);
-            }
-
-            timeout = Some(timo.duration_since(now));
-        }
 
         for device_idx in 0..self.devices.len() {
             let dev = self.devices.get_mut(device_idx).unwrap();

@@ -221,12 +221,13 @@ impl Virtqueue {
     }
 
     // See SeaBIOS virtio-ring.c::vring_add_buf.
-    pub fn add_buf(&mut self, data: &[UserData], outgoing: u16, incoming: u16) {
+    pub fn add_buf(&mut self, data: &[UserData], outgoing: u16, incoming: u16) -> u16 {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
         let mut idx = self.head_idx; // self.get_next_available_idx();;
+        let req_id = idx;
 
         let elements = outgoing + incoming;
 
@@ -252,6 +253,7 @@ impl Virtqueue {
         self.head_idx = idx;
 
         self.increment_available_idx(1);
+        req_id
     }
 
     pub fn more_used(&self) -> bool {
@@ -260,14 +262,19 @@ impl Virtqueue {
         self.last_used_idx != unsafe { ptr.as_ref().unwrap().load(Ordering::Acquire) }
     }
 
-    pub fn reclaim_used(&mut self) {
-        assert!(self.more_used());
-
+    pub fn reclaim_used(&mut self) -> Option<u16> {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let addr = self.used_ring.idx.load(Ordering::Acquire);
+        let ptr = addr as *const AtomicU16;
+        if self.last_used_idx == unsafe { ptr.as_ref().unwrap().load(Ordering::Acquire) } {
+            return None;
+        }
+
         let head = self.last_used_idx % self.queue_size;
         let elem = &self.used_ring.ring[head as usize];
 
         let mut idx = elem.id as u16;
+        let req_id = idx;
         loop {
             let descriptor = self.get_descriptor(idx);
             if (descriptor.flags & VIRTQ_DESC_F_NEXT) != 0 {
@@ -285,6 +292,7 @@ impl Virtqueue {
             self.last_used_idx += 1;
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        Some(req_id)
     }
 
     pub fn consume_used(&mut self) -> u32 {

@@ -73,7 +73,8 @@ impl TxToken for VirtioTxToken {
                 // #[cfg(debug_assertions)]
                 // log::debug!("DEV: pending tx bytes: {}", self.dev().tx_queued);
 
-                // if self.dev().tx_queued > 6000 {
+                // rnetbench can push this quite high (above 80k at least)
+                // if self.dev().tx_queued > 80000 {
                 //     log::info!("DEV: pending tx bytes: {}", self.dev().tx_queued);
                 // }
                 return result;
@@ -90,10 +91,12 @@ impl TxToken for VirtioTxToken {
 
         #[cfg(debug_assertions)]
         log::debug!("enqueueing tx {} bytes into the NIC (zero pending)", len);
-        self.dev()
+        let id = self
+            .dev()
             .virtio_dev
             .post_send(self.dev().tx_header(), buf)
             .unwrap();
+        log::debug!("post_send id {}", id);
         res
     }
 }
@@ -182,9 +185,9 @@ impl VirtioSmoltcpDevice {
 
     fn poll_virtio_tx(&mut self) {
         if self.have_tx {
-            if self.virtio_dev.poll_send() {
+            if let Some(id) = self.virtio_dev.poll_send() {
                 #[cfg(debug_assertions)]
-                log::debug!("TX completed");
+                log::debug!("TX completed id: {}", id);
                 self.have_tx = false;
             } else {
                 return;
@@ -212,7 +215,8 @@ impl VirtioSmoltcpDevice {
                 packet.len(),
                 self.tx_queued
             );
-            self.virtio_dev.post_send(self.tx_header(), buf).unwrap();
+            let id = self.virtio_dev.post_send(self.tx_header(), buf).unwrap();
+            log::debug!("post_send id {}", id);
         }
     }
 }

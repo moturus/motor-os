@@ -233,25 +233,42 @@ impl NetChannel {
                                 stream.recv_queue.push(msg).unwrap(); // TODO: handle error?
                                 s.1
                             } else {
-                                // #[cfg(debug_assertions)]
-                                moturus_log!(
-                                    "{}:{} orphan incoming message for dropped stream 0x{:x}; release i/o page?",
+                                if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
+                                    // RX raced with the client dropping the sream. Need to get page to free it.
+                                    let sz_read = msg.payload.args_64()[1];
+                                    if sz_read > 0 {
+                                        let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
+                                    }
+                                } else {
+                                    // #[cfg(debug_assertions)]
+                                    moturus_log!(
+                                    "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
                                     file!(),
                                     line!(),
+                                    msg.command,
                                     handle
                                 );
+                                }
                                 tcp_streams.remove(&handle);
                                 continue;
                             }
                         } else {
-                            // #[cfg(debug_assertions)]
-                            moturus_log!(
-                                "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
-                                file!(),
-                                line!(),
-                                msg.command,
-                                handle
-                            );
+                            if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
+                                // RX raced with the client dropping the sream. Need to get page to free it.
+                                let sz_read = msg.payload.args_64()[1];
+                                if sz_read > 0 {
+                                    let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
+                                }
+                            } else {
+                                // #[cfg(debug_assertions)]
+                                moturus_log!(
+                                    "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
+                                    file!(),
+                                    line!(),
+                                    msg.command,
+                                    handle
+                                );
+                            }
                             continue;
                         }
                     }
