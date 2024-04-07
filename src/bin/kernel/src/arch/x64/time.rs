@@ -315,10 +315,10 @@ fn nanos_to_tsc(nanos: u64) -> u64 {
 }
 
 pub fn system_start_time() -> super::time::Instant {
-    Instant { tsc_val: 0 }
-    // Instant {
-    //     tsc_val: GLOBALS.system_start_time_tsc.load(Ordering::Relaxed),
-    // }
+    // Instant { tsc_val: 0 }
+    Instant {
+        tsc_val: GLOBALS.system_start_time_tsc.load(Ordering::Relaxed),
+    }
 }
 
 pub fn populate_kernel_static_page(page: &mut moto_sys::KernelStaticPage) {

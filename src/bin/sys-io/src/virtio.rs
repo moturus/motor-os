@@ -1,6 +1,6 @@
+use moto_sys::syscalls::*;
 use std::{collections::BTreeMap, sync::atomic::AtomicU64};
 
-use moto_sys::syscalls::*;
 struct Mapper {
     virt_to_phys_map: moto_runtime::mutex::Mutex<BTreeMap<u64, u64>>,
     map_requests: AtomicU64,
