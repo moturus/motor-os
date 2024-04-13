@@ -153,13 +153,6 @@ impl NetChannel {
     }
 
     fn wait_for_resp(self: &Arc<Self>, resp_id: u64) -> io_channel::Msg {
-        self.recv_waiters.lock().insert(
-            resp_id,
-            (
-                moto_sys::UserThreadControlBlock::get().self_handle.into(),
-                None,
-            ),
-        );
         loop {
             self.receive_or_wait(None);
 
@@ -183,6 +176,17 @@ impl NetChannel {
     // Send message and wait for response.
     fn send_receive(self: &Arc<Self>, mut req: io_channel::Msg) -> io_channel::Msg {
         let req_id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+
+        // Add to waiters before sending the message, otherwise the response may
+        // arive too quickly and the receiving code will panic due to a missing waiter.
+        self.recv_waiters.lock().insert(
+            req_id,
+            (
+                moto_sys::UserThreadControlBlock::get().self_handle.into(),
+                None,
+            ),
+        );
+
         req.id = req_id;
         self.send_msg(req);
         self.wait_for_resp(req_id)
