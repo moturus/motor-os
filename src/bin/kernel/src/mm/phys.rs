@@ -464,7 +464,7 @@ impl<S: PageSize> MemoryArea<S> {
         match self.do_allocate_frame() {
             Ok(f) => Ok(f),
             Err(err) => {
-                log::error!(
+                log::warn!(
                     "OOM: failed to allocate {} frame.\nTotal pages: {}; used pages: {}.\n",
                     S::as_str(),
                     self.total_pages,
