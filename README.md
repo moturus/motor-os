@@ -110,11 +110,3 @@ See [docs/build.md](docs/build.md).
 ## Examples and recipes
 
 see [docs/recipes/index.md](docs/recipes/index.md).
-
-## Waitlist
-
-If you would like to be notified when Motūrus OS is ready for beta testing, please join our [wait list](https://forms.zohopublic.com/lasiotus/form/MoturusOSWaitlist/formperma/xTBqYkCW3nwzwLticewtsb1h0U1_aVNVh76fWQ0oc7I).
-
-## Thanks
-
-Big thanks to Philipp Oppermann for his great [Writing an OS in Rust](https://os.phil-opp.com/) blog series - it has inspired a lot of people to experiment in this space.
