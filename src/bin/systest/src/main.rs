@@ -440,6 +440,15 @@ fn test_stdio() {
     println!("test_stdio() PASS");
 }
 
+fn test_oom() {
+    let mut child = subcommand::spawn();
+    child.oom();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    println!("test_oom() PASS");
+}
+
 fn input_listener() {
     loop {
         let mut input = [0_u8; 16];
@@ -465,6 +474,8 @@ fn main() {
     unsafe { core::arch::asm!("int 3") }
 
     std::thread::spawn(|| input_listener());
+
+    test_oom();
 
     tcp::test_tcp_loopback();
     spawn_wait_kill::test();

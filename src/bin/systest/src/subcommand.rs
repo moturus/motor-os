@@ -2,6 +2,8 @@
  * Spawn a subprocess (subcommand) and manage it via stdio.
  */
 
+use std::time::Duration;
+
 pub struct Subcommand {
     inst: std::process::Child,
     stdin: std::process::ChildStdin,
@@ -41,6 +43,12 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn oom(&mut self) {
+        use std::io::Write;
+        self.stdin.write(format!("oom\n").as_bytes()).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.inst.try_wait()
     }
@@ -73,6 +81,10 @@ fn do_command(cmd: String) {
     }
 
     match words[0] {
+        "oom" => {
+            assert_eq!(1, words.len());
+            trigger_oom()
+        }
         "spin" => {
             assert_eq!(2, words.len());
             let ms = words[1].parse::<u128>().unwrap();
@@ -88,4 +100,21 @@ fn do_command(cmd: String) {
         }
         _ => panic!("unknown command: {:?}", words),
     }
+}
+
+fn trigger_oom() -> ! {
+    use moto_sys::syscalls::SysMem;
+
+    // First reach memory limit.
+    loop {
+        if SysMem::alloc(SysMem::PAGE_SIZE_SMALL, 8).is_err() {
+            break;
+        }
+    }
+
+    // Now try spawning a thread: this should fail because
+    // there's no memory available for this process.
+    let handle = std::thread::spawn(|| std::thread::sleep(Duration::MAX));
+    handle.join().unwrap();
+    unreachable!()
 }
