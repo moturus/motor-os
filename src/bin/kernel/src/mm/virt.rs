@@ -69,6 +69,7 @@ const VMEM_USER_END: u64 = PAGING_DIRECT_MAP_OFFSET >> 1; // 1 << 45 on x64.
 //       the kernel, as we will either have to give the userspace access
 //       to it, or will get #PF.
 const STATIC_SHARED_PAGE_USER_VADDR: u64 = VMEM_KERNEL_DATA_START - PAGE_SIZE_MID;
+pub(super) const STATIC_SYS_IO_MID_PAGE: u64 = STATIC_SHARED_PAGE_USER_VADDR - PAGE_SIZE_MID;
 
 const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
 const _: () = assert!(moto_sys::KernelStaticPage::VADDR == STATIC_SHARED_PAGE_USER_VADDR);

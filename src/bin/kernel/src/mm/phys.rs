@@ -476,7 +476,7 @@ impl<S: PageSize> MemoryArea<S> {
     }
 
     fn allocate_contiguous_frames(&self, num_frames: u64) -> Result<u64, ErrorCode> {
-        if num_frames > 64 {
+        if num_frames > 256 {
             log::debug!(
                 "Alloc: OOM: too many contiguous frames requested: {}.",
                 num_frames
@@ -484,7 +484,7 @@ impl<S: PageSize> MemoryArea<S> {
             Err(ErrorCode::OutOfMemory)
         } else if num_frames == 1 {
             self.allocate_frame()
-        } else {
+        } else if num_frames <= 64 {
             // Linear search is fine as this is used during bootup in VirtIO setup.
             for segment in &self.segments {
                 let start = segment.allocate_contiguous(num_frames);
@@ -501,6 +501,8 @@ impl<S: PageSize> MemoryArea<S> {
                 self.used_pages.load(Ordering::Relaxed)
             );
             Err(ErrorCode::OutOfMemory)
+        } else {
+            todo!("allocate across segments")
         }
     }
 
@@ -550,7 +552,7 @@ struct PhysicalMemory {
     slab: MMSlab<Frame>,
 
     small_pages: MemoryArea<PageSizeSmall>,
-    // mid_pages: DesignatedSegment<PageSizeMid>,
+    mid_pages: DesignatedSegment<PageSizeMid>,
 }
 
 // A pointer to the one and only instance of struct PhysicalMemory.
@@ -559,11 +561,11 @@ static mut PHYS_MEM: usize = 0;
 impl PhysicalMemory {
     // The number of MID pages we reserve. At the moment only the kernel
     // and, maybe, sys-io are allowed to use MID pages, so the number is small.
-    // const MID_PAGES: usize = 8;
-    // const MID_PAGES_SEGMENT: MemorySegment = MemorySegment {
-    //     start: (super::ONE_MB * 2) as u64,
-    //     size: (Self::MID_PAGES << PAGE_SIZE_MID_LOG2) as u64,
-    // };
+    const MID_PAGES: usize = 4;
+    const MID_PAGES_SEGMENT: MemorySegment = MemorySegment {
+        start: (super::ONE_MB * 2) as u64,
+        size: (Self::MID_PAGES << PAGE_SIZE_MID_LOG2) as u64,
+    };
 
     fn inst() -> &'static Self {
         let addr =
@@ -590,7 +592,7 @@ impl PhysicalMemory {
     fn allocate_frameless(&'static self, kind: PageType) -> Result<u64, ErrorCode> {
         let result = match kind {
             PageType::SmallPage => self.small_pages.allocate_frame(),
-            // PageType::MidPage => self.mid_pages.allocate_frame(),
+            PageType::MidPage => self.mid_pages.allocate_frame(),
             _ => panic!(),
         };
 
@@ -654,7 +656,7 @@ impl PhysicalMemory {
         num_frames: u64,
     ) -> Result<Vec<SlabArc<Frame>>, ErrorCode> {
         // At the moment we only support allocating contiguous small pages.
-        assert!(num_frames <= 256);
+        assert!(num_frames <= 64); // At most 64 because DesignatedSegment is at most 64 pages.
         assert_eq!(kind, PageType::SmallPage);
 
         let start = self.small_pages.allocate_contiguous_frames(num_frames)?;
@@ -704,19 +706,27 @@ impl PhysicalMemory {
 
         let mut total_size: u64 = 0;
         let mut prev: u64 = 0; // to validate that the vector is sorted.
+        let mut mid_ok = false;
         for segment in available {
             assert!(prev <= segment.start);
             prev = segment.start + segment.size;
 
             total_size += segment.size;
+
+            if segment.contains(Self::MID_PAGES_SEGMENT.start)
+                && segment.end() >= Self::MID_PAGES_SEGMENT.end()
+            {
+                mid_ok = true;
+            }
         }
+        assert!(mid_ok, "Physical RAM [2M; 10M) area not found.");
 
         use alloc::boxed::Box;
         let self_ = Box::leak(Box::new(PhysicalMemory {
             total_size,
             slab: MMSlab::<Frame>::new(true),
             small_pages: MemoryArea::new(),
-            // mid_pages: DesignatedSegment::new(&Self::MID_PAGES_SEGMENT),
+            mid_pages: DesignatedSegment::new(&Self::MID_PAGES_SEGMENT),
         }));
 
         let ptr = self_ as *mut PhysicalMemory;
@@ -767,7 +777,24 @@ impl PhysicalMemory {
                     }
 
                     let size = pages << S::SIZE_LOG2;
-                    let seg = MemorySegment { start, size };
+                    let mut seg = MemorySegment { start, size };
+
+                    // Do not assign pages in MID_PAGES_SEGMENT.
+                    if seg.start < Self::MID_PAGES_SEGMENT.start
+                        && seg.end() > Self::MID_PAGES_SEGMENT.start
+                    {
+                        seg.size = Self::MID_PAGES_SEGMENT.start - seg.start;
+                    } else if seg.start >= Self::MID_PAGES_SEGMENT.start
+                        && seg.start < Self::MID_PAGES_SEGMENT.end()
+                    {
+                        if segment.end() <= Self::MID_PAGES_SEGMENT.end() {
+                            break;
+                        }
+                        segment.size = segment.end() - Self::MID_PAGES_SEGMENT.end();
+                        segment.start = Self::MID_PAGES_SEGMENT.end();
+                        continue;
+                    }
+
                     if count {
                         segment_count += 1;
                     } else {

@@ -139,7 +139,7 @@ pub(super) struct VirtioDevice {
 
     // Each virtqueue is protected by a mutex so that the guest does not
     // access them concurrently.
-    pub(super) virtqueues: alloc::vec::Vec<spin::Mutex<Virtqueue>>,
+    pub(super) virtqueues: alloc::vec::Vec<Virtqueue>,
 }
 
 impl VirtioDevice {
@@ -661,7 +661,7 @@ impl VirtioDevice {
 
         let mut queue_num = 0u16;
 
-        let mut virtqueues = alloc::vec::Vec::<spin::Mutex<Virtqueue>>::new();
+        let mut virtqueues = alloc::vec::Vec::<Virtqueue>::new();
 
         loop {
             cfg_bar.write_u16(bar_offset + queue_select_offset, queue_num);
@@ -693,7 +693,7 @@ impl VirtioDevice {
                 1,
             );
 
-            virtqueues.push(spin::Mutex::new(virtqueue));
+            virtqueues.push(virtqueue);
             queue_num += 1;
             if queue_num == max_virtqueues {
                 break;

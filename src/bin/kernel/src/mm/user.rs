@@ -3,7 +3,7 @@ use core::sync::atomic::*;
 use alloc::sync::Arc;
 
 use super::{align_up, virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
-use crate::mm::PAGING_DIRECT_MAP_OFFSET;
+use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID, PAGING_DIRECT_MAP_OFFSET};
 use crate::stats::MemStats;
 use moto_sys::ErrorCode;
 
@@ -386,9 +386,28 @@ impl UserAddressSpace {
             })
     }
 
-    pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
-        use super::MappingOptions;
+    pub fn alloc_user_mid_pages(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
+        self.stats_user_add(num_pages << super::PAGE_SIZE_MID_LOG2)?;
 
+        assert_eq!(num_pages, 1);
+        let phys_addr = super::phys::phys_allocate_frameless(crate::mm::PageType::MidPage)?;
+        assert_eq!(phys_addr, 2 * super::ONE_MB); // For now, a single MID page can be allocated globally.
+
+        let virt_addr = super::virt::STATIC_SYS_IO_MID_PAGE;
+        self.inner.page_table_ref().map_page(
+            phys_addr,
+            virt_addr,
+            crate::mm::PageType::MidPage,
+            MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE,
+        );
+
+        Ok(MemorySegment {
+            start: virt_addr,
+            size: PAGE_SIZE_MID,
+        })
+    }
+
+    pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
         self.inner

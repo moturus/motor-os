@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicU64;
+
 use moto_ipc::io_channel;
 use moto_sys::SysHandle;
 
@@ -36,4 +38,34 @@ pub fn start() {
     while STARTED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         moto_runtime::futex_wait(&STARTED, 0, None);
     }
+}
+
+// A single 2M page used for VirtIO/MMIO.
+// It's a hack, but we don't need anything more complicated for now.
+pub static MMIO_PAGE: AtomicU64 = AtomicU64::new(0);
+
+pub fn init() {
+    assert_eq!(0, MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed));
+    MMIO_PAGE.store(
+        moto_sys::syscalls::SysMem::alloc(moto_sys::syscalls::SysMem::PAGE_SIZE_MID, 1)
+            .expect("Failed to allocate a 2M page."),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+// Return (phys_addr, virt_addr).
+pub fn alloc_mmio_region(size: u64) -> (u64, u64) {
+    use moto_sys::syscalls::SysMem;
+
+    static BUMP: AtomicU64 = AtomicU64::new(0);
+
+    let size = moto_sys::align_up(size, SysMem::PAGE_SIZE_SMALL);
+    assert_eq!(0, size & (SysMem::PAGE_SIZE_SMALL - 1));
+    let start = BUMP.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+    assert!(start + size < SysMem::PAGE_SIZE_MID);
+
+    let virt_addr = MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed) + start;
+    let phys_addr = SysMem::virt_to_phys(virt_addr).unwrap();
+
+    (phys_addr, virt_addr)
 }

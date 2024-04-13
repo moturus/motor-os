@@ -40,7 +40,8 @@ impl moto_virtio::KernelAdapter for Mapper {
     }
 
     fn alloc_contiguous_pages(&self, sz: u64) -> Result<u64, ()> {
-        Ok(SysMem::alloc_contiguous_pages(sz).unwrap())
+        let (_, addr) = crate::runtime::alloc_mmio_region(sz);
+        Ok(addr)
     }
 
     // Register a custom IRQ and an associated wait handle; the library will then use

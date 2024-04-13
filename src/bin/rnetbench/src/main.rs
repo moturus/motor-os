@@ -10,6 +10,12 @@
 
 #![feature(io_error_more)]
 
+use std::io::Read;
+use std::io::Result;
+use std::io::Write;
+use std::time::Duration;
+use std::{net::TcpStream, time::Instant};
+
 mod client;
 mod server;
 
@@ -39,8 +45,6 @@ fn print_usage_and_exit() -> ! {
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 fn input_listener(prog: String) {
-    use std::io::Read;
-
     loop {
         let mut input = [0_u8; 16];
         let sz = std::io::stdin().read(&mut input).unwrap();
@@ -72,4 +76,74 @@ fn main() {
     }
 
     print_usage_and_exit()
+}
+
+fn do_throughput_read(mut stream: TcpStream, what: &str) -> Result<()> {
+    // Note: we use buffers of different size, to make things more interesting.
+    let mut buffer = [0; 1513];
+    let start_time = Instant::now();
+    let mut total_bytes_read = 0usize;
+
+    let mut counter: u8 = 0;
+    loop {
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        for idx in 0..bytes_read {
+            assert_eq!(counter, buffer[idx]);
+            counter = counter.wrapping_add(1);
+        }
+        total_bytes_read += bytes_read;
+    }
+
+    let duration = start_time.elapsed();
+    let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+    println!(
+        "Throughput {} done: {:.2}MB received; {:.2?} MiB/sec.",
+        what,
+        total_bytes_read as f64 / (1024.0 * 1024.0),
+        rate
+    );
+
+    Ok(())
+}
+
+fn do_throughput_write(mut stream: TcpStream, what: &str) -> std::io::Result<()> {
+    let mut data = [0u8; 1011];
+    let mut total_bytes_sent = 0usize;
+    const TP_DURATION: Duration = Duration::from_secs(3);
+
+    let start = std::time::Instant::now();
+    let mut counter: u8 = 0;
+    while start.elapsed() < TP_DURATION {
+        for idx in 0..data.len() {
+            data[idx] = counter;
+            counter = counter.wrapping_add(1);
+        }
+        match stream.write_all(&data) {
+            Ok(_) => total_bytes_sent += data.len(),
+            Err(e) => {
+                eprintln!("Failed to write to socket: {}", e);
+                return Ok(());
+            }
+        }
+    }
+
+    stream.flush().unwrap();
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+
+    let duration = start.elapsed();
+    let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+    println!(
+        "Throughput {} done: {:.2}MB sent; {:.2?} MiB/sec.",
+        what,
+        (total_bytes_sent as f64) / (1024.0 * 1024.0),
+        rate
+    );
+
+    Ok(())
 }

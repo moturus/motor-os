@@ -97,7 +97,7 @@ pub(super) struct Virtqueue {
     available_ring: VirtqAvail,
     used_ring: VirtqUsed,
 
-    head_idx: u16,
+    free_head_idx: u16,
     last_used_idx: u16,
 
     wait_handles: alloc::vec::Vec<crate::WaitHandle>,
@@ -158,7 +158,7 @@ impl Virtqueue {
             descriptors,
             available_ring,
             used_ring,
-            head_idx: 0,
+            free_head_idx: 0,
             last_used_idx: 0,
             wait_handles: alloc::vec![],
         })
@@ -220,13 +220,12 @@ impl Virtqueue {
         &mut self.descriptors[idx as usize]
     }
 
-    // See SeaBIOS virtio-ring.c::vring_add_buf.
     pub fn add_buf(&mut self, data: &[UserData], outgoing: u16, incoming: u16) -> u16 {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        let mut idx = self.head_idx; // self.get_next_available_idx();;
+        let mut idx = self.free_head_idx; // self.get_next_available_idx();;
         let req_id = idx;
 
         let elements = outgoing + incoming;
@@ -249,11 +248,93 @@ impl Virtqueue {
             idx = descriptor.next;
         }
 
-        self.update_available(self.head_idx);
-        self.head_idx = idx;
+        self.update_available(self.free_head_idx);
+        self.free_head_idx = idx;
 
         self.increment_available_idx(1);
         req_id
+    }
+
+    pub fn add_rx_buf(&mut self, phys_addr: u64, len: u32, idx: u16) {
+        let descriptor = self.get_descriptor(idx);
+        descriptor.addr = phys_addr;
+        descriptor.len = len;
+        descriptor.flags = VIRTQ_DESC_F_WRITE;
+        self.update_available(idx);
+        self.increment_available_idx(1);
+    }
+
+    pub fn add_tx_buf(&mut self, phys_addr: u64, idx: u16, len: u32) {
+        let idx = idx << 1;
+
+        // Net header.
+        let descriptor = self.get_descriptor(idx);
+        descriptor.addr = phys_addr;
+        descriptor.len = super::virtio_net::NET_HEADER_LEN as u32;
+        descriptor.flags = VIRTQ_DESC_F_NEXT;
+
+        // Net bytes.
+        let descriptor = self.get_descriptor(idx + 1);
+        descriptor.addr = phys_addr + (super::virtio_net::NET_HEADER_LEN as u64);
+        descriptor.len = len;
+        descriptor.flags = 0;
+
+        self.update_available(idx);
+        self.increment_available_idx(1);
+    }
+
+    pub fn get_completed_rx_buf(&mut self) -> Option<(u16, u32)> {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let addr = self.used_ring.idx.load(Ordering::Acquire);
+        let ptr = addr as *const AtomicU16;
+        if self.last_used_idx == unsafe { ptr.as_ref().unwrap().load(Ordering::Acquire) } {
+            return None;
+        }
+
+        let head = self.last_used_idx % self.queue_size;
+        let elem = &self.used_ring.ring[head as usize];
+
+        let idx = elem.id as u16;
+        let consumed = elem.len;
+
+        // let descriptor = self.get_descriptor(idx);
+        // assert_eq!(descriptor.flags & VIRTQ_DESC_F_NEXT, 0);
+
+        if self.last_used_idx == u16::MAX {
+            self.last_used_idx = 0;
+        } else {
+            self.last_used_idx += 1;
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+        Some((idx, consumed))
+    }
+
+    pub fn get_completed_tx_buf(&mut self) -> Option<u16> {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let addr = self.used_ring.idx.load(Ordering::Acquire);
+        let ptr = addr as *const AtomicU16;
+        if self.last_used_idx == unsafe { ptr.as_ref().unwrap().load(Ordering::Acquire) } {
+            return None;
+        }
+
+        let head = self.last_used_idx % self.queue_size;
+        let elem = &self.used_ring.ring[head as usize];
+
+        let idx = elem.id as u16;
+        assert_eq!(0, idx & 1);
+
+        // let descriptor = self.get_descriptor(idx);
+        // assert_ne!(descriptor.flags & VIRTQ_DESC_F_NEXT, 0);
+
+        if self.last_used_idx == u16::MAX {
+            self.last_used_idx = 0;
+        } else {
+            self.last_used_idx += 1;
+        }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+        Some(idx >> 1)
     }
 
     pub fn more_used(&self) -> bool {
@@ -280,8 +361,8 @@ impl Virtqueue {
             if (descriptor.flags & VIRTQ_DESC_F_NEXT) != 0 {
                 idx = descriptor.next;
             } else {
-                assert!(descriptor.next == self.head_idx);
-                self.head_idx = idx;
+                assert!(descriptor.next == self.free_head_idx);
+                self.free_head_idx = idx;
                 break;
             }
         }
@@ -316,8 +397,8 @@ impl Virtqueue {
                     idx = descriptor.next;
                 }
             } else {
-                assert!(descriptor.next == self.head_idx);
-                self.head_idx = idx;
+                assert!(descriptor.next == self.free_head_idx);
+                self.free_head_idx = idx;
                 break;
             }
 

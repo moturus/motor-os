@@ -49,6 +49,29 @@ fn sys_map(
         return sys_mmio_map(address_space, phys_addr, virt_addr, page_size, num_pages);
     }
 
+    if page_size == SysMem::PAGE_SIZE_MID {
+        if curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER == 0 {
+            return ResultBuilder::result(ErrorCode::NotAllowed);
+        }
+        if flags != (SysMem::F_READABLE | SysMem::F_WRITABLE) || num_pages != 1 {
+            log::debug!(
+                "sys_map: bad flags: 0x{:x} or num_pages: {}",
+                flags,
+                num_pages
+            );
+            return ResultBuilder::result(ErrorCode::InvalidArgument);
+        }
+        if phys_addr != u64::MAX || virt_addr != u64::MAX {
+            log::debug!("sys_mem_impl: bad map addresses");
+            return ResultBuilder::invalid_argument();
+        }
+
+        return match address_space.alloc_user_mid_pages(num_pages) {
+            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
+            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+        };
+    }
+
     if page_size != SysMem::PAGE_SIZE_SMALL {
         return ResultBuilder::invalid_argument();
     }
@@ -64,7 +87,7 @@ fn sys_map(
             return ResultBuilder::invalid_argument();
         }
 
-        if num_pages > 256 {
+        if num_pages > 64 {
             log::debug!("sys_mem_impl: too many pages");
             return ResultBuilder::invalid_argument();
         }

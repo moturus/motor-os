@@ -153,7 +153,7 @@ impl Blk {
         ];
 
         assert_eq!(self.dev.virtqueues.len(), 1);
-        let mut virtqueue = self.dev.virtqueues[0].lock();
+        let virtqueue = &mut self.dev.virtqueues[0];
         virtqueue.add_buf(&buffs, 1, 2);
 
         // Notify
@@ -243,7 +243,7 @@ impl Blk {
         ];
 
         assert_eq!(self.dev.virtqueues.len(), 1);
-        let mut virtqueue = self.dev.virtqueues[0].lock();
+        let virtqueue = &mut self.dev.virtqueues[0];
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         virtqueue.add_buf(&sg, 2, 1);
@@ -322,7 +322,7 @@ impl Blk {
         ];
 
         assert_eq!(self.dev.virtqueues.len(), 1);
-        let mut virtqueue = self.dev.virtqueues[0].lock();
+        let virtqueue = &mut self.dev.virtqueues[0];
         virtqueue.add_buf(&sg, 1, 1);
 
         // Notify

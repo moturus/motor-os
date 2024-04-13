@@ -1,3 +1,6 @@
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 
@@ -19,13 +22,72 @@ pub struct Header {
     num_buffers: u16,
 }
 
+pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<Header>();
+
+type IoBuf = [u8; 2048];
+
+pub struct RxPacket {
+    idx: u8,
+    len: u16,
+    netdev: *mut NetDev,
+}
+
+impl Drop for RxPacket {
+    fn drop(&mut self) {
+        unsafe { (*self.netdev).release_rx_packet(self.idx) }
+    }
+}
+
+impl RxPacket {
+    pub fn bytes_mut(&self) -> &mut [u8] {
+        let netdev: &'static mut NetDev = unsafe { &mut *self.netdev };
+        &mut netdev.rx_bufs[self.idx as usize][NET_HEADER_LEN..(self.len as usize)]
+    }
+}
+
+pub struct TxPacket {
+    idx: u8,
+    netdev: *mut NetDev,
+}
+
+impl Drop for TxPacket {
+    fn drop(&mut self) {
+        unsafe { (*self.netdev).release_tx_packet(self.idx) }
+    }
+}
+
+impl TxPacket {
+    pub fn bytes_mut(&self) -> &mut [u8] {
+        let netdev: &'static mut NetDev = unsafe { &mut *self.netdev };
+        &mut netdev.tx_bufs[self.idx as usize][NET_HEADER_LEN..2048]
+    }
+
+    pub fn consume(self, len: u16) {
+        unsafe { (*self.netdev).send_tx_packet(self.idx, len) }
+        core::mem::forget(self);
+    }
+}
+
 pub struct NetDev {
     dev: alloc::boxed::Box<VirtioDevice>,
     mac: [u8; 6],
+
+    rx_bufs: &'static mut [IoBuf; 256],
+    tx_bufs: &'static mut [IoBuf; 128], // A single TX buf consumes two descriptors in virtqueue.
+
+    tx_buf_freelist: VecDeque<u8>,
+
+    rx_bufs_phys_addr: u64,
+    tx_bufs_phys_addr: u64,
 }
 
-static NET_DEVICES: spin::Mutex<alloc::vec::Vec<alloc::sync::Arc<NetDev>>> =
-    spin::Mutex::new(alloc::vec::Vec::new());
+impl Drop for NetDev {
+    fn drop(&mut self) {
+        panic!("VirtIO NetDev must not be dropped: RxPackets reference it statically.")
+    }
+}
+
+static NET_DEVICES: spin::Mutex<Vec<NetDev>> = spin::Mutex::new(Vec::new());
 
 impl NetDev {
     const VIRTQ_RX: usize = 0;
@@ -49,13 +111,39 @@ impl NetDev {
             return;
         }
 
-        let mut net = NetDev { dev, mac: [0; 6] };
+        let bufs = crate::mapper()
+            .alloc_contiguous_pages(2048 * 256)
+            .expect("Failed to allocate RX buffers.");
+        let rx_bufs = unsafe { (bufs as usize as *mut [IoBuf; 256]).as_mut().unwrap() };
+        let rx_bufs_phys_addr = crate::mapper().virt_to_phys(bufs).unwrap();
+
+        let bufs = crate::mapper()
+            .alloc_contiguous_pages(2048 * 128)
+            .expect("Failed to allocate RX buffers.");
+        let tx_bufs = unsafe { (bufs as usize as *mut [IoBuf; 128]).as_mut().unwrap() };
+        let tx_bufs_phys_addr = crate::mapper().virt_to_phys(bufs).unwrap();
+
+        let mut tx_buf_freelist = VecDeque::new();
+        tx_buf_freelist.reserve_exact(256);
+        for idx in 0..128 {
+            tx_buf_freelist.push_back(idx)
+        }
+
+        let mut net = NetDev {
+            dev,
+            mac: [0; 6],
+            rx_bufs,
+            tx_bufs,
+            tx_buf_freelist,
+            rx_bufs_phys_addr,
+            tx_bufs_phys_addr,
+        };
 
         if net.self_init().is_ok() {
             log::debug!("Initialized Virtio NET device {:?}.", net.dev.pci_device.id,);
             #[cfg(debug_assertions)]
             moto_sys::syscalls::SysMem::log("Initialized Virtio NET device.").ok();
-            NET_DEVICES.lock().push(alloc::sync::Arc::new(net));
+            NET_DEVICES.lock().push(net);
         } else {
             moto_sys::syscalls::SysMem::log("Failed to initialize Virtio NET device.").ok();
             net.dev.mark_failed();
@@ -136,7 +224,7 @@ impl NetDev {
     pub fn wait_handles(&self) -> alloc::vec::Vec<crate::WaitHandle> {
         let mut result = alloc::vec::Vec::new();
         for q in &self.dev.virtqueues {
-            for h in &*q.lock().wait_handles() {
+            for h in q.wait_handles() {
                 result.push(*h);
             }
         }
@@ -144,60 +232,21 @@ impl NetDev {
         result
     }
 
-    #[inline(never)]
-    pub fn post_receive(&self, buf: &mut [u8]) -> Result<(), ()> {
-        use super::virtio_queue::UserData;
-        let user_data = UserData {
-            addr: buf.as_mut_ptr() as usize as u64,
-            len: buf.len() as u32,
-        };
-
-        assert_eq!(self.dev.virtqueues.len(), 2);
-        let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_RX].lock();
-
-        virtqueue.add_buf(&[user_data], 0, 1);
-
-        // Notify
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap();
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64 * virtqueue.queue_notify_off as u64);
-
-        cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
-        Ok(())
-    }
-
-    #[inline(never)]
-    pub fn consume_receive(&self) -> u32 {
-        assert_eq!(self.dev.virtqueues.len(), 2);
-        let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_RX].lock();
-
-        virtqueue.consume_used()
-    }
-
-    #[inline(never)]
-    pub fn post_send(&self, header: &mut Header, buf: &[u8]) -> Result<u16, ()> {
+    pub fn start_receiving(&mut self) {
         use super::virtio_queue::UserData;
 
-        *header = Header::default();
+        let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
+        assert_eq!(rxq.queue_size as usize, self.rx_bufs.len());
 
-        let buffs: [UserData; 2] = [
-            UserData {
-                addr: header as *const Header as usize as u64,
-                len: core::mem::size_of::<Header>() as u32,
-            },
-            UserData {
-                addr: buf.as_ptr() as usize as u64,
+        for pos in 0..self.rx_bufs.len() {
+            let buf = &mut self.rx_bufs[pos];
+            let user_data = UserData {
+                addr: buf.as_mut_ptr() as usize as u64,
                 len: buf.len() as u32,
-            },
-        ];
+            };
 
-        assert_eq!(self.dev.virtqueues.len(), 2);
-        let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_TX].lock();
-
-        let res = virtqueue.add_buf(&buffs, 2, 0);
+            assert_eq!(pos as u16, rxq.add_buf(&[user_data], 0, 1));
+        }
 
         // Notify
         let notify_cap = self.dev.notify_cfg.unwrap();
@@ -205,18 +254,83 @@ impl NetDev {
             .as_ref()
             .unwrap();
         let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64 * virtqueue.queue_notify_off as u64);
+            + (notify_cap.notify_off_multiplier as u64 * rxq.queue_notify_off as u64);
 
-        cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
-        Ok(res)
+        cfg_bar.write_u16(notify_offset, rxq.queue_num);
     }
 
-    #[inline(never)]
-    pub fn poll_send(&self) -> Option<u16> {
-        assert_eq!(self.dev.virtqueues.len(), 2);
-        let mut virtqueue = self.dev.virtqueues[Self::VIRTQ_TX].lock();
+    // Get incoming bytes, if any, with an id of the buffer.
+    pub fn rx_get(&mut self) -> Option<RxPacket> {
+        let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
+        if let Some((idx, len)) = rxq.get_completed_rx_buf() {
+            Some(RxPacket {
+                idx: idx as u8,
+                len: len as u16,
+                netdev: self as *mut _,
+            })
+        } else {
+            None
+        }
+    }
 
-        virtqueue.reclaim_used()
+    pub fn tx_get(&mut self) -> Option<TxPacket> {
+        let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
+        while let Some(idx) = txq.get_completed_tx_buf() {
+            self.tx_buf_freelist.push_back(idx as u8);
+        }
+
+        if let Some(idx) = self.tx_buf_freelist.pop_front() {
+            Some(TxPacket {
+                idx,
+                netdev: self as *mut _,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn send_tx_packet(&mut self, idx: u8, len: u16) {
+        let pos = idx as usize;
+        let buf = &mut self.tx_bufs[pos];
+
+        let header = buf.as_ptr() as usize as *mut Header;
+        unsafe { *header = Header::default() };
+
+        let phys_addr = self.tx_bufs_phys_addr + ((idx as u64) << 11);
+
+        let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
+        txq.add_tx_buf(phys_addr, idx as u16, len as u32);
+
+        // Notify
+        let notify_cap = self.dev.notify_cfg.unwrap();
+        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
+            .as_ref()
+            .unwrap();
+        let notify_offset = notify_cap.offset as u64
+            + (notify_cap.notify_off_multiplier as u64 * txq.queue_notify_off as u64);
+
+        cfg_bar.write_u16(notify_offset, txq.queue_num);
+    }
+
+    fn release_rx_packet(&mut self, idx: u8) {
+        let phys_addr = self.rx_bufs_phys_addr + ((idx as u64) << 11);
+
+        let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
+        rxq.add_rx_buf(phys_addr, 2048, idx as u16);
+
+        // Notify
+        let notify_cap = self.dev.notify_cfg.unwrap();
+        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
+            .as_ref()
+            .unwrap();
+        let notify_offset = notify_cap.offset as u64
+            + (notify_cap.notify_off_multiplier as u64 * rxq.queue_notify_off as u64);
+
+        cfg_bar.write_u16(notify_offset, rxq.queue_num);
+    }
+
+    fn release_tx_packet(&mut self, idx: u8) {
+        self.tx_buf_freelist.push_back(idx);
     }
 }
 
@@ -224,10 +338,11 @@ pub const fn header_len() -> usize {
     core::mem::size_of::<Header>()
 }
 
-pub fn find_by_mac(mac: &[u8; 6]) -> Option<alloc::sync::Arc<NetDev>> {
-    for dev in &*NET_DEVICES.lock() {
-        if dev.mac == *mac {
-            return Some(dev.clone());
+pub fn take_by_mac(mac: &[u8; 6]) -> Option<NetDev> {
+    let devices = &mut *NET_DEVICES.lock();
+    for idx in 0..devices.len() {
+        if devices[idx].mac == *mac {
+            return Some(devices.remove(idx));
         }
     }
 

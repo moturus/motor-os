@@ -52,13 +52,6 @@ pub(super) struct NetSys {
 
 impl NetSys {
     pub fn new(config: super::config::NetConfig) -> Box<Self> {
-        #[cfg(debug_assertions)]
-        log::debug!(
-            "{}:{} TODO: tcp stream read does one buffer at a time. Enqueue more?.",
-            file!(),
-            line!()
-        );
-
         let devices = super::netdev::init(&config);
         let mut self_ref = Box::new(Self {
             devices,

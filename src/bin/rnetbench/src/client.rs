@@ -5,7 +5,6 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::time::Duration;
-use std::time::Instant;
 
 pub fn run(host_port: &str) -> ! {
     match do_run(host_port) {
@@ -57,10 +56,10 @@ fn try_addr(addr: SocketAddr, cmd: u64) -> Result<()> {
             do_rr(tcp_stream)?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            do_throughput_out(tcp_stream)?;
+            crate::do_throughput_write(tcp_stream, "client => server")?;
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            do_throughput_in(tcp_stream)?;
+            crate::do_throughput_read(tcp_stream, "server => client")?;
         }
         _ => {
             panic!("unrecognized command: {}", cmd);
@@ -95,68 +94,6 @@ fn do_rr(mut stream: TcpStream) -> Result<()> {
         "\tRR done: {} iterations/sec; {:.3} usec/iteration.",
         iters_per_sec as u64,
         1_000_000_f64 / iters_per_sec
-    );
-
-    Ok(())
-}
-
-fn do_throughput_out(mut stream: TcpStream) -> std::io::Result<()> {
-    let data = [0u8; 1024]; // Sample data buffer
-    let mut total_bytes_sent = 0usize;
-    const TP_DURATION: Duration = Duration::from_secs(3);
-    println!(
-        "{}: starting TCP throughput test (1k buffers)...",
-        crate::binary_name()
-    );
-
-    let start = std::time::Instant::now();
-    // for _ in 0..1000 {
-    while start.elapsed() < TP_DURATION {
-        match stream.write(&data) {
-            Ok(bytes_sent) => total_bytes_sent += bytes_sent,
-            Err(e) => {
-                eprintln!("Failed to write to socket: {}", e);
-                return Ok(());
-            }
-        }
-    }
-
-    stream.flush().unwrap();
-    stream.shutdown(std::net::Shutdown::Both).unwrap();
-
-    let duration = start.elapsed();
-    let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-    println!(
-        "\tThroughput client => server done: {:.2}MB sent; {:.2?} MiB/sec.",
-        (total_bytes_sent as f64) / (1024.0 * 1024.0),
-        rate
-    );
-
-    Ok(())
-}
-
-fn do_throughput_in(mut stream: TcpStream) -> Result<()> {
-    let mut buffer = [0; 2048];
-    let start_time = Instant::now();
-    let mut total_bytes_read = 0usize;
-
-    loop {
-        let bytes_read = match stream.read(&mut buffer) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if bytes_read == 0 {
-            break;
-        }
-        total_bytes_read += bytes_read;
-    }
-
-    let duration = start_time.elapsed();
-    let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-    println!(
-        "\tThroughput server => client done: {:.2}MB received; {:.2?} MiB/sec.",
-        total_bytes_read as f64 / (1024.0 * 1024.0),
-        rate
     );
 
     Ok(())

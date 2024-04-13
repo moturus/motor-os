@@ -1,7 +1,6 @@
 mod dispatcher;
 mod driver;
 mod filesystem;
-// mod fs_fat32;
 mod fs_flatfs;
 mod fs_srfs;
 mod mbr;
