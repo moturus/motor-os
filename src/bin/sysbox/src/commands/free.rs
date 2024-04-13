@@ -42,7 +42,7 @@ pub fn do_command(args: &[String]) {
     let total = stats.available >> shift_bits;
     let used = stats.used() >> shift_bits;
 
-    println!("               total         used         free         heap    pages");
+    println!("               total         used         free        kheap    pages");
     println!(
         "Mem:    {:12} {:12} {:12} {:12}    {}",
         total,
