@@ -27,7 +27,7 @@ impl RxToken for VirtioRxToken {
     {
         if let Some(rx_packet) = self.dev().rx_packet.as_ref() {
             let buf = rx_packet.bytes_mut();
-            log::debug!("consuming {} RX bytes", buf.len());
+            // log::debug!("consuming {} RX bytes", buf.len());
             let res = f(buf);
             self.dev().rx_packet = None;
 
@@ -60,7 +60,7 @@ impl TxToken for VirtioTxToken {
             return f(&mut buf[..]);
         }
 
-        log::debug!("Tx consume {} bytes", len);
+        // log::debug!("Tx consume {} bytes", len);
 
         if !self.dev().pending_tx.is_empty() {
             self.dev().send_pending_tx();
@@ -73,8 +73,8 @@ impl TxToken for VirtioTxToken {
                 let packet = &mut buf[0..len];
                 let res = f(packet);
 
-                #[cfg(debug_assertions)]
-                log::debug!("enqueueing tx {} bytes into the NIC (zero pending)", len);
+                // #[cfg(debug_assertions)]
+                // log::debug!("enqueueing tx {} bytes into the NIC (zero pending)", len);
                 tx_packet.consume(len as u16);
                 return res;
             }
@@ -137,10 +137,10 @@ impl VirtioSmoltcpDevice {
         if self.rx_packet.is_none() {
             self.rx_packet = self.virtio_dev.rx_get();
 
-            #[cfg(debug_assertions)]
-            if let Some(packet) = &self.rx_packet {
-                log::debug!("got {} RX bytes in the NIC", packet.bytes_mut().len());
-            }
+            // #[cfg(debug_assertions)]
+            // if let Some(packet) = &self.rx_packet {
+            //     log::debug!("got {} RX bytes in the NIC", packet.bytes_mut().len());
+            // }
         }
     }
 
@@ -159,8 +159,8 @@ impl VirtioSmoltcpDevice {
                 core::ptr::copy_nonoverlapping(packet.as_ptr(), buf.as_mut_ptr(), packet.len());
             }
 
-            #[cfg(debug_assertions)]
-            log::debug!("enqueueing tx {} bytes into the NIC", packet.len());
+            // #[cfg(debug_assertions)]
+            // log::debug!("enqueueing tx {} bytes into the NIC", packet.len());
             tx_packet.consume(packet.len() as u16);
 
             if self.pending_tx.is_empty() {

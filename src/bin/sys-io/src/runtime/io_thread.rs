@@ -63,11 +63,11 @@ impl IoRuntime {
 
         if self.cached_wakee_connection != wakee_connection {
             if likely(!self.cached_wakee_connection.is_none()) {
-                #[cfg(debug_assertions)]
-                log::debug!(
-                    "waking connection 0x{:x}",
-                    self.cached_wakee_connection.as_u64()
-                );
+                // #[cfg(debug_assertions)]
+                // log::debug!(
+                //     "waking connection 0x{:x}",
+                //     self.cached_wakee_connection.as_u64()
+                // );
                 if SysCpu::wake(self.cached_wakee_connection).is_err() {
                     #[cfg(debug_assertions)]
                     log::debug!(

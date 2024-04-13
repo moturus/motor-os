@@ -655,8 +655,6 @@ impl NetSys {
         }
         moto_socket.rx_ack = rx_ack;
 
-        log::debug!("rx_ack {} for stream 0x{:x}", rx_ack, u64::from(socket_id));
-
         self.do_tcp_rx(socket_id);
 
         Ok(())
@@ -1075,13 +1073,13 @@ impl NetSys {
         let can_send = smol_socket.can_send();
         let state = smol_socket.state();
 
-        log::debug!(
-            "{}:{} on_tcp_socket_poll 0x{:x} - {:?}",
-            file!(),
-            line!(),
-            u64::from(socket_id),
-            state
-        );
+        // log::debug!(
+        //     "{}:{} on_tcp_socket_poll 0x{:x} - {:?}",
+        //     file!(),
+        //     line!(),
+        //     u64::from(socket_id),
+        //     state
+        // );
 
         /*
           RFC 793: https://datatracker.ietf.org/doc/html/rfc793
@@ -1291,14 +1289,14 @@ impl NetSys {
 
             smol_socket.recv(&mut receive_closure).unwrap();
 
-            #[cfg(debug_assertions)]
-            log::debug!(
-                "{}:{} TcpRx event: seq {} {} bytes",
-                file!(),
-                line!(),
-                moto_socket.rx_seq,
-                rx_buf.consumed
-            );
+            // #[cfg(debug_assertions)]
+            // log::debug!(
+            //     "{}:{} TcpRx event: seq {} {} bytes",
+            //     file!(),
+            //     line!(),
+            //     moto_socket.rx_seq,
+            //     rx_buf.consumed
+            // );
 
             moto_socket.rx_seq += 1;
             self.pending_completions.push_back(Self::rx_buf_to_pc(
@@ -1344,9 +1342,6 @@ impl NetSys {
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
-        #[cfg(debug_assertions)]
-        log::debug!("tcp TX in: {} qsz", moto_socket.tx_queue.len());
-
         while smol_socket.can_send() {
             let mut tx_buf = if let Some(x) = moto_socket.tx_queue.pop_front() {
                 x
@@ -1370,20 +1365,13 @@ impl NetSys {
             }
         }
 
-        #[cfg(debug_assertions)]
-        log::debug!(
-            "tcp TX out: {} page qsz {} smol qsz",
-            moto_socket.tx_queue.len(),
-            smol_socket.send_queue()
-        );
-
-        if moto_socket.tx_queue.len() > 2 {
-            log::debug!(
-                "tcp TX out: {} page qsz {} smol qsz",
-                moto_socket.tx_queue.len(),
-                smol_socket.send_queue()
-            );
-        }
+        // if moto_socket.tx_queue.len() > 2 {
+        //     log::debug!(
+        //         "tcp TX out: {} page qsz {} smol qsz",
+        //         moto_socket.tx_queue.len(),
+        //         smol_socket.send_queue()
+        //     );
+        // }
 
         // if smol_socket.send_queue() > 9000 {
         //     log::info!("tcp TX: smol qsz: {}", smol_socket.send_queue());
@@ -1525,7 +1513,7 @@ impl IoSubsystem for NetSys {
     ) -> Result<Option<io_channel::Msg>, ()> {
         debug_assert_eq!(msg.status(), ErrorCode::NotReady);
 
-        log::debug!("{}:{} got SQE cmd {}", file!(), line!(), msg.command);
+        // log::debug!("{}:{} got SQE cmd {}", file!(), line!(), msg.command);
 
         match msg.command {
             rt_api::net::CMD_TCP_LISTENER_BIND => Ok(Some(self.tcp_listener_bind(conn, msg))),
