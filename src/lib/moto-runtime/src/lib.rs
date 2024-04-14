@@ -12,19 +12,8 @@ pub mod env;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod fs;
 
-// #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
-// pub mod io_executor;
-
-// #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
-// pub mod io_runtime;
-
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod net;
-
-// #[cfg(feature = "rustc-dep-of-std")]
-// pub mod net_async;
-// #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
-// pub mod net_runtime;
 
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod process;
