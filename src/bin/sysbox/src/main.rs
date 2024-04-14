@@ -16,6 +16,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox pwd");
     println!("\tsysbox rm");
     println!("\tsysbox rmdir");
+    println!("\tsysbox sleep");
     println!("\tsysbox time");
     std::process::exit(exit_code);
 }
@@ -40,6 +41,7 @@ fn main() {
         "pwd" => commands::pwd::do_command(&args[1..]),
         "rm" => commands::rm::do_command(&args[1..]),
         "rmdir" => commands::rmdir::do_command(&args[1..]),
+        "sleep" => commands::sleep::do_command(&args[1..]),
         "time" => commands::time::do_command(&args[1..]),
         _ => print_usage_and_exit(1),
     }

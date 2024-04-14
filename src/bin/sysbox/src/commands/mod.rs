@@ -9,4 +9,5 @@ pub mod ps;
 pub mod pwd;
 pub mod rm;
 pub mod rmdir;
+pub mod sleep;
 pub mod time;
