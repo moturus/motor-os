@@ -90,7 +90,7 @@ impl Drop for SegmentCache {
             assert_eq!(0, self.counts[idx].load(Ordering::Relaxed));
             let mut lock = self.caches[idx].lock(line!());
             if lock.is_null() {
-                return;
+                continue;
             }
 
             CacheLine::drop(*lock);

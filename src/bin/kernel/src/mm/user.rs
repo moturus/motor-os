@@ -59,6 +59,7 @@ impl Drop for UserAddressSpace {
             self.do_drop_kernel_stack(segment);
         }
 
+        log::debug!("UserAddressSpace::drop()");
         // We don't check that total_usage is zero here, because
         // memory could still be mapped in self.inner.
     }
@@ -66,6 +67,8 @@ impl Drop for UserAddressSpace {
 
 impl UserAddressSpace {
     pub fn new() -> Result<Arc<Self>, ErrorCode> {
+        log::debug!("UserAddressSpace::new()");
+
         let self_ = Arc::new(Self {
             inner: UserAddressSpaceBase::new()?,
             max_memory: AtomicU64::new(
@@ -79,8 +82,6 @@ impl UserAddressSpace {
             kernel_stacks: super::cache::SegmentCache::new(),
             user_stacks: super::cache::SegmentCache::new(),
         });
-
-        log::debug!("UserAddressSpace::new()");
 
         // Safe because we are the only users.
         unsafe {
