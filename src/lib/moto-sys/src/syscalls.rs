@@ -142,6 +142,7 @@ impl SysCtl {
     pub const OP_CREATE: u8 = 3;
     pub const OP_QUERY_PROCESS: u8 = 4;
     pub const OP_SET_LOG_LEVEL: u8 = 5;
+    pub const OP_QUERY_HANDLE: u8 = 6;
 
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
@@ -321,6 +322,26 @@ impl SysCtl {
             } else {
                 Err(ErrorCode::NotFound)
             }
+        }
+    }
+
+    // Returns OK if the handle can be waited on.
+    #[cfg(feature = "userspace")]
+    pub fn handle_status(handle: SysHandle) -> Result<(), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_CTL, Self::OP_QUERY_HANDLE, 0, 0),
+            handle.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(result.error_code().into())
         }
     }
 

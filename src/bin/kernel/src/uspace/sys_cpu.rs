@@ -13,6 +13,7 @@ fn process_wait_handles(
     args: &SyscallArgs,
     next_arg: usize,
 ) -> SyscallResult {
+    // NOTE: if this changes, you may need to change sys_ctl::sys_query_handle().
     let flags = args.flags;
 
     let handles: Vec<SysHandle> = if flags & SysCpu::F_HANDLE_ARRAY != 0 {

@@ -363,6 +363,36 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
     ResultBuilder::ok_1(counter as u64)
 }
 
+fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
+    if args.version > 0 {
+        return ResultBuilder::version_too_high();
+    }
+
+    let handle = SysHandle::from_u64(args.args[0]);
+
+    // See process_wait_handle in SysCpu.
+    let process = thread.owner();
+    let obj = process.get_object(&handle);
+    if let Some(obj) = obj {
+        if obj.sys_object.sibling_dropped() {
+            log::debug!(
+                "sys_wait: object {} has it's sibling dropped in pid {}.",
+                handle.as_u64(),
+                process.pid().as_u64()
+            );
+            return ResultBuilder::bad_handle(handle);
+        }
+        return ResultBuilder::ok();
+    } else {
+        log::debug!(
+            "sys_wait: object not found in pid {} for handle {}.",
+            process.pid().as_u64(),
+            handle.as_u64()
+        );
+        return ResultBuilder::bad_handle(handle);
+    }
+}
+
 pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     let parent = SysHandle::from_u64(args.args[0]);
 
@@ -467,6 +497,9 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
             _ => ResultBuilder::invalid_argument(),
         },
+
+        SysCtl::OP_QUERY_HANDLE => sys_query_handle(thread, args),
+
         SysCtl::OP_SET_LOG_LEVEL => {
             if args.version > 0 {
                 return ResultBuilder::version_too_high();

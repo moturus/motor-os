@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "once_cell"
