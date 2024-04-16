@@ -134,7 +134,17 @@ impl StdinRt {
             }
             Ok(to_copy)
         } else {
-            stdin_lock.stdio.pipe().read(buf)
+            // stdin_lock.stdio.pipe().read(buf)
+            match stdin_lock.stdio.pipe().read(buf) {
+                Ok(n) => {
+                    if n == 0 {
+                        panic!("zero read")
+                    } else {
+                        Ok(n)
+                    }
+                }
+                Err(err) => Err(err),
+            }
         }
     }
 }
@@ -207,8 +217,36 @@ pub(super) fn set_relay(
             let mut stdin_lock = STDIN.lock();
             let mut dest = unsafe { crate::sync_pipe::Writer::new(to) };
             let mut buf = [0_u8; 80];
+
+            // We need to break if the child exits, so we wait for the child or for the data,
+            // and read with a short timeout.
+            let wait_handles = [stdin_lock.stdio.pipe().handle(), dest.handle()];
+            let mut had_error = false;
             loop {
-                match stdin_lock.stdio.pipe().read(&mut buf) {
+                let mut handles = wait_handles;
+                if moto_sys::syscalls::SysCpu::wait(
+                    &mut handles,
+                    SysHandle::NONE,
+                    SysHandle::NONE,
+                    None,
+                )
+                .is_err()
+                {
+                    if had_error {
+                        break;
+                    } else {
+                        // Don't exit on the first error, as there may be something
+                        // in the buffer to process.
+                        had_error = true;
+                    }
+                }
+
+                let timeout = moto_sys::time::Instant::now() + core::time::Duration::new(0, 1_000);
+                match stdin_lock
+                    .stdio
+                    .pipe()
+                    .read_timeout(&mut buf, Some(timeout))
+                {
                     Ok(sz_read) => {
                         if sz_read > 0 {
                             match dest.write(&buf[0..sz_read]) {
@@ -232,11 +270,14 @@ pub(super) fn set_relay(
                             break;
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        if err == ErrorCode::TimedOut {
+                            continue;
+                        }
                         break;
                     }
                 }
-            }
+            } // loop
         } else {
             let mut dest = unsafe { crate::sync_pipe::Reader::new(to) };
             let mut buf = [0_u8; 80];
@@ -272,7 +313,7 @@ pub(super) fn set_relay(
 
         super::tls::thread_exiting();
         let _ = moto_sys::syscalls::SysCtl::put(SysHandle::SELF);
-    }
+    } // relay_thread_fn
 
     let local_copy = to.unsafe_copy();
     let thread_arg = Box::into_raw(Box::new(RelayArg { from, to })) as usize;

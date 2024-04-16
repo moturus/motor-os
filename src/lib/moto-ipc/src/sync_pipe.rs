@@ -193,7 +193,19 @@ impl Reader {
         }
     }
 
+    pub fn handle(&self) -> SysHandle {
+        self.buffer.ipc_handle
+    }
+
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        self.read_timeout(buf, None)
+    }
+
+    pub fn read_timeout(
+        &mut self,
+        buf: &mut [u8],
+        timeout: Option<moto_sys::time::Instant>,
+    ) -> Result<usize, ErrorCode> {
         self.buffer.assert_invariants();
         if buf.len() == 0 {
             return Err(ErrorCode::InvalidArgument);
@@ -210,7 +222,7 @@ impl Reader {
                     &mut [self.buffer.ipc_handle],
                     self.buffer.ipc_handle,
                     SysHandle::NONE,
-                    None,
+                    timeout,
                 ) {
                     self.buffer.error_code = e;
                     break 'outer;
@@ -233,10 +245,18 @@ impl Reader {
         // and then exited, we don't want to lose that.
         let read = self.buffer.read(buf);
         if read > 0 {
+            if self.buffer.error_code == ErrorCode::TimedOut {
+                self.buffer.error_code = ErrorCode::Ok;
+            }
             return Ok(read);
         }
 
-        Err(self.buffer.error_code)
+        if self.buffer.error_code == ErrorCode::TimedOut {
+            self.buffer.error_code = ErrorCode::Ok;
+            Err(ErrorCode::TimedOut)
+        } else {
+            Err(self.buffer.error_code)
+        }
     }
 
     pub fn total_read(&self) -> usize {
@@ -255,7 +275,19 @@ impl Writer {
         }
     }
 
+    pub fn handle(&self) -> SysHandle {
+        self.buffer.ipc_handle
+    }
+
     pub fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        self.write_timeout(buf, None)
+    }
+
+    pub fn write_timeout(
+        &mut self,
+        buf: &[u8],
+        timeout: Option<moto_sys::time::Instant>,
+    ) -> Result<usize, ErrorCode> {
         if self.buffer.error_code.is_err() {
             return Err(self.buffer.error_code);
         }
@@ -272,7 +304,7 @@ impl Writer {
                     &mut [self.buffer.ipc_handle],
                     self.buffer.ipc_handle,
                     SysHandle::NONE,
-                    None,
+                    timeout,
                 ) {
                     self.buffer.error_code = err;
                     written = written.checked_sub(self.buffer.unwrite()).unwrap_or(0);
@@ -326,8 +358,16 @@ impl Pipe {
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        self.read_timeout(buf, None)
+    }
+
+    pub fn read_timeout(
+        &mut self,
+        buf: &mut [u8],
+        timeout: Option<moto_sys::time::Instant>,
+    ) -> Result<usize, ErrorCode> {
         match self {
-            Self::Reader(reader) => reader.read(buf),
+            Self::Reader(reader) => reader.read_timeout(buf, timeout),
             Self::Null => Ok(0),
             _ => Err(ErrorCode::InvalidArgument),
         }
@@ -356,10 +396,26 @@ impl Pipe {
     }
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        self.write_timeout(buf, None)
+    }
+
+    pub fn write_timeout(
+        &mut self,
+        buf: &[u8],
+        timeout: Option<moto_sys::time::Instant>,
+    ) -> Result<usize, ErrorCode> {
         match self {
-            Self::Writer(writer) => writer.write(buf),
+            Self::Writer(writer) => writer.write_timeout(buf, timeout),
             Self::Null => Ok(0),
             _ => Err(ErrorCode::InvalidArgument),
+        }
+    }
+
+    pub fn handle(&self) -> SysHandle {
+        match self {
+            Self::Reader(reader) => reader.buffer.ipc_handle,
+            Self::Writer(writer) => writer.buffer.ipc_handle,
+            _ => SysHandle::NONE,
         }
     }
 }
@@ -373,11 +429,8 @@ pub struct RawPipeData {
 impl RawPipeData {
     // Release self (memory, handle).
     pub unsafe fn release(self, owner_process: SysHandle) {
-        moto_sys::syscalls::SysCtl::put_remote(
-            owner_process,
-            SysHandle::from_u64(self.ipc_handle),
-        )
-        .unwrap();
+        moto_sys::syscalls::SysCtl::put_remote(owner_process, SysHandle::from_u64(self.ipc_handle))
+            .unwrap();
 
         moto_sys::syscalls::SysMem::unmap(owner_process, 0, u64::MAX, self.buf_addr as u64)
             .unwrap();

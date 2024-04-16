@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "moto-ipc"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "moto-sys",
 ]
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "rustversion"
