@@ -45,7 +45,12 @@ impl Dispatcher {
     }
 
     fn process_ipc(&mut self, waker: &SysHandle) {
-        let conn = self.ipc_server.get_connection(*waker).unwrap();
+        let conn = if let Some(conn) = self.ipc_server.get_connection(*waker) {
+            conn
+        } else {
+            // A spurious wakeup by a dropped connection.
+            return;
+        };
         assert!(conn.connected());
 
         let req = conn.req::<GetServerUrlRequest>();
