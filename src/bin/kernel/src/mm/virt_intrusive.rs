@@ -3,10 +3,10 @@
 // they involve heap allocations, and we don't want to do heap allocations
 // while allocating virtual memory, as it results in nasty recursion.
 use core::mem::MaybeUninit;
-use moto_sys::ErrorCode;
 use intrusive_collections::{intrusive_adapter, UnsafeRef};
 use intrusive_collections::{KeyAdapter, RBTree, RBTreeLink};
 use intrusive_collections::{SinglyLinkedList, SinglyLinkedListLink};
+use moto_sys::ErrorCode;
 
 use crate::mm::{PageType, PAGE_SIZE_SMALL_LOG2};
 use crate::util::SpinLock;
@@ -18,7 +18,7 @@ use super::{MappingOptions, MemorySegment, PAGE_SIZE_SMALL};
 
 #[derive(Default)]
 pub(super) struct Page {
-    free_list_link: SinglyLinkedListLink,
+    list_link: SinglyLinkedListLink,
     tree_link: RBTreeLink,
     start: u64,
     frame: SlabArc<Frame>,
@@ -47,7 +47,7 @@ impl Page {
     fn clear(&mut self) {
         assert!(self.frame.is_null());
         assert!(!self.tree_link.is_linked());
-        assert!(!self.free_list_link.is_linked());
+        assert!(!self.list_link.is_linked());
 
         self.start = 0;
         self.mapping_options = MappingOptions::empty();
@@ -57,7 +57,7 @@ impl Page {
         self.start == 0
             && self.mapping_options.is_empty()
             && self.frame.is_null()
-            && !self.free_list_link.is_linked()
+            && !self.list_link.is_linked()
             && !self.tree_link.is_linked()
     }
 
@@ -66,7 +66,7 @@ impl Page {
     }
 }
 
-intrusive_adapter!(PageListAdapter = UnsafeRef<Page>: Page { free_list_link: SinglyLinkedListLink });
+intrusive_adapter!(PageListAdapter = UnsafeRef<Page>: Page { list_link: SinglyLinkedListLink });
 intrusive_adapter!(PageTreeAdapter = UnsafeRef<Page>: Page { tree_link: RBTreeLink });
 
 type PageSlab = [Page; STRUCT_PAGES_IN_SMALL_PAGE];
@@ -112,6 +112,7 @@ impl PageAllocatorInner {
         while let Some(page_ref) = self.slab_list.pop_front() {
             let page = unsafe { UnsafeRef::into_raw(page_ref).as_mut().unwrap() };
             let frame = page.frame.take();
+            assert!(!page.list_link.is_linked()); // TODO: remove.
             page.clear();
             // Slab frames are not mapped explictly, we use PAGING_DIRECT_MAP_OFFSET,
             // so we don't do any explicit unmapping.
@@ -376,6 +377,7 @@ impl VmemSegment {
                 let frame = match super::phys::allocate_frame(PageType::SmallPage) {
                     Ok(frame) => frame,
                     Err(err) => {
+                        assert!(!page_mut.list_link.is_linked()); // TODO: remove.
                         page_mut.clear();
                         self.address_space().page_allocator.free_page(page);
                         self.clear();
@@ -771,7 +773,8 @@ impl SegmentMap {
 
         // Initialize the first page.
         let slab_page = &mut segment_slab.slab_page;
-        debug_assert!(slab_page.is_empty());
+        debug_assert!(slab_page.is_empty()); // We initialized it above.
+        debug_assert_eq!(slab_page as *mut _ as usize, virt_addr as usize);
 
         slab_page.start = virt_addr;
         slab_page.frame = frame;
@@ -824,12 +827,12 @@ impl SegmentMap {
         self.free_segment_count = 0;
 
         while let Some(slab_page) = self.slab_list.pop_front() {
-            let page_ptr = UnsafeRef::into_raw(slab_page);
-            let page_mut = unsafe { page_ptr.as_mut().unwrap() };
+            let page_mut = unsafe { &mut *UnsafeRef::into_raw(slab_page) };
             let frame = page_mut.frame.take();
             drop(frame);
 
-            page_mut.clear();
+            // Note: slab_page was backed by the frame just dropped above.
+            // We should NOT touch slab_page now.
             self.slab_count -= 1;
         }
 
