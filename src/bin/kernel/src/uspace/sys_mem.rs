@@ -40,9 +40,15 @@ fn sys_map(
     page_size: u64,
     num_pages: u64,
 ) -> SyscallResult {
+    // Protect against bad numbers.
+    let (new_bytes, overflow) = page_size.overflowing_mul(num_pages);
+    if overflow || new_bytes > (1 << 40) {
+        return ResultBuilder::result(ErrorCode::OutOfMemory); // TODO: should we kill the process?
+    }
+
     let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
 
-    if !io_manager && crate::mm::oom_for_user() {
+    if !io_manager && crate::mm::oom_for_user(page_size * num_pages) {
         return ResultBuilder::result(ErrorCode::OutOfMemory);
     }
 

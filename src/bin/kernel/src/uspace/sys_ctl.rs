@@ -400,7 +400,8 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
 
     match args.operation {
         SysCtl::OP_CREATE => {
-            if !io_manager && crate::mm::oom_for_user() {
+            const OP_CREATE_MEMORY_THRESHOLD: u64 = 64 << 10; // TODO: do we need to be more precise?
+            if !io_manager && crate::mm::oom_for_user(OP_CREATE_MEMORY_THRESHOLD) {
                 return ResultBuilder::result(ErrorCode::OutOfMemory);
             }
 
