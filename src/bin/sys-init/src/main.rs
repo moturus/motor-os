@@ -67,6 +67,9 @@ fn main() {
 
     if let Some(log) = &config.log {
         std::process::Command::new(log.as_str())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect(format!("Error spawning {}", log).as_str());
 
@@ -88,6 +91,9 @@ fn main() {
 
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, "0xffffffffffffffff")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
     tty.wait().unwrap();
