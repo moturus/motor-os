@@ -1,5 +1,3 @@
-mod xor_server;
-
 use moto_runtime::moturus_log;
 
 // use moto_sys::caps::{CAP_IO_MANAGER, CAP_LOG, CAP_SHARE, CAP_SPAWN};
@@ -87,9 +85,6 @@ fn main() {
         }
         log::set_max_level(log::LevelFilter::Info);
     }
-
-    // While we are in dev/testing mode, run the xor server/service.
-    xor_server::start();
 
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, "0xffffffffffffffff")

@@ -3,6 +3,7 @@ mod mpmc;
 mod spawn_wait_kill;
 mod subcommand;
 mod tcp;
+mod xor_server;
 
 use std::{
     io::{Read, Write},
@@ -140,6 +141,10 @@ fn test_cpus() {
 fn test_ipc() {
     use moto_ipc::sync::*;
 
+    let mut xor_service = subcommand::spawn();
+    xor_service.start_xor_service();
+    std::thread::sleep(std::time::Duration::new(0, 100_000));
+
     let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
     conn.connect("xor-service").unwrap();
 
@@ -166,6 +171,7 @@ fn test_ipc() {
     moto_sys::stats::get_cpu_usage(&mut cpu_usage).unwrap();
 
     conn.disconnect();
+    xor_service.do_exit(0);
 
     let nanos = (stop - start).as_nanos();
     assert!(nanos > 0);

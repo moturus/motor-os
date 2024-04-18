@@ -56,6 +56,14 @@ impl Subcommand {
     pub fn kill(&mut self) {
         self.inst.kill().unwrap()
     }
+
+    pub fn start_xor_service(&mut self) {
+        use std::io::Write;
+        self.stdin
+            .write(format!("xor_service\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+    }
 }
 
 pub fn run_child(args: Vec<String>) -> ! {
@@ -98,6 +106,7 @@ fn do_command(cmd: String) {
             let code = words[1].parse::<i32>().unwrap();
             std::process::exit(code)
         }
+        "xor_service" => crate::xor_server::start(),
         _ => panic!("unknown command: {:?}", words),
     }
 }

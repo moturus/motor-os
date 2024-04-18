@@ -25,9 +25,7 @@ fn thread_fn() {
             *data ^= u64::MAX;
 
             if idx < wakers.len() - 1 {
-                if conn.finish_rpc().is_err() {
-                    log::debug!("xor-service: disconnected");
-                }
+                if conn.finish_rpc().is_err() {}
             } else {
                 swap_target = conn.handle();
             }
