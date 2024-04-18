@@ -557,6 +557,7 @@ impl Process {
                     ProcessStatus::Exiting(val) => {
                         *status_lock = ProcessStatus::Exited(val);
                     }
+                    ProcessStatus::Error(_) => {}
                     _ => {
                         panic!("Unexpected process status {:?}.", *status_lock);
                     }
