@@ -40,9 +40,15 @@ fn sys_map(
     page_size: u64,
     num_pages: u64,
 ) -> SyscallResult {
+    let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
+
+    if !io_manager && crate::mm::oom_for_user() {
+        return ResultBuilder::result(ErrorCode::OutOfMemory);
+    }
+
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_MMIO) {
         // This is used for MMIO at specific addresses, e.g. PCI functions.
-        if curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER == 0 {
+        if !io_manager {
             log::debug!("sys_map: MMIO w/o CAP_IO_MAN");
             return ResultBuilder::result(ErrorCode::NotAllowed);
         }
@@ -50,7 +56,7 @@ fn sys_map(
     }
 
     if page_size == SysMem::PAGE_SIZE_MID {
-        if curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER == 0 {
+        if !io_manager {
             return ResultBuilder::result(ErrorCode::NotAllowed);
         }
         if flags != (SysMem::F_READABLE | SysMem::F_WRITABLE) || num_pages != 1 {
@@ -78,7 +84,7 @@ fn sys_map(
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_CONTIGUOUS) {
         // This is used for MMIO at arbitrary addresses, e.g. to create VirtIO virtqueues.
-        if curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER == 0 {
+        if !io_manager {
             log::debug!("sys_map: MMIO w/o CAP_IO_MAN");
             return ResultBuilder::result(ErrorCode::NotAllowed);
         }

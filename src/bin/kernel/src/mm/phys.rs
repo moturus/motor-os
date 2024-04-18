@@ -854,14 +854,14 @@ impl PhysStats {
             total_size: inst.total_size,
 
             small_pages: inst.small_pages.total_pages,
-            mid_pages: 0, // PhysicalMemory::MID_PAGES as u64,
+            mid_pages: inst.mid_pages.num_pages as u64,
 
             small_pages_used: inst.small_pages.used_pages.load(Ordering::Relaxed),
-            mid_pages_used: 0, /* inst
-                               .mid_pages
-                               .used_bitmap
-                               .load(Ordering::Relaxed)
-                               .count_ones() as u64 */
+            mid_pages_used: inst
+                .mid_pages
+                .used_bitmap
+                .load(Ordering::Relaxed)
+                .count_ones() as u64,
         }
     }
 

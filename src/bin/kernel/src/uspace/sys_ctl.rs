@@ -396,8 +396,14 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
 pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     let parent = SysHandle::from_u64(args.args[0]);
 
+    let io_manager = thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
+
     match args.operation {
         SysCtl::OP_CREATE => {
+            if !io_manager && crate::mm::oom_for_user() {
+                return ResultBuilder::result(ErrorCode::OutOfMemory);
+            }
+
             if args.version > 0 {
                 return ResultBuilder::version_too_high();
             }
