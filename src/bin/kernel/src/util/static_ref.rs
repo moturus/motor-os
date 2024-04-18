@@ -46,12 +46,12 @@ impl<T> StaticRef<T> {
     }
 
     // Unsafe because can race with another set/reset.
-    pub unsafe fn _reset(&self, val: &'static T) {
-        let new_ptr = val as *const T;
-        let new_ptr = new_ptr as usize;
+    // pub unsafe fn _reset(&self, val: &'static T) {
+    //     let new_ptr = val as *const T;
+    //     let new_ptr = new_ptr as usize;
 
-        self.ptr.store(new_ptr, Ordering::Release);
-    }
+    //     self.ptr.store(new_ptr, Ordering::Release);
+    // }
 
     fn inst(&self) -> &T {
         let ptr = self.ptr.load(Ordering::Acquire);

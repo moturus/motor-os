@@ -1,5 +1,8 @@
 fn print_usage_and_exit(exit_code: i32) -> ! {
+    eprintln!("Report PHYSICAL RAM available and used.");
+    eprintln!("This is different from `ps`, which reports VIRTUAL RAM usage.");
     eprintln!("usage:\n\tfree [-(b|k|m|g)] [reclaim]\n");
+    std::thread::sleep(std::time::Duration::new(0, 1_000_000));
     std::process::exit(exit_code);
 }
 

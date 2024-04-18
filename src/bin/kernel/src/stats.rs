@@ -48,31 +48,49 @@ impl MemStats {
         Self::new(false)
     }
 
-    pub fn new_with_data(small: u64) -> Self {
-        Self {
-            pages_used: AtomicU64::new(small),
-            user_stats: false,
-        }
-    }
+    // pub fn new_with_data(small: u64) -> Self {
+    //     Self {
+    //         pages_used: AtomicU64::new(small),
+    //         user_stats: false,
+    //     }
+    // }
 
     pub fn total(&self) -> u64 {
         self.pages_used.load(Ordering::Relaxed) << PAGE_SIZE_SMALL_LOG2
     }
 
     pub fn add(&self, num_pages: u64) {
-        self.pages_used.fetch_add(num_pages, Ordering::Relaxed);
+        self.add_simple(num_pages);
 
         if self.user_stats {
-            SYSTEM_STATS.mem_stats_user.add(num_pages);
+            SYSTEM_STATS.mem_stats_user.add_simple(num_pages);
+        } else {
+            if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
+                SYSTEM_STATS.mem_stats_kernel.add_simple(num_pages);
+            }
         }
     }
 
+    #[inline]
+    fn add_simple(&self, num_pages: u64) {
+        self.pages_used.fetch_add(num_pages, Ordering::Relaxed);
+    }
+
     pub fn sub(&self, num_pages: u64) {
-        self.pages_used.fetch_sub(num_pages, Ordering::Relaxed);
+        self.sub_simple(num_pages);
 
         if self.user_stats {
-            SYSTEM_STATS.mem_stats_user.sub(num_pages);
+            SYSTEM_STATS.mem_stats_user.sub_simple(num_pages);
+        } else {
+            if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
+                SYSTEM_STATS.mem_stats_kernel.sub_simple(num_pages);
+            }
         }
+    }
+
+    #[inline]
+    fn sub_simple(&self, num_pages: u64) {
+        self.pages_used.fetch_sub(num_pages, Ordering::Relaxed);
     }
 }
 
@@ -294,8 +312,8 @@ pub fn init() {
         None,
         ProcessId::from_u64(PID_SYSTEM),
         "(total)".to_owned(),
-        Arc::new(MemStats::new_kernel()), // new_kernel() to avoid recursion in add/sub.
-        crate::mm::virt::kernel_mem_stats(),
+        Arc::new(MemStats::new_user()),
+        Arc::new(MemStats::new_kernel()),
     ))));
 
     KERNEL_STATS.set(Box::leak(Box::new(KProcessStats::new(
@@ -319,9 +337,18 @@ pub fn init() {
     SYSTEM_STATS
         .total_threads
         .store(num_cpus, Ordering::Relaxed);
+
+    // The kernel may have allocated a bunch of memory by this time.
+    SYSTEM_STATS.mem_stats_kernel.pages_used.fetch_add(
+        KERNEL_STATS
+            .mem_stats_kernel
+            .pages_used
+            .load(Ordering::Acquire),
+        Ordering::Relaxed,
+    );
 }
 
-pub fn system_stats() -> Arc<KProcessStats> {
+fn system_stats() -> Arc<KProcessStats> {
     SYSTEM_STATS.clone()
 }
 
