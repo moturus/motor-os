@@ -471,14 +471,25 @@ impl AddressSpaceBase {
             page_allocator: super::virt_intrusive::PageAllocator::default(),
 
             mem_stats: Arc::new(if kernel {
-                let stats = super::phys::PhysStats::get();
-                log::debug!(
-                    "New kernel address space: s: {} m: {}",
-                    stats.small_pages_used,
-                    stats.mid_pages_used,
-                );
+                // let stats = super::phys::PhysStats::get();
+                // // log::debug and similare are not yet available.
+                // crate::arch_raw_log!(
+                //     "New kernel address space: s: {} m: {}",
+                //     stats.small_pages_used,
+                //     stats.mid_pages_used,
+                // );
 
-                MemStats::new_with_data(stats.small_pages_used)
+                // MemStats::new_with_data(stats.small_pages_used)
+
+                // Note: while there is some (excessive) memory usage
+                //       here, during boot, captured in the commented
+                //       section above; it will mostly be freed
+                //       later; and this freeing will not be captured
+                //       properly, so it is more accurate to start with
+                //       zero usage than to have ~30M of extra RAM
+                //       attributed to the kernel.
+
+                MemStats::new_kernel()
             } else {
                 MemStats::new_user()
             }),
