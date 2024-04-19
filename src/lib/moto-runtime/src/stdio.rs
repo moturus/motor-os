@@ -318,7 +318,17 @@ pub(super) fn set_relay(
     let local_copy = to.unsafe_copy();
     let thread_arg = Box::into_raw(Box::new(RelayArg { from, to })) as usize;
 
-    super::thread::spawn(1024 * 64, relay_thread_fn as usize, thread_arg).map_err(|err| {
+    #[cfg(debug_assertions)]
+    const RELAY_THREAD_STACK_SIZE: usize = 1024 * 16;
+    #[cfg(not(debug_assertions))]
+    const RELAY_THREAD_STACK_SIZE: usize = 1024 * 4;
+
+    super::thread::spawn(
+        RELAY_THREAD_STACK_SIZE,
+        relay_thread_fn as usize,
+        thread_arg,
+    )
+    .map_err(|err| {
         unsafe {
             drop(Box::from_raw(thread_arg as *mut RelayArg));
             local_copy.release(SysHandle::SELF);
