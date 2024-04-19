@@ -1260,13 +1260,15 @@ impl NetSys {
             || (moto_socket.rx_seq > (moto_socket.rx_ack + rt_api::net::TCP_RX_MAX_INFLIGHT))
         {
             #[cfg(debug_assertions)]
-            log::debug!(
-                "{}:{} TCP RX: stuck seq: {} ack: {}",
-                file!(),
-                line!(),
-                moto_socket.rx_seq,
-                moto_socket.rx_ack,
-            );
+            if moto_socket.rx_ack != u64::MAX {
+                log::debug!(
+                    "{}:{} TCP RX: stuck seq: {} ack: {}",
+                    file!(),
+                    line!(),
+                    moto_socket.rx_seq,
+                    moto_socket.rx_ack,
+                );
+            }
             return;
         }
 

@@ -143,7 +143,11 @@ fn test_ipc() {
 
     let mut xor_service = subcommand::spawn();
     xor_service.start_xor_service();
-    std::thread::sleep(std::time::Duration::new(0, 100_000));
+
+    #[cfg(debug_assertions)]
+    std::thread::sleep(std::time::Duration::new(0, 100_000_000));
+    #[cfg(not(debug_assertions))]
+    std::thread::sleep(std::time::Duration::new(0, 1_000_000));
 
     let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
     conn.connect("xor-service").unwrap();
