@@ -689,7 +689,11 @@ impl Drop for Thread {
 
 impl Thread {
     const DEFAULT_USER_STACK_SIZE_PAGES: u64 = 254; // +2 are added as guards.
-    const DEFAULT_KERNEL_STACK_SIZE_PAGES: u64 = 30; // +2 are added as guards.
+    #[cfg(debug_assertions)]
+    const DEFAULT_KERNEL_STACK_SIZE_PAGES: u64 = 8; // +2 are added as guards.
+    #[cfg(not(debug_assertions))]
+    const DEFAULT_KERNEL_STACK_SIZE_PAGES: u64 = 4; // +2 are added as guards.
+
     const USER_TCB_GUARD: u64 = 0xdead_f00b_a4ba_22cd; // Whatever.
 
     fn new(
