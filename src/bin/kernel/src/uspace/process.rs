@@ -172,6 +172,7 @@ impl Process {
                 debug_name,
                 user_mem_stats,
                 kernel_mem_stats,
+                me.clone(),
             ),
         });
 
@@ -183,6 +184,11 @@ impl Process {
             let ptr = Arc::as_ptr(&self_) as usize as *mut Process;
             ptr.as_mut().unwrap()
         };
+
+        let process_page = self_mut.address_space.process_static_page_mut();
+        process_page.pid = self_mut.pid().as_u64();
+        process_page.capabilities = capabilities;
+
         self_mut.main_thread = Some(Thread::new(self_.clone(), user_stack, self_mut.entry_point));
 
         let thread = self_mut.main_thread.as_ref().unwrap();
@@ -212,6 +218,18 @@ impl Process {
         }
 
         let parent = parent_thread.owner();
+        let parent_caps = parent.capabilities();
+        if parent_caps & moto_sys::caps::CAP_SYS == 0 {
+            if capabilities & (moto_sys::caps::CAP_IO_MANAGER | moto_sys::caps::CAP_SYS) != 0 {
+                return Err(ErrorCode::NotAllowed);
+            }
+
+            if (capabilities & !parent_caps) != 0 {
+                // Non-system processes cannot grant themseves caps they don't have.
+                return Err(ErrorCode::NotAllowed);
+            }
+        }
+
         let (address_space, url) = match parent.get_object(&address_space_handle) {
             None => {
                 log::debug!("bad handle");
@@ -449,6 +467,11 @@ impl Process {
 
     fn on_thread_exited(&self, tid: ThreadId, thread_status: ThreadStatus) {
         self.stats.on_thread_exited();
+        self.address_space
+            .process_static_page_mut()
+            .active_threads
+            .fetch_add(1, Ordering::Relaxed);
+
         #[cfg(debug_assertions)]
         log::debug!(
             "on_thread_exited: pid: {} tid: {}",
@@ -488,6 +511,9 @@ impl Process {
                     *status_lock = match thread_status {
                         ThreadStatus::Finished => ProcessStatus::Exiting(0),
                         ThreadStatus::Exited(val) => ProcessStatus::Exiting(val),
+                        ThreadStatus::Killed(_) | ThreadStatus::Error(_) => {
+                            ProcessStatus::Exiting(u64::MAX)
+                        }
                         // _ => ProcessStatus::Exiting(u64::MAX),
                         _ => panic!("Unexpected thread status {:?}.", thread_status),
                     };
@@ -756,6 +782,12 @@ impl Thread {
             self_mut.join_object = Some(join_object.clone());
             self_mut.join_handle = owner.add_object(join_object);
         }
+
+        owner
+            .address_space
+            .process_static_page_mut()
+            .active_threads
+            .fetch_add(1, Ordering::Relaxed);
 
         owner.stats.on_thread_added();
         self_

@@ -406,18 +406,18 @@ impl IoRuntime {
                     if err == ErrorCode::TimedOut {
                         if timeout >= core::time::Duration::from_secs(1) {
                             debug_timed_out = true;
-                            #[cfg(debug_assertions)]
-                            {
-                                log::debug!("timeout wakeup");
+                            // #[cfg(debug_assertions)]
+                            // {
+                            //     log::debug!("timeout wakeup");
 
-                                let cpu_usage = moto_runtime::util::get_cpu_usage();
-                                log::debug!("\tcpu usage: ");
-                                let mut s = String::new();
-                                for n in &cpu_usage {
-                                    s.push_str(std::format!("{: >5.1}% ", (*n) * 100.0).as_str());
-                                }
-                                log::debug!("{}", s);
-                            }
+                            //     let cpu_usage = moto_runtime::util::get_cpu_usage();
+                            //     log::debug!("\tcpu usage: ");
+                            //     let mut s = String::new();
+                            //     for n in &cpu_usage {
+                            //         s.push_str(std::format!("{: >5.1}% ", (*n) * 100.0).as_str());
+                            //     }
+                            //     log::debug!("{}", s);
+                            // }
 
                             debug_assert!(self.pending_completions.is_empty());
                             self.process_wakeups(self.all_handles.clone(), true);

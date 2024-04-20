@@ -3,12 +3,13 @@ use moto_sys::stats::{ProcessStatsV1, PID_KERNEL, PID_SYSTEM};
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("Report some process stats.");
     eprintln!("Note 1: PPID = parent pid.");
-    eprintln!("Note 2: Memory usage here is virtual memory used per process.");
+    eprintln!("Note 2: System processes are marked with '*'.");
+    eprintln!("Note 3: Memory usage here is virtual memory used per process.");
     eprintln!("        Kernel memory usage is a bit underreported, as some bootup memory is not captured.");
     eprintln!("        Process memory usage captures shared memory, meaning that total/cumulative");
     eprintln!("        virtual memory usage is higher than actual physical memory usage.");
     eprintln!("        Lazily mapped virtual memory (e.g. stacks) is included here, which also");
-    eprintln!("        leads to overstating virtual memory usage vs physical memory usage.");
+    eprintln!("        leads to overstating virtual memory usage vs physical memory usage.\n");
     eprintln!("usage:\n\tps [-H]\n");
     std::thread::sleep(std::time::Duration::new(0, 1_000_000));
     std::process::exit(exit_code);
@@ -25,6 +26,7 @@ pub fn do_command(args: &[String]) {
     if args.len() == 2 {
         match args[1].as_str() {
             "-H" => should_print_tree = true,
+            "--help" => print_usage_and_exit(0),
             _ => print_usage_and_exit(1),
         }
     }
@@ -59,7 +61,7 @@ pub fn do_command(args: &[String]) {
     let col_width = max_num.to_string().len();
 
     println!(
-        "{:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:<w$} ST   Name",
+        "{:>w$}* {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:<w$}  ST   Name",
         "PID",
         "PPID",
         "A_THR",
@@ -84,8 +86,9 @@ pub fn do_command(args: &[String]) {
 
 fn print_line(proc: &ProcessStatsV1, col_width: usize, name_offset: usize) {
     println!(
-        "{:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {} {:off$} {}",
+        "{:>w$}{} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {} {:off$} {}",
         proc.pid,
+        if proc.system_process != 0 { "*" } else { " " },
         proc.parent_pid,
         proc.active_threads,
         proc.total_threads,

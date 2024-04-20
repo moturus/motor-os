@@ -60,6 +60,11 @@ pub fn num_cpus() -> u32 {
     KernelStaticPage::get().num_cpus
 }
 
+#[cfg(feature = "userspace")]
+pub fn current_pid() -> u64 {
+    shared_mem::ProcessStaticPage::get().pid
+}
+
 // Most system-level APIs (syscalls, IO drivers) return 16-bit error codes
 // to make things simple (errno works well enough in Linux/POSIX).
 // Applications that want to use more sophisticated errors are free to do that.

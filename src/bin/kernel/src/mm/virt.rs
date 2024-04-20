@@ -68,11 +68,14 @@ const VMEM_USER_END: u64 = PAGING_DIRECT_MAP_OFFSET >> 1; // 1 << 45 on x64.
 // Note: the address below must NOT be in the L4 region that is used by
 //       the kernel, as we will either have to give the userspace access
 //       to it, or will get #PF.
-const STATIC_SHARED_PAGE_USER_VADDR: u64 = VMEM_KERNEL_DATA_START - PAGE_SIZE_MID;
-pub(super) const STATIC_SYS_IO_MID_PAGE: u64 = STATIC_SHARED_PAGE_USER_VADDR - PAGE_SIZE_MID;
+const KERNEL_STATIC_SHARED_PAGE_USER_VADDR: u64 = VMEM_KERNEL_DATA_START - PAGE_SIZE_MID;
+const PROCESS_STATIC_SHARED_PAGE_USER_VADDR: u64 =
+    KERNEL_STATIC_SHARED_PAGE_USER_VADDR - PAGE_SIZE_MID;
+pub(super) const STATIC_SYS_IO_MID_PAGE: u64 =
+    KERNEL_STATIC_SHARED_PAGE_USER_VADDR - 2 * PAGE_SIZE_MID;
 
 const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
-const _: () = assert!(moto_sys::KernelStaticPage::VADDR == STATIC_SHARED_PAGE_USER_VADDR);
+const _: () = assert!(moto_sys::KernelStaticPage::VADDR == KERNEL_STATIC_SHARED_PAGE_USER_VADDR);
 
 pub const fn kernel_vmem_offset() -> u64 {
     VMEM_KERNEL_DATA_START
@@ -645,6 +648,10 @@ pub(super) struct UserAddressSpaceBase {
     base: AddressSpaceBase,
     pub(super) normal_memory: VmemRegion, // "Normal" memory, managed by the kernel.
     pub(super) custom_memory: VmemRegion, // "Custom" memory, managed by the userspace.
+
+    // Each process has a small page that the kernel maps at a fixed address
+    // to share some info. See moto_sys::shared_mem::ProcessStaticPage.
+    process_static_page_phys_addr: AtomicU64,
 }
 
 impl Drop for UserAddressSpaceBase {
@@ -657,9 +664,20 @@ impl Drop for UserAddressSpaceBase {
         // Need to manually unmap manually mapped pages.
         self.base.page_table.unmap_page(
             KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
-            STATIC_SHARED_PAGE_USER_VADDR,
+            KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
             PageType::SmallPage,
         );
+
+        let phys_addr = self
+            .process_static_page_phys_addr
+            .swap(0, Ordering::Relaxed);
+        self.base.page_table.unmap_page(
+            phys_addr,
+            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+            PageType::SmallPage,
+        );
+        super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
+
         self.base.page_table.unmap_kernel_from_user();
 
         #[cfg(debug_assertions)]
@@ -692,6 +710,7 @@ impl UserAddressSpaceBase {
             }),
 
             base: AddressSpaceBase::new(false)?,
+            process_static_page_phys_addr: AtomicU64::new(0),
         })
     }
 
@@ -713,10 +732,30 @@ impl UserAddressSpaceBase {
 
         self.base.page_table.map_page(
             KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
-            STATIC_SHARED_PAGE_USER_VADDR,
+            KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
             PageType::SmallPage,
             MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
         );
+
+        let phys_addr = super::phys::phys_allocate_frameless(PageType::SmallPage).unwrap();
+        self.base.page_table.map_page(
+            phys_addr,
+            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+            PageType::SmallPage,
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
+        );
+        self.process_static_page_phys_addr
+            .store(phys_addr, Ordering::Relaxed);
+    }
+
+    pub fn process_static_page_mut(&self) -> &'static mut moto_sys::ProcessStaticPage {
+        let vaddr =
+            self.process_static_page_phys_addr.load(Ordering::Relaxed) + PAGING_DIRECT_MAP_OFFSET;
+        unsafe {
+            (vaddr as usize as *mut moto_sys::ProcessStaticPage)
+                .as_mut()
+                .unwrap_unchecked()
+        }
     }
 
     pub(super) fn mem_stats(&self) -> &Arc<MemStats> {

@@ -56,6 +56,11 @@ fn main() {
     #[cfg(debug_assertions)]
     SysMem::log("sys-init started").ok();
 
+    assert_eq!(
+        1,
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
+    );
+
     let config = process_config();
     if let Err(msg) = config {
         log::error!("sys-init: {}", msg);
@@ -67,6 +72,10 @@ fn main() {
 
     if let Some(log) = &config.log {
         std::process::Command::new(log.as_str())
+            .env(
+                moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
+                format!("0x{:x}", moto_sys::caps::CAP_LOG),
+            )
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

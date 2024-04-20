@@ -93,6 +93,10 @@ impl UserAddressSpace {
         Ok(self_)
     }
 
+    pub fn process_static_page_mut(&self) -> &'static mut moto_sys::ProcessStaticPage {
+        self.inner.process_static_page_mut()
+    }
+
     pub fn user_mem_stats(&self) -> &Arc<MemStats> {
         self.inner.mem_stats()
     }

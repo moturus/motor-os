@@ -296,6 +296,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
 
     if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PEER {
         if (killer.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
+            // This is used by sys-io.
             return ResultBuilder::result(ErrorCode::NotAllowed);
         }
         if let Some(obj) = killer.owner().get_object(&target) {
@@ -310,6 +311,29 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
             }
         }
         return ResultBuilder::result(ErrorCode::BadHandle);
+    }
+
+    if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PID {
+        let target_pid = args.args[0];
+        if let Some(target_stats) = crate::stats::stats_from_pid(target_pid) {
+            if let Some(target) = target_stats.owner.upgrade() {
+                if target.capabilities() & moto_sys::caps::CAP_SYS != 0 {
+                    return ResultBuilder::result(ErrorCode::NotAllowed);
+                } else {
+                    log::debug!(
+                        "process {} killed by {}",
+                        target.debug_name(),
+                        killer.owner().debug_name()
+                    );
+                    target.die();
+                    return ResultBuilder::ok();
+                }
+            } else {
+                return ResultBuilder::result(ErrorCode::InvalidArgument);
+            }
+        } else {
+            return ResultBuilder::result(ErrorCode::InvalidArgument);
+        }
     }
 
     if args.flags != 0 {

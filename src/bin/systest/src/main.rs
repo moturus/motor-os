@@ -459,6 +459,24 @@ fn test_oom() {
     println!("test_oom() PASS");
 }
 
+fn test_caps() {
+    assert_eq!(
+        0,
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
+    );
+
+    assert!(std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env(
+            moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
+            format!("0x{:x}", moto_sys::caps::CAP_SYS),
+        )
+        .spawn()
+        .is_err());
+
+    println!("test_caps() PASS");
+}
+
 fn input_listener() {
     loop {
         let mut input = [0_u8; 16];
@@ -485,6 +503,8 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    test_caps();
+    spawn_wait_kill::test_pid_kill();
     test_oom();
 
     tcp::test_tcp_loopback();

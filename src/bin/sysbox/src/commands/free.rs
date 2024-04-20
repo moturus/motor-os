@@ -24,6 +24,7 @@ pub fn do_command(args: &[String]) {
     if args.len() > 1 {
         match args[1].as_str() {
             "-b" => {}
+            "--help" => print_usage_and_exit(0),
             "-k" => shift_bits = 10,
             "-m" => shift_bits = 20,
             "-g" => shift_bits = 30,

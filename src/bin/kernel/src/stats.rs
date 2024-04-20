@@ -108,6 +108,7 @@ pub struct KProcessStats {
 
     mem_stats_user: Arc<MemStats>,
     mem_stats_kernel: Arc<MemStats>,
+    pub owner: Weak<crate::uspace::Process>,
 }
 
 impl Drop for KProcessStats {
@@ -132,6 +133,7 @@ impl KProcessStats {
         debug_name: String,
         mem_stats_user: Arc<MemStats>,
         mem_stats_kernel: Arc<MemStats>,
+        owner: Weak<crate::uspace::Process>,
     ) -> Arc<Self> {
         Self::new_impl(
             Some(parent),
@@ -139,6 +141,7 @@ impl KProcessStats {
             debug_name,
             mem_stats_user,
             mem_stats_kernel,
+            owner,
         )
     }
 
@@ -148,6 +151,7 @@ impl KProcessStats {
         debug_name: String,
         mem_stats_user: Arc<MemStats>,
         mem_stats_kernel: Arc<MemStats>,
+        owner: Weak<crate::uspace::Process>,
     ) -> Arc<Self> {
         let self_ = Arc::new(Self {
             pid,
@@ -161,6 +165,7 @@ impl KProcessStats {
             active: AtomicBool::new(true),
             mem_stats_user,
             mem_stats_kernel,
+            owner,
         });
 
         match self_.parent.as_ref() {
@@ -240,6 +245,13 @@ impl KProcessStats {
         dest.pages_user = self.mem_stats_user.pages_used.load(Ordering::Relaxed);
         dest.pages_kernel = self.mem_stats_kernel.pages_used.load(Ordering::Relaxed);
 
+        dest.system_process = 0;
+        if let Some(proc) = self.owner.upgrade() {
+            if proc.capabilities() & moto_sys::caps::CAP_SYS != 0 {
+                dest.system_process = 1
+            }
+        };
+
         let debug_name = if self.debug_name.as_bytes().len() > 32 {
             &self.debug_name.as_bytes()[0..32]
         } else {
@@ -314,14 +326,16 @@ pub fn init() {
         "(total)".to_owned(),
         Arc::new(MemStats::new_user()),
         Arc::new(MemStats::new_kernel()),
+        Weak::new(),
     ))));
 
-    KERNEL_STATS.set(Box::leak(Box::new(KProcessStats::new(
-        system_stats(),
+    KERNEL_STATS.set(Box::leak(Box::new(KProcessStats::new_impl(
+        Some(system_stats()),
         ProcessId::from_u64(PID_KERNEL),
         "kernel".to_owned(),
         Arc::new(MemStats::new_user()),
         crate::mm::virt::kernel_mem_stats(),
+        Weak::new(),
     ))));
 
     let num_cpus = crate::config::num_cpus() as u64;
@@ -354,4 +368,12 @@ fn system_stats() -> Arc<KProcessStats> {
 
 pub fn kernel_stats() -> Arc<KProcessStats> {
     KERNEL_STATS.clone()
+}
+
+pub fn stats_from_pid(pid: u64) -> Option<Arc<KProcessStats>> {
+    SYSTEM_STATS
+        .children
+        .lock(line!())
+        .get(&ProcessId::from_u64(pid))
+        .map(|w| w.upgrade())?
 }

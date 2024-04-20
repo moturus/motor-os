@@ -24,7 +24,8 @@ pub struct ProcessStatsV1 {
     pub active_children: u64, // Children still running.
     pub debug_name_bytes: [u8; 32],
     pub debug_name_len: u8,
-    pub active: u8, // 0 => zombie; 1 => active.
+    pub active: u8,         // 0 => zombie; 1 => active.
+    pub system_process: u8, // 1 => system; 0 => normal.
 }
 
 #[cfg(feature = "userspace")]

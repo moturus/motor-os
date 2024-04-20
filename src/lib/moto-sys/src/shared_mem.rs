@@ -54,21 +54,16 @@ const _: () =
 #[repr(C)]
 pub struct ProcessStaticPage {
     pub version: u64,
+    pub pid: u64,
 
     // The capabilities of the process.
     pub capabilities: u64,
-
-    // How much memory the process can use.
-    // The number cannot change for now, but...
-    pub max_memory: AtomicU64,
-
-    pub kernel_memory_used: AtomicU64,
-    pub user_memory_used: AtomicU64,
+    pub active_threads: AtomicU64, // Includes stdio relay threads.
 }
 
 impl ProcessStaticPage {
     pub const PAGE_SIZE: u64 = 4096;
-    pub const VADDR: u64 = (1_u64 << 46) - (2 * super::syscalls::SysMem::PAGE_SIZE_MID); // x64.
+    pub const VADDR: u64 = KernelStaticPage::VADDR - super::syscalls::SysMem::PAGE_SIZE_MID;
 
     #[cfg(feature = "userspace")]
     pub fn get() -> &'static Self {

@@ -288,6 +288,7 @@ fn run_elf(
         return Err(err);
     }
 
+    // TODO: remove CAP_LOG when the runtime is stabilized.
     let mut caps = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG;
     // Find MOTURUS_CAPS env var.
     for (k, v) in &mut env {
