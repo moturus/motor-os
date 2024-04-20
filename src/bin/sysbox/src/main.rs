@@ -8,6 +8,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox echo");
     println!("\tsysbox free");
     println!("\tsysbox help");
+    println!("\tsysbox kill");
     println!("\tsysbox loop");
     println!("\tsysbox ls");
     println!("\tsysbox mkdir");
@@ -33,6 +34,7 @@ fn main() {
         "echo" => commands::echo::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
+        "kill" => commands::kill::do_command(&args[1..]),
         "loop" => commands::cmd_loop::do_command(&args[1..]),
         "ls" => commands::ls::do_command(&args[1..]),
         "mkdir" => commands::mkdir::do_command(&args[1..]),

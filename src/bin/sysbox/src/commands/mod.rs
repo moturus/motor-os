@@ -2,6 +2,7 @@ pub mod cat;
 pub mod cmd_loop;
 pub mod echo;
 pub mod free;
+pub mod kill;
 pub mod ls;
 pub mod mkdir;
 pub mod mv;
