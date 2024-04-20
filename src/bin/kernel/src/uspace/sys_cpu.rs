@@ -197,7 +197,10 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     };
 
     if wakers.len() > 6 {
-        todo!()
+        todo!(
+            "wow, a lot of wakers for proc {}",
+            curr.owner().debug_name()
+        )
     } // Do HANDLE_ARRAY
 
     let mut data = [0_u64; 6];

@@ -610,6 +610,16 @@ impl Process {
             }
         }
     }
+
+    fn job_fn_kill_by_pid(_: &Weak<Thread>, pid: u64) {
+        if let Some(target_stats) = crate::stats::stats_from_pid(pid) {
+            if let Some(target) = target_stats.owner.upgrade() {
+                if target.capabilities() & moto_sys::caps::CAP_SYS == 0 {
+                    target.die();
+                }
+            }
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -1714,4 +1724,11 @@ impl Thread {
             thread.on_thread_exited();
         }
     }
+}
+
+pub fn post_kill_by_pid(pid: u64) {
+    crate::sched::post(crate::sched::Job::new_with_arg(
+        Process::job_fn_kill_by_pid,
+        pid,
+    ));
 }

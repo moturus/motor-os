@@ -115,14 +115,14 @@ impl Drop for KProcessStats {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.as_ref() {
             assert!(parent.children.lock(line!()).remove(&self.pid).is_some());
-            assert!(SYSTEM_STATS
-                .children
-                .lock(line!())
-                .remove(&self.pid)
-                .is_some());
         } else {
             panic!("impossible");
         }
+        assert!(SYSTEM_STATS
+            .children
+            .lock(line!())
+            .remove(&self.pid)
+            .is_some());
     }
 }
 
@@ -209,6 +209,14 @@ impl KProcessStats {
             panic!("impossible");
         }
         self.active.store(false, Ordering::Relaxed);
+
+        // Kill child processes. Do it asynchronously to avoid stack overflow.
+        // Do it here because this is the only place where child processes
+        // are tracked.
+        let children = self.children.lock(line!());
+        for (pid, _) in &*children {
+            crate::uspace::process::post_kill_by_pid(pid.as_u64());
+        }
     }
 
     pub fn active_threads(&self) -> u64 {

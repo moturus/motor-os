@@ -93,6 +93,16 @@ impl Job {
         }
     }
 
+    pub fn new_with_arg(job_fn: SchedulerJobFn, arg: u64) -> Self {
+        Job {
+            job_fn,
+            thread: Weak::default(),
+            arg,
+            prio: Priority::Normal,
+            cpu: uCpus::MAX,
+        }
+    }
+
     pub fn new(job_fn: SchedulerJobFn, thread: &Thread) -> Self {
         Job {
             job_fn,
@@ -467,7 +477,7 @@ pub fn start() -> ! {
 pub fn post(job: Job) {
     if job.cpu == uCpus::MAX {
         {
-            GLOBAL_READY_QUEUE_NORMAL.lock(101).push_back(job)
+            GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job)
         };
         let mut wake = |_: uCpus, scheduler: &Scheduler| -> bool {
             if scheduler.idle.load(Ordering::Acquire) {
