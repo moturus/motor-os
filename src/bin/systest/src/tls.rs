@@ -43,18 +43,14 @@ pub fn test_tls() {
         });
     };
 
-    println!("starting tls_test");
-
     let t1 = std::thread::spawn(thread_fn);
     let t2 = std::thread::spawn(thread_fn);
     let t3 = std::thread::spawn(thread_fn);
 
-    println!("tls_test: spawned threads; waiting for the counter");
     while TLS_COUNTER.load(Ordering::Relaxed) != 3 {
         std::thread::sleep(Duration::new(0, 1000));
     }
 
-    println!("tls_test: stopping threads");
     TLS_EXIT.store(true, Ordering::Relaxed);
     t1.join().unwrap();
     t2.join().unwrap();
