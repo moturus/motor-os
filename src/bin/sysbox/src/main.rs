@@ -5,6 +5,7 @@ mod commands;
 fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("sysbox commands:");
     println!("\tsysbox cat");
+    println!("\tdate");
     println!("\tsysbox echo");
     println!("\tsysbox free");
     println!("\tsysbox help");
@@ -31,11 +32,12 @@ fn main() {
 
     match args[1].as_str() {
         "cat" => commands::cat::do_command(&args[1..]),
+        "date" => commands::date::do_command(&args[1..]),
         "echo" => commands::echo::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
         "kill" => commands::kill::do_command(&args[1..]),
-        "loop" => commands::cmd_loop::do_command(&args[1..]),
+        "loop" => commands::loop_cmd::do_command(&args[1..]),
         "ls" => commands::ls::do_command(&args[1..]),
         "mkdir" => commands::mkdir::do_command(&args[1..]),
         "mv" => commands::mv::do_command(&args[1..]),

@@ -9,6 +9,7 @@ edition = "2021"
 moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 moto-ipc     = { path = "../../lib/moto-ipc" }
 moto-sys     = { path = "../../lib/moto-sys" }
+time = { version = "0.3.36", default-features = false, features = ["std"] }
 
 [patch.crates-io]
 moto-ipc = { path = "../../lib/moto-ipc" }
