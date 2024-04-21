@@ -3,6 +3,7 @@ mod mpmc;
 mod spawn_wait_kill;
 mod subcommand;
 mod tcp;
+mod tls;
 mod xor_server;
 
 use std::{
@@ -503,6 +504,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    tls::test_tls();
     test_caps();
     spawn_wait_kill::test_pid_kill();
     test_oom();
