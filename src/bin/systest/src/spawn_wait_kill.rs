@@ -52,7 +52,7 @@ pub fn test_pid_kill() {
 
     for proc in &processes {
         if proc.debug_name().contains("systest") {
-            if proc.pid == moto_sys::current_pid() {
+            if proc.parent_pid != moto_sys::current_pid() {
                 continue;
             }
 
