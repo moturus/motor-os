@@ -39,8 +39,9 @@ pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
     let res = PhysicalMemory::inst().allocate_frame(kind);
     if res.is_err() {
         log::debug!("OOM");
-        #[cfg(debug_assertions)]
-        dump_stats();
+        panic!("OOM")
+        // #[cfg(debug_assertions)]
+        // dump_stats();
     }
     res
 }
@@ -464,11 +465,12 @@ impl<S: PageSize> MemoryArea<S> {
         match self.do_allocate_frame() {
             Ok(f) => Ok(f),
             Err(err) => {
-                log::warn!(
-                    "OOM: failed to allocate {} frame.\nTotal pages: {}; used pages: {}.\n",
+                log::error!(
+                    "OOM: failed to allocate {} frame.\nTotal pages: {}; used pages: {} available: {}.\n",
                     S::as_str(),
                     self.total_pages,
                     self.used_pages.load(Ordering::Acquire),
+                    PhysStats::get().available(),
                 );
                 Err(err)
             }
@@ -867,7 +869,9 @@ impl PhysStats {
 
     pub fn used(&self) -> u64 {
         (self.small_pages_used << PAGE_SIZE_SMALL_LOG2)
-            + (self.mid_pages_used << PAGE_SIZE_MID_LOG2)
+            // + (self.mid_pages_used << PAGE_SIZE_MID_LOG2)
+            // Note: we don't count MID pages as available.
+            + (self.mid_pages << PAGE_SIZE_MID_LOG2)
     }
 
     pub fn available(&self) -> u64 {

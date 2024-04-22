@@ -22,6 +22,7 @@ pub struct ProcessStatsV1 {
     pub total_children: u64,  // All direct child processes spawned.
     pub active_threads: u64,  // Threads still running.
     pub active_children: u64, // Children still running.
+    pub cpu_usage: u64,       // Total, in TSC.
     pub debug_name_bytes: [u8; 32],
     pub debug_name_len: u8,
     pub active: u8,         // 0 => zombie; 1 => active.

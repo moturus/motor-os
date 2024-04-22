@@ -5,6 +5,8 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
+use crate::arch::num_cpus;
+use crate::config::uCpus;
 use crate::mm::PAGE_SIZE_SMALL_LOG2;
 use crate::uspace::process::ProcessId;
 use crate::util::SpinLock;
@@ -48,13 +50,6 @@ impl MemStats {
         Self::new(false)
     }
 
-    // pub fn new_with_data(small: u64) -> Self {
-    //     Self {
-    //         pages_used: AtomicU64::new(small),
-    //         user_stats: false,
-    //     }
-    // }
-
     pub fn total(&self) -> u64 {
         self.pages_used.load(Ordering::Relaxed) << PAGE_SIZE_SMALL_LOG2
     }
@@ -94,6 +89,54 @@ impl MemStats {
     }
 }
 
+#[repr(C, align(64))]
+pub struct PerCpuStatsEntry {
+    pub cpu_uspace: AtomicU64,  // as TSC
+    pub cpu_kernel: AtomicU64,  // as TSC
+    pub cpu_started: AtomicU64, // if running, indicates when this has started, otherwise zero
+    _pad: [u64; 5],
+}
+
+const _: () = assert!(64 == core::mem::size_of::<PerCpuStatsEntry>());
+
+impl PerCpuStatsEntry {
+    const fn new() -> Self {
+        Self {
+            cpu_uspace: AtomicU64::new(0),
+            cpu_kernel: AtomicU64::new(0),
+            cpu_started: AtomicU64::new(0),
+            _pad: [0; 5],
+        }
+    }
+}
+
+pub struct PerCpuStats {
+    data: alloc::vec::Vec<PerCpuStatsEntry>,
+}
+
+impl PerCpuStats {
+    fn new() -> Self {
+        let mut data = alloc::vec::Vec::new();
+        data.reserve_exact(num_cpus() as usize);
+        for _ in 0..num_cpus() {
+            data.push(PerCpuStatsEntry::new());
+        }
+
+        Self { data }
+    }
+}
+
+pub struct CpuUsageScope {
+    stats: Arc<KProcessStats>,
+    is_uspace: bool,
+}
+
+impl Drop for CpuUsageScope {
+    fn drop(&mut self) {
+        self.stats.stop_cpu_usage(self.is_uspace)
+    }
+}
+
 // Process stats are held in a tree.
 pub struct KProcessStats {
     pid: ProcessId,
@@ -109,6 +152,8 @@ pub struct KProcessStats {
     mem_stats_user: Arc<MemStats>,
     mem_stats_kernel: Arc<MemStats>,
     pub owner: Weak<crate::uspace::Process>,
+
+    per_cpu_stats: PerCpuStats,
 }
 
 impl Drop for KProcessStats {
@@ -166,6 +211,7 @@ impl KProcessStats {
             mem_stats_user,
             mem_stats_kernel,
             owner,
+            per_cpu_stats: PerCpuStats::new(),
         });
 
         match self_.parent.as_ref() {
@@ -252,6 +298,7 @@ impl KProcessStats {
         dest.active_children = self.active_children.load(Ordering::Relaxed);
         dest.pages_user = self.mem_stats_user.pages_used.load(Ordering::Relaxed);
         dest.pages_kernel = self.mem_stats_kernel.pages_used.load(Ordering::Relaxed);
+        dest.cpu_usage = self.cpu_usage();
 
         dest.system_process = 0;
         if let Some(proc) = self.owner.upgrade() {
@@ -321,6 +368,38 @@ impl KProcessStats {
             }
         }
     }
+
+    pub fn cpu_usage(&self) -> u64 {
+        let mut res = 0;
+        for entry in &self.per_cpu_stats.data {
+            res +=
+                entry.cpu_uspace.load(Ordering::Relaxed) + entry.cpu_kernel.load(Ordering::Relaxed);
+        }
+
+        res
+    }
+
+    pub fn get_percpu_stats_entry(&self, cpu: uCpus) -> &PerCpuStatsEntry {
+        &self.per_cpu_stats.data[cpu as usize]
+    }
+
+    #[inline]
+    pub fn start_cpu_usage(&self) {
+        crate::sched::start_cpu_usage(self)
+    }
+
+    #[inline]
+    pub fn stop_cpu_usage(&self, is_uspace: bool) {
+        crate::sched::stop_cpu_usage(self, is_uspace)
+    }
+
+    pub fn cpu_usage_scope(self: &Arc<Self>, is_uspace: bool) -> CpuUsageScope {
+        self.start_cpu_usage();
+        CpuUsageScope {
+            stats: self.clone(),
+            is_uspace,
+        }
+    }
 }
 
 static SYSTEM_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
@@ -384,4 +463,12 @@ pub fn stats_from_pid(pid: u64) -> Option<Arc<KProcessStats>> {
         .lock(line!())
         .get(&ProcessId::from_u64(pid))
         .map(|w| w.upgrade())?
+}
+
+pub fn system_stats_ref() -> &'static KProcessStats {
+    &SYSTEM_STATS
+}
+
+pub fn kernel_stats_ref() -> &'static KProcessStats {
+    &KERNEL_STATS
 }

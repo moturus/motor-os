@@ -381,6 +381,11 @@ fn sys_spawn_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Syscal
         return ResultBuilder::invalid_argument();
     }
 
+    const NEW_THREAD_THRESHOLD: u64 = 1024 * 256; // TODO: do we need to be more precise?
+    if crate::mm::oom_for_user(NEW_THREAD_THRESHOLD) {
+        return ResultBuilder::result(ErrorCode::OutOfMemory);
+    }
+
     let stack_size = args.args[1];
     let thread_fn = args.args[2];
     let thread_arg = args.args[3];

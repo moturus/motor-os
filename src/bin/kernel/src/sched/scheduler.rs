@@ -17,6 +17,7 @@
 // just use another VM.
 
 use crate::arch::current_cpu;
+use crate::stats::KProcessStats;
 use crate::uspace::process::Thread;
 use crate::uspace::SysObject;
 use alloc::borrow::ToOwned;
@@ -313,6 +314,11 @@ impl Scheduler {
         let mut curr_iteration = 0_u64;
         let mut last_job_iter = 0_u64;
 
+        let now_tsc = crate::arch::time::Instant::now().as_u64();
+        let percpu_stats = crate::stats::kernel_stats_ref().get_percpu_stats_entry(self.cpu);
+        percpu_stats.cpu_kernel.store(now_tsc, Ordering::Relaxed);
+        percpu_stats.cpu_started.store(now_tsc, Ordering::Relaxed);
+
         #[cfg(debug_assertions)]
         self.last_alive_check.store(
             crate::arch::time::Instant::now().as_u64(),
@@ -398,9 +404,11 @@ impl Scheduler {
                     interrupts::enable();
                 } else {
                     crate::util::tracing::trace("scheduler hlt", 0, 0, 0);
+                    self.start_cpu_usage(crate::stats::system_stats_ref());
                     self.idle.store(true, Ordering::Release);
                     interrupts::enable_and_hlt();
                     self.idle.store(false, Ordering::Release);
+                    self.stop_cpu_usage(crate::stats::system_stats_ref(), false);
                     crate::util::tracing::trace("scheduler hlt wake", 0, 0, 0);
                 }
             }
@@ -408,6 +416,45 @@ impl Scheduler {
             curr_iteration = 0; // Prevent overflows.
             last_job_iter = curr_iteration; // Reset the interval.
         }
+    }
+
+    #[inline]
+    fn do_start_cpu_usage(&self, stats: &KProcessStats, now: u64) {
+        let stats_entry = stats.get_percpu_stats_entry(self.cpu);
+        assert_eq!(0, stats_entry.cpu_started.load(Ordering::Relaxed));
+
+        stats_entry.cpu_started.store(now, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn do_stop_cpu_usage(&self, stats: &KProcessStats, now: u64, is_uspace: bool) {
+        let stats_entry = stats.get_percpu_stats_entry(self.cpu);
+        let started = stats_entry.cpu_started.swap(0, Ordering::Relaxed);
+        assert_ne!(started, 0);
+        let diff = now - started;
+        if diff > 0 {
+            if is_uspace {
+                stats_entry.cpu_uspace.fetch_add(diff, Ordering::Relaxed);
+            } else {
+                stats_entry.cpu_kernel.fetch_add(diff, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn start_cpu_usage(&self, stats: &KProcessStats) {
+        let now = Instant::now().as_u64();
+        let kernel_entry = crate::stats::kernel_stats_ref();
+
+        self.do_stop_cpu_usage(kernel_entry, now, false);
+        self.do_start_cpu_usage(stats, now);
+    }
+
+    fn stop_cpu_usage(&self, stats: &KProcessStats, is_uspace: bool) {
+        let now = Instant::now().as_u64();
+        let kernel_entry = crate::stats::kernel_stats_ref();
+
+        self.do_stop_cpu_usage(stats, now, is_uspace);
+        self.do_start_cpu_usage(kernel_entry, now);
     }
 }
 
@@ -600,4 +647,16 @@ pub fn get_usage(buf: &mut [f32]) {
 #[cfg(debug_assertions)]
 pub fn print_stack_trace_and_die(cpu: uCpus) {
     PERCPU_SCHEDULERS.get_for_cpu(cpu).die()
+}
+
+#[inline]
+pub fn start_cpu_usage(stats: &KProcessStats) {
+    PERCPU_SCHEDULERS.get_per_cpu().start_cpu_usage(stats);
+}
+
+#[inline]
+pub fn stop_cpu_usage(stats: &KProcessStats, is_uspace: bool) {
+    PERCPU_SCHEDULERS
+        .get_per_cpu()
+        .stop_cpu_usage(stats, is_uspace);
 }

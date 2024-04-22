@@ -52,6 +52,11 @@ fn sys_handle_create(
                     return Err(ErrorCode::InvalidArgument);
                 };
 
+                const NEW_PROCESS_THRESHOLD: u64 = 1 << 20; // TODO: do we need to be more precise?
+                if crate::mm::oom_for_user(NEW_PROCESS_THRESHOLD) {
+                    return Err(ErrorCode::OutOfMemory);
+                }
+
                 let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
                 let sys_object = SysObject::new_owned(
                     Arc::new(moto_sys::url_decode(debug_name)),

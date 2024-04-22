@@ -235,6 +235,8 @@ impl ThreadControlBlock {
     }
 
     pub fn spawn_usermode_thread(&mut self, arg: u64) -> ThreadOffCpuReason {
+        self.owner().process_stats.start_cpu_usage();
+
         self.owner().trace("spawn_usermode_thread", arg, 0);
         crate::util::full_fence(); // The kernel does a #PF without this.
 
@@ -264,7 +266,7 @@ impl ThreadControlBlock {
         self.owner()
             .trace("spawn_usermode_thread back", self.syscall_rsp, 0);
         crate::util::full_fence(); // The kernel does a #PF without this.
-        thread_off_cpu_reason(ret, maybe_addr)
+        self.thread_off_cpu_reason(ret, maybe_addr)
     }
 
     #[inline(never)]
@@ -328,6 +330,8 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn pause(&self) {
+        self.owner().process_stats.stop_cpu_usage(false); // kernel
+        self.owner().process_stats.start_cpu_usage(); // uspace: tocr will attribute cpu usave to uspace
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
         self.owner().trace("pause", self.syscall_rsp, 0);
         crate::util::full_fence();
@@ -343,6 +347,7 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn resume(&self) -> ThreadOffCpuReason {
+        self.owner().process_stats.start_cpu_usage();
         self.owner().trace("tcb::resume", self.syscall_rsp, 0);
         self.validate_rsp();
 
@@ -365,7 +370,7 @@ impl ThreadControlBlock {
 
         crate::util::full_fence();
         self.owner().trace("tcb::resume ret", ret, maybe_addr);
-        thread_off_cpu_reason(ret, maybe_addr)
+        self.thread_off_cpu_reason(ret, maybe_addr)
     }
 
     // Called from IRQ.
@@ -419,6 +424,7 @@ impl ThreadControlBlock {
     }
 
     pub fn resume_preempted_thread(&self) -> ThreadOffCpuReason {
+        self.owner().process_stats.start_cpu_usage();
         self.owner().trace("tcb::resume_preempted_thread", 0, 0);
         unsafe {
             // Must clear to clear pf_addr.
@@ -450,7 +456,7 @@ impl ThreadControlBlock {
         crate::util::full_fence();
         self.owner()
             .trace("tcb::resume_preempted_thread ret", ret, maybe_addr);
-        thread_off_cpu_reason(ret, maybe_addr)
+        self.thread_off_cpu_reason(ret, maybe_addr)
     }
 
     unsafe fn current_tcb() -> &'static mut Self {
@@ -463,6 +469,26 @@ impl ThreadControlBlock {
         let fsbase = thread.user_tcb_user_addr();
         unsafe {
             asm!("wrfsbase {}", in(reg) fsbase, options(nostack, preserves_flags));
+        }
+    }
+
+    fn thread_off_cpu_reason(&self, tocr: u64, addr: u64) -> ThreadOffCpuReason {
+        self.owner().process_stats.stop_cpu_usage(true);
+
+        match tocr {
+            TOCR_PAUSED => ThreadOffCpuReason::Paused,
+            TOCR_PREEMPTED => {
+                // If the timer fires when the CPU is running a userspace thread,
+                // it is preempted and ends up here.
+                crate::sched::on_timer_irq();
+                ThreadOffCpuReason::Preempted
+            }
+            TOCR_EXITED => ThreadOffCpuReason::Exited,
+            TOCR_KILLED_SF => ThreadOffCpuReason::KilledSf,
+            TOCR_KILLED_GPF => ThreadOffCpuReason::KilledGpf,
+            TOCR_KILLED_PF => ThreadOffCpuReason::KilledPf(addr),
+            TOCR_KILLED_OTHER => ThreadOffCpuReason::KilledOther,
+            val => panic!("unknown Thread Off CPU Reason: 0x{:x}", val),
         }
     }
 }
@@ -505,7 +531,11 @@ extern "C" fn syscall_handler_rust(
     let thread = tcb.owner();
 
     // This may block (call TCB::pause()).
+    thread.process_stats.stop_cpu_usage(true);
+    thread.process_stats.start_cpu_usage(); // kernel
     let result = do_syscall(thread, &mut args);
+    thread.process_stats.stop_cpu_usage(false);
+    thread.process_stats.start_cpu_usage(); // uspace
     tcb.xrstor();
 
     tcb.validate_gs();
@@ -814,21 +844,3 @@ pub const TOCR_KILLED_GPF: u64 = 0x1_0001;
 pub const TOCR_KILLED_PF: u64 = 0x1_0002;
 pub const TOCR_KILLED_SF: u64 = 0x1_0003;
 pub const TOCR_KILLED_OTHER: u64 = 0x1_0004;
-
-fn thread_off_cpu_reason(tocr: u64, addr: u64) -> ThreadOffCpuReason {
-    match tocr {
-        TOCR_PAUSED => ThreadOffCpuReason::Paused,
-        TOCR_PREEMPTED => {
-            // If the timer fires when the CPU is running a userspace thread,
-            // it is preempted and ends up here.
-            crate::sched::on_timer_irq();
-            ThreadOffCpuReason::Preempted
-        }
-        TOCR_EXITED => ThreadOffCpuReason::Exited,
-        TOCR_KILLED_SF => ThreadOffCpuReason::KilledSf,
-        TOCR_KILLED_GPF => ThreadOffCpuReason::KilledGpf,
-        TOCR_KILLED_PF => ThreadOffCpuReason::KilledPf(addr),
-        TOCR_KILLED_OTHER => ThreadOffCpuReason::KilledOther,
-        val => panic!("unknown Thread Off CPU Reason: 0x{:x}", val),
-    }
-}

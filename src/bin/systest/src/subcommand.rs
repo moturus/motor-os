@@ -115,11 +115,13 @@ fn trigger_oom() -> ! {
     use moto_sys::syscalls::SysMem;
 
     // First reach memory limit.
+    println!("oom: stage 1");
     loop {
         if SysMem::alloc(SysMem::PAGE_SIZE_SMALL, 8).is_err() {
             break;
         }
     }
+    println!("oom: stage 2");
 
     // Now try spawning a thread: this should fail because
     // there's no memory available for this process.

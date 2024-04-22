@@ -709,6 +709,8 @@ pub struct Thread {
 
     last_cpu: AtomicU32,
     affined_to: AtomicU32,
+
+    pub process_stats: Arc<KProcessStats>,
 }
 
 unsafe impl Send for Thread {}
@@ -762,6 +764,7 @@ impl Thread {
             wakers: SpinLock::new(alloc::vec![]),
             last_cpu: AtomicU32::new(u32::MAX),
             affined_to: AtomicU32::new(uCpus::MAX as u32),
+            process_stats: owner.stats.clone(),
         });
         unsafe {
             let (self_mut, _lock) = self_.get_mut();
@@ -1065,6 +1068,8 @@ impl Thread {
     //fn start_trampoline(thread: u64, arg: u64) {
     //    let self_ = thread as usize as *const Thread;
     fn do_start(&self, arg: u64) {
+        let cpu_usage_scope = self.process_stats.cpu_usage_scope(false);
+
         self.trace("thread do_start", arg, 0);
         let entry_point = self.thread_entry_point;
 
@@ -1161,6 +1166,7 @@ impl Thread {
                 self.on_thread_exited();
                 return;
             }
+            core::mem::drop(cpu_usage_scope);
             self.on_thread_descheduled(tcb.spawn_usermode_thread(arg));
         }
     }
