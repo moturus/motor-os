@@ -11,7 +11,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("        Lazily mapped virtual memory (e.g. stacks) is included here, which also");
     eprintln!("        leads to overstating virtual memory usage vs physical memory usage.\n");
     eprintln!("usage:\n\tps [-H]\n");
-    std::thread::sleep(std::time::Duration::new(0, 1_000_000));
+    std::thread::sleep(std::time::Duration::new(0, 50_000_000));
     std::process::exit(exit_code);
 }
 
@@ -50,18 +50,28 @@ pub fn do_command(args: &[String]) {
     }
 
     let mut max_num = 123456;
+    let mut total_cpu: u64 = 0;
     for proc in &processes[0..cnt] {
         max_num = max_num.max(proc.pid);
         max_num = max_num.max(proc.parent_pid);
         max_num = max_num.max(proc.total_threads);
         max_num = max_num.max(proc.total_children);
-        max_num = max_num.max(proc.total_bytes() >> 10)
+        max_num = max_num.max(proc.total_bytes() >> 10);
+        total_cpu += proc.cpu_usage;
     }
 
+    // The first element has idle CPU; we show the sum of the rest.
+    total_cpu -= processes[0].cpu_usage;
+    processes[0].cpu_usage = total_cpu;
+
     let col_width = max_num.to_string().len();
+    let cpu_width = (total_cpu / moto_sys::KernelStaticPage::get().tsc_in_sec)
+        .to_string()
+        .len()
+        + 4;
 
     println!(
-        "{:>w$}* {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:<w$}  ST   Name",
+        "{:>w$}* {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:<w$} {:>wsec$}  ST   Name",
         "PID",
         "PPID",
         "A_THR",
@@ -71,22 +81,26 @@ pub fn do_command(args: &[String]) {
         "P_USER",
         "P_KERN",
         "KBYTES",
-        w = col_width
+        "CPU",
+        w = col_width,
+        wsec = cpu_width
     );
 
     if should_print_tree {
-        print_tree(&processes[0..cnt], col_width);
+        print_tree(&processes[0..cnt], col_width, cpu_width);
         return;
     }
 
     for proc in &processes[0..cnt] {
-        print_line(proc, col_width, 0);
+        print_line(proc, col_width, cpu_width, 0);
     }
 }
 
-fn print_line(proc: &ProcessStatsV1, col_width: usize, name_offset: usize) {
+fn print_line(proc: &ProcessStatsV1, col_width: usize, cpu_width: usize, name_offset: usize) {
+    let tsc_f64 = moto_sys::KernelStaticPage::get().tsc_in_sec as f64;
+
     println!(
-        "{:>w$}{} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {} {:off$} {}",
+        "{:>w$}{} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>cpu_width$.3} {} {:off$} {}",
         proc.pid,
         if proc.system_process != 0 { "*" } else { " " },
         proc.parent_pid,
@@ -97,15 +111,17 @@ fn print_line(proc: &ProcessStatsV1, col_width: usize, name_offset: usize) {
         proc.pages_user,
         proc.pages_kernel,
         proc.total_bytes() >> 10,
+        (proc.cpu_usage as f64) / tsc_f64,
         if proc.active == 1 { "RUN " } else { "DEAD" },
         "",
         proc.debug_name(),
         w = col_width,
+        cpu_width = cpu_width,
         off = name_offset
     );
 }
 
-fn print_tree(processes: &[ProcessStatsV1], col_width: usize) {
+fn print_tree(processes: &[ProcessStatsV1], col_width: usize, cpu_width: usize) {
     assert!(processes.len() > 2);
     // TODO: construct a proper tree for printing, instead of doing
     // the inefficient thing below.
@@ -114,19 +130,25 @@ fn print_tree(processes: &[ProcessStatsV1], col_width: usize) {
     assert_eq!(processes[0].pid, PID_SYSTEM);
     assert_eq!(processes[1].pid, PID_KERNEL);
 
-    print_line(&processes[0], col_width, 0);
-    print_line(&processes[1], col_width, 0);
+    print_line(&processes[0], col_width, cpu_width, 0);
+    print_line(&processes[1], col_width, cpu_width, 0);
 
-    print_subtree(processes, PID_KERNEL, col_width, 1);
+    print_subtree(processes, PID_KERNEL, col_width, cpu_width, 1);
 }
 
-fn print_subtree(processes: &[ProcessStatsV1], parent_pid: u64, col_width: usize, sublevel: usize) {
+fn print_subtree(
+    processes: &[ProcessStatsV1],
+    parent_pid: u64,
+    col_width: usize,
+    cpu_width: usize,
+    sublevel: usize,
+) {
     for proc in processes {
         if proc.parent_pid != parent_pid {
             continue;
         }
 
-        print_line(proc, col_width, sublevel * 2);
-        print_subtree(processes, proc.pid, col_width, sublevel + 1);
+        print_line(proc, col_width, cpu_width, sublevel * 2);
+        print_subtree(processes, proc.pid, col_width, cpu_width, sublevel + 1);
     }
 }

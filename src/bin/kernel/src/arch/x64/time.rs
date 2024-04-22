@@ -213,9 +213,12 @@ pub fn init_pvclock() {
     GLOBALS.base_nsec.store(base, Ordering::Release);
 
     enable_kvm_system_time();
-    GLOBALS
-        .system_start_time_tsc
-        .store(rdtsc(), Ordering::Relaxed);
+
+    // Note: because we count the full boot time from zero TSC as kernel CPU
+    // usage, we also have to use zero TSC as system start time to have
+    // `uptime` match total CPU usage.
+    GLOBALS.system_start_time_tsc.store(0, Ordering::Relaxed);
+    // .store(rdtsc(), Ordering::Relaxed);
 
     update_globals();
 }
