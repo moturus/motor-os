@@ -25,12 +25,29 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     std::process::exit(exit_code);
 }
 
+fn input_listener() {
+    use std::io::Read;
+
+    loop {
+        let mut input = [0_u8; 16];
+        let sz = std::io::stdin().read(&mut input).unwrap();
+        for b in &input[0..sz] {
+            if *b == 3 {
+                println!("Caught ^C: exiting.");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().collect();
 
     if args.len() < 2 {
         print_usage_and_exit(0);
     }
+
+    std::thread::spawn(|| input_listener());
 
     match args[1].as_str() {
         "cat" => commands::cat::do_command(&args[1..]),

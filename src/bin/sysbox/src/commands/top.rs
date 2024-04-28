@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use moto_sys::stats::ProcessStatsV1;
+
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("usage:\n\ttop\n");
     std::process::exit(exit_code);
@@ -8,12 +12,54 @@ fn tsc_to_sec(tsc: u64) -> f64 {
     (tsc as f64) / tsc_in_sec
 }
 
+fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: u64) -> String {
+    if pid == moto_sys::stats::PID_SYSTEM {
+        return "(idle)".to_owned();
+    }
+    if pid == moto_sys::stats::PID_KERNEL {
+        return "kernel".to_owned();
+    }
+    if pid == moto_sys::stats::PID_SYS_IO {
+        return "sys-io".to_owned();
+    }
+
+    fn update_cache(cmd_cache: &mut HashMap<u64, String>, pid: u64) {
+        const MAX_PROCS: usize = 256;
+        let mut processes: Vec<ProcessStatsV1> = Vec::with_capacity(MAX_PROCS);
+        for _ in 0..MAX_PROCS {
+            processes.push(ProcessStatsV1::default());
+        }
+
+        ProcessStatsV1::list(pid, &mut processes[..]).unwrap();
+        for stats in &processes {
+            cmd_cache.insert(stats.pid, stats.debug_name().to_owned());
+        }
+    }
+
+    if cmd_cache.len() == 0 {
+        update_cache(cmd_cache, moto_sys::stats::PID_SYSTEM);
+    }
+
+    if let Some(cmd) = cmd_cache.get(&pid) {
+        return cmd.clone();
+    }
+
+    update_cache(cmd_cache, pid);
+    if let Some(cmd) = cmd_cache.get(&pid) {
+        return cmd.clone();
+    }
+
+    "(???)".to_owned()
+}
+
 pub fn do_command(args: &[String]) {
     assert_eq!(args[0], "top");
 
     if args.len() != 1 {
         print_usage_and_exit(1);
     }
+
+    let mut cmd_cache: HashMap<u64, String> = HashMap::new();
 
     let stats = moto_sys::stats::CpuStatsV1::new();
     let num_cpus = stats.num_cpus();
@@ -52,12 +98,20 @@ pub fn do_command(args: &[String]) {
     for cpu in 0..num_cpus {
         header += &format!(" {:>w$}{}", "CPU", cpu, w = (sec_width - num_cpus_len));
     }
+    header += " command";
+
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all("\x1b[2J".as_bytes()).unwrap(); // Clear screen.
+    stdout.write_all("\x1b[H".as_bytes()).unwrap(); // Move the cursor to 1:1 pos.
+    stdout.flush().unwrap();
+
     println!("{}", header);
-    let mut border = String::new();
-    for _ in 0..header.len() {
-        border += "-";
-    }
-    println!("{border}");
+    // let mut border = String::new();
+    // for _ in 0..header.len() {
+    //     border += "-";
+    // }
+    // println!("{border}");
 
     for idx in 0..num_entries {
         let entry = stats.entry(idx as usize);
@@ -71,7 +125,16 @@ pub fn do_command(args: &[String]) {
             );
         }
 
+        line_k += &format!(" {}", get_cmd_string(&mut cmd_cache, entry.pid));
+
         println!("{}", line_k);
+
+        if entry.pid == moto_sys::stats::PID_SYSTEM {
+            continue;
+        }
+        if entry.pid == moto_sys::stats::PID_KERNEL {
+            continue;
+        }
 
         let mut line_u = format!("{:>w$}  u ", " ", w = pid_width);
 
