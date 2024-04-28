@@ -413,9 +413,11 @@ impl KProcessStats {
         let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
         let prev = kernel_entry.started_k.swap(0, Ordering::Relaxed);
         assert_ne!(prev, 0);
-        kernel_entry
-            .cpu_kernel
-            .fetch_add(now - prev, Ordering::Relaxed);
+        if now > prev {
+            kernel_entry
+                .cpu_kernel
+                .fetch_add(now - prev, Ordering::Relaxed);
+        }
 
         // Start self.
         let entry = &self.per_cpu_stats.data[cpu];
@@ -431,7 +433,9 @@ impl KProcessStats {
         let entry = &self.per_cpu_stats.data[cpu];
         let prev = entry.started_k.swap(0, Ordering::Relaxed);
         assert_ne!(prev, 0);
-        entry.cpu_kernel.fetch_add(now - prev, Ordering::Relaxed);
+        if now > prev {
+            entry.cpu_kernel.fetch_add(now - prev, Ordering::Relaxed);
+        }
 
         // Start kernel.
         let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
@@ -447,9 +451,11 @@ impl KProcessStats {
         let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
         let prev = kernel_entry.started_k.swap(0, Ordering::Relaxed);
         assert_ne!(prev, 0);
-        kernel_entry
-            .cpu_kernel
-            .fetch_add(now - prev, Ordering::Relaxed);
+        if now > prev {
+            kernel_entry
+                .cpu_kernel
+                .fetch_add(now - prev, Ordering::Relaxed);
+        }
 
         // Start self.
         let entry = &self.per_cpu_stats.data[cpu];
@@ -465,7 +471,9 @@ impl KProcessStats {
         let entry = &self.per_cpu_stats.data[cpu];
         let prev = entry.started_u.swap(0, Ordering::Relaxed);
         assert_ne!(prev, 0);
-        entry.cpu_uspace.fetch_add(now - prev, Ordering::Relaxed);
+        if now > prev {
+            entry.cpu_uspace.fetch_add(now - prev, Ordering::Relaxed);
+        }
 
         // Start kernel.
         let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
