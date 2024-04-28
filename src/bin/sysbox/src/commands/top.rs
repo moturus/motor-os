@@ -94,11 +94,11 @@ pub fn do_command(args: &[String]) {
     let pid_width = max_pid.to_string().len().max(3);
     let sec_width = format!("{:.3}", max_sec).len().max(num_cpus_len + 3);
 
-    let mut header = format!("{:>w$}  * ", "pid", w = pid_width);
+    let mut header = format!("{:>w$}  * ", "PID", w = pid_width);
     for cpu in 0..num_cpus {
         header += &format!(" {:>w$}{}", "CPU", cpu, w = (sec_width - num_cpus_len));
     }
-    header += " command";
+    header += "  COMMAND";
 
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
@@ -107,11 +107,11 @@ pub fn do_command(args: &[String]) {
     stdout.flush().unwrap();
 
     println!("{}", header);
-    // let mut border = String::new();
-    // for _ in 0..header.len() {
-    //     border += "-";
-    // }
-    // println!("{border}");
+    let mut border = String::new();
+    for _ in 0..(header.len() + 10) {
+        border += "-";
+    }
+    println!("{border}");
 
     for idx in 0..num_entries {
         let entry = stats.entry(idx as usize);
@@ -125,7 +125,7 @@ pub fn do_command(args: &[String]) {
             );
         }
 
-        line_k += &format!(" {}", get_cmd_string(&mut cmd_cache, entry.pid));
+        line_k += &format!("  {}", get_cmd_string(&mut cmd_cache, entry.pid));
 
         println!("{}", line_k);
 
