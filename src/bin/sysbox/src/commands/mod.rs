@@ -13,5 +13,5 @@ pub mod rm;
 pub mod rmdir;
 pub mod sleep;
 pub mod time;
-// pub mod top;
+pub mod top;
 pub mod uptime;
