@@ -52,6 +52,84 @@ impl ProcessStatsV1 {
     }
 }
 
+#[repr(C)]
+pub struct CpuStatsPerCpuEntryV1 {
+    pub kernel: u64,
+    pub uspace: u64,
+}
+
+#[repr(C)]
+pub struct CpuStatsEntryV1<'a> {
+    pub pid: u64,
+    pub percpu_entries: &'a [CpuStatsPerCpuEntryV1], // The number of entries == num_cpus
+}
+
+#[cfg(feature = "userspace")]
+pub struct CpuStatsV1 {
+    num_entries: u32,
+    num_cpus: u32,
+    page_addr: u64,
+}
+
+#[cfg(feature = "userspace")]
+impl Drop for CpuStatsV1 {
+    fn drop(&mut self) {
+        crate::syscalls::SysMem::free(self.page_addr).unwrap();
+    }
+}
+
+#[cfg(feature = "userspace")]
+impl CpuStatsV1 {
+    pub fn new() -> Self {
+        let page_addr =
+            crate::syscalls::SysMem::alloc(crate::syscalls::SysMem::PAGE_SIZE_SMALL, 1).unwrap();
+        let num_entries = crate::syscalls::SysCpu::get_percpu_stats_v1(page_addr).unwrap();
+        let num_cpus = crate::shared_mem::KernelStaticPage::get().num_cpus;
+
+        assert!(
+            (num_entries * (8 + num_cpus * 16)) as u64 <= crate::syscalls::SysMem::PAGE_SIZE_SMALL
+        );
+
+        Self {
+            num_entries,
+            num_cpus,
+            page_addr,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        self.num_entries = crate::syscalls::SysCpu::get_percpu_stats_v1(self.page_addr).unwrap();
+    }
+
+    pub fn num_cpus(&self) -> u32 {
+        self.num_cpus
+    }
+
+    pub fn num_entries(&self) -> u32 {
+        self.num_entries
+    }
+
+    pub fn entry<'a>(&'a self, pos: usize) -> CpuStatsEntryV1<'a> {
+        assert!(pos < (self.num_entries as usize));
+
+        unsafe {
+            let entry_sz = (8 + self.num_cpus * 16) as usize;
+
+            let addr = self.page_addr as usize + entry_sz * pos;
+            let pid = *(addr as *const u64);
+            let percpu_entries = core::slice::from_raw_parts(
+                (addr + 8) as *const CpuStatsPerCpuEntryV1,
+                self.num_entries as usize,
+            );
+
+            CpuStatsEntryV1 {
+                pid,
+                percpu_entries,
+            }
+        }
+    }
+}
+
 // Physical memory stats.
 #[repr(C)]
 #[derive(Default)]

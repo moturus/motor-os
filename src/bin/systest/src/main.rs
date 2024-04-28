@@ -12,6 +12,7 @@ use std::{
         atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 fn test_syscall() {
@@ -504,6 +505,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    test_cpus();
     tls::test_tls();
     test_caps();
     spawn_wait_kill::test_pid_kill();
@@ -530,6 +532,7 @@ fn main() {
     test_futex();
     test_rt_mutex();
 
-    test_cpus();
     println!("PASS");
+
+    std::thread::sleep(Duration::new(0, 10_000_000));
 }

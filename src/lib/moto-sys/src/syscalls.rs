@@ -703,6 +703,7 @@ impl SysCpu {
     pub const OP_SPAWN: u8 = 5;
     pub const OP_USAGE: u8 = 6;
     pub const OP_AFFINE_CPU: u8 = 7;
+    pub const OP_QUERY_PERCPU_STATS: u8 = 8;
 
     // Controls whether hanles to wait for are passed via registers or as an array in memory.
     pub const F_HANDLE_ARRAY: u32 = 1;
@@ -979,6 +980,25 @@ impl SysCpu {
             Ok(())
         } else {
             Err(result.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn get_percpu_stats_v1(page_addr: u64) -> Result<u32, ErrorCode> {
+        let res = do_syscall(
+            pack_nr_ver(SYS_CPU, Self::OP_QUERY_PERCPU_STATS, 0, 0),
+            page_addr,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if res.is_ok() {
+            Ok(res.data[0] as u32)
+        } else {
+            Err(res.error_code())
         }
     }
 

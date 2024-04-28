@@ -1068,7 +1068,7 @@ impl Thread {
     //fn start_trampoline(thread: u64, arg: u64) {
     //    let self_ = thread as usize as *const Thread;
     fn do_start(&self, arg: u64) {
-        let cpu_usage_scope = self.process_stats.cpu_usage_scope(false);
+        let cpu_usage_scope = self.process_stats.cpu_usage_scope_kernel();
 
         self.trace("thread do_start", arg, 0);
         let entry_point = self.thread_entry_point;

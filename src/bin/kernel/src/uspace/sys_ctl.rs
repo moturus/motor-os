@@ -340,9 +340,11 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
     let mut error = ErrorCode::Ok;
     let error_ref = &mut error;
 
+    let now = crate::arch::time::Instant::now().as_u64();
+
     let func = |val: &KProcessStats| -> bool {
         let mut stats = ProcessStatsV1::default();
-        val.into_v1(&mut stats);
+        val.into_v1(&mut stats, now);
 
         unsafe {
             let dest_ptr = dest_addr + *counter_ref * core::mem::size_of::<ProcessStatsV1>();

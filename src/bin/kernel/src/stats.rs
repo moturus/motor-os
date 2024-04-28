@@ -5,6 +5,7 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
+use crate::arch::current_cpu;
 use crate::arch::num_cpus;
 use crate::config::uCpus;
 use crate::mm::PAGE_SIZE_SMALL_LOG2;
@@ -91,10 +92,11 @@ impl MemStats {
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
-    pub cpu_uspace: AtomicU64,  // as TSC
-    pub cpu_kernel: AtomicU64,  // as TSC
-    pub cpu_started: AtomicU64, // if running, indicates when this has started, otherwise zero
-    _pad: [u64; 5],
+    pub cpu_kernel: AtomicU64, // as TSC
+    pub cpu_uspace: AtomicU64, // as TSC
+    pub started_k: AtomicU64,  // if running, indicates when cpu_kernel started, otherwise zero
+    pub started_u: AtomicU64,  // if running, indicates when cpu_uspace started, otherwise zero
+    _pad: [u64; 4],
 }
 
 const _: () = assert!(64 == core::mem::size_of::<PerCpuStatsEntry>());
@@ -104,8 +106,29 @@ impl PerCpuStatsEntry {
         Self {
             cpu_uspace: AtomicU64::new(0),
             cpu_kernel: AtomicU64::new(0),
-            cpu_started: AtomicU64::new(0),
-            _pad: [0; 5],
+            started_k: AtomicU64::new(0),
+            started_u: AtomicU64::new(0),
+            _pad: [0; 4],
+        }
+    }
+
+    fn usage_kernel(&self, now: u64) -> u64 {
+        let started_k = self.started_k.load(Ordering::Relaxed);
+        let cpu_kernel = self.cpu_kernel.load(Ordering::Relaxed);
+        if started_k > 0 {
+            cpu_kernel + now - started_k
+        } else {
+            cpu_kernel
+        }
+    }
+
+    fn usage_uspace(&self, now: u64) -> u64 {
+        let started_u = self.started_u.load(Ordering::Relaxed);
+        let cpu_uspace = self.cpu_uspace.load(Ordering::Relaxed);
+        if started_u > 0 {
+            cpu_uspace + now - started_u
+        } else {
+            cpu_uspace
         }
     }
 }
@@ -126,14 +149,13 @@ impl PerCpuStats {
     }
 }
 
-pub struct CpuUsageScope {
+pub struct CpuUsageScopeKernel {
     stats: Arc<KProcessStats>,
-    is_uspace: bool,
 }
 
-impl Drop for CpuUsageScope {
+impl Drop for CpuUsageScopeKernel {
     fn drop(&mut self) {
-        self.stats.stop_cpu_usage(self.is_uspace)
+        self.stats.stop_cpu_usage_kernel()
     }
 }
 
@@ -289,7 +311,7 @@ impl KProcessStats {
         SYSTEM_STATS.active_threads.fetch_sub(1, Ordering::Relaxed);
     }
 
-    pub fn into_v1(&self, dest: &mut ProcessStatsV1) {
+    pub fn into_v1(&self, dest: &mut ProcessStatsV1, now: u64) {
         dest.pid = self.pid.as_u64();
         dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.pid.as_u64());
         dest.total_threads = self.total_threads.load(Ordering::Relaxed);
@@ -298,7 +320,7 @@ impl KProcessStats {
         dest.active_children = self.active_children.load(Ordering::Relaxed);
         dest.pages_user = self.mem_stats_user.pages_used.load(Ordering::Relaxed);
         dest.pages_kernel = self.mem_stats_kernel.pages_used.load(Ordering::Relaxed);
-        dest.cpu_usage = self.cpu_usage();
+        dest.cpu_usage = self.cpu_usage(now);
 
         dest.system_process = 0;
         if let Some(proc) = self.owner.upgrade() {
@@ -369,11 +391,10 @@ impl KProcessStats {
         }
     }
 
-    pub fn cpu_usage(&self) -> u64 {
+    fn cpu_usage(&self, now: u64) -> u64 {
         let mut res = 0;
         for entry in &self.per_cpu_stats.data {
-            res +=
-                entry.cpu_uspace.load(Ordering::Relaxed) + entry.cpu_kernel.load(Ordering::Relaxed);
+            res += entry.usage_kernel(now) + entry.usage_uspace(now);
         }
 
         res
@@ -384,20 +405,77 @@ impl KProcessStats {
     }
 
     #[inline]
-    pub fn start_cpu_usage(&self) {
-        crate::sched::start_cpu_usage(self)
+    pub fn start_cpu_usage_kernel(&self) {
+        let now = crate::arch::time::Instant::now().as_u64();
+        let cpu = current_cpu() as usize;
+
+        // Stop kernel.
+        let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
+        let prev = kernel_entry.started_k.swap(0, Ordering::Relaxed);
+        assert_ne!(prev, 0);
+        kernel_entry
+            .cpu_kernel
+            .fetch_add(now - prev, Ordering::Relaxed);
+
+        // Start self.
+        let entry = &self.per_cpu_stats.data[cpu];
+        assert_eq!(0, entry.started_k.swap(now, Ordering::Relaxed));
     }
 
     #[inline]
-    pub fn stop_cpu_usage(&self, is_uspace: bool) {
-        crate::sched::stop_cpu_usage(self, is_uspace)
+    pub fn stop_cpu_usage_kernel(&self) {
+        let now = crate::arch::time::Instant::now().as_u64();
+        let cpu = current_cpu() as usize;
+
+        // Stop self.
+        let entry = &self.per_cpu_stats.data[cpu];
+        let prev = entry.started_k.swap(0, Ordering::Relaxed);
+        assert_ne!(prev, 0);
+        entry.cpu_kernel.fetch_add(now - prev, Ordering::Relaxed);
+
+        // Start kernel.
+        let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
+        assert_eq!(0, kernel_entry.started_k.swap(now, Ordering::Relaxed));
     }
 
-    pub fn cpu_usage_scope(self: &Arc<Self>, is_uspace: bool) -> CpuUsageScope {
-        self.start_cpu_usage();
-        CpuUsageScope {
+    #[inline]
+    pub fn start_cpu_usage_uspace(&self) {
+        let now = crate::arch::time::Instant::now().as_u64();
+        let cpu = current_cpu() as usize;
+
+        // Stop kernel.
+        let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
+        let prev = kernel_entry.started_k.swap(0, Ordering::Relaxed);
+        assert_ne!(prev, 0);
+        kernel_entry
+            .cpu_kernel
+            .fetch_add(now - prev, Ordering::Relaxed);
+
+        // Start self.
+        let entry = &self.per_cpu_stats.data[cpu];
+        assert_eq!(0, entry.started_u.swap(now, Ordering::Relaxed));
+    }
+
+    #[inline]
+    pub fn stop_cpu_usage_uspace(&self) {
+        let now = crate::arch::time::Instant::now().as_u64();
+        let cpu = current_cpu() as usize;
+
+        // Stop self.
+        let entry = &self.per_cpu_stats.data[cpu];
+        let prev = entry.started_u.swap(0, Ordering::Relaxed);
+        assert_ne!(prev, 0);
+        entry.cpu_uspace.fetch_add(now - prev, Ordering::Relaxed);
+
+        // Start kernel.
+        let kernel_entry = &KERNEL_STATS.per_cpu_stats.data[cpu];
+        assert_eq!(0, kernel_entry.started_k.swap(now, Ordering::Relaxed));
+    }
+
+    pub fn cpu_usage_scope_kernel(self: &Arc<Self>) -> CpuUsageScopeKernel {
+        self.start_cpu_usage_kernel();
+        CpuUsageScopeKernel {
             stats: self.clone(),
-            is_uspace,
         }
     }
 }
@@ -471,4 +549,65 @@ pub fn system_stats_ref() -> &'static KProcessStats {
 
 pub fn kernel_stats_ref() -> &'static KProcessStats {
     &KERNEL_STATS
+}
+
+pub fn fill_percpu_stats_entry(
+    page_addr: usize,
+    num_cpus: usize,
+    entry_idx: usize,
+    now: u64,
+    stats: &KProcessStats,
+) -> bool {
+    unsafe {
+        let entry_sz = 8 + num_cpus * 16;
+        let addr_offset = entry_sz * entry_idx;
+        if (addr_offset + entry_sz) > crate::mm::PAGE_SIZE_SMALL as usize {
+            return false;
+        }
+        *((page_addr + addr_offset) as *mut u64) = stats.pid.as_u64();
+        let percpu_entries = core::slice::from_raw_parts_mut(
+            (page_addr + addr_offset + 8) as *mut moto_sys::stats::CpuStatsPerCpuEntryV1,
+            num_cpus,
+        );
+
+        for cpu in 0..num_cpus {
+            let entry_here = stats.get_percpu_stats_entry(cpu as uCpus);
+            let entry_there = &mut percpu_entries[cpu];
+            entry_there.kernel = entry_here.usage_kernel(now);
+            entry_there.uspace = entry_here.usage_uspace(now);
+        }
+    }
+
+    true
+}
+
+pub fn fill_percpu_stats_page(page_addr: usize) -> usize {
+    let num_cpus = num_cpus() as usize;
+
+    let processes = {
+        let mut processes = alloc::vec::Vec::new();
+        let lock = SYSTEM_STATS.children.lock(line!());
+        processes.reserve_exact(lock.len());
+
+        for (_, stats) in &*lock {
+            processes.push(stats.clone());
+        }
+
+        processes
+    };
+
+    let now = crate::arch::time::Instant::now().as_u64();
+    fill_percpu_stats_entry(page_addr, num_cpus, 0, now, SYSTEM_STATS.as_ref());
+
+    let mut curr_entry = 1_usize;
+    for stats in &processes {
+        if let Some(stats) = stats.upgrade() {
+            if !(fill_percpu_stats_entry(page_addr, num_cpus, curr_entry, now, stats.as_ref())) {
+                break;
+            }
+            curr_entry += 1
+        }
+    }
+
+    curr_entry
 }

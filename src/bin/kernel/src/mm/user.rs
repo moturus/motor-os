@@ -551,6 +551,30 @@ impl UserAddressSpace {
         Ok(())
     }
 
+    pub fn get_user_page_as_kernel(&self, user_page_addr: u64) -> Result<u64, ErrorCode> {
+        if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
+            return Err(ErrorCode::InvalidArgument);
+        }
+        let mapping = self.inner.vaddr_map_status(user_page_addr);
+        let phys_start = match mapping {
+            VaddrMapStatus::Private(addr) => addr,
+            VaddrMapStatus::Shared(addr) => addr,
+            _ => {
+                log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
+                return Err(ErrorCode::InvalidArgument);
+            }
+        };
+
+        let phys_start_2 = self
+            .inner
+            .page_table_ref()
+            .virt_to_phys(user_page_addr)
+            .unwrap();
+        assert_eq!(phys_start, phys_start_2);
+
+        Ok(phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET)
+    }
+
     pub fn read_from_user(
         &self,
         vaddr_start: u64,

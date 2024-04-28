@@ -478,6 +478,29 @@ fn sys_affine_cpu(curr: &super::process::Thread, args: &mut SyscallArgs) -> Sysc
     ResultBuilder::ok()
 }
 
+fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs) -> SyscallResult {
+    if args.version > 0 {
+        return ResultBuilder::version_too_high();
+    }
+    if args.flags != 0 {
+        return ResultBuilder::invalid_argument();
+    }
+
+    let user_page_addr = args.args[0];
+    let page_addr = if let Ok(addr) = curr
+        .owner()
+        .address_space()
+        .get_user_page_as_kernel(user_page_addr)
+    {
+        addr
+    } else {
+        return ResultBuilder::invalid_argument();
+    };
+
+    let num_entries = crate::stats::fill_percpu_stats_page(page_addr as usize);
+    ResultBuilder::ok_1(num_entries as u64)
+}
+
 pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> SyscallResult {
     match args.operation {
         SysCpu::OP_WAIT => sys_wait_impl(curr, args),
@@ -486,6 +509,7 @@ pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs
         SysCpu::OP_SPAWN => sys_spawn_impl(curr, args),
         SysCpu::OP_USAGE => sys_cpu_usage_impl(curr, args),
         SysCpu::OP_AFFINE_CPU => sys_affine_cpu(curr, args),
+        SysCpu::OP_QUERY_PERCPU_STATS => sys_query_percpu_stats(curr, args),
         // Note: curr.exit() below does not return, and the compiler puts ud2 after call,
         //       so if we get INVALID_OPCODE interrupt, we screwed up in syscall_exit_asm().
         SysCpu::OP_EXIT => curr.exit(args.args[0]),

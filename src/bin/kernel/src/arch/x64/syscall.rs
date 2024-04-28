@@ -235,7 +235,7 @@ impl ThreadControlBlock {
     }
 
     pub fn spawn_usermode_thread(&mut self, arg: u64) -> ThreadOffCpuReason {
-        self.owner().process_stats.start_cpu_usage();
+        self.owner().process_stats.start_cpu_usage_uspace();
 
         self.owner().trace("spawn_usermode_thread", arg, 0);
         crate::util::full_fence(); // The kernel does a #PF without this.
@@ -271,6 +271,8 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn exit(&self) -> ! {
+        self.owner().process_stats.stop_cpu_usage_kernel();
+        self.owner().process_stats.start_cpu_usage_uspace();
         #[cfg(debug_assertions)]
         debug_assert!(super::is_kernel_rsp());
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
@@ -279,6 +281,8 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn die(&self, tocr: u64, addr: u64) -> ! {
+        self.owner().process_stats.stop_cpu_usage_kernel();
+        self.owner().process_stats.start_cpu_usage_uspace();
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
         kill_current_thread(tocr, addr)
     }
@@ -330,8 +334,8 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn pause(&self) {
-        self.owner().process_stats.stop_cpu_usage(false); // kernel
-        self.owner().process_stats.start_cpu_usage(); // uspace: tocr will attribute cpu usave to uspace
+        self.owner().process_stats.stop_cpu_usage_kernel();
+        self.owner().process_stats.start_cpu_usage_uspace(); // see tocr re: why
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
         self.owner().trace("pause", self.syscall_rsp, 0);
         crate::util::full_fence();
@@ -347,7 +351,7 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn resume(&self) -> ThreadOffCpuReason {
-        self.owner().process_stats.start_cpu_usage();
+        self.owner().process_stats.start_cpu_usage_kernel();
         self.owner().trace("tcb::resume", self.syscall_rsp, 0);
         self.validate_rsp();
 
@@ -424,7 +428,7 @@ impl ThreadControlBlock {
     }
 
     pub fn resume_preempted_thread(&self) -> ThreadOffCpuReason {
-        self.owner().process_stats.start_cpu_usage();
+        self.owner().process_stats.start_cpu_usage_uspace();
         self.owner().trace("tcb::resume_preempted_thread", 0, 0);
         unsafe {
             // Must clear to clear pf_addr.
@@ -473,7 +477,7 @@ impl ThreadControlBlock {
     }
 
     fn thread_off_cpu_reason(&self, tocr: u64, addr: u64) -> ThreadOffCpuReason {
-        self.owner().process_stats.stop_cpu_usage(true);
+        self.owner().process_stats.stop_cpu_usage_uspace();
 
         match tocr {
             TOCR_PAUSED => ThreadOffCpuReason::Paused,
@@ -530,12 +534,12 @@ extern "C" fn syscall_handler_rust(
         .is_ok());
     let thread = tcb.owner();
 
+    thread.process_stats.stop_cpu_usage_uspace();
+    thread.process_stats.start_cpu_usage_kernel();
     // This may block (call TCB::pause()).
-    thread.process_stats.stop_cpu_usage(true);
-    thread.process_stats.start_cpu_usage(); // kernel
     let result = do_syscall(thread, &mut args);
-    thread.process_stats.stop_cpu_usage(false);
-    thread.process_stats.start_cpu_usage(); // uspace
+    thread.process_stats.stop_cpu_usage_kernel();
+    thread.process_stats.start_cpu_usage_uspace();
     tcb.xrstor();
 
     tcb.validate_gs();
