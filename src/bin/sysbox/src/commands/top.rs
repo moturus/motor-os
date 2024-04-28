@@ -36,18 +36,32 @@ pub fn do_command(args: &[String]) {
         }
     }
 
-    let max_sec = tsc_to_sec(max_tsc);
-    let pid_width = max_pid.to_string().len();
-    let sec_width = format!("{:.3}", max_sec).len();
+    let num_cpus_len: usize = if num_cpus > 100 {
+        3
+    } else if num_cpus > 10 {
+        2
+    } else {
+        1
+    };
 
-    let mut header = format!("{:>w$}   ", "pid", w = pid_width);
+    let max_sec = tsc_to_sec(max_tsc);
+    let pid_width = max_pid.to_string().len().max(3);
+    let sec_width = format!("{:.3}", max_sec).len().max(num_cpus_len + 3);
+
+    let mut header = format!("{:>w$}  * ", "pid", w = pid_width);
     for cpu in 0..num_cpus {
-        header += &format!(" {:>w$}", cpu, w = sec_width);
+        header += &format!(" {:>w$}{}", "CPU", cpu, w = (sec_width - num_cpus_len));
     }
+    println!("{}", header);
+    let mut border = String::new();
+    for _ in 0..header.len() {
+        border += "-";
+    }
+    println!("{border}");
 
     for idx in 0..num_entries {
         let entry = stats.entry(idx as usize);
-        let mut line_k = format!("{:>w$} k ", entry.pid, w = pid_width);
+        let mut line_k = format!("{:>w$}  k ", entry.pid, w = pid_width);
 
         for cpu in 0..num_cpus {
             line_k += &format!(
@@ -59,7 +73,7 @@ pub fn do_command(args: &[String]) {
 
         println!("{}", line_k);
 
-        let mut line_u = format!("{:>w$} u ", " ", w = pid_width);
+        let mut line_u = format!("{:>w$}  u ", " ", w = pid_width);
 
         for cpu in 0..num_cpus {
             line_u += &format!(
