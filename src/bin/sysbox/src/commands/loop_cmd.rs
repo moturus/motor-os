@@ -10,6 +10,8 @@ pub fn do_command(args: &[String]) {
         print_usage_and_exit(1);
     }
 
+    crate::spawn_generic_input_listener();
+
     loop {
         let mut cmd = std::process::Command::new(args[1].as_str());
 

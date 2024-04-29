@@ -40,14 +40,16 @@ fn input_listener() {
     }
 }
 
+fn spawn_generic_input_listener() {
+    std::thread::spawn(|| input_listener());
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().collect();
 
     if args.len() < 2 {
         print_usage_and_exit(0);
     }
-
-    std::thread::spawn(|| input_listener());
 
     match args[1].as_str() {
         "cat" => commands::cat::do_command(&args[1..]),
