@@ -1,14 +1,29 @@
 use moto_sys::stats::{CpuStatsV1, ProcessStatsV1};
+use moto_sys::time::Instant;
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 
-static MODE_PERCENT: AtomicBool = AtomicBool::new(true);
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    #[allow(unused)]
+    Percent = 1,
+    Total = 2,
+    Diff = 3,
+}
 
-// If MODE_PERCENT is false, this determines whether absolute CPU usage is shown, or only for the tick.
-static MODE_DIFF: AtomicBool = AtomicBool::new(false);
+impl From<u32> for Mode {
+    fn from(value: u32) -> Self {
+        unsafe { core::mem::transmute(value) }
+    }
+}
+
+static MODE: AtomicU32 = AtomicU32::new(1);
+
+static SLEEP: AtomicU32 = AtomicU32::new(0);
 
 struct Context {
     num_cpus: u32,
@@ -16,8 +31,7 @@ struct Context {
     stats_now: CpuStatsV1,
     cmd_cache: HashMap<u64, String>,
     elapsed: Duration,
-    mode_percent: bool,
-    mode_diff: bool,
+    mode: Mode,
 }
 
 fn hide_cursor() {
@@ -67,12 +81,10 @@ fn print_preamble(ctx: &Context) -> u32 {
     let secs = seconds % 60;
     let millis = uptime.subsec_millis();
 
-    let mode = if ctx.mode_percent {
-        "%"
-    } else if ctx.mode_diff {
-        "msec"
-    } else {
-        "sec"
+    let mode = match ctx.mode {
+        Mode::Percent => "%",
+        Mode::Total => "sec",
+        Mode::Diff => "msec",
     };
 
     write_line(
@@ -158,17 +170,19 @@ fn input_listener() {
         let sz = std::io::stdin().read(&mut input).unwrap();
         for b in &input[0..sz] {
             match *b {
-                3 /* ^C */ | 27 /* esc */ | b'q' | b'Q' =>  {
-                    write_line(1, "");
-                    clear_remaining_screen();
-                    show_cursor();
-                    std::process::exit(0);
-                }
-                b' ' => {
-                    MODE_PERCENT.store(!MODE_PERCENT.load(Ordering::Relaxed), Ordering::Relaxed);
-                    if MODE_PERCENT.load(Ordering::Relaxed) {
-                        MODE_DIFF.store(!MODE_DIFF.load(Ordering::Relaxed), Ordering::Release);
+                3 /* ^C */ | 27 /* esc */ | b'q' | b'Q' =>
+                    { SLEEP.store(2, Ordering::Release);
+                        moto_runtime::futex_wake(&SLEEP);
                     }
+                b' ' => {
+                    match MODE.load(Ordering::Acquire) {
+                        1 => MODE.store(2, Ordering::Release),
+                        2 => MODE.store(3, Ordering::Release),
+                        3 => MODE.store(1, Ordering::Release),
+                        _ => unreachable!()
+                    }
+                    SLEEP.store(1, Ordering::Release);
+                        moto_runtime::futex_wake(&SLEEP);
                 }
                 _ => {}
             }
@@ -236,7 +250,7 @@ fn calc_values(ctx: &Context) -> HashMap<u64, Vec<(f64, f64)>> {
         values.insert(entry.pid, line);
     }
 
-    if !ctx.mode_percent && !ctx.mode_diff {
+    if ctx.mode == Mode::Total {
         return values; // Only absolute values are shown.
     }
 
@@ -255,7 +269,7 @@ fn calc_values(ctx: &Context) -> HashMap<u64, Vec<(f64, f64)>> {
         }
     }
 
-    if !ctx.mode_percent {
+    if ctx.mode == Mode::Diff {
         return values;
     }
 
@@ -274,12 +288,33 @@ fn calc_values(ctx: &Context) -> HashMap<u64, Vec<(f64, f64)>> {
 }
 
 fn format_value(ctx: &Context, val: f64) -> String {
-    if ctx.mode_percent {
-        format!("{:.3}", val * 100.0)
-    } else if ctx.mode_diff {
-        format!("{:.0}", val * 1000.0)
-    } else {
-        format!("{:.3}", val)
+    let empty = "-";
+    match ctx.mode {
+        Mode::Percent => {
+            let res = format!("{:.3}", val * 100.0);
+            if res.as_str() == "0.000" {
+                empty.to_owned()
+            } else {
+                res
+            }
+        }
+        Mode::Total => {
+            let res = format!("{:.3}", val);
+            if res.as_str() == "0.000" {
+                empty.to_owned()
+            } else {
+                res
+            }
+        }
+
+        Mode::Diff => {
+            let res = format!("{:.0}", val * 1000.0);
+            if res.as_str() == "0" {
+                empty.to_owned()
+            } else {
+                res
+            }
+        }
     }
 }
 
@@ -303,6 +338,7 @@ fn format_values(
 }
 
 fn tick(ctx: &mut Context) {
+    hide_cursor();
     let mut row = print_preamble(ctx);
     let values_f64 = calc_values(ctx);
     let values = format_values(ctx, values_f64);
@@ -362,7 +398,9 @@ fn tick(ctx: &mut Context) {
         write_line(row, line_u.as_str());
     }
 
+    write_line(row + 1, "");
     clear_remaining_screen();
+    show_cursor();
 }
 
 pub fn do_command(args: &[String]) {
@@ -388,23 +426,26 @@ pub fn do_command(args: &[String]) {
         stats_now,
         cmd_cache,
         elapsed: tick_now.duration_since(tick_prev),
-        mode_percent: MODE_PERCENT.load(Ordering::Relaxed),
-        mode_diff: MODE_DIFF.load(Ordering::Relaxed),
+        mode: MODE.load(Ordering::Relaxed).into(),
     };
-
-    hide_cursor();
 
     loop {
         tick(&mut ctx);
 
-        std::thread::sleep(Duration::new(1, 0));
+        moto_runtime::futex_wait(&SLEEP, 0, Some(Instant::now() + Duration::new(1, 0)));
+        let sleep = SLEEP.load(Ordering::Acquire);
+        if sleep == 2 {
+            std::process::exit(0);
+        } else if sleep == 1 {
+            SLEEP.store(0, Ordering::Release);
+        }
+
         core::mem::swap(&mut ctx.stats_prev, &mut ctx.stats_now);
         tick_prev = tick_now;
 
         ctx.stats_now.tick();
         tick_now = Instant::now();
         ctx.elapsed = tick_now.duration_since(tick_prev);
-        ctx.mode_percent = MODE_PERCENT.load(Ordering::Acquire);
-        ctx.mode_diff = MODE_DIFF.load(Ordering::Relaxed);
+        ctx.mode = MODE.load(Ordering::Acquire).into();
     }
 }
