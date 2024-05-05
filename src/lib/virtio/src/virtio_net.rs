@@ -172,6 +172,15 @@ impl NetDev {
             return Err(());
         }
 
+        if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) == 0 {
+            log::warn!(
+                "Virtio NET device {:?}: VIRTIO_F_RING_EVENT_IDX feature not available; features: 0x{:x}.",
+                self.dev.pci_device.id,
+                features_available
+            );
+            return Err(());
+        }
+
         /*
         if (features_available & VIRTIO_NET_F_STATUS) == 0 {
             log::warn!(
@@ -183,7 +192,10 @@ impl NetDev {
         }
         */
 
-        let features_acked = super::virtio_device::VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC; // | VIRTIO_NET_F_STATUS;
+        let features_acked = super::virtio_device::VIRTIO_F_VERSION_1
+            | VIRTIO_NET_F_MAC
+            | super::virtio_device::VIRTIO_F_RING_EVENT_IDX; // | VIRTIO_NET_F_STATUS;
+
         if (features_available & VIRTIO_NET_F_CSUM) == VIRTIO_NET_F_CSUM {
             // Note: in VirtIO 1.1. spec, section 5.1.6.2, it says:
             /*
@@ -248,7 +260,7 @@ impl NetDev {
             assert_eq!(pos as u16, rxq.add_buf(&[user_data], 0, 1));
         }
 
-        // Notify
+        // Kick unconditionally: it's done only once, so let's not complicate things.
         let notify_cap = self.dev.notify_cfg.unwrap();
         let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
             .as_ref()
@@ -299,34 +311,36 @@ impl NetDev {
         let phys_addr = self.tx_bufs_phys_addr + ((idx as u64) << 11);
 
         let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
-        txq.add_tx_buf(phys_addr, idx as u16, len as u32);
+        let should_notify = txq.add_tx_buf(phys_addr, idx as u16, len as u32);
 
-        // Notify
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap();
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64 * txq.queue_notify_off as u64);
+        if should_notify {
+            let notify_cap = self.dev.notify_cfg.unwrap();
+            let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
+                .as_ref()
+                .unwrap();
+            let notify_offset = notify_cap.offset as u64
+                + (notify_cap.notify_off_multiplier as u64 * txq.queue_notify_off as u64);
 
-        cfg_bar.write_u16(notify_offset, txq.queue_num);
+            cfg_bar.write_u16(notify_offset, txq.queue_num);
+        }
     }
 
     fn release_rx_packet(&mut self, idx: u8) {
         let phys_addr = self.rx_bufs_phys_addr + ((idx as u64) << 11);
 
         let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
-        rxq.add_rx_buf(phys_addr, 2048, idx as u16);
+        let should_notify = rxq.add_rx_buf(phys_addr, 2048, idx as u16);
 
-        // Notify
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap();
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64 * rxq.queue_notify_off as u64);
+        if should_notify {
+            let notify_cap = self.dev.notify_cfg.unwrap();
+            let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
+                .as_ref()
+                .unwrap();
+            let notify_offset = notify_cap.offset as u64
+                + (notify_cap.notify_off_multiplier as u64 * rxq.queue_notify_off as u64);
 
-        cfg_bar.write_u16(notify_offset, rxq.queue_num);
+            cfg_bar.write_u16(notify_offset, rxq.queue_num);
+        }
     }
 
     fn release_tx_packet(&mut self, idx: u8) {
