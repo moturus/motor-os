@@ -169,8 +169,8 @@ impl Virtqueue {
         self.wait_handles.push(handle);
     }
 
-    pub fn wait(&self) -> Result<(), ()> {
-        if self.more_used() {
+    pub fn wait_deprecated(&self) -> Result<(), ()> {
+        if self.more_used_deprecated() {
             return Ok(());
         }
         if self.wait_handles.is_empty() {
@@ -202,7 +202,6 @@ impl Virtqueue {
     }
 
     fn increment_available_idx(&mut self, cnt: u16) {
-        // core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let val = (*self.available_ring.idx).wrapping_add(cnt);
         *self.available_ring.idx = val;
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -327,12 +326,12 @@ impl Virtqueue {
         Some(idx >> 1)
     }
 
-    pub fn more_used(&self) -> bool {
+    pub fn more_used_deprecated(&self) -> bool {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         self.last_used_idx != *self.used_ring.idx
     }
 
-    pub fn reclaim_used(&mut self) -> Option<u16> {
+    pub fn reclaim_used_deprecated(&mut self) -> Option<u16> {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
         if self.last_used_idx == *self.used_ring.idx {
             return None;
@@ -360,8 +359,8 @@ impl Virtqueue {
         Some(req_id)
     }
 
-    pub fn consume_used(&mut self) -> u32 {
-        if !self.more_used() {
+    pub fn consume_used_deprecated(&mut self) -> u32 {
+        if !self.more_used_deprecated() {
             return 0;
         }
 

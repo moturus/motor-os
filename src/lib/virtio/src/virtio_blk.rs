@@ -167,19 +167,19 @@ impl Blk {
         cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
 
         let mut wait_failed = false;
-        while !virtqueue.more_used() {
+        while !virtqueue.more_used_deprecated() {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             if wait_failed {
                 super::nop(); // Don't spam the kernel if something is wrong here.
             } else {
-                wait_failed = virtqueue.wait().is_err();
+                wait_failed = virtqueue.wait_deprecated().is_err();
                 if wait_failed {
                     log::error!("virtqueue.wait() failed: switching to spinning.");
                 }
             }
         }
-        let consumed = virtqueue.consume_used();
+        let consumed = virtqueue.consume_used_deprecated();
         // Qemu indicates that 513 bytes were consumed, but CHV says 512.
         assert!((consumed == 512) || (consumed == 513));
 
@@ -259,19 +259,19 @@ impl Blk {
         cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
 
         let mut wait_failed = false;
-        while !virtqueue.more_used() {
+        while !virtqueue.more_used_deprecated() {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             if wait_failed {
                 super::nop(); // Don't spam the kernel if something is wrong here.
             } else {
-                wait_failed = virtqueue.wait().is_err();
+                wait_failed = virtqueue.wait_deprecated().is_err();
                 if wait_failed {
                     log::error!("virtqueue.wait() failed: switching to spinning.");
                 }
             }
         }
-        virtqueue.reclaim_used();
+        virtqueue.reclaim_used_deprecated();
 
         // todo!("add vring_get_isr");
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
@@ -336,19 +336,19 @@ impl Blk {
         cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
 
         let mut wait_failed = false;
-        while !virtqueue.more_used() {
+        while !virtqueue.more_used_deprecated() {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             if wait_failed {
                 super::nop(); // Don't spam the kernel if something is wrong here.
             } else {
-                wait_failed = virtqueue.wait().is_err();
+                wait_failed = virtqueue.wait_deprecated().is_err();
                 if wait_failed {
                     log::error!("virtqueue.wait() failed: switching to spinning.");
                 }
             }
         }
-        virtqueue.reclaim_used();
+        virtqueue.reclaim_used_deprecated();
 
         // todo!("add vring_get_isr");
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
