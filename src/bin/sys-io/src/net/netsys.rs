@@ -362,6 +362,7 @@ impl NetSys {
         }
 
         if let Some((socket_id, socket_addr)) = listener.pop_pending_socket() {
+            // TODO: the unwrap() below once triggered on remote drop.
             let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
             assert!(moto_socket.listener_id.is_none());
             moto_socket.state = TcpState::ReadWrite;
@@ -1385,111 +1386,6 @@ impl NetSys {
         // TODO: Linux keeps sending buffered packets after socket close. Should we do the same?
         moto_socket.tx_queue.clear();
     }
-
-    /*
-    fn add_socket_timeout(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-
-        let next_read_timeout = if moto_socket.read_timeout != std::time::Duration::MAX {
-            moto_socket
-                .rx_bufs
-                .front()
-                .map(|x| x.expires(&moto_socket.read_timeout))
-        } else {
-            moto_socket.next_timeout = None;
-            return;
-        };
-
-        if next_read_timeout.is_none() {
-            moto_socket.next_timeout = None;
-            return;
-        }
-
-        moto_socket.next_timeout = next_read_timeout;
-        let timo = next_read_timeout.unwrap();
-
-        if let Some(socks) = self.tcp_rw_timeouts.get_mut(&timo) {
-            socks.push(socket_id);
-        } else {
-            self.tcp_rw_timeouts.insert(timo, vec![socket_id]);
-        }
-    }
-
-    fn remove_socket_timeout(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-
-        if let Some(timo) = moto_socket.next_timeout.take() {
-            if let Some(socks) = self.tcp_rw_timeouts.get_mut(&timo) {
-                for idx in 0..socks.len() {
-                    if socks[idx] == socket_id {
-                        socks.remove(idx);
-                        break;
-                    }
-                }
-                if socks.is_empty() {
-                    self.tcp_rw_timeouts.remove(&timo);
-                }
-            }
-        }
-    }
-
-    fn set_read_timeout(&mut self, socket_id: SocketId, timeout: core::time::Duration) {
-        let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
-        if moto_socket.read_timeout == timeout {
-            return;
-        }
-
-        self.remove_socket_timeout(socket_id);
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-        moto_socket.read_timeout = timeout;
-
-        self.add_socket_timeout(socket_id);
-    }
-
-    fn set_write_timeout(&mut self, socket_id: SocketId, timeout: core::time::Duration) {
-        let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
-        if moto_socket.write_timeout == timeout {
-            return;
-        }
-
-        self.remove_socket_timeout(socket_id);
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-        moto_socket.write_timeout = timeout;
-
-        self.add_socket_timeout(socket_id);
-    }
-
-    fn process_rw_timeout(&mut self, socket_id: SocketId, now: moto_sys::time::Instant) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-
-        let cutoff = now + Self::TIMEOUT_GRANULARITY;
-        if let Some(timo) = moto_socket.next_timeout.as_ref() {
-            if *timo > cutoff {
-                return;
-            }
-        }
-        // else: don't return, as when there are no rx/tx bufs, the socket doesn't have next_timeout.
-
-        if moto_socket.read_timeout != std::time::Duration::MAX {
-            while let Some(x_buf) = moto_socket.rx_bufs.front() {
-                if x_buf.expired(&moto_socket.read_timeout, cutoff) {
-                    let mut x_buf = moto_socket.rx_bufs.pop_front().unwrap();
-
-                    x_buf.status = ErrorCode::TimedOut;
-                    self.pending_completions
-                        .push_back(Self::io_buf_to_pc(moto_socket.conn.wait_handle(), x_buf));
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // Note: write timeouts are dealt with in tcp_stream_write.
-
-        self.remove_socket_timeout(socket_id);
-        self.add_socket_timeout(socket_id);
-    }
-    */
 }
 
 impl IoSubsystem for NetSys {

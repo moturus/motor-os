@@ -18,12 +18,15 @@ struct VirtqDesc {
     next: le16,
 }
 
+// Updated by the driver (here, in this file).
 struct VirtqAvail {
     _flags: &'static mut le16, // Ignored/never used.
-    idx: &'static mut le16,
+    idx: *mut le16,
     ring: &'static mut [le16],
-    used_event: &'static mut le16,
+    used_event: *mut le16,
 }
+
+unsafe impl Send for VirtqAvail {}
 
 pub struct UserData {
     pub addr: u64,
@@ -43,9 +46,9 @@ impl VirtqAvail {
         unsafe {
             VirtqAvail {
                 _flags: &mut *(flags_addr as *mut le16),
-                idx: &mut *(idx_addr as *mut le16),
+                idx: idx_addr as *mut le16,
                 ring,
-                used_event: &mut *(used_event_addr as *mut le16),
+                used_event: used_event_addr as *mut le16,
             }
         }
     }
@@ -57,12 +60,15 @@ struct VirtqUsedElem {
     len: le32, // le32,
 }
 
+// Updated by the "device" (the VMM).
 struct VirtqUsed {
     _flags: &'static mut le16, // Ignored/never used.
-    idx: &'static mut le16,
+    idx: *const le16,
     ring: &'static mut [VirtqUsedElem],
-    avail_event: &'static mut le16,
+    avail_event: *const le16,
 }
+
+unsafe impl Send for VirtqUsed {}
 
 impl VirtqUsed {
     fn from_addr(addr: u64, queue_size: u16) -> Self {
@@ -81,9 +87,9 @@ impl VirtqUsed {
 
         VirtqUsed {
             _flags: unsafe { &mut *(flags_addr as *mut le16) },
-            idx: unsafe { &mut *(idx_addr as *mut le16) },
+            idx: idx_addr as *const le16,
             ring,
-            avail_event: unsafe { &mut *(avail_event_addr as *mut le16) },
+            avail_event: avail_event_addr as *const le16,
         }
     }
 }
@@ -195,16 +201,35 @@ impl Virtqueue {
         &self.wait_handles
     }
 
-    fn update_available(&mut self, head: u16) -> u16 {
+    /*
+    fn _update_available(&mut self, head: u16) -> u16 {
         let idx = *self.available_ring.idx % self.queue_size;
         self.available_ring.ring[idx as usize] = head;
         idx
     }
 
-    fn increment_available_idx(&mut self, cnt: u16) {
+    fn _increment_available_idx(&mut self, cnt: u16) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
         let val = (*self.available_ring.idx).wrapping_add(cnt);
         *self.available_ring.idx = val;
+
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+    */
+
+    fn update_and_increment_available_idx(&mut self, head: u16) -> u16 {
+        unsafe {
+            let idx = *self.available_ring.idx;
+            let true_idx = idx % self.queue_size;
+            ((&mut self.available_ring.ring[true_idx as usize]) as *mut u16).write_volatile(head);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            let next_idx = idx.wrapping_add(1);
+            self.available_ring.idx.write_volatile(next_idx);
+
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+            true_idx
+        }
     }
 
     fn get_descriptor(&mut self, idx: u16) -> &mut VirtqDesc {
@@ -217,7 +242,6 @@ impl Virtqueue {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
         let mut idx = self.free_head_idx;
         let req_id = idx;
 
@@ -241,10 +265,9 @@ impl Virtqueue {
             idx = descriptor.next;
         }
 
-        self.update_available(self.free_head_idx);
+        self.update_and_increment_available_idx(self.free_head_idx);
         self.free_head_idx = idx;
 
-        self.increment_available_idx(1);
         req_id
     }
 
@@ -254,10 +277,9 @@ impl Virtqueue {
         descriptor.addr = phys_addr;
         descriptor.len = len;
         descriptor.flags = VIRTQ_DESC_F_WRITE;
-        let updated_idx = self.update_available(descriptor_idx);
+        let updated_idx = self.update_and_increment_available_idx(descriptor_idx);
 
-        self.increment_available_idx(1);
-        let avail_event = *self.used_ring.avail_event % self.queue_size;
+        let avail_event = unsafe { self.used_ring.avail_event.read_volatile() } % self.queue_size;
         updated_idx <= avail_event || avail_event == 0
     }
 
@@ -277,19 +299,18 @@ impl Virtqueue {
         descriptor.len = len;
         descriptor.flags = 0;
 
-        let updated_idx = self.update_available(descriptor_idx);
+        let updated_idx = self.update_and_increment_available_idx(descriptor_idx);
 
-        self.increment_available_idx(1);
-        let avail_event = *self.used_ring.avail_event % self.queue_size;
+        let avail_event = unsafe { self.used_ring.avail_event.read_volatile() } % self.queue_size;
         updated_idx <= avail_event || avail_event == 0
     }
 
     pub fn get_completed_rx_buf(&mut self) -> Option<(u16, u32)> {
-        // Having Acquire here and Release below is not enough (rnetbench hangs).
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        if self.last_used_idx == *self.used_ring.idx {
+        if self.last_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
         }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
 
         let head = self.last_used_idx % self.queue_size;
         let elem = &self.used_ring.ring[head as usize];
@@ -299,18 +320,19 @@ impl Virtqueue {
 
         let val = self.last_used_idx.wrapping_add(1);
         self.last_used_idx = val;
-        *self.available_ring.used_event = val;
         core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
+        unsafe { self.available_ring.used_event.write_volatile(val) };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
         Some((idx, consumed))
     }
 
     pub fn get_completed_tx_buf(&mut self) -> Option<u16> {
-        // Having Acquire here and Release below is not enough (rnetbench hangs).
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        if self.last_used_idx == *self.used_ring.idx {
+        if self.last_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
         }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
 
         let head = self.last_used_idx % self.queue_size;
         let elem = &self.used_ring.ring[head as usize];
@@ -320,20 +342,21 @@ impl Virtqueue {
 
         let val = self.last_used_idx.wrapping_add(1);
         self.last_used_idx = val;
-        *self.available_ring.used_event = val;
         core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
+        unsafe { self.available_ring.used_event.write_volatile(val) };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
         Some(idx >> 1)
     }
 
     pub fn more_used_deprecated(&self) -> bool {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        self.last_used_idx != *self.used_ring.idx
+        self.last_used_idx != unsafe { self.used_ring.idx.read_volatile() }
     }
 
     pub fn reclaim_used_deprecated(&mut self) -> Option<u16> {
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        if self.last_used_idx == *self.used_ring.idx {
+        if self.last_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
         }
 

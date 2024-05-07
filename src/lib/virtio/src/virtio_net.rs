@@ -93,6 +93,10 @@ pub struct NetDev {
 
     rx_bufs_phys_addr: u64,
     tx_bufs_phys_addr: u64,
+
+    notify_bar: *const PciBar,
+    txq_notify_offset: u64,
+    rxq_notify_offset: u64,
 }
 
 impl Drop for NetDev {
@@ -100,6 +104,8 @@ impl Drop for NetDev {
         panic!("VirtIO NetDev must not be dropped: RxPackets reference it statically.")
     }
 }
+
+unsafe impl Send for NetDev {}
 
 static NET_DEVICES: spin::Mutex<Vec<NetDev>> = spin::Mutex::new(Vec::new());
 
@@ -116,6 +122,21 @@ impl NetDev {
         self.negotiate_features()?; // Steps 4, 5, 6
         self.dev.init_virtqueues(2, 2)?; // Step 7
         self.dev.driver_ok(); // Step 8
+
+        let notify_cap = self.dev.notify_cfg.unwrap();
+        let notify_bar = self.dev.pci_device.bars[notify_cap.bar as usize]
+            .as_ref()
+            .unwrap() as *const PciBar;
+        let txq_notify_offset = notify_cap.offset as u64
+            + (notify_cap.notify_off_multiplier as u64
+                * self.dev.virtqueues[Self::VIRTQ_TX].queue_notify_off as u64);
+        let rxq_notify_offset = notify_cap.offset as u64
+            + (notify_cap.notify_off_multiplier as u64
+                * self.dev.virtqueues[Self::VIRTQ_RX].queue_notify_off as u64);
+        self.notify_bar = notify_bar;
+        self.txq_notify_offset = txq_notify_offset;
+        self.rxq_notify_offset = rxq_notify_offset;
+
         Ok(())
     }
 
@@ -152,6 +173,9 @@ impl NetDev {
             tx_buf_freelist,
             rx_bufs_phys_addr,
             tx_bufs_phys_addr,
+            notify_bar: core::ptr::null(),
+            txq_notify_offset: 0,
+            rxq_notify_offset: 0,
         };
 
         if net.self_init().is_ok() {
@@ -301,14 +325,7 @@ impl NetDev {
         }
 
         // Kick unconditionally: it's done only once, so let's not complicate things.
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap();
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64 * rxq.queue_notify_off as u64);
-
-        cfg_bar.write_u16(notify_offset, rxq.queue_num);
+        unsafe { (*self.notify_bar).write_u16(self.rxq_notify_offset, rxq.queue_num) };
     }
 
     // Get incoming bytes, if any, with an id of the buffer.
@@ -326,18 +343,24 @@ impl NetDev {
     }
 
     pub fn tx_get(&mut self) -> Option<TxPacket> {
-        let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
-        while let Some(idx) = txq.get_completed_tx_buf() {
-            self.tx_buf_freelist.push_back(idx as u8);
-        }
-
         if let Some(idx) = self.tx_buf_freelist.pop_front() {
             Some(TxPacket {
                 idx,
                 netdev: self as *mut _,
             })
         } else {
-            None
+            let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
+            while let Some(idx) = txq.get_completed_tx_buf() {
+                self.tx_buf_freelist.push_back(idx as u8);
+            }
+            if let Some(idx) = self.tx_buf_freelist.pop_front() {
+                Some(TxPacket {
+                    idx,
+                    netdev: self as *mut _,
+                })
+            } else {
+                None
+            }
         }
     }
 
@@ -354,14 +377,7 @@ impl NetDev {
         let should_notify = txq.add_tx_buf(phys_addr, idx as u16, len as u32);
 
         if should_notify {
-            let notify_cap = self.dev.notify_cfg.unwrap();
-            let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-                .as_ref()
-                .unwrap();
-            let notify_offset = notify_cap.offset as u64
-                + (notify_cap.notify_off_multiplier as u64 * txq.queue_notify_off as u64);
-
-            cfg_bar.write_u16(notify_offset, txq.queue_num);
+            unsafe { (*self.notify_bar).write_u16_unfenced(self.txq_notify_offset, txq.queue_num) };
         }
     }
 
@@ -372,14 +388,7 @@ impl NetDev {
         let should_notify = rxq.add_rx_buf(phys_addr, 2048, idx as u16);
 
         if should_notify {
-            let notify_cap = self.dev.notify_cfg.unwrap();
-            let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-                .as_ref()
-                .unwrap();
-            let notify_offset = notify_cap.offset as u64
-                + (notify_cap.notify_off_multiplier as u64 * rxq.queue_notify_off as u64);
-
-            cfg_bar.write_u16(notify_offset, rxq.queue_num);
+            unsafe { (*self.notify_bar).write_u16_unfenced(self.rxq_notify_offset, rxq.queue_num) };
         }
     }
 

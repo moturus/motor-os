@@ -295,6 +295,10 @@ impl PciBar {
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
+    pub fn write_u16_unfenced(&self, offset: u64, val: u16) {
+        unsafe { core::ptr::write_volatile((self.virt_addr + offset) as *mut u16, val) }
+    }
+
     pub fn read_u32(&self, offset: u64) -> u32 {
         // unsafe { core::intrinsics::atomic_load_acq((virt_addr + offset) as *const u8) }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);

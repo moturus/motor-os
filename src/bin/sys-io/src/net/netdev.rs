@@ -85,15 +85,6 @@ impl TxToken for VirtioTxToken {
         self.dev().tx_queued += buffer.len();
         self.dev().pending_tx.push_back(buffer);
 
-        // rnetbench can push this above 80k
-        // static mut MAX_Q: usize = 64000;
-        // unsafe {
-        //     if self.dev().tx_queued > MAX_Q {
-        //         MAX_Q = self.dev().tx_queued;
-        //         log::info!("DEV: pending tx bytes: {}", MAX_Q);
-        //     }
-        // }
-
         result
     }
 }
