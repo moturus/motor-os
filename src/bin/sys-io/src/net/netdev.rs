@@ -211,7 +211,11 @@ impl smoltcp::phy::Device for VirtioSmoltcpDevice {
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
         let mut caps = smoltcp::phy::DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ethernet;
-        caps.max_transmission_unit = 1536;
+        caps.max_transmission_unit = if let Some(mtu) = self.virtio_dev.mtu() {
+            mtu as usize
+        } else {
+            1536
+        };
 
         caps
     }

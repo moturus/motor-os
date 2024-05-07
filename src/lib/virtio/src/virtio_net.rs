@@ -1,14 +1,27 @@
+use core::mem::offset_of;
+
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use super::le16;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 
 // Feature bits.
 const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
+const VIRTIO_NET_F_MTU: u64 = 1_u64 << 3;
 const VIRTIO_NET_F_MAC: u64 = 1_u64 << 5;
 #[allow(unused)]
 const VIRTIO_NET_F_STATUS: u64 = 1_u64 << 16;
+
+#[allow(unused)]
+#[repr(C, packed)]
+struct VirtioNetConfig {
+    mac: [u8; 6],
+    status: le16,
+    max_virtqueue_pairs: le16,
+    mtu: le16,
+}
 
 #[repr(C, packed)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -71,6 +84,7 @@ impl TxPacket {
 pub struct NetDev {
     dev: alloc::boxed::Box<VirtioDevice>,
     mac: [u8; 6],
+    mtu: Option<u16>,
 
     rx_bufs: &'static mut [IoBuf; 256],
     tx_bufs: &'static mut [IoBuf; 128], // A single TX buf consumes two descriptors in virtqueue.
@@ -132,6 +146,7 @@ impl NetDev {
         let mut net = NetDev {
             dev,
             mac: [0; 6],
+            mtu: None,
             rx_bufs,
             tx_bufs,
             tx_buf_freelist,
@@ -153,6 +168,8 @@ impl NetDev {
     // Step 4
     fn negotiate_features(&mut self) -> Result<(), ()> {
         let features_available = self.dev.get_available_features();
+        let mut features_acked = 0_u64;
+
         // NOTE: neither CHV nor QEMU have VIRTIO_F_IN_ORDER available.
         #[cfg(debug_assertions)]
         log::debug!("NET features available: 0x{:x}", features_available);
@@ -161,6 +178,10 @@ impl NetDev {
             log::warn!("Virtio NET device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
                 self.dev.pci_device.id, features_available);
             return Err(());
+        }
+
+        if (features_available & VIRTIO_NET_F_MTU) != 0 {
+            features_acked |= VIRTIO_NET_F_MTU;
         }
 
         if (features_available & VIRTIO_NET_F_MAC) == 0 {
@@ -192,7 +213,7 @@ impl NetDev {
         }
         */
 
-        let features_acked = super::virtio_device::VIRTIO_F_VERSION_1
+        features_acked |= super::virtio_device::VIRTIO_F_VERSION_1
             | VIRTIO_NET_F_MAC
             | super::virtio_device::VIRTIO_F_RING_EVENT_IDX; // | VIRTIO_NET_F_STATUS;
 
@@ -230,7 +251,26 @@ impl NetDev {
 
         log::debug!("NET MAC: {:02x?}", self.mac);
 
+        if (features_acked & VIRTIO_NET_F_MTU) != 0 {
+            let mtu = cfg_bar
+                .read_u16(device_cfg.offset as u64 + offset_of!(VirtioNetConfig, mtu) as u64);
+            if mtu < 68 {
+                log::warn!(
+                    "Virtio NET device {:?}: bad MTU: {}.",
+                    self.dev.pci_device.id,
+                    mtu
+                );
+                return Err(());
+            }
+
+            self.mtu = Some(mtu);
+        }
+
         Ok(())
+    }
+
+    pub fn mtu(&self) -> Option<u16> {
+        self.mtu
     }
 
     pub fn wait_handles(&self) -> alloc::vec::Vec<crate::WaitHandle> {
