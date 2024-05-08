@@ -9,9 +9,9 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use moto_ipc::sync::ClientConnection;
 use implementation::{GetTailEntriesRequest, GetTailEntriesResponse};
 use log::Record;
+use moto_ipc::sync::ClientConnection;
 
 pub const LOG_ERROR_EXIT_CODE: i32 = 0xbad106;
 
@@ -117,7 +117,7 @@ pub fn init(tag: &str) -> Result<(), StdError> {
         BASIC_LOGGER.swap(logger as *mut _ as usize, Ordering::Relaxed)
     );
 
-    log::set_logger(logger).map_err(|err| StdError::from(err))
+    log::set_logger(logger).map_err(|err| StdError::from(format!("{err}")))
 }
 
 pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {

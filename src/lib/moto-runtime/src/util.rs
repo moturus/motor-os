@@ -108,13 +108,12 @@ impl Backoff {
                 core::hint::spin_loop();
             }
         } else {
-            #[cfg(not(feature = "std"))]
             for _ in 0..1 << self.step.get() {
                 core::hint::spin_loop();
             }
 
-            #[cfg(feature = "std")]
-            ::std::thread::yield_now();
+            // #[cfg(feature = "std")]
+            // ::std::thread::yield_now();
         }
 
         if self.step.get() <= YIELD_LIMIT {

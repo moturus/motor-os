@@ -25,8 +25,7 @@ path = "../bit_field"
 # version = "0.10"
 
 [dependencies.log]
-path = "../log"
-# version = "0.4"
+version = "0.4.21"
 
 [dependencies.rsdp]
 path = "../rsdp"

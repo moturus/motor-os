@@ -18,7 +18,7 @@ default = ["alloc"]
 
 [dependencies]
 # memoffset = "0.9"
-memoffset = { path = "../memoffset" }
+# memoffset = { path = "../memoffset" }
 
 [dev-dependencies]
 rand = "0.8.4"

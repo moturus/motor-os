@@ -228,7 +228,6 @@ pub fn attr(args: TokenStream, input: TokenStream) -> TokenStream {
         .unwrap_or_else(Error::into_compile_error)
 }
 
-#[cfg(not(cfg_macro_not_allowed))]
 #[proc_macro]
 pub fn cfg(input: TokenStream) -> TokenStream {
     use proc_macro::{Ident, Span, TokenTree};

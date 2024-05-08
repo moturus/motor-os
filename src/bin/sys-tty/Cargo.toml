@@ -9,8 +9,9 @@ edition = "2021"
 moto-ipc = { path = "../../lib/moto-ipc" }
 moto-sys = { path = "../../lib/moto-sys" }
 moto-log = { path = "../../lib/moto-log" }
-log = { path = "../../third_party/log", features = ["std"] }
 x86_64 = { path = "../../third_party/x86_64"}  # Used for port I/O.
+
+log = "0.4.21"
 
 [profile.dev]
 panic = "abort"

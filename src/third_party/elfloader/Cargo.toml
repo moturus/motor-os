@@ -17,7 +17,6 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-# log = { path = "../log", optional = true }
 xmas-elf = { path = "../xmas-elf", optional = true }
 bitflags = { path = "../bitflags", optional = true }
 core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }

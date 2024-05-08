@@ -15,10 +15,10 @@ frusa    = { path = "../../lib/frusa" }
 bitflags = { path = "../../third_party/bitflags" }
 elfloader = { path = "../../third_party/elfloader" }
 intrusive-collections = { path = "../../third_party/intrusive-rs" }
-log = { path = "../../third_party/log" }
 x86 = { path = "../../third_party/x86" }
 x86_64 = { path = "../../third_party/x86_64" }
 
+log = "0.4.21"
 xsave = "2.0.2"
 
 [features]

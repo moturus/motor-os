@@ -1,5 +1,6 @@
 use core::arch::asm;
 
+#[allow(unused)]
 #[derive(core::fmt::Debug)]
 pub struct Leaf {
     pub leaf: u32,

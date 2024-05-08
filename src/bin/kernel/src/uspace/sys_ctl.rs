@@ -5,6 +5,7 @@ use super::syscall::*;
 use super::SysObject;
 use alloc::sync::Arc;
 use alloc::{borrow::ToOwned, string::String};
+use log::LevelFilter;
 use moto_sys::stats::ProcessStatsV1;
 use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
@@ -530,17 +531,24 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             let curr_log_level = log::max_level() as usize as u64;
             let next_log_level = args.args[0] as usize;
 
-            if let Some(level) = log::LevelFilter::from_usize(next_log_level) {
-                log::set_max_level(level);
-                log::info!(
-                    "Thread {} set log level to {:?}",
-                    thread.debug_name(),
-                    level
-                );
-                ResultBuilder::ok_1(curr_log_level)
-            } else {
-                ResultBuilder::invalid_argument()
-            }
+            let level = match next_log_level {
+                1 => LevelFilter::Error,
+                2 => LevelFilter::Warn,
+                3 => LevelFilter::Info,
+                4 => LevelFilter::Debug,
+                5 => LevelFilter::Trace,
+                _ => {
+                    return ResultBuilder::invalid_argument();
+                }
+            };
+
+            log::set_max_level(level);
+            log::info!(
+                "Thread {} set log level to {:?}",
+                thread.debug_name(),
+                level
+            );
+            ResultBuilder::ok_1(curr_log_level)
         }
         _ => ResultBuilder::invalid_argument(),
     }

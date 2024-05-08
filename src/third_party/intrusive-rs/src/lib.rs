@@ -310,7 +310,7 @@ pub use crate::unsafe_ref::UnsafeRef;
 pub use crate::xor_linked_list::AtomicLink as XorLinkedListAtomicLink;
 pub use crate::xor_linked_list::Link as XorLinkedListLink;
 pub use crate::xor_linked_list::XorLinkedList;
-pub use memoffset::offset_of;
+pub use core::mem::offset_of;
 
 /// An endpoint of a range of keys.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

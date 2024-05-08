@@ -1,14 +1,6 @@
-#[cfg(feature = "compression")]
-use std::borrow::Cow;
-#[cfg(feature = "compression")]
-use std::vec::Vec;
-
 use core::fmt;
 use core::mem;
 use core::slice;
-
-#[cfg(feature = "compression")]
-use flate2::{Decompress, FlushDecompress};
 
 use {P32, P64, ElfFile};
 use header::{Header, Class};
@@ -169,44 +161,6 @@ impl<'a> SectionHeader<'a> {
     pub fn raw_data(&self, elf_file: &ElfFile<'a>) -> &'a [u8] {
         assert_ne!(self.get_type().unwrap(), ShType::Null);
         &elf_file.input[self.offset() as usize..(self.offset() + self.size()) as usize]
-    }
-
-    #[cfg(feature = "compression")]
-    pub fn decompressed_data(&self, elf_file: &ElfFile<'a>) -> Result<Cow<'a, [u8]>, &'static str> {
-        let raw = self.raw_data(elf_file);
-        Ok(if (self.flags() & SHF_COMPRESSED) == 0 {
-            Cow::Borrowed(raw)
-        } else {
-            let (compression_type, size, compressed_data) = match elf_file.header.pt1.class() {
-                Class::ThirtyTwo => {
-                    if raw.len() < 12 {
-                        return Err("Unexpected EOF in compressed section");
-                    }
-                    let header: &'a CompressionHeader32 = read(&raw[..12]);
-                    (header.type_.as_compression_type(), header.size as usize, &raw[12..])
-                },
-                Class::SixtyFour => {
-                    if raw.len() < 24 {
-                        return Err("Unexpected EOF in compressed section");
-                    }
-                    let header: &'a CompressionHeader64 = read(&raw[..24]);
-                    (header.type_.as_compression_type(), header.size as usize, &raw[24..])
-                },
-                Class::None | Class::Other(_) => unreachable!(),
-            };
-
-            if compression_type != Ok(CompressionType::Zlib) {
-                return Err("Unknown compression type");
-            }
-
-            let mut decompressed = Vec::with_capacity(size);
-            let mut decompress = Decompress::new(true);
-            if let Err(_) = decompress.decompress_vec(
-                compressed_data, &mut decompressed, FlushDecompress::Finish) {
-                return Err("Decompression error");
-            }
-            Cow::Owned(decompressed)
-        })
     }
 
     getter!(flags, u64);

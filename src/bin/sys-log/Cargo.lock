@@ -3,15 +3,10 @@
 version = 3
 
 [[package]]
-name = "cfg-if"
-version = "1.0.0"
-
-[[package]]
 name = "log"
-version = "0.4.17"
-dependencies = [
- "cfg-if",
-]
+version = "0.4.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90ed8c1e510134f979dbc4f070f87d4313098b704861a105fe34231c70a3901c"
 
 [[package]]
 name = "moto-ipc"

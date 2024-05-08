@@ -18,11 +18,6 @@ macro_rules! check {
     };
 }
 
-#[cfg(feature = "compression")]
-extern crate std;
-#[cfg(feature = "compression")]
-extern crate flate2;
-
 extern crate zero;
 
 pub mod header;

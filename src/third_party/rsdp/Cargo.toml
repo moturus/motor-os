@@ -22,5 +22,4 @@ license = "MIT/Apache-2.0"
 repository = "https://github.com/rust-osdev/acpi"
 
 [dependencies.log]
-path = "../log"
-# version = "0.4"
+version = "0.4.21"

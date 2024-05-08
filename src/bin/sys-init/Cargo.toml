@@ -6,11 +6,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-log          = { path = "../../third_party/log" }
 moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-log     = { path = "../../lib/moto-log"    }
+
+log = "0.4.21"
 
 [patch.crates-io]
 moto-ipc     = { path = "../../lib/moto-ipc"    }
