@@ -295,6 +295,7 @@ impl PciBar {
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
+    #[allow(unused)]
     pub fn write_u16_unfenced(&self, offset: u64, val: u16) {
         unsafe { core::ptr::write_volatile((self.virt_addr + offset) as *mut u16, val) }
     }

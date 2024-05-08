@@ -377,7 +377,8 @@ impl NetDev {
         let should_notify = txq.add_tx_buf(phys_addr, idx as u16, len as u32);
 
         if should_notify {
-            unsafe { (*self.notify_bar).write_u16_unfenced(self.txq_notify_offset, txq.queue_num) };
+            // unsafe { (*self.notify_bar).write_u16_unfenced(self.txq_notify_offset, txq.queue_num) };
+            unsafe { (*self.notify_bar).write_u16(self.txq_notify_offset, txq.queue_num) };
         }
     }
 
@@ -388,7 +389,8 @@ impl NetDev {
         let should_notify = rxq.add_rx_buf(phys_addr, 2048, idx as u16);
 
         if should_notify {
-            unsafe { (*self.notify_bar).write_u16_unfenced(self.rxq_notify_offset, rxq.queue_num) };
+            // unsafe { (*self.notify_bar).write_u16_unfenced(self.rxq_notify_offset, rxq.queue_num) };
+            unsafe { (*self.notify_bar).write_u16(self.rxq_notify_offset, rxq.queue_num) };
         }
     }
 
