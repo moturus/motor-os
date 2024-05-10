@@ -857,14 +857,11 @@ impl NetSys {
         sqe
     }
 
-    fn tcp_stream_drop(
-        &mut self,
-        conn: &Rc<io_channel::ServerConnection>,
-        mut sqe: io_channel::Msg,
-    ) -> Option<io_channel::Msg> {
-        let socket_id = match self.tcp_socket_from_msg(conn.wait_handle(), &sqe) {
-            Ok(s) => s,
-            Err(err) => return Some(err),
+    fn tcp_stream_drop(&mut self, conn: &Rc<io_channel::ServerConnection>, sqe: io_channel::Msg) {
+        let socket_id = if let Ok(s) = self.tcp_socket_from_msg(conn.wait_handle(), &sqe) {
+            s
+        } else {
+            return; // Nobody is listening. Drop the connection here (this is an error condition)?
         };
         log::debug!(
             "{}:{} tcp_stream_drop 0x{:x}",
@@ -876,8 +873,6 @@ impl NetSys {
         // we drop everything here: let the user-side worry about
         // not dropping connections before writes are complete.
         self.drop_tcp_socket(socket_id);
-        sqe.status = ErrorCode::Ok.into();
-        Some(sqe)
     }
 
     fn next_id(&mut self) -> u64 {
@@ -1426,7 +1421,10 @@ impl IoSubsystem for NetSys {
             rt_api::net::CMD_TCP_STREAM_GET_OPTION => {
                 Ok(Some(self.tcp_stream_get_option(conn, msg)))
             }
-            rt_api::net::CMD_TCP_STREAM_DROP => Ok(self.tcp_stream_drop(conn, msg)),
+            rt_api::net::CMD_TCP_STREAM_DROP => {
+                self.tcp_stream_drop(conn, msg);
+                Ok(None)
+            }
             _ => {
                 #[cfg(debug_assertions)]
                 log::debug!(
