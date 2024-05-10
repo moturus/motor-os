@@ -443,6 +443,18 @@ pub struct TcpStreamImpl {
 
 impl Drop for TcpStreamImpl {
     fn drop(&mut self) {
+        let mut req = io_channel::Msg::new();
+        req.command = rt_api::net::CMD_TCP_STREAM_DROP;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = self.next_rx_seq.load(Ordering::Relaxed) - 1;
+        #[cfg(debug_assertions)]
+        moturus_log!(
+            "{}:{} sending rx_ack {}",
+            file!(),
+            line!(),
+            req.payload.args_64_mut()[0]
+        );
+        self.channel.send_msg(req);
         self.channel.tcp_stream_dropped(self.handle);
     }
 }
