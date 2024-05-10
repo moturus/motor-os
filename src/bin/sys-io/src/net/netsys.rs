@@ -932,6 +932,8 @@ impl NetSys {
         // Without these, remotely dropped sockets may hang around indefinitely.
         smol_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
         smol_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
+        smol_socket.set_nagle_enabled(false); // A good idea, generally.
+        smol_socket.set_ack_delay(None);
 
         let local_addr = super::smoltcp_helpers::socket_addr_from_endpoint(
             smol_socket.local_endpoint().unwrap(),
@@ -1000,6 +1002,8 @@ impl NetSys {
         // Without these, remotely dropped sockets may hang around indefinitely.
         smol_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
         smol_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
+        smol_socket.set_nagle_enabled(false); // A good idea, generally.
+        smol_socket.set_ack_delay(None);
 
         let local_addr = super::smoltcp_helpers::socket_addr_from_endpoint(
             smol_socket.local_endpoint().unwrap(),
