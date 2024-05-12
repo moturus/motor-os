@@ -25,6 +25,8 @@ pub const CMD_TCP_STREAM_DROP: u16 = CMD_MIN + 11;
 
 pub const CMD_MAX: u16 = CMD_TCP_STREAM_DROP;
 
+pub const EVT_TCP_STREAM_STATE_CHANGED: u16 = CMD_MIN;
+
 pub const TCP_OPTION_SHUT_RD: u64 = 1 << 0;
 pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
 pub const TCP_OPTION_READ_TIMEOUT: u64 = 1 << 2;
@@ -36,14 +38,34 @@ pub const TCP_OPTION_NONBLOCKING: u64 = 1 << 6;
 pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u32)]
 pub enum TcpState {
-    Listening,
-    PendingAccept,
-    Connecting,
-    ReadWrite,
-    ReadOnly,
-    WriteOnly,
-    Closed,
+    Closed = 0,
+    Listening = 1,
+    PendingAccept = 2,
+    Connecting = 3,
+    ReadWrite = 4,
+    ReadOnly = 5,
+    WriteOnly = 6,
+    _Max = 7,
+}
+
+impl TryFrom<u32> for TcpState {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value < (Self::_Max as u32) {
+            Ok(unsafe { core::mem::transmute(value) })
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl Into<u32> for TcpState {
+    fn into(self) -> u32 {
+        self as u32
+    }
 }
 
 impl TcpState {

@@ -154,7 +154,7 @@ impl NetChannel {
 
     fn wait_for_resp(self: &Arc<Self>, resp_id: u64) -> io_channel::Msg {
         loop {
-            self.receive_or_wait(None);
+            self.receive_or_wait_handle_set(None);
 
             {
                 let mut recv_waiters = self.recv_waiters.lock();
@@ -192,11 +192,14 @@ impl NetChannel {
         self.wait_for_resp(req_id)
     }
 
-    fn receive_or_wait(self: &Arc<Self>, timeout: Option<Instant>) {
+    fn receive_or_wait_handle_set(self: &Arc<Self>, timeout: Option<Instant>) {
         if !self.this_thread_is_receiver.swap(true, Ordering::AcqRel) {
-            self.receive_messages(timeout);
+            self.do_receive_messages(timeout);
             self.this_thread_is_receiver.store(false, Ordering::Release);
         } else {
+            // Note: this function is only called if a wait_handle is set (that's its name!),
+            //       so this thread will be woken for sure (inless the wake is lost, but
+            //       this is the kernel's problem).
             let _ = moto_sys::syscalls::SysCpu::wait(
                 &mut [],
                 SysHandle::NONE,
@@ -206,27 +209,33 @@ impl NetChannel {
         }
     }
 
-    // This will return when the receive queue is empty or after N messages have been received.
-    fn receive_messages(self: &Arc<Self>, timeout: Option<Instant>) {
+    fn poll_messages(self: &Arc<Self>) -> usize {
+        let result;
+        if !self.this_thread_is_receiver.swap(true, Ordering::AcqRel) {
+            result = self.do_poll_messages();
+            self.this_thread_is_receiver.store(false, Ordering::Release);
+        } else {
+            result = 0;
+        }
+
+        result
+    }
+
+    // Poll messages, if any. Returns the number of messages polled (capped).
+    fn do_poll_messages(self: &Arc<Self>) -> usize {
         let mut received_messages = 0;
 
-        loop {
-            if let Some(timeout) = timeout {
-                if Instant::now() >= timeout {
-                    return;
-                }
-            }
+        while let Ok(msg) = self.conn.recv() {
+            received_messages += 1;
 
-            while let Ok(msg) = self.conn.recv() {
-                received_messages += 1;
-
-                let wait_handle: Option<SysHandle> = if msg.id == 0 {
-                    // This is an incoming packet, or similar.
-                    let handle = msg.handle;
-                    {
-                        let mut tcp_streams = self.tcp_streams.lock();
-                        if let Some(s) = tcp_streams.get(&handle) {
-                            if let Some(stream) = s.0.upgrade() {
+            let wait_handle: Option<SysHandle> = if msg.id == 0 {
+                // This is an incoming packet, or similar.
+                let handle = msg.handle;
+                {
+                    let mut tcp_streams = self.tcp_streams.lock();
+                    if let Some(s) = tcp_streams.get_mut(&handle) {
+                        if let Some(stream) = s.0.upgrade() {
+                            if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
                                 #[cfg(debug_assertions)]
                                 moturus_log!(
                                     "{}:{} got recv msg {}",
@@ -235,16 +244,36 @@ impl NetChannel {
                                     msg.command
                                 );
                                 stream.recv_queue.push(msg).unwrap(); // TODO: handle error?
-                                s.1
-                            } else {
-                                if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
+                            } else if msg.command == rt_api::net::EVT_TCP_STREAM_STATE_CHANGED {
+                                #[cfg(debug_assertions)]
+                                moturus_log!(
+                                    "{}:{}: got STATE EVENT {:?} for 0x{:x}",
+                                    file!(),
+                                    line!(),
+                                    rt_api::net::TcpState::try_from(msg.payload.args_32()[0]),
+                                    msg.handle
+                                );
+                                stream
+                                    .tcp_state
+                                    .store(msg.payload.args_32()[0], Ordering::Relaxed);
+                            }
+
+                            // Return the handle of a sleeping/reading thread, if any.
+                            s.1.take()
+                        } else {
+                            match msg.command {
+                                rt_api::net::CMD_TCP_STREAM_RX => {
                                     // RX raced with the client dropping the sream. Need to get page to free it.
                                     let sz_read = msg.payload.args_64()[1];
                                     if sz_read > 0 {
                                         let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
                                     }
-                                } else {
+                                }
+                                rt_api::net::EVT_TCP_STREAM_STATE_CHANGED => {}
+                                _ => {
                                     // #[cfg(debug_assertions)]
+                                    // This is logged always because if a new incoming message is added that
+                                    // has to be handled but is not, we may have a problem.
                                     moturus_log!(
                                     "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
                                     file!(),
@@ -253,51 +282,64 @@ impl NetChannel {
                                     handle
                                 );
                                 }
-                                tcp_streams.remove(&handle);
-                                continue;
                             }
-                        } else {
-                            if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
-                                // RX raced with the client dropping the sream. Need to get page to free it.
-                                let sz_read = msg.payload.args_64()[1];
-                                if sz_read > 0 {
-                                    let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
-                                }
-                            } else {
-                                // #[cfg(debug_assertions)]
-                                moturus_log!(
-                                    "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
-                                    file!(),
-                                    line!(),
-                                    msg.command,
-                                    handle
-                                );
-                            }
+                            tcp_streams.remove(&handle);
                             continue;
                         }
-                    }
-                } else {
-                    let mut recv_waiters = self.recv_waiters.lock();
-                    if let Some((handle, resp)) = recv_waiters.get_mut(&msg.id) {
-                        *resp = Some(msg);
-                        Some(*handle)
                     } else {
-                        panic!("unexpected msg");
-                    }
-                };
-
-                if let Some(wait_handle) = wait_handle {
-                    if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
-                        let _ = moto_sys::syscalls::SysCpu::wake(wait_handle);
+                        if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
+                            // RX raced with the client dropping the sream. Need to get page to free it.
+                            let sz_read = msg.payload.args_64()[1];
+                            if sz_read > 0 {
+                                let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
+                            }
+                        } else {
+                            // #[cfg(debug_assertions)]
+                            moturus_log!(
+                                "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
+                                file!(),
+                                line!(),
+                                msg.command,
+                                handle
+                            );
+                        }
+                        continue;
                     }
                 }
+            } else {
+                let mut recv_waiters = self.recv_waiters.lock();
+                if let Some((handle, resp)) = recv_waiters.get_mut(&msg.id) {
+                    *resp = Some(msg);
+                    Some(*handle)
+                } else {
+                    panic!("unexpected msg");
+                }
+            };
 
-                if received_messages > 32 {
+            if let Some(wait_handle) = wait_handle {
+                if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
+                    let _ = moto_sys::syscalls::SysCpu::wake(wait_handle);
+                }
+            }
+
+            if received_messages > 32 {
+                return received_messages;
+            }
+        }
+
+        received_messages
+    }
+
+    // This will return when the receive queue is empty or after N messages have been received.
+    fn do_receive_messages(self: &Arc<Self>, timeout: Option<Instant>) {
+        loop {
+            if let Some(timeout) = timeout {
+                if Instant::now() >= timeout {
                     return;
                 }
             }
 
-            if received_messages > 0 {
+            if self.do_poll_messages() > 0 {
                 return;
             }
 
@@ -435,7 +477,9 @@ pub struct TcpStreamImpl {
 
     // A partially consumed incoming RX.
     rx_buf: crate::external::spin::Mutex<Option<RxBuf>>,
-    rx_closed: AtomicBool,
+
+    tcp_state: AtomicU32, // rt_api::TcpState
+    rx_done: AtomicBool,
 
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
@@ -473,6 +517,10 @@ impl TcpStreamImpl {
             req.payload.args_64_mut()[0]
         );
         self.channel.send_msg(req);
+    }
+
+    fn tcp_state(&self) -> rt_api::net::TcpState {
+        rt_api::net::TcpState::try_from(self.tcp_state.load(Ordering::Relaxed)).unwrap()
     }
 }
 
@@ -525,7 +573,8 @@ impl TcpStream {
             recv_queue: ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             next_rx_seq: AtomicU64::new(1),
             rx_buf: crate::external::spin::Mutex::new(None),
-            rx_closed: AtomicBool::new(false),
+            tcp_state: AtomicU32::new(rt_api::net::TcpState::ReadWrite.into()),
+            rx_done: AtomicBool::new(false),
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
         });
@@ -609,6 +658,73 @@ impl TcpStream {
         todo!()
     }
 
+    fn process_rx_message(&self, buf: &mut [u8], msg: io_channel::Msg) -> Result<usize, ErrorCode> {
+        assert_eq!(msg.command, crate::rt_api::net::CMD_TCP_STREAM_RX);
+        let sz_read = msg.payload.args_64()[1] as usize;
+        let rx_seq_incoming = msg.payload.args_64()[2];
+        let rx_seq = self.inner.next_rx_seq.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(rx_seq, rx_seq_incoming);
+        if rx_seq & (crate::rt_api::net::TCP_RX_MAX_INFLIGHT - 1) == 0 {
+            self.inner.ack_rx();
+        }
+
+        if sz_read == 0 {
+            assert_eq!(msg.payload.shared_pages()[0], u16::MAX);
+            self.inner.rx_done.store(true, Ordering::Release);
+            #[cfg(debug_assertions)]
+            moturus_log!(
+                "{}:{} RX closed for stream 0x{:x} rx_seq {}",
+                file!(),
+                line!(),
+                msg.handle,
+                rx_seq
+            );
+            return Ok(0);
+        }
+
+        let io_page = self
+            .inner
+            .channel
+            .conn
+            .get_page(msg.payload.shared_pages()[0]);
+        #[cfg(debug_assertions)]
+        moturus_log!(
+            "{}:{} incoming {} bytes for stream 0x{:x} rx_seq {}",
+            file!(),
+            line!(),
+            sz_read,
+            msg.handle,
+            rx_seq
+        );
+
+        let sz_read = if sz_read > buf.len() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    io_page.bytes().as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                );
+            }
+
+            let mut buf_lock = self.inner.rx_buf.lock();
+            let rx_buf = &mut *buf_lock;
+            assert!(rx_buf.is_none());
+            *rx_buf = Some(RxBuf {
+                page: io_page,
+                len: sz_read,
+                consumed: buf.len(),
+            });
+            buf.len()
+        } else {
+            unsafe {
+                core::ptr::copy_nonoverlapping(io_page.bytes().as_ptr(), buf.as_mut_ptr(), sz_read);
+            }
+            sz_read
+        };
+
+        return Ok(sz_read);
+    }
+
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         {
             let mut buf_lock = self.inner.rx_buf.lock();
@@ -631,10 +747,6 @@ impl TcpStream {
             }
         }
 
-        if self.inner.rx_closed.load(Ordering::Relaxed) {
-            return Ok(0);
-        }
-
         let rx_timeout_ns = self.inner.rx_timeout_ns.load(Ordering::Relaxed);
         let rx_timeout = if rx_timeout_ns == u64::MAX {
             None
@@ -655,6 +767,11 @@ impl TcpStream {
                 if let Some(msg) = stream_entry.0.upgrade().unwrap().recv_queue.pop() {
                     Some(msg)
                 } else {
+                    if self.inner.rx_done.load(Ordering::Relaxed) {
+                        return Ok(0);
+                    }
+
+                    // Store this thread's handle so that it is woken when an RX message arrives.
                     stream_entry.1 =
                         Some(moto_sys::UserThreadControlBlock::get().self_handle.into());
                     None
@@ -662,76 +779,13 @@ impl TcpStream {
             };
 
             if let Some(msg) = msg {
-                assert_eq!(msg.command, crate::rt_api::net::CMD_TCP_STREAM_RX);
-                let sz_read = msg.payload.args_64()[1] as usize;
-                let rx_seq_incoming = msg.payload.args_64()[2];
-                let rx_seq = self.inner.next_rx_seq.fetch_add(1, Ordering::Relaxed);
-                assert_eq!(rx_seq, rx_seq_incoming);
-                if rx_seq & (crate::rt_api::net::TCP_RX_MAX_INFLIGHT - 1) == 0 {
-                    self.inner.ack_rx();
-                }
-
-                if sz_read == 0 {
-                    assert_eq!(msg.payload.shared_pages()[0], u16::MAX);
-                    self.inner.rx_closed.store(true, Ordering::Release);
-                    #[cfg(debug_assertions)]
-                    moturus_log!(
-                        "{}:{} RX closed for stream 0x{:x} rx_seq {}",
-                        file!(),
-                        line!(),
-                        handle,
-                        rx_seq
-                    );
-                    return Ok(0);
-                }
-
-                let io_page = self
-                    .inner
-                    .channel
-                    .conn
-                    .get_page(msg.payload.shared_pages()[0]);
-                #[cfg(debug_assertions)]
-                moturus_log!(
-                    "{}:{} incoming {} bytes for stream 0x{:x} rx_seq {}",
-                    file!(),
-                    line!(),
-                    sz_read,
-                    handle,
-                    rx_seq
-                );
-
-                let sz_read = if sz_read > buf.len() {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            io_page.bytes().as_ptr(),
-                            buf.as_mut_ptr(),
-                            buf.len(),
-                        );
-                    }
-
-                    let mut buf_lock = self.inner.rx_buf.lock();
-                    let rx_buf = &mut *buf_lock;
-                    assert!(rx_buf.is_none());
-                    *rx_buf = Some(RxBuf {
-                        page: io_page,
-                        len: sz_read,
-                        consumed: buf.len(),
-                    });
-                    buf.len()
-                } else {
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            io_page.bytes().as_ptr(),
-                            buf.as_mut_ptr(),
-                            sz_read,
-                        );
-                    }
-                    sz_read
-                };
-
-                return Ok(sz_read);
+                return self.process_rx_message(buf, msg);
             } else {
-                self.inner.channel.receive_or_wait(rx_timeout);
+                // Note: even if the socket is closed, there can be RX packets buffered
+                // in sys-io, so we don't stop reading until we get a zero-length packet.
+
+                // Note: this thread will be woken because we stored its handle i stream_entry.1 above.
+                self.inner.channel.receive_or_wait_handle_set(rx_timeout);
             }
         }
     }
@@ -739,6 +793,16 @@ impl TcpStream {
     pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         if buf.len() == 0 {
             return Ok(0);
+        }
+
+        if !self.inner.tcp_state().can_write() {
+            return Ok(0);
+        }
+
+        if self.inner.channel.poll_messages() > 0 {
+            if !self.inner.tcp_state().can_write() {
+                return Ok(0);
+            }
         }
 
         let timestamp = moto_sys::time::Instant::now().as_u64();
@@ -787,6 +851,9 @@ impl TcpStream {
         let resp = self.inner.channel.send_receive(req);
 
         if resp.status().is_ok() {
+            self.inner
+                .tcp_state
+                .store(resp.payload.args_32()[5], Ordering::Relaxed);
             Ok(())
         } else {
             Err(resp.status())
@@ -978,7 +1045,8 @@ impl TcpListener {
             recv_queue: ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             next_rx_seq: AtomicU64::new(1),
             rx_buf: crate::external::spin::Mutex::new(None),
-            rx_closed: AtomicBool::new(false),
+            tcp_state: AtomicU32::new(rt_api::net::TcpState::ReadWrite.into()),
+            rx_done: AtomicBool::new(false),
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
         });
