@@ -29,11 +29,8 @@ pub const EVT_TCP_STREAM_STATE_CHANGED: u16 = CMD_MIN;
 
 pub const TCP_OPTION_SHUT_RD: u64 = 1 << 0;
 pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
-pub const TCP_OPTION_READ_TIMEOUT: u64 = 1 << 2;
-pub const TCP_OPTION_WRITE_TIMEOUT: u64 = 1 << 3;
-pub const TCP_OPTION_NODELAY: u64 = 1 << 4;
-pub const TCP_OPTION_TTL: u64 = 1 << 5;
-pub const TCP_OPTION_NONBLOCKING: u64 = 1 << 6;
+pub const TCP_OPTION_NODELAY: u64 = 1 << 2;
+pub const TCP_OPTION_TTL: u64 = 1 << 3;
 
 pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
 

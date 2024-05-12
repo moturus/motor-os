@@ -209,6 +209,31 @@ impl NetChannel {
         }
     }
 
+    fn on_orphan_message(self: &Arc<Self>, msg: io_channel::Msg) {
+        match msg.command {
+            rt_api::net::CMD_TCP_STREAM_RX => {
+                // RX raced with the client dropping the sream. Need to get page to free it.
+                let sz_read = msg.payload.args_64()[1];
+                if sz_read > 0 {
+                    let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
+                }
+            }
+            rt_api::net::EVT_TCP_STREAM_STATE_CHANGED => {}
+            _ => {
+                // #[cfg(debug_assertions)]
+                // This is logged always because if a new incoming message is added that
+                // has to be handled but is not, we may have a problem.
+                moturus_log!(
+                    "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
+                    file!(),
+                    line!(),
+                    msg.command,
+                    msg.handle
+                );
+            }
+        }
+    }
+
     fn poll_messages(self: &Arc<Self>) -> usize {
         let result;
         if !self.this_thread_is_receiver.swap(true, Ordering::AcqRel) {
@@ -235,74 +260,48 @@ impl NetChannel {
                     let mut tcp_streams = self.tcp_streams.lock();
                     if let Some(s) = tcp_streams.get_mut(&handle) {
                         if let Some(stream) = s.0.upgrade() {
-                            if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
-                                #[cfg(debug_assertions)]
-                                moturus_log!(
-                                    "{}:{} got recv msg {}",
+                            match msg.command {
+                                rt_api::net::CMD_TCP_STREAM_RX => {
+                                    #[cfg(debug_assertions)]
+                                    moturus_log!(
+                                        "{}:{} got recv msg {}",
+                                        file!(),
+                                        line!(),
+                                        msg.command
+                                    );
+                                    stream.recv_queue.push(msg).unwrap(); // TODO: handle error?
+                                }
+                                rt_api::net::EVT_TCP_STREAM_STATE_CHANGED => {
+                                    #[cfg(debug_assertions)]
+                                    moturus_log!(
+                                        "{}:{}: got STATE EVENT {:?} for 0x{:x}",
+                                        file!(),
+                                        line!(),
+                                        rt_api::net::TcpState::try_from(msg.payload.args_32()[0]),
+                                        msg.handle
+                                    );
+                                    stream
+                                        .tcp_state
+                                        .store(msg.payload.args_32()[0], Ordering::Relaxed);
+                                }
+                                _ => panic!(
+                                    "{}:{}: Unrecognized msg {} for stream 0x{:x}",
                                     file!(),
                                     line!(),
-                                    msg.command
-                                );
-                                stream.recv_queue.push(msg).unwrap(); // TODO: handle error?
-                            } else if msg.command == rt_api::net::EVT_TCP_STREAM_STATE_CHANGED {
-                                #[cfg(debug_assertions)]
-                                moturus_log!(
-                                    "{}:{}: got STATE EVENT {:?} for 0x{:x}",
-                                    file!(),
-                                    line!(),
-                                    rt_api::net::TcpState::try_from(msg.payload.args_32()[0]),
+                                    msg.command,
                                     msg.handle
-                                );
-                                stream
-                                    .tcp_state
-                                    .store(msg.payload.args_32()[0], Ordering::Relaxed);
+                                ),
                             }
 
                             // Return the handle of a sleeping/reading thread, if any.
                             s.1.take()
                         } else {
-                            match msg.command {
-                                rt_api::net::CMD_TCP_STREAM_RX => {
-                                    // RX raced with the client dropping the sream. Need to get page to free it.
-                                    let sz_read = msg.payload.args_64()[1];
-                                    if sz_read > 0 {
-                                        let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
-                                    }
-                                }
-                                rt_api::net::EVT_TCP_STREAM_STATE_CHANGED => {}
-                                _ => {
-                                    // #[cfg(debug_assertions)]
-                                    // This is logged always because if a new incoming message is added that
-                                    // has to be handled but is not, we may have a problem.
-                                    moturus_log!(
-                                    "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
-                                    file!(),
-                                    line!(),
-                                    msg.command,
-                                    handle
-                                );
-                                }
-                            }
+                            self.on_orphan_message(msg);
                             tcp_streams.remove(&handle);
                             continue;
                         }
                     } else {
-                        if msg.command == rt_api::net::CMD_TCP_STREAM_RX {
-                            // RX raced with the client dropping the sream. Need to get page to free it.
-                            let sz_read = msg.payload.args_64()[1];
-                            if sz_read > 0 {
-                                let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
-                            }
-                        } else {
-                            // #[cfg(debug_assertions)]
-                            moturus_log!(
-                                "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
-                                file!(),
-                                line!(),
-                                msg.command,
-                                handle
-                            );
-                        }
+                        self.on_orphan_message(msg);
                         continue;
                     }
                 }

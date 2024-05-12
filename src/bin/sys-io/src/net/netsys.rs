@@ -689,29 +689,6 @@ impl NetSys {
             return sqe;
         }
 
-        if options == rt_api::net::TCP_OPTION_READ_TIMEOUT
-            || options == rt_api::net::TCP_OPTION_WRITE_TIMEOUT
-        {
-            panic!()
-            /*
-            let timo_ns = sqe.payload.args_64()[1];
-            let timo = if timo_ns == u64::MAX {
-                std::time::Duration::MAX
-            } else {
-                std::time::Duration::from_nanos(timo_ns)
-            };
-
-            if options == rt_api::net::TCP_OPTION_READ_TIMEOUT {
-                self.set_read_timeout(socket_id, timo);
-            } else {
-                self.set_write_timeout(socket_id, timo);
-            }
-
-            sqe.status = ErrorCode::Ok.into();
-            return Some(sqe);
-            */
-        }
-
         if options == rt_api::net::TCP_OPTION_NODELAY {
             let nodelay_u64 = sqe.payload.args_64()[1];
             let nodelay = match nodelay_u64 {
