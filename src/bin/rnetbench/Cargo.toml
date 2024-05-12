@@ -7,6 +7,7 @@ authors = ["U. Lasiotus"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+clap = { version = "4.5.4", default-features = false, features = ["derive", "error-context", "help", "std"] }
 
 [profile.release]
 panic = "abort"

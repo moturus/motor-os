@@ -6,8 +6,8 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn run(host_port: &str) -> ! {
-    match do_run(host_port) {
+pub fn run(args: &crate::Args) -> ! {
+    match do_run(args) {
         Ok(_) => std::process::exit(0),
         Err(err) => {
             eprintln!("{} error: {:?}", crate::binary_name(), err);
@@ -16,17 +16,17 @@ pub fn run(host_port: &str) -> ! {
     }
 }
 
-fn do_run(host_port: &str) -> Result<()> {
+fn do_run(args: &crate::Args) -> Result<()> {
     use std::net::ToSocketAddrs;
-    let addrs = host_port.to_socket_addrs()?;
+    let addrs = args.client.as_ref().unwrap().to_socket_addrs()?;
 
     for addr in addrs {
         // return try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN);
-        if try_addr(addr, crate::CMD_TCP_RR).is_ok() {
+        if try_addr(addr, crate::CMD_TCP_RR, args).is_ok() {
             std::thread::sleep(Duration::from_millis(100));
-            if try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT).is_ok() {
+            if try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args).is_ok() {
                 std::thread::sleep(Duration::from_millis(100));
-                return try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN);
+                return try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN, args);
             }
         }
     }
@@ -34,7 +34,7 @@ fn do_run(host_port: &str) -> Result<()> {
     Err(ErrorKind::HostUnreachable.into())
 }
 
-fn try_addr(addr: SocketAddr, cmd: u64) -> Result<()> {
+fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
     let mut buf: [u8; 1500] = [0; 1500];
     let mut tcp_stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
     tcp_stream.set_nodelay(true).unwrap();
@@ -56,10 +56,10 @@ fn try_addr(addr: SocketAddr, cmd: u64) -> Result<()> {
             do_rr(tcp_stream)?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            crate::do_throughput_write(tcp_stream, "client => server")?;
+            crate::do_throughput_write(tcp_stream, "client => server", Some(args))?;
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            crate::do_throughput_read(tcp_stream, "server => client")?;
+            crate::do_throughput_read(tcp_stream, "server => client", Some(args))?;
         }
         _ => {
             panic!("unrecognized command: {}", cmd);

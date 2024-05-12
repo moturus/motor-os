@@ -59,10 +59,10 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
             do_rr(tcp_stream)?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            crate::do_throughput_read(tcp_stream, "client => server")?;
+            crate::do_throughput_read(tcp_stream, "client => server", None)?;
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            crate::do_throughput_write(tcp_stream, "server => client")?;
+            crate::do_throughput_write(tcp_stream, "server => client", None)?;
         }
         _ => {
             panic!("unrecognized command: {}", cmd);

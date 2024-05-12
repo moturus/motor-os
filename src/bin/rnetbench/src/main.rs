@@ -13,11 +13,43 @@
 use std::io::Read;
 use std::io::Result;
 use std::io::Write;
+use std::net::TcpStream;
 use std::time::Duration;
-use std::{net::TcpStream, time::Instant};
+
+use clap::Parser;
 
 mod client;
 mod server;
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(short, long, default_value_t = false)]
+    server: bool,
+
+    #[arg(short, long, default_value_t = 40000, requires = "server")]
+    port: u16,
+
+    #[arg(short, long, conflicts_with = "server")]
+    client: Option<String>, // The host to connect to.
+
+    #[arg(
+        short,
+        long,
+        default_value_t = 5,
+        conflicts_with = "server",
+        requires = "client"
+    )]
+    time: u32, // The number of seconds to run a single test.
+
+    #[arg(
+        short = 'P',
+        long,
+        default_value_t = 1,
+        conflicts_with = "server",
+        requires = "client"
+    )]
+    parallel: u16, // The number of parallel streams/threads to run.
+}
 
 static MAGIC_BYTES_CLIENT: &[u8] = b"rnetbench_magic_client";
 static MAGIC_BYTES_SERVER: &[u8] = b"rnetbench_magic_server";
@@ -32,15 +64,6 @@ fn binary_name() -> String {
         .to_str()
         .unwrap()
         .to_owned()
-}
-
-fn print_usage_and_exit() -> ! {
-    let prog = binary_name();
-    println!("Usage:");
-    println!("\t{} -s -p <PORT>     # Server.", prog);
-    println!("\t{} -c <HOST:PORT>   # Client.", prog);
-
-    std::process::exit(1)
 }
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
@@ -60,32 +83,31 @@ fn input_listener(prog: String) {
 fn main() {
     std::thread::spawn(move || input_listener(binary_name()));
 
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
 
-    if args.len() == 4 && args[1] == "-s" && args[2] == "-p" {
-        let port = args[3].parse::<u16>();
-        if port.is_err() {
-            eprintln!("Error parsing the port number.");
-            std::process::exit(1);
-        }
-        server::run(port.unwrap());
+    if args.server {
+        server::run(args.port);
+    } else if args.client.is_some() {
+        client::run(&args);
+    } else {
+        eprintln!("error: either --server or --client argument is required");
     }
-
-    if args.len() == 3 && args[1] == "-c" {
-        client::run(args[2].as_str());
-    }
-
-    print_usage_and_exit()
 }
 
-fn do_throughput_read(mut stream: TcpStream, what: &str) -> Result<()> {
+fn do_throughput_read(mut stream: TcpStream, what: &str, client_args: Option<&Args>) -> Result<()> {
     // Note: we use buffers of different size, to make things more interesting.
     let mut buffer = [0; 1513];
-    let start_time = Instant::now();
     let mut total_bytes_read = 0usize;
+    let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
     let mut counter: u8 = 0;
+    let start = std::time::Instant::now();
     loop {
+        if let Some(duration) = duration {
+            if start.elapsed() >= duration {
+                break;
+            }
+        }
         let bytes_read = match stream.read(&mut buffer) {
             Ok(n) => n,
             Err(_) => break,
@@ -100,7 +122,10 @@ fn do_throughput_read(mut stream: TcpStream, what: &str) -> Result<()> {
         total_bytes_read += bytes_read;
     }
 
-    let duration = start_time.elapsed();
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+
+    let duration = start.elapsed();
     let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
     println!(
         "Throughput {} done: {:.2}MB received; {:.2?} MiB/sec.",
@@ -112,29 +137,47 @@ fn do_throughput_read(mut stream: TcpStream, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn do_throughput_write(mut stream: TcpStream, what: &str) -> std::io::Result<()> {
+fn do_throughput_write(
+    mut stream: TcpStream,
+    what: &str,
+    client_args: Option<&Args>,
+) -> std::io::Result<()> {
     let mut data = [0u8; 1011];
     let mut total_bytes_sent = 0usize;
-    const TP_DURATION: Duration = Duration::from_secs(3);
+    let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
     let start = std::time::Instant::now();
     let mut counter: u8 = 0;
-    while start.elapsed() < TP_DURATION {
+    'outer: loop {
+        if let Some(duration) = duration {
+            if start.elapsed() >= duration {
+                break;
+            }
+        }
         for idx in 0..data.len() {
             data[idx] = counter;
             counter = counter.wrapping_add(1);
         }
-        match stream.write_all(&data) {
-            Ok(_) => total_bytes_sent += data.len(),
-            Err(e) => {
-                eprintln!("Failed to write to socket: {}", e);
-                return Ok(());
+
+        let mut written = 0;
+        while written < data.len() {
+            match stream.write(&data[written..]) {
+                Ok(n) => {
+                    if n == 0 {
+                        break 'outer;
+                    }
+                    total_bytes_sent += n;
+                    written += n;
+                }
+                Err(_) => {
+                    break 'outer;
+                }
             }
         }
     }
 
-    stream.flush().unwrap();
-    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 
     let duration = start.elapsed();
     let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
