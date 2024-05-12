@@ -1,6 +1,6 @@
 #!/bin/sh
 
-../../../alioth/target/release/alioth \
+alioth \
     -l debug,alioth::acpi=warn \
     --log-to-file \
     run \
