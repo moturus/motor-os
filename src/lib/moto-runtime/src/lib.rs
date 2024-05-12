@@ -60,3 +60,8 @@ mod external;
 
 // Needed by bitflags!.
 pub extern crate core as _core;
+
+#[cfg(feature = "rustc-dep-of-std")]
+pub fn hashmap_random_keys() -> (u64, u64) {
+    (7, 13)
+}
