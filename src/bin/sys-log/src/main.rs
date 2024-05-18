@@ -42,7 +42,7 @@ impl LogServer {
                 .as_ref()
                 .unwrap()
         };
-        if req.command != CMD_CONNECT || req.version != 0 {
+        if req.header.cmd != CMD_CONNECT || req.header.ver != 0 {
             SysMem::log("Bad ConnectRequest.").ok();
             return Err(());
         }
@@ -61,7 +61,7 @@ impl LogServer {
                     .unwrap()
             };
             resp.tag_id = next_tag_id;
-            resp.result = 0;
+            resp.header.result = 0;
 
             Ok(())
         } else {
@@ -78,14 +78,14 @@ impl LogServer {
                 .as_ref()
                 .unwrap()
         };
-        assert_eq!(req.command, CMD_LOG);
+        assert_eq!(req.header.cmd, CMD_LOG);
 
         let ext = match conn.extension::<Connection>() {
             Some(ext) => ext,
             None => return Err(()),
         };
 
-        if req.version != 0 || req.tag_id != ext.tag_id {
+        if req.header.ver != 0 || req.tag_id != ext.tag_id {
             return Err(());
         }
 
@@ -106,7 +106,7 @@ impl LogServer {
                 .as_mut()
                 .unwrap()
         };
-        resp.result = 0;
+        resp.header.result = 0;
 
         Ok(record)
     }
@@ -123,9 +123,9 @@ impl LogServer {
                 .as_ref()
                 .unwrap()
         };
-        assert_eq!(req.command, CMD_GET_TAIL_ENTRIES);
+        assert_eq!(req.header.cmd, CMD_GET_TAIL_ENTRIES);
 
-        if req.version != 0 {
+        if req.header.ver != 0 {
             return Err(());
         }
         if req.tag_id != 0 {
@@ -182,7 +182,7 @@ impl LogServer {
                 .unwrap()
         };
 
-        resp.result = 0;
+        resp.header.result = 0;
         resp.num_entries = num_entries;
 
         Ok(())
@@ -193,13 +193,15 @@ impl LogServer {
 
         let conn = self.ipc_server.get_connection(*waker).unwrap();
         assert!(conn.connected());
+        if !conn.have_req() {
+            return;
+        }
 
-        let cmd = unsafe { (conn.data().as_ptr() as *const u16).as_ref().unwrap() };
+        let cmd = unsafe { conn.raw_channel().get::<RequestHeader>().cmd };
 
-        let mut req_ok = true;
         let mut record = None;
 
-        let res = match *cmd {
+        let res = match cmd {
             CMD_LOG => {
                 if let Ok(rec) = Self::process_log_request(conn) {
                     record = Some(rec);
@@ -222,13 +224,15 @@ impl LogServer {
         };
 
         if res.is_err() {
-            req_ok = false;
-            conn.data_mut()[0] = u8::MAX;
+            if conn.connected() {
+                unsafe {
+                    conn.raw_channel().get_mut::<ResponseHeader>().result =
+                        moto_sys::ErrorCode::InvalidArgument.into()
+                };
+            }
         }
 
-        if conn.finish_rpc().is_err() || !req_ok {
-            conn.disconnect();
-        }
+        let _ = conn.finish_rpc();
 
         if let Some(record) = record {
             self.add_log_record(record);

@@ -240,22 +240,22 @@ impl DirBuilder {
 
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
-    flags: u16,
+    flags: u32,
 }
 
 impl OpenOptions {
-    const F_READ: u16 = FileOpenRequest::F_READ;
-    const F_WRITE: u16 = FileOpenRequest::F_WRITE;
-    const F_APPEND: u16 = FileOpenRequest::F_APPEND;
-    const F_TRUNCATE: u16 = FileOpenRequest::F_TRUNCATE;
-    const F_CREATE: u16 = FileOpenRequest::F_CREATE;
-    const F_CREATE_NEW: u16 = FileOpenRequest::F_CREATE_NEW;
+    const F_READ: u32 = FileOpenRequest::F_READ;
+    const F_WRITE: u32 = FileOpenRequest::F_WRITE;
+    const F_APPEND: u32 = FileOpenRequest::F_APPEND;
+    const F_TRUNCATE: u32 = FileOpenRequest::F_TRUNCATE;
+    const F_CREATE: u32 = FileOpenRequest::F_CREATE;
+    const F_CREATE_NEW: u32 = FileOpenRequest::F_CREATE_NEW;
 
     pub const fn new() -> OpenOptions {
         Self { flags: 0 }
     }
 
-    fn set_flag(&mut self, flag: u16, val: bool) {
+    fn set_flag(&mut self, flag: u32, val: bool) {
         if val {
             self.flags |= flag;
         } else {
@@ -594,23 +594,20 @@ impl FsClient {
             let raw_channel = conn.raw_channel();
             unsafe {
                 let req = raw_channel.get_mut::<StatRequest>();
-                req.command = CMD_STAT;
-                req.version = 0;
-                req.flags = 0;
+                req.header.cmd = CMD_STAT;
+                req.header.ver = 0;
+                req.header.flags = 0;
                 req.parent_fd = 0;
 
                 req.fname_size = c_path.abs_path.as_bytes().len() as u16;
                 raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
             }
 
-            unsafe {
-                assert_eq!(CMD_STAT, *raw_channel.get::<u16>());
-            }
             conn.do_rpc(None)?;
 
             let resp = unsafe { raw_channel.get::<StatResponse>() };
-            if resp.result != 0 {
-                return Err(ErrorCode::from(resp.result));
+            if resp.header.result != 0 {
+                return Err(ErrorCode::from(resp.header.result));
             }
 
             let file_attr = FileAttr::new(&resp.attr);
@@ -646,43 +643,37 @@ impl FsClient {
             )?;
         }
 
-        unsafe {
-            assert_eq!(CMD_RENAME, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<RenameResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from(resp.header.result));
         }
 
         Ok(())
     }
 
-    fn unlink(path: &str, flags: u16) -> Result<(), ErrorCode> {
+    fn unlink(path: &str, flags: u32) -> Result<(), ErrorCode> {
         let c_path = CanonicalPath::parse(path)?;
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
 
         unsafe {
             let req = raw_channel.get_mut::<UnlinkRequest>();
-            req.command = CMD_UNLINK;
-            req.version = 0;
-            req.flags = flags;
+            req.header.cmd = CMD_UNLINK;
+            req.header.ver = 0;
+            req.header.flags = flags;
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
         }
 
-        unsafe {
-            assert_eq!(CMD_UNLINK, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<UnlinkResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from(resp.header.result));
         }
 
         Ok(())
@@ -695,23 +686,20 @@ impl FsClient {
 
         unsafe {
             let req = raw_channel.get_mut::<FileOpenRequest>();
-            req.command = CMD_FILE_OPEN;
-            req.version = 0;
-            req.flags = opts.flags;
+            req.header.cmd = CMD_FILE_OPEN;
+            req.header.ver = 0;
+            req.header.flags = opts.flags;
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
         }
 
-        unsafe {
-            assert_eq!(CMD_FILE_OPEN, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<FileOpenResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from(resp.header.result));
         }
 
         if resp.fd == 0 {
@@ -789,8 +777,8 @@ impl FsClient {
         let raw_channel = conn.raw_channel();
         unsafe {
             let req = raw_channel.get_mut::<FileReadRequest>();
-            req.command = CMD_FILE_READ;
-            req.version = 0;
+            req.header.cmd = CMD_FILE_READ;
+            req.header.ver = 0;
             req.fd = file.fd;
             req.offset = file.pos.load(Ordering::Relaxed);
             req.max_bytes = {
@@ -802,14 +790,11 @@ impl FsClient {
             } as u32;
         }
 
-        unsafe {
-            assert_eq!(CMD_FILE_READ, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<FileReadResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from(resp.header.result));
         }
 
         // resp.size may be BLOCK_SIZE if buf is too small.
@@ -832,8 +817,9 @@ impl FsClient {
         let raw_channel = conn.raw_channel();
         unsafe {
             let req = raw_channel.get_mut::<FileWriteRequest>();
-            req.command = CMD_FILE_WRITE;
-            req.version = 0;
+            req.header.cmd = CMD_FILE_WRITE;
+            req.header.ver = 0;
+            req.header.flags = 0;
             req.fd = file.fd;
             req.offset = file.pos.load(Ordering::Relaxed);
 
@@ -844,14 +830,11 @@ impl FsClient {
             raw_channel.put_bytes(&buf[0..size], &mut req.data).unwrap();
         }
 
-        unsafe {
-            assert_eq!(CMD_FILE_WRITE, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<FileWriteResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from_u16(resp.header.result));
         }
 
         file.pos.fetch_add(resp.written as u64, Ordering::Relaxed);
@@ -865,23 +848,20 @@ impl FsClient {
         let raw_channel = conn.raw_channel();
         unsafe {
             let req = raw_channel.get_mut::<ReadDirRequest>();
-            req.command = CMD_READDIR;
-            req.version = 0;
-            req.flags = 0;
+            req.header.cmd = CMD_READDIR;
+            req.header.ver = 0;
+            req.header.flags = 0;
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
         }
 
-        unsafe {
-            assert_eq!(CMD_READDIR, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<ReadDirResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from(resp.header.result));
         }
 
         ReadDir::from(c_path.abs_path, &resp)
@@ -892,20 +872,17 @@ impl FsClient {
         let raw_channel = conn.raw_channel();
         unsafe {
             let req = raw_channel.get_mut::<ReadDirNextRequest>();
-            req.command = CMD_READDIR_NEXT;
-            req.version = 0;
-            req.reserved = 0;
+            req.header.cmd = CMD_READDIR_NEXT;
+            req.header.ver = 0;
+            req.header.flags = 0;
             req.readdir_fd = readdir.fd;
         }
 
-        unsafe {
-            assert_eq!(CMD_READDIR_NEXT, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<ReadDirNextResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from(resp.header.result));
         }
 
         if resp.entries == 0 {
@@ -920,25 +897,21 @@ impl FsClient {
         Ok(Some(DirEntry::from(readdir, &raw_channel, &dentry[0])?))
     }
 
-    fn close_fd(fd: u64, flags: u16) -> Result<(), ErrorCode> {
+    fn close_fd(fd: u64, flags: u32) -> Result<(), ErrorCode> {
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
         unsafe {
             let req = raw_channel.get_mut::<CloseFdRequest>();
-            req.command = CMD_CLOSE_FD;
-            req.version = 0;
-            req.reserved = 0;
-            req.flags = flags;
+            req.header.cmd = CMD_CLOSE_FD;
+            req.header.ver = 0;
+            req.header.flags = flags;
             req.fd = fd;
         }
 
-        unsafe {
-            assert_eq!(CMD_CLOSE_FD, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<CloseFdResponse>() };
-        if resp.result != 0 {
+        if resp.header.result != 0 {
             SysMem::log("close_fd: RPC failed.").ok();
         }
 
@@ -952,23 +925,20 @@ impl FsClient {
 
         unsafe {
             let req = raw_channel.get_mut::<StatRequest>();
-            req.command = CMD_STAT;
-            req.version = 0;
-            req.flags = 0;
+            req.header.cmd = CMD_STAT;
+            req.header.ver = 0;
+            req.header.flags = 0;
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
         }
 
-        unsafe {
-            assert_eq!(CMD_STAT, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<StatResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from_u16(resp.header.result));
         }
 
         let file_attr = FileAttr::new(&resp.attr);
@@ -983,23 +953,20 @@ impl FsClient {
 
         unsafe {
             let req = raw_channel.get_mut::<MkdirRequest>();
-            req.command = CMD_MKDIR;
-            req.version = 0;
-            req.flags = 0;
+            req.header.cmd = CMD_MKDIR;
+            req.header.ver = 0;
+            req.header.flags = 0;
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
         }
 
-        unsafe {
-            assert_eq!(CMD_MKDIR, *raw_channel.get::<u16>());
-        }
         conn.do_rpc(None)?;
 
         let resp = unsafe { raw_channel.get::<MkdirResponse>() };
-        if resp.result != 0 {
-            return Err(ErrorCode::from_u16(resp.result));
+        if resp.header.result != 0 {
+            return Err(ErrorCode::from_u16(resp.header.result));
         }
 
         Ok(())
@@ -1011,15 +978,15 @@ fn get_fileserver_url() -> Result<String, ErrorCode> {
     conn.connect(FS_URL)?;
 
     let req = conn.req::<GetServerUrlRequest>();
-    req.command = 1;
-    req.version = 0;
-    req.flags = 0;
+    req.header.cmd = 1;
+    req.header.ver = 0;
+    req.header.flags = 0;
     conn.do_rpc(Some(
         moto_sys::time::Instant::now() + core::time::Duration::from_millis(1000),
     ))?;
 
     let resp = conn.resp::<GetServerUrlResponse>();
-    if resp.result != 0 || resp.version != 0 {
+    if resp.header.result != 0 || resp.header.ver != 0 {
         SysMem::log("get_fileserver_url() failed.").ok();
         return Err(ErrorCode::InternalError);
     }

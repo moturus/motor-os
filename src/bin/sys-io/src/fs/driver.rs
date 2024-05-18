@@ -91,21 +91,15 @@ impl Driver {
         moto_runtime::futex_wake(&super::STARTED);
 
         let self_ = Self::get();
-        let mut swap_target = SysHandle::NONE;
         loop {
-            let wait_result = self_.ipc_server.wait(swap_target, &[]);
+            let wait_result = self_.ipc_server.wait(SysHandle::NONE, &[]);
             let wakers = match wait_result {
                 Ok(wakers) => wakers,
                 Err(bad_wakers) => {
-                    if bad_wakers.len() != 0 {
-                        assert_eq!(1, bad_wakers.len());
-                        assert_eq!(swap_target, bad_wakers[0]);
-                        swap_target = SysHandle::NONE;
-                    }
+                    assert!(bad_wakers.is_empty());
                     continue;
                 }
             };
-            swap_target = SysHandle::NONE;
 
             for idx in 0..wakers.len() {
                 let waker = &wakers[idx];
@@ -115,10 +109,13 @@ impl Driver {
                 }
                 let conn = unsafe { conn.unwrap_unchecked() };
                 assert!(conn.connected());
+                if !conn.have_req() {
+                    continue;
+                }
 
                 let raw_channel = conn.raw_channel();
                 unsafe {
-                    let cmd = *raw_channel.get::<u16>();
+                    let cmd = raw_channel.get::<RequestHeader>().cmd;
 
                     let result = match cmd {
                         CMD_STAT => Self::on_stat(raw_channel),
@@ -141,38 +138,30 @@ impl Driver {
                             crate::moto_log!("fs::driver: command {} failed with {:?}", cmd, err);
                         }
 
-                        #[cfg(debug_assertions)]
+                        // #[cfg(debug_assertions)]
                         if cmd == 0 {
-                            // This is wrong.
+                            // This is wrong. But most likeky fixed.
                             static ONCE: std::sync::Once = std::sync::Once::new();
                             ONCE.call_once(|| {
                                 crate::moto_log!("{}:{} fs::driver: ZERO", file!(), line!());
                             });
                         }
                         let raw_channel = conn.raw_channel();
-                        let resp = raw_channel.get_mut::<u16>();
-                        *resp = err as u16;
+                        let resp = raw_channel.get_mut::<ResponseHeader>();
+                        resp.result = err as u16;
                     }
                 }
 
-                if idx < wakers.len() - 1 {
-                    if conn.finish_rpc().is_err() {
-                        conn.disconnect();
-                    }
-                } else {
-                    if conn.connected() {
-                        swap_target = conn.handle();
-                    }
-                }
+                let _ = conn.finish_rpc();
             }
         }
     }
 
     unsafe fn on_mkdir(raw_channel: RawChannel) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<MkdirRequest>();
-        assert_eq!(req.command, CMD_MKDIR);
+        assert_eq!(req.header.cmd, CMD_MKDIR);
 
-        if (req.version != 0) || (req.flags != 0) || (req.parent_fd != 0) {
+        if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
             return Err(ErrorCode::InternalError);
         }
 
@@ -193,15 +182,15 @@ impl Driver {
         super::filesystem::fs().mkdir(fname)?;
 
         let resp = raw_channel.get_mut::<CloseFdResponse>();
-        resp.result = 0;
+        resp.header.result = 0;
         Ok(())
     }
 
     unsafe fn on_unlink(raw_channel: RawChannel) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<UnlinkRequest>();
-        assert_eq!(req.command, CMD_UNLINK);
+        assert_eq!(req.header.cmd, CMD_UNLINK);
 
-        if (req.version != 0) || (req.parent_fd != 0) {
+        if (req.header.ver != 0) || (req.parent_fd != 0) {
             return Err(ErrorCode::InvalidArgument);
         }
 
@@ -219,7 +208,7 @@ impl Driver {
             }
         };
 
-        match req.flags {
+        match req.header.flags {
             F_UNLINK_FILE => super::filesystem::fs().unlink(fname)?,
             F_UNLINK_DIR => super::filesystem::fs().delete_dir(fname)?,
             F_UNLINK_DIR_ALL => super::filesystem::fs().delete_dir_all(fname)?,
@@ -227,15 +216,15 @@ impl Driver {
         }
 
         let resp = raw_channel.get_mut::<UnlinkResponse>();
-        resp.result = 0;
+        resp.header.result = 0;
         Ok(())
     }
 
     unsafe fn on_rename(raw_channel: RawChannel) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<RenameRequest>();
-        assert_eq!(req.command, CMD_RENAME);
+        assert_eq!(req.header.cmd, CMD_RENAME);
 
-        if (req.version != 0) || (req.parent_fd != 0) || (req.flags != 0) {
+        if (req.header.ver != 0) || (req.parent_fd != 0) || (req.header.flags != 0) {
             return Err(ErrorCode::InvalidArgument);
         }
 
@@ -246,7 +235,7 @@ impl Driver {
 
         super::filesystem::fs().rename(old, new)?;
         let resp = raw_channel.get_mut::<RenameResponse>();
-        resp.result = 0;
+        resp.header.result = 0;
         Ok(())
     }
 
@@ -255,9 +244,9 @@ impl Driver {
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<ReadDirRequest>();
-        assert_eq!(req.command, CMD_READDIR);
+        assert_eq!(req.header.cmd, CMD_READDIR);
 
-        if (req.version != 0) || (req.flags != 0) || (req.parent_fd != 0) {
+        if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
             return Err(ErrorCode::InternalError);
         }
 
@@ -290,9 +279,8 @@ impl Driver {
         let readdir_fd = pcon.add_readdir(iter);
 
         let resp = raw_channel.get_mut::<ReadDirResponse>();
-        resp.result = 0;
-        resp.version = 0;
-        resp.reserved = 0;
+        resp.header.result = 0;
+        resp.header.ver = 0;
         resp.fd = readdir_fd;
 
         Ok(())
@@ -303,9 +291,9 @@ impl Driver {
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<ReadDirNextRequest>();
-        assert_eq!(req.command, CMD_READDIR_NEXT);
+        assert_eq!(req.header.cmd, CMD_READDIR_NEXT);
 
-        if (req.version != 0) || (req.reserved != 0) {
+        if req.header.ver != 0 {
             return Err(ErrorCode::InternalError);
         }
 
@@ -325,9 +313,8 @@ impl Driver {
         let item = iter.next();
 
         let resp = raw_channel.get_mut::<ReadDirNextResponse>();
-        resp.result = 0;
-        resp.version = 0;
-        resp.reserved = 0;
+        resp.header.result = 0;
+        resp.header.ver = 0;
 
         if item.is_none() {
             resp.entries = 0;
@@ -372,9 +359,9 @@ impl Driver {
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<FileOpenRequest>();
-        assert_eq!(req.command, CMD_FILE_OPEN);
+        assert_eq!(req.header.cmd, CMD_FILE_OPEN);
 
-        if (req.version != 0) || (req.parent_fd != 0) {
+        if (req.header.ver != 0) || (req.parent_fd != 0) {
             return Err(ErrorCode::InternalError);
         }
 
@@ -392,7 +379,7 @@ impl Driver {
             }
         };
 
-        let mut flags = req.flags;
+        let mut flags = req.header.flags;
         if flags & FileOpenRequest::F_CREATE_NEW == FileOpenRequest::F_CREATE_NEW {
             fs().create_file(fname)?;
             flags ^= FileOpenRequest::F_CREATE_NEW;
@@ -411,7 +398,11 @@ impl Driver {
             && flags != FileOpenRequest::F_APPEND
         {
             moto_sys::syscalls::SysMem::log(
-                alloc::format!("on_file_open: flags not supported: 0x{:x}", req.flags).as_str(),
+                alloc::format!(
+                    "on_file_open: flags not supported: 0x{:x}",
+                    req.header.flags
+                )
+                .as_str(),
             )
             .ok();
             return Err(ErrorCode::NotImplemented);
@@ -433,9 +424,7 @@ impl Driver {
         let fd = pcon.add_file(file);
 
         let resp = raw_channel.get_mut::<FileOpenResponse>();
-        resp.result = 0;
-        resp.version = 0;
-        resp.reserved = 0;
+        resp.header.result = 0;
         resp.size = file_sz;
         resp.fd = fd;
 
@@ -447,9 +436,9 @@ impl Driver {
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<FileReadRequest>();
-        assert_eq!(req.command, CMD_FILE_READ);
+        assert_eq!(req.header.cmd, CMD_FILE_READ);
 
-        if req.version != 0 {
+        if req.header.ver != 0 {
             return Err(ErrorCode::InternalError);
         }
 
@@ -462,8 +451,7 @@ impl Driver {
 
         if let Some(file) = pcon.get_file(req.fd) {
             let resp = raw_channel.get_mut::<FileReadResponse>();
-            resp.result = 0;
-            resp.reserved = 0;
+            resp.header.result = 0;
 
             let buf_size = (req.max_bytes as usize)
                 .min(raw_channel.size() - core::mem::size_of::<FileReadResponse>());
@@ -484,9 +472,9 @@ impl Driver {
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<FileWriteRequest>();
-        assert_eq!(req.command, CMD_FILE_WRITE);
+        assert_eq!(req.header.cmd, CMD_FILE_WRITE);
 
-        if req.version != 0 {
+        if req.header.ver != 0 {
             return Err(ErrorCode::InternalError);
         }
 
@@ -511,8 +499,7 @@ impl Driver {
         let written = file.write_offset(req.offset, buf)?;
 
         let resp = raw_channel.get_mut::<FileWriteResponse>();
-        resp.result = 0;
-        resp.reserved = 0;
+        resp.header.result = 0;
         resp.written = written as u32;
 
         Ok(())
@@ -523,9 +510,9 @@ impl Driver {
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<CloseFdRequest>();
-        assert_eq!(req.command, CMD_CLOSE_FD);
+        assert_eq!(req.header.cmd, CMD_CLOSE_FD);
 
-        if (req.version != 0) || (req.reserved != 0) {
+        if req.header.ver != 0 {
             return Err(ErrorCode::InternalError);
         }
 
@@ -536,7 +523,7 @@ impl Driver {
             }
         };
 
-        if req.flags == CloseFdRequest::F_READDIR {
+        if req.header.flags == CloseFdRequest::F_READDIR {
             let iter = pcon.get_readdir(req.fd);
             if iter.is_none() {
                 return Err(ErrorCode::InternalError);
@@ -544,7 +531,7 @@ impl Driver {
 
             drop(iter);
             pcon.remove_readdir(req.fd);
-        } else if req.flags == CloseFdRequest::F_FILE {
+        } else if req.header.flags == CloseFdRequest::F_FILE {
             let file = pcon.get_file(req.fd);
             if file.is_none() {
                 return Err(ErrorCode::InternalError);
@@ -557,15 +544,15 @@ impl Driver {
         }
 
         let resp = raw_channel.get_mut::<CloseFdResponse>();
-        resp.result = 0;
+        resp.header.result = 0;
         Ok(())
     }
 
     unsafe fn on_stat(raw_channel: RawChannel) -> Result<(), ErrorCode> {
         let req = raw_channel.get::<StatRequest>();
-        assert_eq!(req.command, CMD_STAT);
+        assert_eq!(req.header.cmd, CMD_STAT);
 
-        if (req.version != 0) || (req.flags != 0) || (req.parent_fd != 0) {
+        if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
             return Err(ErrorCode::InternalError);
         }
 
@@ -586,9 +573,7 @@ impl Driver {
         let attr = fs().stat(fname)?;
 
         let resp = raw_channel.get_mut::<StatResponse>();
-        resp.result = 0; // Ok.
-        resp.version = 0;
-        resp.reserved = 0;
+        resp.header.result = 0; // Ok.
         resp.fd = 0;
         resp.attr = attr;
 

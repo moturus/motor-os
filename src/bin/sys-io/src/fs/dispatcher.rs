@@ -52,16 +52,20 @@ impl Dispatcher {
             return;
         };
         assert!(conn.connected());
+        if !conn.have_req() {
+            // TODO: this seems to be happening relatively often. Figure out why.
+            return;
+        }
 
         let req = conn.req::<GetServerUrlRequest>();
-        if req.command != 1 || req.version != 0 || req.flags != 0 {
+        if req.header.cmd != 1 || req.header.ver != 0 || req.header.flags != 0 {
             conn.disconnect();
             return;
         }
 
         let resp = conn.resp::<GetServerUrlResponse>();
-        resp.result = 0;
-        resp.version = 0;
+        resp.header.result = 0;
+        resp.header.ver = 0;
         resp.url_size = super::DRIVER_URL.as_bytes().len() as u16;
         unsafe {
             core::intrinsics::copy_nonoverlapping(
@@ -71,9 +75,7 @@ impl Dispatcher {
             );
         }
 
-        if conn.finish_rpc().is_err() {
-            conn.disconnect();
-        }
+        let _ = conn.finish_rpc();
     }
 }
 

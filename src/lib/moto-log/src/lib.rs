@@ -1,4 +1,5 @@
 // Provides a centralized implementation of log interface/facade for motor-os.
+// Somewhat outdated/unused.
 
 // TODO: at the moment moto-log is very simple and rather slow. A faster
 // implementation could cache logs locally per-cpu or per-thread
@@ -165,6 +166,7 @@ pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
 // Implementation details.
 #[doc(hidden)]
 pub mod implementation {
+    use moto_ipc::sync::{RequestHeader, ResponseHeader};
     use moto_sys::ErrorCode;
     use std::mem::size_of;
 
@@ -187,8 +189,7 @@ pub mod implementation {
 
     #[repr(C, align(8))]
     pub struct ConnectRequest {
-        pub command: u16, // CMD_CONNECT
-        pub version: u8,
+        pub header: moto_ipc::sync::RequestHeader,
         pub payload_size: u8, // The tag is the payload.
     }
 
@@ -203,8 +204,8 @@ pub mod implementation {
             assert!(data.len() > 0);
 
             let req = &mut data[0];
-            req.command = CMD_CONNECT;
-            req.version = 0;
+            req.header.cmd = CMD_CONNECT;
+            req.header.ver = 0;
             req.payload_size = tag.len() as u8;
 
             let payload = &mut buffer[size_of::<Self>()..(size_of::<Self>() + tag.len())];
@@ -214,30 +215,28 @@ pub mod implementation {
 
     #[repr(C, align(8))]
     pub struct ConnectResponse {
-        pub result: u32, // Zero if OK.
-        pub _pad: u32,
+        pub header: moto_ipc::sync::ResponseHeader,
         pub tag_id: u64, // ID associated with the tag.
     }
 
     impl ConnectResponse {
-        pub fn parse(buffer: &[u8]) -> Result<u64, u32> {
+        pub fn parse(buffer: &[u8]) -> Result<u64, ErrorCode> {
             assert!(buffer.len() >= size_of::<Self>());
 
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to::<Self>() };
             assert_eq!(prefix.len(), 0);
 
-            match data[0].result {
+            match data[0].header.result {
                 0 => Ok(data[0].tag_id),
-                e => Err(e),
+                e => Err(e.into()),
             }
         }
     }
 
     #[repr(C, align(8))]
     pub struct LogRequest {
-        pub command: u16, // CMD_LOG
-        pub version: u8,
+        pub header: moto_ipc::sync::RequestHeader,
         pub log_level: u8,
         pub payload_size: u32,
         pub tag_id: u64,
@@ -254,8 +253,8 @@ pub mod implementation {
             assert!(data.len() > 0);
 
             let req = &mut data[0];
-            req.command = CMD_LOG;
-            req.version = 0;
+            req.header.cmd = CMD_LOG;
+            req.header.ver = 0;
             req.log_level = level_as_u8(record.level());
             req.tag_id = tag_id;
             // req.timestamp = std::time::SystemTime::now()
@@ -281,39 +280,37 @@ pub mod implementation {
 
     #[repr(C, align(8))]
     pub struct LogResponse {
-        pub result: u32, // Zero if OK.
+        pub header: moto_ipc::sync::ResponseHeader,
     }
 
     impl LogResponse {
-        pub fn parse(buffer: &[u8]) -> Result<(), u32> {
+        pub fn parse(buffer: &[u8]) -> Result<(), ErrorCode> {
             assert!(buffer.len() >= size_of::<Self>());
 
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to::<Self>() };
             assert_eq!(prefix.len(), 0);
 
-            match data[0].result {
+            match data[0].header.result {
                 0 => Ok(()),
-                e => Err(e),
+                e => Err(e.into()),
             }
         }
     }
 
     #[repr(C, align(8))]
     pub struct DisconnectRequest {
-        command: u16, // CMD_DISCONNECT
-        version: u8,
+        pub header: RequestHeader,
     }
 
     #[repr(C, align(8))]
     pub struct DisconnectResponse {
-        result: u32, // Zero if OK.
+        pub header: ResponseHeader,
     }
 
     #[repr(C, align(8))]
     pub struct GetTailEntriesRequest {
-        pub command: u16, // CMD_GET_UTF8_TAIL
-        pub version: u8,
+        pub header: RequestHeader,
         pub log_level: u8,
         pub _pad: u32,
         pub tag_id: u64,
@@ -327,8 +324,8 @@ pub mod implementation {
             assert!(data.len() > 0);
 
             let req = &mut data[0];
-            req.command = CMD_GET_TAIL_ENTRIES;
-            req.version = 0;
+            req.header.cmd = CMD_GET_TAIL_ENTRIES;
+            req.header.ver = 0;
             req.log_level = log_level;
             req.tag_id = tag_id;
         }
@@ -336,8 +333,7 @@ pub mod implementation {
 
     #[repr(C, align(8))]
     pub struct GetTailEntriesResponse {
-        pub result: u16, // Zero if OK.
-        pub reserved: u16,
+        pub header: ResponseHeader,
         pub num_entries: u32, // Size of the payload.
     }
 
@@ -356,7 +352,7 @@ pub mod implementation {
             let (prefix, data, _) = unsafe { buffer.align_to::<Self>() };
             assert_eq!(prefix.len(), 0);
 
-            match data[0].result {
+            match data[0].header.result {
                 0 => {
                     let mut pos = size_of::<Self>();
                     let num_entries = data[0].num_entries as usize;

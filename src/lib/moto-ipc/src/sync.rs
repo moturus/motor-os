@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::slice;
+use core::sync::atomic::*;
 
 use moto_sys::ErrorCode;
 use moto_sys::{syscalls::*, url_encode};
@@ -23,6 +24,24 @@ impl ChannelSize {
             ChannelSize::Mid => SysMem::PAGE_SIZE_MID as usize,
         }
     }
+}
+
+// Every request must have this at the beginning.
+#[repr(C, align(8))]
+pub struct RequestHeader {
+    seq: AtomicU64, // For internal use by channel. Odd => request; Even => response.
+    pub cmd: u16,
+    pub ver: u16,
+    pub flags: u32,
+}
+
+// Every response must have this at the beginning.
+#[repr(C, align(8))]
+pub struct ResponseHeader {
+    seq: AtomicU64,  // For internal use by channel. Odd => request; Even => response.
+    pub result: u16, // ErrorCode.
+    pub ver: u16,
+    _reserved: u32,
 }
 
 // Rust's borrow checker inferferes with direct memory access to the shared mem
@@ -115,7 +134,6 @@ impl RawChannel {
 #[derive(Debug, PartialEq, Eq)]
 enum ClientConnectionStatus {
     CONNECTED,
-    ERROR,
     NONE,
 }
 
@@ -124,6 +142,7 @@ pub struct ClientConnection {
     handle: SysHandle,
     smem_addr: u64,
     channel_size: ChannelSize,
+    seq: u64,
 }
 
 impl Drop for ClientConnection {
@@ -167,17 +186,28 @@ impl ClientConnection {
             )?,
         };
 
-        Ok(Self {
+        let self_ = Self {
             status: ClientConnectionStatus::NONE,
             handle: SysHandle::NONE,
             smem_addr: addr,
             channel_size,
-        })
+            seq: 0,
+        };
+
+        assert_eq!(
+            0,
+            self_.resp::<ResponseHeader>().seq.load(Ordering::Acquire)
+        );
+
+        Ok(self_)
     }
 
     pub fn connect(&mut self, url: &str) -> Result<(), ErrorCode> {
         assert_eq!(self.status, ClientConnectionStatus::NONE);
         assert_eq!(self.handle, SysHandle::NONE);
+
+        self.req::<RequestHeader>().seq.store(0, Ordering::Release);
+        assert_eq!(0, self.seq);
 
         let full_url = alloc::format!(
             "shared:url={};address={};page_type={};page_num=1",
@@ -198,6 +228,9 @@ impl ClientConnection {
             SysCtl::put(self.handle).unwrap();
             self.handle = SysHandle::NONE;
             self.status = ClientConnectionStatus::NONE;
+
+            self.req::<RequestHeader>().seq.store(0, Ordering::Relaxed);
+            self.seq = 0;
         }
     }
 
@@ -220,22 +253,36 @@ impl ClientConnection {
         }
     }
 
-    pub fn do_rpc(
-        &mut self,
-        timeout: Option<moto_sys::time::Instant>,
-    ) -> Result<(), ErrorCode> {
+    pub fn do_rpc(&mut self, timeout: Option<moto_sys::time::Instant>) -> Result<(), ErrorCode> {
         if self.connected() {
-            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-            let mut handles = [self.handle];
-            let res = SysCpu::wait(&mut handles, self.handle, SysHandle::NONE, timeout);
+            fence(core::sync::atomic::Ordering::SeqCst);
+            let seq = self
+                .req::<RequestHeader>()
+                .seq
+                .fetch_add(1, Ordering::AcqRel);
+            assert_eq!(seq, self.seq);
+            assert_eq!(seq & 1, 0);
+            self.seq = seq + 1;
 
-            if res.is_ok() {
-                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-            } else if let Err(ErrorCode::BadHandle) = res {
-                assert_eq!(handles[0], self.handle);
-                self.status = ClientConnectionStatus::ERROR;
+            loop {
+                let mut handles = [self.handle];
+                let res = SysCpu::wait(&mut handles, self.handle, SysHandle::NONE, timeout);
+
+                if res.is_ok() {
+                    let seq = self.resp::<ResponseHeader>().seq.load(Ordering::SeqCst);
+                    if self.seq == seq {
+                        continue;
+                    }
+                    assert_eq!(self.seq + 1, seq);
+                    self.seq += 1;
+                } else if let Err(ErrorCode::BadHandle) = res {
+                    assert_eq!(handles[0], self.handle);
+                    self.disconnect();
+                } else {
+                    assert_eq!(res.err().unwrap(), ErrorCode::TimedOut);
+                }
+                return res;
             }
-            res
         } else {
             Err(ErrorCode::InvalidArgument)
         }
@@ -280,6 +327,7 @@ pub struct LocalServerConnection {
     smem_addr: u64,
     channel_size: ChannelSize,
     extension: Box<dyn Any>,
+    seq: u64,
 }
 
 impl Drop for LocalServerConnection {
@@ -329,6 +377,7 @@ impl LocalServerConnection {
             smem_addr: addr,
             channel_size,
             extension: Box::new(()),
+            seq: 0,
         })
     }
 
@@ -402,14 +451,21 @@ impl LocalServerConnection {
                 SysCtl::put(self.handle).unwrap();
                 self.handle = SysHandle::NONE;
                 self.status = LocalServerConnectionStatus::NONE;
+                self.seq = 0;
             }
             LocalServerConnectionStatus::NONE => {}
         }
     }
 
     pub fn finish_rpc(&mut self) -> Result<(), ErrorCode> {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         if self.connected() {
+            let seq = self
+                .resp::<ResponseHeader>()
+                .seq
+                .fetch_add(1, Ordering::SeqCst);
+            self.seq += 2;
+            assert_eq!(self.seq, seq + 1);
+            assert_eq!(0, self.seq & 1);
             SysCpu::wake(self.handle).map_err(|err| {
                 assert_eq!(err, ErrorCode::BadHandle);
                 self.disconnect();
@@ -440,6 +496,16 @@ impl LocalServerConnection {
 
     pub fn handle(&self) -> SysHandle {
         self.handle
+    }
+
+    pub fn have_req(&self) -> bool {
+        let seq = self.req::<RequestHeader>().seq.load(Ordering::Acquire);
+        if seq == self.seq {
+            false
+        } else {
+            assert_eq!(seq, self.seq + 1);
+            true
+        }
     }
 }
 

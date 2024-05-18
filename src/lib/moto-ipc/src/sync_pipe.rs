@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
 use moto_sys::{syscalls::SysCpu, ErrorCode, SysHandle};
 
@@ -107,7 +107,8 @@ impl PipeBuffer {
         if (writer_offset + to_write) <= self.work_buf_len {
             self.work_buf[writer_offset..(writer_offset + to_write)]
                 .copy_from_slice(&src[0..to_write]);
-            self.writer_counter().fetch_add(to_write, Ordering::Release);
+            fence(Ordering::Release);
+            self.writer_counter().fetch_add(to_write, Ordering::AcqRel);
             return to_write;
         }
 
@@ -116,8 +117,9 @@ impl PipeBuffer {
 
         let second_write = to_write - first_write;
         self.work_buf[0..second_write].copy_from_slice(&src[first_write..to_write]);
+        fence(Ordering::Release);
 
-        self.writer_counter().fetch_add(to_write, Ordering::Release);
+        self.writer_counter().fetch_add(to_write, Ordering::AcqRel);
         to_write
     }
 
