@@ -25,6 +25,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     std::process::exit(exit_code);
 }
 
+#[allow(unused)]
 fn input_listener() {
     use std::io::Read;
 
@@ -40,6 +41,7 @@ fn input_listener() {
     }
 }
 
+#[allow(unused)]
 fn spawn_generic_input_listener() {
     std::thread::spawn(|| input_listener());
 }
