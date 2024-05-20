@@ -34,7 +34,7 @@ fn do_run(args: &crate::Args) -> Result<()> {
     Err(ErrorKind::HostUnreachable.into())
 }
 
-fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
+fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
     let mut buf: [u8; 1500] = [0; 1500];
     let mut tcp_stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
     tcp_stream.set_nodelay(true).unwrap();
@@ -51,15 +51,31 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
         unsafe { core::slice::from_raw_parts(&cmd as *const u64 as usize as *const u8, 8) };
     tcp_stream.write_all(buf)?;
 
+    Ok(tcp_stream)
+}
+
+fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
     match cmd {
         crate::CMD_TCP_RR => {
-            do_rr(tcp_stream)?;
+            do_rr(handshake(addr, cmd)?)?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            crate::do_throughput_write(tcp_stream, "client => server", Some(args))?;
+            let (duration, bytes) = crate::do_throughput_write(handshake(addr, cmd)?, Some(args))?;
+            let rate = bytes as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+            println!(
+                "Throughput client => server done: {:.2}MB sent; {:.2?} MiB/sec.",
+                (bytes as f64) / (1024.0 * 1024.0),
+                rate
+            );
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            crate::do_throughput_read(tcp_stream, "server => client", Some(args))?;
+            let (duration, bytes) = crate::do_throughput_read(handshake(addr, cmd)?, Some(args))?;
+            let rate = bytes as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
+            println!(
+                "Throughput server => client done: {:.2}MB sent; {:.2?} MiB/sec.",
+                (bytes as f64) / (1024.0 * 1024.0),
+                rate
+            );
         }
         _ => {
             panic!("unrecognized command: {}", cmd);

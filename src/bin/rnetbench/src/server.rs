@@ -1,4 +1,3 @@
-use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Result;
 use std::io::Write;
@@ -6,7 +5,6 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
-use std::time::Instant;
 
 pub fn run(port: u16) -> ! {
     match do_run(port) {
@@ -29,14 +27,17 @@ fn do_run(port: u16) -> Result<()> {
     );
 
     for tcp_stream in listener.incoming() {
-        handle_connection(tcp_stream?)?;
+        if let Ok(stream) = tcp_stream {
+            // let _ = std::thread::spawn(|| {
+            let _ = handle_connection(stream);
+            // });
+        }
     }
 
     unreachable!()
 }
 
 fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
-    println!("\n{}: got a connection.", crate::binary_name());
     tcp_stream.set_nodelay(true).unwrap();
     let mut buf: [u8; 1500] = [0; 1500];
 
@@ -44,12 +45,11 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
     tcp_stream.read_exact(&mut buf[0..crate::MAGIC_BYTES_CLIENT.len()])?;
 
     if crate::MAGIC_BYTES_CLIENT != &buf[0..crate::MAGIC_BYTES_CLIENT.len()] {
-        eprintln!("{} error: bad client.", crate::binary_name());
-        std::process::exit(1);
+        return Ok(()); // Doesn't matter if we return Ok or Err.
     }
     tcp_stream.write_all(crate::MAGIC_BYTES_SERVER)?;
 
-    // Figure out which test are we doing.
+    // Figure out which test we are doing.
     let mut cmd: u64 = 0;
     let buf: &mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(&mut cmd as *mut u64 as usize as *mut u8, 8) };
@@ -59,13 +59,13 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
             do_rr(tcp_stream)?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            crate::do_throughput_read(tcp_stream, "client => server", None)?;
+            let _ = crate::do_throughput_read(tcp_stream, None)?;
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            crate::do_throughput_write(tcp_stream, "server => client", None)?;
+            let _ = crate::do_throughput_write(tcp_stream, None)?;
         }
         _ => {
-            panic!("unrecognized command: {}", cmd);
+            eprintln!("unrecognized command: {}", cmd);
         }
     }
 
@@ -74,35 +74,9 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
 
 fn do_rr(mut stream: TcpStream) -> Result<()> {
     let mut buf: [u8; 64] = [0; 64];
-    let start_time = Instant::now();
-    let mut total_iterations = 0usize;
 
     loop {
-        if let Err(err) = stream.read_exact(&mut buf) {
-            if err.kind() == ErrorKind::UnexpectedEof {
-                break;
-            }
-            eprintln!("read error: {:?}", err);
-            std::process::exit(1);
-        }
-        if let Err(err) = stream.write_all(&buf) {
-            eprintln!("write error: {:?}", err);
-            std::process::exit(1);
-        }
-        total_iterations += 1;
+        stream.read_exact(&mut buf)?;
+        stream.write_all(&buf)?;
     }
-
-    let duration = start_time.elapsed();
-    println!(
-        "RR done: {} iterations over {:.2?};",
-        total_iterations, duration
-    );
-    let iters_per_sec = (total_iterations as f64) / (duration.as_secs_f64());
-    println!(
-        "\t{} iterations/sec; {:.3} usec/iteration.",
-        iters_per_sec as u64,
-        1_000_000_f64 / iters_per_sec
-    );
-
-    Ok(())
 }

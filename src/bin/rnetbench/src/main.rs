@@ -1,12 +1,4 @@
 // Pure rust network performance benchmark.
-//
-// With Alpine linux in the qemu guest running rnetbench server,
-// and Ubuntu linux in the host running rnetbench client,
-// round-robin is 19.8 us/roundtrip,
-// and throughput is 615.8 MB/sec.
-//
-// On a baremetal Ubuntu Linux (loopback), RR is 6.5 us/roundtrip,
-// and throughput is 520 MB/sec (throughput is slower!)
 
 #![feature(io_error_more)]
 
@@ -94,7 +86,10 @@ fn main() {
     }
 }
 
-fn do_throughput_read(mut stream: TcpStream, what: &str, client_args: Option<&Args>) -> Result<()> {
+fn do_throughput_read(
+    mut stream: TcpStream,
+    client_args: Option<&Args>,
+) -> Result<(Duration, usize)> {
     // Note: we use buffers of different size, to make things more interesting.
     let mut buffer = [0; 1513];
     let mut total_bytes_read = 0usize;
@@ -123,25 +118,16 @@ fn do_throughput_read(mut stream: TcpStream, what: &str, client_args: Option<&Ar
     }
 
     let _ = stream.flush();
+    let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
-    let duration = start.elapsed();
-    let rate = total_bytes_read as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-    println!(
-        "Throughput {} done: {:.2}MB received; {:.2?} MiB/sec.",
-        what,
-        total_bytes_read as f64 / (1024.0 * 1024.0),
-        rate
-    );
-
-    Ok(())
+    Ok((duration, total_bytes_read))
 }
 
 fn do_throughput_write(
     mut stream: TcpStream,
-    what: &str,
     client_args: Option<&Args>,
-) -> std::io::Result<()> {
+) -> Result<(Duration, usize)> {
     let mut data = [0u8; 1011];
     let mut total_bytes_sent = 0usize;
     let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
@@ -177,16 +163,8 @@ fn do_throughput_write(
     }
 
     let _ = stream.flush();
+    let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
-    let duration = start.elapsed();
-    let rate = total_bytes_sent as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-    println!(
-        "Throughput {} done: {:.2}MB sent; {:.2?} MiB/sec.",
-        what,
-        (total_bytes_sent as f64) / (1024.0 * 1024.0),
-        rate
-    );
-
-    Ok(())
+    Ok((duration, total_bytes_sent))
 }
