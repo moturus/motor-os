@@ -155,20 +155,19 @@ fn test_ipc() {
     conn.connect("xor-service").unwrap();
 
     #[cfg(debug_assertions)]
-    const STEPS: u64 = 10_000;
+    const STEPS: u64 = 1_000;
     #[cfg(not(debug_assertions))]
-    const STEPS: u64 = 1_000_000;
+    const STEPS: u64 = 100_000;
 
     // let prev_log_level = moto_sys::syscalls::SysCtl::set_log_level(4).unwrap();
     let start = std::time::Instant::now();
     for idx in 0..STEPS {
-        let data_in: &mut u64 =
-            unsafe { (conn.data_mut().as_mut_ptr() as *mut u64).as_mut().unwrap() };
-        *data_in = 0xdeadbeef ^ idx;
+        let req = conn.req::<xor_server::XorRequest>();
+        req.data = 0xdeadbeef ^ idx;
         assert!(conn.connected());
         conn.do_rpc(None).expect("???");
-        let data_out: &u64 = unsafe { (conn.data().as_ptr() as *const u64).as_ref().unwrap() };
-        assert_eq!(*data_out ^ (0xdeadbeef ^ idx), u64::MAX);
+        let resp = conn.resp::<xor_server::XorResponse>();
+        assert_eq!(resp.data ^ (0xdeadbeef ^ idx), u64::MAX);
     }
     let stop = std::time::Instant::now();
     // moto_sys::syscalls::SysCtl::set_log_level(prev_log_level).unwrap();

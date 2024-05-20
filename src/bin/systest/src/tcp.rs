@@ -6,9 +6,13 @@ use std::net::ToSocketAddrs;
 use std::sync::{atomic::*, Arc};
 use std::time::Duration;
 
-fn handle_client(mut stream: std::net::TcpStream) {
+fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
+    stream.set_read_timeout(Some(Duration::from_millis(1)));
     let mut data = [0 as u8; 17];
     loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         match stream.read(&mut data) {
             Ok(size) => {
                 if size == 0 {
@@ -32,13 +36,14 @@ fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
     assert!(std::net::TcpListener::bind("127.0.0.1:3333").is_err());
     start.store(true, Ordering::Release);
 
-    for stream in listener.incoming() {
+    loop {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        match stream {
-            Ok(stream) => {
-                std::thread::spawn(move || handle_client(stream));
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let stop_clone = stop.clone();
+                std::thread::spawn(move || handle_client(stream, stop_clone));
             }
             Err(e) => {
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -56,7 +61,7 @@ fn client_iter() {
     let mut stream =
         std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
-    stream.write(&tx).unwrap();
+    assert_eq!(tx.len(), stream.write(&tx).unwrap());
 
     let mut rx = [0 as u8; 8];
     match stream.read_exact(&mut rx) {
@@ -65,9 +70,10 @@ fn client_iter() {
         }
         Err(e) => {
             println!("Failed to receive data: {}", e);
-            panic!()
+            panic!("{:?}", e)
         }
     }
+    stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn test_io_latency() {
@@ -87,6 +93,7 @@ fn test_io_latency() {
     }
 
     let elapsed = start.elapsed();
+    stream.shutdown(std::net::Shutdown::Both);
     println!(
         "IO latency of TcpStream::set_nodelay(): {:.3} usec/IO",
         elapsed.as_secs_f64() * 1000.0 * 1000.0 / (iters as f64)
@@ -182,7 +189,19 @@ pub fn test_tcp_loopback() {
 
     stop.store(true, Ordering::Release);
     // Kick the listener.
-    let _ = std::net::TcpStream::connect("localhost:3333").unwrap();
+    // TODO: is there a better way?
+    while !server.is_finished() {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let socket_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            3333,
+        );
+        let stream = std::net::TcpStream::connect_timeout(&socket_addr, Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(stream) = stream {
+            stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
     server.join().unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(10));
