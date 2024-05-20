@@ -419,7 +419,7 @@ impl IoRuntime {
                             //     log::debug!("{}", s);
                             // }
 
-                            debug_assert!(self.pending_completions.is_empty());
+                            assert!(self.pending_completions.is_empty());
                             self.process_wakeups(self.all_handles.clone(), true);
                         } else {
                             debug_timed_out = false;

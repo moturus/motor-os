@@ -4,7 +4,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{self, AtomicUsize, Ordering};
+use core::sync::atomic::{self, AtomicU32, AtomicUsize, Ordering};
 
 #[macro_export]
 macro_rules! moturus_log {
@@ -549,5 +549,95 @@ impl<T> Iterator for IntoIter<T> {
         } else {
             None
         }
+    }
+}
+
+pub struct SpinLock<T: ?Sized> {
+    lock_word: AtomicU32, // Unlocked == 0.
+    data: UnsafeCell<T>,
+}
+
+#[derive(Debug)]
+pub struct LockGuard<'a, T: ?Sized> {
+    lock_word: &'a AtomicU32,
+    data: &'a mut T,
+}
+
+unsafe impl<T: ?Sized + Send> Sync for SpinLock<T> {}
+unsafe impl<T: ?Sized + Send> Send for SpinLock<T> {}
+
+impl<T> SpinLock<T> {
+    pub const fn new(user_data: T) -> SpinLock<T> {
+        SpinLock {
+            lock_word: AtomicU32::new(0),
+            data: UnsafeCell::new(user_data),
+        }
+    }
+}
+
+impl<T: ?Sized> SpinLock<T> {
+    fn obtain_lock(&self, lockword: u32) {
+        assert_ne!(0, lockword);
+        let mut outer_iter = 0_u64;
+        while self
+            .lock_word
+            .compare_exchange(0, lockword, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            outer_iter += 1;
+            if outer_iter > 1_000 {
+                panic!(
+                    "spinlock outer deadlock: {} => {}",
+                    self.lock_word.load(Ordering::Acquire),
+                    lockword
+                )
+            }
+            // Wait until the lock looks unlocked before retrying.
+            let mut inner_iter = 0_u64;
+            while self.lock_word.load(Ordering::Relaxed) != 0 {
+                inner_iter += 1;
+                if inner_iter > 100_000_000 {
+                    panic!(
+                        "spinlock inner deadlock: {} => {}",
+                        self.lock_word.load(Ordering::Acquire),
+                        lockword
+                    )
+                }
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    pub fn lock(&self, lockword: u32) -> LockGuard<'_, T> {
+        self.obtain_lock(lockword);
+        LockGuard {
+            lock_word: &self.lock_word,
+            data: unsafe { &mut *self.data.get() },
+        }
+    }
+}
+
+impl<T: ?Sized + Default> Default for SpinLock<T> {
+    fn default() -> SpinLock<T> {
+        SpinLock::new(Default::default())
+    }
+}
+
+impl<'a, T: ?Sized> Deref for LockGuard<'a, T> {
+    type Target = T;
+    fn deref<'b>(&'b self) -> &'b T {
+        &*self.data
+    }
+}
+
+impl<'a, T: ?Sized> DerefMut for LockGuard<'a, T> {
+    fn deref_mut<'b>(&'b mut self) -> &'b mut T {
+        &mut *self.data
+    }
+}
+
+impl<'a, T: ?Sized> Drop for LockGuard<'a, T> {
+    fn drop(&mut self) {
+        self.lock_word.store(0, Ordering::SeqCst);
     }
 }

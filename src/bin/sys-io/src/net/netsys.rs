@@ -1010,6 +1010,7 @@ impl NetSys {
         });
 
         self.do_tcp_rx(socket_id); // The socket can now Rx.
+        #[cfg(debug_assertions)]
         log::debug!(
             "{}:{} on_socket_connected 0x{:x} - {:?}",
             file!(),
