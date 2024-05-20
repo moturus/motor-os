@@ -1,3 +1,14 @@
+// Note: we have an IO thread per net channel instead of a single IO thread:
+// - simpler/easier to code here: no need to "schedule" between channels
+// - will scale better in the future when the driver side is also multithreaded
+// - the usually assumed negatives are not necessarily as bad in Moturus OS
+//   as in e.g. Linux:
+//   - threads are "lighter", i.e. they consume less memory
+//   - thread scheduling is potentially better, as Moturus OS is designed
+//     for the cloud use case vs a general purpose thingly, whatever that is,
+//     that Linux targets.
+
+use super::util::moturus_log;
 use crate::rt_api;
 use crate::util::ArrayQueue;
 use crate::util::CachePadded;
@@ -16,10 +27,7 @@ use moto_sys::time::Instant;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 
-// #[cfg(debug_assertions)]
-use super::util::moturus_log;
-
-static NET: crate::mutex::Mutex<NetRuntime> = crate::mutex::Mutex::new(NetRuntime {
+static NET: crate::util::SpinLock<NetRuntime> = crate::util::SpinLock::new(NetRuntime {
     full_channels: BTreeMap::new(),
     channels: BTreeMap::new(),
 });
@@ -137,7 +145,7 @@ impl NetChannel {
                 .strong_count()
         );
 
-        NET.lock().on_channel_available(self);
+        NET.lock(line!()).on_channel_available(self);
     }
 
     fn tcp_listener_created(self: &Arc<Self>, listener: &Arc<TcpListenerImpl>) {
@@ -156,7 +164,7 @@ impl NetChannel {
                 .strong_count()
         );
 
-        NET.lock().on_channel_available(self);
+        NET.lock(line!()).on_channel_available(self);
     }
 
     fn wait_for_resp(self: &Arc<Self>, resp_id: u64, _log_dbg: bool) -> io_channel::Msg {
@@ -374,17 +382,13 @@ impl NetChannel {
     fn send_messages(self: &Arc<Self>) {
         loop {
             if self.this_thread_is_sender.swap(true, Ordering::SeqCst) {
+                moturus_log!("not sending");
                 return;
             }
 
             // This thread is now the writer.
             let mut sent_messages = 0;
             while let Some(msg) = self.send_queue.pop() {
-                sent_messages += 1;
-                if sent_messages > 32 {
-                    break;
-                }
-
                 loop {
                     match self.conn.send(msg) {
                         Ok(()) => break,
@@ -400,6 +404,11 @@ impl NetChannel {
                             continue;
                         }
                     }
+                }
+
+                sent_messages += 1;
+                if sent_messages > 32 {
+                    break;
                 }
             }
 
@@ -422,7 +431,9 @@ impl NetChannel {
 
     // Sends a write message or queues it.
     fn send_msg(self: &Arc<Self>, msg: io_channel::Msg) {
-        while self.send_queue.push(msg).is_err() {} // TODO: be smarter?
+        while self.send_queue.push(msg).is_err() {
+            // self.send_messages();
+        } // TODO: be smarter?
         self.send_messages();
     }
 
@@ -445,6 +456,8 @@ impl NetChannel {
             }
 
             if self.send_queue.is_empty() {
+                // TODO: wait on the server handle?
+                // self.poll_messages();
                 let _ = moto_sys::syscalls::SysCpu::wait(
                     &mut [],
                     SysHandle::NONE,
@@ -578,7 +591,7 @@ impl TcpStream {
             socket_addr,
         );
 
-        let channel = NET.lock().reserve_channel();
+        let channel = NET.lock(line!()).reserve_channel();
         let req = if let Some(timo) = timeout {
             rt_api::net::tcp_stream_connect_timeout_request(
                 socket_addr,
@@ -598,7 +611,7 @@ impl TcpStream {
                 socket_addr,
             );
 
-            NET.lock().release_channel(channel.clone());
+            NET.lock(line!()).release_channel(channel.clone());
             return Err(resp.status());
         }
 
@@ -617,7 +630,7 @@ impl TcpStream {
         });
 
         channel.tcp_stream_created(&inner);
-        NET.lock().release_channel(channel);
+        NET.lock(line!()).release_channel(channel);
         inner.ack_rx();
 
         #[cfg(debug_assertions)]
@@ -1028,10 +1041,10 @@ pub struct TcpListener {
 impl TcpListener {
     pub fn bind(socket_addr: &SocketAddr) -> Result<TcpListener, ErrorCode> {
         let req = rt_api::net::bind_tcp_listener_request(socket_addr);
-        let channel = NET.lock().reserve_channel();
+        let channel = NET.lock(line!()).reserve_channel();
         let resp = channel.send_receive(req);
         if resp.status().is_err() {
-            NET.lock().release_channel(channel);
+            NET.lock(line!()).release_channel(channel);
             return Err(resp.status());
         }
 
@@ -1042,7 +1055,7 @@ impl TcpListener {
             nonblocking: AtomicBool::new(false),
         });
         channel.tcp_listener_created(&inner);
-        NET.lock().release_channel(channel);
+        NET.lock(line!()).release_channel(channel);
 
         #[cfg(debug_assertions)]
         moturus_log!(
@@ -1067,7 +1080,7 @@ impl TcpListener {
         if self.inner.nonblocking.load(Ordering::Relaxed) {
             todo!()
         }
-        let channel = NET.lock().reserve_channel();
+        let channel = NET.lock(line!()).reserve_channel();
         let req = rt_api::net::accept_tcp_listener_request(self.inner.handle);
         let resp = channel.send_receive(req);
         if resp.status().is_err() {
@@ -1091,7 +1104,7 @@ impl TcpListener {
         });
 
         channel.tcp_stream_created(&inner);
-        NET.lock().release_channel(channel);
+        NET.lock(line!()).release_channel(channel);
         inner.ack_rx();
 
         #[cfg(debug_assertions)]
