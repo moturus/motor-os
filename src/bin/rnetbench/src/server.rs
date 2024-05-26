@@ -28,9 +28,9 @@ fn do_run(port: u16) -> Result<()> {
 
     for tcp_stream in listener.incoming() {
         if let Ok(stream) = tcp_stream {
-            // let _ = std::thread::spawn(|| {
-            let _ = handle_connection(stream);
-            // });
+            let _ = std::thread::spawn(|| {
+                let _ = handle_connection(stream);
+            });
         }
     }
 
@@ -59,10 +59,10 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
             do_rr(tcp_stream)?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            let _ = crate::do_throughput_read(tcp_stream, None)?;
+            crate::do_throughput_read(tcp_stream, None);
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            let _ = crate::do_throughput_write(tcp_stream, None)?;
+            crate::do_throughput_write(tcp_stream, None);
         }
         _ => {
             eprintln!("unrecognized command: {}", cmd);

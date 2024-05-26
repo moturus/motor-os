@@ -21,7 +21,7 @@ fn do_run(args: &crate::Args) -> Result<()> {
     let addrs = args.client.as_ref().unwrap().to_socket_addrs()?;
 
     for addr in addrs {
-        // return try_addr(addr, crate::CMD_TCP_THROUGHPUT_IN);
+        // return try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args);
         if try_addr(addr, crate::CMD_TCP_RR, args).is_ok() {
             std::thread::sleep(Duration::from_millis(100));
             if try_addr(addr, crate::CMD_TCP_THROUGHPUT_OUT, args).is_ok() {
@@ -57,10 +57,10 @@ fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
 fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
     match cmd {
         crate::CMD_TCP_RR => {
-            do_rr(handshake(addr, cmd)?)?;
+            do_rr(handshake(addr, cmd)?, Duration::from_secs(args.time as u64))?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
-            let (duration, bytes) = crate::do_throughput_write(handshake(addr, cmd)?, Some(args))?;
+            let (duration, bytes) = crate::do_throughput_write(handshake(addr, cmd)?, Some(args));
             let rate = bytes as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
             println!(
                 "Throughput client => server done: {:.2}MB sent; {:.2?} MiB/sec.",
@@ -69,7 +69,7 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
             );
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
-            let (duration, bytes) = crate::do_throughput_read(handshake(addr, cmd)?, Some(args))?;
+            let (duration, bytes) = crate::do_throughput_read(handshake(addr, cmd)?, Some(args));
             let rate = bytes as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
             println!(
                 "Throughput server => client done: {:.2}MB sent; {:.2?} MiB/sec.",
@@ -85,16 +85,15 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
     Ok(())
 }
 
-fn do_rr(mut stream: TcpStream) -> Result<()> {
+fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
     let mut buf: [u8; 1500] = [0; 1500];
-    const RR_DURATION: Duration = Duration::from_secs(3);
     println!(
         "{}: starting TCP round-robin test (64 byte buffers)...",
         crate::binary_name()
     );
     let mut rr_iters = 0_u64;
     let start = std::time::Instant::now();
-    while start.elapsed() < RR_DURATION {
+    while start.elapsed() < duration {
         rr_iters += 1;
 
         stream.write_all(&buf[0..64])?;

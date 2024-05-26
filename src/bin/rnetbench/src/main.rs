@@ -3,7 +3,6 @@
 #![feature(io_error_more)]
 
 use std::io::Read;
-use std::io::Result;
 use std::io::Write;
 use std::net::TcpStream;
 use std::time::Duration;
@@ -86,15 +85,12 @@ fn main() {
     }
 }
 
-fn do_throughput_read(
-    mut stream: TcpStream,
-    client_args: Option<&Args>,
-) -> Result<(Duration, usize)> {
-    // Note: we use buffers of different size, to make things more interesting.
+fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Duration, usize) {
     let mut buffer = [0; 1513];
     let mut total_bytes_read = 0usize;
     let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
+    // println!("throughput read starting");
     let mut counter: u8 = 0;
     let start = std::time::Instant::now();
     loop {
@@ -121,17 +117,15 @@ fn do_throughput_read(
     let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
-    Ok((duration, total_bytes_read))
+    (duration, total_bytes_read)
 }
 
-fn do_throughput_write(
-    mut stream: TcpStream,
-    client_args: Option<&Args>,
-) -> Result<(Duration, usize)> {
-    let mut data = [0u8; 1011];
+fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Duration, usize) {
+    let mut data = [0u8; 1024];
     let mut total_bytes_sent = 0usize;
     let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
+    // println!("throughput write starting");
     let start = std::time::Instant::now();
     let mut counter: u8 = 0;
     'outer: loop {
@@ -166,5 +160,5 @@ fn do_throughput_write(
     let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
-    Ok((duration, total_bytes_sent))
+    (duration, total_bytes_sent)
 }
