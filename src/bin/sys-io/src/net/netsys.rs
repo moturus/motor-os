@@ -540,15 +540,14 @@ impl NetSys {
             .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
 
         if let Some(timeout) = timeout {
-            let nanos = timeout.as_u64();
-            let now = moto_sys::time::Instant::now().as_u64();
-            if nanos <= now {
+            let now = moto_sys::time::Instant::now();
+            if timeout <= now {
                 // We check this upon receiving sqe; the thread got preempted or something.
                 // Just use an arbitrary small timeout.
                 smol_socket.set_timeout(Some(smoltcp::time::Duration::from_micros(10)));
             } else {
                 smol_socket.set_timeout(Some(smoltcp::time::Duration::from_micros(
-                    (nanos + 999 - now) / 1000,
+                    timeout.duration_since(now).as_micros() as u64,
                 )));
             }
         }
@@ -1027,14 +1026,6 @@ impl NetSys {
         });
 
         self.do_tcp_rx(socket_id); // The socket can now Rx.
-        #[cfg(debug_assertions)]
-        log::debug!(
-            "{}:{} on_socket_connected 0x{:x} - {:?}",
-            file!(),
-            line!(),
-            u64::from(socket_id),
-            local_addr
-        );
     }
 
     fn on_connect_failed(&mut self, socket_id: SocketId) {

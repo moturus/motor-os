@@ -325,7 +325,15 @@ impl IoRuntime {
         let mut debug_timed_out = false;
         loop {
             let mut had_work = false;
+
+            let mut cnt = 0;
             loop {
+                cnt += 1;
+                if cnt > 32 {
+                    // We don't want to starve things like outgoing connections,
+                    // which require the wait() below.
+                    break;
+                }
                 match self.net.poll() {
                     Some(p_c) => {
                         had_work = true;
