@@ -109,4 +109,9 @@ impl UserThreadControlBlock {
     pub fn get() -> &'static Self {
         Self::get_mut()
     }
+
+    #[cfg(feature = "userspace")]
+    pub fn this_thread_handle() -> crate::SysHandle {
+        Self::get().self_handle.into()
+    }
 }

@@ -10,12 +10,14 @@
 
 use super::util::moturus_log;
 use crate::rt_api;
+use crate::rt_api::net::IO_SUBCHANNELS;
 use crate::util::ArrayQueue;
 use crate::util::CachePadded;
 use alloc::collections::BTreeMap;
-use alloc::collections::BTreeSet;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
+use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::net::Ipv6Addr;
 use core::net::SocketAddr;
@@ -26,6 +28,7 @@ use moto_ipc::io_channel;
 use moto_sys::time::Instant;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
+use moto_sys::UserThreadControlBlock;
 
 static NET: crate::util::SpinLock<NetRuntime> = crate::util::SpinLock::new(NetRuntime {
     full_channels: BTreeMap::new(),
@@ -42,6 +45,7 @@ struct NetRuntime {
 impl NetRuntime {
     fn on_channel_available(&mut self, channel: &Arc<NetChannel>) {
         if let Some(channel) = self.full_channels.remove(&channel.id()) {
+            // TODO: maybe clear empty channels?
             self.channels.insert(channel.id(), channel);
         }
     }
@@ -73,57 +77,268 @@ impl NetRuntime {
 
 struct NetChannel {
     conn: io_channel::ClientConnection,
+    reservations: AtomicUsize,
 
+    subchannels_in_use: Vec<AtomicBool>,
+
+    // TODO: we will only have at most IO_SUBCHANNELS streams per connection. Maybe
+    //       we should get rid of spinlocks below and have simple vectors?
+    //
     // We use weak references to TcpStream below because ultimately the user
     // owns tcp streams, and we want to clear things away when the user drops them.
     // Waiters for streams (e.x. RX) are in the Option<SysHandle> below.
     tcp_streams: crate::util::SpinLock<BTreeMap<u64, (Weak<TcpStreamImpl>, Option<SysHandle>)>>,
     tcp_listeners: crate::util::SpinLock<BTreeMap<u64, Weak<TcpListenerImpl>>>,
 
-    reservations: AtomicUsize,
+    next_msg_id: CachePadded<AtomicU64>, // A counter.
 
-    next_msg_id: AtomicU64,
-
-    this_thread_is_sender: CachePadded<AtomicBool>,
     send_queue: crate::util::ArrayQueue<io_channel::Msg>,
 
-    this_thread_is_receiver: CachePadded<AtomicBool>,
+    // Threads waiting to add their msg to send_queue.
+    send_waiters: crate::util::SpinLock<VecDeque<u64>>,
 
-    // Map resp_id => (thread handle, resp).
-    // This map contains waiters for specific resp_id.
+    // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
     resp_waiters: crate::util::SpinLock<BTreeMap<u64, (SysHandle, Option<io_channel::Msg>)>>,
 
-    // All waiters. Needed so that at least one is actively listening to the server.
-    waiters: crate::util::SpinLock<BTreeSet<u64>>,
+    io_thread_join_handle: AtomicU64,
+    io_thread_wake_handle: AtomicU64,
+
+    io_thread_running: CachePadded<AtomicBool>,
+    io_thread_wake_requested: CachePadded<AtomicBool>,
+    exiting: CachePadded<AtomicBool>,
+}
+
+impl Drop for NetChannel {
+    fn drop(&mut self) {
+        self.exiting.store(true, Ordering::Release);
+        todo!("wait for the IO thread to finish")
+    }
 }
 
 impl NetChannel {
-    // Max TCP/UDP sockets per channel.
-    const MAX_SOCKETS: usize = 16;
-
     fn id(&self) -> u64 {
         self.conn.server_handle().into()
     }
 
+    fn io_thread(&self) -> ! {
+        self.io_thread_running.store(true, Ordering::Release);
+
+        let mut maybe_msg = None;
+        loop {
+            let mut should_sleep = self.io_thread_poll_messages();
+            let (sleep, msg) = self.io_thread_send_messages(maybe_msg);
+            maybe_msg = msg;
+            should_sleep |= sleep;
+
+            if should_sleep {
+                assert!(maybe_msg.is_none());
+                if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
+                    continue;
+                }
+                self.io_thread_running.store(false, Ordering::Release);
+                if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
+                    self.io_thread_running.store(true, Ordering::Release);
+                    continue;
+                }
+                self.wake_driver(); // TODO: be smarter.
+
+                // TODO: add a long timeout. Dump state if something is suspicious.
+                let _ = moto_sys::syscalls::SysCpu::wait(
+                    &mut [self.conn.server_handle()],
+                    SysHandle::NONE,
+                    SysHandle::NONE,
+                    None,
+                );
+            }
+        }
+    }
+
+    // Poll messages, if any. Returns true if the IO thread may sleep.
+    fn io_thread_poll_messages(self: &Self) -> bool {
+        let mut received_messages = 0;
+
+        while let Ok(msg) = self.conn.recv() {
+            received_messages += 1;
+            // crate::util::moturus_log!(
+            //     "{}:{} got resp for msg {}:0x{:x}:{}",
+            //     file!(),
+            //     line!(),
+            //     msg.id,
+            //     msg.handle,
+            //     msg.command
+            // );
+
+            let wait_handle: Option<SysHandle> = if msg.id == 0 {
+                // This is an incoming packet, or similar, without a dedicated waiter.
+                let stream_handle = msg.handle;
+                {
+                    let (stream, wait_handle) = {
+                        let mut tcp_streams = self.tcp_streams.lock(line!());
+                        if let Some(s) = tcp_streams.get_mut(&stream_handle) {
+                            if let Some(stream) = s.0.upgrade() {
+                                (Some(stream), s.1.take())
+                            } else {
+                                (None, None)
+                            }
+                        } else {
+                            (None, None)
+                        }
+                    };
+                    if let Some(stream) = stream {
+                        stream.process_incoming_msg(msg);
+                        wait_handle
+                    } else {
+                        self.on_orphan_message(msg);
+                        continue;
+                    }
+                }
+            } else {
+                let mut resp_waiters = self.resp_waiters.lock(line!());
+                if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
+                    *resp = Some(msg);
+                    Some(*handle)
+                } else {
+                    panic!("unexpected msg");
+                }
+            };
+
+            if let Some(wait_handle) = wait_handle {
+                if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
+                    let _ = moto_sys::syscalls::SysCpu::wake(wait_handle);
+                }
+            }
+
+            if received_messages > 32 {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    // Attempts to send some messages. Returns true if the io thread may sleep.
+    fn io_thread_send_messages(
+        self: &Self,
+        msg: Option<io_channel::Msg>,
+    ) -> (bool, Option<io_channel::Msg>) {
+        if let Some(msg) = msg {
+            if let Err(err) = self.conn.send(msg) {
+                assert_eq!(err, ErrorCode::NotReady);
+                self.wake_driver();
+                return (true, Some(msg));
+            }
+        }
+
+        let mut sent_messages = 0;
+        while let Some(msg) = self.send_queue.pop() {
+            if let Err(err) = self.conn.send(msg) {
+                assert_eq!(err, ErrorCode::NotReady);
+                self.wake_driver();
+                return (true, Some(msg));
+            }
+
+            sent_messages += 1;
+            if sent_messages > 32 {
+                self.wake_driver();
+                return (false, None);
+            }
+        }
+
+        if sent_messages > 0 {
+            self.wake_driver();
+        }
+        (true, None)
+    }
+
+    fn maybe_wake_io_thread(&self) {
+        self.io_thread_wake_requested.store(true, Ordering::Release);
+        if self.io_thread_running.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let _ = moto_sys::syscalls::SysCpu::wake(
+            self.io_thread_wake_handle.load(Ordering::Relaxed).into(),
+        );
+    }
+
+    extern "C" fn io_thread_init(self_addr: usize) {
+        // We extract a raw reference from Arc<Self> so that refcounting works and Self::drop()
+        // gets triggered.
+        let self_: &'static Self = unsafe {
+            let self_arc = Arc::from_raw(self_addr as *const Self);
+            let self_ptr = Arc::as_ptr(&self_arc);
+            &*self_ptr
+        };
+
+        self_.io_thread_wake_handle.store(
+            moto_sys::UserThreadControlBlock::get().self_handle.into(),
+            Ordering::Release,
+        );
+
+        self_.io_thread();
+    }
+
     fn new() -> Arc<Self> {
-        Arc::new(NetChannel {
+        let mut subchannels_in_use = Vec::with_capacity(IO_SUBCHANNELS);
+        for _ in 0..IO_SUBCHANNELS {
+            subchannels_in_use.push(AtomicBool::new(false));
+        }
+
+        let self_ = Arc::new(NetChannel {
             conn: io_channel::ClientConnection::connect("sys-io").unwrap(),
+            subchannels_in_use,
             tcp_streams: crate::util::SpinLock::new(BTreeMap::new()),
             tcp_listeners: crate::util::SpinLock::new(BTreeMap::new()),
             reservations: AtomicUsize::new(0),
-            next_msg_id: AtomicU64::new(1),
-            this_thread_is_sender: CachePadded::new(AtomicBool::new(false)),
+            next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crate::util::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
-            this_thread_is_receiver: CachePadded::new(AtomicBool::new(false)),
+            send_waiters: crate::util::SpinLock::new(VecDeque::new()),
             resp_waiters: crate::util::SpinLock::new(BTreeMap::new()),
-            waiters: crate::util::SpinLock::new(BTreeSet::new()),
-        })
+            io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
+            io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
+            io_thread_running: CachePadded::new(AtomicBool::new(false)),
+            io_thread_wake_requested: CachePadded::new(AtomicBool::new(false)),
+            exiting: CachePadded::new(AtomicBool::new(false)),
+        });
+
+        let self_ptr = Arc::into_raw(self_.clone());
+        let thread_handle =
+            super::thread::spawn(4096 * 16, Self::io_thread_init as usize, self_ptr as usize)
+                .unwrap();
+        self_
+            .io_thread_join_handle
+            .store(thread_handle.into(), Ordering::Release);
+
+        while self_.io_thread_wake_handle.load(Ordering::Acquire) == 0 {
+            core::hint::spin_loop()
+        }
+
+        self_
+    }
+
+    /// Returns the index of the subchannel in [0..IO_SUBCHANNELS).
+    fn reserve_subchannel(&self) -> usize {
+        // Because NetChannels are reserved at NetRuntime with NetChannel::reservations
+        // counted, we can loop here.
+        loop {
+            for idx in 0..IO_SUBCHANNELS {
+                if self.subchannels_in_use[idx].swap(true, Ordering::AcqRel) {
+                    continue; // Was already reserved.
+                }
+                return idx;
+            }
+        }
+    }
+
+    fn release_subchannel(&self, idx: usize) {
+        assert!(idx < IO_SUBCHANNELS);
+        assert!(self.subchannels_in_use[idx].swap(false, Ordering::AcqRel));
     }
 
     fn at_capacity(&self) -> bool {
         self.reservations.load(Ordering::Relaxed) + { self.tcp_streams.lock(line!()).len() } + {
             self.tcp_listeners.lock(line!()).len()
-        } == Self::MAX_SOCKETS
+        } == IO_SUBCHANNELS
     }
 
     fn tcp_stream_created(self: &Arc<Self>, stream: &Arc<TcpStreamImpl>) {
@@ -134,17 +349,11 @@ impl NetChannel {
             .is_none());
     }
 
-    fn tcp_stream_dropped(self: &Arc<Self>, handle: u64) {
-        assert_eq!(
-            0,
-            self.tcp_streams
-                .lock(line!())
-                .remove(&handle)
-                .unwrap()
-                .0
-                .strong_count()
-        );
+    fn tcp_stream_dropped(self: &Arc<Self>, handle: u64, subchannel_idx: usize) {
+        let (stream, _) = self.tcp_streams.lock(line!()).remove(&handle).unwrap();
+        assert_eq!(0, stream.strong_count());
 
+        self.release_subchannel(subchannel_idx);
         NET.lock(line!()).on_channel_available(self);
     }
 
@@ -169,38 +378,20 @@ impl NetChannel {
 
     fn wait_for_resp(self: &Arc<Self>, resp_id: u64, _log_dbg: bool) -> io_channel::Msg {
         loop {
-            self.receive_or_wait_handle_set(None);
+            {
+                let mut recv_waiters = self.resp_waiters.lock(line!());
+                if let Some(resp) = recv_waiters.get_mut(&resp_id).unwrap().1.take() {
+                    // if log_dbg {
+                    //     crate::util::moturus_log!("got resp {}", resp_id);
+                    // }
+                    recv_waiters.remove(&resp_id);
+                    return resp;
+                }
+            }
 
-            {
-                let mut recv_waiters = self.resp_waiters.lock(line!());
-                if let Some(resp) = recv_waiters.get_mut(&resp_id).unwrap().1.take() {
-                    // if log_dbg {
-                    //     crate::util::moturus_log!("got resp {}", resp_id);
-                    // }
-                    recv_waiters.remove(&resp_id);
-                    return resp;
-                }
-            }
-            // Give another thread a chance to become the receiver.
-            // Note: another thread may receive our msg while this wait waits, and wakes
-            //       this thread; therefore we must re-check for the received msg, otherwise
-            //       the wake will be lost.
-            let _ = moto_sys::syscalls::SysCpu::wait(
-                &mut [],
-                SysHandle::NONE,
-                SysHandle::NONE,
-                Some(moto_sys::time::Instant::now() + Duration::from_micros(5)),
-            );
-            {
-                let mut recv_waiters = self.resp_waiters.lock(line!());
-                if let Some(resp) = recv_waiters.get_mut(&resp_id).unwrap().1.take() {
-                    // if log_dbg {
-                    //     crate::util::moturus_log!("got resp {}", resp_id);
-                    // }
-                    recv_waiters.remove(&resp_id);
-                    return resp;
-                }
-            }
+            // No need to wake the IO thread, as it will be woken by sys-io.
+            let _ =
+                moto_sys::syscalls::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
         }
     }
 
@@ -227,37 +418,7 @@ impl NetChannel {
         self.wait_for_resp(req_id, log_dbg)
     }
 
-    fn receive_or_wait_handle_set(self: &Arc<Self>, timeout: Option<Instant>) {
-        let self_handle = moto_sys::UserThreadControlBlock::get().self_handle;
-        self.waiters.lock(line!()).insert(self_handle);
-
-        if !self.this_thread_is_receiver.swap(true, Ordering::SeqCst) {
-            self.do_receive_messages(timeout);
-            self.this_thread_is_receiver.store(false, Ordering::SeqCst);
-
-            let next_waiter = {
-                let mut waiters = self.waiters.lock(line!());
-                waiters.remove(&self_handle);
-                waiters.first().map(|x| *x)
-            };
-
-            if let Some(waiter) = next_waiter {
-                let _ = moto_sys::syscalls::SysCpu::wake(SysHandle::from(waiter));
-            }
-        } else {
-            // We can wait forever here because we've added self_handle to the list of
-            // waiters, so there will always be a thread listening to the server via
-            // do_receive_messages().
-            let _ = moto_sys::syscalls::SysCpu::wait(
-                &mut [],
-                SysHandle::NONE,
-                SysHandle::NONE,
-                timeout,
-            );
-        }
-    }
-
-    fn on_orphan_message(self: &Arc<Self>, msg: io_channel::Msg) {
+    fn on_orphan_message(self: &Self, msg: io_channel::Msg) {
         match msg.command {
             rt_api::net::CMD_TCP_STREAM_RX => {
                 // RX raced with the client dropping the sream. Need to get page to free it.
@@ -282,191 +443,33 @@ impl NetChannel {
         }
     }
 
-    fn poll_messages(self: &Arc<Self>) -> usize {
-        let result;
-        if !self.this_thread_is_receiver.swap(true, Ordering::SeqCst) {
-            result = self.do_poll_messages();
-            self.this_thread_is_receiver.store(false, Ordering::SeqCst);
-            let next_waiter = { self.waiters.lock(line!()).first().map(|x| *x) };
-
-            if let Some(waiter) = next_waiter {
-                let _ = moto_sys::syscalls::SysCpu::wake(SysHandle::from(waiter));
-            }
-        } else {
-            result = 0;
-        }
-
-        result
-    }
-
-    // Poll messages, if any. Returns the number of messages polled (capped).
-    fn do_poll_messages(self: &Arc<Self>) -> usize {
-        let mut received_messages = 0;
-
-        while let Ok(msg) = self.conn.recv() {
-            received_messages += 1;
-
-            let wait_handle: Option<SysHandle> = if msg.id == 0 {
-                // This is an incoming packet, or similar.
-                let stream_handle = msg.handle;
-                {
-                    let (stream, wait_handle) = {
-                        let mut tcp_streams = self.tcp_streams.lock(line!());
-                        if let Some(s) = tcp_streams.get_mut(&stream_handle) {
-                            if let Some(stream) = s.0.upgrade() {
-                                (Some(stream), s.1.take())
-                            } else {
-                                (None, None)
-                            }
-                        } else {
-                            (None, None)
-                        }
-                    };
-                    if let Some(stream) = stream {
-                        stream.process_incoming_msg(msg);
-                        wait_handle
-                    } else {
-                        self.on_orphan_message(msg);
-                        continue;
-                    }
-                }
-            } else {
-                // crate::util::moturus_log!("got resp for msg id {}", msg.id);
-                let mut resp_waiters = self.resp_waiters.lock(line!());
-                if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
-                    // crate::util::moturus_log!("received resp {}", msg.id);
-                    *resp = Some(msg);
-                    Some(*handle)
-                } else {
-                    panic!("unexpected msg");
-                }
-            };
-
-            if let Some(wait_handle) = wait_handle {
-                if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
-                    let _ = moto_sys::syscalls::SysCpu::wake(wait_handle);
-                }
-            }
-
-            if received_messages > 32 {
-                return received_messages;
-            }
-        }
-
-        received_messages
-    }
-
-    // This will return when the receive queue is empty or after N messages have been received.
-    fn do_receive_messages(self: &Arc<Self>, timeout: Option<Instant>) {
-        if let Some(timeout) = timeout {
-            if Instant::now() >= timeout {
-                return;
-            }
-        }
-
-        if self.do_poll_messages() > 0 {
-            return;
-        }
-
-        let server_handle = self.conn.server_handle();
-        let _ = moto_sys::syscalls::SysCpu::wait(
-            &mut [server_handle],
-            SysHandle::NONE,
-            SysHandle::NONE,
-            timeout,
-        );
-    }
-
-    // This will return when either the send queue is empty or there is an active sender.
-    // Returns true if any messages have been sent.
-    fn send_messages(self: &Arc<Self>) {
-        loop {
-            if self.this_thread_is_sender.swap(true, Ordering::SeqCst) {
-                moturus_log!("not sending");
-                return;
-            }
-
-            // This thread is now the writer.
-            let mut sent_messages = 0;
-            while let Some(msg) = self.send_queue.pop() {
-                loop {
-                    match self.conn.send(msg) {
-                        Ok(()) => break,
-                        Err(err) => {
-                            assert_eq!(err, ErrorCode::NotReady);
-                            let server_handle = self.conn.server_handle();
-                            let _ = moto_sys::syscalls::SysCpu::wait(
-                                &mut [server_handle],
-                                SysHandle::NONE,
-                                server_handle,
-                                None,
-                            );
-                            continue;
-                        }
-                    }
-                }
-
-                sent_messages += 1;
-                if sent_messages > 32 {
-                    break;
-                }
-            }
-
-            self.this_thread_is_sender.store(false, Ordering::SeqCst);
-            let _ = moto_sys::syscalls::SysCpu::wake(self.conn.server_handle());
-
-            if self.send_queue.is_empty() {
-                return;
-            } else {
-                // Give another thread a chance to become the sender.
-                let _ = moto_sys::syscalls::SysCpu::wait(
-                    &mut [],
-                    SysHandle::NONE,
-                    SysHandle::NONE,
-                    Some(moto_sys::time::Instant::now() + Duration::from_micros(5)),
-                );
-            }
-        }
+    #[inline]
+    fn wake_driver(&self) {
+        let _ = moto_sys::syscalls::SysCpu::wake(self.conn.server_handle());
     }
 
     // Sends a write message or queues it.
     fn send_msg(self: &Arc<Self>, msg: io_channel::Msg) {
-        while self.send_queue.push(msg).is_err() {
-            // self.send_messages();
-        } // TODO: be smarter?
-        self.send_messages();
-    }
-
-    fn alloc_page(self: &Arc<Self>, timeout_ns: u64) -> Result<io_channel::IoPage, ErrorCode> {
-        let timeout = if timeout_ns == u64::MAX {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_nanos(timeout_ns))
-        };
-
+        // moturus_log!(
+        //     "{}:{} sending message {}:0x{:x}:{}",
+        //     file!(),
+        //     line!(),
+        //     msg.id,
+        //     msg.handle,
+        //     msg.command
+        // );
         loop {
-            if let Some(timeout) = timeout {
-                if Instant::now() >= timeout {
-                    return Err(ErrorCode::TimedOut);
-                }
+            if self.send_queue.push(msg).is_ok() {
+                self.maybe_wake_io_thread();
+                return;
             }
 
-            if let Ok(page) = self.conn.alloc_page() {
-                return Ok(page);
-            }
-
-            if self.send_queue.is_empty() {
-                // TODO: wait on the server handle?
-                // self.poll_messages();
-                let _ = moto_sys::syscalls::SysCpu::wait(
-                    &mut [],
-                    SysHandle::NONE,
-                    SysHandle::NONE,
-                    Some(moto_sys::time::Instant::now() + Duration::from_micros(50)),
-                );
-            } else {
-                self.send_messages();
-            }
+            self.send_waiters
+                .lock(line!())
+                .push_back(UserThreadControlBlock::this_thread_handle().into());
+            self.maybe_wake_io_thread();
+            let _ =
+                moto_sys::syscalls::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
         }
     }
 }
@@ -512,15 +515,19 @@ pub struct TcpStreamImpl {
 
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
+
+    subchannel_idx: usize, // Never changes.
+    subchannel_mask: u64,  // Never changes.
 }
 
 impl Drop for TcpStreamImpl {
     fn drop(&mut self) {
         let mut req = io_channel::Msg::new();
-        req.command = rt_api::net::CMD_TCP_STREAM_DROP;
+        req.command = rt_api::net::CMD_TCP_STREAM_CLOSE;
         req.handle = self.handle;
-        self.channel.send_msg(req);
-        self.channel.tcp_stream_dropped(self.handle);
+        let _ = self.channel.send_receive(req);
+        self.channel
+            .tcp_stream_dropped(self.handle, self.subchannel_idx);
     }
 }
 
@@ -530,13 +537,6 @@ impl TcpStreamImpl {
         req.command = rt_api::net::CMD_TCP_STREAM_RX_ACK;
         req.handle = self.handle;
         req.payload.args_64_mut()[0] = self.next_rx_seq.load(Ordering::Relaxed) - 1;
-        #[cfg(debug_assertions)]
-        moturus_log!(
-            "{}:{} sending rx_ack {}",
-            file!(),
-            line!(),
-            req.payload.args_64_mut()[0]
-        );
         self.channel.send_msg(req);
     }
 
@@ -547,19 +547,9 @@ impl TcpStreamImpl {
     fn process_incoming_msg(&self, msg: io_channel::Msg) {
         match msg.command {
             rt_api::net::CMD_TCP_STREAM_RX => {
-                #[cfg(debug_assertions)]
-                moturus_log!("{}:{} got recv msg {}", file!(), line!(), msg.command);
                 self.recv_queue.push(msg).unwrap(); // TODO: handle error?
             }
             rt_api::net::EVT_TCP_STREAM_STATE_CHANGED => {
-                #[cfg(debug_assertions)]
-                moturus_log!(
-                    "{}:{}: got STATE EVENT {:?} for 0x{:x}",
-                    file!(),
-                    line!(),
-                    rt_api::net::TcpState::try_from(msg.payload.args_32()[0]),
-                    msg.handle
-                );
                 self.tcp_state
                     .store(msg.payload.args_32()[0], Ordering::Relaxed);
             }
@@ -592,13 +582,17 @@ impl TcpStream {
         );
 
         let channel = NET.lock(line!()).reserve_channel();
+        let subchannel_idx = channel.reserve_subchannel();
+        let subchannel_mask = rt_api::net::io_subchannel_mask(subchannel_idx);
+
         let req = if let Some(timo) = timeout {
             rt_api::net::tcp_stream_connect_timeout_request(
                 socket_addr,
+                subchannel_mask,
                 moto_sys::time::Instant::now() + timo,
             )
         } else {
-            crate::rt_api::net::tcp_stream_connect_request(socket_addr)
+            crate::rt_api::net::tcp_stream_connect_request(socket_addr, subchannel_mask)
         };
 
         let resp = channel.send_receive(req);
@@ -611,6 +605,7 @@ impl TcpStream {
                 socket_addr,
             );
 
+            channel.release_subchannel(subchannel_idx);
             NET.lock(line!()).release_channel(channel.clone());
             return Err(resp.status());
         }
@@ -627,6 +622,8 @@ impl TcpStream {
             rx_done: AtomicBool::new(false),
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_idx,
+            subchannel_mask,
         });
 
         channel.tcp_stream_created(&inner);
@@ -736,7 +733,8 @@ impl TcpStream {
             .inner
             .channel
             .conn
-            .get_page(msg.payload.shared_pages()[0]);
+            .get_page(msg.payload.shared_pages()[0])
+            .unwrap();
         #[cfg(debug_assertions)]
         moturus_log!(
             "{}:{} incoming {} bytes for stream 0x{:x} rx_seq {}",
@@ -775,7 +773,7 @@ impl TcpStream {
         return Ok(sz_read);
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn poll_rx(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         {
             let mut buf_lock = self.inner.rx_buf.lock();
             if let Some(rx_buf) = &mut *buf_lock {
@@ -797,6 +795,23 @@ impl TcpStream {
             }
         }
 
+        if let Some(msg) = self.inner.recv_queue.pop() {
+            return self.process_rx_message(buf, msg);
+        }
+
+        if self.inner.rx_done.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
+
+        Err(ErrorCode::NotReady)
+    }
+
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        match self.poll_rx(buf) {
+            Ok(sz) => return Ok(sz),
+            Err(err) => assert_eq!(err, ErrorCode::NotReady),
+        }
+
         let rx_timeout_ns = self.inner.rx_timeout_ns.load(Ordering::Relaxed);
         let rx_timeout = if rx_timeout_ns == u64::MAX {
             None
@@ -811,31 +826,65 @@ impl TcpStream {
                     return Err(ErrorCode::TimedOut);
                 }
             }
-            let msg = {
+
+            match self.poll_rx(buf) {
+                Ok(sz) => return Ok(sz),
+                Err(err) => assert_eq!(err, ErrorCode::NotReady),
+            }
+            {
                 let mut streams_lock = self.inner.channel.tcp_streams.lock(line!());
                 let stream_entry = streams_lock.get_mut(&handle).unwrap();
-                if let Some(msg) = stream_entry.0.upgrade().unwrap().recv_queue.pop() {
-                    Some(msg)
-                } else {
-                    if self.inner.rx_done.load(Ordering::Relaxed) {
-                        return Ok(0);
+
+                // Store this thread's handle so that it is woken when an RX message arrives.
+                stream_entry.1 = Some(moto_sys::UserThreadControlBlock::get().self_handle.into());
+            }
+
+            // Re-check for incoming messages.
+            match self.poll_rx(buf) {
+                Ok(sz) => {
+                    {
+                        let mut streams_lock = self.inner.channel.tcp_streams.lock(line!());
+                        let stream_entry = streams_lock.get_mut(&handle).unwrap();
+
+                        stream_entry.1 = None;
                     }
 
-                    // Store this thread's handle so that it is woken when an RX message arrives.
-                    stream_entry.1 =
-                        Some(moto_sys::UserThreadControlBlock::get().self_handle.into());
-                    None
+                    return Ok(sz);
                 }
-            };
+                Err(err) => assert_eq!(err, ErrorCode::NotReady),
+            }
 
-            if let Some(msg) = msg {
-                return self.process_rx_message(buf, msg);
+            // Note: even if the socket is closed, there can be RX packets buffered
+            // in sys-io, so we don't stop reading until we get a zero-length packet.
+
+            // Note: this thread will be woken because we stored its handle in stream_entry.1 above.
+            self.inner.channel.maybe_wake_io_thread();
+
+            const DEBUG_TIMEOUT: Duration = Duration::from_secs(5);
+            let debug_timeout = Instant::now() + DEBUG_TIMEOUT;
+            let mut debug_assert = false;
+            let timo = if let Some(timeout) = rx_timeout {
+                if timeout < debug_timeout {
+                    timeout
+                } else {
+                    debug_assert = true;
+                    debug_timeout
+                }
             } else {
-                // Note: even if the socket is closed, there can be RX packets buffered
-                // in sys-io, so we don't stop reading until we get a zero-length packet.
-
-                // Note: this thread will be woken because we stored its handle in stream_entry.1 above.
-                self.inner.channel.receive_or_wait_handle_set(rx_timeout);
+                debug_assert = true;
+                debug_timeout
+            };
+            if let Err(err) = moto_sys::syscalls::SysCpu::wait(
+                &mut [],
+                SysHandle::NONE,
+                SysHandle::NONE,
+                // rx_timeout,
+                Some(timo),
+            ) {
+                assert_eq!(err, ErrorCode::TimedOut);
+                if debug_assert {
+                    assert!(self.inner.recv_queue.is_empty());
+                }
             }
         }
     }
@@ -849,19 +898,76 @@ impl TcpStream {
             return Ok(0);
         }
 
-        if self.inner.channel.poll_messages() > 0 {
-            if !self.inner.tcp_state().can_write() {
-                return Ok(0);
-            }
-        }
-
-        let timestamp = moto_sys::time::Instant::now().as_u64();
-
+        let timestamp = moto_sys::time::Instant::now();
         let write_sz = buf.len().min(io_channel::PAGE_SIZE);
-        let io_page = self
-            .inner
-            .channel
-            .alloc_page(self.inner.tx_timeout_ns.load(Ordering::Relaxed))?;
+        let timo_ns = self.inner.tx_timeout_ns.load(Ordering::Relaxed);
+        let abs_timeout = if timo_ns == u64::MAX {
+            None
+        } else {
+            Some(timestamp + Duration::from_nanos(timo_ns))
+        };
+
+        // TODO: now we sleep exponentially long (up to a limit) on stuck writes.
+        //       We should add a new msg to the driver so that it wakes us up
+        //       when writes are unstuck.
+        let mut sleep_timo_usec = 0;
+        let mut spin_loop_counter: u64 = 0;
+        let io_page = loop {
+            if let Some(timo) = abs_timeout {
+                if moto_sys::time::Instant::now() >= timo {
+                    return Err(ErrorCode::TimedOut);
+                }
+            }
+
+            match self
+                .inner
+                .channel
+                .conn
+                .alloc_page(self.inner.subchannel_mask)
+            {
+                Ok(page) => break page,
+                Err(_) => {
+                    if !self.inner.tcp_state().can_write() {
+                        return Ok(0);
+                    }
+
+                    if spin_loop_counter < 100 {
+                        spin_loop_counter += 1;
+                        core::hint::spin_loop();
+                        continue;
+                    } else if sleep_timo_usec < 10 {
+                        moto_sys::syscalls::SysCpu::sched_yield();
+                        sleep_timo_usec += 1;
+                        continue;
+                    }
+
+                    let mut sleep_timo =
+                        moto_sys::time::Instant::now() + Duration::from_micros(sleep_timo_usec);
+                    if let Some(timo) = abs_timeout {
+                        if timo < sleep_timo {
+                            sleep_timo = timo;
+                        }
+                    }
+                    sleep_timo_usec *= 2;
+                    if sleep_timo_usec > 3_000_000 {
+                        sleep_timo_usec = 3_000_000;
+                        moturus_log!(
+                            "{}:{} alloc page stuck for socket 0x{:x}",
+                            file!(),
+                            line!(),
+                            u64::from(self.inner.handle)
+                        );
+                    }
+
+                    let _ = moto_sys::syscalls::SysCpu::wait(
+                        &mut [],
+                        SysHandle::NONE,
+                        SysHandle::NONE,
+                        Some(sleep_timo),
+                    );
+                }
+            }
+        };
         unsafe {
             core::ptr::copy_nonoverlapping(
                 buf.as_ptr(),
@@ -870,8 +976,12 @@ impl TcpStream {
             );
         }
 
-        let msg = rt_api::net::tcp_stream_tx_msg(self.inner.handle, io_page, write_sz, timestamp);
-
+        let msg = rt_api::net::tcp_stream_tx_msg(
+            self.inner.handle,
+            io_page,
+            write_sz,
+            timestamp.as_u64(),
+        );
         self.inner.channel.send_msg(msg);
         Ok(write_sz)
     }
@@ -1081,9 +1191,14 @@ impl TcpListener {
             todo!()
         }
         let channel = NET.lock(line!()).reserve_channel();
-        let req = rt_api::net::accept_tcp_listener_request(self.inner.handle);
+        let subchannel_idx = channel.reserve_subchannel();
+        let subchannel_mask = rt_api::net::io_subchannel_mask(subchannel_idx);
+
+        let req = rt_api::net::accept_tcp_listener_request(self.inner.handle, subchannel_mask);
         let resp = channel.send_receive(req);
         if resp.status().is_err() {
+            channel.release_subchannel(subchannel_idx);
+            NET.lock(line!()).release_channel(channel);
             return Err(resp.status());
         }
 
@@ -1101,6 +1216,8 @@ impl TcpListener {
             rx_done: AtomicBool::new(false),
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_idx,
+            subchannel_mask,
         });
 
         channel.tcp_stream_created(&inner);

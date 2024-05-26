@@ -139,7 +139,34 @@ impl Msg {
 
 pub const QUEUE_SIZE: u64 = 64;
 const QUEUE_MASK: u64 = QUEUE_SIZE - 1;
-pub const CHANNEL_PAGE_COUNT: usize = 128;
+pub const CHANNEL_PAGE_COUNT: usize = 64;
+
+#[derive(Clone, Copy, Debug)]
+pub enum SubChannelType {
+    Client,
+    Server,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SubChannel {
+    Client(u64),
+    Server(u64),
+}
+
+impl Into<SubChannelType> for SubChannel {
+    fn into(self) -> SubChannelType {
+        match self {
+            SubChannel::Client(_) => SubChannelType::Client,
+            SubChannel::Server(_) => SubChannelType::Server,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RawIoPage {
+    page_idx: u16,
+    s_type: SubChannelType,
+}
 
 #[repr(C, align(4096))]
 struct RawChannel {
@@ -153,9 +180,9 @@ struct RawChannel {
     server_queue_tail: AtomicU64,
     _pad4: [u64; 7],
 
-    shared_pages_in_use_0: AtomicU64,
+    client_pages_in_use: AtomicU64,
     _pad5: [u64; 7],
-    shared_pages_in_use_1: AtomicU64,
+    server_pages_in_use: AtomicU64,
     _pad6: [u64; 7],
 
     // Pad to BLOCK_SIZE (512 bytes).
@@ -170,7 +197,8 @@ struct RawChannel {
     // offset: 8192 = 2 pages; server=>client queue.
     server_queue: [MsgSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
 
-    shared_pages: [Page; CHANNEL_PAGE_COUNT],
+    client_pages: [Page; CHANNEL_PAGE_COUNT],
+    server_pages: [Page; CHANNEL_PAGE_COUNT],
 }
 
 pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == ((128 + 3) * 4096));
@@ -181,62 +209,74 @@ impl RawChannel {
             == self.server_queue_tail.load(Ordering::Acquire)
     }
 
-    fn shared_page_bytes(&self, page_idx: u16) -> Result<&mut [u8], ErrorCode> {
-        if page_idx >= (CHANNEL_PAGE_COUNT as u16) {
+    fn page_bytes(&self, raw_page: RawIoPage) -> Result<&mut [u8], ErrorCode> {
+        if raw_page.page_idx >= (CHANNEL_PAGE_COUNT as u16) {
             return Err(ErrorCode::InvalidArgument);
         }
 
         unsafe {
-            let addr = &self.shared_pages[page_idx as usize] as *const _ as usize;
+            let addr = match raw_page.s_type {
+                SubChannelType::Server => {
+                    &self.server_pages[raw_page.page_idx as usize] as *const _ as usize
+                }
+                SubChannelType::Client => {
+                    &self.client_pages[raw_page.page_idx as usize] as *const _ as usize
+                }
+            };
             Ok(core::slice::from_raw_parts_mut(addr as *mut u8, PAGE_SIZE))
         }
     }
 
-    fn alloc_page_in(&self, arena_idx: usize) -> Result<u16, ErrorCode> {
-        let bitmap_ref = if arena_idx == 0 {
-            &self.shared_pages_in_use_0
-        } else if arena_idx == 1 {
-            &self.shared_pages_in_use_1
-        } else {
-            panic!()
+    fn alloc_page(&self, subchannel: SubChannel) -> Result<RawIoPage, ErrorCode> {
+        let (bitmap_ref, subchannel_mask) = match subchannel {
+            SubChannel::Client(mask) => (&self.client_pages_in_use, mask),
+            SubChannel::Server(mask) => (&self.server_pages_in_use, mask),
         };
-        let bitmap = bitmap_ref.load(Ordering::Relaxed);
-        let ones = bitmap.trailing_ones();
-        if ones == 64 {
-            // Nothing left.
-            return Err(ErrorCode::NotReady);
-        }
 
-        let bit = 1u64 << ones;
-        assert_eq!(0, bitmap & bit);
-        // We cannot use fetch_xor here, because if a concurent xor succeeds, we may clear it,
-        // and another concurrent xor will succeed again, leading to double alloc.
-        if bitmap_ref
-            .compare_exchange_weak(bitmap, bitmap | bit, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            // Contention.
-            return Err(ErrorCode::NotReady);
-        }
+        loop {
+            let bitmap = bitmap_ref.load(Ordering::Relaxed);
+            let ones = (bitmap | !subchannel_mask).trailing_ones();
+            if ones == 64 {
+                // Nothing left.
+                return Err(ErrorCode::NotReady);
+            }
 
-        Ok(ones as u16)
+            let bit = 1u64 << ones;
+            debug_assert_eq!(0, bitmap & bit);
+            debug_assert_ne!(0, subchannel_mask & bit);
+            // We cannot use fetch_xor here, because if a concurent xor succeeds, we may clear it,
+            // and another concurrent xor will succeed again, leading to double alloc.
+            if bitmap_ref
+                .compare_exchange_weak(bitmap, bitmap | bit, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+            {
+                // Contention. Mitigated via subchannels.
+                continue;
+            }
+
+            return Ok(RawIoPage {
+                page_idx: ones as u16,
+                s_type: subchannel.into(),
+            });
+        }
     }
 
-    fn free_page_in(&self, arena_idx: usize, page_idx: u16) -> Result<(), ErrorCode> {
-        let bitmap = if arena_idx == 0 {
-            &self.shared_pages_in_use_0
-        } else if arena_idx == 1 {
-            &self.shared_pages_in_use_1
-        } else {
-            panic!()
+    fn free_page(&self, raw_page: RawIoPage) -> Result<(), ErrorCode> {
+        if (raw_page.page_idx as usize) >= CHANNEL_PAGE_COUNT {
+            return Err(ErrorCode::InvalidArgument);
+        }
+
+        let bitmap = match raw_page.s_type {
+            SubChannelType::Client => &self.client_pages_in_use,
+            SubChannelType::Server => &self.server_pages_in_use,
         };
-        let bit = 1u64 << page_idx;
-        if (bitmap.fetch_xor(bit, Ordering::Relaxed) & bit) == 0 {
+
+        let bit = 1u64 << raw_page.page_idx;
+        if (bitmap.fetch_xor(bit, Ordering::AcqRel) & bit) == 0 {
             // The page was not actually used.
             panic!(
-                "io_channel: freeing unused page {} in arena {}; bitmap: 0x{:x}",
-                page_idx,
-                arena_idx,
+                "io_channel: freeing unused page 0x{:x?}; used pages: 0x{:x}",
+                raw_page,
                 bitmap.load(Ordering::Relaxed)
             )
         } else {
@@ -244,57 +284,82 @@ impl RawChannel {
         }
     }
 
-    fn free_page(&self, page_idx: u16) -> Result<(), ErrorCode> {
-        if (page_idx as usize) >= CHANNEL_PAGE_COUNT {
-            return Err(ErrorCode::InvalidArgument);
-        }
-
-        if page_idx < 64 {
-            self.free_page_in(0, page_idx)
-        } else {
-            self.free_page_in(1, page_idx - 64)
-        }
-    }
-
     fn dump_state(&self) {
         crate::moto_log!(
-            "RawChannel: sqh: {} sqt: {} cqh: {} cqt: {}",
+            "RawChannel: sqh: {} sqt: {} cqh: {} cqt: {} client pages: 0x{:x} server pages: 0x{:x}",
             self.client_queue_head.load(Ordering::Relaxed),
             self.client_queue_tail.load(Ordering::Relaxed),
             self.server_queue_head.load(Ordering::Relaxed),
             self.server_queue_tail.load(Ordering::Relaxed),
+            self.client_pages_in_use.load(Ordering::Relaxed),
+            self.server_pages_in_use.load(Ordering::Relaxed),
         );
     }
 }
 
 pub struct IoPage {
-    page_idx: u16,
+    raw_page: RawIoPage,
     raw_channel: &'static RawChannel,
 }
 
 impl Drop for IoPage {
     fn drop(&mut self) {
-        if self.page_idx != u16::MAX {
-            self.raw_channel.free_page(self.page_idx).unwrap();
+        if self.raw_page.page_idx != u16::MAX {
+            self.raw_channel.free_page(self.raw_page).unwrap();
         }
     }
 }
 
 impl IoPage {
+    const SERVER_FLAG: u16 = 1 << 15;
+    const _FOO: () = assert!((CHANNEL_PAGE_COUNT as u16) < Self::SERVER_FLAG);
+
     pub fn bytes(&self) -> &[u8] {
-        self.raw_channel.shared_page_bytes(self.page_idx).unwrap()
+        self.raw_channel.page_bytes(self.raw_page).unwrap()
     }
 
     pub fn bytes_mut(&self) -> &mut [u8] {
-        self.raw_channel.shared_page_bytes(self.page_idx).unwrap()
+        self.raw_channel.page_bytes(self.raw_page).unwrap()
     }
 
-    pub fn page_idx(&self) -> u16 {
-        self.page_idx
+    /// Consumes the `IoPage`, returning an opaque number.
+    ///
+    /// To avoid a memory leak the number must be converted back to an `IoPage` using
+    /// [`IoPage::from_u16`].
+    ///
+    pub fn into_u16(mut val: Self) -> u16 {
+        let res = match val.raw_page.s_type {
+            SubChannelType::Client => val.raw_page.page_idx,
+            SubChannelType::Server => val.raw_page.page_idx | Self::SERVER_FLAG,
+        };
+        val.raw_page.page_idx = u16::MAX;
+        res
     }
 
-    pub fn forget(mut self) {
-        self.page_idx = u16::MAX;
+    /// Constructs an `IoPage` from an opaque number.
+    ///
+    /// The number must have been previously returned by a call to
+    /// [`IoPage::into_u16`][into_u16].
+    ///
+    fn from_u16(val: u16, raw_channel: &'static RawChannel) -> Self {
+        debug_assert!(((val & !Self::SERVER_FLAG) as usize) < CHANNEL_PAGE_COUNT);
+        match val & Self::SERVER_FLAG {
+            0 => Self {
+                raw_page: RawIoPage {
+                    page_idx: val,
+                    s_type: SubChannelType::Client,
+                },
+                raw_channel,
+            },
+            Self::SERVER_FLAG => Self {
+                raw_page: RawIoPage {
+                    page_idx: val & !Self::SERVER_FLAG,
+                    s_type: SubChannelType::Server,
+                },
+                raw_channel,
+            },
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -448,30 +513,25 @@ impl ClientConnection {
         Ok(cqe)
     }
 
-    pub fn alloc_page(&self) -> Result<IoPage, ErrorCode> {
-        // The client allocates first in 0, then 1. The server allocates first in 1, then 0.
-        if let Ok(idx) = self.raw_channel().alloc_page_in(0) {
+    pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+        if let Ok(raw_page) = self
+            .raw_channel()
+            .alloc_page(SubChannel::Client(subchannel_mask))
+        {
             Ok(IoPage {
-                page_idx: idx,
+                raw_page,
                 raw_channel: self.raw_channel(),
             })
         } else {
-            if let Ok(idx) = self.raw_channel().alloc_page_in(1) {
-                Ok(IoPage {
-                    page_idx: idx + 64,
-                    raw_channel: self.raw_channel(),
-                })
-            } else {
-                Err(ErrorCode::NotReady)
-            }
+            Err(ErrorCode::NotReady)
         }
     }
 
-    pub fn get_page(&self, page_idx: u16) -> IoPage {
-        assert!(page_idx < CHANNEL_PAGE_COUNT as u16);
-        IoPage {
-            page_idx,
-            raw_channel: self.raw_channel(),
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+        if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
+            Err(ErrorCode::InvalidArgument)
+        } else {
+            Ok(IoPage::from_u16(page_idx, self.raw_channel()))
         }
     }
 
@@ -658,33 +718,25 @@ impl ServerConnection {
         self.wait_handle = SysHandle::NONE;
     }
 
-    pub fn alloc_page(&self) -> Result<IoPage, ErrorCode> {
-        // The client allocates first in 0, then 1. The server allocates first in 1, then 0.
-        if let Ok(idx) = self.raw_channel().alloc_page_in(1) {
+    pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+        if let Ok(raw_page) = self
+            .raw_channel()
+            .alloc_page(SubChannel::Server(subchannel_mask))
+        {
             Ok(IoPage {
-                page_idx: idx + 64,
+                raw_page,
                 raw_channel: self.raw_channel(),
             })
         } else {
-            if let Ok(idx) = self.raw_channel().alloc_page_in(0) {
-                Ok(IoPage {
-                    page_idx: idx,
-                    raw_channel: self.raw_channel(),
-                })
-            } else {
-                Err(ErrorCode::NotReady)
-            }
+            Err(ErrorCode::NotReady)
         }
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
-        if page_idx >= (CHANNEL_PAGE_COUNT as u16) {
+        if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
             Err(ErrorCode::InvalidArgument)
         } else {
-            Ok(IoPage {
-                page_idx,
-                raw_channel: self.raw_channel(),
-            })
+            Ok(IoPage::from_u16(page_idx, self.raw_channel()))
         }
     }
 

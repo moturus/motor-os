@@ -21,9 +21,9 @@ pub const CMD_TCP_STREAM_RX: u16 = CMD_MIN + 7;
 pub const CMD_TCP_STREAM_RX_ACK: u16 = CMD_MIN + 8;
 pub const CMD_TCP_STREAM_SET_OPTION: u16 = CMD_MIN + 9;
 pub const CMD_TCP_STREAM_GET_OPTION: u16 = CMD_MIN + 10;
-pub const CMD_TCP_STREAM_DROP: u16 = CMD_MIN + 11;
+pub const CMD_TCP_STREAM_CLOSE: u16 = CMD_MIN + 11;
 
-pub const CMD_MAX: u16 = CMD_TCP_STREAM_DROP;
+pub const CMD_MAX: u16 = CMD_TCP_STREAM_CLOSE;
 
 pub const EVT_TCP_STREAM_STATE_CHANGED: u16 = CMD_MIN;
 
@@ -33,6 +33,34 @@ pub const TCP_OPTION_NODELAY: u64 = 1 << 2;
 pub const TCP_OPTION_TTL: u64 = 1 << 3;
 
 pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
+
+/// Each IO Channel in moto_ipc::io_channel has 64 pages (for the server and for the client).
+/// Using the full channel per socket is wasteful, so channels are split into subchannels.
+/// A channel can be split into 2^0, 2^1, 2^2, ... 2^6 subchannels (technically, we
+/// don't need a full power-of-two number of subchannels, as io_channel accepts a 64 bit
+/// mask for the subchannel, so we can have a 1-page-wide channel, a 31-page-wide channel,
+/// and a 32-page-wide channel, and maybe later we will do that, but for now we
+/// hard-code the number of equal sized subchannels in IO_SUBCHANNELS).
+///
+/// Eight subchannels (8 pages in-flight) are not much worse re: throughput vs four
+/// (16 pages in-flight), based on benchmarks.
+pub const IO_SUBCHANNELS: usize = 8;
+
+pub const fn io_subchannel_mask(io_channel_idx: usize) -> u64 {
+    debug_assert!(io_channel_idx < IO_SUBCHANNELS);
+
+    const IO_SUBCHANNEL_WIDTH: u8 = 8;
+    const IO_SUBCHANNEL_MASK: u64 = 0xFF;
+    const _A1: () = assert!((IO_SUBCHANNEL_WIDTH as usize) * IO_SUBCHANNELS == 64);
+    const _A2: () = assert!(IO_SUBCHANNEL_MASK == ((1 << IO_SUBCHANNEL_WIDTH) - 1));
+
+    IO_SUBCHANNEL_MASK << ((io_channel_idx as u64) * (IO_SUBCHANNEL_WIDTH as u64))
+}
+
+const _A1: () = assert!(io_subchannel_mask(0) == 0xFF);
+const _A2: () = assert!(io_subchannel_mask(1) == 0xFF00);
+const _A3: () = assert!(io_subchannel_mask(2) == 0xFF_0000);
+const _A4: () = assert!(io_subchannel_mask(7) == 0xFF00_0000_0000_0000);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(u32)]
@@ -83,17 +111,19 @@ pub fn bind_tcp_listener_request(addr: &SocketAddr) -> io_channel::Msg {
     msg
 }
 
-pub fn accept_tcp_listener_request(handle: u64) -> io_channel::Msg {
+pub fn accept_tcp_listener_request(handle: u64, subchannel_mask: u64) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_LISTENER_ACCEPT;
     msg.handle = handle;
+    msg.payload.args_64_mut()[0] = subchannel_mask;
 
     msg
 }
 
-pub fn tcp_stream_connect_request(addr: &SocketAddr) -> io_channel::Msg {
+pub fn tcp_stream_connect_request(addr: &SocketAddr, subchannel_mask: u64) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_STREAM_CONNECT;
+    msg.payload.args_64_mut()[0] = subchannel_mask;
     msg.payload.args_32_mut()[5] = 0; // timeout
     put_socket_addr(&mut msg.payload, addr);
 
@@ -102,6 +132,7 @@ pub fn tcp_stream_connect_request(addr: &SocketAddr) -> io_channel::Msg {
 
 pub fn tcp_stream_connect_timeout_request(
     addr: &SocketAddr,
+    subchannel_mask: u64,
     timeout: moto_sys::time::Instant,
 ) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
@@ -110,6 +141,7 @@ pub fn tcp_stream_connect_timeout_request(
     // We have only 32 bits for timeout. ~10ms granularity is fine.
     let timeout = timeout.as_u64() >> 27;
     assert!(timeout < (u32::MAX) as u64);
+    msg.payload.args_64_mut()[0] = subchannel_mask;
     msg.payload.args_32_mut()[5] = timeout as u32;
     put_socket_addr(&mut msg.payload, addr);
 
@@ -135,11 +167,9 @@ pub fn tcp_stream_tx_msg(
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_STREAM_TX;
     msg.handle = handle;
-    msg.payload.shared_pages_mut()[0] = io_page.page_idx();
+    msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
     msg.payload.args_64_mut()[1] = sz as u64;
     msg.payload.args_64_mut()[2] = timestamp;
-
-    io_page.forget();
 
     msg
 }
@@ -153,11 +183,9 @@ pub fn tcp_stream_rx_msg(
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_STREAM_RX;
     msg.handle = handle;
-    msg.payload.shared_pages_mut()[0] = io_page.page_idx();
+    msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
     msg.payload.args_64_mut()[1] = sz as u64;
     msg.payload.args_64_mut()[2] = rx_seq;
-
-    io_page.forget();
 
     msg
 }

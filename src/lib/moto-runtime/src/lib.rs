@@ -21,7 +21,7 @@ pub mod process;
 pub mod std_rt;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod stdio;
-#[cfg(feature = "rustc-dep-of-std")]
+#[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod thread;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod time;

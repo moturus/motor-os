@@ -44,6 +44,9 @@ pub(super) struct MotoSocket {
 
     // When the socket becomes CloseWait or Closed, sys-io notifies the client once.
     pub rx_closed_notified: bool,
+
+    // See moto_ipc::io_channel::ServerConnection::alloc_page().
+    pub subchannel_mask: u64,
 }
 
 impl Drop for MotoSocket {
