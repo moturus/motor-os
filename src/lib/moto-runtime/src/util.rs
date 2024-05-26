@@ -596,7 +596,7 @@ impl<T: ?Sized> SpinLock<T> {
             let mut inner_iter = 0_u64;
             while self.lock_word.load(Ordering::Relaxed) != 0 {
                 inner_iter += 1;
-                if inner_iter > 100_000_000 {
+                if inner_iter > 1_000_000_000 {
                     panic!(
                         "spinlock inner deadlock: {} => {}",
                         self.lock_word.load(Ordering::Acquire),
@@ -609,6 +609,7 @@ impl<T: ?Sized> SpinLock<T> {
     }
 
     pub fn lock(&self, lockword: u32) -> LockGuard<'_, T> {
+        assert_ne!(0, lockword);
         self.obtain_lock(lockword);
         LockGuard {
             lock_word: &self.lock_word,
