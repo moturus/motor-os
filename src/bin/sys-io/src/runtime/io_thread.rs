@@ -144,8 +144,10 @@ impl IoRuntime {
 
             if msg.status() != ErrorCode::NotReady {
                 log::info!(
-                    "Dropping conn 0x{:x} due to bad sqe.",
-                    endpoint_handle.as_u64()
+                    "Dropping conn 0x{:x} due to bad sqe {} {:?}.",
+                    endpoint_handle.as_u64(),
+                    msg.command,
+                    msg.status()
                 );
                 self.drop_connection(endpoint_handle);
                 return;
