@@ -198,7 +198,8 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
 
     if wakers.len() > 6 {
         todo!(
-            "wow, a lot of wakers for proc {}",
+            "wow, a lot of wakers ({} exactly) for proc {}",
+            wakers.len(),
             curr.owner().debug_name()
         )
     } // Do HANDLE_ARRAY
