@@ -87,34 +87,64 @@ pub fn test_array_queue() {
 
     let queue = std::sync::Arc::new(ArrayQueue::<Msg>::new(128));
     let queue_2 = queue.clone();
+    let queue_3 = queue.clone();
 
     let start = Instant::now();
-    let sender = std::thread::spawn(move || {
+    let sender1 = std::thread::spawn(move || {
         for n in 0..ITERS {
             loop {
-                if queue_2.push(Msg::new(n)).is_ok() {
+                let mut msg = Msg::new(n);
+                msg.data[0] = 1;
+                if queue_2.push(msg).is_ok() {
+                    break;
+                }
+            }
+        }
+    });
+    let sender2 = std::thread::spawn(move || {
+        for n in 0..ITERS {
+            loop {
+                let mut msg = Msg::new(n);
+                msg.data[0] = 2;
+                if queue_3.push(msg).is_ok() {
                     break;
                 }
             }
         }
     });
 
+
     // Receive inline.
-    for _n in 0..ITERS {
-        loop {
-            if queue.pop().is_some() {
-                break;
+    let mut s1_count = 0;
+    let mut s2_count = 0;
+    for _ in 0..2 * ITERS {
+        let msg = loop {
+            if let Some(msg) = queue.pop() {
+                break msg;
             }
+        };
+        let val = if msg.data[0] == 1 {
+            s1_count += 1;
+            s1_count - 1
+        } else if msg.data[0] == 2 {
+            s2_count += 1;
+            s2_count - 1
+        } else {
+            panic!("{}", msg.data[0]);
+        };
+        for idx in 1..msg.data.len() {
+            assert_eq!(val, msg.data[idx]);
         }
     }
 
-    sender.join().unwrap();
+    sender1.join().unwrap();
+    sender2.join().unwrap();
     let elapsed = start.elapsed();
     let cpu_usage = moto_runtime::util::get_cpu_usage();
 
     println!(
         "test_array_queue: {:.3} MIOPS",
-        (ITERS as f64) / elapsed.as_secs_f64() / (1000.0 * 1000.0)
+        ((2 * ITERS) as f64) / elapsed.as_secs_f64() / (1000.0 * 1000.0)
     );
     print!("\tcpu usage: ");
     for n in &cpu_usage {

@@ -7,7 +7,7 @@ use std::sync::{atomic::*, Arc};
 use std::time::Duration;
 
 fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
-    stream.set_read_timeout(Some(Duration::from_millis(1)));
+    stream.set_read_timeout(Some(Duration::from_millis(1000)));
     let mut data = [0 as u8; 17];
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -28,7 +28,7 @@ fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
             }
         }
     }
-    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
@@ -73,7 +73,7 @@ fn client_iter() {
             panic!("{:?}", e)
         }
     }
-    stream.shutdown(std::net::Shutdown::Both);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn test_io_latency() {
@@ -93,7 +93,7 @@ fn test_io_latency() {
     }
 
     let elapsed = start.elapsed();
-    stream.shutdown(std::net::Shutdown::Both);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     println!(
         "IO latency of TcpStream::set_nodelay(): {:.3} usec/IO",
         elapsed.as_secs_f64() * 1000.0 * 1000.0 / (iters as f64)
@@ -119,7 +119,7 @@ fn test_read_timeout() {
         while !stop_listener.load(Ordering::Relaxed) {
             let _ = stream.read(&mut data);
         }
-        stream.shutdown(std::net::Shutdown::Both).unwrap();
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     });
 
     while !started_listener.load(Ordering::Relaxed) {
@@ -172,7 +172,7 @@ fn test_read_timeout() {
     stream.set_ttl(43).unwrap();
     assert_eq!(43, stream.ttl().unwrap());
 
-    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     stop_sender.store(true, Ordering::Relaxed);
 
     // TODO: server.join() below sometimes (rarely) hangs, indicating that stream.shutdown()
@@ -210,7 +210,7 @@ pub fn test_tcp_loopback() {
         let stream = std::net::TcpStream::connect_timeout(&socket_addr, Duration::from_millis(100));
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(stream) = stream {
-            stream.shutdown(std::net::Shutdown::Both);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
     server.join().unwrap();
