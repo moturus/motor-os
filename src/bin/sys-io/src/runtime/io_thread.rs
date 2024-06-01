@@ -38,7 +38,7 @@ impl IoRuntime {
                 self.cached_wakee_connection = SysHandle::NONE;
             }
 
-            log::debug!("dropping client 0x{:x}", handle.as_u64());
+            log::info!("Dropping conn 0x{:x}.", handle.as_u64());
 
             // Ignore errors below because the target could be dead.
             let _ = moto_sys::syscalls::SysCpu::kill_remote(handle);
@@ -105,14 +105,19 @@ impl IoRuntime {
     }
 
     fn poll_endpoint(&mut self, endpoint_handle: SysHandle, mut timeout_wakeup: bool) {
-        let conn = if unlikely(timeout_wakeup) {
-            if let Some(p) = self.connections.get_mut(&endpoint_handle) {
-                p
-            } else {
+        let conn = if let Some(conn) = self.connections.get_mut(&endpoint_handle) {
+            conn
+        } else {
+            if unlikely(timeout_wakeup) {
                 return;
             }
-        } else {
-            self.connections.get_mut(&endpoint_handle).unwrap()
+
+            log::error!(
+                "Unknown wakeup handle 0x{:x}; timeout: {:?}",
+                u64::from(endpoint_handle),
+                timeout_wakeup
+            );
+            return;
         };
         debug_assert_eq!(conn.status(), io_channel::ServerStatus::Connected);
 
@@ -133,7 +138,7 @@ impl IoRuntime {
             };
 
             if unlikely(timeout_wakeup) {
-                log::info!(
+                log::error!(
                     "timeout wakeup: got sqe 0x{:x} for conn 0x{:x}:{:x}",
                     msg.id,
                     conn.wait_handle().as_u64(),
@@ -143,7 +148,7 @@ impl IoRuntime {
             }
 
             if msg.status() != ErrorCode::NotReady {
-                log::info!(
+                log::error!(
                     "Dropping conn 0x{:x} due to bad sqe {} {:?}.",
                     endpoint_handle.as_u64(),
                     msg.command,
@@ -230,8 +235,7 @@ impl IoRuntime {
                     log::debug!("io_runtime: accept() failed.");
                     return;
                 }
-                #[cfg(debug_assertions)]
-                log::debug!("io_runtime: new connection 0x{:x}.", handle.as_u64());
+                log::info!("New conn 0x{:x}.", handle.as_u64());
                 self.connections.insert(handle, Rc::new(listener));
             }
         }
