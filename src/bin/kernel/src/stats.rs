@@ -361,7 +361,7 @@ impl KProcessStats {
                 }
             }
             let child_lock = SYSTEM_STATS.children.lock(line!());
-            for entry in child_lock.range(ProcessId::from_u64(PID_KERNEL)..) {
+            for entry in child_lock.range(start..) {
                 if let Some(e) = entry.1.upgrade() {
                     if !func(e.as_ref()) {
                         return;

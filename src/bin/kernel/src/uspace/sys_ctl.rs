@@ -377,6 +377,11 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     }
 
     let handle = SysHandle::from_u64(args.args[0]);
+    let return_pid = match args.flags {
+        0 => false,
+        SysCtl::F_QUERY_PID => true,
+        _ => return ResultBuilder::invalid_argument(),
+    };
 
     // See process_wait_handle in SysCpu.
     let process = thread.owner();
@@ -390,7 +395,16 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             );
             return ResultBuilder::bad_handle(handle);
         }
-        return ResultBuilder::ok();
+
+        if return_pid {
+            if let Some(proc) = super::shared::peer_owner(thread.owner().pid(), &obj.sys_object) {
+                return ResultBuilder::ok_1(proc.pid().as_u64());
+            } else {
+                return ResultBuilder::result(ErrorCode::NotFound);
+            }
+        } else {
+            return ResultBuilder::ok();
+        }
     } else {
         log::debug!(
             "sys_wait: object not found in pid {} for handle {}.",

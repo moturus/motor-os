@@ -147,6 +147,7 @@ impl SysCtl {
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
     pub const F_QUERY_LIST_CHILDREN: u32 = 3;
+    pub const F_QUERY_PID: u32 = 4;
 
     // When connecting to ("getting") a shared URL, wake the counterpart.
     pub const F_WAKE_PEER: u32 = 1;
@@ -340,6 +341,26 @@ impl SysCtl {
 
         if result.is_ok() {
             Ok(())
+        } else {
+            Err(result.error_code().into())
+        }
+    }
+
+    /// Returns the PID of the handle owner.
+    #[cfg(feature = "userspace")]
+    pub fn get_pid(handle: SysHandle) -> Result<u64, ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_CTL, Self::OP_QUERY_HANDLE, Self::F_QUERY_PID, 0),
+            handle.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(result.data[0])
         } else {
             Err(result.error_code().into())
         }
