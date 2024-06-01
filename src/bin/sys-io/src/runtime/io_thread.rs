@@ -16,7 +16,7 @@ struct IoRuntime {
     net_handles: HashSet<SysHandle>,
 
     listeners: HashMap<SysHandle, io_channel::ServerConnection>,
-    connections: HashMap<SysHandle, Rc<io_channel::ServerConnection>>,
+    connections: HashMap<SysHandle, (Rc<io_channel::ServerConnection>, String)>,
 
     all_handles: Vec<SysHandle>,
 
@@ -31,14 +31,14 @@ impl IoRuntime {
     fn drop_connection(&mut self, handle: SysHandle) {
         if let Some(conn) = self.connections.remove(&handle) {
             self.net.on_connection_drop(handle);
-            assert_eq!(1, Rc::strong_count(&conn));
+            assert_eq!(1, Rc::strong_count(&conn.0));
 
             self.update_handles();
             if self.cached_wakee_connection == handle {
                 self.cached_wakee_connection = SysHandle::NONE;
             }
 
-            log::info!("Dropping conn 0x{:x}.", handle.as_u64());
+            crate::moto_log!("Dropping 0x{:x} {}.", handle.as_u64(), conn.1);
 
             // Ignore errors below because the target could be dead.
             let _ = moto_sys::syscalls::SysCpu::kill_remote(handle);
@@ -105,7 +105,7 @@ impl IoRuntime {
     }
 
     fn poll_endpoint(&mut self, endpoint_handle: SysHandle, mut timeout_wakeup: bool) {
-        let conn = if let Some(conn) = self.connections.get_mut(&endpoint_handle) {
+        let conn = if let Some((conn, _)) = self.connections.get_mut(&endpoint_handle) {
             conn
         } else {
             if unlikely(timeout_wakeup) {
@@ -235,8 +235,10 @@ impl IoRuntime {
                     log::debug!("io_runtime: accept() failed.");
                     return;
                 }
-                log::info!("New conn 0x{:x}.", handle.as_u64());
-                self.connections.insert(handle, Rc::new(listener));
+                let conn_name = super::conn_name(handle);
+                crate::moto_log!("New conn 0x{:x} {}.", handle.as_u64(), conn_name);
+                self.connections
+                    .insert(handle, (Rc::new(listener), conn_name));
             }
         }
 
@@ -269,7 +271,7 @@ impl IoRuntime {
 
             let wakee = completion.endpoint_handle;
 
-            if let Err(err) = conn.send(completion.msg) {
+            if let Err(err) = conn.0.send(completion.msg) {
                 debug_assert_eq!(err, ErrorCode::NotReady);
                 self.pending_completions.push_back(completion);
             }

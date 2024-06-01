@@ -69,3 +69,17 @@ pub fn alloc_mmio_region(size: u64) -> (u64, u64) {
 
     (phys_addr, virt_addr)
 }
+
+fn conn_name(handle: SysHandle) -> String {
+    let pid = if let Ok(pid) = moto_sys::syscalls::SysCtl::get_pid(handle) {
+        pid
+    } else {
+        return "<unknown>".to_owned();
+    };
+    let mut stats = [moto_sys::stats::ProcessStatsV1::default()];
+    if let Ok(1) = moto_sys::stats::ProcessStatsV1::list(pid, &mut stats) {
+        return format!("{}: `{}`", pid, stats[0].debug_name()).to_owned();
+    } else {
+        return "<unknown>".to_owned();
+    }
+}
