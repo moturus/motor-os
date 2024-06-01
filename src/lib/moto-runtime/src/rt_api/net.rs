@@ -103,9 +103,18 @@ impl TcpState {
     }
 }
 
-pub fn bind_tcp_listener_request(addr: &SocketAddr) -> io_channel::Msg {
+/// Prepare CMD_TCP_LISTENER_BIND IO message. `num_listeners` indicate the number of
+/// outstanding listening sockets to create: each incoming connection consumes one
+/// socket, and a new listener is created. But if several incoming connections happen
+/// at once, they can consume all outstanding listeners so that new incoming connections
+/// are rejected until new listeners are created, thus having several outstanding listeners
+/// reduces the chance that an incoming connection is rejected because there are no
+/// outstanding listeners due to a spike in incoming connections.
+/// `num_listeners` can be no more than 32.
+pub fn bind_tcp_listener_request(addr: &SocketAddr, num_listeners: Option<u8>) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_LISTENER_BIND;
+    msg.flags = num_listeners.unwrap_or(0) as u32;
     put_socket_addr(&mut msg.payload, addr);
 
     msg

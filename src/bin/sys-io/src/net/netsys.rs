@@ -19,7 +19,8 @@ use super::RxBuf;
 use super::{netdev::NetDev, TxBuf};
 
 // How many listening sockets to open (per specific SocketAddr).
-const _DEFAULT_MAX_LISTENING_SOCKETS: usize = 4;
+const DEFAULT_NUM_LISTENING_SOCKETS: usize = 4;
+const MAX_NUM_LISTENING_SOCKETS: usize = 32;
 // How many concurrent connections per listener (any SocketAddr) to allow.
 const _DEFAULT_MAX_CONNECTIONS_PER_LISTENER: usize = 16;
 
@@ -134,6 +135,16 @@ impl NetSys {
             }
         };
 
+        let num_listeners = if sqe.flags == 0 {
+            DEFAULT_NUM_LISTENING_SOCKETS
+        } else {
+            sqe.flags as usize
+        };
+        if num_listeners > MAX_NUM_LISTENING_SOCKETS {
+            sqe.status = ErrorCode::InvalidArgument.into();
+            return sqe;
+        }
+
         let listener_id: TcpListenerId = self.next_id().into();
         let listener = TcpListener::new(conn.clone(), socket_addr);
         self.tcp_listeners.insert(listener_id, listener);
@@ -163,9 +174,12 @@ impl NetSys {
                     let cidrs = self.devices[idx].dev_cfg().cidrs.clone();
                     for cidr in &cidrs {
                         let local_addr = SocketAddr::new(cidr.ip(), socket_addr.port());
-                        if let Err(err) =
-                            self.start_listening_on_device(listener_id, idx, local_addr)
-                        {
+                        if let Err(err) = self.start_listening_on_device(
+                            listener_id,
+                            idx,
+                            local_addr,
+                            num_listeners,
+                        ) {
                             self.drop_tcp_listener(listener_id);
                             sqe.status = err.into();
                             return sqe;
@@ -174,7 +188,9 @@ impl NetSys {
                 }
             }
             Some(idx) => {
-                if let Err(err) = self.start_listening_on_device(listener_id, idx, socket_addr) {
+                if let Err(err) =
+                    self.start_listening_on_device(listener_id, idx, socket_addr, num_listeners)
+                {
                     self.drop_tcp_listener(listener_id);
                     sqe.status = err.into();
                     return sqe;
@@ -192,47 +208,52 @@ impl NetSys {
         listener_id: TcpListenerId,
         device_idx: usize,
         socket_addr: SocketAddr,
+        num_listeners: usize,
     ) -> Result<(), ErrorCode> {
         assert!(!socket_addr.ip().is_unspecified());
-        let mut moto_socket = self.new_socket_for_device(device_idx)?;
-        let socket_id = moto_socket.id;
-        moto_socket.listener_id = Some(listener_id);
-        self.tcp_listeners
-            .get_mut(&listener_id)
-            .unwrap()
-            .add_listening_socket(socket_id);
-        moto_socket.state = TcpState::Listening;
 
-        let smol_handle = moto_socket.handle;
-        self.tcp_sockets.insert(moto_socket.id, moto_socket);
+        for _ in 0..num_listeners {
+            let mut moto_socket = self.new_socket_for_device(device_idx)?;
+            let socket_id = moto_socket.id;
+            moto_socket.listener_id = Some(listener_id);
+            self.tcp_listeners
+                .get_mut(&listener_id)
+                .unwrap()
+                .add_listening_socket(socket_id);
+            moto_socket.state = TcpState::Listening;
 
-        let smol_socket = self.devices[device_idx]
-            .sockets
-            .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
-        smol_socket
-            .listen((socket_addr.ip(), socket_addr.port()))
-            .unwrap();
-        log::debug!(
-            "{}:{} started listener {:?} on device #{}",
-            file!(),
-            line!(),
-            socket_addr,
-            device_idx
-        );
+            let smol_handle = moto_socket.handle;
+            self.tcp_sockets.insert(moto_socket.id, moto_socket);
+
+            let smol_socket = self.devices[device_idx]
+                .sockets
+                .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
+            smol_socket
+                .listen((socket_addr.ip(), socket_addr.port()))
+                .unwrap();
+            log::debug!(
+                "{}:{} started listener {:?} on device #{}",
+                file!(),
+                line!(),
+                socket_addr,
+                device_idx
+            );
+        }
+
         Ok(())
     }
 
     fn new_socket_for_device(&mut self, device_idx: usize) -> Result<MotoSocket, ErrorCode> {
-        let mut socket = self.get_unused_tcp_socket()?;
+        let mut smol_socket = self.get_unused_tcp_socket()?;
         let socket_id = self.next_id().into();
 
         let socket_waker = super::socket::SocketWaker::new(socket_id, self.woken_sockets.clone());
         let waker = unsafe { std::task::Waker::from_raw(socket_waker.into_raw_waker()) };
-        socket.register_recv_waker(&waker);
-        socket.register_send_waker(&waker);
+        smol_socket.register_recv_waker(&waker);
+        smol_socket.register_send_waker(&waker);
         self.wakers.insert(socket_id, waker);
 
-        let handle = self.devices[device_idx].sockets.add(socket);
+        let handle = self.devices[device_idx].sockets.add(smol_socket);
 
         log::debug!(
             "{}:{} new TCP socket 0x{:x}; {} active sockets.",
@@ -985,7 +1006,9 @@ impl NetSys {
             remote_addr
         );
 
-        if let Err(err) = self.start_listening_on_device(listener_id, device_idx, local_addr) {
+        // One listening socket has been consumed (became a connected socket),
+        // so we create another one.
+        if let Err(err) = self.start_listening_on_device(listener_id, device_idx, local_addr, 1) {
             log::error!(
                 "{}:{} bind_on_device() failed with {:?}",
                 file!(),

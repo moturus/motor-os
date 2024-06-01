@@ -1160,7 +1160,7 @@ pub struct TcpListener {
 
 impl TcpListener {
     pub fn bind(socket_addr: &SocketAddr) -> Result<TcpListener, ErrorCode> {
-        let req = rt_api::net::bind_tcp_listener_request(socket_addr);
+        let req = rt_api::net::bind_tcp_listener_request(socket_addr, None);
         let channel = NET.lock(line!()).reserve_channel();
         let resp = channel.send_receive(req);
         if resp.status().is_err() {
