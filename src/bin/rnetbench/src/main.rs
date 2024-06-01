@@ -12,7 +12,7 @@ use clap::Parser;
 mod client;
 mod server;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 struct Args {
     #[arg(short, long, default_value_t = false)]
     server: bool,
@@ -86,7 +86,7 @@ fn main() {
 }
 
 fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Duration, usize) {
-    let mut buffer = [0; 1513];
+    let mut buffer = [0; 1024];
     let mut total_bytes_read = 0usize;
     let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
@@ -117,6 +117,7 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
     let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
+    // println!("throughput read done");
     (duration, total_bytes_read)
 }
 
@@ -160,5 +161,6 @@ fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Du
     let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
+    // println!("throughput write done");
     (duration, total_bytes_sent)
 }

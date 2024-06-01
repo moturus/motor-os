@@ -59,29 +59,95 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
         crate::CMD_TCP_RR => {
             do_rr(handshake(addr, cmd)?, Duration::from_secs(args.time as u64))?;
         }
-        crate::CMD_TCP_THROUGHPUT_OUT => {
-            let (duration, bytes) = crate::do_throughput_write(handshake(addr, cmd)?, Some(args));
-            let rate = bytes as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-            println!(
-                "Throughput client => server done: {:.2}MB sent; {:.2?} MiB/sec.",
-                (bytes as f64) / (1024.0 * 1024.0),
-                rate
-            );
-        }
-        crate::CMD_TCP_THROUGHPUT_IN => {
-            let (duration, bytes) = crate::do_throughput_read(handshake(addr, cmd)?, Some(args));
-            let rate = bytes as f64 / duration.as_secs_f64() / (1024.0 * 1024.0);
-            println!(
-                "Throughput server => client done: {:.2}MB sent; {:.2?} MiB/sec.",
-                (bytes as f64) / (1024.0 * 1024.0),
-                rate
-            );
+        crate::CMD_TCP_THROUGHPUT_IN | crate::CMD_TCP_THROUGHPUT_OUT => {
+            do_throughput_cmd(cmd, addr, args)?;
         }
         _ => {
             panic!("unrecognized command: {}", cmd);
         }
     }
 
+    Ok(())
+}
+
+struct ThroughputResult {
+    duration: std::time::Duration,
+    bytes: usize,
+}
+
+impl ThroughputResult {
+    fn new() -> Self {
+        ThroughputResult {
+            duration: Duration::new(0, 0),
+            bytes: 0,
+        }
+    }
+}
+
+fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<()> {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    let num_threads = args.parallel;
+    let duration = std::time::Duration::from_secs(args.time as u64);
+
+    let thread_func = move |arg: Arc<Mutex<ThroughputResult>>, args: crate::Args| {
+        let (duration, bytes) = match cmd {
+            crate::CMD_TCP_THROUGHPUT_IN => {
+                crate::do_throughput_read(handshake(addr, cmd).unwrap(), Some(&args))
+            }
+            crate::CMD_TCP_THROUGHPUT_OUT => {
+                crate::do_throughput_write(handshake(addr, cmd).unwrap(), Some(&args))
+            }
+            _ => panic!(),
+        };
+        let mut res = arg.lock().unwrap();
+        res.duration = duration;
+        res.bytes = bytes;
+    };
+
+    let mut results: Vec<Arc<Mutex<ThroughputResult>>> = Vec::new();
+    let mut threads = Vec::new();
+
+    for _ in 0..num_threads {
+        let result = Arc::new(Mutex::new(ThroughputResult::new()));
+        let cloned_args = args.clone();
+        results.push(result.clone());
+        threads.push(std::thread::spawn(move || {
+            thread_func(result, cloned_args);
+        }));
+    }
+
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    let mut total_duration = Duration::new(0, 0);
+    let mut total_bytes = 0;
+
+    for r in &results {
+        let res = r.lock().unwrap();
+        assert!(res.duration >= duration);
+        assert!(res.duration.as_secs_f64() < duration.as_secs_f64() * 1.1);
+
+        total_duration += res.duration;
+        total_bytes += res.bytes;
+    }
+
+    let rate = total_bytes as f64
+        / (total_duration.as_secs_f64() / (num_threads as f64))
+        / (1024.0 * 1024.0);
+    let op = match cmd {
+        crate::CMD_TCP_THROUGHPUT_IN => "Throughput server => client",
+        crate::CMD_TCP_THROUGHPUT_OUT => "Throughput client => server",
+        _ => panic!(),
+    };
+
+    println!(
+        "{op} done: {:.2}MB sent; {:.2?} MiB/sec.",
+        (total_bytes as f64) / (1024.0 * 1024.0),
+        rate
+    );
     Ok(())
 }
 
