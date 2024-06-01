@@ -148,6 +148,19 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
         (total_bytes as f64) / (1024.0 * 1024.0),
         rate
     );
+
+    if num_threads > 1 {
+        for idx in 0..num_threads {
+            let res = results[idx as usize].lock().unwrap();
+            let rate = res.bytes as f64 / res.duration.as_secs_f64() / (1024.0 * 1024.0);
+            println!(
+                "    T{}: {:.2}MB sent; {:.2?} MiB/sec.",
+                idx,
+                (res.bytes as f64) / (1024.0 * 1024.0),
+                rate
+            );
+        }
+    }
     Ok(())
 }
 
