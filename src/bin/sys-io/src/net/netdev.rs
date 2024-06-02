@@ -82,7 +82,6 @@ impl TxToken for VirtioTxToken {
 
         let mut buffer = vec![0u8; len];
         let result = f(&mut buffer);
-        self.dev().tx_queued += buffer.len();
         self.dev().pending_tx.push_back(buffer);
 
         result
@@ -92,10 +91,7 @@ impl TxToken for VirtioTxToken {
 struct VirtioSmoltcpDevice {
     // If virtio_dev does not have available TX buffers, we store outgoing bytes here.
     pending_tx: VecDeque<Vec<u8>>,
-    tx_queued: usize,
-
     virtio_dev: moto_virtio::virtio_net::NetDev,
-
     rx_packet: Option<moto_virtio::virtio_net::RxPacket>,
 }
 
@@ -107,7 +103,6 @@ impl VirtioSmoltcpDevice {
 
         let mut self_ = Self {
             pending_tx: VecDeque::new(),
-            tx_queued: 0,
             virtio_dev,
             rx_packet: None,
         };
@@ -194,6 +189,9 @@ impl smoltcp::phy::Device for VirtioSmoltcpDevice {
 
     // Note: this is called from smoltcp::iface::Interface::poll() if smoltcp has bytes to send.
     fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
+        if !self.pending_tx.is_empty() {
+            return None;
+        }
         Some(VirtioTxToken {
             dev: self as *mut Self,
         })

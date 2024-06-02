@@ -128,14 +128,13 @@ impl NetChannel {
     }
 
     fn io_thread(&self) -> ! {
-        self.io_thread_running.store(true, Ordering::Release);
-
         let mut maybe_msg = None;
         loop {
+            self.io_thread_running.store(true, Ordering::Release);
             let mut should_sleep = self.io_thread_poll_messages();
             let (sleep, msg) = self.io_thread_send_messages(maybe_msg);
             maybe_msg = msg;
-            should_sleep |= sleep;
+            should_sleep &= sleep;
 
             if should_sleep {
                 assert!(maybe_msg.is_none());
@@ -147,7 +146,6 @@ impl NetChannel {
                 }
                 self.io_thread_running.store(false, Ordering::Release);
                 if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
-                    self.io_thread_running.store(true, Ordering::Release);
                     continue;
                 }
                 let waiter = { self.send_waiters.lock(line!()).pop_front() };
@@ -157,7 +155,6 @@ impl NetChannel {
                     continue;
                 }
                 if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
-                    self.io_thread_running.store(true, Ordering::Release);
                     continue;
                 }
 
@@ -941,7 +938,10 @@ impl TcpStream {
                         return Ok(0);
                     }
 
-                    if spin_loop_counter < 100 {
+                    // 100_000 ok
+                    // 1000 ok
+                    // 100 is bad
+                    if spin_loop_counter < 800 {
                         spin_loop_counter += 1;
                         core::hint::spin_loop();
                         continue;
@@ -1237,11 +1237,12 @@ impl TcpListener {
 
         #[cfg(debug_assertions)]
         moturus_log!(
-            "{}:{} new incoming TcpStream {:?} <- {:?}",
+            "{}:{} new incoming TcpStream {:?} <- {:?} mask: 0x{:x}",
             file!(),
             line!(),
             inner.local_addr,
-            inner.remote_addr
+            inner.remote_addr,
+            inner.subchannel_mask
         );
 
         Ok((TcpStream { inner }, remote_addr))
