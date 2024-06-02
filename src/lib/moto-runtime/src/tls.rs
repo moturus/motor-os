@@ -1,6 +1,6 @@
+use crate::external::spin;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::*;
-use crate::external::spin;
 
 pub type Key = usize;
 pub type Dtor = unsafe extern "C" fn(*mut u8);
@@ -77,7 +77,5 @@ pub fn thread_exiting() {
 }
 
 pub fn destroy(key: Key) {
-    // This never happens, it seems. Maybe we should call it?
-    moto_sys::syscalls::SysMem::log("tls::destroy").ok();
     KEYS.lock().remove(&key);
 }
