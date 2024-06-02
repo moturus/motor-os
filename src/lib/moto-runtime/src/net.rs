@@ -917,8 +917,9 @@ impl TcpStream {
         // TODO: now we sleep exponentially long (up to a limit) on stuck writes.
         //       We should add a new msg to the driver so that it wakes us up
         //       when writes are unstuck.
-        let mut sleep_timo_usec = 0;
+        let mut sleep_timo_usec = 1;
         let mut spin_loop_counter: u64 = 0;
+        let mut yield_counter: u64 = 0;
         let io_page = loop {
             if let Some(timo) = abs_timeout {
                 if moto_sys::time::Instant::now() >= timo {
@@ -938,16 +939,13 @@ impl TcpStream {
                         return Ok(0);
                     }
 
-                    // 100_000 ok
-                    // 1000 ok
-                    // 100 is bad
-                    if spin_loop_counter < 800 {
+                    if spin_loop_counter < 100 {
                         spin_loop_counter += 1;
                         core::hint::spin_loop();
                         continue;
-                    } else if sleep_timo_usec < 10 {
+                    } else if yield_counter < 100 {
                         moto_sys::syscalls::SysCpu::sched_yield();
-                        sleep_timo_usec += 1;
+                        yield_counter += 1;
                         continue;
                     }
 
