@@ -38,6 +38,7 @@ impl IoRuntime {
                 self.cached_wakee_connection = SysHandle::NONE;
             }
 
+            #[cfg(debug_assertions)]
             crate::moto_log!("Dropping 0x{:x} {}.", handle.as_u64(), conn.1);
 
             // Ignore errors below because the target could be dead.
@@ -236,6 +237,7 @@ impl IoRuntime {
                     return;
                 }
                 let conn_name = super::conn_name(handle);
+                #[cfg(debug_assertions)]
                 crate::moto_log!("New conn 0x{:x} {}.", handle.as_u64(), conn_name);
                 self.connections
                     .insert(handle, (Rc::new(listener), conn_name));

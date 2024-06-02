@@ -388,7 +388,12 @@ impl NetSys {
         };
 
         if listener.conn_handle() != conn.wait_handle() {
-            todo!("validate that both handles belong to the same process");
+            // Validate that the listener and the connection belong to the same process.
+            let pid1 = moto_sys::syscalls::SysCtl::get_pid(listener.conn_handle()).unwrap();
+            let pid2 = moto_sys::syscalls::SysCtl::get_pid(conn.wait_handle()).unwrap();
+            if pid1 != pid2 {
+                return Err(());
+            }
         }
 
         if let Some((socket_id, socket_addr)) = listener.pop_pending_socket() {
