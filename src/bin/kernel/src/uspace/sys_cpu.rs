@@ -117,6 +117,78 @@ fn process_wait_handles(
     ResultBuilder::ok()
 }
 
+fn process_wake_handles(
+    curr: &super::process::Thread,
+    args: &SyscallArgs,
+    next_arg: usize,
+    wakers: Vec<SysHandle>,
+    timed_out: bool,
+) -> SyscallResult {
+    if wakers.len() < 6 {
+        let mut data = [0_u64; 6];
+
+        for idx in 0..data.len() {
+            if idx < wakers.len() {
+                data[idx] = wakers[idx].as_u64();
+            } else {
+                data[idx] = 0;
+            }
+        }
+
+        if timed_out {
+            return SyscallResult {
+                result: ErrorCode::TimedOut as u64,
+                data,
+            };
+        } else {
+            return SyscallResult {
+                result: ErrorCode::Ok as u64,
+                data,
+            };
+        }
+    }
+
+    // We assume, below, that args have been validated in process_wait_handles().
+    assert_ne!(0, args.flags & SysCpu::F_HANDLE_ARRAY);
+    let h_ptr = args.args[next_arg];
+    let h_sz = args.args[next_arg + 1];
+    assert!(wakers.len() <= h_sz as usize);
+
+    let mut idx = 0;
+    for handle in &wakers {
+        let val = u64::from(handle);
+        let buf: &[u8] =
+            unsafe { core::slice::from_raw_parts(&val as *const _ as usize as *const u8, 8) };
+        unsafe {
+            curr.owner()
+                .address_space()
+                .copy_to_user(buf, h_ptr + 8 * idx)
+                .unwrap();
+        }
+        idx += 1;
+    }
+
+    let zero = 0_u64;
+    let buf_zero: &[u8] =
+        unsafe { core::slice::from_raw_parts(&zero as *const _ as usize as *const u8, 8) };
+    for pos in idx..h_sz {
+        unsafe {
+            curr.owner()
+                .address_space()
+                .copy_to_user(buf_zero, h_ptr + 8 * pos)
+                .unwrap();
+        }
+    }
+
+    let mut result = ResultBuilder::ok();
+    result.result |= SyscallResult::F_HANDLE_ARRAY;
+    if timed_out {
+        result.result |= ErrorCode::TimedOut as u64;
+    }
+
+    result
+}
+
 pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     if args.version < 1 {
         return ResultBuilder::version_too_low();
@@ -196,35 +268,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         curr.wait()
     };
 
-    if wakers.len() > 6 {
-        todo!(
-            "wow, a lot of wakers ({} exactly) for proc {}",
-            wakers.len(),
-            curr.owner().debug_name()
-        )
-    } // Do HANDLE_ARRAY
-
-    let mut data = [0_u64; 6];
-
-    for idx in 0..data.len() {
-        if idx < wakers.len() {
-            data[idx] = wakers[idx].as_u64();
-        } else {
-            data[idx] = 0;
-        }
-    }
-
-    if timed_out {
-        SyscallResult {
-            result: ErrorCode::TimedOut as u64,
-            data,
-        }
-    } else {
-        SyscallResult {
-            result: ErrorCode::Ok as u64,
-            data,
-        }
-    }
+    process_wake_handles(curr, args, next_arg, wakers, timed_out)
 }
 
 pub(super) fn do_wake(
