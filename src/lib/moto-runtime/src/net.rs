@@ -50,35 +50,30 @@ struct NetRuntime {
 }
 
 impl NetRuntime {
-    fn on_channel_available(&mut self, channel: &Arc<NetChannel>) {
-        if let Some(channel) = self.full_channels.remove(&channel.id()) {
-            // TODO: maybe clear empty channels?
-            self.channels.insert(channel.id(), channel);
-        }
-    }
-
     fn reserve_channel(&mut self) -> Arc<NetChannel> {
-        let channel = if let Some(entry) = self.channels.first_entry() {
-            entry.get().reservations.fetch_add(1, Ordering::Relaxed);
-            entry.get().clone()
+        if let Some(entry) = self.channels.first_entry() {
+            let channel = entry.get().clone();
+            let reservations = 1 + channel.reservations.fetch_add(1, Ordering::Relaxed);
+            if reservations == IO_SUBCHANNELS {
+                self.channels.remove(&channel.id());
+                self.full_channels.insert(channel.id(), channel.clone());
+            }
+
+            channel
         } else {
             let channel = NetChannel::new();
             channel.reservations.fetch_add(1, Ordering::Relaxed);
             self.channels.insert(channel.id(), channel.clone());
             channel
-        };
-
-        if channel.at_capacity() {
-            self.channels.remove(&channel.id());
-            self.full_channels.insert(channel.id(), channel.clone());
         }
-
-        channel
     }
 
     fn release_channel(&mut self, channel: Arc<NetChannel>) {
-        channel.reservations.fetch_sub(0, Ordering::Relaxed);
-        self.on_channel_available(&channel);
+        channel.reservations.fetch_sub(1, Ordering::Relaxed);
+        if let Some(channel) = self.full_channels.remove(&channel.id()) {
+            // TODO: maybe clear empty channels?
+            self.channels.insert(channel.id(), channel);
+        }
     }
 }
 
@@ -242,7 +237,7 @@ impl NetChannel {
             if let Err(err) = self.conn.send(msg) {
                 assert_eq!(err, ErrorCode::NotReady);
                 self.wake_driver();
-                return (true, Some(msg));
+                return (false, Some(msg));
             }
             sent_messages += 1;
         }
@@ -252,7 +247,7 @@ impl NetChannel {
             if let Err(err) = self.conn.send(msg) {
                 assert_eq!(err, ErrorCode::NotReady);
                 self.wake_driver();
-                return (true, Some(msg));
+                return (false, Some(msg));
             }
 
             sent_messages += 1;
@@ -336,27 +331,18 @@ impl NetChannel {
 
     /// Returns the index of the subchannel in [0..IO_SUBCHANNELS).
     fn reserve_subchannel(&self) -> usize {
-        // Because NetChannels are reserved at NetRuntime with NetChannel::reservations
-        // counted, we can loop here.
-        loop {
-            for idx in 0..IO_SUBCHANNELS {
-                if self.subchannels_in_use[idx].swap(true, Ordering::AcqRel) {
-                    continue; // Was already reserved.
-                }
-                return idx;
+        for idx in 0..IO_SUBCHANNELS {
+            if self.subchannels_in_use[idx].swap(true, Ordering::AcqRel) {
+                continue; // Was already reserved.
             }
+            return idx;
         }
+        panic!("Failed to reserve IO subchannel.")
     }
 
     fn release_subchannel(&self, idx: usize) {
         assert!(idx < IO_SUBCHANNELS);
         assert!(self.subchannels_in_use[idx].swap(false, Ordering::AcqRel));
-    }
-
-    fn at_capacity(&self) -> bool {
-        self.reservations.load(Ordering::Relaxed) + { self.tcp_streams.lock(line!()).len() } + {
-            self.tcp_listeners.lock(line!()).len()
-        } == IO_SUBCHANNELS
     }
 
     fn tcp_stream_created(self: &Arc<Self>, stream: &Arc<TcpStreamImpl>) {
@@ -372,7 +358,7 @@ impl NetChannel {
         assert_eq!(0, stream.strong_count());
 
         self.release_subchannel(subchannel_idx);
-        NET.lock(line!()).on_channel_available(self);
+        NET.lock(line!()).release_channel(self.clone());
     }
 
     fn tcp_listener_created(self: &Arc<Self>, listener: &Arc<TcpListenerImpl>) {
@@ -391,7 +377,7 @@ impl NetChannel {
                 .strong_count()
         );
 
-        NET.lock(line!()).on_channel_available(self);
+        NET.lock(line!()).release_channel(self.clone());
     }
 
     fn send_msg(self: &Arc<Self>, msg: io_channel::Msg) {
@@ -637,7 +623,6 @@ impl TcpStream {
         });
 
         channel.tcp_stream_created(&inner);
-        NET.lock(line!()).release_channel(channel);
         inner.ack_rx();
 
         #[cfg(debug_assertions)]
@@ -1173,7 +1158,6 @@ impl TcpListener {
             nonblocking: AtomicBool::new(false),
         });
         channel.tcp_listener_created(&inner);
-        NET.lock(line!()).release_channel(channel);
 
         #[cfg(debug_assertions)]
         moturus_log!(
@@ -1230,7 +1214,6 @@ impl TcpListener {
         });
 
         channel.tcp_stream_created(&inner);
-        NET.lock(line!()).release_channel(channel);
         inner.ack_rx();
 
         #[cfg(debug_assertions)]
