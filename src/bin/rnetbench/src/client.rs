@@ -34,9 +34,18 @@ fn do_run(args: &crate::Args) -> Result<()> {
     Err(ErrorKind::HostUnreachable.into())
 }
 
+fn connect_with_retry(addr: SocketAddr) -> TcpStream {
+    for _ in 0..100 {
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
+            return stream;
+        }
+    }
+    panic!("Failed to connect to {:?}", addr)
+}
+
 fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
     let mut buf: [u8; 1500] = [0; 1500];
-    let mut tcp_stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+    let mut tcp_stream = connect_with_retry(addr);
     tcp_stream.set_nodelay(true).unwrap();
 
     tcp_stream.write_all(crate::MAGIC_BYTES_CLIENT)?;
@@ -128,6 +137,13 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
     for r in &results {
         let res = r.lock().unwrap();
         assert!(res.duration >= duration);
+        if res.duration.as_secs_f64() >= duration.as_secs_f64() * 1.1 {
+            panic!(
+                "bad runtime: {:.3} vs {:.3}",
+                res.duration.as_secs_f64(),
+                duration.as_secs_f64()
+            );
+        }
         assert!(res.duration.as_secs_f64() < duration.as_secs_f64() * 1.1);
 
         total_duration += res.duration;
