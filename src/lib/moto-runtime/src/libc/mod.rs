@@ -2,6 +2,7 @@
 // many things fail to link.
 
 mod fmod;
+mod log;
 mod log2;
 
 // mem* functions below have been copied from rust compiler_builtins/mem.rs.
