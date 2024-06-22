@@ -1,5 +1,6 @@
 // mod channel_test;
 mod mpmc;
+mod net_async;
 mod spawn_wait_kill;
 mod subcommand;
 mod tcp;
@@ -503,6 +504,8 @@ fn main() {
     unsafe { core::arch::asm!("int 3") }
 
     std::thread::spawn(|| input_listener());
+
+    // net_async::test();
 
     test_cpus();
     tls::test_tls();
