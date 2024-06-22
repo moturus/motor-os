@@ -95,12 +95,12 @@ fn main() {
 
     let prog_copy = prog.to_owned();
 
-    std::thread::spawn(move || input_listener(prog_copy));
-
     if args.len() != 3 {
         eprintln!("Usage: {} host:port www-dir", prog);
         std::process::exit(-1);
     }
+
+    std::thread::spawn(move || input_listener(prog_copy));
 
     let url = &args[1];
     match std::fs::read_dir(Path::new(&args[2])) {
@@ -115,9 +115,14 @@ fn main() {
 
     println!("Serving HTTP on {}. Press Ctrl+C to exit.", url);
 
+    #[cfg(target_os = "moturus")]
+    let server_name = "motor-os httpd";
+    #[cfg(not(target_os = "moturus"))]
+    let server_name = prog;
+
     let result = Server::new(serve)
         .with_global_timeout(Duration::from_secs(10))
-        .with_server_name(prog)
+        .with_server_name(server_name)
         .unwrap()
         .listen(url.as_str());
 
