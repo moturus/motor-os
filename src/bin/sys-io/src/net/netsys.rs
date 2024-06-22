@@ -1232,8 +1232,10 @@ impl NetSys {
             },
 
             smoltcp::socket::tcp::State::CloseWait => match moto_socket.state {
-                TcpState::Connecting | TcpState::Listening => panic!("bad state: {:?}", moto_socket.state), // Impossible.
-                TcpState::PendingAccept => {
+                TcpState::Connecting => {
+                    panic!("bad state transition: {:?} => CloseWait", moto_socket.state)
+                } // Impossible.
+                TcpState::Listening | TcpState::PendingAccept => {
                     self.drop_tcp_socket(socket_id);
                     return;
                 }
