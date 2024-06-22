@@ -1,0 +1,14 @@
+[package]
+name = "moto-async"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+moto-sys = { path = "../moto-sys" }
+moto-runtime = { path = "../moto-runtime", features = ["rt-api"]}
+log = "0.4.21"
+futures = "0.3.30"
+
+[features]
