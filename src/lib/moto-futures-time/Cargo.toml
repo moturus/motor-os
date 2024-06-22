@@ -1,0 +1,9 @@
+[package]
+name = "futures-time"
+version = "3.0.0"
+edition = "2021"
+description = "A minimal copy of futures-time."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+pin-project-lite = "0.2.8"
