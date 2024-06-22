@@ -48,6 +48,12 @@ pub union Payload {
     args_64: [u64; 3],
 }
 
+impl Debug for Payload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[...]")
+    }
+}
+
 const _PAYLOAD_SIZE: () = assert!(core::mem::size_of::<Payload>() == 24);
 
 impl Payload {
@@ -93,7 +99,7 @@ impl Payload {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Msg {
     pub id: u64,          // IN. See user_data in io_uring.pdf. Used by client-side executor.
     pub handle: u64,      // IN/OUT. Like Windows handle, or Unix fd.
@@ -114,12 +120,6 @@ struct MsgSlot {
 }
 
 const _SLOT_SIZE: () = assert!(core::mem::size_of::<MsgSlot>() == 64);
-
-impl Debug for Msg {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Msg").field("id", &self.id).finish()
-    }
-}
 
 impl Msg {
     pub fn new() -> Self {
