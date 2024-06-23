@@ -1217,8 +1217,10 @@ impl NetSys {
                     self.on_connect_failed(socket_id);
                     return;
                 }
-                TcpState::Listening => panic!(), // Impossible.
-                TcpState::PendingAccept => todo!(),
+                TcpState::Listening | TcpState::PendingAccept => {
+                    self.drop_tcp_socket(socket_id);
+                    return;
+                }
                 TcpState::ReadWrite | TcpState::ReadOnly | TcpState::WriteOnly => {
                     moto_socket.state = TcpState::Closed;
                     #[cfg(debug_assertions)]
