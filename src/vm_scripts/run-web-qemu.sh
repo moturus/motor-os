@@ -8,5 +8,4 @@ qemu-system-x86_64 -m 64M -enable-kvm -cpu host -smp 4 \
   -device virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0 \
   -no-reboot -nographic
 
-#  -netdev user,host=10.0.2.10,hostfwd=tcp:127.0.0.1:10023-:5542,id=nic0 \
 
