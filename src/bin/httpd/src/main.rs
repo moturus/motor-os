@@ -1,6 +1,7 @@
 use oxhttp::model::{Request, Response, Status};
 use oxhttp::Server;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,6 +22,110 @@ fn input_listener(prog: String) {
 }
 
 static ROOT_DIR: Mutex<String> = Mutex::new(String::new());
+static TXT_FILE_CACHE: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+static IMG_FILE_CACHE: Mutex<Option<HashMap<PathBuf, Vec<u8>>>> = Mutex::new(None);
+static BAD_FILE_CACHE: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+const MAX_BAD_CACHE_LEN: usize = 4096;
+
+fn get_txt_file(pb: PathBuf) -> Option<String> {
+    // Try cache hit.
+    {
+        let mut cache = TXT_FILE_CACHE.lock().unwrap();
+        if cache.is_none() {
+            *cache = Some(HashMap::new());
+        }
+
+        let map = cache.as_mut().unwrap();
+        match map.get(&pb) {
+            Some(s) => return Some(s.clone()),
+            None => {}
+        }
+    }
+
+    let mut bad_cache_full = false;
+    // Try cache miss.
+    {
+        let bad_cache = BAD_FILE_CACHE.lock().unwrap();
+        if let Some(set) = &*bad_cache {
+            if set.len() >= MAX_BAD_CACHE_LEN {
+                bad_cache_full = true;
+            }
+            if set.contains(&pb) {
+                return None;
+            }
+        }
+    }
+
+    // Try reading the file.
+    if let Ok(s) = std::fs::read_to_string(pb.clone()) {
+        TXT_FILE_CACHE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(pb, s.clone());
+        Some(s)
+    } else {
+        if !bad_cache_full {
+            let mut bad_cache = BAD_FILE_CACHE.lock().unwrap();
+            if bad_cache.is_none() {
+                *bad_cache = Some(HashSet::new());
+            }
+            bad_cache.as_mut().unwrap().insert(pb);
+        }
+        None
+    }
+}
+
+fn get_img_file(pb: PathBuf) -> Option<Vec<u8>> {
+    // Try cache hit.
+    {
+        let mut cache = IMG_FILE_CACHE.lock().unwrap();
+        if cache.is_none() {
+            *cache = Some(HashMap::new());
+        }
+
+        let map = cache.as_mut().unwrap();
+        match map.get(&pb) {
+            Some(v) => return Some(v.clone()),
+            None => {}
+        }
+    }
+
+    let mut bad_cache_full = false;
+    // Try cache miss.
+    {
+        let bad_cache = BAD_FILE_CACHE.lock().unwrap();
+        if let Some(set) = &*bad_cache {
+            if set.len() >= MAX_BAD_CACHE_LEN {
+                bad_cache_full = true;
+            }
+            if set.contains(&pb) {
+                return None;
+            }
+        }
+    }
+
+    // Try reading the file.
+    if let Ok(bytes) = std::fs::read(pb.clone()) {
+        IMG_FILE_CACHE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(pb, bytes.clone());
+        Some(bytes)
+    } else {
+        if !bad_cache_full {
+            let mut bad_cache = BAD_FILE_CACHE.lock().unwrap();
+            if bad_cache.is_none() {
+                *bad_cache = Some(HashSet::new());
+            }
+            bad_cache.as_mut().unwrap().insert(pb);
+        }
+        None
+    }
+}
 
 fn sanitize(s: &[u8]) -> String {
     let mut res = String::new();
@@ -76,18 +181,18 @@ fn serve(request: &mut Request) -> Response {
     };
 
     let path_str = request_path.clone().into_os_string().into_string().unwrap();
+    if path_str.len() > 256 {
+        log_request(Status::NOT_FOUND, request.url().path().as_bytes());
+        return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
+    }
+
     if path_str.find("..").is_some() {
         log_request(Status::NOT_FOUND, request.url().path().as_bytes());
         return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
     }
 
-    if let Ok(text) = std::fs::read_to_string(request_path.clone()) {
-        log_request(Status::OK, request.url().path().as_bytes());
-        return Response::builder(Status::OK).with_body(text);
-    }
-
     if path_str.as_str().ends_with(".jpg") {
-        if let Ok(bytes) = std::fs::read(request_path.clone()) {
+        if let Some(bytes) = get_img_file(request_path.clone()) {
             log_request(Status::OK, request.url().path().as_bytes());
             return Response::builder(Status::OK)
                 .with_header("Content-type", "image/jpeg")
@@ -99,7 +204,7 @@ fn serve(request: &mut Request) -> Response {
     }
 
     if path_str.as_str().ends_with(".png") {
-        if let Ok(bytes) = std::fs::read(request_path.clone()) {
+        if let Some(bytes) = get_img_file(request_path.clone()) {
             log_request(Status::OK, request.url().path().as_bytes());
             return Response::builder(Status::OK)
                 .with_header("Content-type", "image/png")
@@ -108,6 +213,10 @@ fn serve(request: &mut Request) -> Response {
                 .unwrap()
                 .with_body(bytes);
         }
+    }
+    if let Some(text) = get_txt_file(request_path.clone()) {
+        log_request(Status::OK, request.url().path().as_bytes());
+        return Response::builder(Status::OK).with_body(text);
     }
 
     log_request(Status::NOT_FOUND, request.url().path().as_bytes());
