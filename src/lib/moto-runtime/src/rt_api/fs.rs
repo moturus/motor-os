@@ -179,6 +179,7 @@ pub struct ReadDirNextResponse {
     pub dir_entries: [DirEntryData; 0],
 }
 
+#[allow(unused)]
 #[repr(C, align(8))]
 pub struct FileReadRequest {
     pub header: moto_ipc::sync::RequestHeader, // CMD_FILE_READ
@@ -195,6 +196,7 @@ pub struct FileReadResponse {
     pub data: [u8; 0],
 }
 
+#[allow(unused)]
 #[repr(C, align(8))]
 pub struct FileWriteRequest {
     pub header: moto_ipc::sync::RequestHeader, // CMD_FILE_WRITE

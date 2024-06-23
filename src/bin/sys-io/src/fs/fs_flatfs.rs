@@ -51,6 +51,7 @@ impl super::File for FileFlatFs {
 
 struct DirectoryEntryFlatFs {
     name: &'static str,
+    #[allow(unused)]
     path: String,
     file: Option<FileFlatFs>,
     dir: Option<&'static flatfs::Dir<'static>>,
