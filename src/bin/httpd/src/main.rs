@@ -22,9 +22,38 @@ fn input_listener(prog: String) {
 
 static ROOT_DIR: Mutex<String> = Mutex::new(String::new());
 
+fn sanitize(s: &[u8]) -> String {
+    let mut res = String::new();
+    res.reserve(64);
+    let bytes = if s.len() < 64 { s } else { &s[0..64] };
+    for b in bytes {
+        if b.is_ascii() {
+            res.push(*b as char);
+        } else {
+            res.push('¿');
+        }
+    }
+    res
+}
+
+fn log_request(status: Status, request: &[u8]) {
+    let now = time::OffsetDateTime::now_utc();
+    println!(
+        "{}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} UTC {status}: {}",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        now.millisecond(),
+        sanitize(request)
+    );
+}
+
 fn serve(request: &mut Request) -> Response {
     if request.method().as_bytes() != b"GET" {
-        println!("\"{}\": 501", request.method());
+        log_request(Status::NOT_IMPLEMENTED, request.method().as_bytes());
         return Response::builder(Status::NOT_IMPLEMENTED).with_body("501: Not implemented.");
     }
 
@@ -39,7 +68,7 @@ fn serve(request: &mut Request) -> Response {
                 url = &url[1..];
             }
             if url.is_empty() {
-                println!("\"GET {}\": 404", request.url().path());
+                log_request(Status::NOT_FOUND, request.url().path().as_bytes());
                 return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
             }
             Path::new(root.as_str()).join(url)
@@ -48,18 +77,18 @@ fn serve(request: &mut Request) -> Response {
 
     let path_str = request_path.clone().into_os_string().into_string().unwrap();
     if path_str.find("..").is_some() {
-        println!("\"GET {}\": 404", request.url().path());
+        log_request(Status::NOT_FOUND, request.url().path().as_bytes());
         return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
     }
 
     if let Ok(text) = std::fs::read_to_string(request_path.clone()) {
-        println!("\"GET {}\": 200", request.url().path());
+        log_request(Status::OK, request.url().path().as_bytes());
         return Response::builder(Status::OK).with_body(text);
     }
 
     if path_str.as_str().ends_with(".jpg") {
         if let Ok(bytes) = std::fs::read(request_path.clone()) {
-            println!("\"GET {}\": 200", request.url().path());
+            log_request(Status::OK, request.url().path().as_bytes());
             return Response::builder(Status::OK)
                 .with_header("Content-type", "image/jpeg")
                 .unwrap()
@@ -71,7 +100,7 @@ fn serve(request: &mut Request) -> Response {
 
     if path_str.as_str().ends_with(".png") {
         if let Ok(bytes) = std::fs::read(request_path.clone()) {
-            println!("\"GET {}\": 200", request.url().path());
+            log_request(Status::OK, request.url().path().as_bytes());
             return Response::builder(Status::OK)
                 .with_header("Content-type", "image/png")
                 .unwrap()
@@ -81,7 +110,7 @@ fn serve(request: &mut Request) -> Response {
         }
     }
 
-    println!("\"GET {}\": 404", request.url().path());
+    log_request(Status::NOT_FOUND, request.url().path().as_bytes());
     return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
 }
 
