@@ -328,6 +328,15 @@ impl NetSys {
         // wakeups on the dropped socket.
         self.wakers.remove(&socket_id);
 
+        if let Some(listener_id) = moto_socket.listener_id.take() {
+            // When handling drop_tcp_listener cmd, the listener is first removed,
+            // then its listening sockets are removed, so the next line will get None.
+            if let Some(listener) = self.tcp_listeners.get_mut(&listener_id) {
+                listener.remove_listening_socket(socket_id);
+                listener.remove_pending_socket(socket_id);
+            }
+        }
+
         // Poll the device to send the final RST. Otherwise smol_socket.abort() above
         // does nothing, and the remote connection is kept alive/hanging until it times out.
         // Need to poll all sockets on the device, not just the one being removed,
@@ -344,14 +353,6 @@ impl NetSys {
 
         if let Some(port) = moto_socket.ephemeral_port.take() {
             self.devices[moto_socket.device_idx].free_ephemeral_port(port);
-        }
-
-        if let Some(listener_id) = moto_socket.listener_id.take() {
-            // When handling drop_tcp_listener cmd, the listener is first removed,
-            // then its listening sockets are removed, so the next line will get None.
-            if let Some(listener) = self.tcp_listeners.get_mut(&listener_id) {
-                listener.remove_listening_socket(socket_id);
-            }
         }
 
         if let Some(mut cqe) = moto_socket.connect_req.take() {
@@ -399,7 +400,8 @@ impl NetSys {
         if let Some((socket_id, socket_addr)) = listener.pop_pending_socket() {
             // TODO: the unwrap() below once triggered on remote drop.
             let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-            assert!(moto_socket.listener_id.is_none());
+            assert_eq!(moto_socket.listener_id.unwrap(), listener_id);
+            moto_socket.listener_id = None;
 
             moto_socket.subchannel_mask = req.payload.args_64()[0];
 
@@ -971,10 +973,11 @@ impl NetSys {
             smol_socket.remote_endpoint().unwrap(),
         );
 
-        let listener_id = moto_socket.listener_id.take().unwrap();
+        let listener_id = *moto_socket.listener_id.as_ref().unwrap();
         let listener = self.tcp_listeners.get_mut(&listener_id).unwrap();
         let may_do_io = if let Some((mut msg, conn)) = listener.get_pending_accept() {
             moto_socket.state = TcpState::ReadWrite;
+            moto_socket.listener_id = None;
             let endpoint_handle = conn.wait_handle();
             moto_socket.subchannel_mask = msg.payload.args_64()[0];
             moto_socket.conn = Some(conn);
@@ -994,7 +997,6 @@ impl NetSys {
             });
             true
         } else {
-            // TODO: this codepath is probably untested (usually accept request comes before remote connects).
             assert_eq!(moto_socket.state, TcpState::Listening);
             // Note: we don't generate the state change event because accept() is handled explicitly.
             moto_socket.state = TcpState::PendingAccept;

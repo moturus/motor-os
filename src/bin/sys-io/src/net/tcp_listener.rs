@@ -78,6 +78,15 @@ impl TcpListener {
         self.pending_sockets.pop_front()
     }
 
+    pub fn remove_pending_socket(&mut self, id: SocketId) {
+        for idx in 0..self.pending_sockets.len() {
+            if self.pending_sockets[idx].0 == id {
+                let _ = self.pending_sockets.remove(idx);
+                return;
+            }
+        }
+    }
+
     pub fn add_pending_accept(
         &mut self,
         msg: io_channel::Msg,
