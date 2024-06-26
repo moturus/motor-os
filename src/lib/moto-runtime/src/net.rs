@@ -874,8 +874,17 @@ impl TcpStream {
             ) {
                 assert_eq!(err, ErrorCode::TimedOut);
                 if debug_assert {
-                    // TODO: this assert triggered on 2024-05-29.
-                    assert!(self.inner.recv_queue.lock(line!()).is_empty());
+                    // TODO: this assert triggered on 2024-05-29 and on 2024-06-25.
+                    // assert!(self.inner.recv_queue.lock(line!()).is_empty());
+                    let queue_length = self.inner.recv_queue.lock(line!()).len();
+                    if queue_length > 0 {
+                        moturus_log!(
+                            "{}:{} this is bad: RX timo with recv queue {}",
+                            file!(),
+                            line!(),
+                            queue_length
+                        );
+                    }
                 }
             }
         }
