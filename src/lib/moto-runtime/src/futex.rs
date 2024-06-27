@@ -162,11 +162,9 @@ static FUTEX_WAIT_QUEUES: spin::Mutex<BTreeMap<usize, Arc<WaitQueue>>> =
     spin::Mutex::new(BTreeMap::new());
 
 // Returns false on timeout.
-pub fn futex_wait(
-    futex: &AtomicU32,
-    expected: u32,
-    timeout: Option<moto_sys::time::Instant>,
-) -> bool {
+pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::Duration>) -> bool {
+    let timeout = timeout.map(|dur| moto_sys::time::Instant::now() + dur);
+
     let key = futex as *const _ as usize;
     loop {
         if futex.load(Ordering::Relaxed) != expected {
