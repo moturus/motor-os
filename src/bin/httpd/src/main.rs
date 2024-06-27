@@ -1,9 +1,6 @@
-use oxhttp::model::{Request, Response, Status};
-use oxhttp::Server;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 fn input_listener(prog: String) {
@@ -141,7 +138,7 @@ fn sanitize(s: &[u8]) -> String {
     res
 }
 
-fn log_request(status: Status, request: &[u8]) {
+fn log_request(status: u16, request: &[u8]) {
     let now = time::OffsetDateTime::now_utc();
     println!(
         "{}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} UTC {status}: {}",
@@ -154,73 +151,6 @@ fn log_request(status: Status, request: &[u8]) {
         now.millisecond(),
         sanitize(request)
     );
-}
-
-fn serve(request: &mut Request) -> Response {
-    if request.method().as_bytes() != b"GET" {
-        log_request(Status::NOT_IMPLEMENTED, request.method().as_bytes());
-        return Response::builder(Status::NOT_IMPLEMENTED).with_body("501: Not implemented.");
-    }
-
-    let root = ROOT_DIR.lock().unwrap().clone();
-
-    let request_path = {
-        let mut url = request.url().path();
-        if url == "/" {
-            Path::new(root.as_str()).join("index.html")
-        } else {
-            while url.starts_with('/') {
-                url = &url[1..];
-            }
-            if url.is_empty() {
-                log_request(Status::NOT_FOUND, request.url().path().as_bytes());
-                return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
-            }
-            Path::new(root.as_str()).join(url)
-        }
-    };
-
-    let path_str = request_path.clone().into_os_string().into_string().unwrap();
-    if path_str.len() > 256 {
-        log_request(Status::NOT_FOUND, request.url().path().as_bytes());
-        return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
-    }
-
-    if path_str.find("..").is_some() {
-        log_request(Status::NOT_FOUND, request.url().path().as_bytes());
-        return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
-    }
-
-    if path_str.as_str().ends_with(".jpg") {
-        if let Some(bytes) = get_img_file(request_path.clone()) {
-            log_request(Status::OK, request.url().path().as_bytes());
-            return Response::builder(Status::OK)
-                .with_header("Content-type", "image/jpeg")
-                .unwrap()
-                .with_header("Content-Length", format!("{}", bytes.len()))
-                .unwrap()
-                .with_body(bytes);
-        }
-    }
-
-    if path_str.as_str().ends_with(".png") {
-        if let Some(bytes) = get_img_file(request_path.clone()) {
-            log_request(Status::OK, request.url().path().as_bytes());
-            return Response::builder(Status::OK)
-                .with_header("Content-type", "image/png")
-                .unwrap()
-                .with_header("Content-Length", format!("{}", bytes.len()))
-                .unwrap()
-                .with_body(bytes);
-        }
-    }
-    if let Some(text) = get_txt_file(request_path.clone()) {
-        log_request(Status::OK, request.url().path().as_bytes());
-        return Response::builder(Status::OK).with_body(text);
-    }
-
-    log_request(Status::NOT_FOUND, request.url().path().as_bytes());
-    return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
 }
 
 fn main() {
@@ -240,7 +170,7 @@ fn main() {
 
     std::thread::spawn(move || input_listener(prog_copy));
 
-    let url = &args[1];
+    let addr = &args[1];
     match std::fs::read_dir(Path::new(&args[2])) {
         Ok(_) => {
             *ROOT_DIR.lock().unwrap() = args[2].clone();
@@ -251,20 +181,112 @@ fn main() {
         }
     }
 
-    println!("Serving HTTP on {}. Press Ctrl+C to exit.", url);
+    let server = tiny_http::Server::http(addr).unwrap();
+    println!("Serving HTTP on {}. Press Ctrl+C to exit.", addr);
 
-    #[cfg(target_os = "moturus")]
-    let server_name = "motor-os httpd";
-    #[cfg(not(target_os = "moturus"))]
-    let server_name = prog;
+    loop {
+        let request = match server.recv() {
+            Ok(rq) => rq,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                continue;
+            }
+        };
 
-    let result = Server::new(serve)
-        .with_global_timeout(Duration::from_secs(10))
-        .with_server_name(server_name)
-        .unwrap()
-        .listen(url.as_str());
-
-    if result.is_err() {
-        eprintln!("listen() failed.");
+        process(request);
     }
+}
+
+fn process(request: tiny_http::Request) {
+    let hdr_server =
+        tiny_http::Header::from_bytes(&b"Server"[..], &b"tiny-http (Motor OS)"[..]).unwrap();
+
+    match *request.method() {
+        tiny_http::Method::Get => {}
+        _ => {
+            log_request(405, request.url().as_bytes());
+            let _ = request.respond(
+                tiny_http::Response::empty(tiny_http::StatusCode(405)).with_header(hdr_server),
+            );
+            return;
+        }
+    }
+
+    let root = ROOT_DIR.lock().unwrap().clone();
+
+    let request_path = {
+        let mut url = request.url();
+        if url == "/" {
+            Path::new(root.as_str()).join("index.html")
+        } else {
+            while url.starts_with('/') {
+                url = &url[1..];
+            }
+            if url.is_empty() {
+                log_request(404, url.as_bytes());
+                let _ = request.respond(
+                    tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server),
+                );
+                return;
+            }
+            Path::new(root.as_str()).join(url)
+        }
+    };
+
+    let path_str = request_path.clone().into_os_string().into_string().unwrap();
+    if path_str.len() > 256 {
+        log_request(404, request.url().as_bytes());
+        let _ = request.respond(
+            tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server),
+        );
+        return;
+    }
+
+    if path_str.find("..").is_some() {
+        log_request(404, request.url().as_bytes());
+        let _ = request.respond(tiny_http::Response::empty(tiny_http::StatusCode(404)));
+        return;
+    }
+
+    if path_str.as_str().ends_with(".jpg") {
+        if let Some(bytes) = get_img_file(request_path.clone()) {
+            log_request(200, request.url().as_bytes());
+            let content_type =
+                tiny_http::Header::from_bytes(&b"Content-type"[..], &b"image/jpeg"[..]).unwrap();
+            let response = tiny_http::Response::from_data(bytes);
+            let _ = request.respond(
+                response
+                    .with_header(hdr_server)
+                    .with_header(content_type)
+                    .with_status_code(200),
+            );
+            return;
+        }
+    }
+
+    if path_str.as_str().ends_with(".png") {
+        if let Some(bytes) = get_img_file(request_path.clone()) {
+            log_request(200, request.url().as_bytes());
+            let content_type =
+                tiny_http::Header::from_bytes(&b"Content-type"[..], &b"image/png"[..]).unwrap();
+            let response = tiny_http::Response::from_data(bytes);
+            let _ = request.respond(
+                response
+                    .with_header(hdr_server)
+                    .with_header(content_type)
+                    .with_status_code(200),
+            );
+            return;
+        }
+    }
+    if let Some(text) = get_txt_file(request_path.clone()) {
+        log_request(200, request.url().as_bytes());
+        let response = tiny_http::Response::from_data(text.as_bytes());
+        let _ = request.respond(response.with_header(hdr_server).with_status_code(200));
+        return;
+    }
+
+    log_request(404, request.url().as_bytes());
+    let _ = request
+        .respond(tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server));
 }
