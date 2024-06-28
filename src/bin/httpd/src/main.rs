@@ -1,9 +1,20 @@
+use clap::Parser;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+#[derive(Parser)]
+struct Args {
+    #[arg(short, long)]
+    addr: std::net::SocketAddr,
+    #[arg(short, long)]
+    dir: String,
+    #[arg(short, long, default_value_t = 4)]
+    threads: u8,
+}
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
-fn input_listener(prog: String) {
+fn input_listener() {
     use std::io::Read;
 
     loop {
@@ -11,7 +22,7 @@ fn input_listener(prog: String) {
         let sz = std::io::stdin().read(&mut input).unwrap();
         for b in &input[0..sz] {
             if *b == 3 {
-                println!("\n{prog}: caught ^C: exiting.");
+                println!("\ncaught ^C: exiting.");
                 std::process::exit(0);
             }
         }
@@ -153,50 +164,6 @@ fn log_request(status: u16, request: &[u8]) {
     );
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let prog = std::path::Path::new(args[0].as_str())
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
-
-    let prog_copy = prog.to_owned();
-
-    if args.len() != 3 {
-        eprintln!("Usage: {} host:port www-dir", prog);
-        std::process::exit(-1);
-    }
-
-    std::thread::spawn(move || input_listener(prog_copy));
-
-    let addr = &args[1];
-    match std::fs::read_dir(Path::new(&args[2])) {
-        Ok(_) => {
-            *ROOT_DIR.lock().unwrap() = args[2].clone();
-        }
-        Err(_) => {
-            eprintln!("Directory '{}' not found.", &args[2]);
-            std::process::exit(-1);
-        }
-    }
-
-    let server = tiny_http::Server::http(addr).unwrap();
-    println!("Serving HTTP on {}. Press Ctrl+C to exit.", addr);
-
-    loop {
-        let request = match server.recv() {
-            Ok(rq) => rq,
-            Err(e) => {
-                eprintln!("error: {}", e);
-                continue;
-            }
-        };
-
-        process(request);
-    }
-}
-
 fn process(request: tiny_http::Request) {
     let hdr_server =
         tiny_http::Header::from_bytes(&b"Server"[..], &b"tiny-http (Motor OS)"[..]).unwrap();
@@ -289,4 +256,47 @@ fn process(request: tiny_http::Request) {
     log_request(404, request.url().as_bytes());
     let _ = request
         .respond(tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server));
+}
+
+fn main() {
+    std::thread::spawn(move || input_listener());
+
+    let mut args = Args::parse();
+    if args.threads == 0 {
+        args.threads = 1;
+    }
+
+    match std::fs::read_dir(Path::new(&args.dir)) {
+        Ok(_) => {
+            *ROOT_DIR.lock().unwrap() = args.dir.clone();
+        }
+        Err(_) => {
+            eprintln!("Directory '{}' not found.", &args.dir);
+            std::process::exit(-1);
+        }
+    }
+
+    let server = Arc::new(tiny_http::Server::http(args.addr).unwrap());
+    println!("Serving HTTP on {:?}. Press Ctrl+C to exit.", args.addr);
+
+    let mut threads = Vec::new();
+    for _ in 0..args.threads {
+        let server = server.clone();
+
+        threads.push(std::thread::spawn(move || loop {
+            let request = match server.recv() {
+                Ok(rq) => rq,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    continue;
+                }
+            };
+
+            process(request);
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }

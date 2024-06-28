@@ -1,5 +1,5 @@
 #!/bin/rush
 
-/bin/httpd 192.168.4.2:80 /www
+/bin/httpd -a 192.168.4.2:80 -d /www -t 8
 
 
