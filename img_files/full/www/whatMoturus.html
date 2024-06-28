@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<title>What is Motor OS</title>
+<link rel="icon" type="image/png" sizes="32x32" href="moturus-256.png">
+</head>
+<style>
+.myDiv {
+  height: 1480px;   
+  text-align: left;
+  line-height: 1.4;
+  font-size: 16px;
+  padding: 0 10px;
+  margin: 50px auto;
+  max-width: 600px;
+font-family:tahoma;
+}
+
+</style>
+
+<body>
+
+<div class="myDiv">
+<p><a href="moturusHome.html">Back to home</a></p>
+<h1>What is Motor OS</h1>
+
+<p>
+Motor OS is a microkernel-based operating system, built in Rust, that targets virtualized workloads exclusively. It currently supports x64 KVM-based virtual machines, and can run in either Qemu or Cloud Hypervisor.
+<br>
+Rust is the language of Motor OS: not only it is implemented in Rust, it also exposes its ABI in Rust, not C.
+</p>
+<h2>What works</h2>
+<p>
+While at the moment most of the subsystems are working in only POC/MVP mode, they are working, and you can run, say, a web server.
+<br>
+More specifically, these things work:
+</p>
+
+ <ul>
+  <li>boots via MBR (Qemu) or PVH (Cloud Hypervisor) in about 200ms</li>
+  <li>himem micro-kernel</li>
+  <li>scheduling:</li>
+	<ul>
+	   <li>a simple multi-processor round robin (SMP)</li>
+	   <li>in-kernel scheduling is cooperative</li>
+		<ul>
+		   <li>the kernel is very small and does not block, so does not need to be preemptible</li>
+		</ul>
+	   <li>the userspace is preemptible</li>
+	</ul>
+  <li>memory management:</li>
+	<ul>
+	   <li>only 4K pages at the moment</li>
+	   <li>stacks are guarded</li>
+	   <li>page faults in the userspace work and are properly handled (only stack memory allocations are currently lazy)</li>
+	</ul>
+  <li>I/O subsystem (in the userspace)</li>
+	<ul>
+	   <li>VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/lib/virtio">drivers</a></li>
+	   <li>two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs"></a>)</li>
+	   <li><a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking (TCP only at the moment</li>
+		<ul>
+		   <li>a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided</li>
+		</ul>
+	</ul>
+  <li>the userspace:</li>
+	<ul>
+	   <li>multiple processes, with preemption</li>
+	   <li>threads, TLS</li>
+	   <li>Rust's standard library mostly ported</li>
+		<ul>
+		   <li>Rust programs that use Rust standard library and do not depend, directly or indirectly, on Unix or<br> Windows FFI, will cross-compile for Motūrus OS and run, subject to "what does not work" below</li>
+		</ul>
+	   <li>a simple <a href="https://github.com/moturus/rush">unix-like</a> shell in the serial console</li>
+	   <li>a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a></li>
+	   <li>a simle <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a></li>
+	</ul>
+</ul> 
+
+
+<h2>What does not work</h2>
+<p>
+Most pieces are not yet ready for production use. No security audit has been made. It is very easy to hit a "not implemented" panic in sys-io (the userspace I/O subsystem).
+<br>
+More specifically:
+
+<ul>
+<li>Filesystem: most Rust std::fs APIs have been implemented as proof-of-concept, but are slow (synchronous) and will have to be reimplemented using Motūrus async I/O</li>
+<li>Networking:</li>
+   <ul>
+      <li>std::net::TcpStream is mostly implemented, but there are todo! panics</li>
+      <li>other protocols are not implemented yet</li>
+      <li>performance can (and will) be better</li>
+   </ul>
+<li>The ecosystem outside Rust std:</li>
+   <ul>
+      <li>crates like rand or rustls can be compiled and used with minor tweaks</li>
+      <li>crates depending on async runtimes (e.g. <a href="https://tokio.rs/">Tokio</a>) will not compile at the moment</li>
+	<ul><li><a href="https://github.com/tokio-rs/mio">Tokio Mio</a> should be not too difficult to port</li></ul>
+      <li>crates that are wrappers around native Linux or Windows APIs will not work, obviously</li>
+   </ul>
+</ul>
+</p>
+<center>
+<img src="moturus-256.png" alt="Metal Bear on Motorbike">
+</center>
+</div>
+</body>
+</html>

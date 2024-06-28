@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+<title>Why Motor OS</title>
+<link rel="icon" type="image/png" sizes="32x32" href="moturus-256.png">
+</head>
+
+<style>
+.myDiv {
+  height: 480px;   
+  text-align: left;
+  line-height: 1.4;
+  font-size: 16px;
+  padding: 0 10px;
+  margin: 50px auto;
+  max-width: 600px;
+  font-family:tahoma;
+}
+</style>
+
+<body>
+
+<div class="myDiv">
+<a href="moturusHome.html">Back to home</a>
+<h1>Why Motor OS</h1>
+<p>
+At the moment, most virtualized production workloads run Linux. While Linux has many advanced features that in many situations mean it is the only reasonable OS choice, there are several complications that make it not ideal, in theory, for some virtualized workloads:
+</p>
+<ul>
+  <li>Linux is optimized for baremetal, which leads to inefficiencies when it is used inside a VM that is running on a <br>Linux host:</li>
+	<ul>
+	   <li>duplicate block caches</li>
+	   <li>duplicate page table walks</li>
+	   <li>the host scheduler can preempt the VCPU holding a spinlock in the VM's kernel</li>
+	</ul>
+  <li>Linux is difficult to use:</li>
+	<ul>
+	   <li>Docker, Nix OS, "serverless", etc. all exist because of Linux's complexity</li>
+	</ul>
+  <li>Linux has, historically, not been very secure</li>
+</ul> 
+<p>
+A new operating system built from ground-up with the focus on virtualized workloads can be made much simpler and more secure than Linux, while matching or exceeding its performance and/or efficiency.
+</p>
+<center>
+<img src="moturus-256.png" alt="Metal Bear on Motorbike">
+</center>
+</div>
+</body>
+</html>
