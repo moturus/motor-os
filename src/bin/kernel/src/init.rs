@@ -270,6 +270,8 @@ fn start_bsp(arg: u64) -> ! {
 }
 
 fn start_ap(this_cpu: uCpus) -> ! {
+    crate::arch::init_kvm_clock();
+
     AP_STARTED.fetch_add(1, Ordering::Relaxed);
     let new_stack = crate::mm::init_mm_ap_stage1();
     let cpu_main_addr = cpu_main as *const fn(u64) as usize as u64;

@@ -11,11 +11,11 @@ pub struct Instant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SystemTime {
-    nanos: u64, // Note that SystemTime uses nanos vs Instant which uses tsc.
+    nanos: u128, // Note that SystemTime uses nanos vs Instant which uses tsc.
 }
 
 #[allow(unused)]
-pub const UNIX_EPOCH: SystemTime = SystemTime { nanos: 0u64 };
+pub const UNIX_EPOCH: SystemTime = SystemTime { nanos: 0u128 };
 pub const NANOS_IN_SEC: u64 = 1_000_000_000;
 
 impl Instant {
@@ -77,7 +77,7 @@ impl Instant {
             return Duration::ZERO;
         }
         let secs = tsc_diff / tsc_in_sec;
-        let nanos = tsc_to_nanos(tsc_diff % tsc_in_sec);
+        let nanos = tsc_to_nanos_128(tsc_diff % tsc_in_sec);
 
         Duration::new(secs, nanos as u32)
     }
@@ -179,54 +179,42 @@ impl SystemTime {
         }
     }
 
-    pub fn from_u64(val: u64) -> Self {
-        Self { nanos: val }
-    }
-
-    pub fn as_u64(&self) -> u64 {
-        self.nanos
-    }
-
     pub fn as_unix_ts(&self) -> u64 {
-        self.nanos
+        (self.nanos & (u64::MAX as u128)) as u64
     }
 
     pub fn from_unix_ts(val: u64) -> Self {
-        Self { nanos: val }
+        Self { nanos: val as u128 }
     }
 
     pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
         if self.nanos >= other.nanos {
-            Ok(Duration::from_nanos(self.nanos - other.nanos))
+            let total_nanos = self.nanos - other.nanos;
+            let secs = total_nanos / (NANOS_IN_SEC as u128);
+            let nanos = total_nanos % (NANOS_IN_SEC as u128);
+            Ok(Duration::new(secs as u64, nanos as u32))
         } else {
-            Err(Duration::from_nanos(other.nanos - self.nanos))
+            let total_nanos = other.nanos - self.nanos;
+            let secs = total_nanos / (NANOS_IN_SEC as u128);
+            let nanos = total_nanos % (NANOS_IN_SEC as u128);
+            Err(Duration::new(secs as u64, nanos as u32))
         }
     }
 
     pub fn checked_add_duration(&self, other: &Duration) -> Option<SystemTime> {
-        let result_nanos = self.nanos as u128 + other.as_nanos();
-        if result_nanos > (u64::MAX as u128) {
-            None
-        } else {
-            Some(Self {
-                nanos: result_nanos as u64,
-            })
-        }
+        self.nanos
+            .checked_add(other.as_nanos())
+            .map(|nanos| Self { nanos })
     }
 
     pub fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
-        let other_nanos = other.as_nanos();
-        if self.nanos as u128 >= other_nanos {
-            Some(Self {
-                nanos: self.nanos - (other_nanos as u64),
-            })
-        } else {
-            None
-        }
+        self.nanos
+            .checked_sub(other.as_nanos())
+            .map(|nanos| Self { nanos })
     }
 }
 
-fn abs_nanos_from_tsc(tsc_val: u64) -> u64 {
+fn abs_nanos_from_tsc(tsc_val: u64) -> u128 {
     /*  see https://www.kernel.org/doc/Documentation/virt/kvm/msr.rst
         time = (current_tsc - tsc_timestamp)
         if (tsc_shift >= 0)
@@ -237,6 +225,7 @@ fn abs_nanos_from_tsc(tsc_val: u64) -> u64 {
         time = time + system_time
     */
     fence(Ordering::Acquire);
+
     let page = KernelStaticPage::get();
     let mut time = tsc_val - page.tsc_ts;
     let tsc_shift = page.tsc_shift;
@@ -246,13 +235,14 @@ fn abs_nanos_from_tsc(tsc_val: u64) -> u64 {
         time >>= -tsc_shift;
     }
 
-    // TODO: sometimes this overflows in debug mode.
-    let (mul, _overflow) = time.overflowing_mul(page.tsc_mul as u64);
+    // The multiplication below MUST be done with higher precision, as
+    // doing it in u64 overflows and leads to wrong time.
+    let mul = (time as u128) * (page.tsc_mul as u128);
 
-    time = mul >> 32;
-    time += page.system_time;
+    let mut time = mul >> 32;
+    time += page.system_time as u128;
 
-    page.base_nsec + time
+    page.base_nsec as u128 + time
 }
 
 fn rdtsc() -> u64 {
@@ -284,23 +274,6 @@ fn tsc_to_nanos_128(tsc: u64) -> u128 {
     }
 
     nanos * (page.tsc_mul as u128) >> 32
-}
-
-fn tsc_to_nanos(tsc: u64) -> u64 {
-    fence(Ordering::Acquire);
-    let page = KernelStaticPage::get();
-
-    let mut nanos = tsc;
-    let tsc_shift = page.tsc_shift;
-    if tsc_shift >= 0 {
-        nanos <<= tsc_shift;
-    } else {
-        nanos >>= -tsc_shift;
-    }
-
-    // TODO: this may overflow and panic. Fix.
-    let (mul, _overflow) = nanos.overflowing_mul(page.tsc_mul as u64);
-    mul >> 32
 }
 
 fn nanos_to_tsc(nanos: u64) -> u64 {

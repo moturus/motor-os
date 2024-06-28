@@ -324,11 +324,23 @@ impl Scheduler {
             Ordering::Relaxed,
         );
 
+        let mut last_system_time_update = now_tsc;
+
         loop {
             #[cfg(debug_assertions)]
             self.alive();
 
             self.wake.store(false, Ordering::Relaxed);
+
+            if self.cpu == 0 {
+                // TODO: should we do this more often? less often?
+                let now_tsc = crate::arch::time::Instant::now().as_u64();
+                if now_tsc - last_system_time_update > 1_000_000_000 {
+                    last_system_time_update = now_tsc;
+                    update_system_time();
+                }
+            }
+
             crate::uspace::process_wake_events(); // May add jobs to queues.
 
             curr_iteration += 1;
@@ -463,7 +475,7 @@ pub fn start() -> ! {
             let shared_page = unsafe { crate::mm::virt::get_kernel_static_page_mut() };
             shared_page.version = 0;
             shared_page.num_cpus = crate::arch::num_cpus() as u32;
-            crate::arch::time::populate_kernel_static_page(shared_page);
+            update_system_time();
         }
         core::sync::atomic::fence(Ordering::Release);
 
@@ -479,6 +491,11 @@ pub fn start() -> ! {
 
     let queue = PERCPU_SCHEDULERS.get_per_cpu();
     queue.sched_loop();
+}
+
+fn update_system_time() {
+    let shared_page = unsafe { crate::mm::virt::get_kernel_static_page_mut() };
+    crate::arch::time::populate_kernel_static_page(shared_page);
 }
 
 pub fn post(job: Job) {

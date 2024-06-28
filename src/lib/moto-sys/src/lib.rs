@@ -124,3 +124,14 @@ impl From<u16> for ErrorCode {
         Self::from_u16(value)
     }
 }
+
+// #[cfg(feature = "userspace")]
+// #[macro_export]
+// macro_rules! moturus_log {
+//     ($($arg:tt)*) => {
+//         {
+//             extern crate alloc;
+//             crate::syscalls::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+//         }
+//     };
+// }
