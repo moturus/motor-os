@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html>
-
 <head>
+<meta charset="UTF-8">
 <title>What is Motor OS</title>
-<link rel="icon" type="image/png" sizes="32x32" href="moturus-256.png">
 </head>
+
 <style>
-.myDiv {
+.main-body {
   height: 1480px;   
   text-align: left;
   line-height: 1.4;
@@ -14,15 +14,13 @@
   padding: 0 10px;
   margin: 50px auto;
   max-width: 600px;
-font-family:tahoma;
+  font-family:sans;
 }
-
 </style>
 
 <body>
-
-<div class="myDiv">
-<p><a href="moturusHome.html">Back to home</a></p>
+<div class="main-body">
+<p align="right"><a href="/">Motor OS</a> | <a href="why.html">Why</a> | <a href="https://github.com/moturus/motor-os" target="_blank">GitHub</a></p>
 <h1>What is Motor OS</h1>
 
 <p>
@@ -38,7 +36,7 @@ More specifically, these things work:
 </p>
 
  <ul>
-  <li>boots via MBR (Qemu) or PVH (Cloud Hypervisor) in about 200ms</li>
+  <li>boots via MBR (Qemu) or PVH (Alioth, Cloud Hypervisor) in 100ms (Alioth) or 200ms (CHV, Qemu)</li>
   <li>himem micro-kernel</li>
   <li>scheduling:</li>
 	<ul>
@@ -102,9 +100,11 @@ More specifically:
    </ul>
 </ul>
 </p>
+<p>
 <center>
 <img src="moturus-256.png" alt="Metal Bear on Motorbike">
 </center>
+</p>
 </div>
 </body>
 </html>
