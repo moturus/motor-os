@@ -1681,6 +1681,7 @@ impl IoSubsystem for NetSys {
             }
 
             stats.tcp_state = moto_socket.state.try_into().unwrap();
+            stats.smoltcp_state = smol_socket.state();
 
             results.push(stats);
             if results.len() == num_results {

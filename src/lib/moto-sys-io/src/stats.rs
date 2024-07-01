@@ -9,7 +9,7 @@ use moto_sys::ErrorCode;
 pub const URL_IO_STATS: &str = "sys-io-stats-service";
 
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct TcpSocketStatsV1 {
     pub id: u64,
     pub device_id: u64,
@@ -20,19 +20,37 @@ pub struct TcpSocketStatsV1 {
     pub remote_port: u16,      // Zero if not known.
 
     pub tcp_state: moto_runtime::rt_api::net::TcpState,
+    pub smoltcp_state: smoltcp::socket::tcp::State,
+}
+
+impl Default for TcpSocketStatsV1 {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            device_id: u64::MAX,
+            pid: 0,
+            local_addr: [0; 16],
+            local_port: 0,
+            remote_addr: [0; 16],
+            remote_port: 0,
+            tcp_state: moto_runtime::rt_api::net::TcpState::Closed,
+            smoltcp_state: smoltcp::socket::tcp::State::Closed,
+        }
+    }
 }
 
 impl core::fmt::Debug for TcpSocketStatsV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TCP: pid: {} dev: {} id: {} local_addr: {:?} remote_addr: {:?} state: {:?}",
+            "TCP: pid: {} dev: {} id: {} local_addr: {:?} remote_addr: {:?} state: {:?} ({:?})",
             self.pid,
             self.device_id,
             self.id,
             self.local_addr(),
             self.remote_addr(),
-            self.tcp_state
+            self.tcp_state,
+            self.smoltcp_state
         )
     }
 }
@@ -115,7 +133,7 @@ pub struct GetTcpSocketStatsResponse<const N: usize> {
     pub socket_stats: [TcpSocketStatsV1; N],
 }
 
-pub const MAX_TCP_SOCKET_STATS: usize = 63;
+pub const MAX_TCP_SOCKET_STATS: usize = 56;
 
 const _SZ: () = assert!(
     size_of::<GetTcpSocketStatsResponse<MAX_TCP_SOCKET_STATS>>()
