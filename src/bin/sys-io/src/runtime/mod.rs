@@ -3,6 +3,8 @@ use std::sync::atomic::AtomicU64;
 use moto_ipc::io_channel;
 use moto_sys::SysHandle;
 
+pub mod internal_queue;
+pub mod io_stats;
 mod io_thread;
 
 pub struct PendingCompletion {
@@ -29,15 +31,19 @@ pub trait IoSubsystem {
     // For how long the IO thread may sleep without calling poll.
     // This is particularly useful in networking, where TCP have various timers.
     fn wait_timeout(&mut self) -> Option<core::time::Duration>;
+
+    fn get_stats(&mut self, msg: &internal_queue::Msg);
 }
 
 pub static STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub fn start() {
+    internal_queue::init();
     io_thread::start();
     while STARTED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         moto_runtime::futex_wait(&STARTED, 0, None);
     }
+    io_stats::spawn_stats_service();
 }
 
 // A single 2M page used for VirtIO/MMIO.

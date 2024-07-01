@@ -1,0 +1,15 @@
+[package]
+name = "moto-sys-io"
+version = "0.2.4"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+keywords = ["moturus", "motor-os"]
+readme = "README.md"
+repository = "https://github.com/moturus/moto-sys"
+description = "Motor OS system I/O crate."
+edition = "2021"
+
+[dependencies]
+moto-ipc = { path = "../moto-ipc" }
+moto-sys = { path = "../moto-sys" }
+moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }

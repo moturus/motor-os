@@ -31,6 +31,15 @@ name = "moto-sys"
 version = "0.2.4"
 
 [[package]]
+name = "moto-sys-io"
+version = "0.2.4"
+dependencies = [
+ "moto-ipc",
+ "moto-runtime",
+ "moto-sys",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -98,6 +107,7 @@ dependencies = [
  "moto-ipc",
  "moto-runtime",
  "moto-sys",
+ "moto-sys-io",
  "time",
 ]
 

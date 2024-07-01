@@ -61,6 +61,10 @@ impl TcpListener {
         }
     }
 
+    pub fn conn(&self) -> &Rc<io_channel::ServerConnection> {
+        &self.conn
+    }
+
     pub fn conn_handle(&self) -> SysHandle {
         self.conn.wait_handle()
     }

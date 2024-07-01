@@ -2,6 +2,7 @@
 use core::intrinsics::{likely, unlikely};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
 
 use moto_ipc::io_channel;
 use moto_runtime::rt_api;
@@ -10,6 +11,8 @@ use moto_sys::ErrorCode;
 
 use super::IoSubsystem;
 use super::PendingCompletion;
+
+pub static IO_THREAD_HANDLE: AtomicU64 = AtomicU64::new(0);
 
 struct IoRuntime {
     net: Box<dyn IoSubsystem>,
@@ -310,10 +313,27 @@ impl IoRuntime {
         }
 
         self_mut.update_handles();
+        IO_THREAD_HANDLE.store(
+            moto_sys::UserThreadControlBlock::this_thread_handle().into(),
+            std::sync::atomic::Ordering::Release,
+        );
 
         SysCpu::affine_to_cpu(Some(0)).unwrap();
         std::thread::sleep(core::time::Duration::from_micros(10));
         self_mut.io_thread();
+    }
+
+    fn check_internal_queue(&mut self) {
+        let msg = match super::internal_queue::pop_msg() {
+            Some(msg) => msg,
+            None => return,
+        };
+
+        match msg.cmd {
+            moto_sys_io::stats::CMD_TCP_STATS => self.net.get_stats(&msg),
+            _ => panic!(),
+        }
+        msg.mark_done();
     }
 
     fn wait_timeout(&mut self) -> core::time::Duration {
@@ -335,6 +355,7 @@ impl IoRuntime {
         let mut debug_timed_out = false;
         loop {
             let mut had_work = false;
+            self.check_internal_queue();
 
             let mut cnt = 0;
             loop {
