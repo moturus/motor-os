@@ -223,6 +223,7 @@ impl NetSys {
                 .unwrap()
                 .conn()
                 .clone();
+            let conn_handle = conn.wait_handle();
             let mut moto_socket = self.new_socket_for_device(device_idx, conn)?;
             let socket_id = moto_socket.id;
             moto_socket.listener_id = Some(listener_id);
@@ -232,6 +233,13 @@ impl NetSys {
                 .add_listening_socket(socket_id);
             moto_socket.state = TcpState::Listening;
             moto_socket.listening_on = Some(socket_addr);
+            if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&conn_handle) {
+                conn_sockets.insert(moto_socket.id);
+            } else {
+                let mut conn_sockets = HashSet::new();
+                conn_sockets.insert(moto_socket.id);
+                self.conn_tcp_sockets.insert(conn_handle, conn_sockets);
+            }
 
             let smol_handle = moto_socket.handle;
             self.socket_ids.insert(moto_socket.id);
