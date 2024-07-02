@@ -286,9 +286,9 @@ impl VirtioDevice {
 
     // Step 0: see virtio_pci_device::init() in osv.
     fn init(&mut self) {
-        // Set bus master.
+        // Set bus master, enable I/O and memory space.
         let mut command = self.pci_device.id.read_config_u16(pci::PCI_CFG_COMMAND);
-        command |= pci::PCI_COMMAND_BUS_MASTER;
+        command |= pci::PCI_COMMAND_BUS_MASTER | pci::PCI_COMMAND_BUS_IO | pci::PCI_COMMAND_BUS_MEM;
         self.pci_device
             .id
             .write_config_u16(pci::PCI_CFG_COMMAND, command);
