@@ -305,6 +305,7 @@ impl NetSys {
             rx_closed_notified: false,
             subchannel_mask: u64::MAX,
             listening_on: None,
+            replacement_listener_created: false,
         })
     }
 
@@ -335,6 +336,30 @@ impl NetSys {
     fn drop_tcp_socket(&mut self, socket_id: SocketId) {
         self.cancel_tcp_tx(socket_id);
 
+        // First, abort the connection without removing the socket from
+        // self.tcp_sockets, as this may call self.cancel_tcp_tx(),
+        // which will panic if the socket is not found. Yes, we could
+        // change cancel_tcp_tx() to not panic if the socket is not found,
+        // but this will introduce some haziness to the code, and it is
+        // better to keep it tight.
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        let smol_socket = self.devices[moto_socket.device_idx]
+            .sockets
+            .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+
+        smol_socket.abort();
+
+        // Remove the waker so that any polls on the socket from below don't trigger
+        // wakeups on the dropped socket.
+        self.wakers.remove(&socket_id);
+
+        // Poll the device to send the final RST. Otherwise smol_socket.abort() above
+        // does nothing, and the remote connection is kept alive/hanging until it times out.
+        // Need to poll all sockets on the device, not just the one being removed,
+        // as on loopback devices the peer won't get notified.
+        while self.devices[moto_socket.device_idx].poll() {}
+
+        // Now we can remove moto_socket.
         let mut moto_socket = self.tcp_sockets.remove(&socket_id).unwrap();
         assert!(self.socket_ids.remove(&socket_id));
         while let Some(tx_buf) = moto_socket.tx_queue.pop_front() {
@@ -348,16 +373,6 @@ impl NetSys {
             assert!(conn_sockets.remove(&socket_id));
         }
 
-        let smol_socket = self.devices[moto_socket.device_idx]
-            .sockets
-            .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
-
-        smol_socket.abort();
-
-        // Remove the waker so that any polls on the socket from below don't trigger
-        // wakeups on the dropped socket.
-        self.wakers.remove(&socket_id);
-
         if let Some(listener_id) = moto_socket.listener_id.take() {
             // When handling drop_tcp_listener cmd, the listener is first removed,
             // then its listening sockets are removed, so the next line will get None.
@@ -367,12 +382,16 @@ impl NetSys {
             }
         }
 
-        // Poll the device to send the final RST. Otherwise smol_socket.abort() above
-        // does nothing, and the remote connection is kept alive/hanging until it times out.
-        // Need to poll all sockets on the device, not just the one being removed,
-        // as on loopback devices the peer won't get notified.
-        while self.devices[moto_socket.device_idx].poll() {}
+        if let Some(mut cqe) = moto_socket.connect_req.take() {
+            assert_eq!(moto_socket.state, TcpState::Connecting);
+            cqe.status = ErrorCode::BadHandle.into();
+            self.pending_completions.push_back(PendingCompletion {
+                msg: cqe,
+                endpoint_handle: moto_socket.conn.wait_handle(),
+            });
+        }
 
+        // Remove and cache the unused smol_socket.
         let smol_socket = match self.devices[moto_socket.device_idx]
             .sockets
             .remove(moto_socket.handle)
@@ -385,15 +404,7 @@ impl NetSys {
             self.devices[moto_socket.device_idx].free_ephemeral_port(port);
         }
 
-        if let Some(mut cqe) = moto_socket.connect_req.take() {
-            assert_eq!(moto_socket.state, TcpState::Connecting);
-            cqe.status = ErrorCode::BadHandle.into();
-            self.pending_completions.push_back(PendingCompletion {
-                msg: cqe,
-                endpoint_handle: moto_socket.conn.wait_handle(),
-            });
-        }
-
+        assert_eq!(smol_socket.state(), smoltcp::socket::tcp::State::Closed);
         self.put_unused_tcp_socket(smol_socket);
         #[cfg(debug_assertions)]
         log::debug!(
@@ -996,6 +1007,7 @@ impl NetSys {
         let local_addr = super::smoltcp_helpers::socket_addr_from_endpoint(
             smol_socket.local_endpoint().unwrap(),
         );
+        assert_eq!(local_addr, moto_socket.listening_on.unwrap());
         let remote_addr = super::smoltcp_helpers::socket_addr_from_endpoint(
             smol_socket.remote_endpoint().unwrap(),
         );
@@ -1040,9 +1052,19 @@ impl NetSys {
             remote_addr
         );
 
-        // One listening socket has been consumed (became a connected socket),
-        // so we create another one.
-        if let Err(err) = self.start_listening_on_device(listener_id, device_idx, local_addr, 1) {
+        may_do_io
+    }
+
+    fn spawn_replacement_listener(&mut self, socket_id: SocketId) {
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        assert_eq!(moto_socket.state, TcpState::Listening);
+        assert!(!moto_socket.replacement_listener_created);
+        moto_socket.replacement_listener_created = true;
+
+        let device_idx = moto_socket.device_idx;
+        let listener_id = *moto_socket.listener_id.as_ref().unwrap();
+        let addr = moto_socket.listening_on.unwrap();
+        if let Err(err) = self.start_listening_on_device(listener_id, device_idx, addr, 1) {
             log::error!(
                 "{}:{} bind_on_device() failed with {:?}",
                 file!(),
@@ -1050,8 +1072,6 @@ impl NetSys {
                 err
             );
         }
-
-        may_do_io
     }
 
     fn on_socket_connected(&mut self, socket_id: SocketId) {
@@ -1113,11 +1133,11 @@ impl NetSys {
         } else {
             return; // The socket has been removed/aborted.
         };
-        let moto_socket = match self.tcp_sockets.get_mut(&socket_id) {
+        let mut moto_socket = match self.tcp_sockets.get_mut(&socket_id) {
             Some(s) => s,
             None => return,
         };
-        let smol_socket = self.devices[moto_socket.device_idx]
+        let mut smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
@@ -1129,6 +1149,20 @@ impl NetSys {
         let can_recv = smol_socket.can_recv() || !moto_socket.rx_closed_notified;
         let can_send = smol_socket.can_send();
         let state = smol_socket.state();
+
+        if moto_socket.state == TcpState::Listening
+            && smol_socket.state() != smoltcp::socket::tcp::State::Listen
+            && !moto_socket.replacement_listener_created
+        {
+            self.spawn_replacement_listener(socket_id);
+
+            // Must re-initialize moto_socket and smol_socket because the borrow-checker
+            //  complains about self.spawn_replacement_listener() above.
+            moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+            smol_socket = self.devices[moto_socket.device_idx]
+                .sockets
+                .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+        }
 
         #[cfg(debug_assertions)]
         let mut dbg_moto_state = moto_socket.state;
@@ -1681,6 +1715,7 @@ impl IoSubsystem for NetSys {
             }
 
             stats.tcp_state = moto_socket.state.try_into().unwrap();
+            stats.smoltcp_state = smol_socket.state();
 
             results.push(stats);
             if results.len() == num_results {
