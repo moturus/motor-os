@@ -11,6 +11,11 @@ struct Args {
     dir: String,
     #[arg(short, long, default_value_t = 4)]
     threads: u8,
+
+    #[arg(long)]
+    ssl_cert: Option<String>,
+    #[arg(long)]
+    ssl_key: Option<String>,
 }
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
@@ -183,6 +188,12 @@ fn process(request: tiny_http::Request) {
 
     let request_path = {
         let mut url = request.url();
+        if url.find("..").is_some() {
+            log_request(404, request.url().as_bytes());
+            let _ = request.respond(tiny_http::Response::empty(tiny_http::StatusCode(404)));
+            return;
+        }
+
         if url == "/" {
             Path::new(root.as_str()).join("index.html")
         } else {
@@ -258,6 +269,48 @@ fn process(request: tiny_http::Request) {
         .respond(tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server));
 }
 
+fn start_https(args: &Args) -> Arc<tiny_http::Server> {
+    let ssl_cert_path = args.ssl_cert.as_ref().unwrap();
+    let ssl_key_path = args.ssl_key.as_ref().unwrap();
+
+    let certificate = match std::fs::read(std::path::Path::new(ssl_cert_path)) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("Error reading ssl cert {}: {:?}.", ssl_cert_path, err);
+            std::process::exit(-1);
+        }
+    };
+    let private_key = match std::fs::read(std::path::Path::new(ssl_key_path)) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("Error reading ssl key {}: {:?}.", ssl_key_path, err);
+            std::process::exit(-1);
+        }
+    };
+
+    Arc::new(
+        tiny_http::Server::https(
+            args.addr,
+            tiny_http::SslConfig {
+                certificate,
+                private_key,
+            },
+        )
+        .unwrap(),
+    )
+}
+
+fn start_server(args: &Args) -> Arc<tiny_http::Server> {
+    if args.ssl_cert.is_some() && args.ssl_key.is_some() {
+        start_https(args)
+    } else if args.ssl_cert.is_none() && args.ssl_key.is_none() {
+        Arc::new(tiny_http::Server::http(args.addr).unwrap())
+    } else {
+        eprintln!("ERROR: ssl_cert and ssl_key args must either be both specified or none.");
+        std::process::exit(-1);
+    }
+}
+
 fn main() {
     std::thread::spawn(move || input_listener());
 
@@ -276,8 +329,12 @@ fn main() {
         }
     }
 
-    let server = Arc::new(tiny_http::Server::http(args.addr).unwrap());
-    println!("Serving HTTP on {:?}. Press Ctrl+C to exit.", args.addr);
+    let server = start_server(&args);
+    if args.ssl_cert.is_some() {
+        println!("Serving HTTPS on {:?}. Press Ctrl+C to exit.", args.addr);
+    } else {
+        println!("Serving HTTP on {:?}. Press Ctrl+C to exit.", args.addr);
+    }
 
     let mut threads = Vec::new();
     for _ in 0..args.threads {
