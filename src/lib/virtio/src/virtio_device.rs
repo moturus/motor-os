@@ -165,7 +165,7 @@ impl VirtioDevice {
             return Err(());
         }
 
-        if device_id.header_type() != 0 {
+        if device_id.header_type() & 0x7F != 0 {
             log::warn!(
                 "Skipping VirtIO device_id with wrong header type {}",
                 device_id.header_type()

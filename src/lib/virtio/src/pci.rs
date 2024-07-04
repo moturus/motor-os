@@ -140,7 +140,6 @@ impl PciDeviceID {
     }
 
     pub fn header_type(&self) -> u8 {
-        assert_eq!(self.func, 0);
         let res = self.read_config_u32(0x0C);
         ((res >> 16) & 0xFF) as u8
     }
