@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## 2024-07-04
 
+TLS/HTTPS serving implemented.
+
+## 2024-06-30
+
 `ss` command implemented.
 
 ## 2024-05-08
