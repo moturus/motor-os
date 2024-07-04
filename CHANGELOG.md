@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2024-07-04
+
+`ss` command implemented.
+
 ## 2024-05-08
 
 The serving side of TCP stack seems to be robust now: rnetbench
