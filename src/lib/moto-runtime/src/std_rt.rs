@@ -80,7 +80,7 @@ use core::panic::PanicInfo;
 #[no_mangle]
 pub fn moturus_log_panic(info: &PanicInfo<'_>) {
     if moturus_log_panics_to_kernel() {
-        SysMem::log("PANIC").ok();  // Log w/o allocations.
+        SysMem::log("PANIC").ok(); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}", info);
         SysMem::log(msg.as_str()).ok();
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
@@ -88,7 +88,7 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
         use core::fmt::Write;
 
         let mut stderr = super::stdio::StderrRt::new();
-        let _ = stderr.write_str("PANIC\n");  // Log w/o allocations.
+        let _ = stderr.write_str("PANIC\n"); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}\n", info);
         let _ = stderr.write_str(msg.as_str());
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
@@ -181,4 +181,16 @@ pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
     // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
     // don't have stdio, so they will override this function to log via SysMem::log().
     false
+}
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    panic!("__stack_chk_fail")
+}
+
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn __assert_fail() -> ! {
+    // void __assert_fail(const char * assertion, const char * file, unsigned int line, const char * function);
+    panic!("__assert_fail")
 }
