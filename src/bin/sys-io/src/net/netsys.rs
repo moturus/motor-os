@@ -1530,7 +1530,16 @@ impl NetSys {
     }
 
     fn cancel_tcp_tx(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
+            s
+        } else {
+            // See drop_tcp_socket(): we carefully order ops so that this does not happen,
+            // but it still happens when the client does something naughty: when our httpd
+            // based on tiny-http runs without Cloudflare proxy, and we ^C httpd, this
+            // line triggers sometimes.
+            log::error!("Missing socket {} in cancel_tcp_tx.", u64::from(socket_id));
+            return;
+        };
         // TODO: Linux keeps sending buffered packets after socket close. Should we do the same?
         moto_socket.tx_queue.clear();
     }
