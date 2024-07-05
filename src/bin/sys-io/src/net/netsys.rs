@@ -342,7 +342,15 @@ impl NetSys {
         // change cancel_tcp_tx() to not panic if the socket is not found,
         // but this will introduce some haziness to the code, and it is
         // better to keep it tight.
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
+            s
+        } else {
+            log::error!(
+                "drop_tcp_socket(): socket {} not found.",
+                u64::from(socket_id)
+            );
+            return;
+        };
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
