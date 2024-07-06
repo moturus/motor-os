@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2024-07-06
+
+Motor OS [web site](https://motor-os.org) is now served from inside
+a couple of Motor OS VMs (proxied via Cloudflare).
+
 ## 2024-07-04
 
 TLS/HTTPS serving implemented.
