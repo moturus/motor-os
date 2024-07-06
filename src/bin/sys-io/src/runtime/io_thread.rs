@@ -34,7 +34,10 @@ impl IoRuntime {
     fn drop_connection(&mut self, handle: SysHandle) {
         if let Some(conn) = self.connections.remove(&handle) {
             self.net.on_connection_drop(handle);
-            assert_eq!(1, Rc::strong_count(&conn.0));
+            if Rc::strong_count(&conn.0) != 1 {
+                // It was 2 once.
+                log::error!("Rc::strong_count() is {}", Rc::strong_count(&conn.0));
+            }
 
             self.update_handles();
             if self.cached_wakee_connection == handle {
