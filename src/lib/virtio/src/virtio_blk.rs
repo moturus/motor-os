@@ -69,7 +69,7 @@ impl Blk {
             );
             (*BLK.lock()).push(blk);
         } else {
-            moto_sys::SysMem::log("Failed to initialize Virtio BLK device.").ok();
+            moto_sys::SysRay::log("Failed to initialize Virtio BLK device.").ok();
             blk.dev.mark_failed();
         }
     }

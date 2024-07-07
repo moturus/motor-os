@@ -1,6 +1,6 @@
 use moto_sys::{stats::ProcessStatsV1, syscalls::SyscallResult, ErrorCode, SysHandle, SysRay};
 
-use crate::stats::KProcessStats;
+use crate::xray::stats::KProcessStats;
 
 use super::syscall::{ResultBuilder, SyscallArgs};
 
@@ -93,6 +93,41 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
     ResultBuilder::ok_1(counter as u64)
 }
 
+fn sys_log(
+    curr_thread: &super::process::Thread,
+    flags: u32,
+    virt_addr: u64,
+    sz: u64,
+) -> SyscallResult {
+    if (curr_thread.owner().capabilities() & moto_sys::caps::CAP_LOG) == 0 {
+        return ResultBuilder::result(ErrorCode::NotAllowed);
+    }
+
+    if flags != 0 {
+        return ResultBuilder::invalid_argument();
+    }
+
+    let sz = u64::min(256, sz);
+    let address_space = curr_thread.owner().address_space().clone();
+    let bytes = match address_space.read_from_user(virt_addr, sz) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::debug!("sys_debug: read from user failed: {:?}", err);
+            return ResultBuilder::invalid_argument();
+        }
+    };
+
+    use core::str;
+    match str::from_utf8(bytes.as_slice()) {
+        Ok(str) => {
+            crate::xray::logger::log_user(curr_thread, str);
+        }
+        Err(_) => return ResultBuilder::result(ErrorCode::InvalidArgument),
+    };
+
+    ResultBuilder::ok()
+}
+
 pub(super) fn sys_ray_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     match args.operation {
         SysRay::OP_QUERY_PROCESS => match args.flags {
@@ -102,6 +137,17 @@ pub(super) fn sys_ray_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
             _ => ResultBuilder::invalid_argument(),
         },
+        SysRay::OP_LOG => {
+            if args.args[2] != 0 || args.args[3] != 0 || args.args[4] != 0 || args.args[5] != 0 {
+                return ResultBuilder::invalid_argument();
+            }
+            return sys_log(
+                thread,
+                args.flags,
+                args.args[0], // virt_addr
+                args.args[1], // sz
+            );
+        }
         _ => ResultBuilder::invalid_argument(),
     }
 }

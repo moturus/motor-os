@@ -54,7 +54,7 @@ fn process_config() -> Result<Config, String> {
 
 fn main() {
     #[cfg(debug_assertions)]
-    SysMem::log("sys-init started").ok();
+    SysRay::log("sys-init started").ok();
 
     assert_eq!(
         1,
@@ -64,7 +64,7 @@ fn main() {
     let config = process_config();
     if let Err(msg) = config {
         log::error!("sys-init: {}", msg);
-        SysMem::log(format!("sys-init: {}", msg).as_str()).unwrap();
+        SysRay::log(format!("sys-init: {}", msg).as_str()).unwrap();
         std::process::exit(1);
     }
 
@@ -88,7 +88,7 @@ fn main() {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1));
             if log_start.elapsed().as_secs() > 5 {
-                SysMem::log("sys-init: failed to initialize logging").unwrap();
+                SysRay::log("sys-init: failed to initialize logging").unwrap();
                 std::process::exit(1);
             }
             if moto_log::init("sys-init").is_ok() {

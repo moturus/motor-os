@@ -2,7 +2,7 @@ use std::mem::size_of;
 
 use moto_ipc::sync::*;
 use moto_sys::SysHandle;
-use moto_sys::SysMem;
+use moto_sys::SysRay;
 
 struct Connection {
     _tag: String,
@@ -43,7 +43,7 @@ impl LogServer {
                 .unwrap()
         };
         if req.header.cmd != CMD_CONNECT || req.header.ver != 0 {
-            SysMem::log("Bad ConnectRequest.").ok();
+            SysRay::log("Bad ConnectRequest.").ok();
             return Err(());
         }
 
@@ -65,7 +65,7 @@ impl LogServer {
 
             Ok(())
         } else {
-            SysMem::log("Bad tag.").ok();
+            SysRay::log("Bad tag.").ok();
             Err(())
         }
     }
@@ -129,7 +129,7 @@ impl LogServer {
             return Err(());
         }
         if req.tag_id != 0 {
-            SysMem::log("sys-log: filtering by TAG ID not implemented").ok();
+            SysRay::log("sys-log: filtering by TAG ID not implemented").ok();
             return Err(());
         }
 
@@ -264,7 +264,7 @@ impl LogServer {
         };
 
         #[cfg(debug_assertions)]
-        SysMem::log("sys-log started").ok();
+        SysRay::log("sys-log started").ok();
         log_server.run()
     }
 }

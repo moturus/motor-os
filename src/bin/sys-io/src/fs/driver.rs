@@ -397,7 +397,7 @@ impl Driver {
             && flags != FileOpenRequest::F_WRITE
             && flags != FileOpenRequest::F_APPEND
         {
-            moto_sys::SysMem::log(
+            moto_sys::SysRay::log(
                 alloc::format!(
                     "on_file_open: flags not supported: 0x{:x}",
                     req.header.flags

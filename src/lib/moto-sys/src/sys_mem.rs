@@ -32,7 +32,6 @@ impl SysMem {
     pub const OP_UNMAP: u8 = 5;
     pub const OP_REMAP: u8 = 6;
     pub const OP_QUERY: u8 = 7;
-    pub const OP_DEBUG: u8 = 8;
     pub const OP_RECLAIM: u8 = 9;
 
     // Bit flags for create/map operations.
@@ -46,8 +45,6 @@ impl SysMem {
     // memory allocations; F_LAZY is a *hint* that the userspace
     // is OK with lazy mapping.
     pub const F_LAZY: u32 = 0x20;
-
-    pub const F_LOG_UTF8: u32 = 1; // OP_DEBUG.
 
     // Bit flags for query.
     pub const F_QUERY_STATS: u32 = 1;
@@ -204,30 +201,6 @@ impl SysMem {
             PAGE_SIZE_SMALL,
             size >> PAGE_SIZE_SMALL_LOG2,
         )
-    }
-
-    #[cfg(feature = "userspace")]
-    pub fn log(msg: &str) -> Result<(), ErrorCode> {
-        let bytes = msg.as_bytes();
-        if bytes.len() == 0 {
-            return Err(ErrorCode::InvalidArgument);
-        }
-
-        let res = do_syscall(
-            pack_nr_ver(SYS_MEM, Self::OP_DEBUG, Self::F_LOG_UTF8, 0),
-            SysHandle::SELF.as_u64(),
-            0,
-            msg.as_bytes().as_ptr() as usize as u64,
-            0,
-            0,
-            bytes.len() as u64,
-        );
-
-        if res.is_ok() {
-            Ok(())
-        } else {
-            Err(res.error_code())
-        }
     }
 
     #[cfg(feature = "userspace")]

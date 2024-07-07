@@ -79,9 +79,9 @@ use core::panic::PanicInfo;
 #[no_mangle]
 pub fn moturus_log_panic(info: &PanicInfo<'_>) {
     if moturus_log_panics_to_kernel() {
-        SysMem::log("PANIC").ok(); // Log w/o allocations.
+        SysRay::log("PANIC").ok(); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}", info);
-        SysMem::log(msg.as_str()).ok();
+        SysRay::log(msg.as_str()).ok();
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
     } else {
         use core::fmt::Write;
@@ -168,7 +168,7 @@ pub fn log_backtrace(binary: &str) {
     let _ = write!(&mut writer, "\n\n");
 
     if moturus_log_panics_to_kernel() {
-        let _ = SysMem::log(writer.as_str());
+        let _ = SysRay::log(writer.as_str());
     } else {
         let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
     }

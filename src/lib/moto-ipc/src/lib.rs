@@ -11,7 +11,7 @@ pub mod sync_pipe;
 macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
-        moto_sys::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+        moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
         }
     };
 }

@@ -314,7 +314,7 @@ impl Scheduler {
         let mut last_job_iter = 0_u64;
 
         let now_tsc = crate::arch::time::Instant::now().as_u64();
-        let percpu_stats = crate::stats::kernel_stats_ref().get_percpu_stats_entry(self.cpu);
+        let percpu_stats = crate::xray::stats::kernel_stats_ref().get_percpu_stats_entry(self.cpu);
         percpu_stats.cpu_kernel.store(now_tsc, Ordering::Relaxed);
         percpu_stats.started_k.store(now_tsc, Ordering::Relaxed);
 
@@ -414,13 +414,13 @@ impl Scheduler {
                 if self.wake.load(Ordering::Acquire) {
                     interrupts::enable();
                 } else {
-                    crate::util::tracing::trace("scheduler hlt", 0, 0, 0);
-                    crate::stats::system_stats_ref().start_cpu_usage_kernel();
+                    crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
+                    crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
                     self.idle.store(true, Ordering::Release);
                     interrupts::enable_and_hlt();
                     self.idle.store(false, Ordering::Release);
-                    crate::stats::system_stats_ref().stop_cpu_usage_kernel();
-                    crate::util::tracing::trace("scheduler hlt wake", 0, 0, 0);
+                    crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
+                    crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
                 }
             }
             self.idle_stop();

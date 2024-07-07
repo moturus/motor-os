@@ -362,12 +362,12 @@ pub mod implementation {
                     for _ in 0..num_entries {
                         pos = (pos + 7) & !7; // Align to 8 bytes.
                         if pos >= buffer.len() {
-                            moto_sys::SysMem::log("bad tail entries response (1)").ok();
+                            moto_sys::SysRay::log("bad tail entries response (1)").ok();
                             return Err(ErrorCode::InternalError);
                         }
                         let curr_buffer = &buffer[pos..];
                         if curr_buffer.len() < size_of::<LogEntryHeader>() {
-                            moto_sys::SysMem::log("bad tail entries response (2)").ok();
+                            moto_sys::SysRay::log("bad tail entries response (2)").ok();
                             return Err(ErrorCode::InternalError);
                         }
 
@@ -381,7 +381,7 @@ pub mod implementation {
                         if pos + size_of::<LogEntryHeader>() + (header.payload_size as usize)
                             > buffer.len()
                         {
-                            moto_sys::SysMem::log("bad tail entries response (3)").ok();
+                            moto_sys::SysRay::log("bad tail entries response (3)").ok();
                             return Err(ErrorCode::InternalError);
                         }
 

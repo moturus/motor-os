@@ -2,7 +2,7 @@ use super::rt_api::fs::*;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use core::sync::atomic::*;
-use moto_sys::SysMem;
+use moto_sys::SysRay;
 
 #[derive(Debug)]
 pub enum SeekFrom {
@@ -397,7 +397,7 @@ pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
 }
 
 pub fn lstat(path: &str) -> Result<FileAttr, ErrorCode> {
-    SysMem::log(alloc::format!("fs.rs: lstat: {}", path).as_str()).ok();
+    SysRay::log(alloc::format!("fs.rs: lstat: {}", path).as_str()).ok();
     todo!()
 }
 
@@ -551,7 +551,7 @@ impl FsClient {
 
         let mut conn = moto_ipc::sync::ClientConnection::new(moto_ipc::sync::ChannelSize::Small)?;
         if let Err(err) = conn.connect(url.as_str()) {
-            SysMem::log("Failed to connect to FS driver.").ok();
+            SysRay::log("Failed to connect to FS driver.").ok();
             return Err(err.into());
         }
 
@@ -754,7 +754,7 @@ impl FsClient {
                     return Err(ErrorCode::InvalidArgument);
                 }
                 if n > 0 {
-                    SysMem::log(
+                    SysRay::log(
                         alloc::format!(
                             "fs.rs: File::seek: '{:?}' => {:?}: Not Implemented",
                             file,
@@ -810,7 +810,7 @@ impl FsClient {
 
     fn write(file: &File, buf: &[u8]) -> Result<usize, ErrorCode> {
         if buf.len() == 0 {
-            SysMem::log("FS: write request with empty buf").ok();
+            SysRay::log("FS: write request with empty buf").ok();
             return Err(ErrorCode::InvalidArgument);
         }
         let mut conn = Self::get()?.conn.lock();
@@ -912,7 +912,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<CloseFdResponse>() };
         if resp.header.result != 0 {
-            SysMem::log("close_fd: RPC failed.").ok();
+            SysRay::log("close_fd: RPC failed.").ok();
         }
 
         Ok(())
@@ -987,7 +987,7 @@ fn get_fileserver_url() -> Result<String, ErrorCode> {
 
     let resp = conn.resp::<GetServerUrlResponse>();
     if resp.header.result != 0 || resp.header.ver != 0 {
-        SysMem::log("get_fileserver_url() failed.").ok();
+        SysRay::log("get_fileserver_url() failed.").ok();
         return Err(ErrorCode::InternalError);
     }
 

@@ -9,7 +9,7 @@ pub use x64::tlb::invalidate as tlb_invalidate;
 macro_rules! arch_raw_log {
     ($($arg:tt)*) => {
         {
-            let _lock = crate::util::logger::lock();
+            let _lock = crate::xray::logger::lock();
             $crate::arch::serial::write_serial_!($($arg)*);
             $crate::arch::serial::write_serial_!("\n");
         }

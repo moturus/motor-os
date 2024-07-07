@@ -364,7 +364,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
 
     if args.flags == SysCpu::F_KILL_PID {
         let target_pid = args.args[0];
-        if let Some(target_stats) = crate::stats::stats_from_pid(target_pid) {
+        if let Some(target_stats) = crate::xray::stats::stats_from_pid(target_pid) {
             if let Some(target) = target_stats.owner.upgrade() {
                 if target.capabilities() & moto_sys::caps::CAP_SYS != 0 {
                     return ResultBuilder::result(ErrorCode::NotAllowed);
@@ -543,7 +543,7 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
         return ResultBuilder::invalid_argument();
     };
 
-    let num_entries = crate::stats::fill_percpu_stats_page(page_addr as usize);
+    let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr as usize);
     ResultBuilder::ok_1(num_entries as u64)
 }
 

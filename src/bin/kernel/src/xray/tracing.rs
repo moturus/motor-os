@@ -8,7 +8,7 @@ use crate::{
     config::{uCpus, TRACE_BUFFER_SIZE},
 };
 
-use super::{StaticPerCpu, StaticRef};
+use crate::util::{StaticPerCpu, StaticRef};
 
 const _: () = assert!(TRACE_BUFFER_SIZE.is_power_of_two());
 

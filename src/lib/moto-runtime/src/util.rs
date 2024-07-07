@@ -11,7 +11,7 @@ macro_rules! moturus_log {
     ($($arg:tt)*) => {
         {
             extern crate alloc;
-            moto_sys::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+            moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
         }
     };
 }

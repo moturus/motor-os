@@ -278,41 +278,6 @@ fn sys_mem_query(
     }
 }
 
-fn sys_debug(
-    curr_thread: &super::process::Thread,
-    address_space: &UserAddressSpace,
-    flags: u32,
-    virt_addr: u64,
-    sz: u64,
-) -> SyscallResult {
-    if (curr_thread.owner().capabilities() & moto_sys::caps::CAP_LOG) == 0 {
-        return ResultBuilder::result(ErrorCode::NotAllowed);
-    }
-
-    if flags != SysMem::F_LOG_UTF8 {
-        return ResultBuilder::invalid_argument();
-    }
-
-    let sz = u64::min(256, sz);
-    let bytes = match address_space.read_from_user(virt_addr, sz) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            log::debug!("sys_debug: read from user failed: {:?}", err);
-            return ResultBuilder::invalid_argument();
-        }
-    };
-
-    use core::str;
-    match str::from_utf8(bytes.as_slice()) {
-        Ok(str) => {
-            crate::util::logger::log_user(curr_thread, str);
-        }
-        Err(_) => return ResultBuilder::result(ErrorCode::InvalidArgument),
-    };
-
-    ResultBuilder::ok()
-}
-
 fn sys_reclaim() -> SyscallResult {
     log::warn!("SysMem::reclaim(): do CAPs check.");
 
@@ -407,18 +372,6 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
                 args.args[2],
                 args.args[3],
                 args.args[4],
-            );
-        }
-        SysMem::OP_DEBUG => {
-            if args.args[1] != 0 || args.args[3] != 0 || args.args[4] != 0 {
-                return ResultBuilder::invalid_argument();
-            }
-            return sys_debug(
-                thread,
-                &address_space,
-                args.flags,
-                args.args[2], // virt_addr
-                args.args[5], // sz
             );
         }
         _ => {

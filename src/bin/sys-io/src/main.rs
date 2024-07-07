@@ -15,7 +15,7 @@ extern crate alloc;
 macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
-        moto_sys::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+        moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
         }
     };
 }
@@ -72,5 +72,5 @@ fn main() {
         .wait()
         .unwrap();
     #[cfg(debug_assertions)]
-    moto_sys::SysMem::log("sys-io exiting").ok();
+    moto_sys::SysRay::log("sys-io exiting").ok();
 }

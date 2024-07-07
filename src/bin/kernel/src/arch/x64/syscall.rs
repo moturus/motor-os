@@ -325,7 +325,7 @@ impl ThreadControlBlock {
             } else {
                 self.owner()
                     .trace("validate_rsp failed", self.syscall_rsp, 0);
-                crate::util::tracing::dump();
+                crate::xray::tracing::dump();
                 crate::arch::arch_write_serial!("\nFATAL ERROR: validate_rsp\n");
                 crate::arch::kernel_exit();
             }

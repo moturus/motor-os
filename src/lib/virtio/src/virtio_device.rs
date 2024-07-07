@@ -300,7 +300,7 @@ impl VirtioDevice {
         } else {
             let caps = self.pci_device.id.find_capabilities(pci::PCI_CAP_MSI);
             if caps.len() > 0 {
-                moto_sys::SysMem::log(
+                moto_sys::SysRay::log(
                     alloc::format!(
                         "VirtIO {:?} device has MSI but not MSI-X capability.",
                         self.kind
@@ -558,7 +558,7 @@ impl VirtioDevice {
 
         if virtqueue.queue_num >= msix.msgnum {
             // TODO: do we ever need to share IRQs between virtqueues?
-            moto_sys::SysMem::log("Having more virtqueues than MSIX vectors is not supported.")
+            moto_sys::SysRay::log("Having more virtqueues than MSIX vectors is not supported.")
                 .ok();
             return Err(());
         }
@@ -588,7 +588,7 @@ impl VirtioDevice {
             bar_offset + offset_of!(VirtioPciCommonCfgLayout, queue_msix_vector) as u64;
         cfg_bar.write_u16(queue_msix_vector_offset, virtqueue.queue_num);
         if virtqueue.queue_num != cfg_bar.read_u16(queue_msix_vector_offset) {
-            moto_sys::SysMem::log(
+            moto_sys::SysRay::log(
                 alloc::format!(
                     "VirtioDevice {:?}: setting MSIX entry for queue {} failed.",
                     self.pci_device.id,

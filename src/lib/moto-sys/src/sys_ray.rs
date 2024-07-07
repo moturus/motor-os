@@ -11,6 +11,7 @@ pub struct SysRay;
 impl SysRay {
     pub const OP_QUERY_PROCESS: u8 = 1;
     pub const OP_DBG: u8 = 2;
+    pub const OP_LOG: u8 = 3;
 
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
@@ -212,6 +213,30 @@ impl SysRay {
             Ok(result.data[0] as usize)
         } else {
             Err(result.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn log(msg: &str) -> Result<(), ErrorCode> {
+        let bytes = msg.as_bytes();
+        if bytes.len() == 0 {
+            return Err(ErrorCode::InvalidArgument);
+        }
+
+        let res = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_LOG, 0, 0),
+            msg.as_bytes().as_ptr() as usize as u64,
+            bytes.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if res.is_ok() {
+            Ok(())
+        } else {
+            Err(res.error_code())
         }
     }
 }

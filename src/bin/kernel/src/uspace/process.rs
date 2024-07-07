@@ -9,9 +9,9 @@ use crate::arch::time::Instant;
 use crate::config::uCpus;
 use crate::mm;
 use crate::mm::user::UserAddressSpace;
-use crate::stats::KProcessStats;
 use crate::util::LockGuard;
 use crate::util::SpinLock;
+use crate::xray::stats::KProcessStats;
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -612,7 +612,7 @@ impl Process {
     }
 
     fn job_fn_kill_by_pid(_: &Weak<Thread>, pid: u64) {
-        if let Some(target_stats) = crate::stats::stats_from_pid(pid) {
+        if let Some(target_stats) = crate::xray::stats::stats_from_pid(pid) {
             if let Some(target) = target_stats.owner.upgrade() {
                 if target.capabilities() & moto_sys::caps::CAP_SYS == 0 {
                     target.die();
@@ -925,7 +925,7 @@ impl Thread {
     }
 
     pub fn trace(&self, event: &'static str, arg1: u64, arg2: u64) {
-        crate::util::tracing::trace(event, self.tid.as_u64(), arg1, arg2);
+        crate::xray::tracing::trace(event, self.tid.as_u64(), arg1, arg2);
     }
 
     // Called when the thread has entered the kernel via a syscall.

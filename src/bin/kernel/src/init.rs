@@ -322,10 +322,10 @@ fn cpu_main(this_cpu: u64) -> ! {
             core::hint::spin_loop();
         }
 
-        crate::util::logger::init_logging();
+        crate::xray::logger::init_logging();
 
         crate::mm::init_mm_bsp_stage2();
-        crate::stats::init();
+        crate::xray::stats::init();
         crate::uspace::init();
 
         // If we print the boot logo before init_clock(), KVM in the host misbehaves and
@@ -376,7 +376,7 @@ pub fn start_userspace_processes() {
     let entry_point = result.unwrap();
 
     let process = crate::uspace::Process::new(
-        crate::stats::kernel_stats(),
+        crate::xray::stats::kernel_stats(),
         address_space,
         entry_point,
         0xffff_ffff_ffff_ffff, // All possible caps.

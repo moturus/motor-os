@@ -183,7 +183,7 @@ impl Virtqueue {
             return Err(()); // Nothing to wait on.
         }
         if self.wait_handles.len() > 2 {
-            moto_sys::SysMem::log(
+            moto_sys::SysRay::log(
                 alloc::format!("too many wait handles: {}", self.wait_handles.len()).as_str(),
             )
             .ok();

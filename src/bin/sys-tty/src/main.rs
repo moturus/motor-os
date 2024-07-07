@@ -27,7 +27,7 @@ fn read_config() -> String {
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
         Err(err) => {
-            moto_sys::SysMem::log(format!("Error reading '{}': {:?}", config_path, err).as_str())
+            moto_sys::SysRay::log(format!("Error reading '{}': {:?}", config_path, err).as_str())
                 .ok();
             std::process::exit(1);
         }
@@ -36,7 +36,7 @@ fn read_config() -> String {
 
 fn main() {
     #[cfg(debug_assertions)]
-    moto_sys::SysMem::log("sys-tty started").ok();
+    moto_sys::SysRay::log("sys-tty started").ok();
     moto_log::init("sys-tty").unwrap();
 
     log::set_max_level(log::LevelFilter::Trace);
@@ -47,7 +47,7 @@ fn main() {
     let words: Vec<_> = config.trim().split_whitespace().collect();
 
     if words.len() == 0 {
-        moto_sys::SysMem::log("Error: empty config.").ok();
+        moto_sys::SysRay::log("Error: empty config.").ok();
         std::process::exit(1);
     }
 

@@ -1,9 +1,9 @@
 struct Logger {
-    lock: super::SpinLock<()>, // To unscramble concurrent log messages.
+    lock: crate::util::SpinLock<()>, // To unscramble concurrent log messages.
 }
 
 static LOGGER: Logger = Logger {
-    lock: super::SpinLock::new(()),
+    lock: crate::util::SpinLock::new(()),
 };
 
 impl log::Log for Logger {
@@ -79,6 +79,6 @@ pub fn init_logging() {
     // This can be overwritten via SysCtl from the userspace.
 }
 
-pub fn lock() -> super::LockGuard<'static, ()> {
+pub fn lock() -> crate::util::LockGuard<'static, ()> {
     LOGGER.lock.lock(line!())
 }

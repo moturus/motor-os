@@ -1,10 +1,8 @@
 pub mod loader;
-pub mod logger;
 pub mod percpu;
 pub mod pin_weak;
 pub mod spin_lock;
 pub mod static_ref;
-pub mod tracing;
 pub mod unsafe_ref;
 
 use alloc::vec::Vec;

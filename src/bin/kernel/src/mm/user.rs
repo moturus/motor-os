@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 
 use super::{align_up, virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use crate::mm::{MappingOptions, MemorySegment, PAGE_SIZE_MID, PAGING_DIRECT_MAP_OFFSET};
-use crate::stats::MemStats;
+use crate::xray::stats::MemStats;
 use moto_sys::ErrorCode;
 
 #[derive(Debug)]
