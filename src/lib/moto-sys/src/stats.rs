@@ -154,3 +154,11 @@ impl MemoryStats {
 pub fn get_cpu_usage(buf: &mut [f32]) -> Result<(), ErrorCode> {
     crate::syscalls::SysCpu::query_stats(buf)
 }
+
+#[repr(C)]
+#[derive(Default)]
+pub struct ThreadDataV1 {
+    pub tid: u64,
+    pub ip: u64,  // Instruction pointer.
+    pub rbp: u64, // The value of the RBP register.
+}
