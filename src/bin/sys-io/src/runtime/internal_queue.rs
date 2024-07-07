@@ -49,7 +49,7 @@ pub fn call(cmd: u16, payload: Payload) {
             Err(m) => msg = m,
         }
     }
-    moto_sys::syscalls::SysCpu::wake(
+    moto_sys::SysCpu::wake(
         super::io_thread::IO_THREAD_HANDLE
             .load(Ordering::Relaxed)
             .into(),

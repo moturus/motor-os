@@ -4,7 +4,7 @@ use moto_runtime::rt_api;
 use moto_sys::ErrorCode;
 
 const BLOCK_SIZE: u64 = moto_virtio::BLOCK_SIZE as u64;
-const PAGE_SIZE_SMALL: u64 = moto_sys::syscalls::SysMem::PAGE_SIZE_SMALL;
+const PAGE_SIZE_SMALL: u64 = moto_sys::sys_mem::PAGE_SIZE_SMALL;
 
 const _: () = assert!(PAGE_SIZE_SMALL % BLOCK_SIZE == 0);
 const _: () = assert!(BLOCK_SIZE <= PAGE_SIZE_SMALL);
@@ -281,16 +281,16 @@ pub(super) fn init(
     const BLOCKS_PER_PAGE: u64 = PAGE_SIZE_SMALL / BLOCK_SIZE;
     const _: () = assert!(BLOCKS_PER_PAGE.is_power_of_two());
     let num_pages = moto_sys::align_up(blocks, BLOCKS_PER_PAGE) / BLOCKS_PER_PAGE;
-    let maybe_addr = moto_sys::syscalls::SysMem::alloc(PAGE_SIZE_SMALL, num_pages);
+    let maybe_addr = moto_sys::SysMem::alloc(PAGE_SIZE_SMALL, num_pages);
     if maybe_addr.is_err() {
         crate::moto_log!("sys-io: failed to allocate {} pages for FlatFS.", num_pages);
-        moto_sys::syscalls::SysCpu::exit(1);
+        moto_sys::SysCpu::exit(1);
     }
 
     let buf: &'static mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(
             maybe_addr.unwrap() as usize as *mut u8,
-            (num_pages << moto_sys::syscalls::SysMem::PAGE_SIZE_SMALL_LOG2) as usize,
+            (num_pages << moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2) as usize,
         )
     };
 
@@ -305,7 +305,7 @@ pub(super) fn init(
     let root_dir = flatfs::unpack(buf);
     if root_dir.is_err() {
         crate::moto_log!("sys-io: failed unpack FlatFS.");
-        moto_sys::syscalls::SysCpu::exit(1);
+        moto_sys::SysCpu::exit(1);
     }
 
     Box::new(FileSystemFlatFS {

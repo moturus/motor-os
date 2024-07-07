@@ -181,10 +181,10 @@ impl NetDev {
         if net.self_init().is_ok() {
             log::debug!("Initialized Virtio NET device {:?}.", net.dev.pci_device.id,);
             #[cfg(debug_assertions)]
-            moto_sys::syscalls::SysMem::log("Initialized Virtio NET device.").ok();
+            moto_sys::SysMem::log("Initialized Virtio NET device.").ok();
             NET_DEVICES.lock().push(net);
         } else {
-            moto_sys::syscalls::SysMem::log("Failed to initialize Virtio NET device.").ok();
+            moto_sys::SysMem::log("Failed to initialize Virtio NET device.").ok();
             net.dev.mark_failed();
         }
     }

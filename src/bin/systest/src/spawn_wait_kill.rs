@@ -56,7 +56,7 @@ pub fn test_pid_kill() {
                 continue;
             }
 
-            moto_sys::syscalls::SysCpu::kill_pid(proc.pid).unwrap();
+            moto_sys::SysCpu::kill_pid(proc.pid).unwrap();
             break;
         }
     }
@@ -64,7 +64,7 @@ pub fn test_pid_kill() {
     assert_eq!(-1, child.wait().unwrap().code().unwrap());
 
     // sys-io usually has PID 2.
-    assert!(moto_sys::syscalls::SysCpu::kill_pid(2).is_err());
+    assert!(moto_sys::SysCpu::kill_pid(2).is_err());
 
     println!("test_pid_kill test PASS");
 }

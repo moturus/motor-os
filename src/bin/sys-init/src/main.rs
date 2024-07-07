@@ -1,7 +1,7 @@
 use moto_runtime::moturus_log;
 
 // use moto_sys::caps::{CAP_IO_MANAGER, CAP_LOG, CAP_SHARE, CAP_SPAWN};
-use moto_sys::syscalls::*;
+use moto_sys::*;
 
 #[no_mangle]
 pub extern "C" fn moturus_log_panics_to_kernel() -> bool {

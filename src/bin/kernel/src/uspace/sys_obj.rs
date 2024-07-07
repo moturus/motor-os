@@ -7,8 +7,9 @@ use alloc::sync::Arc;
 use alloc::{borrow::ToOwned, string::String};
 use log::LevelFilter;
 use moto_sys::stats::ProcessStatsV1;
-use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+use moto_sys::*;
+use syscalls::SyscallResult;
 
 fn get_url(
     owner: &super::process::Process,
@@ -81,7 +82,7 @@ fn sys_handle_create(
                 }
             }
             "shared" => {
-                return sys_handle_shared(SysCtl::OP_CREATE, thread, parent, suffix);
+                return sys_handle_shared(SysObj::OP_CREATE, thread, parent, suffix);
             }
             _ => {}
         }
@@ -101,7 +102,7 @@ fn sys_handle_shared(
     }
 
     /*
-    if op == SysCtl::OP_CREATE && (thread.owner().capabilities() & moto_sys::caps::CAP_SHARE == 0)
+    if op == SysObj::OP_CREATE && (thread.owner().capabilities() & moto_sys::caps::CAP_SHARE == 0)
     {
         log::debug!("Create shared {}: no CAP_SHARE.", args);
         return Err(ErrorCode::NotAllowed);
@@ -158,14 +159,14 @@ fn sys_handle_shared(
     }
 
     let obj = match op {
-        SysCtl::OP_CREATE => super::shared::create(
+        SysObj::OP_CREATE => super::shared::create(
             thread.owner(),
             url.unwrap(),
             address.unwrap(),
             page_type.unwrap(),
             page_num.unwrap(),
         )?,
-        SysCtl::OP_GET => super::shared::get(
+        SysObj::OP_GET => super::shared::get(
             thread.owner(),
             url.unwrap(),
             address.unwrap(),
@@ -238,7 +239,7 @@ fn sys_handle_get(
                         }
                     }
                     "shared" => {
-                        return sys_handle_shared(SysCtl::OP_GET, thread, parent, suffix);
+                        return sys_handle_shared(SysObj::OP_GET, thread, parent, suffix);
                     }
                     _ => {}
                 }
@@ -287,7 +288,7 @@ fn sys_query_process_status(thread: &super::process::Thread, args: &SyscallArgs)
         return ResultBuilder::version_too_high();
     }
 
-    if args.flags != SysCtl::F_QUERY_STATUS {
+    if args.flags != SysObj::F_QUERY_STATUS {
         return ResultBuilder::invalid_argument();
     }
 
@@ -321,8 +322,8 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
     }
 
     let flat_list = match args.flags {
-        SysCtl::F_QUERY_LIST => true,
-        SysCtl::F_QUERY_LIST_CHILDREN => false,
+        SysObj::F_QUERY_LIST => true,
+        SysObj::F_QUERY_LIST_CHILDREN => false,
         _ => return ResultBuilder::invalid_argument(),
     };
 
@@ -379,7 +380,7 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     let handle = SysHandle::from_u64(args.args[0]);
     let return_pid = match args.flags {
         0 => false,
-        SysCtl::F_QUERY_PID => true,
+        SysObj::F_QUERY_PID => true,
         _ => return ResultBuilder::invalid_argument(),
     };
 
@@ -421,7 +422,7 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
     let io_manager = thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
 
     match args.operation {
-        SysCtl::OP_CREATE => {
+        SysObj::OP_CREATE => {
             const OP_CREATE_MEMORY_THRESHOLD: u64 = 64 << 10; // TODO: do we need to be more precise?
             if !io_manager && crate::mm::oom_for_user(OP_CREATE_MEMORY_THRESHOLD) {
                 return ResultBuilder::result(ErrorCode::OutOfMemory);
@@ -459,15 +460,15 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                 Err(err) => ResultBuilder::result(err),
             }
         }
-        SysCtl::OP_GET => {
+        SysObj::OP_GET => {
             if args.version > 0 {
                 return ResultBuilder::version_too_high();
             }
 
             let mut flags = args.flags;
-            let wake_peer = flags & SysCtl::F_WAKE_PEER != 0;
+            let wake_peer = flags & SysObj::F_WAKE_PEER != 0;
             if wake_peer {
-                flags ^= SysCtl::F_WAKE_PEER;
+                flags ^= SysObj::F_WAKE_PEER;
             }
 
             if flags != 0 {
@@ -500,7 +501,7 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                 Err(err) => ResultBuilder::result(err),
             }
         }
-        SysCtl::OP_PUT => {
+        SysObj::OP_PUT => {
             if args.version > 0 {
                 return ResultBuilder::version_too_high();
             }
@@ -519,17 +520,17 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                 Err(err) => ResultBuilder::result(err),
             }
         }
-        SysCtl::OP_QUERY_PROCESS => match args.flags {
-            SysCtl::F_QUERY_STATUS => sys_query_process_status(thread, args),
-            SysCtl::F_QUERY_LIST | SysCtl::F_QUERY_LIST_CHILDREN => {
+        SysObj::OP_QUERY_PROCESS => match args.flags {
+            SysObj::F_QUERY_STATUS => sys_query_process_status(thread, args),
+            SysObj::F_QUERY_LIST | SysObj::F_QUERY_LIST_CHILDREN => {
                 sys_query_process_list(thread, args)
             }
             _ => ResultBuilder::invalid_argument(),
         },
 
-        SysCtl::OP_QUERY_HANDLE => sys_query_handle(thread, args),
+        SysObj::OP_QUERY_HANDLE => sys_query_handle(thread, args),
 
-        SysCtl::OP_SET_LOG_LEVEL => {
+        SysObj::OP_SET_LOG_LEVEL => {
             if args.version > 0 {
                 return ResultBuilder::version_too_high();
             }

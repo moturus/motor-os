@@ -11,14 +11,11 @@ mod virtio;
 
 extern crate alloc;
 
-#[cfg(debug_assertions)]
-use moto_sys::syscalls::*;
-
 #[macro_export]
 macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
-        moto_sys::syscalls::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+        moto_sys::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
         }
     };
 }
@@ -75,5 +72,5 @@ fn main() {
         .wait()
         .unwrap();
     #[cfg(debug_assertions)]
-    SysMem::log("sys-io exiting").ok();
+    moto_sys::SysMem::log("sys-io exiting").ok();
 }

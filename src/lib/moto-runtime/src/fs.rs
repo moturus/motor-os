@@ -2,7 +2,7 @@ use super::rt_api::fs::*;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use core::sync::atomic::*;
-use moto_sys::syscalls::SysMem;
+use moto_sys::SysMem;
 
 #[derive(Debug)]
 pub enum SeekFrom {

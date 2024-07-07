@@ -287,7 +287,7 @@ impl NetSys {
             self.tcp_sockets.len()
         );
 
-        let pid = moto_sys::syscalls::SysCtl::get_pid(conn.wait_handle()).unwrap();
+        let pid = moto_sys::SysObj::get_pid(conn.wait_handle()).unwrap();
 
         Ok(MotoSocket {
             id: socket_id,
@@ -439,8 +439,8 @@ impl NetSys {
 
         if listener.conn_handle() != conn.wait_handle() {
             // Validate that the listener and the connection belong to the same process.
-            let pid1 = moto_sys::syscalls::SysCtl::get_pid(listener.conn_handle()).unwrap();
-            let pid2 = moto_sys::syscalls::SysCtl::get_pid(conn.wait_handle()).unwrap();
+            let pid1 = moto_sys::SysObj::get_pid(listener.conn_handle()).unwrap();
+            let pid2 = moto_sys::SysObj::get_pid(conn.wait_handle()).unwrap();
             if pid1 != pid2 {
                 return Err(());
             }

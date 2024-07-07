@@ -1,8 +1,9 @@
 use alloc::vec::Vec;
 use core::sync::atomic::*;
 use moto_sys::caps::CAP_IO_MANAGER;
-use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+use moto_sys::*;
+use syscalls::SyscallResult;
 
 use crate::config::uCpus;
 
@@ -342,7 +343,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     }
     let target = SysHandle::from_u64(args.args[0]);
 
-    if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PEER {
+    if args.flags == SysCpu::F_KILL_PEER {
         if (killer.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
             // This is used by sys-io.
             return ResultBuilder::result(ErrorCode::NotAllowed);
@@ -361,7 +362,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
         return ResultBuilder::result(ErrorCode::BadHandle);
     }
 
-    if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PID {
+    if args.flags == SysCpu::F_KILL_PID {
         let target_pid = args.args[0];
         if let Some(target_stats) = crate::stats::stats_from_pid(target_pid) {
             if let Some(target) = target_stats.owner.upgrade() {

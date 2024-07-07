@@ -1,4 +1,4 @@
-use moto_sys::syscalls::*;
+use moto_sys::*;
 use std::{collections::BTreeMap, sync::atomic::AtomicU64};
 
 struct Mapper {
@@ -12,8 +12,8 @@ static MAPPER: Mapper = Mapper {
 
 impl moto_virtio::KernelAdapter for Mapper {
     fn virt_to_phys(&self, virt_addr: u64) -> Result<u64, ()> {
-        let page_addr = virt_addr & !(SysMem::PAGE_SIZE_SMALL - 1);
-        let offset = virt_addr & (SysMem::PAGE_SIZE_SMALL - 1);
+        let page_addr = virt_addr & !(sys_mem::PAGE_SIZE_SMALL - 1);
+        let offset = virt_addr & (sys_mem::PAGE_SIZE_SMALL - 1);
         if let Some(phys_addr) = self.virt_to_phys_map.lock().get(&page_addr) {
             return Ok(offset + *phys_addr);
         }
@@ -47,7 +47,7 @@ impl moto_virtio::KernelAdapter for Mapper {
     // Register a custom IRQ and an associated wait handle; the library will then use
     // the wait handle with wait() below.
     fn create_irq_wait_handle(&self) -> Result<(moto_virtio::WaitHandle, u8), ()> {
-        let handle = SysCtl::get(SysHandle::KERNEL, 0, "irq_wait:64").unwrap();
+        let handle = SysObj::get(SysHandle::KERNEL, 0, "irq_wait:64").unwrap();
         Ok((handle.as_u64(), 64))
     }
 

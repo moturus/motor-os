@@ -1,4 +1,3 @@
-pub use moto_sys::syscalls::*;
 pub use moto_sys::*;
 
 pub fn num_cpus() -> u32 {
@@ -16,7 +15,7 @@ unsafe impl Sync for BackEndAllocator {}
 unsafe impl GlobalAlloc for BackEndAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         const PAGE_4K: u64 = 1 << 12;
-        assert_eq!(SysMem::PAGE_SIZE_SMALL, PAGE_4K);
+        assert_eq!(sys_mem::PAGE_SIZE_SMALL, PAGE_4K);
 
         let alloc_size = align_up(layout.size() as u64, PAGE_4K);
         if let Ok(start) = SysMem::alloc(PAGE_4K, alloc_size >> 12) {

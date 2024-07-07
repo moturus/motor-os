@@ -137,12 +137,11 @@ pub const MAX_TCP_SOCKET_STATS: usize = 56;
 
 const _SZ: () = assert!(
     size_of::<GetTcpSocketStatsResponse<MAX_TCP_SOCKET_STATS>>()
-        <= moto_sys::syscalls::SysMem::PAGE_SIZE_SMALL as usize
+        <= moto_sys::sys_mem::PAGE_SIZE_SMALL as usize
 );
 
 impl<const N: usize> GetTcpSocketStatsResponse<N> {
-    const _SZ: () =
-        assert!(size_of::<Self>() <= moto_sys::syscalls::SysMem::PAGE_SIZE_SMALL as usize);
+    const _SZ: () = assert!(size_of::<Self>() <= moto_sys::sys_mem::PAGE_SIZE_SMALL as usize);
 
     pub fn socket_stats(&self) -> Result<&[TcpSocketStatsV1], ErrorCode> {
         let res = ErrorCode::from(self.header.result);
@@ -154,7 +153,7 @@ impl<const N: usize> GetTcpSocketStatsResponse<N> {
         let len = (self.num_results as usize) * size_of::<TcpSocketStatsV1>();
 
         if start_addr + len
-            > (self as *const _ as usize) + (moto_sys::syscalls::SysMem::PAGE_SIZE_SMALL as usize)
+            > (self as *const _ as usize) + (moto_sys::sys_mem::PAGE_SIZE_SMALL as usize)
         {
             return Err(ErrorCode::InternalError);
         }

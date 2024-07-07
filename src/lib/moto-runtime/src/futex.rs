@@ -6,9 +6,9 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
-use moto_sys::syscalls::SysCpu;
-use moto_sys::syscalls::SysHandle;
 use moto_sys::ErrorCode;
+use moto_sys::SysCpu;
+use moto_sys::SysHandle;
 
 // We need to be able to remove from the middle of the list, and Rust's
 // standard List does not have this functionality.

@@ -1,5 +1,5 @@
 use clap::Parser;
-use moto_sys::syscalls::SysCtl;
+use moto_sys::SysObj;
 
 #[derive(Parser)]
 struct Args {
@@ -25,7 +25,10 @@ fn input_listener() {
 }
 */
 
-fn print_stack_trace(dbg_handle: moto_sys::SysHandle, tid: u64) -> Result<(), moto_sys::ErrorCode> {
+fn print_stack_trace(
+    _dbg_handle: moto_sys::SysHandle,
+    tid: u64,
+) -> Result<(), moto_sys::ErrorCode> {
     println!("print_stack_trace {tid}");
     Ok(())
 }
@@ -36,13 +39,13 @@ fn main() -> Result<(), moto_sys::ErrorCode> {
     let args = Args::parse();
     let pid = args.print_stacks;
 
-    let dbg_handle = SysCtl::dbg_attach(pid)?;
-    SysCtl::dbg_stop(dbg_handle)?;
+    let dbg_handle = SysObj::dbg_attach(pid)?;
+    SysObj::dbg_stop(dbg_handle)?;
 
     let mut tids = [0_u64; 64];
     let mut start_tid = 0;
     loop {
-        let sz = SysCtl::dbg_list_threads(dbg_handle, start_tid, &mut tids)?;
+        let sz = SysObj::dbg_list_threads(dbg_handle, start_tid, &mut tids)?;
 
         for idx in 0..sz {
             print_stack_trace(dbg_handle, tids[idx])?;
@@ -54,6 +57,6 @@ fn main() -> Result<(), moto_sys::ErrorCode> {
         start_tid = tids[sz - 1] + 1;
     }
 
-    SysCtl::dbg_resume(dbg_handle)?;
+    SysObj::dbg_resume(dbg_handle)?;
     Ok(())
 }

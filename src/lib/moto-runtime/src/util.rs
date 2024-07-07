@@ -11,7 +11,7 @@ macro_rules! moturus_log {
     ($($arg:tt)*) => {
         {
             extern crate alloc;
-            moto_sys::syscalls::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+            moto_sys::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
         }
     };
 }
@@ -44,7 +44,7 @@ impl<'a> Drop for ScopedTimer<'a> {
             moturus_log!("{}: {:?} elapsed.", self.msg, elapsed);
 
             if self.die {
-                moto_sys::syscalls::SysCpu::exit(1);
+                moto_sys::SysCpu::exit(1);
             }
         }
     }

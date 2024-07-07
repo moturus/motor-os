@@ -1,5 +1,6 @@
-use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+use moto_sys::*;
+use syscalls::SyscallResult;
 
 use crate::mm::user::UserAddressSpace;
 use crate::mm::MappingOptions;
@@ -18,7 +19,7 @@ fn sys_mmio_map(
         return ResultBuilder::invalid_argument();
     }
 
-    if page_size != SysMem::PAGE_SIZE_SMALL {
+    if page_size != sys_mem::PAGE_SIZE_SMALL {
         log::debug!("sys_mem_impl: bad page_size: 0x{:x}", page_size);
         return ResultBuilder::invalid_argument();
     }
@@ -61,7 +62,7 @@ fn sys_map(
         return sys_mmio_map(address_space, phys_addr, virt_addr, page_size, num_pages);
     }
 
-    if page_size == SysMem::PAGE_SIZE_MID {
+    if page_size == sys_mem::PAGE_SIZE_MID {
         if !io_manager {
             return ResultBuilder::result(ErrorCode::NotAllowed);
         }
@@ -84,7 +85,7 @@ fn sys_map(
         };
     }
 
-    if page_size != SysMem::PAGE_SIZE_SMALL {
+    if page_size != sys_mem::PAGE_SIZE_SMALL {
         return ResultBuilder::invalid_argument();
     }
 

@@ -1,8 +1,8 @@
 use std::mem::size_of;
 
 use moto_ipc::sync::*;
-use moto_sys::syscalls::SysMem;
 use moto_sys::SysHandle;
+use moto_sys::SysMem;
 
 struct Connection {
     _tag: String,

@@ -13,8 +13,8 @@ pub use sys_object::SysObject;
 
 // Syscalls.
 mod sys_cpu;
-mod sys_ctl;
 mod sys_mem;
+mod sys_obj;
 
 pub use sys_object::process_wake_events;
 

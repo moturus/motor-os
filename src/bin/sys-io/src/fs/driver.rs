@@ -85,7 +85,7 @@ impl Driver {
 
     fn run() -> ! {
         // VirtIO interrupts are affined to CPU 0.
-        moto_sys::syscalls::SysCpu::affine_to_cpu(Some(0)).unwrap();
+        moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
 
         super::STARTED.store(1, Ordering::Release);
         moto_runtime::futex_wake(&super::STARTED);
@@ -397,7 +397,7 @@ impl Driver {
             && flags != FileOpenRequest::F_WRITE
             && flags != FileOpenRequest::F_APPEND
         {
-            moto_sys::syscalls::SysMem::log(
+            moto_sys::SysMem::log(
                 alloc::format!(
                     "on_file_open: flags not supported: 0x{:x}",
                     req.header.flags

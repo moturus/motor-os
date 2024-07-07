@@ -52,7 +52,7 @@ impl Instant {
         if earlier.tsc_val > self.tsc_val {
             // TODO: figure out why this happens in hyperv + qemu.
             #[cfg(all(not(feature = "rustc-dep-of-std"), feature = "userspace"))]
-            super::syscalls::SysMem::log(
+            crate::SysMem::log(
                 alloc::format!(
                     "time goes back: earlier: {:x} > later: {:x}",
                     earlier.tsc_val,
@@ -63,7 +63,7 @@ impl Instant {
             .ok();
 
             #[cfg(feature = "rustc-dep-of-std")]
-            super::syscalls::SysMem::log("fros-sys: time: time goes back").ok();
+            crate::SysMem::log("fros-sys: time: time goes back").ok();
             return Duration::ZERO;
         }
 

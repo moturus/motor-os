@@ -6,8 +6,7 @@ use std::sync::atomic::AtomicU64;
 
 use moto_ipc::io_channel;
 use moto_runtime::rt_api;
-use moto_sys::syscalls::*;
-use moto_sys::ErrorCode;
+use moto_sys::*;
 
 use super::IoSubsystem;
 use super::PendingCompletion;
@@ -48,7 +47,7 @@ impl IoRuntime {
             crate::moto_log!("Dropping 0x{:x} {}.", handle.as_u64(), conn.1);
 
             // Ignore errors below because the target could be dead.
-            let _ = moto_sys::syscalls::SysCpu::kill_remote(handle);
+            let _ = moto_sys::SysCpu::kill_remote(handle);
         } // else: we may have deferred completions for dead connections.
     }
 

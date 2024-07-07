@@ -1,5 +1,5 @@
-use moto_sys::syscalls::*;
-use moto_sys::ErrorCode;
+use moto_sys::syscalls;
+use moto_sys::{syscalls::SyscallResult, ErrorCode};
 
 pub const RES_EXIT: u64 = 0xff_ff_ff_ff; // Kill the thread. Never returns to uspace.
 
@@ -66,7 +66,7 @@ impl ResultBuilder {
     }
 
     #[inline(always)]
-    pub fn bad_handle(handle: SysHandle) -> SyscallResult {
+    pub fn bad_handle(handle: moto_sys::SysHandle) -> SyscallResult {
         let mut data = [0_u64; 6];
         data[0] = handle.as_u64();
         SyscallResult {
@@ -107,9 +107,9 @@ pub fn do_syscall(curr: &super::process::Thread, args: &mut SyscallArgs) -> Sysc
     curr.on_syscall_enter(args.syscall_nr, args.operation);
 
     let result = match args.syscall_nr {
-        SYS_CTL => super::sys_ctl::sys_ctl_impl(curr, args),
-        SYS_MEM => super::sys_mem::sys_mem_impl(curr, args),
-        SYS_CPU => super::sys_cpu::sys_cpu_impl(curr, args),
+        syscalls::SYS_OBJ => super::sys_obj::sys_ctl_impl(curr, args),
+        syscalls::SYS_MEM => super::sys_mem::sys_mem_impl(curr, args),
+        syscalls::SYS_CPU => super::sys_cpu::sys_cpu_impl(curr, args),
         _ => ResultBuilder::not_implemented(),
     };
 

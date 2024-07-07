@@ -259,20 +259,20 @@ fn test_thread() {
 }
 
 fn test_lazy_memory_map() {
-    use moto_sys::syscalls::*;
+    use moto_sys::*;
 
     let addr = SysMem::map(
         SysHandle::SELF,
         SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
         u64::MAX,
         u64::MAX,
-        SysMem::PAGE_SIZE_SMALL,
+        sys_mem::PAGE_SIZE_SMALL,
         1,
     )
     .unwrap();
     // let prev_log_level = moto_sys::syscalls::SysCtl::set_log_level(4).unwrap();
     let buf = unsafe {
-        core::slice::from_raw_parts_mut(addr as usize as *mut u8, SysMem::PAGE_SIZE_SMALL as usize)
+        core::slice::from_raw_parts_mut(addr as usize as *mut u8, sys_mem::PAGE_SIZE_SMALL as usize)
     };
     for idx in 0..buf.len() {
         assert_eq!(0, buf[idx]);

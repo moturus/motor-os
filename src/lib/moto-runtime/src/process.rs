@@ -5,8 +5,7 @@ use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use moto_sys::syscalls::*;
-use moto_sys::ErrorCode;
+use moto_sys::*;
 
 pub struct CommandRt {
     program: String,
@@ -69,7 +68,7 @@ pub struct Process {
 impl Drop for Process {
     fn drop(&mut self) {
         if !self.handle.is_none() {
-            SysCtl::put(self.handle).unwrap();
+            SysObj::put(self.handle).unwrap();
         }
     }
 }
@@ -102,7 +101,7 @@ impl Process {
 
         SysCpu::wait(&mut [self.handle], SysHandle::NONE, SysHandle::NONE, None)?;
 
-        let exit_status = SysCtl::process_status(self.handle)?.unwrap();
+        let exit_status = SysObj::process_status(self.handle)?.unwrap();
         Ok(Self::convert_exit_status(exit_status))
     }
 
@@ -111,7 +110,7 @@ impl Process {
             return Err(ErrorCode::InvalidArgument);
         }
 
-        let exit_status = SysCtl::process_status(self.handle)?;
+        let exit_status = SysObj::process_status(self.handle)?;
         Ok(exit_status.map(Self::convert_exit_status))
     }
 }
@@ -252,9 +251,9 @@ fn run_elf(
 
     let (page_size, num_pages) = {
         (
-            SysMem::PAGE_SIZE_SMALL,
-            moto_sys::align_up(file_sz as u64, SysMem::PAGE_SIZE_SMALL)
-                >> SysMem::PAGE_SIZE_SMALL_LOG2,
+            sys_mem::PAGE_SIZE_SMALL,
+            moto_sys::align_up(file_sz as u64, sys_mem::PAGE_SIZE_SMALL)
+                >> sys_mem::PAGE_SIZE_SMALL_LOG2,
         )
     };
     let buf_addr = SysMem::alloc(page_size, num_pages)?;
@@ -281,7 +280,7 @@ fn run_elf(
         "address_space:debug_name={}",
         &moto_sys::url_encode(debug_name.as_str())
     );
-    let address_space = RaiiHandle::from(SysCtl::create(SysHandle::NONE, 0, &full_url)?);
+    let address_space = syscalls::RaiiHandle::from(SysObj::create(SysHandle::NONE, 0, &full_url)?);
     let load_result = load_binary(buf, address_space.syshandle());
 
     if let Err(err) = load_result {
@@ -308,7 +307,8 @@ fn run_elf(
         load_result.unwrap(),
         caps
     );
-    let process = RaiiHandle::from(SysCtl::create(address_space.syshandle(), 0, &proc_url)?);
+    let process =
+        syscalls::RaiiHandle::from(SysObj::create(address_space.syshandle(), 0, &proc_url)?);
 
     // Set up stdio.
     let remote_process_data = create_remote_process_data(address_space.syshandle())?;
@@ -360,12 +360,12 @@ fn run_elf(
         needs_stdin,
     )?;
 
-    let main_thread = SysCtl::get(process.syshandle(), 0, "main_thread").unwrap();
+    let main_thread = SysObj::get(process.syshandle(), 0, "main_thread").unwrap();
     if SysCpu::wake(main_thread).is_ok() {
         // While thread objects extracted from TCB or returned from spawn()
         // must not be put(), this is a cross-process thread handle, and so
         // it must be put().
-        SysCtl::put(main_thread).unwrap();
+        SysObj::put(main_thread).unwrap();
         Ok((
             Process {
                 handle: process.take(),
@@ -386,7 +386,7 @@ fn create_remote_process_data(
         flags,
         u64::MAX,
         super::rt_api::process::ProcessData::ADDR,
-        SysMem::PAGE_SIZE_SMALL,
+        sys_mem::PAGE_SIZE_SMALL,
         1,
     )?;
 
@@ -493,7 +493,7 @@ fn create_stdio_pipes(
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            SysCtl::put(thread).unwrap();
+            SysObj::put(thread).unwrap();
             Ok((
                 None,
                 super::rt_api::process::StdioData {
@@ -547,8 +547,8 @@ struct Loader {
 impl Loader {
     unsafe fn write_remotely(&mut self, dst: u64, src: *const u8, sz: u64) {
         assert_eq!(
-            dst & (SysMem::PAGE_SIZE_SMALL - 1),
-            (src as usize as u64) & (SysMem::PAGE_SIZE_SMALL - 1)
+            dst & (sys_mem::PAGE_SIZE_SMALL - 1),
+            (src as usize as u64) & (sys_mem::PAGE_SIZE_SMALL - 1)
         );
         // There shouldn't be too many entries in the map, so we can just linearly iterate.
         let mut region: Option<(u64, u64, u64)> = None;
@@ -564,7 +564,7 @@ impl Loader {
 
         let remote_region_start = region.0;
         let local_region_start = region.1;
-        let region_sz = region.2 << SysMem::PAGE_SIZE_SMALL_LOG2;
+        let region_sz = region.2 << sys_mem::PAGE_SIZE_SMALL_LOG2;
 
         assert!(remote_region_start <= dst);
         assert!((dst + sz) <= (region.0 + region_sz));
@@ -590,10 +590,10 @@ impl Drop for Loader {
 impl ElfLoader for Loader {
     fn allocate(&mut self, load_headers: LoadableHeaders<'_, '_>) -> Result<(), ElfLoaderErr> {
         for header in load_headers {
-            let vaddr_start = header.virtual_addr() & !(SysMem::PAGE_SIZE_SMALL - 1);
+            let vaddr_start = header.virtual_addr() & !(sys_mem::PAGE_SIZE_SMALL - 1);
             let vaddr_end = moto_sys::align_up(
                 header.virtual_addr() + header.mem_size(),
-                SysMem::PAGE_SIZE_SMALL,
+                sys_mem::PAGE_SIZE_SMALL,
             );
 
             let mut flags = SysMem::F_SHARE_SELF;
@@ -604,14 +604,14 @@ impl ElfLoader for Loader {
                 flags |= SysMem::F_WRITABLE;
             }
 
-            let num_pages = (vaddr_end - vaddr_start) >> SysMem::PAGE_SIZE_SMALL_LOG2;
+            let num_pages = (vaddr_end - vaddr_start) >> sys_mem::PAGE_SIZE_SMALL_LOG2;
 
             let (remote, local) = SysMem::map2(
                 self.address_space,
                 flags,
                 u64::MAX,
                 vaddr_start,
-                SysMem::PAGE_SIZE_SMALL,
+                sys_mem::PAGE_SIZE_SMALL,
                 num_pages,
             )
             .map_err(|_| ElfLoaderErr::OutOfMemory)?;

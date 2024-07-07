@@ -1,9 +1,9 @@
 use crate::mutex::Mutex;
 use crate::sync_pipe::Pipe;
-use crate::ErrorCode;
-use crate::SysHandle;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use moto_sys::ErrorCode;
+use moto_sys::SysHandle;
 
 pub struct StdinRt {}
 pub struct StdoutRt {}
@@ -159,12 +159,12 @@ impl StdoutRt {
         // Without the yield below the current thread will continue
         // and the written bytes will be delivered asynchronously.
         // Yielding here makes the user experience better.
-        moto_sys::syscalls::SysCpu::sched_yield();
+        moto_sys::SysCpu::sched_yield();
         Ok(res)
     }
 
     pub fn flush(&mut self) -> Result<(), ErrorCode> {
-        moto_sys::syscalls::SysCpu::sched_yield();
+        moto_sys::SysCpu::sched_yield();
         Ok(())
     }
 }
@@ -179,12 +179,12 @@ impl StderrRt {
         // Without the yield below the current thread will continue
         // and the written bytes will be delivered asynchronously.
         // Yielding here makes the user experience better.
-        moto_sys::syscalls::SysCpu::sched_yield();
+        moto_sys::SysCpu::sched_yield();
         Ok(res)
     }
 
     pub fn flush(&mut self) -> Result<(), ErrorCode> {
-        moto_sys::syscalls::SysCpu::sched_yield();
+        moto_sys::SysCpu::sched_yield();
         Ok(())
     }
 }
@@ -224,13 +224,8 @@ pub(super) fn set_relay(
             let mut had_error = false;
             loop {
                 let mut handles = wait_handles;
-                if moto_sys::syscalls::SysCpu::wait(
-                    &mut handles,
-                    SysHandle::NONE,
-                    SysHandle::NONE,
-                    None,
-                )
-                .is_err()
+                if moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None)
+                    .is_err()
                 {
                     if had_error {
                         break;
@@ -251,7 +246,7 @@ pub(super) fn set_relay(
                         if sz_read > 0 {
                             match dest.write(&buf[0..sz_read]) {
                                 Ok(sz_written) => {
-                                    moto_sys::syscalls::SysCpu::sched_yield();
+                                    moto_sys::SysCpu::sched_yield();
                                     if sz_written == sz_read {
                                         continue;
                                     } else {
@@ -290,13 +285,13 @@ pub(super) fn set_relay(
                                     if STDOUT.lock().pipe().write(&buf[0..sz]).is_err() {
                                         break;
                                     }
-                                    moto_sys::syscalls::SysCpu::sched_yield();
+                                    moto_sys::SysCpu::sched_yield();
                                 }
                                 StdioKind::Stderr => {
                                     if STDERR.lock().pipe().write(&buf[0..sz]).is_err() {
                                         break;
                                     }
-                                    moto_sys::syscalls::SysCpu::sched_yield();
+                                    moto_sys::SysCpu::sched_yield();
                                 }
                                 _ => panic!(),
                             }
@@ -312,7 +307,7 @@ pub(super) fn set_relay(
         }
 
         super::tls::thread_exiting();
-        let _ = moto_sys::syscalls::SysCtl::put(SysHandle::SELF);
+        let _ = moto_sys::SysObj::put(SysHandle::SELF);
     } // relay_thread_fn
 
     let local_copy = to.unsafe_copy();

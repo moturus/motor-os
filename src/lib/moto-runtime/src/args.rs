@@ -1,7 +1,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
-use moto_sys::syscalls::*;
-use moto_sys::ErrorCode;
+use moto_sys::*;
 
 pub fn args() -> alloc::vec::Vec<&'static str> {
     unsafe {
@@ -49,16 +48,16 @@ pub(super) unsafe fn create_remote_args(
         return Ok(0);
     }
 
-    let page_size = SysMem::PAGE_SIZE_SMALL as u32;
+    let page_size = sys_mem::PAGE_SIZE_SMALL as u32;
     needed_len = (needed_len + page_size - 1) & !(page_size - 1);
-    let num_pages = needed_len >> SysMem::PAGE_SIZE_SMALL_LOG2;
+    let num_pages = needed_len >> sys_mem::PAGE_SIZE_SMALL_LOG2;
 
     let (remote, local) = SysMem::map2(
         address_space,
         SysMem::F_SHARE_SELF | SysMem::F_READABLE,
         u64::MAX,
         u64::MAX,
-        SysMem::PAGE_SIZE_SMALL,
+        sys_mem::PAGE_SIZE_SMALL,
         num_pages as u64,
     )?;
 

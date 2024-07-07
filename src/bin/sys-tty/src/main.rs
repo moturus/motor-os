@@ -3,9 +3,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use moto_sys::syscalls::SysCpu;
-use moto_sys::syscalls::SysCtl;
-use moto_sys::syscalls::SysHandle;
+use moto_sys::SysCpu;
+use moto_sys::SysHandle;
+use moto_sys::SysObj;
 
 use crate::serial::write_serial_raw;
 
@@ -27,10 +27,8 @@ fn read_config() -> String {
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
         Err(err) => {
-            moto_sys::syscalls::SysMem::log(
-                format!("Error reading '{}': {:?}", config_path, err).as_str(),
-            )
-            .ok();
+            moto_sys::SysMem::log(format!("Error reading '{}': {:?}", config_path, err).as_str())
+                .ok();
             std::process::exit(1);
         }
     }
@@ -38,7 +36,7 @@ fn read_config() -> String {
 
 fn main() {
     #[cfg(debug_assertions)]
-    moto_sys::syscalls::SysMem::log("sys-tty started").ok();
+    moto_sys::SysMem::log("sys-tty started").ok();
     moto_log::init("sys-tty").unwrap();
 
     log::set_max_level(log::LevelFilter::Trace);
@@ -49,7 +47,7 @@ fn main() {
     let words: Vec<_> = config.trim().split_whitespace().collect();
 
     if words.len() == 0 {
-        moto_sys::syscalls::SysMem::log("Error: empty config.").ok();
+        moto_sys::SysMem::log("Error: empty config.").ok();
         std::process::exit(1);
     }
 
@@ -62,7 +60,7 @@ fn main() {
     );
 
     let console_wait_handle =
-        moto_sys::syscalls::SysCtl::get(SysHandle::KERNEL, 0, "serial_console").unwrap();
+        moto_sys::SysObj::get(SysHandle::KERNEL, 0, "serial_console").unwrap();
     let mut command = std::process::Command::new(fname);
     command.env_clear();
     command.stdin(std::process::Stdio::piped());
@@ -82,8 +80,7 @@ fn main() {
             // stdin
             let exit1 = exit_notifier.clone();
             let (this_h, that_h) =
-                moto_sys::syscalls::SysCtl::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0)
-                    .unwrap();
+                moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
 
             let mut child_stdin = child.stdin.take().unwrap();
             let stdin_thread = std::thread::spawn(move || {
@@ -107,7 +104,7 @@ fn main() {
                     }
                 }
 
-                SysCtl::put(that_h).unwrap();
+                SysObj::put(that_h).unwrap();
             });
 
             // stdout
@@ -154,7 +151,7 @@ fn main() {
             };
             exit_notifier.store(true, Ordering::Release);
             SysCpu::wake(this_h).ok();
-            SysCtl::put(this_h).unwrap();
+            SysObj::put(this_h).unwrap();
             stdin_thread.join().unwrap();
             stdout_thread.join().unwrap();
             stderr_thread.join().unwrap();

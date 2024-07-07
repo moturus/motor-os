@@ -1,9 +1,11 @@
 // Various statistics, best effort (never precise).
 
 #[cfg(feature = "userspace")]
-use crate::syscalls::SysMem;
+use crate::sys_mem;
 #[cfg(feature = "userspace")]
 use crate::ErrorCode;
+#[cfg(feature = "userspace")]
+use crate::SysMem;
 
 pub const PID_SYSTEM: u64 = 0; // Used for aggregate (System) stats.
 pub const PID_KERNEL: u64 = 1;
@@ -34,12 +36,12 @@ impl ProcessStatsV1 {
     // List processes, in PID order. Completed processes without running
     // descendants may not be listed. @start will be included, if present.
     pub fn list(start: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
-        super::syscalls::SysCtl::list_processes_v1(start, true, buf)
+        crate::SysObj::list_processes_v1(start, true, buf)
     }
 
     // List direct children of the process. @parent will not be included.
     pub fn list_children(parent: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
-        super::syscalls::SysCtl::list_processes_v1(parent, false, buf)
+        crate::SysObj::list_processes_v1(parent, false, buf)
     }
 
     pub fn debug_name(&self) -> &str {
@@ -48,7 +50,7 @@ impl ProcessStatsV1 {
     }
 
     pub fn total_bytes(&self) -> u64 {
-        (self.pages_user + self.pages_kernel) << SysMem::PAGE_SIZE_SMALL_LOG2
+        (self.pages_user + self.pages_kernel) << sys_mem::PAGE_SIZE_SMALL_LOG2
     }
 }
 
@@ -74,21 +76,18 @@ pub struct CpuStatsV1 {
 #[cfg(feature = "userspace")]
 impl Drop for CpuStatsV1 {
     fn drop(&mut self) {
-        crate::syscalls::SysMem::free(self.page_addr).unwrap();
+        crate::SysMem::free(self.page_addr).unwrap();
     }
 }
 
 #[cfg(feature = "userspace")]
 impl CpuStatsV1 {
     pub fn new() -> Self {
-        let page_addr =
-            crate::syscalls::SysMem::alloc(crate::syscalls::SysMem::PAGE_SIZE_SMALL, 1).unwrap();
-        let num_entries = crate::syscalls::SysCpu::get_percpu_stats_v1(page_addr).unwrap();
+        let page_addr = crate::SysMem::alloc(sys_mem::PAGE_SIZE_SMALL, 1).unwrap();
+        let num_entries = crate::SysCpu::get_percpu_stats_v1(page_addr).unwrap();
         let num_cpus = crate::shared_mem::KernelStaticPage::get().num_cpus;
 
-        assert!(
-            (num_entries * (8 + num_cpus * 16)) as u64 <= crate::syscalls::SysMem::PAGE_SIZE_SMALL
-        );
+        assert!((num_entries * (8 + num_cpus * 16)) as u64 <= sys_mem::PAGE_SIZE_SMALL);
 
         Self {
             num_entries,
@@ -98,7 +97,7 @@ impl CpuStatsV1 {
     }
 
     pub fn tick(&mut self) {
-        self.num_entries = crate::syscalls::SysCpu::get_percpu_stats_v1(self.page_addr).unwrap();
+        self.num_entries = crate::SysCpu::get_percpu_stats_v1(self.page_addr).unwrap();
     }
 
     pub fn num_cpus(&self) -> u32 {
@@ -146,13 +145,13 @@ impl MemoryStats {
     }
 
     pub fn used(&self) -> u64 {
-        self.used_pages << SysMem::PAGE_SIZE_SMALL_LOG2
+        self.used_pages << sys_mem::PAGE_SIZE_SMALL_LOG2
     }
 }
 
 #[cfg(feature = "userspace")]
 pub fn get_cpu_usage(buf: &mut [f32]) -> Result<(), ErrorCode> {
-    crate::syscalls::SysCpu::query_stats(buf)
+    crate::SysCpu::query_stats(buf)
 }
 
 #[repr(C)]
