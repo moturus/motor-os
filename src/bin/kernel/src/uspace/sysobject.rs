@@ -186,7 +186,7 @@ impl SysObject {
 
     pub fn wake_thread(&self, wakee_thread: SysHandle, this_cpu: bool) -> Result<(), ()> {
         if let Some(process) = self.process_owner().upgrade() {
-            if let Some(thread) = super::sys_object::object_from_handle::<super::process::Thread>(
+            if let Some(thread) = super::sysobject::object_from_handle::<super::process::Thread>(
                 &process,
                 wakee_thread,
             ) {

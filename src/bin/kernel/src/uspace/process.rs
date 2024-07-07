@@ -1,6 +1,6 @@
 // Userspace process.
 
-use super::sys_object::SysObject;
+use super::sysobject::SysObject;
 use crate::arch::current_cpu;
 use crate::arch::syscall::ThreadControlBlock;
 use crate::arch::syscall::TOCR_KILLED_OTHER;
@@ -325,7 +325,7 @@ impl Process {
         compiler_fence(Ordering::AcqRel);
         core::sync::atomic::fence(Ordering::AcqRel);
         if let Some(obj) = self.self_object.as_ref() {
-            super::sys_object::object_from_sysobject::<Process>(&obj)
+            super::sysobject::object_from_sysobject::<Process>(&obj)
         } else {
             None
         }
@@ -393,7 +393,7 @@ impl Process {
             return Err(ErrorCode::NotFound);
         };
         let target = if let Some(process) =
-            super::sys_object::object_from_sysobject::<Process>(&target_obj.sys_object)
+            super::sysobject::object_from_sysobject::<Process>(&target_obj.sys_object)
         {
             process
         } else {

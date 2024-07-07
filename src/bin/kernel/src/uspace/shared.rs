@@ -1,6 +1,6 @@
 use crate::{
     mm::{MappingOptions, PageType},
-    uspace::sys_object::object_from_handle,
+    uspace::sysobject::object_from_handle,
     util::{SpinLock, StaticRef},
 };
 use alloc::{
@@ -11,7 +11,7 @@ use alloc::{
 };
 use moto_sys::{ErrorCode, SysHandle};
 
-use super::{sys_object::SysObject, Process};
+use super::{sysobject::SysObject, Process};
 
 // A SysObject shared between different userspace processes.
 struct Shared {
@@ -225,7 +225,7 @@ pub(super) fn try_wake(
     wakee_thread: SysHandle,
     this_cpu: bool,
 ) -> Result<(), ()> {
-    if let Some(shared) = super::sys_object::object_from_sysobject::<Shared>(maybe_shared) {
+    if let Some(shared) = super::sysobject::object_from_sysobject::<Shared>(maybe_shared) {
         shared.wake_other(maybe_shared.id(), wakee_thread, this_cpu)
     } else {
         Err(())
@@ -236,7 +236,7 @@ pub(super) fn peer_owner(
     this: super::process::ProcessId,
     maybe_shared: &Arc<SysObject>,
 ) -> Option<Arc<Process>> {
-    if let Some(shared) = super::sys_object::object_from_sysobject::<Shared>(maybe_shared) {
+    if let Some(shared) = super::sysobject::object_from_sysobject::<Shared>(maybe_shared) {
         let sharer = shared
             .sharer
             .upgrade()

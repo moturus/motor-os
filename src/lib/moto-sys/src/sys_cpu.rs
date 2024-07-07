@@ -1,6 +1,8 @@
 //! SysCpu syscall.
 
+#[cfg(feature = "userspace")]
 use crate::syscalls::*;
+#[cfg(feature = "userspace")]
 use crate::ErrorCode;
 
 /// SysCpu syscall: various scheduling-related operations.

@@ -36,12 +36,12 @@ impl ProcessStatsV1 {
     // List processes, in PID order. Completed processes without running
     // descendants may not be listed. @start will be included, if present.
     pub fn list(start: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
-        crate::SysObj::list_processes_v1(start, true, buf)
+        crate::SysRay::list_processes_v1(start, true, buf)
     }
 
     // List direct children of the process. @parent will not be included.
     pub fn list_children(parent: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
-        crate::SysObj::list_processes_v1(parent, false, buf)
+        crate::SysRay::list_processes_v1(parent, false, buf)
     }
 
     pub fn debug_name(&self) -> &str {

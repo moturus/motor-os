@@ -1,6 +1,8 @@
 //! SysMem syscall.
 
+#[cfg(feature = "userspace")]
 use crate::syscalls::*;
+#[cfg(feature = "userspace")]
 use crate::ErrorCode;
 
 // Various constants.

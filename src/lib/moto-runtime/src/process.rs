@@ -101,7 +101,7 @@ impl Process {
 
         SysCpu::wait(&mut [self.handle], SysHandle::NONE, SysHandle::NONE, None)?;
 
-        let exit_status = SysObj::process_status(self.handle)?.unwrap();
+        let exit_status = SysRay::process_status(self.handle)?.unwrap();
         Ok(Self::convert_exit_status(exit_status))
     }
 
@@ -110,7 +110,7 @@ impl Process {
             return Err(ErrorCode::InvalidArgument);
         }
 
-        let exit_status = SysObj::process_status(self.handle)?;
+        let exit_status = SysRay::process_status(self.handle)?;
         Ok(exit_status.map(Self::convert_exit_status))
     }
 }

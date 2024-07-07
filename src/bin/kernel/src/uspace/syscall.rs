@@ -107,9 +107,10 @@ pub fn do_syscall(curr: &super::process::Thread, args: &mut SyscallArgs) -> Sysc
     curr.on_syscall_enter(args.syscall_nr, args.operation);
 
     let result = match args.syscall_nr {
-        syscalls::SYS_OBJ => super::sys_obj::sys_ctl_impl(curr, args),
-        syscalls::SYS_MEM => super::sys_mem::sys_mem_impl(curr, args),
         syscalls::SYS_CPU => super::sys_cpu::sys_cpu_impl(curr, args),
+        syscalls::SYS_MEM => super::sys_mem::sys_mem_impl(curr, args),
+        syscalls::SYS_OBJ => super::sys_obj::sys_ctl_impl(curr, args),
+        syscalls::SYS_RAY => super::sys_ray::sys_ray_impl(curr, args),
         _ => ResultBuilder::not_implemented(),
     };
 

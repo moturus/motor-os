@@ -349,11 +349,11 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     let address_space = match address_space_handle {
         SysHandle::SELF => process.address_space().clone(),
         _ => {
-            match super::sys_object::object_from_handle::<UserAddressSpace>(
+            match super::sysobject::object_from_handle::<UserAddressSpace>(
                 &process,
                 address_space_handle,
             ) {
-                None => match super::sys_object::object_from_handle::<super::Process>(
+                None => match super::sysobject::object_from_handle::<super::Process>(
                     &process,
                     address_space_handle,
                 ) {

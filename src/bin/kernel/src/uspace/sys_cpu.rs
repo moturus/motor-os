@@ -279,7 +279,7 @@ pub(super) fn do_wake(
     this_cpu: bool,
 ) -> Result<(), ErrorCode> {
     if wake_target == SysHandle::SELF && wakee_thread != SysHandle::NONE {
-        if let Some(thread) = super::sys_object::object_from_handle::<super::process::Thread>(
+        if let Some(thread) = super::sysobject::object_from_handle::<super::process::Thread>(
             &waker.owner(),
             wakee_thread,
         ) {
@@ -308,7 +308,7 @@ pub(super) fn do_wake(
     }
 
     if let Some(thread) =
-        super::sys_object::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
+        super::sysobject::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
     {
         thread.post_wake(this_cpu);
         Ok(())

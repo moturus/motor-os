@@ -8,15 +8,16 @@ pub mod serial_console;
 
 mod shared;
 
-mod sys_object;
-pub use sys_object::SysObject;
+mod sysobject;
+pub use sysobject::SysObject;
 
 // Syscalls.
 mod sys_cpu;
 mod sys_mem;
 mod sys_obj;
+mod sys_ray;
 
-pub use sys_object::process_wake_events;
+pub use sysobject::process_wake_events;
 
 pub fn init() {
     shared::init();

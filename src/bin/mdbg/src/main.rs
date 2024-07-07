@@ -1,5 +1,5 @@
 use clap::Parser;
-use moto_sys::SysObj;
+use moto_sys::SysRay;
 
 #[derive(Parser)]
 struct Args {
@@ -39,13 +39,13 @@ fn main() -> Result<(), moto_sys::ErrorCode> {
     let args = Args::parse();
     let pid = args.print_stacks;
 
-    let dbg_handle = SysObj::dbg_attach(pid)?;
-    SysObj::dbg_stop(dbg_handle)?;
+    let dbg_handle = SysRay::dbg_attach(pid)?;
+    SysRay::dbg_stop(dbg_handle)?;
 
     let mut tids = [0_u64; 64];
     let mut start_tid = 0;
     loop {
-        let sz = SysObj::dbg_list_threads(dbg_handle, start_tid, &mut tids)?;
+        let sz = SysRay::dbg_list_threads(dbg_handle, start_tid, &mut tids)?;
 
         for idx in 0..sz {
             print_stack_trace(dbg_handle, tids[idx])?;
@@ -57,6 +57,6 @@ fn main() -> Result<(), moto_sys::ErrorCode> {
         start_tid = tids[sz - 1] + 1;
     }
 
-    SysObj::dbg_resume(dbg_handle)?;
+    SysRay::dbg_resume(dbg_handle)?;
     Ok(())
 }
