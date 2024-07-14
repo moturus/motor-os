@@ -311,12 +311,51 @@ fn sys_dbg_detach(debugger: Arc<super::process::Process>, args: &SyscallArgs) ->
     ResultBuilder::ok()
 }
 
+fn sys_dbg_get_mem(debugger: Arc<super::process::Process>, args: &SyscallArgs) -> SyscallResult {
+    if args.version < 1 {
+        return ResultBuilder::version_too_low();
+    }
+    if args.version > 1 {
+        return ResultBuilder::version_too_high();
+    }
+    if args.args[4..] != [0; 2] {
+        return ResultBuilder::invalid_argument();
+    }
+
+    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let session = match get_session(&debugger, dbg_handle) {
+        Ok(s) => s,
+        Err(err) => return ResultBuilder::result(err),
+    };
+
+    let start_addr = args.args[1];
+    let buf_addr = args.args[2];
+    let buf_len = args.args[3];
+
+    // Read bytes from the debuggee memory.
+    let bytes = match session
+        .debuggee
+        .address_space()
+        .read_from_user(start_addr, buf_len)
+    {
+        Ok(v) => v,
+        Err(err) => return ResultBuilder::result(err),
+    };
+
+    // Write bytes to the debugger memory.
+    match debugger.address_space().copy_to_user(&bytes, buf_addr) {
+        Ok(_) => ResultBuilder::ok_1(bytes.len() as u64),
+        Err(err) => ResultBuilder::result(err),
+    }
+}
+
 pub fn sys_ray_dbg_impl(
     thread: &crate::uspace::process::Thread,
     args: &SyscallArgs,
 ) -> SyscallResult {
     match args.flags {
         SysRay::F_DBG_ATTACH => sys_dbg_attach(thread, args),
+        SysRay::F_DBG_GET_MEM => sys_dbg_get_mem(thread.owner(), args),
         SysRay::F_DBG_PAUSE_PROCESS => sys_dbg_pause_process(thread.owner(), args),
         SysRay::F_DBG_LIST_THREADS => sys_dbg_list_threads(thread.owner(), args),
         SysRay::F_DBG_GET_THREAD_DATA => sys_dbg_get_thread_data(thread.owner(), args),

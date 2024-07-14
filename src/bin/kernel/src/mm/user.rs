@@ -505,11 +505,7 @@ impl UserAddressSpace {
         self.inner.fix_pagefault(pf_addr, error_code)
     }
 
-    pub unsafe fn copy_to_user(
-        &self,
-        bytes: &[u8],
-        user_vaddr_start: u64,
-    ) -> Result<(), ErrorCode> {
+    pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {
         let mut source_start = 0_u64;
         let mut dst_start = user_vaddr_start;
         let mut bytes_left = bytes.len() as u64;
@@ -537,11 +533,14 @@ impl UserAddressSpace {
             let phys_start_2 = self.inner.page_table_ref().virt_to_phys(dst_start).unwrap();
             assert_eq!(phys_start, phys_start_2);
 
-            core::intrinsics::copy_nonoverlapping(
-                bytes.get_unchecked(source_start as usize) as *const u8,
-                (phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET) as usize as *mut u8,
-                bytes_to_copy as usize,
-            );
+            unsafe {
+                core::intrinsics::copy_nonoverlapping(
+                    bytes.get_unchecked(source_start as usize) as *const u8,
+                    (phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET) as usize
+                        as *mut u8,
+                    bytes_to_copy as usize,
+                );
+            }
 
             source_start += bytes_to_copy;
             dst_start += bytes_to_copy;

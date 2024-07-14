@@ -160,12 +160,10 @@ fn process_wake_handles(
         let val = u64::from(handle);
         let buf: &[u8] =
             unsafe { core::slice::from_raw_parts(&val as *const _ as usize as *const u8, 8) };
-        unsafe {
-            curr.owner()
-                .address_space()
-                .copy_to_user(buf, h_ptr + 8 * idx)
-                .unwrap();
-        }
+        curr.owner()
+            .address_space()
+            .copy_to_user(buf, h_ptr + 8 * idx)
+            .unwrap();
         idx += 1;
     }
 
@@ -173,12 +171,10 @@ fn process_wake_handles(
     let buf_zero: &[u8] =
         unsafe { core::slice::from_raw_parts(&zero as *const _ as usize as *const u8, 8) };
     for pos in idx..h_sz {
-        unsafe {
-            curr.owner()
-                .address_space()
-                .copy_to_user(buf_zero, h_ptr + 8 * pos)
-                .unwrap();
-        }
+        curr.owner()
+            .address_space()
+            .copy_to_user(buf_zero, h_ptr + 8 * pos)
+            .unwrap();
     }
 
     let mut result = ResultBuilder::ok();

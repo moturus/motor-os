@@ -146,6 +146,7 @@ pub struct ThreadControlBlock {
     syscall_stack_start: u64, // [24]
     syscall_rsp: u64,         // [32] stack pointer for the in-kernel part of syscalls
     rflags: u64,              // [40] rflags
+    user_rbp: u64,            // [48] user rbp; used for remote debugging.
 
     pf_addr: Option<u64>,
 
@@ -169,6 +170,7 @@ impl ThreadControlBlock {
             syscall_stack_start: 0,
             syscall_rsp: 0,
             rflags: 0x0202,
+            user_rbp: 0,
             pf_addr: None,
             in_syscall: AtomicBool::new(false),
             irq_stack: None,
@@ -210,11 +212,7 @@ impl ThreadControlBlock {
     }
 
     pub fn rbp(&self) -> u64 {
-        if let Some(irq_stack) = self.irq_stack {
-            irq_stack.rbp
-        } else {
-            0
-        }
+        self.user_rbp
     }
 
     fn to_addr(&self) -> u64 {
@@ -396,6 +394,7 @@ impl ThreadControlBlock {
             this_tcb.user_rsp = irq_stack.rsp; //irq_stack as *const _ as usize as u64;
             this_tcb.rip = irq_stack.rip;
             this_tcb.rflags = irq_stack.flags;
+            this_tcb.user_rbp = irq_stack.rbp;
             this_tcb.irq_stack = Some(*irq_stack);
             this_tcb.pf_addr = None;
             this_tcb.xsave();
@@ -634,6 +633,7 @@ unsafe extern "C" fn syscall_handler_asm() {
         "mov [rax], rcx",  // Save user RIP in TCB for validation.
 
         "mov [rax + 8], rsp", // Save user RSP
+        "mov [rax + 48], rbp", // Save user RBP
         "mov rsp, [rax + 24]",   // Install syscall RSP
 
         "push r11",     // save rflags

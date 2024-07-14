@@ -27,7 +27,6 @@ enum Commands {
 // messages to the user.
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
-/*
 fn input_listener() {
     use std::io::Read;
 
@@ -42,15 +41,138 @@ fn input_listener() {
         }
     }
 }
-*/
+
+const BT_DEPTH: usize = 64;
+
+fn _get_backtrace() -> [u64; BT_DEPTH] {
+    let mut backtrace: [u64; BT_DEPTH] = [0; BT_DEPTH];
+
+    let mut rbp: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov rdx, rbp", out("rdx") rbp, options(nomem, nostack)
+        )
+    };
+
+    if rbp == 0 {
+        return backtrace;
+    }
+
+    // Skip the first stack frame, which is one of the log_backtrace
+    // functions below.
+    rbp = unsafe { *(rbp as *mut u64) };
+    let mut prev = 0_u64;
+
+    for idx in 0..BT_DEPTH {
+        if prev == rbp {
+            break;
+        }
+        if rbp == 0 {
+            break;
+        }
+        if rbp < 1024 * 64 {
+            break;
+        }
+        prev = rbp;
+        unsafe {
+            backtrace[idx] = *((rbp + 8) as *mut u64);
+            rbp = *(rbp as *mut u64);
+        }
+    }
+
+    backtrace
+}
+
+fn get_thread_trace(
+    dbg_handle: moto_sys::SysHandle,
+    thread_data: &moto_sys::stats::ThreadDataV1,
+) -> [u64; BT_DEPTH] {
+    let mut backtrace: [u64; BT_DEPTH] = [0; BT_DEPTH];
+
+    let mut rbp: u64 = thread_data.rbp;
+    if rbp == 0 {
+        return backtrace;
+    }
+
+    let mut prev = 0_u64;
+
+    for idx in 0..BT_DEPTH {
+        if prev == rbp {
+            break;
+        }
+        if rbp == 0 {
+            break;
+        }
+        if rbp < 1024 * 64 {
+            break;
+        }
+        prev = rbp;
+
+        // Prepare the place to read into.
+        // TODO: we can read 16 bytes at once, not 8 bytes twice.
+        let mut remove_val = 0;
+        let val_slice = unsafe {
+            core::slice::from_raw_parts_mut(&mut remove_val as *mut _ as usize as *mut u8, 8)
+        };
+
+        // ip = *(rbp+8)
+        match SysRay::dbg_get_mem(dbg_handle, rbp + 8, val_slice) {
+            Ok(sz) => {
+                assert_eq!(sz, 8);
+                backtrace[idx] = remove_val;
+            }
+            Err(_) => {
+                return backtrace;
+            }
+        }
+
+        // rbp = *rbp
+        match SysRay::dbg_get_mem(dbg_handle, rbp, val_slice) {
+            Ok(sz) => {
+                assert_eq!(sz, 8);
+                rbp = remove_val;
+            }
+            Err(_) => {
+                return backtrace;
+            }
+        }
+    }
+
+    backtrace
+}
 
 fn print_stack_trace(dbg_handle: moto_sys::SysHandle, tid: u64) {
     let thread_data = SysRay::dbg_get_thread_data_v1(dbg_handle, tid).unwrap();
     println!("print_stack_trace {:?}", thread_data);
+
+    let backtrace = get_thread_trace(dbg_handle, &thread_data);
+
+    use core::fmt::Write;
+    let mut writer = String::with_capacity(4096);
+    write!(
+        &mut writer,
+        "Thread {}: {:?}({}:{}):",
+        thread_data.tid, thread_data.status, thread_data.syscall_num, thread_data.syscall_op
+    )
+    .ok();
+    write!(&mut writer, " \\\n  0x{:x}", thread_data.ip).ok();
+    for addr in backtrace {
+        if addr == 0 {
+            break;
+        }
+
+        if addr > (1_u64 << 40) {
+            break;
+        }
+
+        write!(&mut writer, " \\\n  0x{:x}", addr).ok();
+    }
+
+    let _ = write!(&mut writer, "\n\n");
+    println!("{}", writer.as_str());
 }
 
 fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
-    println!("cmd_print_stacks({pid}) - start");
     let dbg_handle = match SysRay::dbg_attach(pid) {
         Ok(handle) => handle,
         Err(err) => match err {
@@ -133,8 +255,7 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
 }
 
 fn main() -> Result<(), moto_sys::ErrorCode> {
-    // std::thread::spawn(move || input_listener());
-
+    std::thread::spawn(move || input_listener());
     let cli = Cli::parse();
     // println!("{:#?}", cli);
     match cli.cmd {
