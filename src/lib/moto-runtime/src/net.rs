@@ -416,7 +416,7 @@ impl NetChannel {
             *handle
         };
         if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
-            let _ = moto_sys::syscalls::SysCpu::wake(wait_handle);
+            let _ = moto_sys::SysCpu::wake(wait_handle);
         }
     }
 
