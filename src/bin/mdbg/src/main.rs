@@ -191,6 +191,9 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
     // will eventually pause.
     SysRay::dbg_pause_process(dbg_handle).unwrap();
 
+    // Sleep a bit to let all running threads to get paused.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
     let mut all_tids = VecDeque::new();
 
     let mut tids = [0_u64; 64];
@@ -250,6 +253,10 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
         moto_sys::SysObj::put(dbg_handle).err().unwrap(),
         moto_sys::ErrorCode::BadHandle
     );
+
+    // Sleep a bit to let stdout flush.
+    // TODO: remove when stdio flush issue is fixed.
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     Ok(())
 }
