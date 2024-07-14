@@ -15,6 +15,7 @@
 #![feature(concat_idents)]
 #![feature(get_mut_unchecked)]
 
+// #[macro_use]
 extern crate alloc;
 pub mod arch;
 pub mod config;

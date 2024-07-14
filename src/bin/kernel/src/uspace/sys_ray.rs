@@ -18,13 +18,10 @@ fn sys_query_process_status(thread: &super::process::Thread, args: &SyscallArgs)
         SysHandle::from_u64(args.args[0]),
     ) {
         Some(proc) => match proc.status() {
-            super::process::ProcessStatus::Created => {
-                ResultBuilder::result(ErrorCode::AlreadyInUse)
-            }
-            super::process::ProcessStatus::Running => {
-                ResultBuilder::result(ErrorCode::AlreadyInUse)
-            }
-            super::process::ProcessStatus::Exiting(_) => {
+            super::process::ProcessStatus::Created
+            | super::process::ProcessStatus::Running
+            | super::process::ProcessStatus::PausedDebuggee
+            | super::process::ProcessStatus::Exiting(_) => {
                 ResultBuilder::result(ErrorCode::AlreadyInUse)
             }
             super::process::ProcessStatus::Exited(code) => ResultBuilder::ok_1(code),
@@ -130,6 +127,8 @@ fn sys_log(
 
 pub(super) fn sys_ray_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     match args.operation {
+        SysRay::OP_DBG => super::sys_ray_dbg::sys_ray_dbg_impl(thread, args),
+
         SysRay::OP_QUERY_PROCESS => match args.flags {
             SysRay::F_QUERY_STATUS => sys_query_process_status(thread, args),
             SysRay::F_QUERY_LIST | SysRay::F_QUERY_LIST_CHILDREN => {

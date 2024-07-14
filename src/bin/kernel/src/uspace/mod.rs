@@ -16,6 +16,7 @@ mod sys_cpu;
 mod sys_mem;
 mod sys_obj;
 mod sys_ray;
+mod sys_ray_dbg;
 
 pub use sysobject::process_wake_events;
 

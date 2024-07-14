@@ -295,6 +295,10 @@ impl KProcessStats {
         &self.debug_name.as_str()
     }
 
+    pub fn parent(&self) -> Option<Arc<KProcessStats>> {
+        self.parent.clone()
+    }
+
     pub fn pid(&self) -> ProcessId {
         self.pid
     }

@@ -1,5 +1,6 @@
 // Userspace process.
 
+use super::sys_ray_dbg::DebugSession;
 use super::sysobject::SysObject;
 use crate::arch::current_cpu;
 use crate::arch::syscall::ThreadControlBlock;
@@ -64,12 +65,25 @@ impl ThreadId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    pub const fn from_u64(tid: u64) -> Self {
+        Self(tid)
+    }
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum ProcessStatus {
     Created,
     Running,
+
+    // When a process is a PausedDebuggee, its threads are resumed only
+    // via explicit debugger commands. But when a Running process becomes
+    // PausedDebuggee, its running threads may continue running until
+    // they hit an edge (e.g. preemption) that make them PausedDebuggee
+    // as well. So after a sched tick or two all live threads of a
+    // PausedDebuggee process become PausedDebuggee threads.
+    PausedDebuggee,
+
     Exiting(u64),
     Exited(u64),
     Error(ErrorCode),
@@ -115,6 +129,19 @@ pub struct Process {
     next_wait_object_id: AtomicU64,
 
     stats: Arc<KProcessStats>,
+
+    // If this is a debuggEE, debug_session below will contain the session
+    // object.
+    pub(super) debug_session: SpinLock<Option<Arc<DebugSession>>>,
+
+    // Set to true when self.status == PausedDebuggee. This duplicates
+    // the state, but helps with:
+    // (a) performance: no need to lock Process::status to check this flag, and
+    // (b) avoids potential deadlocks: the value of the flag is often used
+    //     when Thread::status is locked; locking Process::status when
+    //     Thread::status is locked is dangerous, as the normal pattern
+    //     is to order the two locks from the larger (process) to the smaller (thread).
+    paused_debuggee: AtomicBool,
 }
 
 unsafe impl Send for Process {}
@@ -174,6 +201,8 @@ impl Process {
                 kernel_mem_stats,
                 me.clone(),
             ),
+            debug_session: SpinLock::new(None),
+            paused_debuggee: AtomicBool::new(false),
         });
 
         // Safe because this is the "constructor" and no other references exit.
@@ -201,6 +230,12 @@ impl Process {
         ));
 
         Ok(self_)
+    }
+
+    pub fn from_pid(pid: u64) -> Option<Arc<Self>> {
+        crate::xray::stats::stats_from_pid(pid)
+            .map(|stats| stats.owner.upgrade())
+            .flatten()
     }
 
     pub fn new_child(
@@ -298,6 +333,60 @@ impl Process {
         }
     }
 
+    // Note: we only mark the process as PausedDebuggee and don't
+    // actively pause running threads, because this is potentially
+    // a long running operation (imagine thousands of threads that
+    // have to be looped over a couple of times to ensure that all
+    // of them have paused), and we want our syscalls to be short.
+    pub(super) fn dbg_pause(&self) -> Result<(), ErrorCode> {
+        let mut status_lock = self.status.lock(line!());
+        match *status_lock {
+            ProcessStatus::Running => {
+                *status_lock = ProcessStatus::PausedDebuggee;
+                assert!(!self.paused_debuggee.swap(true, Ordering::SeqCst));
+                Ok(())
+            }
+            ProcessStatus::PausedDebuggee => Err(ErrorCode::AlreadyInUse),
+            ProcessStatus::Exiting(_)
+            | ProcessStatus::Exited(_)
+            | ProcessStatus::Error(_)
+            | ProcessStatus::Created
+            | ProcessStatus::Killed => Err(ErrorCode::NotReady),
+        }
+    }
+
+    // Note: we only mark the process as Created/Running and don't
+    // actively resume paused threads, because this is potentially
+    // a long running operation (imagine thousands of threads that
+    // have to be looped over), and we want our syscalls to be short.
+    pub(super) fn dbg_resume(&self) -> Result<(), ErrorCode> {
+        let mut status_lock = self.status.lock(line!());
+        match *status_lock {
+            ProcessStatus::PausedDebuggee => {
+                assert!(self.paused_debuggee.swap(false, Ordering::SeqCst));
+                *status_lock = ProcessStatus::Running;
+                Ok(())
+            }
+            _ => Err(ErrorCode::NotReady),
+        }
+    }
+
+    pub(super) fn dbg_resume_thread(&self, tid: ThreadId) -> Result<(), ErrorCode> {
+        let thread = {
+            let status = self.status.lock(line!());
+            if *status != ProcessStatus::Running {
+                return Err(ErrorCode::NotReady);
+            }
+            if let Some(t) = self.threads.get(&tid) {
+                t.clone()
+            } else {
+                return Err(ErrorCode::NotFound);
+            }
+        };
+
+        thread.resume_debuggee()
+    }
+
     fn process_wake(&self, handle: &SysHandle) {
         let mut objects = self.wait_objects.lock(line!());
         if let Some(obj) = objects.get_mut(handle) {
@@ -307,6 +396,29 @@ impl Process {
 
     pub fn debug_name(&self) -> &str {
         self.stats.debug_name()
+    }
+
+    pub(super) fn list_tids(&self, start_tid: &ThreadId, buf: &mut [u64]) -> usize {
+        let _ = self.status.lock(line!());
+        let tids = self.threads.range(start_tid..);
+        let mut idx = 0;
+        for (tid, _) in tids {
+            buf[idx] = tid.as_u64();
+            idx += 1;
+            if idx >= buf.len() {
+                break;
+            }
+        }
+
+        idx
+    }
+    pub(super) fn get_thread_data(&self, tid: u64) -> Option<moto_sys::stats::ThreadDataV1> {
+        let thread: Arc<Thread> = {
+            let _ = self.status.lock(line!());
+            self.threads.get(&ThreadId::from_u64(tid))?.clone()
+        };
+
+        Some(thread.get_thread_data())
     }
 
     pub(super) fn self_object(&self) -> Option<Arc<SysObject>> {
@@ -407,6 +519,7 @@ impl Process {
             let (target_mut, mut status_lock) = unsafe { target.get_mut() };
             let do_kill = match *status_lock {
                 ProcessStatus::Created | ProcessStatus::Running => true,
+                ProcessStatus::PausedDebuggee => todo!(),
                 ProcessStatus::Exiting(_)
                 | ProcessStatus::Exited(_)
                 | ProcessStatus::Error(_)
@@ -427,7 +540,7 @@ impl Process {
     pub(super) fn die(&self) {
         let (target_mut, mut status_lock) = unsafe { self.get_mut() };
         let do_kill = match *status_lock {
-            ProcessStatus::Created | ProcessStatus::Running => true,
+            ProcessStatus::Created | ProcessStatus::Running | ProcessStatus::PausedDebuggee => true,
             ProcessStatus::Exiting(_)
             | ProcessStatus::Exited(_)
             | ProcessStatus::Error(_)
@@ -622,6 +735,20 @@ impl Process {
     }
 }
 
+// Allowed live thread status transitions:
+//
+// Running -> Preempted
+// Running -> Syscall
+//
+// Preempted -> Running (will be resume in the userspace)
+//
+// Syscall -> Running
+// Syscall -> InWait
+// Syscall -> Runnable
+//
+// InWait -> Runnable
+//
+// Runnable -> Running
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum LiveThreadStatus {
     Running, // Running in userspace.
@@ -637,6 +764,7 @@ pub enum LiveThreadStatus {
 pub enum ThreadStatus {
     Created,
     Live(LiveThreadStatus),
+    PausedDebuggee(LiveThreadStatus),
     Finished,    // Finished "normally", via SysCtl::OP_PUT(SELF).
     Exited(u64), // SysCpu::OP_EXIT.
     Error(ErrorCode),
@@ -928,39 +1056,101 @@ impl Thread {
         crate::xray::tracing::trace(event, self.tid.as_u64(), arg1, arg2);
     }
 
+    fn pause_debuggee_in_syscall(&self) {
+        self.tcb.pause();
+    }
+
+    fn resume_debuggee(&self) -> Result<(), ErrorCode> {
+        let mut status = self.status.lock(line!());
+        match *status {
+            ThreadStatus::Live(_) => Err(ErrorCode::AlreadyInUse),
+            ThreadStatus::PausedDebuggee(live_thread_status) => match live_thread_status {
+                LiveThreadStatus::Running => {
+                    // Paused in on_syscall_exit().
+                    *status = ThreadStatus::Live(LiveThreadStatus::Running);
+                    self.post_wake_locked(false);
+                    Ok(())
+                }
+                LiveThreadStatus::Preempted => {
+                    // Paused in resume_in_userspace() or on_thread_preempted().
+                    *status = ThreadStatus::Live(LiveThreadStatus::Running);
+                    crate::sched::post(crate::sched::Job::new(
+                        Self::job_fn_resume_in_userspace,
+                        self,
+                    ));
+                    Ok(())
+                }
+                LiveThreadStatus::Syscall(_, _) => {
+                    // Paused in on_syscall_enter().
+                    *status = ThreadStatus::Live(live_thread_status);
+                    self.post_wake_locked(false);
+                    Ok(())
+                }
+                LiveThreadStatus::Runnable(_, _) => panic!("not possible"),
+                LiveThreadStatus::InWait(_, _) => panic!("not possible"),
+            },
+            _ => Err(ErrorCode::NotReady),
+        }
+    }
+
     // Called when the thread has entered the kernel via a syscall.
     pub fn on_syscall_enter(&self, syscall_nr: u8, operation: u8) {
         self.trace("on_syscall_enter", syscall_nr as u64, operation as u64);
+        if self.check_user_tcb_guard().is_err() {
+            self.die(ThreadKilledReason::SegFault); // Never returns.
+        }
+        let mut pause_debuggee = false;
         {
             let mut status = self.status.lock(line!());
             match *status {
-                ThreadStatus::Live(LiveThreadStatus::Running) => {}
+                ThreadStatus::Live(LiveThreadStatus::Running) => {
+                    if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                        *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Syscall(
+                            syscall_nr, operation,
+                        ));
+                        pause_debuggee = true;
+                    } else {
+                        *status =
+                            ThreadStatus::Live(LiveThreadStatus::Syscall(syscall_nr, operation));
+                    }
+                }
                 ThreadStatus::Killed(reason) => {
                     core::mem::drop(status); // Unlock.
-                    self.die(reason);
+                    self.die(reason); // Never returns.
                 }
                 _ => panic!("unexpected thread status {:?}", *status),
             }
-            *status = ThreadStatus::Live(LiveThreadStatus::Syscall(syscall_nr, operation));
         }
-        if self.check_user_tcb_guard().is_err() {
-            self.die(ThreadKilledReason::SegFault);
+        if pause_debuggee {
+            self.pause_debuggee_in_syscall();
         }
     }
 
     // Called when the thread is about to exit the syscall/kernel to userspace.
     pub fn on_syscall_exit(&self) {
         self.trace("on_sycall_exit", 0, 0);
-        let mut status = self.status.lock(line!());
-        match *status {
-            ThreadStatus::Live(LiveThreadStatus::Syscall(_, _)) => {}
-            ThreadStatus::Killed(reason) => {
-                core::mem::drop(status); // Unlock.
-                self.die(reason);
+        let mut pause_debuggee = false;
+        {
+            let mut status = self.status.lock(line!());
+            match *status {
+                ThreadStatus::Live(LiveThreadStatus::Syscall(_, _)) => {
+                    if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                        *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Running);
+                        pause_debuggee = true;
+                    } else {
+                        *status = ThreadStatus::Live(LiveThreadStatus::Running);
+                    }
+                }
+                ThreadStatus::Killed(reason) => {
+                    core::mem::drop(status); // Unlock.
+                    self.die(reason);
+                }
+                _ => panic!("unexpected thread status {:?}", *status),
             }
-            _ => panic!("unexpected thread status {:?}", *status),
         }
-        *status = ThreadStatus::Live(LiveThreadStatus::Running);
+        if pause_debuggee {
+            self.pause_debuggee_in_syscall();
+        }
     }
 
     pub fn tid(&self) -> ThreadId {
@@ -1019,7 +1209,7 @@ impl Thread {
         {
             let mut status = self.status.lock(line!());
             match *status {
-                ThreadStatus::Created => {
+                ThreadStatus::Created | ThreadStatus::PausedDebuggee(_) => {
                     *status = ThreadStatus::Killed(reason);
                 }
                 ThreadStatus::Live(live_status) => match live_status {
@@ -1210,7 +1400,14 @@ impl Thread {
         let (timed_out, mut wakers) = {
             {
                 self.trace("thread::wait", 0, 0);
+
+                // tcb.pause() below will triger on_thread_paused() that will
+                // change this thread's status to InWait. It will NOT return
+                // until the thread wakes.
                 self.tcb.pause();
+                // tcb.pause() above is done, which means the thread is
+                // no longer InWait.
+
                 self.trace("thread::wait: woke", 0, 0);
                 // The pause() above deschedules this thread from this CPU.
                 // The thread will resume below via Self::resume().
@@ -1248,6 +1445,8 @@ impl Thread {
         (timed_out, wakers)
     }
 
+    // This is called when a thread in a syscall calls self.tcb.pause(),
+    // which happens either in sys_wait() or when the process is PausedDebuggee.
     fn on_thread_paused(&self) {
         self.trace("thread::on_thread_paused", 0, 0);
         self.tcb.validate_rsp();
@@ -1267,6 +1466,7 @@ impl Thread {
                         self.post_wake_locked(false);
                     }
                 }
+                ThreadStatus::PausedDebuggee(_) => {}
                 ThreadStatus::Killed(_) => {
                     call_on_exited = true;
                 }
@@ -1284,7 +1484,7 @@ impl Thread {
         }
     }
 
-    // Resumes a thread sleeping in Thread::wait().
+    // Resumes a thread sleeping in Thread::wait() or in Thread::pause_debuggee_in_syscall().
     fn resume_in_kernel(&self) {
         self.trace("thread::resume_in_kernel", 0, 0);
         self.tcb.validate_rsp();
@@ -1308,8 +1508,13 @@ impl Thread {
             let mut status = self.status.lock(line!());
             match *status {
                 ThreadStatus::Live(LiveThreadStatus::Preempted) => {
-                    *status = ThreadStatus::Live(LiveThreadStatus::Running);
-                    true
+                    if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                        *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
+                        false
+                    } else {
+                        *status = ThreadStatus::Live(LiveThreadStatus::Running);
+                        true
+                    }
                 }
                 ThreadStatus::Killed(_) => false,
                 _ => panic!("Unexpected thread status {:?}.", *status),
@@ -1343,6 +1548,74 @@ impl Thread {
                 );
             }
         }
+    }
+
+    fn process_live_thread_status_locked(
+        &self,
+        live_status: LiveThreadStatus,
+        thread_data: &mut moto_sys::stats::ThreadDataV1,
+    ) {
+        match live_status {
+            LiveThreadStatus::Running => {
+                thread_data.status = moto_sys::stats::ThreadStatus::LiveRunning
+            }
+            LiveThreadStatus::Preempted => {
+                thread_data.status = moto_sys::stats::ThreadStatus::LivePreempted;
+                thread_data.ip = self.tcb.rip();
+                thread_data.rbp = self.tcb.rbp();
+            }
+            LiveThreadStatus::Runnable(s, o) => {
+                thread_data.status = moto_sys::stats::ThreadStatus::LiveRunnable;
+                thread_data.syscall_num = s;
+                thread_data.syscall_op = o;
+                thread_data.ip = self.tcb.rip();
+                thread_data.rbp = self.tcb.rbp();
+            }
+            LiveThreadStatus::Syscall(s, o) => {
+                thread_data.status = moto_sys::stats::ThreadStatus::LiveSyscall;
+                thread_data.syscall_num = s;
+                thread_data.syscall_op = o;
+                thread_data.ip = self.tcb.rip();
+                thread_data.rbp = self.tcb.rbp();
+            }
+            LiveThreadStatus::InWait(s, o) => {
+                thread_data.status = moto_sys::stats::ThreadStatus::LiveInWait;
+                thread_data.syscall_num = s;
+                thread_data.syscall_op = o;
+                thread_data.ip = self.tcb.rip();
+                thread_data.rbp = self.tcb.rbp();
+            }
+        }
+    }
+
+    fn get_thread_data(&self) -> moto_sys::stats::ThreadDataV1 {
+        let mut thread_data = moto_sys::stats::ThreadDataV1::default();
+
+        thread_data.tid = self.tid.as_u64();
+        {
+            let status = self.status.lock(line!());
+            match *status {
+                ThreadStatus::Created => {
+                    thread_data.status = moto_sys::stats::ThreadStatus::Created
+                }
+                ThreadStatus::Live(live_status) => {
+                    self.process_live_thread_status_locked(live_status, &mut thread_data);
+                }
+
+                ThreadStatus::PausedDebuggee(live_status) => {
+                    self.process_live_thread_status_locked(live_status, &mut thread_data);
+                    thread_data.paused_debuggee = 1;
+                }
+                ThreadStatus::Finished
+                | ThreadStatus::Exited(_)
+                | ThreadStatus::Error(_)
+                | ThreadStatus::Killed(_) => {
+                    thread_data.status = moto_sys::stats::ThreadStatus::Dead
+                }
+            }
+        }
+
+        thread_data
     }
 
     pub fn wake_by_timeout(&self) {
@@ -1558,8 +1831,12 @@ impl Thread {
                         .is_ok()
                     {
                         log::trace!("#PF fixed!");
-                        *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
-                        resume_in_userspace = true;
+                        if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                            *status = ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
+                        } else {
+                            *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
+                            resume_in_userspace = true;
+                        }
                     } else {
                         log::info!(
                             "#PF: thread {} killed: pf_addr: 0x{:x}\n\trip: 0x{:x} stack: 0x{:x?}",
@@ -1608,8 +1885,13 @@ impl Thread {
                         let mut status = self.status.lock(line!());
                         match *status {
                             ThreadStatus::Live(LiveThreadStatus::Running) => {
-                                *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
-                                resume_in_userspace = true;
+                                if self.owner().paused_debuggee.load(Ordering::Relaxed) {
+                                    *status =
+                                        ThreadStatus::PausedDebuggee(LiveThreadStatus::Preempted);
+                                } else {
+                                    *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
+                                    resume_in_userspace = true;
+                                }
                             }
                             ThreadStatus::Killed(_) => {
                                 call_on_exited = true;

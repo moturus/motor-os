@@ -267,7 +267,7 @@ fn sys_handle_put(
     if owner == SysHandle::SELF {
         return this_process
             .put_object(&handle)
-            .map_err(|_| ErrorCode::InvalidArgument);
+            .map_err(|_| ErrorCode::BadHandle);
     }
 
     match super::sysobject::object_from_handle::<super::Process>(&this_process, owner) {

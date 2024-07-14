@@ -19,16 +19,23 @@ impl SysRay {
 
     /// Attach to a running process.
     pub const F_DBG_ATTACH: u32 = 1;
-    /// Stop all threads in the attached process.
-    pub const F_DBG_STOP: u32 = 2;
-    /// Resume a single thread or all threads in the attached process.
-    pub const F_DBG_RESUME: u32 = 3;
+    /// Mark the debuggee process as paused. All its threads will
+    /// eventually pause.
+    pub const F_DBG_PAUSE_PROCESS: u32 = 2;
+    /// Mark a paused debuggee process as running. Paused threads
+    /// will not resume automatically until explicitly resumed
+    /// using F_DBG_RESUME_THREAD.
+    pub const F_DBG_RESUME_PROCESS: u32 = 3;
+    /// Resume a paused thread.
+    pub const F_DBG_RESUME_THREAD: u32 = 4;
     /// List threads in the attached process.
-    pub const F_DBG_LIST_THREADS: u32 = 4;
+    pub const F_DBG_LIST_THREADS: u32 = 5;
     /// Get thread data.
-    pub const F_DBG_GET_THREAD_DATA: u32 = 5;
+    pub const F_DBG_GET_THREAD_DATA: u32 = 6;
     /// Get process memory.
-    pub const F_DBG_GET_MEM: u32 = 6;
+    pub const F_DBG_GET_MEM: u32 = 7;
+    /// Detach the debugger. Note that just putting the handle is not enough.
+    pub const F_DBG_DETACH: u32 = 8;
 
     #[cfg(feature = "userspace")]
     pub fn process_status(handle: SysHandle) -> Result<Option<u64>, ErrorCode> {
@@ -105,9 +112,9 @@ impl SysRay {
     }
 
     #[cfg(feature = "userspace")]
-    pub fn dbg_stop(dbg_handle: SysHandle) -> Result<(), ErrorCode> {
+    pub fn dbg_pause_process(dbg_handle: SysHandle) -> Result<(), ErrorCode> {
         let result = do_syscall(
-            pack_nr_ver(SYS_RAY, Self::OP_DBG, Self::F_DBG_STOP, 1),
+            pack_nr_ver(SYS_RAY, Self::OP_DBG, Self::F_DBG_PAUSE_PROCESS, 1),
             dbg_handle.into(),
             0,
             0,
@@ -124,11 +131,30 @@ impl SysRay {
     }
 
     #[cfg(feature = "userspace")]
-    pub fn dbg_resume(dbg_handle: SysHandle) -> Result<(), ErrorCode> {
+    pub fn dbg_resume_process(dbg_handle: SysHandle) -> Result<(), ErrorCode> {
         let result = do_syscall(
-            pack_nr_ver(SYS_RAY, Self::OP_DBG, Self::F_DBG_RESUME, 1),
+            pack_nr_ver(SYS_RAY, Self::OP_DBG, Self::F_DBG_RESUME_PROCESS, 1),
             dbg_handle.into(),
             0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(())
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn dbg_resume_thread(dbg_handle: SysHandle, tid: u64) -> Result<(), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_DBG, Self::F_DBG_RESUME_THREAD, 1),
+            dbg_handle.into(),
+            tid,
             0,
             0,
             0,
@@ -211,6 +237,25 @@ impl SysRay {
 
         if result.is_ok() {
             Ok(result.data[0] as usize)
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn dbg_detach(dbg_handle: SysHandle) -> Result<(), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_DBG, Self::F_DBG_DETACH, 1),
+            dbg_handle.into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(())
         } else {
             Err(result.error_code())
         }

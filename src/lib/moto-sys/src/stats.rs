@@ -154,10 +154,34 @@ pub fn get_cpu_usage(buf: &mut [f32]) -> Result<(), ErrorCode> {
     crate::SysCpu::query_stats(buf)
 }
 
+#[repr(u16)]
+#[derive(Debug, Clone, Copy)]
+pub enum ThreadStatus {
+    Unknown = 0,
+    Created = 1,
+    LiveRunning,
+    LivePreempted,
+    LiveRunnable,
+    LiveSyscall,
+    LiveInWait,
+    Dead,
+}
+
+impl Default for ThreadStatus {
+    fn default() -> Self {
+        ThreadStatus::Unknown
+    }
+}
+
 #[repr(C)]
-#[derive(Default)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct ThreadDataV1 {
     pub tid: u64,
+    pub status: ThreadStatus, // u16
+    pub syscall_num: u8,
+    pub syscall_op: u8,
+    pub paused_debuggee: u8,
+    pub _pad: [u8; 3],
     pub ip: u64,  // Instruction pointer.
     pub rbp: u64, // The value of the RBP register.
 }
