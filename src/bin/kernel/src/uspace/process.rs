@@ -1073,7 +1073,7 @@ impl Thread {
                 }
                 LiveThreadStatus::Preempted => {
                     // Paused in resume_in_userspace() or on_thread_preempted().
-                    *status = ThreadStatus::Live(LiveThreadStatus::Running);
+                    *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
                     crate::sched::post(crate::sched::Job::new(
                         Self::job_fn_resume_in_userspace,
                         self,
