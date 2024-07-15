@@ -39,7 +39,7 @@ pub fn do_command(args: &[String]) {
         }
     }
     if reclaim {
-        moto_sys::syscalls::SysMem::reclaim(moto_sys::syscalls::SysHandle::KERNEL).unwrap();
+        moto_sys::SysMem::reclaim(moto_sys::syscalls::SysHandle::KERNEL).unwrap();
     }
 
     let stats = moto_sys::stats::MemoryStats::get().unwrap();

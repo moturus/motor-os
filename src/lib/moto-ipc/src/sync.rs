@@ -8,7 +8,7 @@ use core::slice;
 use core::sync::atomic::*;
 
 use moto_sys::ErrorCode;
-use moto_sys::{syscalls::*, url_encode};
+use moto_sys::*;
 
 // ChannelSize: Small: 4K; Mid: 2M.
 #[derive(Clone, Copy)]
@@ -20,8 +20,8 @@ pub enum ChannelSize {
 impl ChannelSize {
     pub fn size(&self) -> usize {
         match self {
-            ChannelSize::Small => SysMem::PAGE_SIZE_SMALL as usize,
-            ChannelSize::Mid => SysMem::PAGE_SIZE_MID as usize,
+            ChannelSize::Small => sys_mem::PAGE_SIZE_SMALL as usize,
+            ChannelSize::Mid => sys_mem::PAGE_SIZE_MID as usize,
         }
     }
 }
@@ -148,7 +148,7 @@ pub struct ClientConnection {
 impl Drop for ClientConnection {
     fn drop(&mut self) {
         if self.handle != SysHandle::NONE {
-            SysCtl::put(self.handle).unwrap();
+            SysObj::put(self.handle).unwrap();
         }
 
         if self.smem_addr == 0 {
@@ -173,7 +173,7 @@ impl ClientConnection {
                 SysMem::F_READABLE | SysMem::F_WRITABLE,
                 u64::MAX,
                 u64::MAX,
-                SysMem::PAGE_SIZE_SMALL,
+                sys_mem::PAGE_SIZE_SMALL,
                 1,
             )?,
             ChannelSize::Mid => SysMem::map(
@@ -181,7 +181,7 @@ impl ClientConnection {
                 SysMem::F_READABLE | SysMem::F_WRITABLE,
                 u64::MAX,
                 u64::MAX,
-                SysMem::PAGE_SIZE_MID,
+                sys_mem::PAGE_SIZE_MID,
                 1,
             )?,
         };
@@ -218,14 +218,14 @@ impl ClientConnection {
                 ChannelSize::Mid => "mid",
             }
         );
-        self.handle = SysCtl::get(SysHandle::SELF, 0, &full_url)?;
+        self.handle = SysObj::get(SysHandle::SELF, 0, &full_url)?;
         self.status = ClientConnectionStatus::CONNECTED;
         Ok(())
     }
 
     pub fn disconnect(&mut self) {
         if self.handle != SysHandle::NONE {
-            SysCtl::put(self.handle).unwrap();
+            SysObj::put(self.handle).unwrap();
             self.handle = SysHandle::NONE;
             self.status = ClientConnectionStatus::NONE;
 
@@ -333,7 +333,7 @@ pub struct LocalServerConnection {
 impl Drop for LocalServerConnection {
     fn drop(&mut self) {
         if self.handle != SysHandle::NONE {
-            SysCtl::put(self.handle).unwrap();
+            SysObj::put(self.handle).unwrap();
         }
 
         if self.smem_addr == 0 {
@@ -358,7 +358,7 @@ impl LocalServerConnection {
                 0, // Not mapped to a physical frame.
                 u64::MAX,
                 u64::MAX,
-                SysMem::PAGE_SIZE_SMALL,
+                sys_mem::PAGE_SIZE_SMALL,
                 1,
             )?,
             ChannelSize::Mid => SysMem::map(
@@ -366,7 +366,7 @@ impl LocalServerConnection {
                 0, // Not mapped to a physical frame.
                 u64::MAX,
                 u64::MAX,
-                SysMem::PAGE_SIZE_MID,
+                sys_mem::PAGE_SIZE_MID,
                 1,
             )?,
         };
@@ -394,7 +394,7 @@ impl LocalServerConnection {
                 ChannelSize::Mid => "mid",
             }
         );
-        self.handle = SysCtl::create(SysHandle::SELF, 0, &full_url)?;
+        self.handle = SysObj::create(SysHandle::SELF, 0, &full_url)?;
         self.status = LocalServerConnectionStatus::LISTENING;
 
         Ok(())
@@ -402,8 +402,8 @@ impl LocalServerConnection {
 
     pub fn channel_size(&self) -> usize {
         match self.channel_size {
-            ChannelSize::Small => SysMem::PAGE_SIZE_SMALL as usize,
-            ChannelSize::Mid => SysMem::PAGE_SIZE_MID as usize,
+            ChannelSize::Small => sys_mem::PAGE_SIZE_SMALL as usize,
+            ChannelSize::Mid => sys_mem::PAGE_SIZE_MID as usize,
         }
     }
 
@@ -448,7 +448,7 @@ impl LocalServerConnection {
     pub fn disconnect(&mut self) {
         match self.status {
             LocalServerConnectionStatus::LISTENING | LocalServerConnectionStatus::CONNECTED => {
-                SysCtl::put(self.handle).unwrap();
+                SysObj::put(self.handle).unwrap();
                 self.handle = SysHandle::NONE;
                 self.status = LocalServerConnectionStatus::NONE;
                 self.seq = 0;

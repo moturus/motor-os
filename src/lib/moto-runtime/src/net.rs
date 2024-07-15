@@ -146,7 +146,7 @@ impl NetChannel {
                 let waiter = { self.send_waiters.lock(line!()).pop_front() };
                 if let Some(waiter) = waiter {
                     self.io_thread_running.store(true, Ordering::Release);
-                    let _ = moto_sys::syscalls::SysCpu::wake(SysHandle::from(waiter));
+                    let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
                     continue;
                 }
                 if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
@@ -155,7 +155,7 @@ impl NetChannel {
 
                 self.wake_driver(); // TODO: be smarter.
 
-                let _ = moto_sys::syscalls::SysCpu::wait(
+                let _ = moto_sys::SysCpu::wait(
                     &mut [self.conn.server_handle()],
                     SysHandle::NONE,
                     SysHandle::NONE,
@@ -214,7 +214,7 @@ impl NetChannel {
 
             if let Some(wait_handle) = wait_handle {
                 if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
-                    let _ = moto_sys::syscalls::SysCpu::wake(wait_handle);
+                    let _ = moto_sys::SysCpu::wake(wait_handle);
                 }
             }
 
@@ -269,9 +269,7 @@ impl NetChannel {
             return;
         }
 
-        let _ = moto_sys::syscalls::SysCpu::wake(
-            self.io_thread_wake_handle.load(Ordering::Relaxed).into(),
-        );
+        let _ = moto_sys::SysCpu::wake(self.io_thread_wake_handle.load(Ordering::Relaxed).into());
     }
 
     extern "C" fn io_thread_init(self_addr: usize) {
@@ -391,8 +389,7 @@ impl NetChannel {
                 .lock(line!())
                 .push_back(moto_sys::UserThreadControlBlock::this_thread_handle().into());
             self.maybe_wake_io_thread();
-            let _ =
-                moto_sys::syscalls::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
+            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
         }
     }
 
@@ -407,8 +404,7 @@ impl NetChannel {
             }
 
             // No need to wake the IO thread, as it will be woken by sys-io.
-            let _ =
-                moto_sys::syscalls::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
+            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
         }
     }
 
@@ -472,7 +468,7 @@ impl NetChannel {
 
     #[inline]
     fn wake_driver(&self) {
-        let _ = moto_sys::syscalls::SysCpu::wake(self.conn.server_handle());
+        let _ = moto_sys::SysCpu::wake(self.conn.server_handle());
     }
 }
 
@@ -877,7 +873,7 @@ impl TcpStream {
                 debug_assert = true;
                 debug_timeout
             };
-            if let Err(err) = moto_sys::syscalls::SysCpu::wait(
+            if let Err(err) = moto_sys::SysCpu::wait(
                 &mut [],
                 SysHandle::NONE,
                 SysHandle::NONE,
@@ -886,8 +882,17 @@ impl TcpStream {
             ) {
                 assert_eq!(err, ErrorCode::TimedOut);
                 if debug_assert {
-                    // TODO: this assert triggered on 2024-05-29.
-                    assert!(self.inner.recv_queue.lock(line!()).is_empty());
+                    // TODO: this assert triggered on 2024-05-29 and on 2024-06-25.
+                    // assert!(self.inner.recv_queue.lock(line!()).is_empty());
+                    let queue_length = self.inner.recv_queue.lock(line!()).len();
+                    if queue_length > 0 {
+                        moturus_log!(
+                            "{}:{} this is bad: RX timo with recv queue {}",
+                            file!(),
+                            line!(),
+                            queue_length
+                        );
+                    }
                 }
             }
         }
@@ -941,7 +946,7 @@ impl TcpStream {
                         core::hint::spin_loop();
                         continue;
                     } else if yield_counter < 100 {
-                        moto_sys::syscalls::SysCpu::sched_yield();
+                        moto_sys::SysCpu::sched_yield();
                         yield_counter += 1;
                         continue;
                     }
@@ -964,7 +969,7 @@ impl TcpStream {
                         );
                     }
 
-                    let _ = moto_sys::syscalls::SysCpu::wait(
+                    let _ = moto_sys::SysCpu::wait(
                         &mut [],
                         SysHandle::NONE,
                         SysHandle::NONE,

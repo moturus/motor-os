@@ -20,10 +20,11 @@ use std::io::{self, Seek, SeekFrom};
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
-static BIN_FULL: [&'static str; 9] = [
+static BIN_FULL: [&'static str; 10] = [
     "bin/httpd",
     "bin/kibim",
     "bin/rush",
+    "sys/mdbg",
     "sys/rnetbench",
     "sys/sys-init",
     "sys/sys-log",
@@ -211,7 +212,7 @@ fn set_partition(
 ) -> u32 {
     let data = File::open(partition).unwrap();
     let size = data.metadata().unwrap().len();
-    let sectors = ((size - 1) / u64::from(SECTOR_SIZE) + 1)
+    let sectors = ((size + u64::from(SECTOR_SIZE) - 1) / u64::from(SECTOR_SIZE))
         .try_into()
         .unwrap();
 
@@ -239,7 +240,13 @@ fn write_partition(mbr: &mbrman::MBR, idx: usize, partition: &Path, disk: &mut F
     ))
     .unwrap();
     let mut data = File::open(partition).unwrap();
-    let written = io::copy(&mut data, disk).unwrap();
+    let written = io::copy(&mut data, disk).unwrap() as u32;
+
+    // We need to pad to SECTOR_SIZE.
+    let tail = (SECTOR_SIZE - (written % SECTOR_SIZE)) % SECTOR_SIZE;
+    for _ in 0..tail {
+        assert_eq!(1, disk.write(&[0]).unwrap());
+    }
     println!("written {written} bytes from {:?}", partition);
 }
 

@@ -112,12 +112,12 @@ fn do_command(cmd: String) {
 }
 
 fn trigger_oom() -> ! {
-    use moto_sys::syscalls::SysMem;
+    use moto_sys::SysMem;
 
     // First reach memory limit.
     println!("oom: stage 1");
     loop {
-        if SysMem::alloc(SysMem::PAGE_SIZE_SMALL, 8).is_err() {
+        if SysMem::alloc(moto_sys::sys_mem::PAGE_SIZE_SMALL, 8).is_err() {
             break;
         }
     }

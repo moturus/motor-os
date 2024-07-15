@@ -1,4 +1,4 @@
-use super::sys_object::SysObject;
+use super::sysobject::SysObject;
 use alloc::{borrow::ToOwned, sync::Arc};
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;

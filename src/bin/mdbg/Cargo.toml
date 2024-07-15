@@ -1,0 +1,17 @@
+[package]
+name = "mdbg"
+description = "Motor OS Debugger"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.6", features = ["derive"] }
+moto-sys = { path = "../../lib/moto-sys" }
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

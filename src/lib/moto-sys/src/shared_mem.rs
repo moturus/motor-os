@@ -63,7 +63,7 @@ pub struct ProcessStaticPage {
 
 impl ProcessStaticPage {
     pub const PAGE_SIZE: u64 = 4096;
-    pub const VADDR: u64 = KernelStaticPage::VADDR - super::syscalls::SysMem::PAGE_SIZE_MID;
+    pub const VADDR: u64 = KernelStaticPage::VADDR - crate::sys_mem::PAGE_SIZE_MID;
 
     #[cfg(feature = "userspace")]
     pub fn get() -> &'static Self {

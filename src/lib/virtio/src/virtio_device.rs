@@ -165,7 +165,7 @@ impl VirtioDevice {
             return Err(());
         }
 
-        if device_id.header_type() != 0 {
+        if device_id.header_type() & 0x7F != 0 {
             log::warn!(
                 "Skipping VirtIO device_id with wrong header type {}",
                 device_id.header_type()
@@ -286,9 +286,9 @@ impl VirtioDevice {
 
     // Step 0: see virtio_pci_device::init() in osv.
     fn init(&mut self) {
-        // Set bus master.
+        // Set bus master, enable I/O and memory space.
         let mut command = self.pci_device.id.read_config_u16(pci::PCI_CFG_COMMAND);
-        command |= pci::PCI_COMMAND_BUS_MASTER;
+        command |= pci::PCI_COMMAND_BUS_MASTER | pci::PCI_COMMAND_BUS_IO | pci::PCI_COMMAND_BUS_MEM;
         self.pci_device
             .id
             .write_config_u16(pci::PCI_CFG_COMMAND, command);
@@ -300,7 +300,7 @@ impl VirtioDevice {
         } else {
             let caps = self.pci_device.id.find_capabilities(pci::PCI_CAP_MSI);
             if caps.len() > 0 {
-                moto_sys::syscalls::SysMem::log(
+                moto_sys::SysRay::log(
                     alloc::format!(
                         "VirtIO {:?} device has MSI but not MSI-X capability.",
                         self.kind
@@ -558,10 +558,8 @@ impl VirtioDevice {
 
         if virtqueue.queue_num >= msix.msgnum {
             // TODO: do we ever need to share IRQs between virtqueues?
-            moto_sys::syscalls::SysMem::log(
-                "Having more virtqueues than MSIX vectors is not supported.",
-            )
-            .ok();
+            moto_sys::SysRay::log("Having more virtqueues than MSIX vectors is not supported.")
+                .ok();
             return Err(());
         }
 
@@ -590,7 +588,7 @@ impl VirtioDevice {
             bar_offset + offset_of!(VirtioPciCommonCfgLayout, queue_msix_vector) as u64;
         cfg_bar.write_u16(queue_msix_vector_offset, virtqueue.queue_num);
         if virtqueue.queue_num != cfg_bar.read_u16(queue_msix_vector_offset) {
-            moto_sys::syscalls::SysMem::log(
+            moto_sys::SysRay::log(
                 alloc::format!(
                     "VirtioDevice {:?}: setting MSIX entry for queue {} failed.",
                     self.pci_device.id,

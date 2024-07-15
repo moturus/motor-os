@@ -1,4 +1,3 @@
-pub use moto_sys::syscalls::*;
 pub use moto_sys::*;
 
 pub fn num_cpus() -> u32 {
@@ -16,7 +15,7 @@ unsafe impl Sync for BackEndAllocator {}
 unsafe impl GlobalAlloc for BackEndAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         const PAGE_4K: u64 = 1 << 12;
-        assert_eq!(SysMem::PAGE_SIZE_SMALL, PAGE_4K);
+        assert_eq!(sys_mem::PAGE_SIZE_SMALL, PAGE_4K);
 
         let alloc_size = align_up(layout.size() as u64, PAGE_4K);
         if let Ok(start) = SysMem::alloc(PAGE_4K, alloc_size >> 12) {
@@ -80,15 +79,15 @@ use core::panic::PanicInfo;
 #[no_mangle]
 pub fn moturus_log_panic(info: &PanicInfo<'_>) {
     if moturus_log_panics_to_kernel() {
-        SysMem::log("PANIC").ok();  // Log w/o allocations.
+        SysRay::log("PANIC").ok(); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}", info);
-        SysMem::log(msg.as_str()).ok();
+        SysRay::log(msg.as_str()).ok();
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
     } else {
         use core::fmt::Write;
 
         let mut stderr = super::stdio::StderrRt::new();
-        let _ = stderr.write_str("PANIC\n");  // Log w/o allocations.
+        let _ = stderr.write_str("PANIC\n"); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}\n", info);
         let _ = stderr.write_str(msg.as_str());
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
@@ -169,7 +168,7 @@ pub fn log_backtrace(binary: &str) {
     let _ = write!(&mut writer, "\n\n");
 
     if moturus_log_panics_to_kernel() {
-        let _ = SysMem::log(writer.as_str());
+        let _ = SysRay::log(writer.as_str());
     } else {
         let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
     }
@@ -181,4 +180,16 @@ pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
     // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
     // don't have stdio, so they will override this function to log via SysMem::log().
     false
+}
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn __stack_chk_fail() -> ! {
+    panic!("__stack_chk_fail")
+}
+
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn __assert_fail() -> ! {
+    // void __assert_fail(const char * assertion, const char * file, unsigned int line, const char * function);
+    panic!("__assert_fail")
 }

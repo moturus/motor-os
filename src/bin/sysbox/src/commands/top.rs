@@ -432,7 +432,7 @@ pub fn do_command(args: &[String]) {
     loop {
         tick(&mut ctx);
 
-        moto_runtime::futex_wait(&SLEEP, 0, Some(Instant::now() + Duration::new(1, 0)));
+        moto_runtime::futex_wait(&SLEEP, 0, Some(Duration::new(1, 0)));
         let sleep = SLEEP.load(Ordering::Acquire);
         if sleep == 2 {
             std::process::exit(0);

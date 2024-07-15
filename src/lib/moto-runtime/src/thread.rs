@@ -1,6 +1,6 @@
 use core::sync::atomic::*;
-use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+use moto_sys::*;
 
 pub fn spawn(
     stack_size: usize,
@@ -16,7 +16,7 @@ pub fn spawn(
 }
 
 pub fn exit_self() -> ! {
-    let _ = SysCtl::put(SysHandle::SELF);
+    let _ = SysObj::put(SysHandle::SELF);
     unreachable!()
 }
 

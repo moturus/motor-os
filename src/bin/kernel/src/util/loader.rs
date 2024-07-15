@@ -46,9 +46,7 @@ impl<'a> elfloader::ElfLoader for Loader<'a> {
         base: elfloader::VAddr,
         region: &[u8],
     ) -> Result<(), elfloader::ElfLoaderErr> {
-        unsafe {
-            self.address_space.copy_to_user(region, base).unwrap();
-        }
+        self.address_space.copy_to_user(region, base).unwrap();
         Ok(())
     }
 

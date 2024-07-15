@@ -50,6 +50,7 @@ dependencies = [
   "rush_debug",
   "httpd_debug",
   "kibim_debug",
+  "mdbg_debug",
   "rnetbench_debug",
   "make_img_debug",
 ]
@@ -70,6 +71,7 @@ dependencies = [
   "rush_release",
   "httpd_release",
   "kibim_release",
+  "mdbg_release",
   "rnetbench_release",
   "make_img_release",
 ]
@@ -89,6 +91,7 @@ dependencies = [
   "rush_debug",
   "httpd_debug",
   "kibim_debug",
+  "mdbg_debug",
   "rnetbench_debug",
   "make_img_debug",
 ]
@@ -108,6 +111,7 @@ dependencies = [
   "rush_release",
   "httpd_release",
   "kibim_release",
+  "mdbg_release",
   "rnetbench_release",
   "make_img_release",
 ]
@@ -299,6 +303,20 @@ cwd = "./src/bin/kibim"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/kibim" "${MOTO_BIN}/kibim"
+'''
+
+[tasks.mdbg_debug]
+cwd = "./src/bin/mdbg"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/mdbg" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/mdbg"
+'''
+
+[tasks.mdbg_release]
+cwd = "./src/bin/mdbg"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/mdbg" "${MOTO_BIN}/mdbg"
 '''
 
 [tasks.rnetbench_debug]

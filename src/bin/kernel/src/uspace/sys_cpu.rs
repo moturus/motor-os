@@ -1,8 +1,9 @@
 use alloc::vec::Vec;
 use core::sync::atomic::*;
 use moto_sys::caps::CAP_IO_MANAGER;
-use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+use moto_sys::*;
+use syscalls::SyscallResult;
 
 use crate::config::uCpus;
 
@@ -159,12 +160,10 @@ fn process_wake_handles(
         let val = u64::from(handle);
         let buf: &[u8] =
             unsafe { core::slice::from_raw_parts(&val as *const _ as usize as *const u8, 8) };
-        unsafe {
-            curr.owner()
-                .address_space()
-                .copy_to_user(buf, h_ptr + 8 * idx)
-                .unwrap();
-        }
+        curr.owner()
+            .address_space()
+            .copy_to_user(buf, h_ptr + 8 * idx)
+            .unwrap();
         idx += 1;
     }
 
@@ -172,12 +171,10 @@ fn process_wake_handles(
     let buf_zero: &[u8] =
         unsafe { core::slice::from_raw_parts(&zero as *const _ as usize as *const u8, 8) };
     for pos in idx..h_sz {
-        unsafe {
-            curr.owner()
-                .address_space()
-                .copy_to_user(buf_zero, h_ptr + 8 * pos)
-                .unwrap();
-        }
+        curr.owner()
+            .address_space()
+            .copy_to_user(buf_zero, h_ptr + 8 * pos)
+            .unwrap();
     }
 
     let mut result = ResultBuilder::ok();
@@ -278,7 +275,7 @@ pub(super) fn do_wake(
     this_cpu: bool,
 ) -> Result<(), ErrorCode> {
     if wake_target == SysHandle::SELF && wakee_thread != SysHandle::NONE {
-        if let Some(thread) = super::sys_object::object_from_handle::<super::process::Thread>(
+        if let Some(thread) = super::sysobject::object_from_handle::<super::process::Thread>(
             &waker.owner(),
             wakee_thread,
         ) {
@@ -307,7 +304,7 @@ pub(super) fn do_wake(
     }
 
     if let Some(thread) =
-        super::sys_object::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
+        super::sysobject::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
     {
         thread.post_wake(this_cpu);
         Ok(())
@@ -342,7 +339,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     }
     let target = SysHandle::from_u64(args.args[0]);
 
-    if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PEER {
+    if args.flags == SysCpu::F_KILL_PEER {
         if (killer.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
             // This is used by sys-io.
             return ResultBuilder::result(ErrorCode::NotAllowed);
@@ -361,9 +358,9 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
         return ResultBuilder::result(ErrorCode::BadHandle);
     }
 
-    if args.flags == moto_sys::syscalls::SysCpu::F_KILL_PID {
+    if args.flags == SysCpu::F_KILL_PID {
         let target_pid = args.args[0];
-        if let Some(target_stats) = crate::stats::stats_from_pid(target_pid) {
+        if let Some(target_stats) = crate::xray::stats::stats_from_pid(target_pid) {
             if let Some(target) = target_stats.owner.upgrade() {
                 if target.capabilities() & moto_sys::caps::CAP_SYS != 0 {
                     return ResultBuilder::result(ErrorCode::NotAllowed);
@@ -542,7 +539,7 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
         return ResultBuilder::invalid_argument();
     };
 
-    let num_entries = crate::stats::fill_percpu_stats_page(page_addr as usize);
+    let num_entries = crate::xray::stats::fill_percpu_stats_page(page_addr as usize);
     ResultBuilder::ok_1(num_entries as u64)
 }
 

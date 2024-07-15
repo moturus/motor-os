@@ -1,13 +1,18 @@
 [package]
 name = "httpd"
-description = "A simple HTTPd serving static content.."
+description = "A simple HTTPd serving static content."
 authors = ["The Moturus Project Developers"]
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-oxhttp = { path = "../../third_party/oxhttp", features = ["server"] }
+clap = { version = "4.5.6", features = ["derive"] }
+time = { version = "0.3.36", default-features = false, features = ["std"] }
+tiny_http = { features = ["ssl-rustls"], git = "https://github.com/moturus/tiny-http.git" }
+
+[patch.crates-io]
+ring = { git = "https://github.com/moturus/ring.git" }
 
 [profile.release]
 panic = "abort"

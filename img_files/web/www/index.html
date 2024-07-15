@@ -2,24 +2,37 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Motūrus OS</title>
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Motor OS | Motūrus</title>
+<style>
+.main-body {
+  height: 160px;   
+  text-align: left;
+  line-height: 1.4;
+  font-size: 16px;
+  padding: 0 10px;
+  margin: 50px auto;
+  max-width: 600px;
+  font-family:sans,tahoma;
+}
+</style>
 </head>
+
 <body>
-<center>
-<div style="font-family:sans;text-align:center;display:inline-block;font-size:12pt">
-<h1>Motūrus OS</h1>
+<div class="main-body">
+<p align="right">Motor OS | <a href="what.html">What</a> | <a href="why.html">Why</a> | <a href="https://github.com/moturus/motor-os" target="_blank">GitHub</a></p>
+<h1>Motor OS</h1>
 
-<p>
-Motūrus OS is a simple, fast, and secure Operating System for the Cloud.</p>
+<p>Motūrus project (Motor OS) is a simple, fast, and secure operating system built for the cloud.
+Designed specifically for virtualized workloads such as web serving, serverless computing,
+and edge caching, it addresses inefficiencies found in traditional operating systems
+like Linux when running in virtual environments.</p>
 
-<p>
-This is a proof-of-concept page showing that basic HTTP serving works
-(and, therefore, networking/TCP).</p>
+<p>Motor OS is built entirely in Rust. It supports x64 KVM-based virtual machines
+and can run on Qemu, Cloud Hypervisor, or Alioth VMMs. The system, including
+its libraries and syscalls, is implemented in Rust and optimized for Rust-based client applications.</p>
+
 </div>
-<br/>
-<img src="moturus-256.png"/>
-</center>
+
 </body>
 </html>
-

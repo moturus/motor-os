@@ -6,7 +6,15 @@
 // Syscalls.
 pub mod caps;
 pub mod stats;
+pub mod sys_cpu;
+pub mod sys_mem;
+pub mod sys_obj;
+pub mod sys_ray;
 pub mod syscalls;
+pub use sys_cpu::SysCpu;
+pub use sys_mem::SysMem;
+pub use sys_obj::SysObj;
+pub use sys_ray::SysRay;
 pub use syscalls::SysHandle;
 
 #[cfg(feature = "userspace")]
@@ -124,3 +132,14 @@ impl From<u16> for ErrorCode {
         Self::from_u16(value)
     }
 }
+
+// #[cfg(feature = "userspace")]
+// #[macro_export]
+// macro_rules! moturus_log {
+//     ($($arg:tt)*) => {
+//         {
+//             extern crate alloc;
+//             crate::syscalls::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
+//         }
+//     };
+// }

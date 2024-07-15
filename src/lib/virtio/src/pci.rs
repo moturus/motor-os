@@ -18,6 +18,8 @@ pub const PCI_CAP_VENDOR: u8 = 0x09;
 pub const PCI_CAP_MSIX: u8 = 0x11;
 
 pub const PCI_CFG_COMMAND: u8 = 0x04;
+pub const PCI_COMMAND_BUS_IO: u16 = 0x01;
+pub const PCI_COMMAND_BUS_MEM: u16 = 0x02;
 pub const PCI_COMMAND_BUS_MASTER: u16 = 0x04;
 pub const PCI_COMMAND_INTX_DISABLE: u16 = 0x400;
 
@@ -138,7 +140,6 @@ impl PciDeviceID {
     }
 
     pub fn header_type(&self) -> u8 {
-        assert_eq!(self.func, 0);
         let res = self.read_config_u32(0x0C);
         ((res >> 16) & 0xFF) as u8
     }

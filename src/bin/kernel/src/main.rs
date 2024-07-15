@@ -15,15 +15,16 @@
 #![feature(concat_idents)]
 #![feature(get_mut_unchecked)]
 
+// #[macro_use]
 extern crate alloc;
 pub mod arch;
 pub mod config;
 pub mod init;
 pub mod mm;
 pub mod sched;
-pub mod stats;
 pub mod uspace;
 pub mod util;
+pub mod xray;
 
 pub use crate::arch::arch_raw_log as raw_log;
 pub use crate::arch::arch_write_serial as write_serial;

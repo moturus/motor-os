@@ -37,6 +37,9 @@ pub(super) struct NetSys {
     tcp_listeners: HashMap<TcpListenerId, TcpListener>,
     tcp_sockets: HashMap<SocketId, MotoSocket>, // Active connections.
 
+    // An ordered list of all sockets in the system, to be used for stats reporting.
+    socket_ids: std::collections::BTreeSet<SocketId>,
+
     // If we can't allocate an IO buffer (page) for RX for a socket, the socket is placed here.
     pending_tcp_rx: VecDeque<SocketId>,
 
@@ -65,6 +68,7 @@ impl NetSys {
             next_id: 1,
             tcp_listeners: HashMap::new(),
             tcp_sockets: HashMap::new(),
+            socket_ids: std::collections::BTreeSet::new(),
             pending_tcp_rx: VecDeque::new(),
             tcp_socket_cache: Vec::new(),
             pending_completions: VecDeque::new(),
@@ -213,7 +217,14 @@ impl NetSys {
         assert!(!socket_addr.ip().is_unspecified());
 
         for _ in 0..num_listeners {
-            let mut moto_socket = self.new_socket_for_device(device_idx)?;
+            let conn = self
+                .tcp_listeners
+                .get_mut(&listener_id)
+                .unwrap()
+                .conn()
+                .clone();
+            let conn_handle = conn.wait_handle();
+            let mut moto_socket = self.new_socket_for_device(device_idx, conn)?;
             let socket_id = moto_socket.id;
             moto_socket.listener_id = Some(listener_id);
             self.tcp_listeners
@@ -221,8 +232,17 @@ impl NetSys {
                 .unwrap()
                 .add_listening_socket(socket_id);
             moto_socket.state = TcpState::Listening;
+            moto_socket.listening_on = Some(socket_addr);
+            if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&conn_handle) {
+                conn_sockets.insert(moto_socket.id);
+            } else {
+                let mut conn_sockets = HashSet::new();
+                conn_sockets.insert(moto_socket.id);
+                self.conn_tcp_sockets.insert(conn_handle, conn_sockets);
+            }
 
             let smol_handle = moto_socket.handle;
+            self.socket_ids.insert(moto_socket.id);
             self.tcp_sockets.insert(moto_socket.id, moto_socket);
 
             let smol_socket = self.devices[device_idx]
@@ -243,7 +263,11 @@ impl NetSys {
         Ok(())
     }
 
-    fn new_socket_for_device(&mut self, device_idx: usize) -> Result<MotoSocket, ErrorCode> {
+    fn new_socket_for_device(
+        &mut self,
+        device_idx: usize,
+        conn: Rc<io_channel::ServerConnection>,
+    ) -> Result<MotoSocket, ErrorCode> {
         let mut smol_socket = self.get_unused_tcp_socket()?;
         let socket_id = self.next_id().into();
 
@@ -263,11 +287,14 @@ impl NetSys {
             self.tcp_sockets.len()
         );
 
+        let pid = moto_sys::SysObj::get_pid(conn.wait_handle()).unwrap();
+
         Ok(MotoSocket {
             id: socket_id,
             handle,
             device_idx,
-            conn: None,
+            conn,
+            pid,
             listener_id: None,
             connect_req: None,
             ephemeral_port: None,
@@ -277,6 +304,8 @@ impl NetSys {
             state: TcpState::Closed,
             rx_closed_notified: false,
             subchannel_mask: u64::MAX,
+            listening_on: None,
+            replacement_listener_created: false,
         })
     }
 
@@ -307,17 +336,21 @@ impl NetSys {
     fn drop_tcp_socket(&mut self, socket_id: SocketId) {
         self.cancel_tcp_tx(socket_id);
 
-        let mut moto_socket = self.tcp_sockets.remove(&socket_id).unwrap();
-        while let Some(tx_buf) = moto_socket.tx_queue.pop_front() {
-            core::mem::drop(tx_buf);
-        }
-
-        if let Some(conn) = moto_socket.conn.as_ref() {
-            if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&conn.wait_handle()) {
-                assert!(conn_sockets.remove(&socket_id));
-            }
-        }
-
+        // First, abort the connection without removing the socket from
+        // self.tcp_sockets, as this may call self.cancel_tcp_tx(),
+        // which will panic if the socket is not found. Yes, we could
+        // change cancel_tcp_tx() to not panic if the socket is not found,
+        // but this will introduce some haziness to the code, and it is
+        // better to keep it tight.
+        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
+            s
+        } else {
+            log::error!(
+                "drop_tcp_socket(): socket {} not found.",
+                u64::from(socket_id)
+            );
+            return;
+        };
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -334,6 +367,39 @@ impl NetSys {
         // as on loopback devices the peer won't get notified.
         while self.devices[moto_socket.device_idx].poll() {}
 
+        // Now we can remove moto_socket.
+        let mut moto_socket = self.tcp_sockets.remove(&socket_id).unwrap();
+        assert!(self.socket_ids.remove(&socket_id));
+        while let Some(tx_buf) = moto_socket.tx_queue.pop_front() {
+            core::mem::drop(tx_buf);
+        }
+
+        if let Some(conn_sockets) = self
+            .conn_tcp_sockets
+            .get_mut(&moto_socket.conn.wait_handle())
+        {
+            assert!(conn_sockets.remove(&socket_id));
+        }
+
+        if let Some(listener_id) = moto_socket.listener_id.take() {
+            // When handling drop_tcp_listener cmd, the listener is first removed,
+            // then its listening sockets are removed, so the next line will get None.
+            if let Some(listener) = self.tcp_listeners.get_mut(&listener_id) {
+                listener.remove_listening_socket(socket_id);
+                listener.remove_pending_socket(socket_id);
+            }
+        }
+
+        if let Some(mut cqe) = moto_socket.connect_req.take() {
+            assert_eq!(moto_socket.state, TcpState::Connecting);
+            cqe.status = ErrorCode::BadHandle.into();
+            self.pending_completions.push_back(PendingCompletion {
+                msg: cqe,
+                endpoint_handle: moto_socket.conn.wait_handle(),
+            });
+        }
+
+        // Remove and cache the unused smol_socket.
         let smol_socket = match self.devices[moto_socket.device_idx]
             .sockets
             .remove(moto_socket.handle)
@@ -346,23 +412,7 @@ impl NetSys {
             self.devices[moto_socket.device_idx].free_ephemeral_port(port);
         }
 
-        if let Some(listener_id) = moto_socket.listener_id.take() {
-            // When handling drop_tcp_listener cmd, the listener is first removed,
-            // then its listening sockets are removed, so the next line will get None.
-            if let Some(listener) = self.tcp_listeners.get_mut(&listener_id) {
-                listener.remove_listening_socket(socket_id);
-            }
-        }
-
-        if let Some(mut cqe) = moto_socket.connect_req.take() {
-            assert_eq!(moto_socket.state, TcpState::Connecting);
-            cqe.status = ErrorCode::BadHandle.into();
-            self.pending_completions.push_back(PendingCompletion {
-                msg: cqe,
-                endpoint_handle: moto_socket.conn.as_ref().unwrap().wait_handle(),
-            });
-        }
-
+        assert_eq!(smol_socket.state(), smoltcp::socket::tcp::State::Closed);
         self.put_unused_tcp_socket(smol_socket);
         #[cfg(debug_assertions)]
         log::debug!(
@@ -389,8 +439,8 @@ impl NetSys {
 
         if listener.conn_handle() != conn.wait_handle() {
             // Validate that the listener and the connection belong to the same process.
-            let pid1 = moto_sys::syscalls::SysCtl::get_pid(listener.conn_handle()).unwrap();
-            let pid2 = moto_sys::syscalls::SysCtl::get_pid(conn.wait_handle()).unwrap();
+            let pid1 = moto_sys::SysObj::get_pid(listener.conn_handle()).unwrap();
+            let pid2 = moto_sys::SysObj::get_pid(conn.wait_handle()).unwrap();
             if pid1 != pid2 {
                 return Err(());
             }
@@ -399,7 +449,8 @@ impl NetSys {
         if let Some((socket_id, socket_addr)) = listener.pop_pending_socket() {
             // TODO: the unwrap() below once triggered on remote drop.
             let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-            assert!(moto_socket.listener_id.is_none());
+            assert_eq!(moto_socket.listener_id.unwrap(), listener_id);
+            moto_socket.listener_id = None;
 
             moto_socket.subchannel_mask = req.payload.args_64()[0];
 
@@ -415,7 +466,7 @@ impl NetSys {
             });
 
             let conn_handle = conn.wait_handle();
-            moto_socket.conn = Some(conn.clone());
+            moto_socket.conn = conn.clone();
             if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&conn_handle) {
                 conn_sockets.insert(socket_id);
             } else {
@@ -532,7 +583,7 @@ impl NetSys {
                 }
             };
 
-        let mut moto_socket = match self.new_socket_for_device(device_idx) {
+        let mut moto_socket = match self.new_socket_for_device(device_idx, conn.clone()) {
             Ok(s) => s,
             Err(err) => {
                 sqe.status = err.into();
@@ -541,7 +592,6 @@ impl NetSys {
         };
         moto_socket.subchannel_mask = sqe.payload.args_64()[0];
 
-        moto_socket.conn = Some(conn.clone());
         let conn_handle = conn.wait_handle();
         if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&conn_handle) {
             conn_sockets.insert(moto_socket.id);
@@ -559,6 +609,7 @@ impl NetSys {
         moto_socket.ephemeral_port = Some(local_port);
 
         let smol_handle = moto_socket.handle;
+        self.socket_ids.insert(moto_socket.id);
         self.tcp_sockets.insert(moto_socket.id, moto_socket);
 
         let smol_socket = self.devices[device_idx]
@@ -958,26 +1009,25 @@ impl NetSys {
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
-        // Without these, remotely dropped sockets may hang around indefinitely.
-        smol_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
-        smol_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
         smol_socket.set_nagle_enabled(false); // A good idea, generally.
         smol_socket.set_ack_delay(None);
 
         let local_addr = super::smoltcp_helpers::socket_addr_from_endpoint(
             smol_socket.local_endpoint().unwrap(),
         );
+        assert_eq!(local_addr, moto_socket.listening_on.unwrap());
         let remote_addr = super::smoltcp_helpers::socket_addr_from_endpoint(
             smol_socket.remote_endpoint().unwrap(),
         );
 
-        let listener_id = moto_socket.listener_id.take().unwrap();
+        let listener_id = *moto_socket.listener_id.as_ref().unwrap();
         let listener = self.tcp_listeners.get_mut(&listener_id).unwrap();
         let may_do_io = if let Some((mut msg, conn)) = listener.get_pending_accept() {
             moto_socket.state = TcpState::ReadWrite;
+            moto_socket.listener_id = None;
             let endpoint_handle = conn.wait_handle();
             moto_socket.subchannel_mask = msg.payload.args_64()[0];
-            moto_socket.conn = Some(conn);
+            moto_socket.conn = conn;
             if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&endpoint_handle) {
                 conn_sockets.insert(socket_id);
             } else {
@@ -994,7 +1044,6 @@ impl NetSys {
             });
             true
         } else {
-            // TODO: this codepath is probably untested (usually accept request comes before remote connects).
             assert_eq!(moto_socket.state, TcpState::Listening);
             // Note: we don't generate the state change event because accept() is handled explicitly.
             moto_socket.state = TcpState::PendingAccept;
@@ -1011,9 +1060,19 @@ impl NetSys {
             remote_addr
         );
 
-        // One listening socket has been consumed (became a connected socket),
-        // so we create another one.
-        if let Err(err) = self.start_listening_on_device(listener_id, device_idx, local_addr, 1) {
+        may_do_io
+    }
+
+    fn spawn_replacement_listener(&mut self, socket_id: SocketId) {
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        assert_eq!(moto_socket.state, TcpState::Listening);
+        assert!(!moto_socket.replacement_listener_created);
+        moto_socket.replacement_listener_created = true;
+
+        let device_idx = moto_socket.device_idx;
+        let listener_id = *moto_socket.listener_id.as_ref().unwrap();
+        let addr = moto_socket.listening_on.unwrap();
+        if let Err(err) = self.start_listening_on_device(listener_id, device_idx, addr, 1) {
             log::error!(
                 "{}:{} bind_on_device() failed with {:?}",
                 file!(),
@@ -1021,8 +1080,6 @@ impl NetSys {
                 err
             );
         }
-
-        may_do_io
     }
 
     fn on_socket_connected(&mut self, socket_id: SocketId) {
@@ -1050,7 +1107,7 @@ impl NetSys {
         cqe.status = ErrorCode::Ok.into();
         self.pending_completions.push_back(PendingCompletion {
             msg: cqe,
-            endpoint_handle: moto_socket.conn.as_ref().unwrap().wait_handle(),
+            endpoint_handle: moto_socket.conn.wait_handle(),
         });
 
         self.do_tcp_rx(socket_id); // The socket can now Rx.
@@ -1066,7 +1123,7 @@ impl NetSys {
         cqe.status = ErrorCode::TimedOut.into();
         self.pending_completions.push_back(PendingCompletion {
             msg: cqe,
-            endpoint_handle: moto_socket.conn.as_ref().unwrap().wait_handle(),
+            endpoint_handle: moto_socket.conn.wait_handle(),
         });
 
         log::debug!(
@@ -1084,11 +1141,11 @@ impl NetSys {
         } else {
             return; // The socket has been removed/aborted.
         };
-        let moto_socket = match self.tcp_sockets.get_mut(&socket_id) {
+        let mut moto_socket = match self.tcp_sockets.get_mut(&socket_id) {
             Some(s) => s,
             None => return,
         };
-        let smol_socket = self.devices[moto_socket.device_idx]
+        let mut smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
@@ -1100,6 +1157,20 @@ impl NetSys {
         let can_recv = smol_socket.can_recv() || !moto_socket.rx_closed_notified;
         let can_send = smol_socket.can_send();
         let state = smol_socket.state();
+
+        if moto_socket.state == TcpState::Listening
+            && smol_socket.state() != smoltcp::socket::tcp::State::Listen
+            && !moto_socket.replacement_listener_created
+        {
+            self.spawn_replacement_listener(socket_id);
+
+            // Must re-initialize moto_socket and smol_socket because the borrow-checker
+            //  complains about self.spawn_replacement_listener() above.
+            moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+            smol_socket = self.devices[moto_socket.device_idx]
+                .sockets
+                .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+        }
 
         #[cfg(debug_assertions)]
         let mut dbg_moto_state = moto_socket.state;
@@ -1217,8 +1288,10 @@ impl NetSys {
                     self.on_connect_failed(socket_id);
                     return;
                 }
-                TcpState::Listening => panic!(), // Impossible.
-                TcpState::PendingAccept => todo!(),
+                TcpState::Listening | TcpState::PendingAccept => {
+                    self.drop_tcp_socket(socket_id);
+                    return;
+                }
                 TcpState::ReadWrite | TcpState::ReadOnly | TcpState::WriteOnly => {
                     moto_socket.state = TcpState::Closed;
                     #[cfg(debug_assertions)]
@@ -1322,7 +1395,7 @@ impl NetSys {
 
         self.pending_completions.push_back(PendingCompletion {
             msg,
-            endpoint_handle: moto_socket.conn.as_ref().unwrap().wait_handle(),
+            endpoint_handle: moto_socket.conn.wait_handle(),
         });
     }
 
@@ -1356,7 +1429,7 @@ impl NetSys {
 
         // We are attempting to deliver any incoming bytes even if the peer has closed the connection.
         while smol_socket.recv_queue() > 0 {
-            let page = match moto_socket.conn.as_ref().unwrap().alloc_page(0xFF) {
+            let page = match moto_socket.conn.alloc_page(0xFF) {
                 Ok(page) => page,
                 Err(err) => {
                     assert_eq!(err, ErrorCode::NotReady);
@@ -1393,7 +1466,7 @@ impl NetSys {
             moto_socket.rx_seq += 1;
             self.pending_completions.push_back(Self::rx_buf_to_pc(
                 socket_id,
-                moto_socket.conn.as_ref().unwrap().wait_handle(),
+                moto_socket.conn.wait_handle(),
                 rx_buf,
                 moto_socket.rx_seq,
             ));
@@ -1421,7 +1494,7 @@ impl NetSys {
 
                 self.pending_completions.push_back(PendingCompletion {
                     msg,
-                    endpoint_handle: moto_socket.conn.as_ref().unwrap().wait_handle(),
+                    endpoint_handle: moto_socket.conn.wait_handle(),
                 });
                 moto_socket.rx_closed_notified = true;
                 log::debug!(
@@ -1465,7 +1538,16 @@ impl NetSys {
     }
 
     fn cancel_tcp_tx(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
+            s
+        } else {
+            // See drop_tcp_socket(): we carefully order ops so that this does not happen,
+            // but it still happens when the client does something naughty: when our httpd
+            // based on tiny-http runs without Cloudflare proxy, and we ^C httpd, this
+            // line triggers sometimes.
+            log::error!("Missing socket {} in cancel_tcp_tx.", u64::from(socket_id));
+            return;
+        };
         // TODO: Linux keeps sending buffered packets after socket close. Should we do the same?
         moto_socket.tx_queue.clear();
     }
@@ -1602,5 +1684,60 @@ impl IoSubsystem for NetSys {
         }
 
         timeout
+    }
+
+    fn get_stats(&mut self, msg: &crate::runtime::internal_queue::Msg) {
+        let num_results = moto_sys_io::stats::MAX_TCP_SOCKET_STATS.min(self.socket_ids.len());
+
+        let payload = msg
+            .payload
+            .clone()
+            .downcast::<crate::runtime::io_stats::GetTcpStatsPayload>()
+            .unwrap();
+
+        let start_id = SocketId::from(payload.start_id);
+
+        let mut results = payload.results.lock(line!());
+        assert_eq!(0, results.len());
+
+        for &socket_id in self.socket_ids.range(start_id..) {
+            let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
+            let device_idx = moto_socket.device_idx;
+            let smol_socket = self.devices[device_idx]
+                .sockets
+                .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+
+            let mut stats = moto_sys_io::stats::TcpSocketStatsV1::default();
+            stats.id = moto_socket.id.into();
+            stats.device_id = device_idx as u64;
+            stats.pid = moto_socket.pid;
+
+            let local_addr = if let Some(e) = smol_socket.local_endpoint() {
+                Some(super::smoltcp_helpers::socket_addr_from_endpoint(e))
+            } else {
+                moto_socket.listening_on.clone()
+            };
+            let remote_addr = smol_socket
+                .remote_endpoint()
+                .map(|e| super::smoltcp_helpers::socket_addr_from_endpoint(e));
+
+            if let Some(addr) = local_addr {
+                stats.local_port = addr.port();
+                stats.local_addr = super::smoltcp_helpers::addr_to_octets(addr.ip());
+            }
+
+            if let Some(addr) = remote_addr {
+                stats.remote_port = addr.port();
+                stats.remote_addr = super::smoltcp_helpers::addr_to_octets(addr.ip());
+            }
+
+            stats.tcp_state = moto_socket.state.try_into().unwrap();
+            stats.smoltcp_state = smol_socket.state();
+
+            results.push(stats);
+            if results.len() == num_results {
+                break;
+            }
+        }
     }
 }

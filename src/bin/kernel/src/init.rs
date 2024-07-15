@@ -270,6 +270,8 @@ fn start_bsp(arg: u64) -> ! {
 }
 
 fn start_ap(this_cpu: uCpus) -> ! {
+    crate::arch::init_kvm_clock();
+
     AP_STARTED.fetch_add(1, Ordering::Relaxed);
     let new_stack = crate::mm::init_mm_ap_stage1();
     let cpu_main_addr = cpu_main as *const fn(u64) as usize as u64;
@@ -320,10 +322,10 @@ fn cpu_main(this_cpu: u64) -> ! {
             core::hint::spin_loop();
         }
 
-        crate::util::logger::init_logging();
+        crate::xray::logger::init_logging();
 
         crate::mm::init_mm_bsp_stage2();
-        crate::stats::init();
+        crate::xray::stats::init();
         crate::uspace::init();
 
         // If we print the boot logo before init_clock(), KVM in the host misbehaves and
@@ -374,7 +376,7 @@ pub fn start_userspace_processes() {
     let entry_point = result.unwrap();
 
     let process = crate::uspace::Process::new(
-        crate::stats::kernel_stats(),
+        crate::xray::stats::kernel_stats(),
         address_space,
         entry_point,
         0xffff_ffff_ffff_ffff, // All possible caps.

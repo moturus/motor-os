@@ -61,6 +61,10 @@ impl TcpListener {
         }
     }
 
+    pub fn conn(&self) -> &Rc<io_channel::ServerConnection> {
+        &self.conn
+    }
+
     pub fn conn_handle(&self) -> SysHandle {
         self.conn.wait_handle()
     }
@@ -76,6 +80,15 @@ impl TcpListener {
 
     pub fn pop_pending_socket(&mut self) -> Option<(SocketId, SocketAddr)> {
         self.pending_sockets.pop_front()
+    }
+
+    pub fn remove_pending_socket(&mut self, id: SocketId) {
+        for idx in 0..self.pending_sockets.len() {
+            if self.pending_sockets[idx].0 == id {
+                let _ = self.pending_sockets.remove(idx);
+                return;
+            }
+        }
     }
 
     pub fn add_pending_accept(

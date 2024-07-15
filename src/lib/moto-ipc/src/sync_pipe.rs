@@ -1,6 +1,6 @@
 use core::sync::atomic::{fence, AtomicUsize, Ordering};
 
-use moto_sys::{syscalls::SysCpu, ErrorCode, SysHandle};
+use moto_sys::*;
 
 struct PipeBuffer {
     buf_addr: usize,
@@ -15,9 +15,8 @@ impl Drop for PipeBuffer {
         if self.error_code.is_ok() {
             SysCpu::wake(self.ipc_handle).ok();
         }
-        moto_sys::syscalls::SysCtl::put(self.ipc_handle).unwrap();
-        moto_sys::syscalls::SysMem::unmap(SysHandle::SELF, 0, u64::MAX, self.buf_addr as u64)
-            .unwrap();
+        moto_sys::SysObj::put(self.ipc_handle).unwrap();
+        moto_sys::SysMem::unmap(SysHandle::SELF, 0, u64::MAX, self.buf_addr as u64).unwrap();
     }
 }
 
@@ -431,11 +430,9 @@ pub struct RawPipeData {
 impl RawPipeData {
     // Release self (memory, handle).
     pub unsafe fn release(self, owner_process: SysHandle) {
-        moto_sys::syscalls::SysCtl::put_remote(owner_process, SysHandle::from_u64(self.ipc_handle))
-            .unwrap();
+        moto_sys::SysObj::put_remote(owner_process, SysHandle::from_u64(self.ipc_handle)).unwrap();
 
-        moto_sys::syscalls::SysMem::unmap(owner_process, 0, u64::MAX, self.buf_addr as u64)
-            .unwrap();
+        moto_sys::SysMem::unmap(owner_process, 0, u64::MAX, self.buf_addr as u64).unwrap();
     }
 
     pub fn unsafe_copy(&self) -> Self {
@@ -465,11 +462,11 @@ pub fn make_pair(
         flags,
         u64::MAX,
         u64::MAX,
-        SysMem::PAGE_SIZE_SMALL,
+        sys_mem::PAGE_SIZE_SMALL,
         1,
     )?;
 
-    let (h1, h2) = SysCtl::create_ipc_pair(process_1, process_2, 0).map_err(|err| {
+    let (h1, h2) = SysObj::create_ipc_pair(process_1, process_2, 0).map_err(|err| {
         SysMem::unmap(remote_process, 0, u64::MAX, remote).unwrap();
 
         SysMem::unmap(SysHandle::SELF, 0, u64::MAX, local).unwrap();
@@ -481,12 +478,12 @@ pub fn make_pair(
         Ok((
             RawPipeData {
                 buf_addr: local as usize,
-                buf_size: SysMem::PAGE_SIZE_SMALL as usize,
+                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
                 ipc_handle: h1.as_u64(),
             },
             RawPipeData {
                 buf_addr: remote as usize,
-                buf_size: SysMem::PAGE_SIZE_SMALL as usize,
+                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
                 ipc_handle: h2.as_u64(),
             },
         ))
@@ -494,12 +491,12 @@ pub fn make_pair(
         Ok((
             RawPipeData {
                 buf_addr: remote as usize,
-                buf_size: SysMem::PAGE_SIZE_SMALL as usize,
+                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
                 ipc_handle: h1.as_u64(),
             },
             RawPipeData {
                 buf_addr: local as usize,
-                buf_size: SysMem::PAGE_SIZE_SMALL as usize,
+                buf_size: sys_mem::PAGE_SIZE_SMALL as usize,
                 ipc_handle: h2.as_u64(),
             },
         ))

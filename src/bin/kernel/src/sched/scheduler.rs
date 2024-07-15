@@ -314,7 +314,7 @@ impl Scheduler {
         let mut last_job_iter = 0_u64;
 
         let now_tsc = crate::arch::time::Instant::now().as_u64();
-        let percpu_stats = crate::stats::kernel_stats_ref().get_percpu_stats_entry(self.cpu);
+        let percpu_stats = crate::xray::stats::kernel_stats_ref().get_percpu_stats_entry(self.cpu);
         percpu_stats.cpu_kernel.store(now_tsc, Ordering::Relaxed);
         percpu_stats.started_k.store(now_tsc, Ordering::Relaxed);
 
@@ -324,11 +324,23 @@ impl Scheduler {
             Ordering::Relaxed,
         );
 
+        let mut last_system_time_update = now_tsc;
+
         loop {
             #[cfg(debug_assertions)]
             self.alive();
 
             self.wake.store(false, Ordering::Relaxed);
+
+            if self.cpu == 0 {
+                // TODO: should we do this more often? less often?
+                let now_tsc = crate::arch::time::Instant::now().as_u64();
+                if now_tsc - last_system_time_update > 1_000_000_000 {
+                    last_system_time_update = now_tsc;
+                    update_system_time();
+                }
+            }
+
             crate::uspace::process_wake_events(); // May add jobs to queues.
 
             curr_iteration += 1;
@@ -402,13 +414,13 @@ impl Scheduler {
                 if self.wake.load(Ordering::Acquire) {
                     interrupts::enable();
                 } else {
-                    crate::util::tracing::trace("scheduler hlt", 0, 0, 0);
-                    crate::stats::system_stats_ref().start_cpu_usage_kernel();
+                    crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
+                    crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
                     self.idle.store(true, Ordering::Release);
                     interrupts::enable_and_hlt();
                     self.idle.store(false, Ordering::Release);
-                    crate::stats::system_stats_ref().stop_cpu_usage_kernel();
-                    crate::util::tracing::trace("scheduler hlt wake", 0, 0, 0);
+                    crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
+                    crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
                 }
             }
             self.idle_stop();
@@ -463,7 +475,7 @@ pub fn start() -> ! {
             let shared_page = unsafe { crate::mm::virt::get_kernel_static_page_mut() };
             shared_page.version = 0;
             shared_page.num_cpus = crate::arch::num_cpus() as u32;
-            crate::arch::time::populate_kernel_static_page(shared_page);
+            update_system_time();
         }
         core::sync::atomic::fence(Ordering::Release);
 
@@ -479,6 +491,11 @@ pub fn start() -> ! {
 
     let queue = PERCPU_SCHEDULERS.get_per_cpu();
     queue.sched_loop();
+}
+
+fn update_system_time() {
+    let shared_page = unsafe { crate::mm::virt::get_kernel_static_page_mut() };
+    crate::arch::time::populate_kernel_static_page(shared_page);
 }
 
 pub fn post(job: Job) {

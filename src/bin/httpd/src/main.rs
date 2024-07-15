@@ -1,11 +1,25 @@
-use oxhttp::model::{Request, Response, Status};
-use oxhttp::Server;
-use std::path::Path;
-use std::sync::Mutex;
-use std::time::Duration;
+use clap::Parser;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+#[derive(Parser)]
+struct Args {
+    #[arg(short, long)]
+    addr: std::net::SocketAddr,
+    #[arg(short, long)]
+    dir: String,
+    #[arg(short, long, default_value_t = 4)]
+    threads: u8,
+
+    #[arg(long)]
+    ssl_cert: Option<String>,
+    #[arg(long)]
+    ssl_key: Option<String>,
+}
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
-fn input_listener(prog: String) {
+fn input_listener() {
     use std::io::Read;
 
     loop {
@@ -13,7 +27,7 @@ fn input_listener(prog: String) {
         let sz = std::io::stdin().read(&mut input).unwrap();
         for b in &input[0..sz] {
             if *b == 3 {
-                println!("\n{prog}: caught ^C: exiting.");
+                println!("\ncaught ^C: exiting.");
                 std::process::exit(0);
             }
         }
@@ -21,17 +35,165 @@ fn input_listener(prog: String) {
 }
 
 static ROOT_DIR: Mutex<String> = Mutex::new(String::new());
+static TXT_FILE_CACHE: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+static IMG_FILE_CACHE: Mutex<Option<HashMap<PathBuf, Vec<u8>>>> = Mutex::new(None);
+static BAD_FILE_CACHE: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+const MAX_BAD_CACHE_LEN: usize = 4096;
 
-fn serve(request: &mut Request) -> Response {
-    if request.method().as_bytes() != b"GET" {
-        println!("\"{}\": 501", request.method());
-        return Response::builder(Status::NOT_IMPLEMENTED).with_body("501: Not implemented.");
+fn get_txt_file(pb: PathBuf) -> Option<String> {
+    // Try cache hit.
+    {
+        let mut cache = TXT_FILE_CACHE.lock().unwrap();
+        if cache.is_none() {
+            *cache = Some(HashMap::new());
+        }
+
+        let map = cache.as_mut().unwrap();
+        match map.get(&pb) {
+            Some(s) => return Some(s.clone()),
+            None => {}
+        }
+    }
+
+    let mut bad_cache_full = false;
+    // Try cache miss.
+    {
+        let bad_cache = BAD_FILE_CACHE.lock().unwrap();
+        if let Some(set) = &*bad_cache {
+            if set.len() >= MAX_BAD_CACHE_LEN {
+                bad_cache_full = true;
+            }
+            if set.contains(&pb) {
+                return None;
+            }
+        }
+    }
+
+    // Try reading the file.
+    if let Ok(s) = std::fs::read_to_string(pb.clone()) {
+        TXT_FILE_CACHE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(pb, s.clone());
+        Some(s)
+    } else {
+        if !bad_cache_full {
+            let mut bad_cache = BAD_FILE_CACHE.lock().unwrap();
+            if bad_cache.is_none() {
+                *bad_cache = Some(HashSet::new());
+            }
+            bad_cache.as_mut().unwrap().insert(pb);
+        }
+        None
+    }
+}
+
+fn get_img_file(pb: PathBuf) -> Option<Vec<u8>> {
+    // Try cache hit.
+    {
+        let mut cache = IMG_FILE_CACHE.lock().unwrap();
+        if cache.is_none() {
+            *cache = Some(HashMap::new());
+        }
+
+        let map = cache.as_mut().unwrap();
+        match map.get(&pb) {
+            Some(v) => return Some(v.clone()),
+            None => {}
+        }
+    }
+
+    let mut bad_cache_full = false;
+    // Try cache miss.
+    {
+        let bad_cache = BAD_FILE_CACHE.lock().unwrap();
+        if let Some(set) = &*bad_cache {
+            if set.len() >= MAX_BAD_CACHE_LEN {
+                bad_cache_full = true;
+            }
+            if set.contains(&pb) {
+                return None;
+            }
+        }
+    }
+
+    // Try reading the file.
+    if let Ok(bytes) = std::fs::read(pb.clone()) {
+        IMG_FILE_CACHE
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .insert(pb, bytes.clone());
+        Some(bytes)
+    } else {
+        if !bad_cache_full {
+            let mut bad_cache = BAD_FILE_CACHE.lock().unwrap();
+            if bad_cache.is_none() {
+                *bad_cache = Some(HashSet::new());
+            }
+            bad_cache.as_mut().unwrap().insert(pb);
+        }
+        None
+    }
+}
+
+fn sanitize(s: &[u8]) -> String {
+    let mut res = String::new();
+    res.reserve(64);
+    let bytes = if s.len() < 64 { s } else { &s[0..64] };
+    for b in bytes {
+        if b.is_ascii() {
+            res.push(*b as char);
+        } else {
+            res.push('¿');
+        }
+    }
+    res
+}
+
+fn log_request(status: u16, request: &[u8]) {
+    let now = time::OffsetDateTime::now_utc();
+    println!(
+        "{}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} UTC {status}: {}",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        now.millisecond(),
+        sanitize(request)
+    );
+}
+
+fn process(request: tiny_http::Request) {
+    let hdr_server =
+        tiny_http::Header::from_bytes(&b"Server"[..], &b"tiny-http (Motor OS)"[..]).unwrap();
+
+    match *request.method() {
+        tiny_http::Method::Get => {}
+        _ => {
+            log_request(405, request.url().as_bytes());
+            let _ = request.respond(
+                tiny_http::Response::empty(tiny_http::StatusCode(405)).with_header(hdr_server),
+            );
+            return;
+        }
     }
 
     let root = ROOT_DIR.lock().unwrap().clone();
 
     let request_path = {
-        let mut url = request.url().path();
+        let mut url = request.url();
+        if url.find("..").is_some() {
+            log_request(404, request.url().as_bytes());
+            let _ = request.respond(tiny_http::Response::empty(tiny_http::StatusCode(404)));
+            return;
+        }
+
         if url == "/" {
             Path::new(root.as_str()).join("index.html")
         } else {
@@ -39,94 +201,159 @@ fn serve(request: &mut Request) -> Response {
                 url = &url[1..];
             }
             if url.is_empty() {
-                println!("\"GET {}\": 404", request.url().path());
-                return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
+                log_request(404, url.as_bytes());
+                let _ = request.respond(
+                    tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server),
+                );
+                return;
             }
             Path::new(root.as_str()).join(url)
         }
     };
 
     let path_str = request_path.clone().into_os_string().into_string().unwrap();
-    if path_str.find("..").is_some() {
-        println!("\"GET {}\": 404", request.url().path());
-        return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
+    if path_str.len() > 256 {
+        log_request(404, request.url().as_bytes());
+        let _ = request.respond(
+            tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server),
+        );
+        return;
     }
 
-    if let Ok(text) = std::fs::read_to_string(request_path.clone()) {
-        println!("\"GET {}\": 200", request.url().path());
-        return Response::builder(Status::OK).with_body(text);
+    if path_str.find("..").is_some() {
+        log_request(404, request.url().as_bytes());
+        let _ = request.respond(tiny_http::Response::empty(tiny_http::StatusCode(404)));
+        return;
     }
 
     if path_str.as_str().ends_with(".jpg") {
-        if let Ok(bytes) = std::fs::read(request_path.clone()) {
-            println!("\"GET {}\": 200", request.url().path());
-            return Response::builder(Status::OK)
-                .with_header("Content-type", "image/jpeg")
-                .unwrap()
-                .with_header("Content-Length", format!("{}", bytes.len()))
-                .unwrap()
-                .with_body(bytes);
+        if let Some(bytes) = get_img_file(request_path.clone()) {
+            log_request(200, request.url().as_bytes());
+            let content_type =
+                tiny_http::Header::from_bytes(&b"Content-type"[..], &b"image/jpeg"[..]).unwrap();
+            let response = tiny_http::Response::from_data(bytes);
+            let _ = request.respond(
+                response
+                    .with_header(hdr_server)
+                    .with_header(content_type)
+                    .with_status_code(200),
+            );
+            return;
         }
     }
 
     if path_str.as_str().ends_with(".png") {
-        if let Ok(bytes) = std::fs::read(request_path.clone()) {
-            println!("\"GET {}\": 200", request.url().path());
-            return Response::builder(Status::OK)
-                .with_header("Content-type", "image/png")
-                .unwrap()
-                .with_header("Content-Length", format!("{}", bytes.len()))
-                .unwrap()
-                .with_body(bytes);
+        if let Some(bytes) = get_img_file(request_path.clone()) {
+            log_request(200, request.url().as_bytes());
+            let content_type =
+                tiny_http::Header::from_bytes(&b"Content-type"[..], &b"image/png"[..]).unwrap();
+            let response = tiny_http::Response::from_data(bytes);
+            let _ = request.respond(
+                response
+                    .with_header(hdr_server)
+                    .with_header(content_type)
+                    .with_status_code(200),
+            );
+            return;
         }
     }
+    if let Some(text) = get_txt_file(request_path.clone()) {
+        log_request(200, request.url().as_bytes());
+        let response = tiny_http::Response::from_data(text.as_bytes());
+        let _ = request.respond(response.with_header(hdr_server).with_status_code(200));
+        return;
+    }
 
-    println!("\"GET {}\": 404", request.url().path());
-    return Response::builder(Status::NOT_FOUND).with_body("404: Not found.");
+    log_request(404, request.url().as_bytes());
+    let _ = request
+        .respond(tiny_http::Response::empty(tiny_http::StatusCode(404)).with_header(hdr_server));
+}
+
+fn start_https(args: &Args) -> Arc<tiny_http::Server> {
+    let ssl_cert_path = args.ssl_cert.as_ref().unwrap();
+    let ssl_key_path = args.ssl_key.as_ref().unwrap();
+
+    let certificate = match std::fs::read(std::path::Path::new(ssl_cert_path)) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("Error reading ssl cert {}: {:?}.", ssl_cert_path, err);
+            std::process::exit(-1);
+        }
+    };
+    let private_key = match std::fs::read(std::path::Path::new(ssl_key_path)) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("Error reading ssl key {}: {:?}.", ssl_key_path, err);
+            std::process::exit(-1);
+        }
+    };
+
+    Arc::new(
+        tiny_http::Server::https(
+            args.addr,
+            tiny_http::SslConfig {
+                certificate,
+                private_key,
+            },
+        )
+        .unwrap(),
+    )
+}
+
+fn start_server(args: &Args) -> Arc<tiny_http::Server> {
+    if args.ssl_cert.is_some() && args.ssl_key.is_some() {
+        start_https(args)
+    } else if args.ssl_cert.is_none() && args.ssl_key.is_none() {
+        Arc::new(tiny_http::Server::http(args.addr).unwrap())
+    } else {
+        eprintln!("ERROR: ssl_cert and ssl_key args must either be both specified or none.");
+        std::process::exit(-1);
+    }
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let prog = std::path::Path::new(args[0].as_str())
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
+    std::thread::spawn(move || input_listener());
 
-    let prog_copy = prog.to_owned();
-
-    if args.len() != 3 {
-        eprintln!("Usage: {} host:port www-dir", prog);
-        std::process::exit(-1);
+    let mut args = Args::parse();
+    if args.threads == 0 {
+        args.threads = 1;
     }
 
-    std::thread::spawn(move || input_listener(prog_copy));
-
-    let url = &args[1];
-    match std::fs::read_dir(Path::new(&args[2])) {
+    match std::fs::read_dir(Path::new(&args.dir)) {
         Ok(_) => {
-            *ROOT_DIR.lock().unwrap() = args[2].clone();
+            *ROOT_DIR.lock().unwrap() = args.dir.clone();
         }
         Err(_) => {
-            eprintln!("Directory '{}' not found.", &args[2]);
+            eprintln!("Directory '{}' not found.", &args.dir);
             std::process::exit(-1);
         }
     }
 
-    println!("Serving HTTP on {}. Press Ctrl+C to exit.", url);
+    let server = start_server(&args);
+    if args.ssl_cert.is_some() {
+        println!("Serving HTTPS on {:?}. Press Ctrl+C to exit.", args.addr);
+    } else {
+        println!("Serving HTTP on {:?}. Press Ctrl+C to exit.", args.addr);
+    }
 
-    #[cfg(target_os = "moturus")]
-    let server_name = "motor-os httpd";
-    #[cfg(not(target_os = "moturus"))]
-    let server_name = prog;
+    let mut threads = Vec::new();
+    for _ in 0..args.threads {
+        let server = server.clone();
 
-    let result = Server::new(serve)
-        .with_global_timeout(Duration::from_secs(10))
-        .with_server_name(server_name)
-        .unwrap()
-        .listen(url.as_str());
+        threads.push(std::thread::spawn(move || loop {
+            let request = match server.recv() {
+                Ok(rq) => rq,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    continue;
+                }
+            };
 
-    if result.is_err() {
-        eprintln!("listen() failed.");
+            process(request);
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
     }
 }

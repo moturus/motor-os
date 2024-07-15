@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use moto_ipc::io_channel;
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub(super) struct SocketId(u64);
 
 impl From<u64> for SocketId {
@@ -23,11 +23,11 @@ pub(super) struct MotoSocket {
     pub handle: smoltcp::iface::SocketHandle,
     pub device_idx: usize,
 
-    // Listening sockets do not have a client connection.
-    pub conn: Option<Rc<io_channel::ServerConnection>>,
+    pub conn: Rc<io_channel::ServerConnection>,
+    pub pid: u64,
 
-    // We need socket's original listener to let it know when a socket has been closed:
-    // we cap the number of active sockets/streams allowed per listener.
+    // We need socket's original listener to let it know when a socket has been closed
+    // or connected or whatever: accept() requests use listener_id.
     pub listener_id: Option<super::tcp_listener::TcpListenerId>,
 
     // We also need to track the issuing connect request.
@@ -47,6 +47,13 @@ pub(super) struct MotoSocket {
 
     // See moto_ipc::io_channel::ServerConnection::alloc_page().
     pub subchannel_mask: u64,
+
+    // SmolTcp sockets don't provide a way to get the address a socket is listening on,
+    // so we cache it ourselves.
+    pub listening_on: Option<std::net::SocketAddr>,
+    // If this was a listening socket, and its state transitioned to smth else,
+    // we create a replacement listening socket, and set this flag to true.
+    pub replacement_listener_created: bool,
 }
 
 impl Drop for MotoSocket {

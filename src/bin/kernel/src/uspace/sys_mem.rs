@@ -1,5 +1,6 @@
-use moto_sys::syscalls::*;
 use moto_sys::ErrorCode;
+use moto_sys::*;
+use syscalls::SyscallResult;
 
 use crate::mm::user::UserAddressSpace;
 use crate::mm::MappingOptions;
@@ -18,7 +19,7 @@ fn sys_mmio_map(
         return ResultBuilder::invalid_argument();
     }
 
-    if page_size != SysMem::PAGE_SIZE_SMALL {
+    if page_size != sys_mem::PAGE_SIZE_SMALL {
         log::debug!("sys_mem_impl: bad page_size: 0x{:x}", page_size);
         return ResultBuilder::invalid_argument();
     }
@@ -61,7 +62,7 @@ fn sys_map(
         return sys_mmio_map(address_space, phys_addr, virt_addr, page_size, num_pages);
     }
 
-    if page_size == SysMem::PAGE_SIZE_MID {
+    if page_size == sys_mem::PAGE_SIZE_MID {
         if !io_manager {
             return ResultBuilder::result(ErrorCode::NotAllowed);
         }
@@ -84,7 +85,7 @@ fn sys_map(
         };
     }
 
-    if page_size != SysMem::PAGE_SIZE_SMALL {
+    if page_size != sys_mem::PAGE_SIZE_SMALL {
         return ResultBuilder::invalid_argument();
     }
 
@@ -277,41 +278,6 @@ fn sys_mem_query(
     }
 }
 
-fn sys_debug(
-    curr_thread: &super::process::Thread,
-    address_space: &UserAddressSpace,
-    flags: u32,
-    virt_addr: u64,
-    sz: u64,
-) -> SyscallResult {
-    if (curr_thread.owner().capabilities() & moto_sys::caps::CAP_LOG) == 0 {
-        return ResultBuilder::result(ErrorCode::NotAllowed);
-    }
-
-    if flags != SysMem::F_LOG_UTF8 {
-        return ResultBuilder::invalid_argument();
-    }
-
-    let sz = u64::min(256, sz);
-    let bytes = match address_space.read_from_user(virt_addr, sz) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            log::debug!("sys_debug: read from user failed: {:?}", err);
-            return ResultBuilder::invalid_argument();
-        }
-    };
-
-    use core::str;
-    match str::from_utf8(bytes.as_slice()) {
-        Ok(str) => {
-            crate::util::logger::log_user(curr_thread, str);
-        }
-        Err(_) => return ResultBuilder::result(ErrorCode::InvalidArgument),
-    };
-
-    ResultBuilder::ok()
-}
-
 fn sys_reclaim() -> SyscallResult {
     log::warn!("SysMem::reclaim(): do CAPs check.");
 
@@ -348,11 +314,11 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     let address_space = match address_space_handle {
         SysHandle::SELF => process.address_space().clone(),
         _ => {
-            match super::sys_object::object_from_handle::<UserAddressSpace>(
+            match super::sysobject::object_from_handle::<UserAddressSpace>(
                 &process,
                 address_space_handle,
             ) {
-                None => match super::sys_object::object_from_handle::<super::Process>(
+                None => match super::sysobject::object_from_handle::<super::Process>(
                     &process,
                     address_space_handle,
                 ) {
@@ -406,18 +372,6 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
                 args.args[2],
                 args.args[3],
                 args.args[4],
-            );
-        }
-        SysMem::OP_DEBUG => {
-            if args.args[1] != 0 || args.args[3] != 0 || args.args[4] != 0 {
-                return ResultBuilder::invalid_argument();
-            }
-            return sys_debug(
-                thread,
-                &address_space,
-                args.flags,
-                args.args[2], // virt_addr
-                args.args[5], // sz
             );
         }
         _ => {

@@ -376,7 +376,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
         #[cfg(debug_assertions)]
         crate::arch::log_backtrace("#");
 
-        crate::util::tracing::dump();
+        crate::xray::tracing::dump();
         kernel_exit();
     }
 }
@@ -407,7 +407,7 @@ extern "x86-interrupt" fn generic_handler2(stack_frame: InterruptStackFrame, err
         #[cfg(debug_assertions)]
         crate::arch::log_backtrace("#");
 
-        crate::util::tracing::dump();
+        crate::xray::tracing::dump();
         kernel_exit();
     }
 }
@@ -462,7 +462,7 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
         #[cfg(debug_assertions)]
         crate::arch::log_backtrace("#GPF");
 
-        crate::util::tracing::dump();
+        crate::xray::tracing::dump();
         crate::arch::kernel_exit();
     }
 }
@@ -477,7 +477,7 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
         unsafe { asm!("swapgs") }
     }
 
-    crate::util::tracing::trace_irq(irq_num, irq_stack.rip, 0);
+    crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 0);
 
     if uspace && !swapgs {
         crate::write_serial!(
@@ -670,7 +670,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
         #[cfg(debug_assertions)]
         crate::arch::log_backtrace("#PF");
 
-        crate::util::tracing::dump();
+        crate::xray::tracing::dump();
 
         kernel_exit();
     }

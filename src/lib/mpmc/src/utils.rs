@@ -39,7 +39,7 @@ pub(crate) fn shuffle<T>(v: &mut [T]) {
 
 /// Sleeps until the deadline, or forever if the deadline isn't specified.
 pub(crate) fn sleep_until(deadline: Option<Instant>) {
-    let _ = moto_sys::syscalls::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, deadline);
+    let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, deadline);
 }
 
 /// Returns the id of the current thread.

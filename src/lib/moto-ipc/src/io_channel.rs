@@ -7,7 +7,7 @@
 //! Also simpler than io_uring. More specifically, SQE and CQE have the same layout.
 use core::{fmt::Debug, sync::atomic::*};
 
-use moto_sys::{syscalls::*, ErrorCode};
+use moto_sys::*;
 
 // Although client+server can use any value in QueueEntry::command, it is recommended
 // that they respect the ranges below.
@@ -392,7 +392,7 @@ impl ClientConnection {
         );
 
         let server_handle =
-            SysCtl::get(SysHandle::SELF, SysCtl::F_WAKE_PEER, &full_url).map_err(|err| {
+            SysObj::get(SysHandle::SELF, SysObj::F_WAKE_PEER, &full_url).map_err(|err| {
                 SysMem::free(addr).unwrap();
                 err
             })?;
@@ -442,7 +442,7 @@ impl ClientConnection {
         SysMem::free(addr as u64).unwrap();
         self.raw_channel
             .store(core::ptr::null_mut(), Ordering::Release);
-        SysCtl::put(self.server_handle).unwrap();
+        SysObj::put(self.server_handle).unwrap();
         self.server_handle = SysHandle::NONE;
     }
 
@@ -589,7 +589,7 @@ impl ServerConnection {
             64
         );
 
-        let wait_handle = SysCtl::create(SysHandle::SELF, 0, &full_url).map_err(|err| {
+        let wait_handle = SysObj::create(SysHandle::SELF, 0, &full_url).map_err(|err| {
             SysMem::free(addr).unwrap();
             err
         })?;
@@ -714,7 +714,7 @@ impl ServerConnection {
         assert!(!self.raw_channel.is_null());
         SysMem::free(self.raw_channel as usize as u64).unwrap();
         self.raw_channel = core::ptr::null_mut();
-        SysCtl::put(self.wait_handle).unwrap();
+        SysObj::put(self.wait_handle).unwrap();
         self.wait_handle = SysHandle::NONE;
     }
 

@@ -178,7 +178,7 @@ impl Context {
     /// Unparks the thread this context belongs to.
     #[inline]
     pub fn unpark(&self) {
-        let _ = moto_sys::syscalls::SysCpu::wake(self.thread_id());
+        let _ = moto_sys::SysCpu::wake(self.thread_id());
     }
 
     /// Returns the id of the thread this context belongs to.

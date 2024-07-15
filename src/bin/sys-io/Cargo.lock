@@ -177,6 +177,16 @@ name = "moto-sys"
 version = "0.2.4"
 
 [[package]]
+name = "moto-sys-io"
+version = "0.2.4"
+dependencies = [
+ "moto-ipc",
+ "moto-runtime",
+ "moto-sys",
+ "smoltcp",
+]
+
+[[package]]
 name = "moto-virtio"
 version = "0.2.0"
 dependencies = [
@@ -331,6 +341,7 @@ dependencies = [
  "moto-ipc",
  "moto-runtime",
  "moto-sys",
+ "moto-sys-io",
  "moto-virtio",
  "serde",
  "smoltcp",

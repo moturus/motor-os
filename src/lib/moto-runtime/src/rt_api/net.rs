@@ -75,6 +75,12 @@ pub enum TcpState {
     _Max = 7,
 }
 
+impl Default for TcpState {
+    fn default() -> Self {
+        Self::Closed
+    }
+}
+
 impl TryFrom<u32> for TcpState {
     type Error = ();
 

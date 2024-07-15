@@ -21,10 +21,10 @@ use super::slab::*;
 use super::virt_intrusive::SegmentMap;
 use super::virt_intrusive::VmemSegment;
 use super::*;
-use crate::stats::MemStats;
 use crate::util::SpinLock;
 use crate::util::StaticRef;
 use crate::util::UnsafeRef;
+use crate::xray::stats::MemStats;
 
 use core::marker::PhantomPinned;
 use core::sync::atomic::AtomicU64;
@@ -456,7 +456,7 @@ pub(super) struct AddressSpaceBase {
     pub(super) page_table: PageTable,
     pub(super) page_allocator: super::virt_intrusive::PageAllocator,
 
-    mem_stats: Arc<crate::stats::MemStats>,
+    mem_stats: Arc<crate::xray::stats::MemStats>,
 }
 
 impl AddressSpaceBase {

@@ -20,7 +20,7 @@ pub fn do_command(args: &[String]) {
         Err(_) => print_usage_and_exit(1),
     };
 
-    if let Err(err) = moto_sys::syscalls::SysCpu::kill_pid(pid) {
+    if let Err(err) = moto_sys::SysCpu::kill_pid(pid) {
         eprintln!("kill failed: {:?}", err);
     }
 }
