@@ -75,3 +75,11 @@ pub fn hashmap_random_keys() -> (u64, u64) {
         (7, 13)
     }
 }
+
+pub fn print_stacktace() {
+    extern "C" {
+        fn moturus_print_stacktrace();
+    }
+
+    unsafe { moturus_print_stacktrace() };
+}

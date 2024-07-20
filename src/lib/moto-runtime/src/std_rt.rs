@@ -152,7 +152,7 @@ pub fn log_backtrace(binary: &str) {
     use core::fmt::Write;
     let mut writer = alloc::string::String::with_capacity(256);
     let backtrace = get_backtrace();
-    write!(&mut writer, "backtrace: run \n\naddr2line -e {}", binary).ok();
+    write!(&mut writer, "backtrace: {}", binary).ok();
     for addr in backtrace {
         if addr == 0 {
             break;
@@ -172,6 +172,18 @@ pub fn log_backtrace(binary: &str) {
     } else {
         let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
     }
+}
+
+#[no_mangle]
+pub extern "C" fn moturus_print_stacktrace() {
+    log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown binary>"));
+    let mut stderr = super::stdio::StderrRt::new();
+    let _ = stderr.flush();
+
+    // At the moment (2024-01-11), stderr.flush() above does nothing.
+    // Wait a bit to let it flush "naturally".
+    // See https://github.com/moturus/motor-os/issues/6
+    crate::thread::sleep(core::time::Duration::from_millis(10));
 }
 
 #[linkage = "weak"]
