@@ -508,6 +508,9 @@ pub struct TcpStreamImpl {
 
     subchannel_idx: usize, // Never changes.
     subchannel_mask: u64,  // Never changes.
+
+    stats_rx_bytes: AtomicU64,
+    stats_tx_bytes: AtomicU64,
 }
 
 impl Drop for TcpStreamImpl {
@@ -524,6 +527,19 @@ impl Drop for TcpStreamImpl {
         } else {
             let _ = self.channel.send_receive(req);
         }
+
+        // Clear RX queue: basically, free up server-allocated pages.
+        {
+            let mut queue = self.recv_queue.lock(line!());
+            while let Some(msg) = queue.pop_front() {
+                assert_eq!(msg.command, rt_api::net::CMD_TCP_STREAM_RX);
+                let sz_read = msg.payload.args_64()[1];
+                if sz_read > 0 {
+                    let _ = self.channel.conn.get_page(msg.payload.shared_pages()[0]);
+                }
+            }
+        }
+
         self.channel
             .tcp_stream_dropped(self.handle, self.subchannel_idx);
     }
@@ -616,6 +632,8 @@ impl TcpStream {
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_idx,
             subchannel_mask,
+            stats_rx_bytes: AtomicU64::new(0),
+            stats_tx_bytes: AtomicU64::new(0),
         });
 
         channel.tcp_stream_created(&inner);
@@ -739,6 +757,17 @@ impl TcpStream {
             rx_seq
         );
 
+        self.inner
+            .stats_rx_bytes
+            .fetch_add(sz_read as u64, Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        moturus_log!(
+            "{}:{} stream 0x{:x}: total RX bytes {}",
+            file!(),
+            line!(),
+            msg.handle,
+            self.inner.stats_rx_bytes.load(Ordering::Relaxed)
+        );
         let sz_read = if sz_read > buf.len() {
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -981,6 +1010,17 @@ impl TcpStream {
             timestamp.as_u64(),
         );
         self.inner.channel.send_msg(msg);
+        self.inner
+            .stats_tx_bytes
+            .fetch_add(write_sz as u64, Ordering::Relaxed);
+        #[cfg(debug_assertions)]
+        moturus_log!(
+            "{}:{} stream 0x{:x} TX bytes {}",
+            file!(),
+            line!(),
+            self.inner.handle,
+            self.inner.stats_tx_bytes.load(Ordering::Relaxed)
+        );
         Ok(write_sz)
     }
 
@@ -1216,6 +1256,8 @@ impl TcpListener {
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_idx,
             subchannel_mask,
+            stats_rx_bytes: AtomicU64::new(0),
+            stats_tx_bytes: AtomicU64::new(0),
         });
 
         channel.tcp_stream_created(&inner);
