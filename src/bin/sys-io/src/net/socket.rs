@@ -54,6 +54,10 @@ pub(super) struct MotoSocket {
     // If this was a listening socket, and its state transitioned to smth else,
     // we create a replacement listening socket, and set this flag to true.
     pub replacement_listener_created: bool,
+
+    // stats
+    pub stats_rx_bytes: u64, // Bytes sent to the application.
+    pub stats_tx_bytes: u64, // Bytes received from the application.
 }
 
 impl Drop for MotoSocket {
