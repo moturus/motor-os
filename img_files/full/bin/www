@@ -1,7 +1,7 @@
 #!/bin/rush
 
 # To run a plain http server, use this command:
-# /bin/httpd -a 192.168.4.2:80 -d /www -t 8
+# /bin/httpd -a 192.168.4.2:80 -d /www
 
-/bin/httpd -a 192.168.4.2:443 -d /www -t 8 --ssl-cert /sys/cfg/ssl/ssl-cert.pem --ssl-key /sys/cfg/ssl/ssl-key.pem
+/bin/httpd -a 192.168.4.2:443 -d /www --ssl-cert /sys/cfg/ssl/ssl-cert.pem --ssl-key /sys/cfg/ssl/ssl-key.pem
 
