@@ -306,6 +306,8 @@ impl NetSys {
             subchannel_mask: u64::MAX,
             listening_on: None,
             replacement_listener_created: false,
+            stats_rx_bytes: 0,
+            stats_tx_bytes: 0,
         })
     }
 
@@ -475,11 +477,24 @@ impl NetSys {
                 self.conn_tcp_sockets.insert(conn_handle, conn_sockets);
             }
 
+            #[cfg(debug_assertions)]
+            log::debug!(
+                "sys-io: 0x{:x}: accepted pending connection 0x{:x}",
+                conn.wait_handle().as_u64(),
+                u64::from(socket_id)
+            );
+
             // Do rx after generating the accept completion, otherwise rx packets
             // may get delivered to the client for an unknown socket.
             self.do_tcp_rx(socket_id); // The socket can now Rx.
             return Ok(None);
         }
+
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "sys-io: 0x{:x}: pending accept",
+            conn.wait_handle().as_u64(),
+        );
 
         listener.add_pending_accept(req, conn);
         Ok(None)
@@ -705,12 +720,18 @@ impl NetSys {
             TcpState::_Max => panic!(),
         }
 
+        moto_socket.stats_tx_bytes += sz as u64;
         moto_socket.tx_queue.push_back(TxBuf {
             page,
             len: sz,
             consumed: 0,
         });
 
+        // log::debug!(
+        //     "socket 0x{:x} total TX bytes: {}",
+        //     u64::from(socket_id),
+        //     moto_socket.stats_tx_bytes
+        // );
         self.do_tcp_tx(socket_id);
     }
 
@@ -1053,11 +1074,12 @@ impl NetSys {
 
         #[cfg(debug_assertions)]
         log::debug!(
-            "{}:{} on_tcp_listener_connected 0x{:x} - {:?}",
+            "{}:{} on_tcp_listener_connected 0x{:x} - {:?}; accepted: {}",
             file!(),
             line!(),
             u64::from(socket_id),
-            remote_addr
+            remote_addr,
+            may_do_io
         );
 
         may_do_io
@@ -1404,6 +1426,12 @@ impl NetSys {
             socket
         } else {
             // The socket may have been closed/removed while sitting on self.pending_tcp_rx.
+            log::debug!(
+                "{}:{} do_tcp_rx: no socket 0x{:x}",
+                file!(),
+                line!(),
+                u64::from(socket_id)
+            );
             return;
         };
         let smol_socket = self.devices[moto_socket.device_idx]
@@ -1413,27 +1441,34 @@ impl NetSys {
         if moto_socket.rx_ack == u64::MAX
             || (moto_socket.rx_seq > (moto_socket.rx_ack + rt_api::net::TCP_RX_MAX_INFLIGHT))
         {
-            // #[cfg(debug_assertions)]
-            // if moto_socket.rx_ack != u64::MAX {
-            //     log::debug!(
-            //         "{}:{} TCP RX: stuck seq: {} ack: {} state: {:?}",
-            //         file!(),
-            //         line!(),
-            //         moto_socket.rx_seq,
-            //         moto_socket.rx_ack,
-            //         moto_socket.state
-            //     );
-            // }
+            #[cfg(debug_assertions)]
+            if moto_socket.rx_ack != u64::MAX {
+                log::debug!(
+                    "{}:{} TCP RX: stuck seq: {} ack: {} state: {:?}",
+                    file!(),
+                    line!(),
+                    moto_socket.rx_seq,
+                    moto_socket.rx_ack,
+                    moto_socket.state
+                );
+            }
             return;
         }
 
         // We are attempting to deliver any incoming bytes even if the peer has closed the connection.
         while smol_socket.recv_queue() > 0 {
-            let page = match moto_socket.conn.alloc_page(0xFF) {
+            let page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
                 Ok(page) => page,
                 Err(err) => {
                     assert_eq!(err, ErrorCode::NotReady);
                     self.pending_tcp_rx.push_back(socket_id);
+                    #[cfg(debug_assertions)]
+                    log::debug!(
+                        "{}:{} do_tcp_rx: alloc error for socket 0x{:x}",
+                        file!(),
+                        line!(),
+                        u64::from(socket_id)
+                    );
                     return;
                 }
             };
@@ -1464,6 +1499,7 @@ impl NetSys {
             // );
 
             moto_socket.rx_seq += 1;
+            moto_socket.stats_rx_bytes += rx_buf.consumed as u64;
             self.pending_completions.push_back(Self::rx_buf_to_pc(
                 socket_id,
                 moto_socket.conn.wait_handle(),
@@ -1475,6 +1511,12 @@ impl NetSys {
                 break;
             }
         }
+
+        // log::debug!(
+        //     "socket 0x{:x} total RX bytes: {}",
+        //     u64::from(socket_id),
+        //     moto_socket.stats_rx_bytes
+        // );
 
         // While the process knows about the socket state, it does not know that there are
         // no cached RX packets. The code below delivers a zero-sized RX packet to that end.
@@ -1528,6 +1570,7 @@ impl NetSys {
                         // actual socket writes happen later/asynchronously.
                         continue;
                     } else {
+                        // moto_socket.
                         moto_socket.tx_queue.push_front(tx_buf);
                         continue;
                     }

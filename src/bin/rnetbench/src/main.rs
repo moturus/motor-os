@@ -91,7 +91,7 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
     let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
     // println!("throughput read starting");
-    let mut counter: u8 = 0;
+    let mut counter: usize = 0;
     let start = std::time::Instant::now();
     loop {
         if let Some(duration) = duration {
@@ -107,10 +107,13 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
             break;
         }
         for idx in 0..bytes_read {
-            assert_eq!(counter, buffer[idx]);
-            counter = counter.wrapping_add(1);
+            if ((counter & 0xff) as u8) != buffer[idx] {
+                panic!("bad data: counter: {counter} data: {}", buffer[idx]);
+            }
+            counter += 1;
         }
         total_bytes_read += bytes_read;
+        assert_eq!(total_bytes_read, counter);
     }
 
     let _ = stream.flush();
@@ -121,6 +124,15 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
     (duration, total_bytes_read)
 }
 
+fn rdrand() -> u64 {
+    let mut val = 0_u64;
+    unsafe {
+        let result = core::arch::x86_64::_rdrand64_step(&mut val);
+        assert_eq!(1, result);
+        val
+    }
+}
+
 fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Duration, usize) {
     let mut data = [0u8; 1024];
     let mut total_bytes_sent = 0usize;
@@ -128,21 +140,26 @@ fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Du
 
     // println!("throughput write starting");
     let start = std::time::Instant::now();
-    let mut counter: u8 = 0;
+    let mut counter: usize = 0;
     'outer: loop {
         if let Some(duration) = duration {
             if start.elapsed() >= duration {
                 break;
             }
         }
-        for idx in 0..data.len() {
-            data[idx] = counter;
-            counter = counter.wrapping_add(1);
+
+        assert_eq!(total_bytes_sent, counter);
+
+        let len = (rdrand() as usize) % data.len();
+
+        for idx in 0..len {
+            data[idx] = (counter & 0xff) as u8;
+            counter += 1;
         }
 
         let mut written = 0;
-        while written < data.len() {
-            match stream.write(&data[written..]) {
+        while written < len {
+            match stream.write(&data[written..len]) {
                 Ok(n) => {
                     if n == 0 {
                         break 'outer;
@@ -155,6 +172,7 @@ fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Du
                 }
             }
         }
+        assert_eq!(written, len);
     }
 
     let _ = stream.flush();

@@ -133,6 +133,29 @@ impl From<u16> for ErrorCode {
     }
 }
 
+pub fn rdrand() -> Result<u64, ErrorCode> {
+    let mut val = 0_u64;
+    unsafe {
+        let result = core::arch::x86_64::_rdrand64_step(&mut val);
+        match result {
+            1 => Ok(val),
+            0 => Err(ErrorCode::NotImplemented), // The hardware does not support this.
+            _ => Err(ErrorCode::InternalError),  // This is unexpected.
+        }
+    }
+}
+
+pub fn rdseed() -> Result<u64, ErrorCode> {
+    let mut val = 0_u64;
+    unsafe {
+        let result = core::arch::x86_64::_rdseed64_step(&mut val);
+        match result {
+            1 => Ok(val),
+            0 => Err(ErrorCode::NotImplemented), // The hardware does not support this.
+            _ => Err(ErrorCode::InternalError),  // This is unexpected.
+        }
+    }
+}
 // #[cfg(feature = "userspace")]
 // #[macro_export]
 // macro_rules! moturus_log {
