@@ -7,9 +7,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5.6", features = ["derive"] }
+clap = { version = "=4.5.6", features = ["derive"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 time = { version = "0.3.36", default-features = false, features = ["std"] }
-tiny_http = { features = ["ssl-rustls"], git = "https://github.com/moturus/tiny-http.git" }
 
 [patch.crates-io]
 ring = { git = "https://github.com/moturus/ring.git" }
