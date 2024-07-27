@@ -520,7 +520,6 @@ impl Drop for ClientConnection {
             tls_conn,
         } = self;
         if let Some(tls_conn) = tls_conn {
-            debug_assert!(!tls_conn.wants_write());
             tls_conn.send_close_notify();
             let _ = tls_conn.write_tls(tcp_stream);
             std::thread::sleep(std::time::Duration::from_millis(10));
