@@ -76,6 +76,9 @@ fn main() {
         "uptime" => commands::uptime::do_command(&args[1..]),
         _ => print_usage_and_exit(1),
     }
+
+    // TODO: remove when stdrt::flush() works.
+    std::thread::sleep(std::time::Duration::from_millis(100));
 }
 
 /*
