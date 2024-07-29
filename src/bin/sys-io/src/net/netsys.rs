@@ -351,6 +351,7 @@ impl NetSys {
                 "drop_tcp_socket(): socket {} not found.",
                 u64::from(socket_id)
             );
+            moto_runtime::print_stacktace();
             return;
         };
         let smol_socket = self.devices[moto_socket.device_idx]
@@ -1044,6 +1045,7 @@ impl NetSys {
         let listener_id = *moto_socket.listener_id.as_ref().unwrap();
         let listener = self.tcp_listeners.get_mut(&listener_id).unwrap();
         let may_do_io = if let Some((mut msg, conn)) = listener.get_pending_accept() {
+            assert!(listener.remove_listening_socket(socket_id));
             moto_socket.state = TcpState::ReadWrite;
             moto_socket.listener_id = None;
             let endpoint_handle = conn.wait_handle();
