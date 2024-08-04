@@ -313,9 +313,13 @@ impl NetChannel {
         });
 
         let self_ptr = Arc::into_raw(self_.clone());
-        let thread_handle =
-            super::thread::spawn(4096 * 16, Self::io_thread_init as usize, self_ptr as usize)
-                .unwrap();
+        let thread_handle = moto_sys::SysCpu::spawn(
+            SysHandle::SELF,
+            4096 * 16,
+            Self::io_thread_init as usize as u64,
+            self_ptr as usize as u64,
+        )
+        .unwrap();
         self_
             .io_thread_join_handle
             .store(thread_handle.into(), Ordering::Release);

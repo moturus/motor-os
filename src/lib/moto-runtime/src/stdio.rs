@@ -318,10 +318,11 @@ pub(super) fn set_relay(
     #[cfg(not(debug_assertions))]
     const RELAY_THREAD_STACK_SIZE: usize = 1024 * 4;
 
-    super::thread::spawn(
-        RELAY_THREAD_STACK_SIZE,
-        relay_thread_fn as usize,
-        thread_arg,
+    moto_sys::SysCpu::spawn(
+        SysHandle::SELF,
+        RELAY_THREAD_STACK_SIZE as u64,
+        relay_thread_fn as usize as u64,
+        thread_arg as u64,
     )
     .map_err(|err| {
         unsafe {

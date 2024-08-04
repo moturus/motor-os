@@ -54,7 +54,12 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
 #[no_mangle]
 pub extern "C" fn moturus_runtime_start() {}
 
+// extern "C" fn moturus_foo() {
+//     super::thread::exit_self()
+// }
+
 #[cfg(not(test))]
+#[inline(never)]
 pub fn moturus_start_rt() {
     moturus_runtime_start();
     if crate::fs::init().is_err() {

@@ -1,47 +1,7 @@
+use alloc::boxed::Box;
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
 use moto_sys::*;
-
-pub fn spawn(
-    stack_size: usize,
-    thread_fn: usize,
-    thread_arg: usize,
-) -> Result<SysHandle, ErrorCode> {
-    SysCpu::spawn(
-        SysHandle::SELF,
-        stack_size as u64,
-        thread_fn as u64,
-        thread_arg as u64,
-    )
-}
-
-pub fn exit_self() -> ! {
-    let _ = SysObj::put(SysHandle::SELF);
-    unreachable!()
-}
-
-pub fn join(handle: SysHandle) {
-    // wait() below will properly succeed if it is called while the joinee is still running
-    // and will fail if the joinee has exited. We need to be careful here:
-    // stdlib will panic if this join() returns while the joinee is still running,
-    // but in moturus OS any thread can be woken unconditionally via SysCpu::wake(),
-    // so we must make sure this thread is woken because the joinee has exited,
-    // not otherwise.
-    loop {
-        let mut handles = [handle];
-        match SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None) {
-            Ok(_) => {
-                if handles[0] == handle {
-                    break;
-                } // else => spurious wakeup.
-            }
-            Err(_) => {
-                assert_eq!(handles[0], handle);
-                break;
-            }
-        }
-    }
-}
 
 pub fn sleep(dur: core::time::Duration) {
     // The current thread may have pending wakeups, and so the wait will immediately
@@ -96,4 +56,61 @@ impl Parker {
             let _ = SysCpu::wake(SysHandle::from_u64(self_handle));
         }
     }
+}
+
+pub struct Thread {
+    handle: SysHandle,
+}
+
+unsafe impl Send for Thread {}
+unsafe impl Sync for Thread {}
+
+impl Thread {
+    pub unsafe fn new(stack: usize, p: Box<dyn FnOnce()>) -> Result<Thread, ErrorCode> {
+        let thread_arg = Box::into_raw(Box::new(p)) as *mut _;
+        moto_sys::SysCpu::spawn(
+            SysHandle::SELF,
+            stack as u64,
+            __moto_runtime_thread_fn as usize as u64,
+            thread_arg as usize as u64,
+        )
+        .map(|handle| Thread { handle })
+    }
+
+    pub fn join(self) {
+        // wait() below will properly succeed if it is called while the joinee is still running
+        // and will fail if the joinee has exited. We need to be careful here:
+        // stdlib will panic if this join() returns while the joinee is still running,
+        // but in moturus OS any thread can be woken unconditionally via SysCpu::wake(),
+        // so we must make sure this thread is woken because the joinee has exited,
+        // not otherwise.
+        loop {
+            let mut handles = [self.handle];
+            match SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None) {
+                Ok(_) => {
+                    if handles[0] == self.handle {
+                        break;
+                    } // else => spurious wakeup.
+                }
+                Err(_) => {
+                    assert_eq!(handles[0], self.handle);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+extern "C" fn __moto_runtime_thread_fn(thread_arg: usize) {
+    unsafe {
+        Box::from_raw(
+            core::ptr::with_exposed_provenance::<Box<dyn FnOnce()>>(thread_arg).cast_mut(),
+        )();
+
+        // TODO: run all destructors
+        // super::thread_local_dtor::run_dtors();
+    }
+    super::tls::thread_exiting();
+    let _ = SysObj::put(SysHandle::SELF);
+    unreachable!()
 }
