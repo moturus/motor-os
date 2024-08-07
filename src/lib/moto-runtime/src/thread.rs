@@ -106,11 +106,8 @@ extern "C" fn __moto_runtime_thread_fn(thread_arg: usize) {
         Box::from_raw(
             core::ptr::with_exposed_provenance::<Box<dyn FnOnce()>>(thread_arg).cast_mut(),
         )();
-
-        // TODO: run all destructors
-        // super::thread_local_dtor::run_dtors();
     }
-    super::tls::thread_exiting();
+    super::tls::destroy_tls();
     let _ = SysObj::put(SysHandle::SELF);
     unreachable!()
 }

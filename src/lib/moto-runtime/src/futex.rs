@@ -10,6 +10,11 @@ use moto_sys::ErrorCode;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 
+/// An atomic for use as a futex that is at least 8-bits but may be larger.
+pub type SmallAtomic = AtomicU32;
+/// Must be the underlying type of SmallAtomic
+pub type SmallPrimitive = u32;
+
 // We need to be able to remove from the middle of the list, and Rust's
 // standard List does not have this functionality.
 struct WaitQueueEntry {

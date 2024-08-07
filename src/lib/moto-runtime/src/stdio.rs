@@ -306,7 +306,7 @@ pub(super) fn set_relay(
             }
         }
 
-        super::tls::thread_exiting();
+        super::tls::destroy_tls();
         let _ = moto_sys::SysObj::put(SysHandle::SELF);
     } // relay_thread_fn
 
