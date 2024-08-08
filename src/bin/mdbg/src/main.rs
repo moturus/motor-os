@@ -26,22 +26,6 @@ enum Commands {
 // We should properly handle these errors and display meaningful
 // messages to the user.
 
-// Intercept Ctrl+C ourselves if the OS does not do it for us.
-fn input_listener() {
-    use std::io::Read;
-
-    loop {
-        let mut input = [0_u8; 16];
-        let sz = std::io::stdin().read(&mut input).unwrap();
-        for b in &input[0..sz] {
-            if *b == 3 {
-                println!("\ncaught ^C: exiting.");
-                std::process::exit(0);
-            }
-        }
-    }
-}
-
 const BT_DEPTH: usize = 64;
 
 fn _get_backtrace() -> [u64; BT_DEPTH] {
@@ -262,9 +246,7 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
 }
 
 fn main() -> Result<(), moto_sys::ErrorCode> {
-    std::thread::spawn(move || input_listener());
     let cli = Cli::parse();
-    // println!("{:#?}", cli);
     match cli.cmd {
         Commands::PrintStacks(args) => cmd_print_stacks(args.pid),
         Commands::Attach => todo!(),
