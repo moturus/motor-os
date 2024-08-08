@@ -242,6 +242,7 @@ impl ThreadControlBlock {
         assert!(!self.in_syscall.load(Ordering::Relaxed));
 
         self.set_fs();
+        self.xrstor();
 
         let mut ret: u64;
         let mut maybe_addr: u64;
