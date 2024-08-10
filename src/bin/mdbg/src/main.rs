@@ -67,6 +67,23 @@ fn _get_backtrace() -> [u64; BT_DEPTH] {
     backtrace
 }
 
+fn get_process_name(pid: u64) -> Result<String, moto_sys::ErrorCode> {
+    use moto_sys::stats::ProcessStatsV1;
+
+    let mut ps = [ProcessStatsV1::default(); 1];
+    assert_eq!(1, ProcessStatsV1::list(pid, &mut ps)?);
+    let mut words = ps[0].debug_name().split_whitespace();
+    let filename = if let Some(w) = words.next() {
+        w
+    } else {
+        return Err(moto_sys::ErrorCode::InternalError);
+    }
+    .split('/')
+    .last()
+    .unwrap();
+    Ok(filename.to_owned())
+}
+
 fn get_thread_trace(
     dbg_handle: moto_sys::SysHandle,
     thread_data: &moto_sys::stats::ThreadDataV1,
@@ -125,9 +142,9 @@ fn get_thread_trace(
     backtrace
 }
 
-fn print_stack_trace(dbg_handle: moto_sys::SysHandle, tid: u64) {
+fn print_stack_trace(proc_name: &str, dbg_handle: moto_sys::SysHandle, tid: u64) {
     let thread_data = SysRay::dbg_get_thread_data_v1(dbg_handle, tid).unwrap();
-    println!("print_stack_trace {:?}", thread_data);
+    println!("# {:?}", thread_data);
 
     let backtrace = get_thread_trace(dbg_handle, &thread_data);
 
@@ -135,11 +152,16 @@ fn print_stack_trace(dbg_handle: moto_sys::SysHandle, tid: u64) {
     let mut writer = String::with_capacity(4096);
     write!(
         &mut writer,
-        "Thread {}: {:?}({}:{}):",
-        thread_data.tid, thread_data.status, thread_data.syscall_num, thread_data.syscall_op
+        "# Thread {}: '{}' {:?}({}:{}):",
+        thread_data.tid,
+        thread_data.thread_name(),
+        thread_data.status,
+        thread_data.syscall_num,
+        thread_data.syscall_op
     )
     .ok();
-    write!(&mut writer, " \\\n  0x{:x}", thread_data.ip).ok();
+    write!(&mut writer, "\naddr2line -e {proc_name} \\").ok();
+    write!(&mut writer, " \n  0x{:x}", thread_data.ip).ok();
     for addr in backtrace {
         if addr == 0 {
             break;
@@ -157,18 +179,27 @@ fn print_stack_trace(dbg_handle: moto_sys::SysHandle, tid: u64) {
 }
 
 fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
+    let proc_name = get_process_name(pid)?;
+
     let dbg_handle = match SysRay::dbg_attach(pid) {
         Ok(handle) => handle,
-        Err(err) => match err {
-            moto_sys::ErrorCode::NotFound => {
-                eprintln!("Process with pid {pid} not found.");
-                std::process::exit(1)
+        Err(err) => {
+            match err {
+                moto_sys::ErrorCode::NotFound => {
+                    eprintln!("Process with pid {pid} not found.");
+                    std::process::exit(1)
+                }
+                moto_sys::ErrorCode::NotAllowed => {
+                    eprintln!("Debugging process {pid} '{proc_name}' is not allowed.");
+                    eprintln!("In general, it is not allowed to debug system processes, ancestors, and self.");
+                    std::process::exit(1)
+                }
+                _ => {
+                    eprintln!("dbg_attach({pid}) failed with {:?}", err);
+                    std::process::exit(1)
+                }
             }
-            _ => {
-                eprintln!("dbg_attach({pid}) failed with {:?}", err);
-                std::process::exit(1)
-            }
-        },
+        }
     };
 
     // This flags the debuggee as paused, and all debuggee threads
@@ -190,7 +221,7 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
 
         for idx in 0..sz {
             all_tids.push_back(tids[idx]);
-            print_stack_trace(dbg_handle, tids[idx]);
+            print_stack_trace(&proc_name, dbg_handle, tids[idx]);
         }
         start_tid = tids[sz - 1] + 1;
     }
