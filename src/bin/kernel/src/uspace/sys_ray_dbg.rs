@@ -208,13 +208,20 @@ fn sys_dbg_get_thread_data(
     }
 
     let dbg_handle = SysHandle::from_u64(args.args[0]);
-    let session = match get_session(&debugger, dbg_handle) {
-        Ok(s) => s,
-        Err(err) => return ResultBuilder::result(err),
+    let debuggee = {
+        if dbg_handle == SysHandle::SELF {
+            debugger.clone()
+        } else {
+            let session = match get_session(&debugger, dbg_handle) {
+                Ok(s) => s,
+                Err(err) => return ResultBuilder::result(err),
+            };
+            session.debuggee.clone()
+        }
     };
 
     let tid = args.args[1];
-    if let Some(thread_data) = session.debuggee.get_thread_data(tid) {
+    if let Some(thread_data) = debuggee.get_thread_data(tid) {
         unsafe {
             let bytes = core::slice::from_raw_parts(
                 &thread_data as *const _ as usize as *const u8,

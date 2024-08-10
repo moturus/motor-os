@@ -62,6 +62,7 @@ pub extern "C" fn moturus_runtime_start() {}
 #[inline(never)]
 pub fn moturus_start_rt() {
     moturus_runtime_start();
+    let _ = moto_sys::set_current_thread_name("main");
     if crate::fs::init().is_err() {
         crate::util::moturus_log!("Failed to initialize FS. Exiting.");
         exit(-1);

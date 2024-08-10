@@ -1190,9 +1190,12 @@ impl Thread {
             user_tcb.kernel_version = 1;
             user_tcb.user_version = 0;
             user_tcb.self_handle = self.self_handle.as_u64();
+            user_tcb.self_tid = self.tid.as_u64();
             user_tcb.tls = 0;
             user_tcb.current_cpu.store(0, Ordering::Relaxed);
-            user_tcb.reserved0 = 0;
+            user_tcb.reserved0 = [0; 3];
+            user_tcb.name_len = 0;
+            user_tcb.name_bytes = [0; 32];
         }
     }
 
@@ -1613,6 +1616,25 @@ impl Thread {
                     thread_data.status = moto_sys::stats::ThreadStatus::Dead
                 }
             }
+        }
+
+        let name = {
+            if self.user_tcb_kernel_addr == 0 {
+                ""
+            } else {
+                let utcb = unsafe {
+                    (self.user_tcb_kernel_addr as usize as *mut UserThreadControlBlock)
+                        .as_ref()
+                        .unwrap_unchecked()
+                };
+                utcb.get_thread_name()
+            }
+        };
+        let name_bytes = name.as_bytes();
+
+        thread_data.name_len = name_bytes.len() as u8;
+        if name_bytes.len() > 0 {
+            thread_data.name_bytes[0..name_bytes.len()].copy_from_slice(name_bytes);
         }
 
         thread_data

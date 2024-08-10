@@ -88,9 +88,12 @@ pub struct UserThreadControlBlock {
     pub kernel_version: u32, // The kernel tells the user the version of the struct.
     pub user_version: u32,   // The userspace tells the kernel the version of the struct.
     pub self_handle: u64,    // Used to wake this thread.
+    pub self_tid: u64,       // This thread's tid.
     pub tls: usize,          // TLS. For userspace use.
     pub current_cpu: core::sync::atomic::AtomicU32,
-    pub reserved0: u32,
+    pub reserved0: [u8; 3],
+    pub name_len: u8,
+    pub name_bytes: [u8; crate::MAX_THREAD_NAME_LEN],
 }
 
 impl UserThreadControlBlock {
@@ -114,4 +117,40 @@ impl UserThreadControlBlock {
     pub fn this_thread_handle() -> crate::SysHandle {
         Self::get().self_handle.into()
     }
+
+    #[cfg(feature = "userspace")]
+    pub fn this_thread_tid() -> u64 {
+        Self::get().self_tid
+    }
+
+    pub fn get_thread_name(&self) -> &str {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let name_len = self.name_len as usize;
+        if name_len > crate::MAX_THREAD_NAME_LEN {
+            return "";
+        }
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
+        core::str::from_utf8(&self.name_bytes[0..name_len]).unwrap_or("")
+    }
+}
+
+#[cfg(feature = "userspace")]
+pub fn set_current_thread_name(name: &str) -> Result<(), crate::ErrorCode> {
+    let bytes = name.as_bytes();
+    if bytes.len() > crate::MAX_THREAD_NAME_LEN {
+        return Err(crate::ErrorCode::InvalidArgument);
+    }
+
+    let utcb = UserThreadControlBlock::get_mut();
+
+    // Carefully order writes because reads can happen concurrently.
+    utcb.name_len = 0;
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    utcb.name_bytes[0..bytes.len()].copy_from_slice(bytes);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
+    utcb.name_len = bytes.len() as u8;
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    Ok(())
 }

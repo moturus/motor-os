@@ -24,6 +24,10 @@ pub mod time;
 extern crate alloc;
 use alloc::string::String;
 
+/// The maximum length of a thread name. Limited because it is
+/// embedded in various structs like UserThreadControlBlock and ThreadDataV1.
+pub const MAX_THREAD_NAME_LEN: usize = 32;
+
 // Kernel/usperspace shared memory.
 mod shared_mem;
 pub use shared_mem::*;
