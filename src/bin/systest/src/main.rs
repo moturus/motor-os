@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+use moto_sys::SysHandle;
+
 fn test_syscall() {
     const ITERS: usize = 1_000_000;
     let start = std::time::Instant::now();
@@ -478,6 +480,34 @@ fn test_caps() {
     println!("test_caps() PASS");
 }
 
+fn test_thread_names() {
+    let handle = std::thread::current();
+    assert_eq!(handle.name(), Some("main"));
+
+    let t_data = moto_sys::SysRay::dbg_get_thread_data_v1(
+        SysHandle::SELF,
+        moto_sys::UserThreadControlBlock::this_thread_tid(),
+    )
+    .unwrap();
+    assert_eq!(t_data.thread_name(), "main");
+
+    let builder = std::thread::Builder::new().name("foo".into());
+
+    builder
+        .spawn(|| {
+            assert_eq!(std::thread::current().name(), Some("foo"));
+            let t_data = moto_sys::SysRay::dbg_get_thread_data_v1(
+                SysHandle::SELF,
+                moto_sys::UserThreadControlBlock::this_thread_tid(),
+            )
+            .unwrap();
+            assert_eq!(t_data.thread_name(), "foo");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 fn input_listener() {
     loop {
         let mut input = [0_u8; 16];
@@ -504,6 +534,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    test_thread_names();
     test_cpus();
     tls::test_tls();
     test_caps();
