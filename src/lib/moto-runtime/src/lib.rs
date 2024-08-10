@@ -1,6 +1,7 @@
 #![no_std]
 #![allow(internal_features)]
 #![feature(core_intrinsics)]
+#![feature(exposed_provenance)]
 #![feature(linkage)]
 #![feature(waker_getters)]
 #![allow(elided_lifetimes_in_paths)]
@@ -21,7 +22,7 @@ pub mod process;
 pub mod std_rt;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod stdio;
-#[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
+#[cfg(feature = "rustc-dep-of-std")]
 pub mod thread;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod time;

@@ -70,10 +70,10 @@ impl Segment for CS {
         unsafe {
             asm!(
                 "push {sel}",
-                "lea {tmp}, [1f + rip]",
+                "lea {tmp}, [2f + rip]",
                 "push {tmp}",
                 "retfq",
-                "1:",
+                "2:",
                 sel = in(reg) u64::from(sel.0),
                 tmp = lateout(reg) _,
                 options(preserves_flags),

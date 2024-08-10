@@ -181,7 +181,16 @@ pub struct ThreadDataV1 {
     pub syscall_num: u8,
     pub syscall_op: u8,
     pub paused_debuggee: u8,
-    pub _pad: [u8; 3],
+    pub name_len: u8,
+    pub _pad: [u8; 2],
     pub ip: u64,  // Instruction pointer.
     pub rbp: u64, // The value of the RBP register.
+    pub name_bytes: [u8; crate::MAX_THREAD_NAME_LEN],
+}
+
+impl ThreadDataV1 {
+    pub fn thread_name(&self) -> &str {
+        assert!(self.name_len as usize <= crate::MAX_THREAD_NAME_LEN);
+        core::str::from_utf8(&self.name_bytes[0..(self.name_len as usize)]).unwrap()
+    }
 }

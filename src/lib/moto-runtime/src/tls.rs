@@ -50,7 +50,7 @@ pub fn get(key: Key) -> *mut u8 {
     return core::ptr::null_mut();
 }
 
-pub fn thread_exiting() {
+pub fn destroy_tls() {
     let tcb = moto_sys::UserThreadControlBlock::get_mut();
     if tcb.tls == 0 {
         return;
