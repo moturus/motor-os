@@ -540,7 +540,6 @@ extern "C" fn syscall_handler_rust(
     let result = do_syscall(thread, &mut args);
     thread.process_stats.stop_cpu_usage_kernel();
     thread.process_stats.start_cpu_usage_uspace();
-    tcb.xrstor();
 
     tcb.validate_gs();
 
@@ -549,6 +548,7 @@ extern "C" fn syscall_handler_rust(
         .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok());
     tcb.set_fs();
+    tcb.xrstor();
 
     let res: u64 = result.result;
     unsafe {

@@ -961,7 +961,7 @@ impl Thread {
         if utcb.guard == Self::USER_TCB_GUARD {
             Ok(())
         } else {
-            log::debug!(
+            log::info!(
                 "UTCB guard check failed: {}:{}",
                 self.owner().pid().as_u64(),
                 self.tid.as_u64()

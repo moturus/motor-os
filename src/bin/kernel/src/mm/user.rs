@@ -39,7 +39,7 @@ pub struct UserAddressSpace {
     kernel_mem_stats: Arc<MemStats>,
 
     kernel_stacks: super::cache::SegmentCache,
-    user_stacks: super::cache::SegmentCache,
+    // user_stacks: super::cache::SegmentCache,
 }
 
 unsafe impl Send for UserAddressSpace {}
@@ -52,9 +52,9 @@ impl Drop for UserAddressSpace {
         // We manually clear caches instead of relying on drops
         // to make sure self.inner is still available, and to
         // validate usage stats.
-        while let Some(segment) = self.user_stacks.pop_any_final() {
-            self.do_drop_user_stack(segment);
-        }
+        // while let Some(segment) = self.user_stacks.pop_any_final() {
+        //     self.do_drop_user_stack(segment);
+        // }
         while let Some(segment) = self.kernel_stacks.pop_any_final() {
             self.do_drop_kernel_stack(segment);
         }
@@ -80,7 +80,31 @@ impl UserAddressSpace {
             kernel_mem_stats: Arc::new(MemStats::new_kernel()),
 
             kernel_stacks: super::cache::SegmentCache::new(),
-            user_stacks: super::cache::SegmentCache::new(),
+            //
+            // NOTE: commit c090f671a26b193dd6b1c4d36ab5669539d88d7a
+            // added several fields to userspace TCB, and httpd started
+            // to panic via __stack_chk_fail() after spawning ~ 50 threads.
+            // The panic was consistently triggered in some "C" curve encryption
+            // code in ring crate.
+            //
+            // Before this change the error was not there - httpd ran for
+            // several days without any issues.
+            //
+            // Tweaks here and there made it so that the error became less
+            // frequent, but the only change that restored reliability
+            // is this one, the removal of user stack caching.
+            // Increasing stack size to 4M didn't help.
+            //
+            // Why user stack caching change is relevant?
+            // - option 1: it is buggy and the same stack is occasionally
+            //   shared between threads;
+            // - option 2: the ring code is buggy and on-stack variables
+            //   must be implicitly initialized to zero: without stack caching
+            //   user stacks are zero-initialized; with stack caching
+            //   reused stacks contain old data (from the same process).
+            //
+            // TODO: re-enable user stack caching.
+            // user_stacks: super::cache::SegmentCache::new(),
         });
 
         // Safe because we are the only users.
@@ -293,9 +317,9 @@ impl UserAddressSpace {
     pub fn alloc_user_stack(&self, num_pages: u64) -> Result<UserStack, ErrorCode> {
         let num_pages = (num_pages + 2).next_power_of_two();
 
-        if let Some(segment) = self.user_stacks.pop(num_pages as usize) {
-            return Ok(UserStack { segment });
-        }
+        // if let Some(segment) = self.user_stacks.pop(num_pages as usize) {
+        //     return Ok(UserStack { segment });
+        // }
 
         // When dropping, we count the full segment, with guard pages, so when adding,
         // we need to do the same.
@@ -354,16 +378,16 @@ impl UserAddressSpace {
 
     pub fn drop_stacks(&self, user_stack: &UserStack, kernel_stack: &Option<super::MemorySegment>) {
         let user_segment = user_stack.segment;
-        if self
-            .user_stacks
-            .push(
-                user_segment,
-                (user_segment.size as usize) >> PAGE_SIZE_SMALL_LOG2,
-            )
-            .is_err()
-        {
-            self.do_drop_user_stack(user_segment);
-        }
+        // if self
+        //     .user_stacks
+        //     .push(
+        //         user_segment,
+        //         (user_segment.size as usize) >> PAGE_SIZE_SMALL_LOG2,
+        //     )
+        //     .is_err()
+        // {
+        self.do_drop_user_stack(user_segment);
+        // }
 
         if let Some(kernel_stack) = kernel_stack {
             let kernel_segment = kernel_stack.clone();
