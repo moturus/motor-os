@@ -23,7 +23,7 @@ pub fn set(key: Key, value: *mut u8) {
         if tcb.tls == 0 {
             let boxed = alloc::boxed::Box::new(PerCpuMap::new());
             let ptr = alloc::boxed::Box::into_raw(boxed);
-            tcb.tls = ptr as usize;
+            tcb.tls = ptr as usize as u64;
             ptr.as_mut().unwrap_unchecked()
         } else {
             let ptr = tcb.tls as *mut PerCpuMap;
@@ -41,7 +41,7 @@ pub fn get(key: Key) -> *mut u8 {
     }
 
     unsafe {
-        let ptr = tcb.tls as *const PerCpuMap;
+        let ptr = tcb.tls as usize as *const PerCpuMap;
         let map = ptr.as_ref().unwrap_unchecked();
         if let Some(value) = map.get(&key) {
             return *value as *mut u8;
