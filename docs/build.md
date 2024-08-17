@@ -31,8 +31,8 @@ $ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```
-$ rustup default nightly-2024-08-05
-$ rustup component add rust-src --toolchain nightly-2024-08-05-x86_64-unknown-linux-gnu
+$ rustup default nightly-2024-08-15
+$ rustup component add rust-src --toolchain nightly-2024-08-15-x86_64-unknown-linux-gnu
 $ cargo install --force cargo-make
 ```
 
