@@ -506,6 +506,7 @@ fn test_thread_names() {
         .unwrap()
         .join()
         .unwrap();
+    println!("test_thread_names() PASS");
 }
 
 fn input_listener() {
