@@ -506,6 +506,25 @@ fn test_thread_names() {
         .unwrap()
         .join()
         .unwrap();
+
+    const LONG_NAME: &str = "foo__0123456789012345678901234567890123456789";
+    let builder = std::thread::Builder::new().name(LONG_NAME.into());
+
+    builder
+        .spawn(|| {
+            assert_eq!(std::thread::current().name(), Some(LONG_NAME));
+            let t_data = moto_sys::SysRay::dbg_get_thread_data_v1(
+                SysHandle::SELF,
+                moto_sys::UserThreadControlBlock::this_thread_tid(),
+            )
+            .unwrap();
+            // Names that are too long are ignored at the OS level.
+            assert_eq!(t_data.thread_name(), "");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+
     println!("test_thread_names() PASS");
 }
 
