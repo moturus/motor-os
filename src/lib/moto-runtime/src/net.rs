@@ -21,6 +21,7 @@ use super::util::moturus_log;
 use crate::rt_api;
 use crate::rt_api::net::IO_SUBCHANNELS;
 use crate::util::CachePadded;
+use _core::ops::DerefMut;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -100,6 +101,7 @@ struct NetChannel {
     send_waiters: crate::util::SpinLock<VecDeque<u64>>,
 
     // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
+    // If the handle is SysHandle::NONE, nobody is waiting because we are working asynchronously.
     resp_waiters: crate::util::SpinLock<BTreeMap<u64, (SysHandle, Option<io_channel::Msg>)>>,
 
     io_thread_join_handle: AtomicU64,
@@ -206,9 +208,18 @@ impl NetChannel {
                 let mut resp_waiters = self.resp_waiters.lock(line!());
                 if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
                     *resp = Some(msg);
-                    Some(*handle)
+                    if SysHandle::NONE != *handle {
+                        Some(*handle)
+                    } else {
+                        None
+                    }
                 } else {
-                    panic!("unexpected msg {:#?}", msg);
+                    match msg.command {
+                        // The listener was dropped, and sys-io now sends cancelled accepts back.
+                        super::rt_api::net::CMD_TCP_LISTENER_ACCEPT => {}
+                        _ => panic!("unexpected msg {:#?}", msg),
+                    }
+                    None
                 }
             };
 
@@ -382,6 +393,15 @@ impl NetChannel {
         NET.lock(line!()).release_channel(self.clone());
     }
 
+    fn post_msg(self: &Arc<Self>, msg: io_channel::Msg) -> Result<(), ErrorCode> {
+        if self.send_queue.push(msg).is_ok() {
+            self.maybe_wake_io_thread();
+            Ok(())
+        } else {
+            Err(ErrorCode::NotReady)
+        }
+    }
+
     fn send_msg(self: &Arc<Self>, msg: io_channel::Msg) {
         loop {
             if self.send_queue.push(msg).is_ok() {
@@ -397,14 +417,29 @@ impl NetChannel {
         }
     }
 
-    fn wait_for_resp(self: &Arc<Self>, resp_id: u64) -> io_channel::Msg {
+    fn wait_for_resp(self: &Arc<Self>, req_id: u64) -> io_channel::Msg {
         loop {
             {
                 let mut recv_waiters = self.resp_waiters.lock(line!());
-                if let Some(resp) = recv_waiters.get_mut(&resp_id).unwrap().1.take() {
-                    recv_waiters.remove(&resp_id);
+                let (wait_handle, response) = recv_waiters.get_mut(&req_id).unwrap();
+                if response.is_some() {
+                    let resp = response.take().unwrap();
+                    let _ = recv_waiters.remove(&req_id).unwrap();
                     return resp;
                 }
+
+                if *wait_handle == SysHandle::NONE {
+                    // This wait has been kicked.
+                    let mut resp = io_channel::Msg::new();
+                    resp.id = req_id;
+                    resp.status = ErrorCode::NotReady.into();
+                    return resp;
+                }
+
+                debug_assert_eq!(
+                    *wait_handle,
+                    moto_sys::UserThreadControlBlock::get().self_handle.into()
+                );
             }
 
             // No need to wake the IO thread, as it will be woken by sys-io.
@@ -412,16 +447,26 @@ impl NetChannel {
         }
     }
 
-    fn cancel_resp(self: &Arc<Self>, resp_id: u64, resp: io_channel::Msg) {
+    fn cancel_waiter(self: &Arc<Self>, req_id: u64) -> Result<(), ErrorCode> {
         let wait_handle = {
             let mut recv_waiters = self.resp_waiters.lock(line!());
-            let (handle, resp_slot) = recv_waiters.get_mut(&resp_id).unwrap();
-            *resp_slot = Some(resp);
-            *handle
+            if let Some((handle, resp_slot)) = recv_waiters.get_mut(&req_id) {
+                assert_ne!(*handle, SysHandle::NONE);
+                if resp_slot.is_some() {
+                    return Err(ErrorCode::AlreadyInUse);
+                }
+                let wait_handle = *handle;
+                *handle = SysHandle::NONE;
+                wait_handle
+            } else {
+                // A response to the request has been delivered asynchronously.
+                return Err(ErrorCode::NotFound);
+            }
         };
-        if wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle {
-            let _ = moto_sys::SysCpu::wake(wait_handle);
-        }
+
+        // We did cancel the request; need to wake the waiter.
+        let _ = moto_sys::SysCpu::wake(wait_handle);
+        Ok(())
     }
 
     // Send message and wait for response.
@@ -1181,12 +1226,30 @@ impl core::fmt::Debug for TcpStream {
     }
 }
 
+// Represents a CMD_TCP_LISTENER_ACCEPT msg added to the send queue.
+// We need a separate SentAccept object to keep track of channel/subchannel.
+struct SentAccept {
+    req_id: u64,
+    channel: Arc<NetChannel>,
+    subchannel_idx: usize,
+}
+
+impl SentAccept {
+    fn release(self) {
+        let _ = self.channel.resp_waiters.lock(line!()).remove(&self.req_id);
+        self.channel.release_subchannel(self.subchannel_idx);
+        NET.lock(line!()).release_channel(self.channel);
+    }
+}
+
 struct TcpListenerImpl {
     socket_addr: SocketAddr,
     channel: Arc<NetChannel>,
     handle: u64,
     nonblocking: AtomicBool,
-    pending_accepts: crate::util::SpinLock<BTreeMap<u64, Arc<NetChannel>>>,
+
+    blocking_accepts: crate::util::SpinLock<BTreeMap<u64, SentAccept>>, // req_id => SentAccept.
+    nonblocking_accepts: crate::util::SpinLock<BTreeMap<u64, SentAccept>>, // req_id => SentAccept.
 }
 
 impl Drop for TcpListenerImpl {
@@ -1195,7 +1258,13 @@ impl Drop for TcpListenerImpl {
         msg.command = rt_api::net::CMD_TCP_LISTENER_DROP;
         msg.handle = self.handle;
         self.channel.send_msg(msg);
-        self.channel.tcp_listener_dropped(self.handle)
+        self.channel.tcp_listener_dropped(self.handle);
+
+        assert!(self.blocking_accepts.lock(line!()).is_empty());
+
+        while let Some((_, sent_accept)) = self.nonblocking_accepts.lock(line!()).pop_first() {
+            sent_accept.release();
+        }
     }
 }
 
@@ -1218,7 +1287,8 @@ impl TcpListener {
             channel: channel.clone(),
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
-            pending_accepts: crate::util::SpinLock::new(BTreeMap::new()),
+            blocking_accepts: crate::util::SpinLock::new(BTreeMap::new()),
+            nonblocking_accepts: crate::util::SpinLock::new(BTreeMap::new()),
         });
         channel.tcp_listener_created(&inner);
 
@@ -1237,14 +1307,12 @@ impl TcpListener {
         Ok(self.inner.socket_addr)
     }
 
-    pub fn accept(&self) -> Result<(TcpStream, SocketAddr), ErrorCode> {
-        // Because a listener can spawn thousands, millions of sockets
-        // (think a long-running web server), we cannot use the listener's
-        // channel for incoming connections.
+    fn accept_blocking(&self) -> Result<(TcpStream, SocketAddr), ErrorCode> {
+        // Because a listener can spawn thousands, millions of sockets (think a long-running
+        // web server), we cannot use the listener's channel for incoming connections:
+        //  each accept() allocates its own subchannel.
 
-        if self.inner.nonblocking.load(Ordering::Relaxed) {
-            todo!()
-        }
+        // Note: we only allow blocking=>nonlocking transitions.
         let channel = NET.lock(line!()).reserve_channel();
         let subchannel_idx = channel.reserve_subchannel();
         let subchannel_mask = rt_api::net::io_subchannel_mask(subchannel_idx);
@@ -1264,19 +1332,33 @@ impl TcpListener {
             );
 
             req.id = req_id;
-            self.inner
-                .pending_accepts
-                .lock(line!())
-                .insert(req_id, channel.clone());
+            self.inner.blocking_accepts.lock(line!()).insert(
+                req_id,
+                SentAccept {
+                    req_id,
+                    channel: channel.clone(),
+                    subchannel_idx,
+                },
+            );
+
             channel.send_msg(req);
             channel.wait_for_resp(req_id)
         };
-        self.inner.pending_accepts.lock(line!()).remove(&req.id);
-        // let resp = channel.send_receive(req);
+
+        // The pending accept may have been removed in TcpListener::set_nonblocking(),
+        // in which case we don't release resources.
+        let should_release = self
+            .inner
+            .blocking_accepts
+            .lock(line!())
+            .remove(&req.id)
+            .is_some();
 
         if resp.status().is_err() {
-            channel.release_subchannel(subchannel_idx);
-            NET.lock(line!()).release_channel(channel);
+            if should_release {
+                channel.release_subchannel(subchannel_idx);
+                NET.lock(line!()).release_channel(channel);
+            }
             return Err(resp.status());
         }
 
@@ -1317,6 +1399,150 @@ impl TcpListener {
         Ok((TcpStream { inner }, remote_addr))
     }
 
+    fn post_accept(&self, mut accepts_locked: crate::util::LockGuard<BTreeMap<u64, SentAccept>>) {
+        // Because a listener can spawn thousands, millions of sockets (think a long-running
+        // web server), we cannot use the listener's channel for incoming connections:
+        //  each accept() allocates its own subchannel.
+
+        let channel = NET.lock(line!()).reserve_channel();
+        let subchannel_idx = channel.reserve_subchannel();
+        let subchannel_mask = rt_api::net::io_subchannel_mask(subchannel_idx);
+
+        let mut req = rt_api::net::accept_tcp_listener_request(self.inner.handle, subchannel_mask);
+        let req_id = channel.next_msg_id.fetch_add(1, Ordering::Relaxed);
+
+        // Add to waiters before sending the message, otherwise the response may
+        // arive too quickly and the receiving code will panic due to a missing waiter.
+        channel
+            .resp_waiters
+            .lock(line!())
+            .insert(req_id, (SysHandle::NONE, None));
+
+        req.id = req_id;
+        if let Err(err) = channel.post_msg(req) {
+            assert_eq!(err, ErrorCode::NotReady);
+
+            // It is safe to release the subchannel now because the request was not sent
+            // and so no response could have messed the maps below.
+            channel.release_subchannel(subchannel_idx);
+
+            assert!(channel.resp_waiters.lock(line!()).remove(&req_id).is_some());
+            NET.lock(line!()).release_channel(channel);
+            return;
+        }
+
+        accepts_locked.insert(
+            req_id,
+            SentAccept {
+                req_id,
+                channel: channel.clone(),
+                subchannel_idx,
+            },
+        );
+    }
+
+    fn poll_accept(&self) -> Result<(SentAccept, io_channel::Msg), ErrorCode> {
+        let mut accepts_locked = self.inner.nonblocking_accepts.lock(line!());
+
+        if accepts_locked.is_empty() {
+            self.post_accept(accepts_locked);
+            return Err(ErrorCode::NotReady);
+        }
+
+        let mut found: Option<(u64, io_channel::Msg)> = None;
+
+        for (id, accept) in accepts_locked.deref_mut() {
+            if accept
+                .channel
+                .resp_waiters
+                .lock(line!())
+                .get(&accept.req_id)
+                .unwrap()
+                .1
+                .is_some()
+            {
+                let (_, resp) = accept
+                    .channel
+                    .resp_waiters
+                    .lock(line!())
+                    .remove(&accept.req_id)
+                    .unwrap();
+                found = Some((*id, resp.unwrap()));
+                break;
+            }
+        }
+
+        if let Some((id, resp)) = found {
+            let accept = accepts_locked.remove(&id).unwrap();
+
+            if accepts_locked.len() < moto_sys::num_cpus() as usize {
+                self.post_accept(accepts_locked);
+            }
+            return Ok((accept, resp));
+        }
+        Err(ErrorCode::NotReady)
+    }
+
+    fn accept_nonblocking(&self) -> Result<(TcpStream, SocketAddr), ErrorCode> {
+        let (accept, resp) = self.poll_accept()?;
+        let SentAccept {
+            req_id: _,
+            channel,
+            subchannel_idx,
+        } = accept;
+
+        if resp.status().is_err() {
+            channel.release_subchannel(subchannel_idx);
+            NET.lock(line!()).release_channel(channel);
+            return Err(resp.status());
+        }
+
+        let remote_addr = rt_api::net::get_socket_addr(&resp.payload).unwrap();
+
+        let subchannel_mask = rt_api::net::io_subchannel_mask(subchannel_idx);
+        let inner = Arc::new(TcpStreamImpl {
+            local_addr: self.inner.socket_addr,
+            remote_addr: remote_addr.clone(),
+            handle: resp.handle,
+            channel: channel.clone(),
+            recv_queue: crate::util::SpinLock::new(VecDeque::new()),
+            next_rx_seq: AtomicU64::new(1),
+            rx_buf: crate::util::SpinLock::new(None),
+            rx_waiter: crate::util::SpinLock::new(None),
+            tcp_state: AtomicU32::new(rt_api::net::TcpState::ReadWrite.into()),
+            rx_done: AtomicBool::new(false),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_idx,
+            subchannel_mask,
+            stats_rx_bytes: AtomicU64::new(0),
+            stats_tx_bytes: AtomicU64::new(0),
+        });
+
+        channel.tcp_stream_created(&inner);
+        inner.ack_rx();
+
+        #[cfg(debug_assertions)]
+        moturus_log!(
+            "{}:{} new incoming TcpStream {:?} <- {:?} mask: 0x{:x}",
+            file!(),
+            line!(),
+            inner.local_addr,
+            inner.remote_addr,
+            inner.subchannel_mask
+        );
+
+        Ok((TcpStream { inner }, remote_addr))
+    }
+
+    pub fn accept(&self) -> Result<(TcpStream, SocketAddr), ErrorCode> {
+        if self.inner.nonblocking.load(Ordering::Relaxed) {
+            self.accept_nonblocking()
+        } else {
+            self.accept_blocking()
+        }
+    }
+
     pub fn duplicate(&self) -> Result<TcpListener, ErrorCode> {
         Ok(TcpListener {
             inner: self.inner.clone(),
@@ -1345,17 +1571,36 @@ impl TcpListener {
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), ErrorCode> {
-        self.inner.nonblocking.store(nonblocking, Ordering::Relaxed);
-        if nonblocking {
-            // Cancel pending accepts.
-            let mut cancel_msg = io_channel::Msg::new();
-            cancel_msg.status = ErrorCode::NotReady.into();
+        // For simplicity, we currently allow only blocking => nonblocking changes,
+        // i.e. a single change over the lifetime of a TcpListener. Otherwise
+        // we need to correctly handle multiple concurrent flips back and forth,
+        // which adds a lot of complexity for unclear gain.
 
-            while let Some((id, channel)) = self.inner.pending_accepts.lock(line!()).pop_first() {
-                channel.cancel_resp(id, cancel_msg);
-                todo!("there is an accept request in sys-io that also needs cancelling");
+        if !nonblocking {
+            if self.inner.nonblocking.load(Ordering::Relaxed) {
+                return Err(ErrorCode::NotAllowed);
+            }
+            return Ok(());
+        }
+
+        // Lock posted_accept to protect against concurrent accept() calls.
+        let mut accepts_locked = self.inner.nonblocking_accepts.lock(line!());
+
+        if self.inner.nonblocking.swap(true, Ordering::SeqCst) {
+            // Already nonblocking.
+            return Ok(());
+        }
+
+        // We are moving blocking => nonblocking. Need to kick blocking accepts, if any.
+        while let Some((req_id, sent_accept)) =
+            self.inner.blocking_accepts.lock(line!()).pop_first()
+        {
+            assert_eq!(req_id, sent_accept.req_id);
+            if sent_accept.channel.cancel_waiter(req_id).is_ok() {
+                accepts_locked.insert(req_id, sent_accept);
             }
         }
+
         Ok(())
     }
 }

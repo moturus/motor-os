@@ -535,7 +535,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
-    // net_async::test();
+    net_async::test();
 
     test_thread_names();
     test_cpus();
