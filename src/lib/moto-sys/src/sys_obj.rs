@@ -23,6 +23,7 @@ impl SysObj {
     // URLS:
     //     - "address_space:$URL"
     //                  Creates a new address space that can be identified by the $URL;
+    //     - "local_event": an in-process object to signal events to waiters
     //     - "capabilities"
     //     - "irq_wait:$NUM"
     //     - "process:entry_point=$NUM;capabilities=$NUM"
@@ -42,6 +43,26 @@ impl SysObj {
         let result = do_syscall(
             pack_nr_ver(SYS_OBJ, Self::OP_CREATE, flags, 0),
             parent.as_u64(),
+            bytes.as_ptr() as usize as u64,
+            bytes.len() as u64,
+            0,
+            0,
+            0,
+        );
+        if result.is_ok() {
+            Ok(SysHandle::from(result.data[0]))
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn create_local_event() -> Result<SysHandle, ErrorCode> {
+        let bytes = b"local_event";
+
+        let result = do_syscall(
+            pack_nr_ver(SYS_OBJ, Self::OP_CREATE, 0, 0),
+            SysHandle::SELF.as_u64(),
             bytes.as_ptr() as usize as u64,
             bytes.len() as u64,
             0,

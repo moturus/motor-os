@@ -290,6 +290,10 @@ pub(super) fn do_wake(
         return Err(ErrorCode::BadHandle);
     }
 
+    // TODO: the whole WaitObject/SysObject/Shared/etc. thing has become too complicated,
+    // and needs to be redesigned/simplified, as evidenced by the search for the wakee below.
+
+    // First, try to interprent the wake target as a shared object.
     if let Some(obj) = waker.owner().get_object(&wake_target) {
         if super::shared::try_wake(&obj.sys_object, wakee_thread, this_cpu).is_ok() {
             return Ok(());
@@ -303,19 +307,28 @@ pub(super) fn do_wake(
         return Err(ErrorCode::BadHandle);
     }
 
+    // Then try to interprent the wake target as a thread.
     if let Some(thread) =
         super::sysobject::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
     {
         thread.post_wake(this_cpu);
-        Ok(())
-    } else {
-        log::debug!(
-            "{}: wakee 0x{:x} not found",
-            waker.debug_name(),
-            wake_target.as_u64()
-        );
-        Err(ErrorCode::BadHandle)
+        return Ok(());
     }
+
+    // Lastly, try to interprent the wake target as a local event.
+    if let Some(obj) = waker.owner().get_object(&wake_target) {
+        if obj.sys_object.url() == "local_event" {
+            obj.sys_object.wake(false);
+            return Ok(());
+        }
+    }
+
+    log::debug!(
+        "{}: wakee 0x{:x} not found",
+        waker.debug_name(),
+        wake_target.as_u64()
+    );
+    Err(ErrorCode::BadHandle)
 }
 
 fn sys_wake_impl(waker: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {

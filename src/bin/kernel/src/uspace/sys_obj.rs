@@ -25,6 +25,15 @@ fn get_url(
     Ok(url.to_owned())
 }
 
+fn create_local_event(thread: &super::process::Thread) -> Result<SysHandle, ErrorCode> {
+    let obj = SysObject::new_owned(
+        Arc::new(moto_sys::url_decode("local_event")),
+        thread.owner(),
+        alloc::sync::Weak::new(),
+    );
+    Ok(thread.owner().add_object(obj))
+}
+
 fn sys_handle_create(
     thread: &super::process::Thread,
     parent: SysHandle,
@@ -352,6 +361,20 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                     return ResultBuilder::invalid_argument();
                 }
             };
+
+            if url == "local_event" {
+                if parent != SysHandle::SELF {
+                    return ResultBuilder::invalid_argument();
+                }
+                if args.args[3..] != [0; 3] {
+                    return ResultBuilder::invalid_argument();
+                }
+
+                return match create_local_event(thread) {
+                    Ok(handle) => ResultBuilder::ok_1(handle.as_u64()),
+                    Err(err) => ResultBuilder::result(err),
+                };
+            }
 
             if url == "ipc_pair" {
                 match super::shared::create_ipc_pair(

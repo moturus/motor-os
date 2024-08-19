@@ -1,4 +1,5 @@
 // mod channel_test;
+mod event;
 mod mpmc;
 mod net_async;
 mod spawn_wait_kill;
@@ -535,6 +536,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    event::test();
     net_async::test();
 
     test_thread_names();
