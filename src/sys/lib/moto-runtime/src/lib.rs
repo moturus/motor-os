@@ -84,3 +84,11 @@ pub fn print_stacktace() {
 
     unsafe { moturus_print_stacktrace() };
 }
+
+// This is defined as weak because it is defined in std_rt,
+// which is always linked; but LDD complains without the weak
+// definition.
+#[cfg(not(feature = "rustc-dep-of-std"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn moturus_print_stacktrace() {}

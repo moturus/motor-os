@@ -1,0 +1,29 @@
+[workspace]
+members = [
+  # system libraries
+  "lib/flatfs",
+  "lib/frusa",
+  "lib/moto-ipc",
+  "lib/moto-log",
+  "lib/moto-mpmc",
+  "lib/moto-runtime",
+  "lib/moto-sys",
+  "lib/moto-sys-io",
+  "lib/srfs",
+  "lib/srfs-core",
+  "lib/virtio",
+
+  # system binaries
+  "kernel",
+  "sys-init",
+  "sys-io",
+  "sys-log",
+  "sys-tty",
+
+  # tools
+  "tools/mdbg",
+  "tools/sysbox",
+
+  # tests
+  "tests/systest",
+]
