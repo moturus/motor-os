@@ -1,0 +1,25 @@
+[package]
+name = "kloader"
+version = "0.1.0"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+
+[dependencies]
+acpi      = { path = "../../third_party/acpi"      }
+bitflags  = { path = "../../third_party/bitflags"  }
+elfloader = { path = "../../third_party/elfloader" }
+rsdp      = { path = "../../third_party/rsdp"      }
+spin      = { path = "../../third_party/spin"      }
+x86       = { path = "../../third_party/x86"       }
+x86_64    = { path = "../../third_party/x86_64"    }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
+

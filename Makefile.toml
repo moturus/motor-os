@@ -129,39 +129,39 @@ mkdir -p "${MOTO_BIN}"
 '''
 
 [tasks.x64_mbr_debug]
-cwd = "./src/bin/x64.mbr"
+cwd = "./src/boot/x64.mbr"
 script = '''
 ./build.sh
 '''
 
 # Need a different debug|release tasks because the output dirs differ.
 [tasks.x64_mbr_release]
-cwd = "./src/bin/x64.mbr"
+cwd = "./src/boot/x64.mbr"
 script = '''
 ./build.sh
 '''
 
 [tasks.x64_boot_debug]
-cwd = "./src/bin/x64.boot"
+cwd = "./src/boot/x64.boot"
 script = '''
 ./build.sh
 '''
 
 # Need a different debug|release tasks because the output dirs differ.
 [tasks.x64_boot_release]
-cwd = "./src/bin/x64.boot"
+cwd = "./src/boot/x64.boot"
 script = '''
 ./build.sh
 '''
 
 [tasks.x64_kloader_debug]
-cwd = "./src/bin/x64.kloader"
+cwd = "./src/boot/x64.kloader"
 script = '''
 ./build.sh
 '''
 
 [tasks.x64_kloader_release]
-cwd = "./src/bin/x64.kloader"
+cwd = "./src/boot/x64.kloader"
 script = '''
 ./build.sh --release
 '''
