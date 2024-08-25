@@ -10,7 +10,7 @@ edition = "2021"
 moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
-moto-mpmc    = { path = "../../lib/mpmc"        }
+moto-mpmc    = { path = "../../lib/moto-mpmc"   }
 
 futures = "0.3"
 
