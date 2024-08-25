@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 moto-ipc = { path = "../../lib/moto-ipc" }
 moto-sys = { path = "../../lib/moto-sys" }
-spin = { path = "../../third_party/spin"}
+spin = { path = "../../../third_party/spin"}
 
 log = "0.4.21"
 

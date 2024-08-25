@@ -6,14 +6,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-moto-ipc = { path = "../../lib/moto-ipc" }
-moto-sys = { path = "../../lib/moto-sys" }
-moto-log = { path = "../../lib/moto-log" }
+moto-ipc = { path = "../lib/moto-ipc" }
+moto-sys = { path = "../lib/moto-sys" }
+moto-log = { path = "../lib/moto-log" }
 
 [patch.crates-io]
-moto-ipc = { path = "../../lib/moto-ipc" }
-moto-sys = { path = "../../lib/moto-sys" }
-moto-log = { path = "../../lib/moto-log" }
+moto-ipc = { path = "../lib/moto-ipc" }
+moto-sys = { path = "../lib/moto-sys" }
+moto-log = { path = "../lib/moto-log" }
 
 [profile.dev]
 panic = "abort"

@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 moto-sys = "0.2.0"
 log = "0.4.20"
-spin = { path = "../../third_party/spin" }
+spin = { path = "../../../third_party/spin" }

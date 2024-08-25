@@ -24,7 +24,7 @@ cargo clean
 rm -rf target
 cd "${RDIR}/src/bin"
 rm -rf */target
-cd "${RDIR}/src/lib"
+cd "${RDIR}/src/sys"
 rm -rf */target
 '''
 
@@ -167,26 +167,26 @@ script = '''
 '''
 
 [tasks.kernel_debug]
-cwd = "./src/bin/kernel"
+cwd = "./src/sys/kernel"
 script = '''
 ./build.sh
 '''
 
 [tasks.kernel_release]
-cwd = "./src/bin/kernel"
+cwd = "./src/sys/kernel"
 script = '''
 ./build.sh --release
 '''
 
 [tasks.sys_io_debug]
-cwd = "./src/bin/sys-io"
+cwd = "./src/sys/sys-io"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-io" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-io"
 '''
 
 [tasks.sys_io_release]
-cwd = "./src/bin/sys-io"
+cwd = "./src/sys/sys-io"
 script = '''
 # CARGO_LOG=cargo::core::compiler::fingerprint=info \
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
@@ -194,70 +194,70 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-io" "${MOTO_BIN}/sys-
 '''
 
 [tasks.sys_init_debug]
-cwd = "./src/bin/sys-init"
+cwd = "./src/sys/sys-init"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-init" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-init"
 '''
 
 [tasks.sys_init_release]
-cwd = "./src/bin/sys-init"
+cwd = "./src/sys/sys-init"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-init" "${MOTO_BIN}/sys-init"
 '''
 
 [tasks.sys_log_debug]
-cwd = "./src/bin/sys-log"
+cwd = "./src/sys/sys-log"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-log" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-log"
 '''
 
 [tasks.sys_log_release]
-cwd = "./src/bin/sys-log"
+cwd = "./src/sys/sys-log"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-log" "${MOTO_BIN}/sys-log"
 '''
 
 [tasks.sys_tty_debug]
-cwd = "./src/bin/sys-tty"
+cwd = "./src/sys/sys-tty"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-tty" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-tty"
 '''
 
 [tasks.sys_tty_release]
-cwd = "./src/bin/sys-tty"
+cwd = "./src/sys/sys-tty"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-tty" "${MOTO_BIN}/sys-tty"
 '''
 
 [tasks.sysbox_debug]
-cwd = "./src/bin/sysbox"
+cwd = "./src/sys/tools/sysbox"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sysbox" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sysbox"
 '''
 
 [tasks.sysbox_release]
-cwd = "./src/bin/sysbox"
+cwd = "./src/sys/tools/sysbox"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sysbox" "${MOTO_BIN}/sysbox"
 '''
 
 [tasks.systest_debug]
-cwd = "./src/bin/systest"
+cwd = "./src/sys/tests/systest"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/systest" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/systest"
 '''
 
 [tasks.systest_release]
-cwd = "./src/bin/systest"
+cwd = "./src/sys/tests/systest"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/systest" "${MOTO_BIN}/systest"
@@ -306,14 +306,14 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/kibim" "${MOTO_BIN}/kibim
 '''
 
 [tasks.mdbg_debug]
-cwd = "./src/bin/mdbg"
+cwd = "./src/sys/tools/mdbg"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/mdbg" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/mdbg"
 '''
 
 [tasks.mdbg_release]
-cwd = "./src/bin/mdbg"
+cwd = "./src/sys/tools/mdbg"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/mdbg" "${MOTO_BIN}/mdbg"
