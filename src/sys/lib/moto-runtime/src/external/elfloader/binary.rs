@@ -1,18 +1,14 @@
+use super::elf_impl::dynamic::Tag;
+use super::elf_impl::program::ProgramHeader::{self, Ph32, Ph64};
+use super::elf_impl::program::{ProgramIter, SegmentData, Type};
+use super::elf_impl::sections::SectionData;
+pub use super::elf_impl::symbol_table::Entry;
+use super::elf_impl::*;
 use super::{
     DynamicFlags1, DynamicInfo, ElfLoader, ElfLoaderErr, LoadableHeaders, RelocationEntry,
     RelocationType,
 };
 use core::fmt;
-
-use crate::external::xmas_elf;
-
-use xmas_elf::dynamic::Tag;
-use xmas_elf::program::ProgramHeader::{self, Ph32, Ph64};
-use xmas_elf::program::{ProgramIter, SegmentData, Type};
-use xmas_elf::sections::SectionData;
-pub use xmas_elf::symbol_table::Entry;
-use xmas_elf::ElfFile;
-use xmas_elf::*;
 
 /// Abstract representation of a loadable ELF binary.
 pub struct ElfBinary<'s> {

@@ -14,8 +14,5 @@ pub mod scopeguard;
 // Copied from https://github.com/mvdnes/spin-rs (MIT).
 pub mod spin;
 
-// Copied from https://github.com/nrc/xmas-elf (Apache2).
-pub mod xmas_elf;
-
 // Copied from https://github.com/nrc/zero (Apache2).
 pub mod zero;

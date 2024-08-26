@@ -1,12 +1,10 @@
+use super::super::super::zero::{read, read_array, Pod};
 use super::dynamic::Dynamic;
 use super::header::{Class, Header};
 use super::sections::NoteHeader;
 use super::{ElfFile, P32, P64};
-use crate::external::zero;
-use zero::{read, read_array, Pod};
 
 use core::fmt;
-use core::mem;
 
 pub fn parse_program_header<'a>(
     input: &'a [u8],
@@ -309,48 +307,3 @@ pub const TYPE_GNU_RELRO: u32 = TYPE_LOOS + 0x474e552;
 pub const FLAG_X: u32 = 0x1;
 pub const FLAG_W: u32 = 0x2;
 pub const FLAG_R: u32 = 0x4;
-pub const FLAG_MASKOS: u32 = 0x0ff00000;
-pub const FLAG_MASKPROC: u32 = 0xf0000000;
-
-pub fn sanity_check<'a>(ph: ProgramHeader<'a>, elf_file: &ElfFile<'a>) -> Result<(), &'static str> {
-    let header = elf_file.header;
-    match ph {
-        ProgramHeader::Ph32(ph) => {
-            check!(
-                mem::size_of_val(ph) == header.pt2.ph_entry_size() as usize,
-                "program header size mismatch"
-            );
-            check!(
-                ((ph.offset + ph.file_size) as usize) < elf_file.input.len(),
-                "entry point out of range"
-            );
-            check!(ph.get_type()? != Type::ShLib, "Shouldn't use ShLib");
-            if ph.align > 1 {
-                check!(
-                    ph.virtual_addr % ph.align == ph.offset % ph.align,
-                    "Invalid combination of virtual_addr, offset, and align"
-                );
-            }
-        }
-        ProgramHeader::Ph64(ph) => {
-            check!(
-                mem::size_of_val(ph) == header.pt2.ph_entry_size() as usize,
-                "program header size mismatch"
-            );
-            check!(
-                ((ph.offset + ph.file_size) as usize) < elf_file.input.len(),
-                "entry point out of range"
-            );
-            check!(ph.get_type()? != Type::ShLib, "Shouldn't use ShLib");
-            if ph.align > 1 {
-                // println!("{} {} {}", ph.virtual_addr, ph.offset, ph.align);
-                check!(
-                    ph.virtual_addr % ph.align == ph.offset % ph.align,
-                    "Invalid combination of virtual_addr, offset, and align"
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
