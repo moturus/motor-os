@@ -27,3 +27,24 @@ members = [
   # tests
   "tests/systest",
 ]
+resolver = "2"
+
+[patch.crates-io]
+flatfs       = { path = "lib/flatfs"          }
+moto-ipc     = { path = "lib/moto-ipc"        }
+moto-log     = { path = "lib/moto-log"        }
+moto-runtime = { path = "lib/moto-runtime"    }
+moto-sys     = { path = "lib/moto-sys"        }
+moto-sys-io  = { path = "lib/moto-sys-io"     }
+moto-virtio  = { path = "lib/virtio"          }
+srfs-core    = { path = "lib/srfs-core"       }
+srfs         = { path = "lib/srfs"            }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

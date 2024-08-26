@@ -12,18 +12,3 @@ moto-sys     = { path = "../../lib/moto-sys"    }
 moto-sys-io  = { path = "../../lib/moto-sys-io" }
 time = { version = "0.3.36", default-features = false, features = ["std"] }
 
-[patch.crates-io]
-moto-ipc     = { path = "../../lib/moto-ipc"     }
-moto-runtime = { path = "../../lib/moto-runtime" }
-moto-sys-io  = { path = "../../lib/moto-sys-io"  }
-moto-sys     = { path = "../../lib/moto-sys"     }
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-lto = "fat"
-strip = true
-codegen-units = 1
-

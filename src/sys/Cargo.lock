@@ -769,7 +769,7 @@ dependencies = [
  "bitflags 2.4.2",
  "log",
  "lru",
- "srfs-core 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "srfs-core",
 ]
 
 [[package]]
@@ -779,16 +779,6 @@ dependencies = [
  "crc",
  "log",
  "rand",
-]
-
-[[package]]
-name = "srfs-core"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3b4fc4818ec9f7f0b8efe27862cb096b7a1867b99d02d1da9f38bd4c36e2a0"
-dependencies = [
- "crc",
- "log",
 ]
 
 [[package]]

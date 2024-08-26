@@ -1,6 +1,6 @@
 #![no_std]
-#![warn(box_pointers, missing_copy_implementations, missing_debug_implementations)]
-#![warn(unused_extern_crates, unused_import_braces, unused_qualifications, unused_results)]
+#![warn(missing_copy_implementations, missing_debug_implementations)]
+#![warn(unused_extern_crates, unused_import_braces, unused_results)]
 #![warn(variant_size_differences)]
 #![allow(elided_lifetimes_in_paths)]
 
@@ -20,16 +20,16 @@ macro_rules! check {
 
 extern crate zero;
 
-pub mod header;
-pub mod sections;
-pub mod program;
-pub mod symbol_table;
 pub mod dynamic;
 pub mod hash;
+pub mod header;
+pub mod program;
+pub mod sections;
+pub mod symbol_table;
 
 use header::Header;
-use sections::{SectionHeader, SectionIter};
 use program::{ProgramHeader, ProgramIter};
+use sections::{SectionHeader, SectionIter};
 use zero::{read, read_str};
 
 pub type P32 = u32;
@@ -43,7 +43,7 @@ pub struct ElfFile<'a> {
 
 impl<'a> ElfFile<'a> {
     pub fn new(input: &'a [u8]) -> Result<ElfFile<'a>, &'static str> {
-        header::parse_header(input).map(|header| ElfFile {input, header})
+        header::parse_header(input).map(|header| ElfFile { input, header })
     }
 
     pub fn section_header(&self, index: u16) -> Result<SectionHeader<'a>, &'static str> {
@@ -61,7 +61,8 @@ impl<'a> ElfFile<'a> {
         program::parse_program_header(self.input, self.header, index)
     }
 
-    pub fn program_iter(&self) -> ProgramIter { // impl Iterator<Item = ProgramHeader<'_>> {
+    pub fn program_iter(&self) -> ProgramIter {
+        // impl Iterator<Item = ProgramHeader<'_>> {
         ProgramIter {
             file: self,
             next_index: 0,
@@ -69,11 +70,14 @@ impl<'a> ElfFile<'a> {
     }
 
     pub fn get_shstr(&self, index: u32) -> Result<&'a str, &'static str> {
-        self.get_shstr_table().map(|shstr_table| read_str(&shstr_table[(index as usize)..]))
+        self.get_shstr_table()
+            .map(|shstr_table| read_str(&shstr_table[(index as usize)..]))
     }
 
     pub fn get_string(&self, index: u32) -> Result<&'a str, &'static str> {
-        let header = self.find_section_by_name(".strtab").ok_or("no .strtab section")?;
+        let header = self
+            .find_section_by_name(".strtab")
+            .ok_or("no .strtab section")?;
         if header.get_type()? != sections::ShType::StrTab {
             return Err("expected .strtab to be StrTab");
         }
@@ -81,7 +85,9 @@ impl<'a> ElfFile<'a> {
     }
 
     pub fn get_dyn_string(&self, index: u32) -> Result<&'a str, &'static str> {
-        let header = self.find_section_by_name(".dynstr").ok_or("no .dynstr section")?;
+        let header = self
+            .find_section_by_name(".dynstr")
+            .ok_or("no .dynstr section")?;
         Ok(read_str(&header.raw_data(self)[(index as usize)..]))
     }
 
@@ -191,12 +197,12 @@ mod test {
     use header::{HeaderPt1, HeaderPt2_};
 
     fn mk_elf_header(class: u8) -> Vec<u8> {
-        let header_size = mem::size_of::<HeaderPt1>() +
-                          match class {
-            1 => mem::size_of::<HeaderPt2_<P32>>(),
-            2 => mem::size_of::<HeaderPt2_<P64>>(),
-            _ => 0,
-        };
+        let header_size = mem::size_of::<HeaderPt1>()
+            + match class {
+                1 => mem::size_of::<HeaderPt2_<P32>>(),
+                2 => mem::size_of::<HeaderPt2_<P64>>(),
+                _ => 0,
+            };
         let mut header = vec![0x7f, 'E' as u8, 'L' as u8, 'F' as u8];
         let data = 1u8;
         let version = 1u8;

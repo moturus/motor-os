@@ -23,11 +23,3 @@ xsave = "2.0.2"
 
 [features]
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-lto = "fat"
-strip = true
-codegen-units = 1

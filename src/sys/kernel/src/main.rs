@@ -7,7 +7,6 @@
 #![feature(alloc_error_handler)]
 #![feature(alloc_layout_extra)]
 #![feature(allocator_api)]
-#![feature(asm_const)]
 #![feature(assert_matches)]
 #![feature(btreemap_alloc)]
 #![feature(core_intrinsics)]

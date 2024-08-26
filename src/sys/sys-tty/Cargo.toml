@@ -13,12 +13,3 @@ x86_64   = { path = "../../third_party/x86_64"}  # Used for port I/O.
 
 log = "0.4.21"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-lto = "fat"
-strip = true
-codegen-units = 1
-

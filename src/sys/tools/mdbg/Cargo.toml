@@ -10,8 +10,3 @@ edition = "2021"
 clap = { version = "4.5.6", features = ["derive"] }
 moto-sys = { path = "../../lib/moto-sys" }
 
-[profile.release]
-panic = "abort"
-lto = "fat"
-strip = true
-codegen-units = 1

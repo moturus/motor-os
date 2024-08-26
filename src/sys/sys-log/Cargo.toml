@@ -10,17 +10,3 @@ moto-ipc = { path = "../lib/moto-ipc" }
 moto-sys = { path = "../lib/moto-sys" }
 moto-log = { path = "../lib/moto-log" }
 
-[patch.crates-io]
-moto-ipc = { path = "../lib/moto-ipc" }
-moto-sys = { path = "../lib/moto-sys" }
-moto-log = { path = "../lib/moto-log" }
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-lto = "fat"
-strip = true
-codegen-units = 1
-

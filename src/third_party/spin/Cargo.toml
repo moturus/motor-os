@@ -19,6 +19,7 @@ documentation = "https://mvdnes.github.io/rust-docs/spin-rs/spin/index.html"
 keywords = ["spinlock", "mutex", "rwlock"]
 license = "MIT"
 repository = "https://github.com/mvdnes/spin-rs.git"
+edition = "2021"
 
 [dependencies]
 core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
