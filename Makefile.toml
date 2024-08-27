@@ -26,6 +26,7 @@ cd "${RDIR}/src/bin"
 rm -rf */target
 cd "${RDIR}/src/sys"
 rm -rf */target
+rm -f lib/iort/iort.bin
 '''
 
 [tasks.all]
@@ -41,6 +42,7 @@ dependencies = [
   "x64_boot_debug",
   "x64_kloader_debug",
   "kernel_debug",
+  "iort_debug",
   "sys_io_debug",
   "sys_init_debug",
   "sys_log_debug",
@@ -62,6 +64,7 @@ dependencies = [
   "x64_boot_release",
   "x64_kloader_release",
   "kernel_release",
+  "iort_release",
   "sys_io_release",
   "sys_init_release",
   "sys_log_release",
@@ -82,6 +85,7 @@ dependencies = [
 [tasks.u_dbg]
 dependencies = [
   "setup_dirs_debug",
+  "iort_debug",
   "sys_io_debug",
   "sys_init_debug",
   "sys_log_debug",
@@ -102,6 +106,7 @@ dependencies = [
 [tasks.u_rel]
 dependencies = [
   "setup_dirs_release",
+  "iort_release",
   "sys_io_release",
   "sys_init_release",
   "sys_log_release",
@@ -174,6 +179,18 @@ script = '''
 
 [tasks.kernel_release]
 cwd = "./src/sys/kernel"
+script = '''
+./build.sh --release
+'''
+
+[tasks.iort_debug]
+cwd = "./src/sys/lib/iort"
+script = '''
+./build.sh
+'''
+
+[tasks.iort_release]
+cwd = "./src/sys/lib/iort"
 script = '''
 ./build.sh --release
 '''

@@ -143,7 +143,7 @@ fn sys_map(
         }
 
         if virt_addr < moto_sys::CUSTOM_USERSPACE_REGION_START
-            || (virt_addr + num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2)
+            || (virt_addr + (num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2))
                 >= CUSTOM_USERSPACE_REGION_END
         {
             return ResultBuilder::invalid_argument();
