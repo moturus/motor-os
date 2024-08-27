@@ -111,17 +111,61 @@ fn sys_map(
         };
     }
 
-    if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE) {
-        // This is a normal user heap allocation.
-        if phys_addr != u64::MAX || virt_addr != u64::MAX {
+    if flags & SysMem::F_CUSTOM_USER == SysMem::F_CUSTOM_USER {
+        if !io_manager {
+            log::debug!("sys_map: F_CUSTOM_USER w/o CAP_IO_MAN");
+            return ResultBuilder::result(ErrorCode::NotAllowed);
+        }
+        if phys_addr != u64::MAX || virt_addr == u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
             return ResultBuilder::invalid_argument();
         }
 
-        return match address_space.alloc_user_heap(num_pages) {
-            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
+        let mut flags = flags ^ SysMem::F_CUSTOM_USER;
+        if flags == 0 {
+            log::debug!("sys_mem_impl: bad flags");
+            return ResultBuilder::invalid_argument();
+        }
+
+        let mut mapping_options = MappingOptions::USER_ACCESSIBLE;
+        if flags & SysMem::F_READABLE != 0 {
+            mapping_options |= MappingOptions::READABLE;
+            flags ^= SysMem::F_READABLE;
+        }
+        if flags & SysMem::F_WRITABLE != 0 {
+            mapping_options |= MappingOptions::WRITABLE;
+            flags ^= SysMem::F_WRITABLE;
+        }
+
+        if flags != 0 {
+            log::debug!("sys_mem_impl: bad flags");
+            return ResultBuilder::invalid_argument();
+        }
+
+        if virt_addr < moto_sys::CUSTOM_USERSPACE_REGION_START
+            || (virt_addr + num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2)
+                >= CUSTOM_USERSPACE_REGION_END
+        {
+            return ResultBuilder::invalid_argument();
+        }
+
+        return match address_space.allocate_user_fixed(virt_addr, num_pages, mapping_options) {
+            Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
             Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
         };
+    }
+
+    if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE) {
+        if phys_addr == u64::MAX && virt_addr == u64::MAX {
+            // This is a normal user heap allocation.
+            return match address_space.alloc_user_heap(num_pages) {
+                Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
+                Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            };
+        }
+
+        log::debug!("sys_mem_impl: bad map addresses");
+        return ResultBuilder::invalid_argument();
     }
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY) {

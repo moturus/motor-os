@@ -5,6 +5,7 @@ use core::sync::atomic::AtomicU64;
 // stdio (stdin/stdout/stderr), env, and args.
 pub const CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);
 pub const CUSTOM_USERSPACE_REGION_END: u64 = CUSTOM_USERSPACE_REGION_START + (1_u64 << 40);
+pub const IORT_VDSO_START: u64 = CUSTOM_USERSPACE_REGION_END - (1_u64 << 32); // 4GB for IORT_VDSO.
 
 // Describes a global static page populated by the kernel and mapped
 // into the address space of each user process (read-only).

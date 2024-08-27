@@ -40,11 +40,8 @@ impl SysMem {
     pub const F_MMIO: u32 = 4;
     pub const F_CONTIGUOUS: u32 = 8;
     pub const F_SHARE_SELF: u32 = 0x10;
-
-    // The kernel may or may not do actual mapping on
-    // memory allocations; F_LAZY is a *hint* that the userspace
-    // is OK with lazy mapping.
-    pub const F_LAZY: u32 = 0x20;
+    pub const F_LAZY: u32 = 0x20; // Just a hint.
+    pub const F_CUSTOM_USER: u32 = 0x40;
 
     // Bit flags for query.
     pub const F_QUERY_STATS: u32 = 1;

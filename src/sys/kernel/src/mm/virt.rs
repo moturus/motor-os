@@ -91,6 +91,8 @@ pub fn is_kernel_addr(vmem_addr: u64) -> bool {
 
 pub fn is_user(vmem_addr: u64) -> bool {
     vmem_addr <= VMEM_USER_END
+        || (vmem_addr >= moto_sys::CUSTOM_USERSPACE_REGION_START
+            && vmem_addr < moto_sys::CUSTOM_USERSPACE_REGION_END)
 }
 
 pub fn init() {

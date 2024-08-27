@@ -180,31 +180,6 @@ impl UserAddressSpace {
         self.kernel_mem_stats.sub(num_pages);
     }
 
-    // Used to map the binary.
-    pub fn map_bytes(
-        &self,
-        addr: u64,
-        bytes: super::MemorySegment,
-        mapping_options: super::MappingOptions,
-    ) -> Result<(), ErrorCode> {
-        let vaddr_start = addr & !(PAGE_SIZE_SMALL - 1);
-        let vaddr_end = align_up(addr + bytes.size, PAGE_SIZE_SMALL);
-        let sz = vaddr_end - vaddr_start;
-        let num_pages = sz >> super::PAGE_SIZE_SMALL_LOG2;
-
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-
-        let _ = self
-            .inner
-            .vmem_allocate_user_fixed(vaddr_start, num_pages, mapping_options)?;
-
-        unsafe {
-            self.copy_to_user(bytes.as_slice(), addr)?;
-        }
-
-        Ok(())
-    }
-
     pub fn allocate_user_fixed(
         &self,
         vaddr: u64,
