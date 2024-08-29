@@ -842,6 +842,7 @@ dependencies = [
  "flatfs",
  "ipnetwork",
  "log",
+ "moto-iort",
  "moto-ipc",
  "moto-runtime",
  "moto-sys",

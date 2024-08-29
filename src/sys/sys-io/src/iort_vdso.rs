@@ -26,12 +26,26 @@ pub fn load() {
         .load(&mut loader)
         .expect("Error loading iort.bin elf.");
 
-    let vsdo_entry_addr: u64 = elf_binary.entry_point() + moto_sys::IORT_VDSO_START;
-    let vsdo_entry: extern "C" fn(u64) -> u64 =
-        unsafe { core::mem::transmute(vsdo_entry_addr as usize as *const ()) };
+    let vdso_entry_addr: u64 = elf_binary.entry_point() + moto_iort::IORT_VDSO_START;
 
+    // Initialize IortVdsoVtable.
+    let addr = moto_sys::SysMem::map(
+        moto_sys::SysHandle::SELF,
+        moto_sys::SysMem::F_CUSTOM_USER
+            | moto_sys::SysMem::F_READABLE
+            | moto_sys::SysMem::F_WRITABLE,
+        u64::MAX,
+        moto_iort::IortVdsoVtable::VADDR,
+        moto_sys::sys_mem::PAGE_SIZE_SMALL,
+        1,
+    )
+    .unwrap();
+    assert_eq!(addr, moto_iort::IortVdsoVtable::VADDR);
+    moto_iort::IortVdsoVtable::get()
+        .vdso_entry
+        .store(vdso_entry_addr, std::sync::atomic::Ordering::SeqCst);
     // This is a temporary test.
-    let res = vsdo_entry(5);
+    let res = moto_iort::iort_entry(5);
     assert_eq!(res, 47);
 }
 
@@ -39,7 +53,7 @@ struct VsdoLoader {}
 
 impl ElfLoader for VsdoLoader {
     fn allocate(&mut self, load_headers: LoadableHeaders) -> Result<(), ElfLoaderErr> {
-        use moto_sys::IORT_VDSO_START;
+        use moto_iort::IORT_VDSO_START;
 
         // We load VDSO at a fixed virtual address, as address randomization
         // is mostly security theader: https://grsecurity.net/kaslr_an_exercise_in_cargo_cult_security
@@ -66,7 +80,6 @@ impl ElfLoader for VsdoLoader {
                 num_pages,
             )
             .map_err(|_| ElfLoaderErr::OutOfMemory)?;
-
             assert_eq!(addr, vaddr_start);
         }
         Ok(())
@@ -74,7 +87,7 @@ impl ElfLoader for VsdoLoader {
 
     fn load(&mut self, _flags: Flags, base: VAddr, region: &[u8]) -> Result<(), ElfLoaderErr> {
         unsafe {
-            let addr = (moto_sys::IORT_VDSO_START + base) as usize as *mut u8;
+            let addr = (moto_iort::IORT_VDSO_START + base) as usize as *mut u8;
             core::ptr::copy_nonoverlapping(region.as_ptr(), addr, region.len());
         }
         Ok(())
@@ -84,7 +97,7 @@ impl ElfLoader for VsdoLoader {
         use elfloader::arch::x86_64::RelocationTypes::*;
         use RelocationType::x86_64;
 
-        let addr: u64 = moto_sys::IORT_VDSO_START + entry.offset;
+        let addr: u64 = moto_iort::IORT_VDSO_START + entry.offset;
         match entry.rtype {
             x86_64(R_AMD64_RELATIVE) => {
                 // This type requires addend to be present.
@@ -94,7 +107,7 @@ impl ElfLoader for VsdoLoader {
 
                 // Need to write (addend + base) into addr.
                 unsafe {
-                    *(addr as usize as *mut u64) = moto_sys::IORT_VDSO_START + addend;
+                    *(addr as usize as *mut u64) = moto_iort::IORT_VDSO_START + addend;
                 }
 
                 Ok(())

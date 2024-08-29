@@ -17,6 +17,7 @@ use crate::ErrorCode;
 // SyscallResult is passed on registers; x64, arm64, and risc-v all have
 // enough argument/scratch registers to pass data back this way.
 #[derive(Debug)]
+#[repr(C)]
 pub struct SyscallResult {
     pub result: u64,    // rax
     pub data: [u64; 6], // rdi, rsi, rdx, r10, r8, r9
@@ -100,6 +101,7 @@ impl From<&SysHandle> for u64 {
 
 /// Same as SysHandle, but calls SysObj::put on drop.
 #[cfg(feature = "userspace")]
+#[repr(C)]
 pub struct RaiiHandle(u64);
 
 #[cfg(feature = "userspace")]

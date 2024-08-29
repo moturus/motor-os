@@ -5,11 +5,13 @@ use core::time::Duration;
 use super::KernelStaticPage;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
 pub struct Instant {
     tsc_val: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
 pub struct SystemTime {
     nanos: u128, // Note that SystemTime uses nanos vs Instant which uses tsc.
 }

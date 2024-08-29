@@ -14,6 +14,7 @@ toml = "0.8.10"
 
 moto-runtime = { path = "../lib/moto-runtime", features = ["rt-api"] }
 flatfs       = { path = "../lib/flatfs"      }
+moto-iort    = { path = "../lib/iort"        }
 moto-ipc     = { path = "../lib/moto-ipc"    }
 moto-sys     = { path = "../lib/moto-sys"    }
 moto-sys-io  = { path = "../lib/moto-sys-io" }
