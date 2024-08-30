@@ -10,7 +10,7 @@ cargo build --target iort.json -Zbuild-std=core,alloc \
   -Zbuild-std-features=compiler-builtins-mem --no-default-features $@
 
 if [[ "$1" == "--release" ]] ; then
-  strip -o "${SCRIPT_DIR}/iort.bin" "${TARGET_DIR}/iort/release/iort"
+  strip -o "${SCRIPT_DIR}/iort.vdso" "${TARGET_DIR}/iort/release/iort"
 else
-  strip -o "${SCRIPT_DIR}/iort.bin" "${TARGET_DIR}/iort/debug/iort"
+  strip -o "${SCRIPT_DIR}/iort.vdso" "${TARGET_DIR}/iort/debug/iort"
 fi

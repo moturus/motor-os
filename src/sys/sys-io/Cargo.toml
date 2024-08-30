@@ -6,21 +6,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-log = "0.4.20"
-spin = { path = "../../third_party/spin" }
-serde = { version = "1.0.*", features = ["derive"] }
-toml = "0.8.10"
-
-
+# Internal.
 moto-runtime = { path = "../lib/moto-runtime", features = ["rt-api"] }
 flatfs       = { path = "../lib/flatfs"      }
-moto-iort    = { path = "../lib/iort"        }
+moto-iort    = { path = "../lib/moto-iort"   }
 moto-ipc     = { path = "../lib/moto-ipc"    }
 moto-sys     = { path = "../lib/moto-sys"    }
 moto-sys-io  = { path = "../lib/moto-sys-io" }
 moto-virtio  = { path = "../lib/virtio"      }
 srfs         = { path = "../lib/srfs"        }
-ipnetwork = "0.20.0"
-smoltcp = "0.11.0"
-elfloader             = { path = "../../third_party/elfloader"    }
+
+# External.
+elfloader    = { path = "../../third_party/elfloader" }
+ipnetwork    = "0.20.0"
+log          = "0.4.20"
+serde        = { version = "1.0.*", features = ["derive"] }
+smoltcp      = "0.11.0"
+spin         = { path = "../../third_party/spin" }
+toml         = "0.8.10"
 

@@ -3,7 +3,8 @@ members = [
   # system libraries
   "lib/flatfs",
   "lib/frusa",
-  "lib/iort",
+  "lib/iort.vdso",
+  "lib/moto-iort",
   "lib/moto-ipc",
   "lib/moto-log",
   "lib/moto-mpmc",

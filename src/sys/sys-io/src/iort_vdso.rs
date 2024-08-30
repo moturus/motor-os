@@ -6,7 +6,7 @@ struct AlignedBytes<B: ?Sized> {
 }
 
 static VDSO_BIN: &'static AlignedBytes<[u8]> = &AlignedBytes {
-    bytes: *include_bytes!("../../lib/iort/iort.bin"),
+    bytes: *include_bytes!("../../lib/iort.vdso/iort.vdso"),
 };
 
 static VDSO_BYTES: &[u8] = &VDSO_BIN.bytes;

@@ -1,0 +1,27 @@
+[package]
+name = "iort"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "iort"
+path = "src/main.rs"
+
+[lib]
+# The following magic line makes rust analyzer stop
+# complaining about panic handler in src/main.rs.
+test = false
+
+[dependencies]
+
+# internal dependencies
+frusa    = { path = "../frusa"    }
+moto-sys = { path = "../moto-sys" }
+
+# external dependencies
+# log = "0.4.21"
+
+[features]
+

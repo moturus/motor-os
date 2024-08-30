@@ -5,13 +5,9 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "iort"
-path = "src/main.rs"
-
 [lib]
-# The following magic line make rust analyzer stop
-# complaining about panic handler in src/main.rs.
+# The following magic line makes rust analyzer stop
+# complaining about the panic handler.
 test = false
 
 [dependencies]

@@ -399,6 +399,14 @@ name = "intrusive-collections"
 version = "0.9.6"
 
 [[package]]
+name = "iort"
+version = "0.1.0"
+dependencies = [
+ "frusa",
+ "moto-sys",
+]
+
+[[package]]
 name = "ipnetwork"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -26,7 +26,7 @@ cd "${RDIR}/src/bin"
 rm -rf */target
 cd "${RDIR}/src/sys"
 rm -rf */target
-rm -f lib/iort/iort.bin
+rm -f lib/iort.vdso/iort.vdso
 '''
 
 [tasks.all]
@@ -184,13 +184,13 @@ script = '''
 '''
 
 [tasks.iort_debug]
-cwd = "./src/sys/lib/iort"
+cwd = "./src/sys/lib/iort.vdso"
 script = '''
 ./build.sh
 '''
 
 [tasks.iort_release]
-cwd = "./src/sys/lib/iort"
+cwd = "./src/sys/lib/iort.vdso"
 script = '''
 ./build.sh --release
 '''
