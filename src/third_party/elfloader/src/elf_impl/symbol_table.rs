@@ -1,7 +1,6 @@
 use super::sections;
 use super::ElfFile;
 
-use crate::external::zero;
 use zero::Pod;
 
 use core::fmt;

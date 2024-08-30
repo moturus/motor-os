@@ -1,10 +1,13 @@
+use super::{P32, P64};
 use core::fmt;
-use {P32, P64};
 use zero::Pod;
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct Dynamic<P> where Tag_<P>: fmt::Debug {
+pub struct Dynamic<P>
+where
+    Tag_<P>: fmt::Debug,
+{
     tag: Tag_<P>,
     un: P,
 }
@@ -64,22 +67,48 @@ macro_rules! impls {
 
             pub fn get_val(&self) -> Result<$p, &'static str> {
                 match self.get_tag()? {
-                    Tag::Needed | Tag::PltRelSize | Tag::RelaSize | Tag::RelaEnt | Tag::StrSize |
-                    Tag::SymEnt | Tag::SoName | Tag::RPath | Tag::RelSize | Tag::RelEnt | Tag::PltRel |
-                    Tag::InitArraySize | Tag::FiniArraySize | Tag::RunPath | Tag::Flags |
-                    Tag::PreInitArraySize | Tag::Flags1 | Tag::OsSpecific(_) |
-                    Tag::ProcessorSpecific(_) => Ok(self.un),
+                    Tag::Needed
+                    | Tag::PltRelSize
+                    | Tag::RelaSize
+                    | Tag::RelaEnt
+                    | Tag::StrSize
+                    | Tag::SymEnt
+                    | Tag::SoName
+                    | Tag::RPath
+                    | Tag::RelSize
+                    | Tag::RelEnt
+                    | Tag::PltRel
+                    | Tag::InitArraySize
+                    | Tag::FiniArraySize
+                    | Tag::RunPath
+                    | Tag::Flags
+                    | Tag::PreInitArraySize
+                    | Tag::Flags1
+                    | Tag::OsSpecific(_)
+                    | Tag::ProcessorSpecific(_) => Ok(self.un),
                     _ => Err("Invalid value"),
                 }
             }
 
             pub fn get_ptr(&self) -> Result<$p, &'static str> {
                 match self.get_tag()? {
-                    Tag::Pltgot | Tag::Hash | Tag::StrTab | Tag::SymTab | Tag::Rela | Tag::Init | Tag::Fini |
-                    Tag::Rel | Tag::Debug | Tag::JmpRel | Tag::InitArray | Tag::FiniArray |
-                    Tag::PreInitArray | Tag::SymTabShIndex  | Tag::OsSpecific(_) | Tag::ProcessorSpecific(_)
-                    => Ok(self.un),
-                     _ => Err("Invalid ptr"),
+                    Tag::Pltgot
+                    | Tag::Hash
+                    | Tag::StrTab
+                    | Tag::SymTab
+                    | Tag::Rela
+                    | Tag::Init
+                    | Tag::Fini
+                    | Tag::Rel
+                    | Tag::Debug
+                    | Tag::JmpRel
+                    | Tag::InitArray
+                    | Tag::FiniArray
+                    | Tag::PreInitArray
+                    | Tag::SymTabShIndex
+                    | Tag::OsSpecific(_)
+                    | Tag::ProcessorSpecific(_) => Ok(self.un),
+                    _ => Err("Invalid ptr"),
                 }
             }
         }
@@ -134,7 +163,7 @@ macro_rules! impls {
                 self.as_tag().fmt(f)
             }
         }
-    }
+    };
 }
 
 impls!(P32);

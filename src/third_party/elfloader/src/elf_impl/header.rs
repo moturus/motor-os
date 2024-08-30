@@ -1,9 +1,8 @@
 use core::fmt;
 use core::mem;
 
-use {P32, P64, ElfFile};
+use super::{P32, P64};
 use zero::{read, Pod};
-
 
 pub fn parse_header<'a>(input: &'a [u8]) -> Result<Header<'a>, &'static str> {
     let size_pt1 = mem::size_of::<HeaderPt1>();
@@ -115,7 +114,7 @@ macro_rules! getter {
                 HeaderPt2::Header64(h) => h.$name as $typ,
             }
         }
-    }
+    };
 }
 
 impl<'a> HeaderPt2<'a> {
@@ -421,33 +420,4 @@ pub enum Machine {
     RISC_V,
     BPF,
     Other(u16), // FIXME there are many, many more of these
-}
-
-// TODO any more constants that need to go in here?
-
-pub fn sanity_check(file: &ElfFile) -> Result<(), &'static str> {
-    check!(mem::size_of::<HeaderPt1>() == 16);
-    check!(file.header.pt1.magic == MAGIC, "bad magic number");
-    let pt2 = &file.header.pt2;
-    check!(mem::size_of::<HeaderPt1>() + pt2.size() == pt2.header_size() as usize,
-           "header_size does not match size of header");
-    match (&file.header.pt1.class(), &file.header.pt2) {
-        (&Class::None, _) => return Err("No class"),
-        (&Class::ThirtyTwo, &HeaderPt2::Header32(_)) |
-        (&Class::SixtyFour, &HeaderPt2::Header64(_)) => {}
-        _ => return Err("Mismatch between specified and actual class"),
-    }
-    check!(!file.header.pt1.version.is_none(), "no version");
-    check!(!file.header.pt1.data.is_none(), "no data format");
-
-    check!(pt2.ph_offset() + (pt2.ph_entry_size() as u64) * (pt2.ph_count() as u64) <=
-           file.input.len() as u64,
-           "program header table out of range");
-    check!(pt2.sh_offset() + (pt2.sh_entry_size() as u64) * (pt2.sh_count() as u64) <=
-           file.input.len() as u64,
-           "section header table out of range");
-
-    // TODO check that SectionHeader_ is the same size as sh_entry_size, depending on class
-
-    Ok(())
 }

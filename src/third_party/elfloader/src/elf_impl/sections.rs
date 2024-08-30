@@ -2,10 +2,8 @@ use core::fmt;
 use core::mem;
 use core::slice;
 
-use crate::external::zero;
-
 use super::dynamic::Dynamic;
-use super::hash::HashTable;
+// use super::hash::HashTable;
 use super::header::{Class, Header};
 use super::symbol_table;
 use super::{ElfFile, P32, P64};
@@ -63,14 +61,9 @@ impl<'b, 'a> Iterator for SectionIter<'b, 'a> {
 // Distinguished section indices.
 pub const SHN_UNDEF: u16 = 0;
 pub const SHN_LORESERVE: u16 = 0xff00;
-pub const SHN_LOPROC: u16 = 0xff00;
-pub const SHN_HIPROC: u16 = 0xff1f;
-pub const SHN_LOOS: u16 = 0xff20;
-pub const SHN_HIOS: u16 = 0xff3f;
 pub const SHN_ABS: u16 = 0xfff1;
 pub const SHN_COMMON: u16 = 0xfff2;
 pub const SHN_XINDEX: u16 = 0xffff;
-pub const SHN_HIRESERVE: u16 = 0xffff;
 
 #[derive(Clone, Copy, Debug)]
 pub enum SectionHeader<'a> {
@@ -155,8 +148,9 @@ impl<'a> SectionHeader<'a> {
                     }
                 }
                 ShType::Hash => {
-                    let data = self.raw_data(elf_file);
-                    SectionData::HashTable(read(&data[0..12]))
+                    // let data = self.raw_data(elf_file);
+                    // SectionData::HashTable(read(&data[0..12]))
+                    unimplemented!()
                 }
             })
         })
@@ -305,7 +299,7 @@ pub enum SectionData<'a> {
     Rel64(&'a [Rel<P64>]),
     Dynamic32(&'a [Dynamic<P32>]),
     Dynamic64(&'a [Dynamic<P64>]),
-    HashTable(&'a HashTable),
+    // HashTable(&'a HashTable),
 }
 
 #[derive(Debug)]
@@ -341,41 +335,6 @@ pub const SHT_LOPROC: u32 = 0x70000000;
 pub const SHT_HIPROC: u32 = 0x7fffffff;
 pub const SHT_LOUSER: u32 = 0x80000000;
 pub const SHT_HIUSER: u32 = 0xffffffff;
-
-// Flags (SectionHeader::flags)
-pub const SHF_WRITE: u64 = 0x1;
-pub const SHF_ALLOC: u64 = 0x2;
-pub const SHF_EXECINSTR: u64 = 0x4;
-pub const SHF_MERGE: u64 = 0x10;
-pub const SHF_STRINGS: u64 = 0x20;
-pub const SHF_INFO_LINK: u64 = 0x40;
-pub const SHF_LINK_ORDER: u64 = 0x80;
-pub const SHF_OS_NONCONFORMING: u64 = 0x100;
-pub const SHF_GROUP: u64 = 0x200;
-pub const SHF_TLS: u64 = 0x400;
-pub const SHF_COMPRESSED: u64 = 0x800;
-pub const SHF_MASKOS: u64 = 0x0ff00000;
-pub const SHF_MASKPROC: u64 = 0xf0000000;
-
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub struct CompressionHeader64 {
-    type_: CompressionType_,
-    _reserved: u32,
-    size: u64,
-    align: u64,
-}
-
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub struct CompressionHeader32 {
-    type_: CompressionType_,
-    size: u32,
-    align: u32,
-}
-
-unsafe impl Pod for CompressionHeader64 {}
-unsafe impl Pod for CompressionHeader32 {}
 
 #[derive(Copy, Clone)]
 pub struct CompressionType_(u32);
@@ -413,11 +372,6 @@ pub const COMPRESS_LOOS: u32 = 0x60000000;
 pub const COMPRESS_HIOS: u32 = 0x6fffffff;
 pub const COMPRESS_LOPROC: u32 = 0x70000000;
 pub const COMPRESS_HIPROC: u32 = 0x7fffffff;
-
-// Group flags
-pub const GRP_COMDAT: u64 = 0x1;
-pub const GRP_MASKOS: u64 = 0x0ff00000;
-pub const GRP_MASKPROC: u64 = 0xf0000000;
 
 #[derive(Debug)]
 #[repr(C)]
@@ -518,15 +472,4 @@ impl NoteHeader {
             slice::from_raw_parts(ptr, self.desc_size as usize)
         }
     }
-}
-
-pub fn sanity_check<'a>(
-    header: SectionHeader<'a>,
-    _file: &ElfFile<'a>,
-) -> Result<(), &'static str> {
-    if header.get_type()? == ShType::Null {
-        return Ok(());
-    }
-    // TODO
-    Ok(())
 }

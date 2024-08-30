@@ -1,35 +1,19 @@
+# Note: this is basically elfloader and xmas-elf from crates.io cut down.
 [package]
 name = "elfloader"
-version = "0.15.0"
-authors = [
-  "Gerd Zellweger <mail@gerdzellweger.com>",
-  "Christopher Cole <chris.cole.09@gmail.com>",
-  "John Kåre Alsaker <john.kare.alsaker@gmail.com>",
-  "Benedikt Radtke <Trolldemorted@users.noreply.github.com>",
-  "Hiroki Tokunaga <tokusan441@gmail.com>",
-  "Bradley Landherr <12598313+landhb@users.noreply.github.com>"
-]
-repository = "https://github.com/gz/rust-elfloader"
-license = "MIT/Apache-2.0"
-description = "A rust library to load ELF files."
-keywords = ["elf", "x86", "os"]
-readme = "README.md"
-edition = "2018"
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
-xmas-elf = { path = "../xmas-elf", optional = true }
 bitflags = { path = "../bitflags", optional = true }
 core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
 compiler_builtins = { version = "0.1", optional = true }
+zero = { path = "../zero" }
 
 [features]
-default = ["bitflags", "xmas-elf" ]
+default = ["bitflags" ]
 rustc-dep-of-std = [
     "compiler_builtins", "core",
     "bitflags/rustc-dep-of-std",
-    "xmas-elf/rustc-dep-of-std",
 ]
 
-
-[target.'cfg(target_family = "unix")'.dev-dependencies]
-# env_logger = "0.9.0"

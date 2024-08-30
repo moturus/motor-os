@@ -1,7 +1,6 @@
+use super::super::super::zero::Pod;
 use super::{P32, P64};
-use crate::external::zero;
 use core::fmt;
-use zero::Pod;
 
 #[derive(Debug)]
 #[repr(C)]

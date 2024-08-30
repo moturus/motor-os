@@ -1,7 +1,7 @@
-use ElfFile;
-use sections;
+use super::sections;
+use super::ElfFile;
 
-use zero::Pod;
+use super::super::super::zero::Pod;
 
 use core::fmt;
 
@@ -74,18 +74,18 @@ pub trait Entry {
         Type_(self.info() & 0xf).as_type()
     }
 
-    fn get_section_header<'a>(&'a self,
-                              elf_file: &ElfFile<'a>,
-                              self_index: usize)
-                              -> Result<sections::SectionHeader<'a>, &'static str> {
+    fn get_section_header<'a>(
+        &'a self,
+        elf_file: &ElfFile<'a>,
+        self_index: usize,
+    ) -> Result<sections::SectionHeader<'a>, &'static str> {
         match self.shndx() {
             sections::SHN_XINDEX => {
                 // TODO factor out distinguished section names into sections consts
                 let header = elf_file.find_section_by_name(".symtab_shndx");
                 if let Some(header) = header {
                     assert_eq!(header.get_type()?, sections::ShType::SymTabShIndex);
-                    if let sections::SectionData::SymTabShIndex(data) =
-                        header.get_data(elf_file)? {
+                    if let sections::SectionData::SymTabShIndex(data) = header.get_data(elf_file)? {
                         // TODO cope with u32 section indices (count is in sh_size of header 0, etc.)
                         // Note that it is completely bogus to crop to u16 here.
                         let index = data[self_index] as u16;
@@ -98,9 +98,9 @@ pub trait Entry {
                     Err("no .symtab_shndx section")
                 }
             }
-            sections::SHN_UNDEF |
-            sections::SHN_ABS |
-            sections::SHN_COMMON => Err("Reserved section header index"),
+            sections::SHN_UNDEF | sections::SHN_ABS | sections::SHN_COMMON => {
+                Err("Reserved section header index")
+            }
             i => elf_file.section_header(i),
         }
     }
@@ -127,14 +127,26 @@ macro_rules! impl_entry {
                 elf_file.$strfunc(self.name())
             }
 
-            fn name(&self) -> u32 { self.0.name }
-            fn info(&self) -> u8 { self.0.info }
-            fn other(&self) -> Visibility_ { self.0.other }
-            fn shndx(&self) -> u16 { self.0.shndx }
-            fn value(&self) -> u64 { self.0.value as u64 }
-            fn size(&self) -> u64 { self.0.size as u64 }
+            fn name(&self) -> u32 {
+                self.0.name
+            }
+            fn info(&self) -> u8 {
+                self.0.info
+            }
+            fn other(&self) -> Visibility_ {
+                self.0.other
+            }
+            fn shndx(&self) -> u16 {
+                self.0.shndx
+            }
+            fn value(&self) -> u64 {
+                self.0.value as u64
+            }
+            fn size(&self) -> u64 {
+                self.0.size as u64
+            }
         }
-    }
+    };
 }
 impl_entry!(Entry32 with ElfFile::get_string);
 impl_entry!(Entry64 with ElfFile::get_string);
