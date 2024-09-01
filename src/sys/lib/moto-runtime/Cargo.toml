@@ -13,15 +13,18 @@ edition = "2021"
 alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
 core  = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
 compiler_builtins = { version = "0.1", optional = true }
-moto-ipc = { path = "../moto-ipc", optional = true }
-moto-sys = { path = "../moto-sys", optional = true }
-frusa    = { path = "../frusa"   , optional = true }
+moto-rt   = { path = "../moto-rt"  , optional = true }
+moto-ipc  = { path = "../moto-ipc" , optional = true }
+moto-sys  = { path = "../moto-sys" , optional = true }
+frusa     = { path = "../frusa"    , optional = true }
 
 [features]
 rustc-dep-of-std = [
-    "alloc", "core",
+    "alloc",
+    "core",
     "compiler_builtins",
     "moto-ipc/rustc-dep-of-std",
+    "moto-rt/rustc-dep-of-std",
     "moto-sys/rustc-dep-of-std",
     "frusa/rustc-dep-of-std",
 ]

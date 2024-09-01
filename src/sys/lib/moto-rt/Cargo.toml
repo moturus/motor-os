@@ -1,5 +1,5 @@
 [package]
-name = "moto-iort"
+name = "moto-rt"
 authors = ["The Moturus Project Developers"]
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
@@ -11,13 +11,11 @@ edition = "2021"
 test = false
 
 [dependencies]
-
-# internal dependencies
-frusa    = { path = "../frusa"    }
-moto-sys = { path = "../moto-sys" }
-
-# external dependencies
-# log = "0.4.21"
+core              = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
+compiler_builtins = { version = "0.1", optional = true }
 
 [features]
-
+rustc-dep-of-std = [
+    "core",
+    "compiler_builtins",
+]

@@ -4,9 +4,9 @@
 #![feature(io_error_more)]
 
 mod fs;
-mod iort_vdso;
 mod logger;
 mod net;
+mod rt_vdso;
 mod runtime;
 mod virtio;
 
@@ -39,7 +39,7 @@ pub extern "C" fn moturus_has_proc_data() -> u8 {
 #[no_mangle]
 pub extern "C" fn moturus_runtime_start() {
     let _ = logger::init();
-    iort_vdso::load();
+    rt_vdso::load();
     runtime::init();
     virtio::init();
     // We need to initialize FS before Rust runtime is initialized (Rust runtime != sys-io runtime).

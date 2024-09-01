@@ -3,11 +3,11 @@ members = [
   # system libraries
   "lib/flatfs",
   "lib/frusa",
-  "lib/iort.vdso",
-  "lib/moto-iort",
+  "lib/rt.vdso",
   "lib/moto-ipc",
   "lib/moto-log",
   "lib/moto-mpmc",
+  "lib/moto-rt",
   "lib/moto-runtime",
   "lib/moto-sys",
   "lib/moto-sys-io",

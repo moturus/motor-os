@@ -1,24 +1,26 @@
 [package]
-name = "iort"
+name = "rt"
 authors = ["The Moturus Project Developers"]
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "iort"
+name = "rt"
 path = "src/main.rs"
 
-[lib]
+# [lib]
 # The following magic line makes rust analyzer stop
-# complaining about panic handler in src/main.rs.
-test = false
+# complaining about the panic handler in src/main.rs.
+# test = false
 
 [dependencies]
 
 # internal dependencies
-frusa    = { path = "../frusa"    }
-moto-sys = { path = "../moto-sys" }
+elfloader = { path = "../../../third_party/elfloader" }
+frusa     = { path = "../frusa"     }
+moto-rt   = { path = "../moto-rt"   }
+moto-sys  = { path = "../moto-sys"  }
 
 # external dependencies
 # log = "0.4.21"

@@ -26,7 +26,7 @@ cd "${RDIR}/src/bin"
 rm -rf */target
 cd "${RDIR}/src/sys"
 rm -rf */target
-rm -f lib/iort.vdso/iort.vdso
+rm -f lib/rt.vdso/rt.vdso
 '''
 
 [tasks.all]
@@ -42,7 +42,7 @@ dependencies = [
   "x64_boot_debug",
   "x64_kloader_debug",
   "kernel_debug",
-  "iort_debug",
+  "rt_debug",
   "sys_io_debug",
   "sys_init_debug",
   "sys_log_debug",
@@ -64,7 +64,7 @@ dependencies = [
   "x64_boot_release",
   "x64_kloader_release",
   "kernel_release",
-  "iort_release",
+  "rt_release",
   "sys_io_release",
   "sys_init_release",
   "sys_log_release",
@@ -85,7 +85,7 @@ dependencies = [
 [tasks.u_dbg]
 dependencies = [
   "setup_dirs_debug",
-  "iort_debug",
+  "rt_debug",
   "sys_io_debug",
   "sys_init_debug",
   "sys_log_debug",
@@ -106,7 +106,7 @@ dependencies = [
 [tasks.u_rel]
 dependencies = [
   "setup_dirs_release",
-  "iort_release",
+  "rt_release",
   "sys_io_release",
   "sys_init_release",
   "sys_log_release",
@@ -183,14 +183,14 @@ script = '''
 ./build.sh --release
 '''
 
-[tasks.iort_debug]
-cwd = "./src/sys/lib/iort.vdso"
+[tasks.rt_debug]
+cwd = "./src/sys/lib/rt.vdso"
 script = '''
 ./build.sh
 '''
 
-[tasks.iort_release]
-cwd = "./src/sys/lib/iort.vdso"
+[tasks.rt_release]
+cwd = "./src/sys/lib/rt.vdso"
 script = '''
 ./build.sh --release
 '''

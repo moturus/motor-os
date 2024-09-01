@@ -281,11 +281,8 @@ fn run_elf(
         &moto_sys::url_encode(debug_name.as_str())
     );
     let address_space = syscalls::RaiiHandle::from(SysObj::create(SysHandle::NONE, 0, &full_url)?);
-    let load_result = load_binary(buf, address_space.syshandle());
-
-    if let Err(err) = load_result {
-        return Err(err);
-    }
+    let load_result = load_binary(buf, address_space.syshandle())?;
+    moto_rt::load_vdso(address_space.syshandle().as_u64()).map_err(|e| ErrorCode::from_u16(e))?;
 
     // TODO: remove CAP_LOG when the runtime is stabilized.
     let mut caps = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG;
@@ -302,11 +299,7 @@ fn run_elf(
     }
 
     // Create the process from the address space.
-    let proc_url = alloc::format!(
-        "process:entry_point={};capabilities={}",
-        load_result.unwrap(),
-        caps
-    );
+    let proc_url = alloc::format!("process:entry_point={};capabilities={}", load_result, caps);
     let process =
         syscalls::RaiiHandle::from(SysObj::create(address_space.syshandle(), 0, &proc_url)?);
 

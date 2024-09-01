@@ -399,14 +399,6 @@ name = "intrusive-collections"
 version = "0.9.6"
 
 [[package]]
-name = "iort"
-version = "0.1.0"
-dependencies = [
- "frusa",
- "moto-sys",
-]
-
-[[package]]
 name = "ipnetwork"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -485,14 +477,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
-name = "moto-iort"
-version = "0.1.0"
-dependencies = [
- "frusa",
- "moto-sys",
-]
-
-[[package]]
 name = "moto-ipc"
 version = "0.2.5"
 dependencies = [
@@ -522,12 +506,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-rt"
+version = "0.1.0"
+dependencies = [
+ "compiler_builtins",
+ "rustc-std-workspace-core",
+]
+
+[[package]]
 name = "moto-runtime"
 version = "0.2.9"
 dependencies = [
  "compiler_builtins",
  "frusa",
  "moto-ipc",
+ "moto-rt",
  "moto-sys",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -687,6 +680,16 @@ name = "raw-cpuid"
 version = "10.3.0"
 dependencies = [
  "bitflags 1.3.2",
+]
+
+[[package]]
+name = "rt"
+version = "0.1.0"
+dependencies = [
+ "elfloader",
+ "frusa",
+ "moto-rt",
+ "moto-sys",
 ]
 
 [[package]]
@@ -850,8 +853,8 @@ dependencies = [
  "flatfs",
  "ipnetwork",
  "log",
- "moto-iort",
  "moto-ipc",
+ "moto-rt",
  "moto-runtime",
  "moto-sys",
  "moto-sys-io",

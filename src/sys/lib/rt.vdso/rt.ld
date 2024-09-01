@@ -1,4 +1,4 @@
-ENTRY(_iort_entry)
+ENTRY(_rt_entry)
 
 PHDRS
 {

@@ -52,7 +52,9 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
 
 #[linkage = "weak"]
 #[no_mangle]
-pub extern "C" fn moturus_runtime_start() {}
+pub extern "C" fn moturus_runtime_start() {
+    moto_rt::init();
+}
 
 // extern "C" fn moturus_foo() {
 //     super::thread::exit_self()

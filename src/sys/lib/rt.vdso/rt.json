@@ -19,7 +19,7 @@
   "relocation-model": "pic",
   "pre-link-args": {
     "ld.lld": [
-      "--script=lib/iort.vdso/iort.ld"
+      "--script=lib/rt.vdso/rt.ld"
     ]
   }
 }
