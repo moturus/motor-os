@@ -518,7 +518,6 @@ name = "moto-runtime"
 version = "0.2.9"
 dependencies = [
  "compiler_builtins",
- "frusa",
  "moto-ipc",
  "moto-rt",
  "moto-sys",

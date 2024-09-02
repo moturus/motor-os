@@ -16,7 +16,6 @@ compiler_builtins = { version = "0.1", optional = true }
 moto-rt   = { path = "../moto-rt"  , optional = true }
 moto-ipc  = { path = "../moto-ipc" , optional = true }
 moto-sys  = { path = "../moto-sys" , optional = true }
-frusa     = { path = "../frusa"    , optional = true }
 
 [features]
 rustc-dep-of-std = [
@@ -26,7 +25,6 @@ rustc-dep-of-std = [
     "moto-ipc/rustc-dep-of-std",
     "moto-rt/rustc-dep-of-std",
     "moto-sys/rustc-dep-of-std",
-    "frusa/rustc-dep-of-std",
 ]
 rt-api = [
     "moto-ipc",

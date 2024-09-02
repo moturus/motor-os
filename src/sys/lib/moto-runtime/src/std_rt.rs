@@ -4,61 +4,11 @@ pub fn num_cpus() -> u32 {
     moto_sys::num_cpus()
 }
 
-use core::alloc::GlobalAlloc;
-use core::alloc::Layout;
-
-struct BackEndAllocator {}
-
-unsafe impl Send for BackEndAllocator {}
-unsafe impl Sync for BackEndAllocator {}
-
-unsafe impl GlobalAlloc for BackEndAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        const PAGE_4K: u64 = 1 << 12;
-        assert_eq!(sys_mem::PAGE_SIZE_SMALL, PAGE_4K);
-
-        let alloc_size = align_up(layout.size() as u64, PAGE_4K);
-        if let Ok(start) = SysMem::alloc(PAGE_4K, alloc_size >> 12) {
-            start as usize as *mut u8
-        } else {
-            core::ptr::null_mut()
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        SysMem::free(ptr as usize as u64).unwrap()
-    }
-}
-
-static BACK_END: BackEndAllocator = BackEndAllocator {};
-// #[global_allocator]
-static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&BACK_END);
-
-pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-    FRUSA.alloc(layout)
-}
-
-pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
-    FRUSA.alloc_zeroed(layout)
-}
-
-pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-    FRUSA.dealloc(ptr, layout)
-}
-
-pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-    FRUSA.realloc(ptr, layout, new_size)
-}
-
 #[linkage = "weak"]
 #[no_mangle]
 pub extern "C" fn moturus_runtime_start() {
     moto_rt::init();
 }
-
-// extern "C" fn moturus_foo() {
-//     super::thread::exit_self()
-// }
 
 #[cfg(not(test))]
 #[inline(never)]
