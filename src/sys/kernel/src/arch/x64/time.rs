@@ -9,13 +9,6 @@ pub struct Instant {
     tsc_val: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SystemTime {
-    nanos: u64, // Note that SystemTime uses nanos vs Instant which uses tsc.
-}
-
-#[allow(unused)]
-pub const UNIX_EPOCH: SystemTime = SystemTime { nanos: 0u64 };
 pub const NANOS_IN_SEC: u64 = 1_000_000_000;
 
 impl Instant {
