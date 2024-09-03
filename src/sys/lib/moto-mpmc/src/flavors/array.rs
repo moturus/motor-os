@@ -13,7 +13,7 @@ use core::cell::UnsafeCell;
 use core::mem::{self, MaybeUninit};
 use core::ptr;
 use core::sync::atomic::{self, AtomicUsize, Ordering};
-use moto_sys::time::Instant;
+use moto_rt::time::Instant;
 
 use crossbeam_utils::{Backoff, CachePadded};
 

@@ -6,12 +6,12 @@ use moto_sys::*;
 pub fn sleep(dur: core::time::Duration) {
     // The current thread may have pending wakeups, and so the wait will immediately
     // return. Thus we have to track time and wait again.
-    let stop = moto_sys::time::Instant::now() + dur;
+    let stop = moto_rt::time::Instant::now() + dur;
     loop {
         match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, Some(stop)) {
             Ok(()) => continue,
             Err(ErrorCode::TimedOut) => {
-                debug_assert!(moto_sys::time::Instant::now() >= stop);
+                debug_assert!(moto_rt::time::Instant::now() >= stop);
                 return;
             }
             Err(err) => {
@@ -42,7 +42,7 @@ impl Parker {
 
         let stop = match dur {
             None => None,
-            Some(dur) => Some(moto_sys::time::Instant::now() + dur),
+            Some(dur) => Some(moto_rt::time::Instant::now() + dur),
         };
 
         let _ = SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, stop);

@@ -17,9 +17,6 @@ pub use sys_obj::SysObj;
 pub use sys_ray::SysRay;
 pub use syscalls::SysHandle;
 
-#[cfg(feature = "userspace")]
-pub mod time;
-
 #[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 use alloc::string::String;

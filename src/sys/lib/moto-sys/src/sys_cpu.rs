@@ -152,7 +152,7 @@ impl SysCpu {
 
     // THE wait function:
     // - if timed out, will return Err(ErrorCode::TimedOut);
-    // - if Instant is_nan(), then won't block (and won't return TimedOut);
+    // - if timeout is Some(Instant::nan()), then won't block (and won't return TimedOut);
     // - if Err(BadHandle), @handles will contain bad handles;
     // - if Ok(()), @handles will contain wakers;
     // - if [swap|wake]_target is not NONE, will swap into the target;
@@ -163,7 +163,7 @@ impl SysCpu {
         wait_handles: &mut [SysHandle],
         swap_target: SysHandle,
         wake_target: SysHandle,
-        timeout: Option<crate::time::Instant>,
+        timeout: Option<moto_rt::time::Instant>,
     ) -> Result<(), ErrorCode> {
         // Note: we consciously drop all wait objects on wakeup and
         // require a full list of wait objects on each new wait. While it
@@ -272,7 +272,7 @@ impl SysCpu {
             &mut [],
             SysHandle::NONE,
             SysHandle::NONE,
-            Some(crate::time::Instant::nan()),
+            Some(moto_rt::time::Instant::nan()),
         )
         .unwrap();
     }

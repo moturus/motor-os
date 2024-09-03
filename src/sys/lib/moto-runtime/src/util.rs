@@ -31,7 +31,7 @@ pub fn get_cpu_usage() -> alloc::vec::Vec<f32> {
 }
 
 pub struct ScopedTimer<'a> {
-    started: moto_sys::time::Instant,
+    started: moto_rt::time::Instant,
     ring_after: core::time::Duration,
     msg: &'a str,
     die: bool,
@@ -53,7 +53,7 @@ impl<'a> Drop for ScopedTimer<'a> {
 impl<'a> ScopedTimer<'a> {
     pub fn start(ring_after: core::time::Duration, msg: &'a str) -> ScopedTimer<'a> {
         Self {
-            started: moto_sys::time::Instant::now(),
+            started: moto_rt::time::Instant::now(),
             ring_after,
             msg,
             die: false,
@@ -62,7 +62,7 @@ impl<'a> ScopedTimer<'a> {
 
     pub fn die_after(die_after: core::time::Duration, msg: &'a str) -> ScopedTimer<'a> {
         Self {
-            started: moto_sys::time::Instant::now(),
+            started: moto_rt::time::Instant::now(),
             ring_after: die_after,
             msg,
             die: true,

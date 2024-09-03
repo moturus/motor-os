@@ -102,7 +102,7 @@ impl WaitQueue {
     }
 
     // Returns true if timed out.
-    fn wait(&self, timeout: &Option<moto_sys::time::Instant>) -> bool {
+    fn wait(&self, timeout: &Option<moto_rt::time::Instant>) -> bool {
         let mut entry = WaitQueueEntry::new();
 
         let tcb = moto_sys::UserThreadControlBlock::get();
@@ -168,7 +168,7 @@ static FUTEX_WAIT_QUEUES: spin::Mutex<BTreeMap<usize, Arc<WaitQueue>>> =
 
 // Returns false on timeout.
 pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::Duration>) -> bool {
-    let timeout = timeout.map(|dur| moto_sys::time::Instant::now() + dur);
+    let timeout = timeout.map(|dur| moto_rt::time::Instant::now() + dur);
 
     let key = futex as *const _ as usize;
     loop {
@@ -176,7 +176,7 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::
             return true;
         }
         if let Some(timo) = timeout {
-            if timo <= moto_sys::time::Instant::now() {
+            if timo <= moto_rt::time::Instant::now() {
                 return false;
             }
         }

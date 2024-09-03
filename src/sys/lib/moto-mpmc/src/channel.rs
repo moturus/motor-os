@@ -4,7 +4,7 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::time::Duration;
-use moto_sys::time::Instant;
+use moto_rt::time::Instant;
 
 use crate::context::Context;
 use crate::counter;

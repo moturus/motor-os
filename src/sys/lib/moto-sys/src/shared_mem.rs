@@ -8,6 +8,8 @@ pub const CUSTOM_USERSPACE_REGION_END: u64 = CUSTOM_USERSPACE_REGION_START + (1_
 // Describes a global static page populated by the kernel and mapped
 // into the address space of each user process (read-only).
 // Readonly in the userspace.
+// NOTE: this is considered private/unstable API and is subject to change.
+#[doc(hidden)]
 #[repr(C)]
 pub struct KernelStaticPage {
     pub version: u64,

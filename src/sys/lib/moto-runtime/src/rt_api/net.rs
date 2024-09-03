@@ -148,7 +148,7 @@ pub fn tcp_stream_connect_request(addr: &SocketAddr, subchannel_mask: u64) -> io
 pub fn tcp_stream_connect_timeout_request(
     addr: &SocketAddr,
     subchannel_mask: u64,
-    timeout: moto_sys::time::Instant,
+    timeout: moto_rt::time::Instant,
 ) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_STREAM_CONNECT;
@@ -163,14 +163,14 @@ pub fn tcp_stream_connect_timeout_request(
     msg
 }
 
-pub fn tcp_stream_connect_timeout(msg: &io_channel::Msg) -> Option<moto_sys::time::Instant> {
+pub fn tcp_stream_connect_timeout(msg: &io_channel::Msg) -> Option<moto_rt::time::Instant> {
     let mut timeout = msg.payload.args_32()[5];
     timeout &= u32::MAX - 1;
     if timeout == 0 {
         return None;
     }
     let timeout = (timeout as u64) << 27;
-    Some(moto_sys::time::Instant::from_u64(timeout))
+    Some(moto_rt::time::Instant::from_u64(timeout))
 }
 
 pub fn tcp_stream_tx_msg(

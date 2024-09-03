@@ -481,6 +481,7 @@ name = "moto-ipc"
 version = "0.2.5"
 dependencies = [
  "compiler_builtins",
+ "moto-rt",
  "moto-sys",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -492,6 +493,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
+ "moto-rt",
  "moto-sys",
  "spin 0.5.2",
 ]
@@ -501,6 +503,7 @@ name = "moto-mpmc"
 version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
+ "moto-rt",
  "moto-runtime",
  "moto-sys",
 ]
@@ -530,6 +533,7 @@ name = "moto-sys"
 version = "0.2.4"
 dependencies = [
  "compiler_builtins",
+ "moto-rt",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -881,6 +885,7 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
+ "moto-rt",
  "moto-sys",
  "x86_64",
 ]
@@ -890,6 +895,7 @@ name = "sysbox"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
+ "moto-rt",
  "moto-runtime",
  "moto-sys",
  "moto-sys-io",

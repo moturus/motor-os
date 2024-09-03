@@ -25,8 +25,6 @@ pub mod stdio;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod thread;
 #[cfg(feature = "rustc-dep-of-std")]
-pub mod time;
-#[cfg(feature = "rustc-dep-of-std")]
 pub mod tls;
 
 #[cfg(feature = "rustc-dep-of-std")]

@@ -2,7 +2,7 @@
 
 use core::num::Wrapping;
 use core::sync::atomic::*;
-use moto_sys::time::Instant;
+use moto_rt::time::Instant;
 use moto_sys::SysHandle;
 
 /// Randomly shuffles a slice.

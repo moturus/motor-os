@@ -41,7 +41,7 @@ impl Display for LogEntry {
         write!(
             f,
             "{} {} {} {}",
-            moto_sys::time::UtcDateTime::from_unix_nanos(
+            moto_rt::time::UtcDateTime::from_unix_nanos(
                 self.timestamp
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -261,7 +261,7 @@ pub mod implementation {
             //     .duration_since(std::time::UNIX_EPOCH)
             //     .unwrap()
             //     .as_nanos() as u64;
-            req.timestamp = moto_sys::time::Instant::now().as_u64();
+            req.timestamp = moto_rt::time::Instant::now().as_u64();
 
             let payload = format!(
                 "{}:{} - {}",

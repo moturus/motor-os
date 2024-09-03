@@ -982,7 +982,7 @@ fn get_fileserver_url() -> Result<String, ErrorCode> {
     req.header.ver = 0;
     req.header.flags = 0;
     conn.do_rpc(Some(
-        moto_sys::time::Instant::now() + core::time::Duration::from_millis(1000),
+        moto_rt::time::Instant::now() + core::time::Duration::from_millis(1000),
     ))?;
 
     let resp = conn.resp::<GetServerUrlResponse>();

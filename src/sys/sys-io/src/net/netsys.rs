@@ -562,7 +562,7 @@ impl NetSys {
 
         let timeout = rt_api::net::tcp_stream_connect_timeout(&sqe);
         if let Some(timo) = timeout {
-            if timo <= moto_sys::time::Instant::now() {
+            if timo <= moto_rt::time::Instant::now() {
                 sqe.status = ErrorCode::TimedOut.into();
                 return Some(sqe);
             }
@@ -633,7 +633,7 @@ impl NetSys {
             .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
 
         if let Some(timeout) = timeout {
-            let now = moto_sys::time::Instant::now();
+            let now = moto_rt::time::Instant::now();
             if timeout <= now {
                 // We check this upon receiving sqe; the thread got preempted or something.
                 // Just use an arbitrary small timeout.

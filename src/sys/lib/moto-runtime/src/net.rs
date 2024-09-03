@@ -33,7 +33,7 @@ use core::net::SocketAddrV4;
 use core::sync::atomic::*;
 use core::time::Duration;
 use moto_ipc::io_channel;
-use moto_sys::time::Instant;
+use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 
@@ -600,7 +600,7 @@ impl TcpStream {
             rt_api::net::tcp_stream_connect_timeout_request(
                 socket_addr,
                 subchannel_mask,
-                moto_sys::time::Instant::now() + timo,
+                Instant::now() + timo,
             )
         } else {
             crate::rt_api::net::tcp_stream_connect_request(socket_addr, subchannel_mask)
@@ -845,7 +845,7 @@ impl TcpStream {
         let rx_timeout = if rx_timeout_ns == u64::MAX {
             None
         } else {
-            Some(moto_sys::time::Instant::now() + Duration::from_nanos(rx_timeout_ns))
+            Some(Instant::now() + Duration::from_nanos(rx_timeout_ns))
         };
 
         loop {
@@ -928,7 +928,7 @@ impl TcpStream {
             return Ok(0);
         }
 
-        let timestamp = moto_sys::time::Instant::now();
+        let timestamp = Instant::now();
         let write_sz = buf.len().min(io_channel::PAGE_SIZE);
         let timo_ns = self.inner.tx_timeout_ns.load(Ordering::Relaxed);
         let abs_timeout = if timo_ns == u64::MAX {
@@ -945,7 +945,7 @@ impl TcpStream {
         let mut yield_counter: u64 = 0;
         let io_page = loop {
             if let Some(timo) = abs_timeout {
-                if moto_sys::time::Instant::now() >= timo {
+                if Instant::now() >= timo {
                     return Err(ErrorCode::TimedOut);
                 }
             }
@@ -972,8 +972,7 @@ impl TcpStream {
                         continue;
                     }
 
-                    let mut sleep_timo =
-                        moto_sys::time::Instant::now() + Duration::from_micros(sleep_timo_usec);
+                    let mut sleep_timo = Instant::now() + Duration::from_micros(sleep_timo_usec);
                     if let Some(timo) = abs_timeout {
                         if timo < sleep_timo {
                             sleep_timo = timo;

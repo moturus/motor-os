@@ -1,7 +1,7 @@
 pub fn do_command(args: &[String]) {
     assert_eq!(args[0], "uptime");
 
-    let uptime = moto_sys::time::since_system_start();
+    let uptime = moto_rt::time::since_system_start();
     let days = uptime.as_secs() / 86400;
     let hours = uptime.as_secs() / 3600 % 24;
     let minutes = uptime.as_secs() / 60 % 60;

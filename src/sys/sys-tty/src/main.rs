@@ -52,7 +52,7 @@ fn main() {
     }
 
     let fname = words[0];
-    let millis = moto_sys::time::since_system_start().as_millis();
+    let millis = moto_rt::time::since_system_start().as_millis();
     crate::serial::write_serial!(
         "   ... all services up at {:03}ms. Starting {}.\n\n",
         millis,

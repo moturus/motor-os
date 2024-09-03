@@ -205,7 +205,7 @@ impl Reader {
     pub fn read_timeout(
         &mut self,
         buf: &mut [u8],
-        timeout: Option<moto_sys::time::Instant>,
+        timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         self.buffer.assert_invariants();
         if buf.len() == 0 {
@@ -287,7 +287,7 @@ impl Writer {
     pub fn write_timeout(
         &mut self,
         buf: &[u8],
-        timeout: Option<moto_sys::time::Instant>,
+        timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         if self.buffer.error_code.is_err() {
             return Err(self.buffer.error_code);
@@ -365,7 +365,7 @@ impl Pipe {
     pub fn read_timeout(
         &mut self,
         buf: &mut [u8],
-        timeout: Option<moto_sys::time::Instant>,
+        timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         match self {
             Self::Reader(reader) => reader.read_timeout(buf, timeout),
@@ -403,7 +403,7 @@ impl Pipe {
     pub fn write_timeout(
         &mut self,
         buf: &[u8],
-        timeout: Option<moto_sys::time::Instant>,
+        timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         match self {
             Self::Writer(writer) => writer.write_timeout(buf, timeout),

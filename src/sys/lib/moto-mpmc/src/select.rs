@@ -5,7 +5,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem;
 use core::time::Duration;
-use moto_sys::time::Instant;
+use moto_rt::time::Instant;
 
 use crossbeam_utils::Backoff;
 

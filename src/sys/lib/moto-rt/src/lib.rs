@@ -30,6 +30,8 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+pub mod time;
+
 // Constants from moto-sys: we replicate them here to avoid depending on moto-sys.
 // NOTE: do not change these numbers unless they are also changed in moto-sys!
 const MOTO_SYS_CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);
@@ -62,11 +64,18 @@ pub struct RtVdsoVtableV1 {
     // Self-replicate into a remote address space.
     pub load_vdso: AtomicU64,
 
-    // Memory allocations.
+    // Memory management.
     pub alloc: AtomicU64,
     pub alloc_zeroed: AtomicU64,
     pub realloc: AtomicU64,
     pub dealloc: AtomicU64,
+
+    // Time management.
+    pub time_instant_now: AtomicU64,
+    pub time_ticks_to_nanos: AtomicU64,
+    pub time_nanos_to_ticks: AtomicU64,
+    pub time_ticks_in_sec: AtomicU64,
+    pub time_abs_ticks_to_nanos: AtomicU64,
 }
 
 #[doc(hidden)]

@@ -2,10 +2,14 @@
 #![no_main]
 
 mod load;
+mod time;
 
 extern crate alloc;
 
-use core::alloc::{GlobalAlloc, Layout};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    sync::atomic::Ordering,
+};
 use moto_rt::RtVdsoVtableV1;
 
 #[macro_export]
@@ -69,34 +73,51 @@ pub extern "C" fn _rt_entry(version: u64) {
 
     let vtable = RtVdsoVtableV1::get();
     let self_addr = _rt_entry as *const () as usize as u64;
-    assert_eq!(
-        vtable
-            .vdso_entry
-            .load(core::sync::atomic::Ordering::Acquire),
-        self_addr
-    );
+    assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
     vtable.load_vdso.store(
         load::load_vdso as *const () as usize as u64,
-        core::sync::atomic::Ordering::Relaxed,
+        Ordering::Relaxed,
     );
 
-    vtable.alloc.store(
-        alloc as *const () as usize as u64,
-        core::sync::atomic::Ordering::Relaxed,
+    // Memory management.
+    vtable
+        .alloc
+        .store(alloc as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .alloc_zeroed
+        .store(alloc_zeroed as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .dealloc
+        .store(dealloc as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .realloc
+        .store(realloc as *const () as usize as u64, Ordering::Relaxed);
+
+    // Time management.
+    vtable.time_instant_now.store(
+        time::time_instant_now as *const () as usize as u64,
+        Ordering::Relaxed,
     );
-    vtable.alloc_zeroed.store(
-        alloc_zeroed as *const () as usize as u64,
-        core::sync::atomic::Ordering::Relaxed,
+    vtable.time_ticks_to_nanos.store(
+        time::ticks_to_nanos as *const () as usize as u64,
+        Ordering::Relaxed,
     );
-    vtable.dealloc.store(
-        dealloc as *const () as usize as u64,
-        core::sync::atomic::Ordering::Relaxed,
+    vtable.time_nanos_to_ticks.store(
+        time::nanos_to_ticks as *const () as usize as u64,
+        Ordering::Relaxed,
     );
-    vtable.realloc.store(
-        realloc as *const () as usize as u64,
-        core::sync::atomic::Ordering::Release,
+    vtable.time_ticks_in_sec.store(
+        moto_sys::KernelStaticPage::get().tsc_in_sec,
+        Ordering::Relaxed,
     );
+    vtable.time_abs_ticks_to_nanos.store(
+        time::abs_ticks_to_nanos as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // The final fence.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 }
 
 unsafe extern "C" fn alloc(size: u64, align: u64) -> u64 {

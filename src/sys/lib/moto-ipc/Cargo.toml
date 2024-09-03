@@ -10,6 +10,7 @@ description = "Motor OS IPC (nostd) crate."
 edition = "2021"
 
 [dependencies]
+moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }
 
 alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }

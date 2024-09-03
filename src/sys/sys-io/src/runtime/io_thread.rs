@@ -168,7 +168,7 @@ impl IoRuntime {
                 io_channel::CMD_NOOP_OK => {
                     let mut cqe = msg;
                     if cqe.flags == io_channel::FLAG_CMD_NOOP_OK_TIMESTAMP {
-                        cqe.payload.args_64_mut()[2] = moto_sys::time::Instant::now().as_u64();
+                        cqe.payload.args_64_mut()[2] = moto_rt::time::Instant::now().as_u64();
                     }
 
                     cqe.status = ErrorCode::Ok.into();
@@ -398,7 +398,7 @@ impl IoRuntime {
                 &mut handles[..],
                 SysHandle::NONE,
                 SysHandle::NONE,
-                Some(moto_sys::time::Instant::nan()),
+                Some(moto_rt::time::Instant::nan()),
             ) {
                 Ok(()) => {
                     if !handles.is_empty() {
@@ -436,7 +436,7 @@ impl IoRuntime {
                 &mut handles[..],
                 SysHandle::NONE,
                 SysHandle::NONE,
-                Some(moto_sys::time::Instant::now() + timeout),
+                Some(moto_rt::time::Instant::now() + timeout),
             );
             match result {
                 Ok(()) => {

@@ -1,5 +1,5 @@
+use moto_rt::time::Instant;
 use moto_sys::stats::{CpuStatsV1, ProcessStatsV1};
-use moto_sys::time::Instant;
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicU32, Ordering},
@@ -74,7 +74,7 @@ fn clear_remaining_screen() {
 }
 
 fn print_preamble(ctx: &Context) -> u32 {
-    let uptime = moto_sys::time::since_system_start();
+    let uptime = moto_rt::time::since_system_start();
     let seconds = uptime.as_secs();
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;

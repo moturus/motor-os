@@ -28,5 +28,6 @@ rustc-dep-of-std = [
 ]
 rt-api = [
     "moto-ipc",
+    "moto-rt",
     "moto-sys/userspace",
 ]

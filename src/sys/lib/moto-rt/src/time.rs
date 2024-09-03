@@ -1,87 +1,69 @@
-use core::arch::asm;
-use core::sync::atomic::*;
-use core::time::Duration;
+use core::{sync::atomic::Ordering, time::Duration};
 
-use super::KernelStaticPage;
+use crate::RtVdsoVtableV1;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
 pub struct Instant {
-    tsc_val: u64,
+    ticks: u64, // Currently tsc. Subject to change.
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
 pub struct SystemTime {
-    nanos: u128, // Note that SystemTime uses nanos vs Instant which uses tsc.
+    nanos: u128, // Note that SystemTime uses nanos vs Instant which uses "ticks".
 }
 
 #[allow(unused)]
 pub const UNIX_EPOCH: SystemTime = SystemTime { nanos: 0u128 };
-pub const NANOS_IN_SEC: u64 = 1_000_000_000;
+const NANOS_IN_SEC: u64 = 1_000_000_000;
 
 impl Instant {
     pub const fn nan() -> Self {
-        Instant { tsc_val: 0 }
+        Instant { ticks: 0 }
     }
     pub fn is_nan(&self) -> bool {
-        self.tsc_val == 0
+        self.ticks == 0
     }
 
     pub fn from_u64(val: u64) -> Self {
-        Instant { tsc_val: val }
+        Instant { ticks: val }
     }
 
     pub fn as_u64(&self) -> u64 {
-        self.tsc_val
-    }
-
-    pub fn from_nanos(nanos: u64) -> Self {
-        Instant {
-            tsc_val: nanos_to_tsc(nanos),
-        }
+        self.ticks
     }
 
     pub fn now() -> Self {
-        Instant { tsc_val: rdtsc() }
-    }
+        let vdso_time_instant_now: extern "C" fn() -> u64 = unsafe {
+            core::mem::transmute(
+                RtVdsoVtableV1::get()
+                    .time_instant_now
+                    .load(Ordering::Relaxed) as usize as *const (),
+            )
+        };
 
-    pub fn raw_tsc(&self) -> u64 {
-        self.tsc_val
+        Self {
+            ticks: vdso_time_instant_now(),
+        }
     }
 
     pub fn duration_since(&self, earlier: Instant) -> Duration {
-        if earlier.tsc_val > self.tsc_val {
-            // TODO: figure out why this happens in hyperv + qemu.
-            #[cfg(all(not(feature = "rustc-dep-of-std"), feature = "userspace"))]
-            crate::SysRay::log(
-                alloc::format!(
-                    "time goes back: earlier: {:x} > later: {:x}",
-                    earlier.tsc_val,
-                    self.tsc_val
-                )
-                .as_str(),
-            )
-            .ok();
-
-            #[cfg(feature = "rustc-dep-of-std")]
-            crate::SysRay::log("fros-sys: time: time goes back").ok();
+        if earlier.ticks > self.ticks {
             return Duration::ZERO;
         }
 
-        let tsc_diff = self.tsc_val - earlier.tsc_val;
-        if tsc_diff == 0 {
+        let ticks_diff = self.ticks - earlier.ticks;
+        if ticks_diff == 0 {
             return Duration::ZERO;
         }
 
-        let tsc_in_sec = KernelStaticPage::get().tsc_in_sec;
-        if core::intrinsics::unlikely(tsc_in_sec == 0) {
-            return Duration::ZERO;
-        }
-        let secs = tsc_diff / tsc_in_sec;
-        let nanos = tsc_to_nanos_128(tsc_diff % tsc_in_sec);
+        let nanos = ticks_to_nanos(ticks_diff);
 
-        Duration::new(secs, nanos as u32)
+        Duration::new(
+            (nanos / (NANOS_IN_SEC as u128)) as u64,
+            (nanos % (NANOS_IN_SEC as u128)) as u32,
+        )
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -89,7 +71,7 @@ impl Instant {
     }
 
     pub const fn infinite_future() -> Self {
-        Instant { tsc_val: u64::MAX }
+        Instant { ticks: u64::MAX }
     }
 
     pub fn checked_sub_instant(&self, other: &Instant) -> Option<Duration> {
@@ -97,8 +79,8 @@ impl Instant {
             return None;
         }
 
-        let result_tsc = self.tsc_val - other.tsc_val;
-        let result_nanos = tsc_to_nanos_128(result_tsc);
+        let result_ticks = self.ticks - other.ticks;
+        let result_nanos = ticks_to_nanos(result_ticks);
         if result_nanos > (u64::MAX as u128) {
             None
         } else {
@@ -107,27 +89,23 @@ impl Instant {
     }
 
     pub fn checked_add_duration(&self, other: &Duration) -> Option<Instant> {
-        let tsc_secs = other
-            .as_secs()
-            .checked_mul(KernelStaticPage::get().tsc_in_sec)?;
-        let tsc_diff = nanos_to_tsc(other.subsec_nanos() as u64).checked_add(tsc_secs)?;
+        let tsc_secs = other.as_secs().checked_mul(ticks_in_sec())?;
+        let tsc_diff = nanos_to_ticks(other.subsec_nanos() as u64).checked_add(tsc_secs)?;
 
         Some(Instant {
-            tsc_val: self.tsc_val.checked_add(tsc_diff)?,
+            ticks: self.ticks.checked_add(tsc_diff)?,
         })
     }
 
     pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
-        let tsc_secs = other
-            .as_secs()
-            .checked_mul(KernelStaticPage::get().tsc_in_sec)?;
-        let tsc_diff = nanos_to_tsc(other.subsec_nanos() as u64).checked_add(tsc_secs)?;
+        let tsc_secs = other.as_secs().checked_mul(ticks_in_sec())?;
+        let tsc_diff = nanos_to_ticks(other.subsec_nanos() as u64).checked_add(tsc_secs)?;
 
-        if tsc_diff > self.tsc_val {
+        if tsc_diff > self.ticks {
             None
         } else {
             Some(Instant {
-                tsc_val: self.tsc_val - tsc_diff,
+                ticks: self.ticks - tsc_diff,
             })
         }
     }
@@ -137,11 +115,11 @@ impl core::ops::Add<Duration> for Instant {
     type Output = Instant;
 
     fn add(self, other: Duration) -> Instant {
-        let tsc_secs = other.as_secs() * KernelStaticPage::get().tsc_in_sec;
-        let tsc_diff = nanos_to_tsc(other.subsec_nanos() as u64) + tsc_secs;
+        let tsc_secs = other.as_secs() * ticks_in_sec();
+        let tsc_diff = nanos_to_ticks(other.subsec_nanos() as u64) + tsc_secs;
 
         Instant {
-            tsc_val: self.tsc_val + tsc_diff,
+            ticks: self.ticks + tsc_diff,
         }
     }
 }
@@ -150,26 +128,18 @@ impl core::ops::Sub<Duration> for Instant {
     type Output = Instant;
 
     fn sub(self, other: Duration) -> Self::Output {
-        let tsc_secs = other.as_secs() * KernelStaticPage::get().tsc_in_sec;
-        let tsc_diff = nanos_to_tsc(other.subsec_nanos() as u64) + tsc_secs;
+        let tsc_secs = other.as_secs() * ticks_in_sec();
+        let tsc_diff = nanos_to_ticks(other.subsec_nanos() as u64) + tsc_secs;
 
         Instant {
-            tsc_val: self.tsc_val - tsc_diff,
+            ticks: self.ticks - tsc_diff,
         }
-    }
-}
-
-pub fn system_start_time() -> super::time::Instant {
-    Instant {
-        tsc_val: KernelStaticPage::get().system_start_time_tsc,
     }
 }
 
 pub fn since_system_start() -> Duration {
     Instant::now()
-        .checked_sub_instant(&Instant {
-            tsc_val: KernelStaticPage::get().system_start_time_tsc,
-        })
+        .checked_sub_instant(&Instant { ticks: 0 })
         .unwrap()
 }
 
@@ -177,7 +147,7 @@ pub fn since_system_start() -> Duration {
 impl SystemTime {
     pub fn now() -> Self {
         SystemTime {
-            nanos: abs_nanos_from_tsc(rdtsc()),
+            nanos: abs_ticks_to_nanos(Instant::now().ticks),
         }
     }
 
@@ -216,89 +186,58 @@ impl SystemTime {
     }
 }
 
-fn abs_nanos_from_tsc(tsc_val: u64) -> u128 {
-    /*  see https://www.kernel.org/doc/Documentation/virt/kvm/msr.rst
-        time = (current_tsc - tsc_timestamp)
-        if (tsc_shift >= 0)
-            time <<= tsc_shift;
-        else
-            time >>= -tsc_shift;
-        time = (time * tsc_to_system_mul) >> 32
-        time = time + system_time
-    */
-    fence(Ordering::Acquire);
-
-    let page = KernelStaticPage::get();
-    let mut time = tsc_val - page.tsc_ts;
-    let tsc_shift = page.tsc_shift;
-    if tsc_shift >= 0 {
-        time <<= tsc_shift;
-    } else {
-        time >>= -tsc_shift;
-    }
-
-    // The multiplication below MUST be done with higher precision, as
-    // doing it in u64 overflows and leads to wrong time.
-    let mul = (time as u128) * (page.tsc_mul as u128);
-
-    let mut time = mul >> 32;
-    time += page.system_time as u128;
-
-    page.base_nsec as u128 + time
-}
-
-fn rdtsc() -> u64 {
-    let mut eax: u32;
-    let mut edx: u32;
-
-    unsafe {
-        asm!(
-            "lfence",  // Prevent the CPU from reordering.
-            "rdtsc",
-            lateout("eax") eax,
-            lateout("edx") edx,
-            options(nostack)  // Don't say "nomem", otherwise the compiler might reorder.
-        );
-    }
-    ((edx as u64) << 32) | (eax as u64)
-}
-
-fn tsc_to_nanos_128(tsc: u64) -> u128 {
-    fence(Ordering::Acquire);
-    let page = KernelStaticPage::get();
-
-    let mut nanos = tsc as u128;
-    let tsc_shift = page.tsc_shift;
-    if tsc_shift >= 0 {
-        nanos <<= tsc_shift;
-    } else {
-        nanos >>= -tsc_shift;
-    }
-
-    nanos * (page.tsc_mul as u128) >> 32
-}
-
-fn nanos_to_tsc(nanos: u64) -> u64 {
-    fence(Ordering::Acquire);
-    let page = KernelStaticPage::get();
-
-    let tsc_shift = page.tsc_shift;
-
-    // TODO: optimize?
-    // TODO: fix panic on overflow.
-    let mut res = if nanos >= (1u64 << 32) {
-        (nanos >> 4) * ((1u64 << 36) / (page.tsc_mul as u64))
-    } else {
-        (nanos << 32) / (page.tsc_mul as u64)
+// This is "Duration".
+fn ticks_to_nanos(ticks: u64) -> u128 {
+    let vdso_ticks_to_nanos: extern "C" fn(u64, *mut u64, *mut u64) = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .time_ticks_to_nanos
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
     };
 
-    if tsc_shift >= 0 {
-        res >>= tsc_shift;
-    } else {
-        res <<= -tsc_shift;
-    }
+    let mut hi = 0_u64;
+    let mut lo = 0_u64;
 
-    return res;
+    vdso_ticks_to_nanos(ticks, &mut hi, &mut lo);
+
+    ((hi as u128) << 64) + (lo as u128)
+}
+
+// This is "system time".
+fn abs_ticks_to_nanos(ticks: u64) -> u128 {
+    let vdso_abs_ticks_to_nanos: extern "C" fn(u64, *mut u64, *mut u64) = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .time_abs_ticks_to_nanos
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut hi = 0_u64;
+    let mut lo = 0_u64;
+
+    vdso_abs_ticks_to_nanos(ticks, &mut hi, &mut lo);
+
+    ((hi as u128) << 64) + (lo as u128)
+}
+
+fn nanos_to_ticks(nanos: u64) -> u64 {
+    let vdso_nanos_to_ticks: extern "C" fn(u64) -> u64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .time_nanos_to_ticks
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_nanos_to_ticks(nanos)
+}
+
+fn ticks_in_sec() -> u64 {
+    RtVdsoVtableV1::get()
+        .time_ticks_in_sec
+        .load(Ordering::Relaxed)
 }
 
 #[derive(Debug)]

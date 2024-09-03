@@ -236,7 +236,7 @@ pub(super) fn set_relay(
                     }
                 }
 
-                let timeout = moto_sys::time::Instant::now() + core::time::Duration::new(0, 1_000);
+                let timeout = moto_rt::time::Instant::now() + core::time::Duration::new(0, 1_000);
                 match stdin_lock
                     .stdio
                     .pipe()

@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
+moto-rt      = { path = "../../lib/moto-rt"     }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-sys-io  = { path = "../../lib/moto-sys-io" }
 time = { version = "0.3.36", default-features = false, features = ["std"] }

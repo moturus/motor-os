@@ -253,7 +253,7 @@ impl ClientConnection {
         }
     }
 
-    pub fn do_rpc(&mut self, timeout: Option<moto_sys::time::Instant>) -> Result<(), ErrorCode> {
+    pub fn do_rpc(&mut self, timeout: Option<moto_rt::time::Instant>) -> Result<(), ErrorCode> {
         if self.connected() {
             fence(core::sync::atomic::Ordering::SeqCst);
             let seq = self

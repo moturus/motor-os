@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use moto_sys::time::Instant;
+use moto_rt::time::Instant;
 use moto_sys::SysHandle;
 
 use crossbeam_utils::Backoff;
