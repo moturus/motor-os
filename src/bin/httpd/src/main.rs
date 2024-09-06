@@ -47,6 +47,16 @@ const MAX_BAD_CACHE_LEN: usize = 4096;
 const MAX_HEADER_LEN: usize = 4096 * 4;
 const MAX_HEADERS: usize = 64;
 
+const BINARY_CONTENT_TYPES: std::sync::LazyLock<HashMap<&'static str, &'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut types = HashMap::new();
+        types.insert("png", "image/png");
+        types.insert("woff", "font/woff");
+        types.insert("woff2", "font/woff2");
+
+        types
+    });
+
 fn get_txt_file(pb: PathBuf) -> Option<String> {
     // Try cache hit.
     {
@@ -299,12 +309,13 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
         return write_error(404, writer);
     }
 
-    if path_str.as_str().ends_with(".png") {
-        if let Some(bytes) = get_img_file(request_path.clone()) {
-            log_request(200, request.url.as_bytes());
+    if let Some(ext) = request_path.extension().and_then(std::ffi::OsStr::to_str) {
+        if let Some(content_type) = BINARY_CONTENT_TYPES.get(ext) {
+            if let Some(bytes) = get_img_file(request_path.clone()) {
+                log_request(200, request.url.as_bytes());
 
-            writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        bytes.len()
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        content_type, bytes.len()
                     )
                     .as_bytes(),
                 )
@@ -312,17 +323,18 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
                     println!("write headers failed with erro {:?}", err);
                     ()
                 })?;
-            writer.write_all(&bytes).map_err(|err| {
-                println!("write bytes failed with err {:?}", err);
-                ()
-            })?;
-            return writer.flush().map_err(|err| {
-                println!("writer flush failed with err {:?}", err);
-                ()
-            });
+                writer.write_all(&bytes).map_err(|err| {
+                    println!("write bytes failed with err {:?}", err);
+                    ()
+                })?;
+                return writer.flush().map_err(|err| {
+                    println!("writer flush failed with err {:?}", err);
+                    ()
+                });
+            }
+            log_request(404, request.url.as_bytes());
+            return write_error(404, writer);
         }
-        log_request(404, request.url.as_bytes());
-        return write_error(404, writer);
     }
 
     if !path_str.as_str().ends_with(".html") {
