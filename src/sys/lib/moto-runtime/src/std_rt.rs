@@ -54,7 +54,9 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
         // At the moment (2024-01-11), stderr.flush() above does nothing.
         // Wait a bit to let it flush "naturally".
         // See https://github.com/moturus/motor-os/issues/6
-        crate::thread::sleep(core::time::Duration::from_millis(10));
+        moto_rt::thread::sleep_until(
+            moto_rt::time::Instant::now() + core::time::Duration::from_millis(10),
+        );
     }
 }
 
@@ -141,7 +143,9 @@ pub extern "C" fn moturus_print_stacktrace() {
     // At the moment (2024-01-11), stderr.flush() above does nothing.
     // Wait a bit to let it flush "naturally".
     // See https://github.com/moturus/motor-os/issues/6
-    crate::thread::sleep(core::time::Duration::from_millis(10));
+    moto_rt::thread::sleep_until(
+        moto_rt::time::Instant::now() + core::time::Duration::from_millis(10),
+    );
 }
 
 #[linkage = "weak"]

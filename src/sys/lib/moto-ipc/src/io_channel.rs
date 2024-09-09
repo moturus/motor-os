@@ -95,13 +95,13 @@ impl Payload {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Msg {
-    pub id: u64,          // IN. See user_data in io_uring.pdf. Used by client-side executor.
-    pub handle: u64,      // IN/OUT. Like Windows handle, or Unix fd.
-    pub command: u16,     // IN.
-    pub status: u16,      // OUT.
-    pub flags: u32,       // IN/OUT.
-    pub wake_handle: u64, // IN (used by client-side executor to notify upon completion).
-    pub payload: Payload, // IN/OUT.
+    pub id: u64,           // IN. See user_data in io_uring.pdf. Used by client-side executor.
+    pub handle: u64,       // IN/OUT. Like Windows handle, or Unix fd.
+    pub command: u16,      // IN.
+    pub status: ErrorCode, // OUT.
+    pub flags: u32,        // IN/OUT.
+    pub wake_handle: u64,  // IN (used by client-side executor to notify upon completion).
+    pub payload: Payload,  // IN/OUT.
 }
 
 const _MSG_SIZE: () = assert!(core::mem::size_of::<Msg>() == 56);
@@ -124,7 +124,7 @@ impl Debug for Msg {
 impl Msg {
     pub fn new() -> Self {
         let mut result: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-        result.status = ErrorCode::NotReady.into();
+        result.status = moto_rt::E_NOT_READY;
         result
     }
 
@@ -133,7 +133,7 @@ impl Msg {
     }
 
     pub fn status(&self) -> ErrorCode {
-        ErrorCode::from_u16(self.status)
+        self.status
     }
 }
 
@@ -211,7 +211,7 @@ impl RawChannel {
 
     fn page_bytes(&self, raw_page: RawIoPage) -> Result<&mut [u8], ErrorCode> {
         if raw_page.page_idx >= (CHANNEL_PAGE_COUNT as u16) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         unsafe {
@@ -238,7 +238,7 @@ impl RawChannel {
             let ones = (bitmap | !subchannel_mask).trailing_ones();
             if ones == 64 {
                 // Nothing left.
-                return Err(ErrorCode::NotReady);
+                return Err(moto_rt::E_NOT_READY);
             }
 
             let bit = 1u64 << ones;
@@ -263,7 +263,7 @@ impl RawChannel {
 
     fn free_page(&self, raw_page: RawIoPage) -> Result<(), ErrorCode> {
         if (raw_page.page_idx as usize) >= CHANNEL_PAGE_COUNT {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let bitmap = match raw_page.s_type {
@@ -467,7 +467,7 @@ impl ClientConnection {
                     Err(head) => pos = head, // continue
                 }
             } else if stamp < pos {
-                return Err(ErrorCode::NotReady); // The queue is full.
+                return Err(moto_rt::E_NOT_READY); // The queue is full.
             } else {
                 // We lost the race - continue.
                 pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
@@ -501,7 +501,7 @@ impl ClientConnection {
                     Err(tail) => pos = tail, // continue
                 }
             } else if stamp < (pos + 1) {
-                return Err(ErrorCode::NotReady); // The queue is empty.
+                return Err(moto_rt::E_NOT_READY); // The queue is empty.
             } else {
                 // We lost the race - continue.
                 pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
@@ -523,13 +523,13 @@ impl ClientConnection {
                 raw_channel: self.raw_channel(),
             })
         } else {
-            Err(ErrorCode::NotReady)
+            Err(moto_rt::E_NOT_READY)
         }
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
-            Err(ErrorCode::InvalidArgument)
+            Err(moto_rt::E_INVALID_ARGUMENT)
         } else {
             Ok(IoPage::from_u16(page_idx, self.raw_channel()))
         }
@@ -608,7 +608,7 @@ impl ServerConnection {
     // See dequeue() in mpmc.cc.
     pub fn recv(&self) -> Result<Msg, ErrorCode> {
         if self.status != ServerStatus::Connected {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let raw_channel = self.raw_channel();
@@ -630,7 +630,7 @@ impl ServerConnection {
                     Err(tail) => pos = tail, // continue
                 }
             } else if stamp < (pos + 1) {
-                return Err(ErrorCode::NotReady); // The queue is empty.
+                return Err(moto_rt::E_NOT_READY); // The queue is empty.
             } else {
                 // We lost the race - continue.
                 pos = raw_channel.client_queue_tail.load(Ordering::Relaxed);
@@ -645,7 +645,7 @@ impl ServerConnection {
     // See enqueue() in mpmc.cc.
     pub fn send(&self, sqe: Msg) -> Result<(), ErrorCode> {
         if self.status != ServerStatus::Connected {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let raw_channel = self.raw_channel();
@@ -668,7 +668,7 @@ impl ServerConnection {
                     Err(head) => pos = head, // continue
                 }
             } else if stamp < pos {
-                return Err(ErrorCode::NotReady); // The queue is full.
+                return Err(moto_rt::E_NOT_READY); // The queue is full.
             } else {
                 // We lost the race - continue.
                 pos = raw_channel.server_queue_head.load(Ordering::Relaxed);
@@ -701,9 +701,9 @@ impl ServerConnection {
                 .load(Ordering::Relaxed)
                 != 0
         {
-            self.status = ServerStatus::Error(ErrorCode::BadHandle);
+            self.status = ServerStatus::Error(moto_rt::E_BAD_HANDLE);
             self.clear();
-            return Err(ErrorCode::BadHandle);
+            return Err(moto_rt::E_BAD_HANDLE);
         }
 
         self.status = ServerStatus::Connected;
@@ -728,13 +728,13 @@ impl ServerConnection {
                 raw_channel: self.raw_channel(),
             })
         } else {
-            Err(ErrorCode::NotReady)
+            Err(moto_rt::E_NOT_READY)
         }
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
-            Err(ErrorCode::InvalidArgument)
+            Err(moto_rt::E_INVALID_ARGUMENT)
         } else {
             Ok(IoPage::from_u16(page_idx, self.raw_channel()))
         }

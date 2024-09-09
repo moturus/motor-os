@@ -22,7 +22,7 @@ const _: () = assert!(PAGE_SIZE_SMALL as usize == core::mem::size_of::<CacheLine
 impl CacheLine {
     fn push(&mut self, segment: MemorySegment) -> Result<(), ErrorCode> {
         if self.count as usize == CACHED_SEGMENTS_PER_PAGE {
-            return Err(ErrorCode::NotReady);
+            return Err(moto_rt::E_NOT_READY);
         }
 
         self.cache[self.count as usize] = segment;

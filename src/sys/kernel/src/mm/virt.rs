@@ -225,7 +225,7 @@ impl VmemRegion {
     #[allow(unused)]
     pub(super) fn free(&self, addr: u64) -> Result<u64, ErrorCode> {
         if !self.segment.contains(addr) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let mut segments = self.used_segments.lock(line!());
@@ -288,7 +288,7 @@ impl VmemRegion {
                     size,
                     self.segment.size
                 );
-                return Err(ErrorCode::OutOfMemory);
+                return Err(moto_rt::E_OUT_OF_MEMORY);
             }
             found_gap = true;
         } else if let Some(last_seg) = segments.last_segment() {
@@ -320,7 +320,7 @@ impl VmemRegion {
                 self.bytes_used.load(Ordering::Relaxed),
                 size
             );
-            return Err(ErrorCode::OutOfMemory);
+            return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
         let mut seg = VmemSegment::new(MemorySegment { start, size }, self, mapping_options);
@@ -417,7 +417,7 @@ impl VmemRegion {
 
         if (vaddr_start < self.segment.start) || ((vaddr_start + size) >= self.segment.end()) {
             log::debug!("allocate_user_fixed failed for addr 0x{:x}", vaddr_start);
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let mut segments = self.used_segments.lock(line!());
@@ -425,7 +425,7 @@ impl VmemRegion {
         // Validate that there is no overlap with existing segments.
         if segments.intersects(&memory_segment) {
             log::debug!("allocate_user_fixed failed for addr 0x{:x}", vaddr_start);
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let mut seg = VmemSegment::new(memory_segment, self, mapping_options);
@@ -441,7 +441,7 @@ impl VmemRegion {
 
     fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         if !self.segment.contains(pf_addr) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let mut segments = self.used_segments.lock(line!());
@@ -450,7 +450,7 @@ impl VmemRegion {
             return seg.fix_pagefault(pf_addr, error_code);
         }
 
-        Err(ErrorCode::InvalidArgument)
+        Err(moto_rt::E_INVALID_ARGUMENT)
     }
 }
 
@@ -825,7 +825,7 @@ impl UserAddressSpaceBase {
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => self
                 .custom_memory
                 .allocate_user_fixed(vaddr_start, num_pages, mapping_options),
-            _ => Err(ErrorCode::InvalidArgument),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
         }
     }
 
@@ -871,7 +871,7 @@ impl UserAddressSpaceBase {
 
             if map_there_segment.is_none() || map_here_segment.is_none() {
                 log::debug!("map_shared: can't find the segments to map");
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
 
             let map_there_segment = map_there_segment.unwrap();
@@ -883,7 +883,7 @@ impl UserAddressSpaceBase {
                     map_there_segment.segment().size,
                     map_here_segment.segment().size,
                 );
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
 
             // Rust does not allow concurrent mutable access to elements of
@@ -941,7 +941,7 @@ impl UserAddressSpaceBase {
 
         if map_there_segment.is_none() || map_here_segment.is_none() {
             log::debug!("map_shared: can't find the segments to map");
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let map_there_segment = map_there_segment.unwrap();
@@ -953,7 +953,7 @@ impl UserAddressSpaceBase {
                 map_there_segment.segment().size,
                 map_here_segment.segment().size,
             );
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         map_here_segment.share_with(

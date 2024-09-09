@@ -1,4 +1,3 @@
-use moto_sys::ErrorCode;
 use moto_sys::*;
 use syscalls::SyscallResult;
 
@@ -28,7 +27,7 @@ fn sys_mmio_map(
         ResultBuilder::ok_1(virt_addr)
     } else {
         log::debug!("sys_mmio_map failed");
-        ResultBuilder::result(ErrorCode::InvalidArgument)
+        ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT)
     }
 }
 
@@ -44,27 +43,27 @@ fn sys_map(
     // Protect against bad numbers.
     let (new_bytes, overflow) = page_size.overflowing_mul(num_pages);
     if overflow || new_bytes > (1 << 40) {
-        return ResultBuilder::result(ErrorCode::OutOfMemory); // TODO: should we kill the process?
+        return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY); // TODO: should we kill the process?
     }
 
     let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
 
     if !io_manager && crate::mm::oom_for_user(page_size * num_pages) {
-        return ResultBuilder::result(ErrorCode::OutOfMemory);
+        return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
     }
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_MMIO) {
         // This is used for MMIO at specific addresses, e.g. PCI functions.
         if !io_manager {
             log::debug!("sys_map: MMIO w/o CAP_IO_MAN");
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         return sys_mmio_map(address_space, phys_addr, virt_addr, page_size, num_pages);
     }
 
     if page_size == sys_mem::PAGE_SIZE_MID {
         if !io_manager {
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         if flags != (SysMem::F_READABLE | SysMem::F_WRITABLE) || num_pages != 1 {
             log::debug!(
@@ -72,7 +71,7 @@ fn sys_map(
                 flags,
                 num_pages
             );
-            return ResultBuilder::result(ErrorCode::InvalidArgument);
+            return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT);
         }
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
@@ -81,7 +80,7 @@ fn sys_map(
 
         return match address_space.alloc_user_mid_pages(num_pages) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };
     }
 
@@ -93,7 +92,7 @@ fn sys_map(
         // This is used for MMIO at arbitrary addresses, e.g. to create VirtIO virtqueues.
         if !io_manager {
             log::debug!("sys_map: MMIO w/o CAP_IO_MAN");
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
@@ -107,14 +106,14 @@ fn sys_map(
 
         return match address_space.alloc_contiguous_pages(num_pages) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };
     }
 
     if flags & SysMem::F_CUSTOM_USER == SysMem::F_CUSTOM_USER {
         if !io_manager {
             log::debug!("sys_map: F_CUSTOM_USER w/o CAP_IO_MAN");
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         if phys_addr != u64::MAX || virt_addr == u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
@@ -151,7 +150,7 @@ fn sys_map(
 
         return match address_space.allocate_user_fixed(virt_addr, num_pages, mapping_options) {
             Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
-            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };
     }
 
@@ -160,7 +159,7 @@ fn sys_map(
             // This is a normal user heap allocation.
             return match address_space.alloc_user_heap(num_pages) {
                 Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-                Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+                Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
             };
         }
 
@@ -177,7 +176,7 @@ fn sys_map(
 
         return match address_space.alloc_user_lazy(num_pages) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };
     }
 
@@ -194,7 +193,7 @@ fn sys_map(
                 debug_assert_eq!(page_size * num_pages, segment.size);
                 ResultBuilder::ok_2(segment.start, segment.size)
             }
-            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };
     }
 
@@ -227,7 +226,7 @@ fn sys_map(
             curr_thread.owner().address_space(),
         ) {
             Ok((addr1, addr2)) => ResultBuilder::ok_2(addr1, addr2),
-            Err(_) => ResultBuilder::result(ErrorCode::OutOfMemory),
+            Err(_) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         };
     }
 

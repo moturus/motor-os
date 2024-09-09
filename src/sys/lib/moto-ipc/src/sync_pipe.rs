@@ -12,7 +12,7 @@ struct PipeBuffer {
 
 impl Drop for PipeBuffer {
     fn drop(&mut self) {
-        if self.error_code.is_ok() {
+        if self.error_code == moto_rt::E_OK {
             SysCpu::wake(self.ipc_handle).ok();
         }
         moto_sys::SysObj::put(self.ipc_handle).unwrap();
@@ -45,7 +45,7 @@ impl PipeBuffer {
                 (buf_addr + Self::DATA_OFFSET) as *mut u8,
                 work_buf_len,
             ),
-            error_code: ErrorCode::Ok,
+            error_code: moto_rt::E_OK,
             ipc_handle,
         }
     }
@@ -209,14 +209,14 @@ impl Reader {
     ) -> Result<usize, ErrorCode> {
         self.buffer.assert_invariants();
         if buf.len() == 0 {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         // Even if the remote end is gone (self.buffer.error_code.is_err()),
         // we should complete reading bytes left in the buffer.
         'outer: loop {
             while !self.buffer.can_read() {
-                if self.buffer.error_code.is_err() {
+                if self.buffer.error_code != moto_rt::E_OK {
                     break 'outer;
                 }
                 if let Err(e) = SysCpu::wait(
@@ -231,7 +231,7 @@ impl Reader {
             }
             let read = self.buffer.read(buf);
             if read > 0 {
-                if self.buffer.error_code.is_err() {
+                if self.buffer.error_code != moto_rt::E_OK {
                     return Ok(read);
                 }
                 if let Err(e) = SysCpu::wake(self.buffer.ipc_handle) {
@@ -246,15 +246,15 @@ impl Reader {
         // and then exited, we don't want to lose that.
         let read = self.buffer.read(buf);
         if read > 0 {
-            if self.buffer.error_code == ErrorCode::TimedOut {
-                self.buffer.error_code = ErrorCode::Ok;
+            if self.buffer.error_code == moto_rt::E_TIMED_OUT {
+                self.buffer.error_code = moto_rt::E_OK;
             }
             return Ok(read);
         }
 
-        if self.buffer.error_code == ErrorCode::TimedOut {
-            self.buffer.error_code = ErrorCode::Ok;
-            Err(ErrorCode::TimedOut)
+        if self.buffer.error_code == moto_rt::E_TIMED_OUT {
+            self.buffer.error_code = moto_rt::E_OK;
+            Err(moto_rt::E_TIMED_OUT)
         } else {
             Err(self.buffer.error_code)
         }
@@ -289,12 +289,12 @@ impl Writer {
         buf: &[u8],
         timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
-        if self.buffer.error_code.is_err() {
+        if self.buffer.error_code != moto_rt::E_OK {
             return Err(self.buffer.error_code);
         }
         self.buffer.assert_invariants();
         if buf.len() == 0 {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let mut written = 0_usize;
@@ -370,7 +370,7 @@ impl Pipe {
         match self {
             Self::Reader(reader) => reader.read_timeout(buf, timeout),
             Self::Null => Ok(0),
-            _ => Err(ErrorCode::InvalidArgument),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
         }
     }
 
@@ -390,7 +390,7 @@ impl Pipe {
                 if size != 0 {
                     return Ok(size);
                 } else {
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             }
         }
@@ -408,7 +408,7 @@ impl Pipe {
         match self {
             Self::Writer(writer) => writer.write_timeout(buf, timeout),
             Self::Null => Ok(0),
-            _ => Err(ErrorCode::InvalidArgument),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
         }
     }
 

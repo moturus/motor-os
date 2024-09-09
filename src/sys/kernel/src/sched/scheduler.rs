@@ -558,16 +558,16 @@ pub fn get_irq_wait_handle(
 ) -> Result<Arc<SysObject>, ErrorCode> {
     // Only the IO Manager can wait on IRQs.
     if process.capabilities() & moto_sys::caps::CAP_IO_MANAGER == 0 {
-        return Err(ErrorCode::NotAllowed);
+        return Err(moto_rt::E_NOT_ALLOWED);
     }
 
     if irq < crate::arch::irq::IRQ_CUSTOM_START {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let idx = irq - crate::arch::irq::IRQ_CUSTOM_START;
     if idx >= crate::config::get().custom_irqs {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     Ok(USER_IRQ_WAITERS[idx as usize].clone())

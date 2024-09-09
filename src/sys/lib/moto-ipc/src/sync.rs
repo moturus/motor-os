@@ -77,7 +77,7 @@ impl RawChannel {
         if (start_addr < self.addr)
             || ((start_addr + core::mem::size_of::<T>() * size) > (self.addr + self.size))
         {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         Ok(core::slice::from_raw_parts_mut(start, size))
@@ -89,7 +89,7 @@ impl RawChannel {
         if (start_addr < self.addr)
             || ((start_addr + core::mem::size_of::<T>() * size) > (self.addr + self.size))
         {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         Ok(core::slice::from_raw_parts(start, size))
@@ -99,7 +99,7 @@ impl RawChannel {
         let start = buf.as_ptr();
         let start_addr = start as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         Ok(core::slice::from_raw_parts(start, size))
@@ -113,7 +113,7 @@ impl RawChannel {
         let start = buf.as_mut_ptr();
         let start_addr = start as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         Ok(core::slice::from_raw_parts_mut(start, size))
@@ -123,7 +123,7 @@ impl RawChannel {
         let start = dst.as_mut_ptr();
         let start_addr = start as usize;
         if (start_addr < self.addr) || ((start_addr + src.len()) > (self.addr + self.size)) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         core::intrinsics::copy_nonoverlapping(src.as_ptr(), start, src.len());
@@ -275,16 +275,16 @@ impl ClientConnection {
                     }
                     assert_eq!(self.seq + 1, seq);
                     self.seq += 1;
-                } else if let Err(ErrorCode::BadHandle) = res {
+                } else if let Err(moto_rt::E_BAD_HANDLE) = res {
                     assert_eq!(handles[0], self.handle);
                     self.disconnect();
                 } else {
-                    assert_eq!(res.err().unwrap(), ErrorCode::TimedOut);
+                    assert_eq!(res.err().unwrap(), moto_rt::E_TIMED_OUT);
                 }
                 return res;
             }
         } else {
-            Err(ErrorCode::InvalidArgument)
+            Err(moto_rt::E_INVALID_ARGUMENT)
         }
     }
 
@@ -467,12 +467,12 @@ impl LocalServerConnection {
             assert_eq!(self.seq, seq + 1);
             assert_eq!(0, self.seq & 1);
             SysCpu::wake(self.handle).map_err(|err| {
-                assert_eq!(err, ErrorCode::BadHandle);
+                assert_eq!(err, moto_rt::E_BAD_HANDLE);
                 self.disconnect();
                 err
             })
         } else {
-            Err(ErrorCode::InvalidArgument)
+            Err(moto_rt::E_INVALID_ARGUMENT)
         }
     }
 
@@ -591,7 +591,7 @@ impl LocalServer {
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, None).map_err(|err| {
-            assert_eq!(err, ErrorCode::BadHandle);
+            assert_eq!(err, moto_rt::E_BAD_HANDLE);
             let mut bad_extras = Vec::new();
             for waiter in &waiters {
                 if *waiter == SysHandle::NONE {

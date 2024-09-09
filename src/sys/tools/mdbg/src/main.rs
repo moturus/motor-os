@@ -67,7 +67,7 @@ fn _get_backtrace() -> [u64; BT_DEPTH] {
     backtrace
 }
 
-fn get_process_name(pid: u64) -> Result<String, moto_sys::ErrorCode> {
+fn get_process_name(pid: u64) -> Result<String, moto_rt::ErrorCode> {
     use moto_sys::stats::ProcessStatsV1;
 
     let mut ps = [ProcessStatsV1::default(); 1];
@@ -76,7 +76,7 @@ fn get_process_name(pid: u64) -> Result<String, moto_sys::ErrorCode> {
     let filename = if let Some(w) = words.next() {
         w
     } else {
-        return Err(moto_sys::ErrorCode::InternalError);
+        return Err(moto_rt::E_INTERNAL_ERROR);
     }
     .split('/')
     .last()
@@ -178,18 +178,18 @@ fn print_stack_trace(proc_name: &str, dbg_handle: moto_sys::SysHandle, tid: u64)
     println!("{}", writer.as_str());
 }
 
-fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
+fn cmd_print_stacks(pid: u64) -> Result<(), moto_rt::ErrorCode> {
     let proc_name = get_process_name(pid)?;
 
     let dbg_handle = match SysRay::dbg_attach(pid) {
         Ok(handle) => handle,
         Err(err) => {
             match err {
-                moto_sys::ErrorCode::NotFound => {
+                moto_rt::E_NOT_FOUND => {
                     eprintln!("Process with pid {pid} not found.");
                     std::process::exit(1)
                 }
-                moto_sys::ErrorCode::NotAllowed => {
+                moto_rt::E_NOT_ALLOWED => {
                     eprintln!("Debugging process {pid} '{proc_name}' is not allowed.");
                     eprintln!("In general, it is not allowed to debug system processes, ancestors, and self.");
                     std::process::exit(1)
@@ -234,9 +234,9 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
     while let Some(tid) = all_tids.pop_front() {
         if let Err(err) = SysRay::dbg_resume_thread(dbg_handle, tid) {
             assert!(
-                err == moto_sys::ErrorCode::AlreadyInUse
-                    || err == moto_sys::ErrorCode::NotFound
-                    || err == moto_sys::ErrorCode::NotReady
+                err == moto_rt::E_ALREADY_IN_USE
+                    || err == moto_rt::E_NOT_FOUND
+                    || err == moto_rt::E_NOT_READY
             );
         }
     }
@@ -253,9 +253,9 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
         for idx in 0..sz {
             if let Err(err) = SysRay::dbg_resume_thread(dbg_handle, tids[idx]) {
                 assert!(
-                    err == moto_sys::ErrorCode::AlreadyInUse
-                        || err == moto_sys::ErrorCode::NotFound
-                        || err == moto_sys::ErrorCode::NotReady
+                    err == moto_rt::E_ALREADY_IN_USE
+                        || err == moto_rt::E_NOT_FOUND
+                        || err == moto_rt::E_NOT_READY
                 );
             }
         }
@@ -266,7 +266,7 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
 
     assert_eq!(
         moto_sys::SysObj::put(dbg_handle).err().unwrap(),
-        moto_sys::ErrorCode::BadHandle
+        moto_rt::E_BAD_HANDLE
     );
 
     // Sleep a bit to let stdout flush.
@@ -276,7 +276,7 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_sys::ErrorCode> {
     Ok(())
 }
 
-fn main() -> Result<(), moto_sys::ErrorCode> {
+fn main() -> Result<(), moto_rt::ErrorCode> {
     let cli = Cli::parse();
     match cli.cmd {
         Commands::PrintStacks(args) => cmd_print_stacks(args.pid),

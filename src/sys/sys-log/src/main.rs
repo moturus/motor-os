@@ -227,7 +227,7 @@ impl LogServer {
             if conn.connected() {
                 unsafe {
                     conn.raw_channel().get_mut::<ResponseHeader>().result =
-                        moto_sys::ErrorCode::InvalidArgument.into()
+                        moto_rt::E_INVALID_ARGUMENT
                 };
             }
         }

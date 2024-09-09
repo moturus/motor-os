@@ -101,7 +101,7 @@ impl NetSys {
         mut sqe: io_channel::Msg,
     ) -> io_channel::Msg {
         if self.devices.is_empty() {
-            sqe.status = ErrorCode::NotFound.into();
+            sqe.status = moto_rt::E_NOT_FOUND;
             return sqe;
         }
 
@@ -116,7 +116,7 @@ impl NetSys {
         // Verify that we are not listening on that address yet.
         for (_, listener) in &self.tcp_listeners {
             if *listener.socket_addr() == socket_addr {
-                sqe.status = ErrorCode::AlreadyInUse.into();
+                sqe.status = moto_rt::E_ALREADY_IN_USE;
                 return sqe;
             }
         }
@@ -133,7 +133,7 @@ impl NetSys {
             match self.ip_addresses.get(&ip_addr) {
                 Some(idx) => Some(*idx),
                 None => {
-                    sqe.status = ErrorCode::InvalidArgument.into();
+                    sqe.status = moto_rt::E_INVALID_ARGUMENT;
                     return sqe;
                 }
             }
@@ -145,7 +145,7 @@ impl NetSys {
             sqe.flags as usize
         };
         if num_listeners > MAX_NUM_LISTENING_SOCKETS {
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return sqe;
         }
 
@@ -203,7 +203,7 @@ impl NetSys {
         }
 
         sqe.handle = listener_id.into();
-        sqe.status = ErrorCode::Ok.into();
+        sqe.status = moto_rt::E_OK;
         sqe
     }
 
@@ -314,7 +314,7 @@ impl NetSys {
     fn drop_tcp_listener(&mut self, listener_id: TcpListenerId) {
         let mut listener = self.tcp_listeners.remove(&listener_id).unwrap();
         while let Some((mut req, conn)) = listener.get_pending_accept() {
-            req.status = ErrorCode::BadHandle.into();
+            req.status = moto_rt::E_BAD_HANDLE;
             self.pending_completions.push_back(PendingCompletion {
                 msg: req,
                 endpoint_handle: conn.wait_handle(),
@@ -395,7 +395,7 @@ impl NetSys {
 
         if let Some(mut cqe) = moto_socket.connect_req.take() {
             assert_eq!(moto_socket.state, TcpState::Connecting);
-            cqe.status = ErrorCode::BadHandle.into();
+            cqe.status = moto_rt::E_BAD_HANDLE;
             self.pending_completions.push_back(PendingCompletion {
                 msg: cqe,
                 endpoint_handle: moto_socket.conn.wait_handle(),
@@ -462,7 +462,7 @@ impl NetSys {
             moto_socket.state = TcpState::ReadWrite;
             req.handle = socket_id.into();
             rt_api::net::put_socket_addr(&mut req.payload, &socket_addr);
-            req.status = ErrorCode::Ok.into();
+            req.status = moto_rt::E_OK;
             self.pending_completions.push_back(PendingCompletion {
                 msg: req,
                 endpoint_handle: conn.wait_handle(),
@@ -563,7 +563,7 @@ impl NetSys {
         let timeout = rt_api::net::tcp_stream_connect_timeout(&sqe);
         if let Some(timo) = timeout {
             if timo <= moto_rt::time::Instant::now() {
-                sqe.status = ErrorCode::TimedOut.into();
+                sqe.status = moto_rt::E_TIMED_OUT;
                 return Some(sqe);
             }
         };
@@ -585,7 +585,7 @@ impl NetSys {
                 remote_addr
             );
 
-            sqe.status = ErrorCode::NotFound.into();
+            sqe.status = moto_rt::E_NOT_FOUND;
             return Some(sqe);
         };
 
@@ -594,7 +594,7 @@ impl NetSys {
                 Some(port) => port,
                 None => {
                     log::info!("get_ephemeral_port({:?}) failed", local_ip_addr);
-                    sqe.status = ErrorCode::OutOfMemory.into();
+                    sqe.status = moto_rt::E_OUT_OF_MEMORY;
                     return Some(sqe);
                 }
             };
@@ -663,13 +663,13 @@ impl NetSys {
             if !socks.contains(&socket_id) {
                 log::debug!("{}:{} bad socket", file!(), line!());
                 let mut err = *sqe;
-                err.status = ErrorCode::InvalidArgument.into();
+                err.status = moto_rt::E_INVALID_ARGUMENT;
                 return Err(err);
             }
         } else {
             log::debug!("{}:{} bad socket", file!(), line!());
             let mut err = *sqe;
-            err.status = ErrorCode::InvalidArgument.into();
+            err.status = moto_rt::E_INVALID_ARGUMENT;
             return Err(err);
         }
 
@@ -785,13 +785,13 @@ impl NetSys {
 
         if moto_socket.state == TcpState::Connecting {
             log::debug!("{}:{} bad state", file!(), line!());
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return sqe;
         }
 
         let mut options = sqe.payload.args_64()[0];
         if options == 0 {
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return sqe;
         }
 
@@ -801,7 +801,7 @@ impl NetSys {
                 1 => true,
                 0 => false,
                 _ => {
-                    sqe.status = ErrorCode::InvalidArgument.into();
+                    sqe.status = moto_rt::E_INVALID_ARGUMENT;
                     return sqe;
                 }
             };
@@ -810,14 +810,14 @@ impl NetSys {
                 .sockets
                 .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
             smol_socket.set_nagle_enabled(!nodelay);
-            sqe.status = ErrorCode::Ok.into();
+            sqe.status = moto_rt::E_OK;
             return sqe;
         }
 
         if options == rt_api::net::TCP_OPTION_TTL {
             let ttl = sqe.payload.args_32()[2];
             if ttl == 0 || ttl > 255 {
-                sqe.status = ErrorCode::InvalidArgument.into();
+                sqe.status = moto_rt::E_INVALID_ARGUMENT;
                 return sqe;
             };
 
@@ -825,7 +825,7 @@ impl NetSys {
                 .sockets
                 .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
             smol_socket.set_hop_limit(Some(ttl as u8));
-            sqe.status = ErrorCode::Ok.into();
+            sqe.status = moto_rt::E_OK;
             return sqe;
         }
 
@@ -838,12 +838,12 @@ impl NetSys {
         options ^= rt_api::net::TCP_OPTION_SHUT_WR;
 
         if options != 0 {
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return sqe;
         }
 
         if !(shut_rd || shut_wr) {
-            sqe.status = ErrorCode::Ok.into(); // Nothing to do.
+            sqe.status = moto_rt::E_OK; // Nothing to do.
             return sqe;
         }
 
@@ -893,7 +893,7 @@ impl NetSys {
             TcpState::_Max => panic!(),
         }
 
-        sqe.status = ErrorCode::Ok.into();
+        sqe.status = moto_rt::E_OK;
         return sqe;
     }
 
@@ -911,13 +911,13 @@ impl NetSys {
 
         if moto_socket.state == TcpState::Connecting {
             log::debug!("{}:{} bad state", file!(), line!());
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return sqe;
         }
 
         let options = sqe.payload.args_64()[0];
         if options == 0 {
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return sqe;
         }
 
@@ -928,7 +928,7 @@ impl NetSys {
                     .get::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
                 let nodelay = !smol_socket.nagle_enabled();
                 sqe.payload.args_64_mut()[0] = if nodelay { 1 } else { 0 };
-                sqe.status = ErrorCode::Ok.into();
+                sqe.status = moto_rt::E_OK;
             }
             rt_api::net::TCP_OPTION_TTL => {
                 let smol_socket = self.devices[moto_socket.device_idx]
@@ -940,11 +940,11 @@ impl NetSys {
                     64 // This is what smoltcp documentation implies.
                 };
                 sqe.payload.args_32_mut()[0] = ttl;
-                sqe.status = ErrorCode::Ok.into();
+                sqe.status = moto_rt::E_OK;
             }
             _ => {
                 log::debug!("Invalid option 0x{}", options);
-                sqe.status = ErrorCode::InvalidArgument.into();
+                sqe.status = moto_rt::E_INVALID_ARGUMENT;
             }
         }
 
@@ -959,7 +959,7 @@ impl NetSys {
         let socket_id = if let Ok(s) = self.tcp_socket_from_msg(conn.wait_handle(), &sqe) {
             s
         } else {
-            sqe.status = ErrorCode::InvalidArgument.into();
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
             return Some(sqe);
         };
         log::debug!(
@@ -973,7 +973,7 @@ impl NetSys {
         // not dropping connections before writes are complete.
         // TODO: implement SO_LINGER (Rust: TcpStream::set_linger()).
         self.drop_tcp_socket(socket_id);
-        sqe.status = ErrorCode::Ok.into();
+        sqe.status = moto_rt::E_OK;
         Some(sqe)
     }
 
@@ -1015,7 +1015,7 @@ impl NetSys {
         let (io_page, sz) = (x_buf.page, x_buf.consumed);
         let mut msg =
             moto_runtime::rt_api::net::tcp_stream_rx_msg(socket_id.into(), io_page, sz, rx_seq);
-        msg.status = ErrorCode::Ok.into();
+        msg.status = moto_rt::E_OK;
 
         PendingCompletion {
             msg,
@@ -1060,7 +1060,7 @@ impl NetSys {
             }
             msg.handle = moto_socket.id.into();
             rt_api::net::put_socket_addr(&mut msg.payload, &remote_addr);
-            msg.status = ErrorCode::Ok.into();
+            msg.status = moto_rt::E_OK;
             self.pending_completions.push_back(PendingCompletion {
                 msg,
                 endpoint_handle,
@@ -1128,7 +1128,7 @@ impl NetSys {
         moto_socket.state = TcpState::ReadWrite;
         cqe.handle = moto_socket.id.into();
         rt_api::net::put_socket_addr(&mut cqe.payload, &local_addr);
-        cqe.status = ErrorCode::Ok.into();
+        cqe.status = moto_rt::E_OK;
         self.pending_completions.push_back(PendingCompletion {
             msg: cqe,
             endpoint_handle: moto_socket.conn.wait_handle(),
@@ -1144,7 +1144,7 @@ impl NetSys {
         // Note: we don't generate the state change event because of the explicit PC below.
         moto_socket.state = TcpState::Closed;
         cqe.handle = moto_socket.id.into();
-        cqe.status = ErrorCode::TimedOut.into();
+        cqe.status = moto_rt::E_TIMED_OUT;
         self.pending_completions.push_back(PendingCompletion {
             msg: cqe,
             endpoint_handle: moto_socket.conn.wait_handle(),
@@ -1415,7 +1415,7 @@ impl NetSys {
         msg.command = rt_api::net::EVT_TCP_STREAM_STATE_CHANGED;
         msg.handle = moto_socket.id.into();
         msg.payload.args_32_mut()[0] = moto_socket.state.into();
-        msg.status = ErrorCode::Ok.into();
+        msg.status = moto_rt::E_OK;
 
         self.pending_completions.push_back(PendingCompletion {
             msg,
@@ -1462,7 +1462,7 @@ impl NetSys {
             let page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
                 Ok(page) => page,
                 Err(err) => {
-                    assert_eq!(err, ErrorCode::NotReady);
+                    assert_eq!(err, moto_rt::E_NOT_READY);
                     self.pending_tcp_rx.push_back(socket_id);
                     #[cfg(debug_assertions)]
                     log::debug!(
@@ -1534,7 +1534,7 @@ impl NetSys {
                 msg.payload.shared_pages_mut()[0] = u16::MAX;
                 msg.payload.args_64_mut()[1] = 0;
                 msg.payload.args_64_mut()[2] = moto_socket.rx_seq;
-                msg.status = ErrorCode::Ok.into();
+                msg.status = moto_rt::E_OK;
 
                 self.pending_completions.push_back(PendingCompletion {
                     msg,
@@ -1619,7 +1619,7 @@ impl IoSubsystem for NetSys {
         conn: &Rc<io_channel::ServerConnection>,
         msg: io_channel::Msg,
     ) -> Result<Option<io_channel::Msg>, ()> {
-        debug_assert_eq!(msg.status(), ErrorCode::NotReady);
+        debug_assert_eq!(msg.status(), moto_rt::E_NOT_READY);
 
         // log::debug!("{}:{} got SQE cmd {}", file!(), line!(), msg.command);
 

@@ -52,10 +52,10 @@ impl SysRay {
         if result.is_ok() {
             Ok(Some(result.data[0]))
         } else {
-            if result.error_code() == ErrorCode::AlreadyInUse {
+            if result.error_code() == moto_rt::E_ALREADY_IN_USE {
                 Ok(None)
             } else {
-                Err(ErrorCode::NotFound)
+                Err(moto_rt::E_NOT_FOUND)
             }
         }
     }
@@ -67,7 +67,7 @@ impl SysRay {
         buf: &mut [super::stats::ProcessStatsV1],
     ) -> Result<usize, ErrorCode> {
         if buf.len() < 1 {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let flags = if flat_list {
@@ -265,7 +265,7 @@ impl SysRay {
     pub fn log(msg: &str) -> Result<(), ErrorCode> {
         let bytes = msg.as_bytes();
         if bytes.len() == 0 {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let res = do_syscall(

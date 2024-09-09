@@ -1,7 +1,6 @@
-use core::sync::atomic::*;
-use moto_sys::ErrorCode;
-
 use crate::util::SpinLock;
+use core::sync::atomic::*;
+use moto_rt::ErrorCode;
 
 pub trait Slabbable: Sized + 'static + Send + Sync {
     // Initialize @self in place, assuming uninit.
@@ -142,7 +141,7 @@ impl<T: Slabbable> Slab4096<T> {
         slab_ref
     }
 
-    fn alloc(&'static self) -> Result<(*mut T, usize), ErrorCode> {
+    fn alloc(&'static self) -> Result<(*mut T, usize), moto_rt::ErrorCode> {
         let mut iters = 0_u64;
         loop {
             iters += 1;
@@ -150,7 +149,7 @@ impl<T: Slabbable> Slab4096<T> {
                 panic!("slab alloc looping (1)");
             }
             if self.used.load(Ordering::Relaxed) as usize == Self::NUM_ELEMENTS {
-                return Err(ErrorCode::OutOfMemory);
+                return Err(moto_rt::E_OUT_OF_MEMORY);
             }
 
             for bitmap_idx in 0..Self::NUM_BITMAPS {

@@ -174,12 +174,12 @@ impl<S: PageSize> DesignatedSegment<S> {
             }
             let prev = self.used_bitmap.load(Ordering::Relaxed);
             if prev == u64::MAX {
-                return Err(ErrorCode::OutOfMemory);
+                return Err(moto_rt::E_OUT_OF_MEMORY);
             }
 
             let ones = prev.trailing_ones() as u8;
             if ones == self.num_pages {
-                return Err(ErrorCode::OutOfMemory);
+                return Err(moto_rt::E_OUT_OF_MEMORY);
             }
             debug_assert!(ones < self.num_pages);
 
@@ -218,7 +218,7 @@ impl<S: PageSize> DesignatedSegment<S> {
 
         if cnt < num {
             log::debug!("Contiguous OOM: requested {} in use: 0b{:b}", num, prev);
-            return Err(ErrorCode::OutOfMemory);
+            return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
         let mut mask = 0_u64;
@@ -235,7 +235,7 @@ impl<S: PageSize> DesignatedSegment<S> {
 
         if let Err(prev) = res {
             log::debug!("Contiguous OOM: requested {} in use: 0b{:b}", num, prev);
-            return Err(ErrorCode::OutOfMemory);
+            return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
         log::trace!(
@@ -264,7 +264,7 @@ impl<S: PageSize> DesignatedSegment<S> {
             let prev = self.used_bitmap.load(Ordering::Relaxed);
             if prev & bit == bit {
                 log::warn!("fixed_addr_reserve: already in use: addr: 0x{:x}", addr);
-                return Err(ErrorCode::AlreadyInUse);
+                return Err(moto_rt::E_ALREADY_IN_USE);
             }
             let next = prev | bit;
 
@@ -418,7 +418,7 @@ impl<S: PageSize> MemoryArea<S> {
         // TODO: figure out how to confirm that the requested address is indeed
         //       available for MMIO.
         Ok(())
-        // Err(ErrorCode::OutOfMemory)
+        // Err(moto_rt::E_OUT_OF_MEMORY)
     }
 
     fn do_allocate_frame(&self) -> Result<u64, ErrorCode> {
@@ -430,7 +430,7 @@ impl<S: PageSize> MemoryArea<S> {
         }
 
         if self.total_pages == self.used_pages.load(Ordering::Relaxed) {
-            return Err(ErrorCode::OutOfMemory);
+            return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
         // Try allocating from a random segment several times.
@@ -458,7 +458,7 @@ impl<S: PageSize> MemoryArea<S> {
             }
         }
 
-        Err(ErrorCode::OutOfMemory)
+        Err(moto_rt::E_OUT_OF_MEMORY)
     }
 
     fn allocate_frame(&self) -> Result<u64, ErrorCode> {
@@ -483,7 +483,7 @@ impl<S: PageSize> MemoryArea<S> {
                 "Alloc: OOM: too many contiguous frames requested: {}.",
                 num_frames
             );
-            Err(ErrorCode::OutOfMemory)
+            Err(moto_rt::E_OUT_OF_MEMORY)
         } else if num_frames == 1 {
             self.allocate_frame()
         } else if num_frames <= 64 {
@@ -502,7 +502,7 @@ impl<S: PageSize> MemoryArea<S> {
                 self.total_pages,
                 self.used_pages.load(Ordering::Relaxed)
             );
-            Err(ErrorCode::OutOfMemory)
+            Err(moto_rt::E_OUT_OF_MEMORY)
         } else {
             todo!("allocate across segments")
         }
@@ -695,7 +695,7 @@ impl PhysicalMemory {
         }
 
         if failed {
-            Err(ErrorCode::OutOfMemory)
+            Err(moto_rt::E_OUT_OF_MEMORY)
         } else {
             Ok(result)
         }

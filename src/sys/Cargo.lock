@@ -422,6 +422,7 @@ dependencies = [
  "frusa",
  "intrusive-collections",
  "log",
+ "moto-rt",
  "moto-sys",
  "x86",
  "x86_64",
@@ -467,6 +468,7 @@ name = "mdbg"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -543,6 +545,7 @@ name = "moto-sys-io"
 version = "0.2.4"
 dependencies = [
  "moto-ipc",
+ "moto-rt",
  "moto-runtime",
  "moto-sys",
  "smoltcp",
@@ -875,6 +878,7 @@ version = "0.1.0"
 dependencies = [
  "moto-ipc",
  "moto-log",
+ "moto-rt",
  "moto-sys",
 ]
 

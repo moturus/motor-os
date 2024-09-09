@@ -186,7 +186,7 @@ impl SysCpu {
 
         if swap_target != SysHandle::NONE {
             if wake_target != SysHandle::NONE {
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
             flags |= Self::F_SWAP_TARGET;
             args[next_arg] = swap_target.as_u64();

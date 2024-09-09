@@ -16,6 +16,7 @@ core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = tru
 moto-rt = { path = "../moto-rt", optional = true }
 
 [features]
+base = ["moto-rt/base"]
 default = ["userspace"]
 rustc-dep-of-std = [ "alloc", "compiler_builtins", "core", "userspace" ]
 userspace = ["moto-rt"]

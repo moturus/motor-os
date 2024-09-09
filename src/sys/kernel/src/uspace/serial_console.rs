@@ -25,11 +25,11 @@ pub(super) fn get_for_process(
     if CONSOLE.owner_pid.load(Ordering::Acquire) != super::process::KERNEL_PID.as_u64() {
         // We do not support transferring console ownership for now.
         log::warn!("Console transfer not allowed.");
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     if process.capabilities() & moto_sys::caps::CAP_IO_MANAGER == 0 {
-        return Err(ErrorCode::NotAllowed);
+        return Err(moto_rt::E_NOT_ALLOWED);
     }
 
     CONSOLE

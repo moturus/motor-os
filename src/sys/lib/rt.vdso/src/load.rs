@@ -4,17 +4,17 @@ use alloc::collections::btree_map::BTreeMap;
 use elfloader::ElfBinary;
 use moto_sys::{sys_mem, ErrorCode, SysHandle, SysMem};
 
-pub extern "C" fn load_vdso(address_space: u64) -> u64 {
+pub extern "C" fn load_vdso(address_space: u64) -> ErrorCode {
     let address_space = SysHandle::from_u64(address_space);
 
     let entry_point = match load_binary(address_space) {
         Ok(e) => e,
-        Err(err) => return u16::from(err) as u64,
+        Err(err) => return err,
     };
 
     match init_remote_vdso(address_space, entry_point) {
-        Ok(()) => 0,
-        Err(err) => u16::from(err) as u64,
+        Ok(()) => moto_rt::E_OK,
+        Err(err) => err,
     }
 }
 
@@ -86,17 +86,17 @@ fn load_binary(address_space: SysHandle) -> Result<u64, ErrorCode> {
     };
     let elf_binary = match ElfBinary::new(vdso_bytes) {
         Err(_) => {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         Ok(binary) => binary,
     };
 
     if elf_binary.get_arch() != elfloader::Machine::X86_64 {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     if elf_binary.interpreter().is_some() {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let mut elf_loader = RemoteLoader {
@@ -107,7 +107,7 @@ fn load_binary(address_space: SysHandle) -> Result<u64, ErrorCode> {
     };
 
     if elf_binary.load(&mut elf_loader).is_err() {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     };
 
     Ok(elf_binary.entry_point() + moto_rt::RT_VDSO_START)

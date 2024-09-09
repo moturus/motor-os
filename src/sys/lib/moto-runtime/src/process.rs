@@ -76,7 +76,7 @@ impl Drop for Process {
 impl Process {
     pub fn kill(&mut self) -> Result<(), ErrorCode> {
         if self.handle.is_none() {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         SysCpu::kill(self.handle)
     }
@@ -96,7 +96,7 @@ impl Process {
 
     pub fn wait(&mut self) -> Result<i32, ErrorCode> {
         if self.handle.is_none() {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         SysCpu::wait(&mut [self.handle], SysHandle::NONE, SysHandle::NONE, None)?;
@@ -107,7 +107,7 @@ impl Process {
 
     pub fn try_wait(&mut self) -> Result<Option<i32>, ErrorCode> {
         if self.handle.is_none() {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let exit_status = SysRay::process_status(self.handle)?;
@@ -119,17 +119,17 @@ impl Process {
 fn load_binary(bytes: &[u8], address_space: SysHandle) -> Result<u64, ErrorCode> {
     let elf_binary = match ElfBinary::new(bytes) {
         Err(_) => {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         Ok(binary) => binary,
     };
 
     if elf_binary.get_arch() != Machine::X86_64 {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     if elf_binary.interpreter().is_some() {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let mut elf_loader = Loader {
@@ -138,7 +138,7 @@ fn load_binary(bytes: &[u8], address_space: SysHandle) -> Result<u64, ErrorCode>
         mapped_regions: BTreeMap::default(),
     };
     match elf_binary.load(&mut elf_loader) {
-        Err(_) => Err(ErrorCode::InvalidArgument),
+        Err(_) => Err(moto_rt::E_INVALID_ARGUMENT),
         Ok(()) => Ok(elf_binary.entry_point()),
     }
 }
@@ -158,13 +158,13 @@ pub fn spawn(
     // Check if this is an elf file or a script.
     let file_sz = program_bytes.size();
     if file_sz < 4 {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     let mut buf: [u8; 4] = [0; 4];
 
     let sz = program_bytes.read(&mut buf)?;
     if sz != 4 {
-        return Err(ErrorCode::UnexpectedEof);
+        return Err(moto_rt::E_UNEXPECTED_EOF);
     }
 
     if is_elf(&buf) {
@@ -185,7 +185,7 @@ pub fn spawn(
         return run_script(exe, program_bytes, command, env, default_stdio, needs_stdin);
     }
 
-    return Err(ErrorCode::InvalidArgument);
+    return Err(moto_rt::E_INVALID_ARGUMENT);
 }
 
 fn run_script(
@@ -205,11 +205,11 @@ fn run_script(
     debug_assert_eq!(bytes[0], b'#');
     debug_assert_eq!(bytes[1], b'!');
 
-    let line = core::str::from_utf8(&bytes[2..]).map_err(|_| ErrorCode::InvalidArgument)?;
+    let line = core::str::from_utf8(&bytes[2..]).map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
     let exe = line
         .lines()
         .next()
-        .ok_or(ErrorCode::InvalidArgument)?
+        .ok_or(moto_rt::E_INVALID_ARGUMENT)?
         .trim()
         .to_owned();
 
@@ -246,7 +246,7 @@ fn run_elf(
     // First, load the binary info RAM.
     let file_sz = program_bytes.size();
     if file_sz < 4 {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let (page_size, num_pages) = {
@@ -266,7 +266,7 @@ fn run_elf(
 
     let sz = program_bytes.read_all(buf)?;
     if sz != file_sz as usize {
-        return Err(ErrorCode::UnexpectedEof);
+        return Err(moto_rt::E_UNEXPECTED_EOF);
     }
 
     let debug_name = match command.args.len() {
@@ -282,7 +282,10 @@ fn run_elf(
     );
     let address_space = syscalls::RaiiHandle::from(SysObj::create(SysHandle::NONE, 0, &full_url)?);
     let load_result = load_binary(buf, address_space.syshandle())?;
-    moto_rt::load_vdso(address_space.syshandle().as_u64()).map_err(|e| ErrorCode::from_u16(e))?;
+    let res = moto_rt::load_vdso(address_space.syshandle().as_u64());
+    if res != moto_rt::E_OK {
+        return Err(res);
+    };
 
     // TODO: remove CAP_LOG when the runtime is stabilized.
     let mut caps = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG;
@@ -366,7 +369,7 @@ fn run_elf(
             our_pipes,
         ))
     } else {
-        Err(ErrorCode::InternalError)
+        Err(moto_rt::E_INTERNAL_ERROR)
     }
 }
 
@@ -678,7 +681,7 @@ fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
         return Ok(exe.to_owned());
     }
 
-    let path = super::env::getenv("PATH").ok_or(ErrorCode::InvalidFilename)?;
+    let path = super::env::getenv("PATH").ok_or(moto_rt::E_INVALID_FILENAME)?;
 
     // TODO: be smarter below (colons in quotes; escaped colons, etc.)
     let dirs: Vec<&str> = path.split(':').collect();
@@ -695,7 +698,7 @@ fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
         }
     }
 
-    Err(ErrorCode::InvalidFilename)
+    Err(moto_rt::E_INVALID_FILENAME)
 }
 
 fn is_elf(buf: &[u8]) -> bool {

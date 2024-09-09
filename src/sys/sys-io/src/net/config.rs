@@ -109,7 +109,7 @@ pub(super) fn load() -> Result<NetConfig, ErrorCode> {
         s
     } else {
         log::error!("{}:{} error reading {}.", file!(), line!(), CFG_PATH);
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     };
 
     toml::from_str::<NetConfig>(config_str.as_str()).map_err(|err| {
@@ -120,7 +120,7 @@ pub(super) fn load() -> Result<NetConfig, ErrorCode> {
             CFG_PATH,
             err
         );
-        ErrorCode::InvalidArgument
+        moto_rt::E_INVALID_ARGUMENT
     })
 }
 

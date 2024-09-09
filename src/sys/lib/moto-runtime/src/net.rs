@@ -235,7 +235,7 @@ impl NetChannel {
         if let Some(msg) = msg {
             fence(Ordering::SeqCst);
             if let Err(err) = self.conn.send(msg) {
-                assert_eq!(err, ErrorCode::NotReady);
+                assert_eq!(err, moto_rt::E_NOT_READY);
                 self.wake_driver();
                 return (false, Some(msg));
             }
@@ -245,7 +245,7 @@ impl NetChannel {
         while let Some(msg) = self.send_queue.pop() {
             fence(Ordering::SeqCst);
             if let Err(err) = self.conn.send(msg) {
-                assert_eq!(err, ErrorCode::NotReady);
+                assert_eq!(err, moto_rt::E_NOT_READY);
                 self.wake_driver();
                 return (false, Some(msg));
             }
@@ -607,7 +607,7 @@ impl TcpStream {
         };
 
         let resp = channel.send_receive(req);
-        if resp.status().is_err() {
+        if resp.status() != moto_rt::E_OK {
             #[cfg(debug_assertions)]
             moturus_log!(
                 "{}:{} TcpStream::connect {:?} failed",
@@ -832,13 +832,13 @@ impl TcpStream {
             return Ok(0);
         }
 
-        Err(ErrorCode::NotReady)
+        Err(moto_rt::E_NOT_READY)
     }
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         match self.poll_rx(buf) {
             Ok(sz) => return Ok(sz),
-            Err(err) => assert_eq!(err, ErrorCode::NotReady),
+            Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
         }
 
         let rx_timeout_ns = self.inner.rx_timeout_ns.load(Ordering::Relaxed);
@@ -851,13 +851,13 @@ impl TcpStream {
         loop {
             if let Some(timeout) = rx_timeout {
                 if Instant::now() >= timeout {
-                    return Err(ErrorCode::TimedOut);
+                    return Err(moto_rt::E_TIMED_OUT);
                 }
             }
 
             match self.poll_rx(buf) {
                 Ok(sz) => return Ok(sz),
-                Err(err) => assert_eq!(err, ErrorCode::NotReady),
+                Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
             }
             {
                 // Store this thread's handle so that it is woken when an RX message arrives.
@@ -871,7 +871,7 @@ impl TcpStream {
                     *self.inner.rx_waiter.lock(line!()) = None;
                     return Ok(sz);
                 }
-                Err(err) => assert_eq!(err, ErrorCode::NotReady),
+                Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
             }
 
             // Note: even if the socket is closed, there can be RX packets buffered
@@ -901,7 +901,7 @@ impl TcpStream {
                 // rx_timeout,
                 Some(timo),
             ) {
-                assert_eq!(err, ErrorCode::TimedOut);
+                assert_eq!(err, moto_rt::E_TIMED_OUT);
                 if debug_assert {
                     // TODO: this assert triggered on 2024-05-29 and on 2024-06-25.
                     // assert!(self.inner.recv_queue.lock(line!()).is_empty());
@@ -946,7 +946,7 @@ impl TcpStream {
         let io_page = loop {
             if let Some(timo) = abs_timeout {
                 if Instant::now() >= timo {
-                    return Err(ErrorCode::TimedOut);
+                    return Err(moto_rt::E_TIMED_OUT);
                 }
             }
 
@@ -1051,7 +1051,7 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = option;
         let resp = self.inner.channel.send_receive(req);
 
-        if resp.status().is_ok() {
+        if resp.status() == moto_rt::E_OK {
             self.inner
                 .tcp_state
                 .store(resp.payload.args_32()[5], Ordering::Relaxed);
@@ -1078,7 +1078,7 @@ impl TcpStream {
         // corresponds to SO_LINGER(0). This may or may not be what the user
         // wants, but anything different requires changing sys-io code/logic,
         // at there are higher-priority work to do.
-        Err(ErrorCode::NotImplemented)
+        Err(moto_rt::E_NOT_IMPLEMENTED)
     }
 
     pub fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
@@ -1095,7 +1095,7 @@ impl TcpStream {
         let resp = self.inner.channel.send_receive(req);
         // crate::moturus_log!("set_nodelay received");
 
-        if resp.status().is_ok() {
+        if resp.status() == moto_rt::E_OK {
             Ok(())
         } else {
             Err(resp.status())
@@ -1109,7 +1109,7 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_NODELAY;
         let resp = self.inner.channel.send_receive(req);
 
-        if resp.status().is_ok() {
+        if resp.status() == moto_rt::E_OK {
             let res = resp.payload.args_64()[0];
             if res == 1 {
                 Ok(true)
@@ -1131,7 +1131,7 @@ impl TcpStream {
         req.payload.args_32_mut()[2] = ttl;
         let resp = self.inner.channel.send_receive(req);
 
-        if resp.status().is_ok() {
+        if resp.status() == moto_rt::E_OK {
             Ok(())
         } else {
             Err(resp.status())
@@ -1145,7 +1145,7 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = rt_api::net::TCP_OPTION_TTL;
         let resp = self.inner.channel.send_receive(req);
 
-        if resp.status().is_ok() {
+        if resp.status() == moto_rt::E_OK {
             Ok(resp.payload.args_32()[0])
         } else {
             Err(resp.status())
@@ -1194,7 +1194,7 @@ impl TcpListener {
         let req = rt_api::net::bind_tcp_listener_request(socket_addr, None);
         let channel = NET.lock(line!()).reserve_channel();
         let resp = channel.send_receive(req);
-        if resp.status().is_err() {
+        if resp.status() != moto_rt::E_OK {
             NET.lock(line!()).release_channel(channel);
             return Err(resp.status());
         }
@@ -1236,7 +1236,7 @@ impl TcpListener {
 
         let req = rt_api::net::accept_tcp_listener_request(self.inner.handle, subchannel_mask);
         let resp = channel.send_receive(req);
-        if resp.status().is_err() {
+        if resp.status() != moto_rt::E_OK {
             channel.release_subchannel(subchannel_idx);
             NET.lock(line!()).release_channel(channel);
             return Err(resp.status());
@@ -1294,11 +1294,11 @@ impl TcpListener {
     }
 
     pub fn set_only_v6(&self, _: bool) -> Result<(), ErrorCode> {
-        Err(ErrorCode::NotImplemented) // This is deprected since Rust 1.16
+        Err(moto_rt::E_NOT_IMPLEMENTED) // This is deprected since Rust 1.16
     }
 
     pub fn only_v6(&self) -> Result<bool, ErrorCode> {
-        Err(ErrorCode::NotImplemented) // This is deprected since Rust 1.16
+        Err(moto_rt::E_NOT_IMPLEMENTED) // This is deprected since Rust 1.16
     }
 
     pub fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
@@ -1485,8 +1485,8 @@ impl TryFrom<&str> for LookupHost {
 
     fn try_from(v: &str) -> Result<LookupHost, ErrorCode> {
         // Split the string by ':' and convert the second part to u16.
-        let (host, port_str) = v.rsplit_once(':').ok_or(ErrorCode::InvalidArgument)?;
-        let port: u16 = port_str.parse().map_err(|_| ErrorCode::InvalidArgument)?;
+        let (host, port_str) = v.rsplit_once(':').ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let port: u16 = port_str.parse().map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
         (host, port).try_into()
     }
 }
@@ -1515,7 +1515,7 @@ impl<'a> TryFrom<(&'a str, u16)> for LookupHost {
                 host,
                 port
             );
-            Err(ErrorCode::NotImplemented)
+            Err(moto_rt::E_NOT_IMPLEMENTED)
         }
     }
 }

@@ -29,7 +29,7 @@ impl SyscallResult {
     pub const F_HANDLE_ARRAY: u64 = 0x_02_00_00;
 
     pub fn is_ok(&self) -> bool {
-        ((self.result & 0xFF_FF) as u16) == ErrorCode::Ok as u16
+        ((self.result & 0xFF_FF) as u16) == moto_rt::E_OK
     }
 
     pub fn timed_out(&self) -> bool {
@@ -37,7 +37,7 @@ impl SyscallResult {
     }
 
     pub fn error_code(&self) -> ErrorCode {
-        ErrorCode::from_u16((self.result & 0xFF_FF) as u16)
+        (self.result & 0xFF_FF) as ErrorCode
     }
 }
 

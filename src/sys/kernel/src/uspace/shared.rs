@@ -100,7 +100,7 @@ pub(super) fn create(
 ) -> Result<Arc<SysObject>, ErrorCode> {
     // Only sys-io can create "sys-io" listeners.
     if url == "sys-io" && owner.pid() != super::process::SYS_IO_PID {
-        return Err(ErrorCode::NotAllowed);
+        return Err(moto_rt::E_NOT_ALLOWED);
     }
 
     let url = Arc::new(url);
@@ -143,7 +143,7 @@ pub(super) fn create(
                             "User error: Shared URL '{}' exists with a different owner.",
                             url
                         );
-                        return Err(ErrorCode::InvalidArgument);
+                        return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
 
                     list.push_back(self_);
@@ -177,7 +177,7 @@ pub(super) fn get(
 
             if shared.page_type != page_type || shared.page_num != page_num {
                 log::debug!("shared: get: '{}': pages don't match.", url);
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
             let result = list.pop_front().unwrap();
             if list.is_empty() {
@@ -187,7 +187,7 @@ pub(super) fn get(
             result
         } else {
             log::debug!("shared: get: bad url: '{}'.", url);
-            return Err(ErrorCode::NotFound);
+            return Err(moto_rt::E_NOT_FOUND);
         }
     };
 
@@ -208,7 +208,7 @@ pub(super) fn get(
         log::warn!("consider re-adding listener to LISTENERS.");
         log::debug!("shared: get: failed to map.");
         SysObject::wake(listener.sharer.upgrade().as_ref().unwrap(), false);
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     let sharee = SysObject::new_owned(
         listener.url.clone(),
@@ -286,7 +286,7 @@ pub(super) fn create_ipc_pair(
             SysHandle::SELF => Ok(owner.self_pinned().unwrap()),
             _ => match object_from_handle::<Process>(owner, handle) {
                 Some(process) => Ok(process),
-                None => Err(ErrorCode::InvalidArgument),
+                None => Err(moto_rt::E_INVALID_ARGUMENT),
             },
         }
     }

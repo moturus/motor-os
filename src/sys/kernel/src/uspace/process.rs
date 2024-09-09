@@ -169,12 +169,12 @@ impl Process {
         debug_name: String,
     ) -> Result<Arc<Self>, ErrorCode> {
         if !crate::mm::virt::is_user(entry_point) {
-            return Err(ErrorCode::NotAllowed);
+            return Err(moto_rt::E_NOT_ALLOWED);
         }
 
         if debug_name.trim().is_empty() {
             log::error!("Process:new(): empty debug_name.");
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let user_stack = address_space.alloc_user_stack(Thread::DEFAULT_USER_STACK_SIZE_PAGES)?;
@@ -249,33 +249,33 @@ impl Process {
 
         if entry_point.is_none() {
             log::debug!("missing entry_point");
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let parent = parent_thread.owner();
         let parent_caps = parent.capabilities();
         if parent_caps & moto_sys::caps::CAP_SYS == 0 {
             if capabilities & (moto_sys::caps::CAP_IO_MANAGER | moto_sys::caps::CAP_SYS) != 0 {
-                return Err(ErrorCode::NotAllowed);
+                return Err(moto_rt::E_NOT_ALLOWED);
             }
 
             if (capabilities & !parent_caps) != 0 {
                 // Non-system processes cannot grant themseves caps they don't have.
-                return Err(ErrorCode::NotAllowed);
+                return Err(moto_rt::E_NOT_ALLOWED);
             }
         }
 
         let (address_space, url) = match parent.get_object(&address_space_handle) {
             None => {
                 log::debug!("bad handle");
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
             Some(a) => {
                 if let Ok(c) = Arc::downcast::<UserAddressSpace>(a.sys_object.owner().clone()) {
                     (c, a.sys_object.url().to_owned())
                 } else {
                     log::debug!("bad handle");
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             }
         };
@@ -287,7 +287,7 @@ impl Process {
             capabilities,
             url,
         )
-        .map_err(|_| ErrorCode::InternalError)?;
+        .map_err(|_| moto_rt::E_INTERNAL_ERROR)?;
 
         Ok(process)
     }
@@ -346,12 +346,12 @@ impl Process {
                 assert!(!self.paused_debuggee.swap(true, Ordering::SeqCst));
                 Ok(())
             }
-            ProcessStatus::PausedDebuggee => Err(ErrorCode::AlreadyInUse),
+            ProcessStatus::PausedDebuggee => Err(moto_rt::E_ALREADY_IN_USE),
             ProcessStatus::Exiting(_)
             | ProcessStatus::Exited(_)
             | ProcessStatus::Error(_)
             | ProcessStatus::Created
-            | ProcessStatus::Killed => Err(ErrorCode::NotReady),
+            | ProcessStatus::Killed => Err(moto_rt::E_NOT_READY),
         }
     }
 
@@ -367,7 +367,7 @@ impl Process {
                 *status_lock = ProcessStatus::Running;
                 Ok(())
             }
-            _ => Err(ErrorCode::NotReady),
+            _ => Err(moto_rt::E_NOT_READY),
         }
     }
 
@@ -375,12 +375,12 @@ impl Process {
         let thread = {
             let status = self.status.lock(line!());
             if *status != ProcessStatus::Running {
-                return Err(ErrorCode::NotReady);
+                return Err(moto_rt::E_NOT_READY);
             }
             if let Some(t) = self.threads.get(&tid) {
                 t.clone()
             } else {
-                return Err(ErrorCode::NotFound);
+                return Err(moto_rt::E_NOT_FOUND);
             }
         };
 
@@ -476,7 +476,7 @@ impl Process {
         'proc_lock: {
             let (self_mut, process_status) = unsafe { self.get_mut() };
             if *process_status != ProcessStatus::Running {
-                error = Some(ErrorCode::InternalError);
+                error = Some(moto_rt::E_INTERNAL_ERROR);
                 log::debug!("bad process status: {:?}", *process_status);
                 break 'proc_lock;
             }
@@ -502,7 +502,7 @@ impl Process {
         let target_obj = if let Some(obj) = self.get_object(&target) {
             obj
         } else {
-            return Err(ErrorCode::NotFound);
+            return Err(moto_rt::E_NOT_FOUND);
         };
         let target = if let Some(process) =
             super::sysobject::object_from_sysobject::<Process>(&target_obj.sys_object)
@@ -510,7 +510,7 @@ impl Process {
             process
         } else {
             log::info!("victim 0x{:x} not process", target.as_u64());
-            return Err(ErrorCode::NotFound);
+            return Err(moto_rt::E_NOT_FOUND);
         };
 
         log::debug!("killing {}", target.debug_name());
@@ -1063,7 +1063,7 @@ impl Thread {
     fn resume_debuggee(&self) -> Result<(), ErrorCode> {
         let mut status = self.status.lock(line!());
         match *status {
-            ThreadStatus::Live(_) => Err(ErrorCode::AlreadyInUse),
+            ThreadStatus::Live(_) => Err(moto_rt::E_ALREADY_IN_USE),
             ThreadStatus::PausedDebuggee(live_thread_status) => match live_thread_status {
                 LiveThreadStatus::Running => {
                     // Paused in on_syscall_exit().
@@ -1089,7 +1089,7 @@ impl Thread {
                 LiveThreadStatus::Runnable(_, _) => panic!("not possible"),
                 LiveThreadStatus::InWait(_, _) => panic!("not possible"),
             },
-            _ => Err(ErrorCode::NotReady),
+            _ => Err(moto_rt::E_NOT_READY),
         }
     }
 
@@ -1278,7 +1278,7 @@ impl Thread {
                 ProcessStatus::Created => {}
                 ProcessStatus::Running => {}
                 _ => {
-                    error = Some(ErrorCode::InternalError);
+                    error = Some(moto_rt::E_INTERNAL_ERROR);
                     log::debug!("bad process status: {:?}", *process_status);
                     break 'proc_lock;
                 }

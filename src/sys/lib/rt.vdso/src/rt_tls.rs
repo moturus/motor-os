@@ -1,23 +1,29 @@
-use crate::external::spin;
+use moto_rt::tls::Key;
+
+use crate::spin;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::*;
 
-pub type Key = usize;
 pub type Dtor = unsafe extern "C" fn(*mut u8);
 
 static NEXT_KEY: AtomicUsize = AtomicUsize::new(1); // Rust does not accept zeroes.
 static KEYS: spin::Mutex<BTreeMap<Key, Option<Dtor>>> = spin::Mutex::new(BTreeMap::new());
 
-pub fn create(dtor: Option<Dtor>) -> Key {
+type PerCpuMap = BTreeMap<Key, usize>;
+
+/// Runtime impl of ```fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key```
+pub unsafe extern "C" fn create(dtor: u64) -> Key {
     let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
-    KEYS.lock().insert(key, dtor);
+    if dtor == 0 {
+        KEYS.lock().insert(key, None);
+    } else {
+        KEYS.lock().insert(key, Some(core::mem::transmute(dtor)));
+    }
     key
 }
 
-type PerCpuMap = BTreeMap<Key, usize>;
-
-pub fn set(key: Key, value: *mut u8) {
-    // super::log_backtrace("TLS::set");
+/// Runtime impl of ```fn set(key: Key, value: *mut u8)```
+pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
     let tcb = moto_sys::UserThreadControlBlock::get_mut();
     let map: &mut PerCpuMap = unsafe {
         if tcb.tls == 0 {
@@ -34,7 +40,8 @@ pub fn set(key: Key, value: *mut u8) {
     map.insert(key, value as usize);
 }
 
-pub fn get(key: Key) -> *mut u8 {
+/// Runtime impl of  ```fn get(key: Key) -> *mut u8```
+pub unsafe extern "C" fn get(key: Key) -> *mut u8 {
     let tcb = moto_sys::UserThreadControlBlock::get();
     if tcb.tls == 0 {
         return core::ptr::null_mut();
@@ -50,7 +57,12 @@ pub fn get(key: Key) -> *mut u8 {
     return core::ptr::null_mut();
 }
 
-pub fn destroy_tls() {
+/// Runtim impl of ```fn destroy(key: Key)```
+pub unsafe extern "C" fn destroy(key: Key) {
+    KEYS.lock().remove(&key);
+}
+
+pub unsafe extern "C" fn tmp_on_thread_exiting() {
     let tcb = moto_sys::UserThreadControlBlock::get_mut();
     if tcb.tls == 0 {
         return;
@@ -74,8 +86,4 @@ pub fn destroy_tls() {
         let _ = alloc::boxed::Box::from_raw(ptr);
         tcb.tls = 0;
     }
-}
-
-pub fn destroy(key: Key) {
-    KEYS.lock().remove(&key);
 }

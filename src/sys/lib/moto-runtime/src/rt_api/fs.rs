@@ -255,7 +255,7 @@ impl RenameRequest {
         raw_channel: &'a moto_ipc::sync::RawChannel,
     ) -> Result<&'a str, ErrorCode> {
         let bytes = raw_channel.get_bytes(&self.fnames, self.old_fname_size as usize)?;
-        core::str::from_utf8(bytes).map_err(|_| ErrorCode::InvalidArgument)
+        core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 
     pub unsafe fn new<'a>(
@@ -269,7 +269,7 @@ impl RenameRequest {
                 .unwrap(),
             self.new_fname_size as usize,
         )?;
-        core::str::from_utf8(bytes).map_err(|_| ErrorCode::InvalidArgument)
+        core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 }
 

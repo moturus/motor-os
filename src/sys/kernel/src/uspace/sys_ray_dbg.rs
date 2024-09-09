@@ -34,7 +34,7 @@ impl DebugSession {
         let session = {
             let mut ss = debuggee.debug_session.lock(line!());
             if ss.is_some() {
-                return Err(ErrorCode::AlreadyInUse);
+                return Err(moto_rt::E_ALREADY_IN_USE);
             }
 
             static NEXT_DEBUG_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -76,14 +76,14 @@ fn sys_dbg_attach(thread: &crate::uspace::process::Thread, args: &SyscallArgs) -
     let pid = args.args[0];
     if pid < 2 {
         // Cannot debug system processes.
-        return ResultBuilder::result(ErrorCode::NotAllowed);
+        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
     }
 
     // Cannot debug self, or ancestors, e.g. because of stdio dependencies.
     let mut stats = crate::xray::stats::stats_from_pid(thread.owner().pid().as_u64());
     while let Some(parent) = stats {
         if parent.pid().as_u64() == pid {
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         stats = parent.parent();
     }
@@ -91,7 +91,7 @@ fn sys_dbg_attach(thread: &crate::uspace::process::Thread, args: &SyscallArgs) -
     let debuggee = if let Some(p) = Process::from_pid(pid) {
         p
     } else {
-        return ResultBuilder::result(moto_sys::ErrorCode::NotFound);
+        return ResultBuilder::result(moto_rt::E_NOT_FOUND);
     };
 
     match DebugSession::new(thread.owner(), debuggee) {
@@ -109,7 +109,7 @@ fn get_session(
     {
         obj
     } else {
-        return Err(ErrorCode::BadHandle);
+        return Err(moto_rt::E_BAD_HANDLE);
     };
 
     assert_eq!(debugger.pid(), session.debugger.pid());
@@ -234,7 +234,7 @@ fn sys_dbg_get_thread_data(
         }
         ResultBuilder::ok()
     } else {
-        ResultBuilder::result(ErrorCode::NotFound)
+        ResultBuilder::result(moto_rt::E_NOT_FOUND)
     }
 }
 

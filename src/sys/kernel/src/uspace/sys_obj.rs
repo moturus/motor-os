@@ -2,8 +2,8 @@ use crate::mm::PageType;
 
 use super::syscall::*;
 use super::SysObject;
+use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::{borrow::ToOwned, string::String};
 use log::LevelFilter;
 use moto_sys::ErrorCode;
 use moto_sys::*;
@@ -15,14 +15,14 @@ fn get_url(
     bytes_len: u64,
 ) -> Result<String, ErrorCode> {
     if bytes_len > crate::config::MAX_URL_SIZE {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let bytes = owner
         .address_space()
         .read_from_user(bytes_addr, bytes_len)?;
-    let url = core::str::from_utf8(bytes.as_slice()).map_err(|_| ErrorCode::InvalidArgument)?;
-    Ok(url.to_owned())
+    let url = core::str::from_utf8(bytes.as_slice()).map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
+    Ok(alloc::borrow::ToOwned::to_owned(url))
 }
 
 fn sys_handle_create(
@@ -34,27 +34,27 @@ fn sys_handle_create(
         match prefix {
             "address_space" => {
                 if parent != SysHandle::NONE {
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
                 if thread.capabilities() & moto_sys::caps::CAP_SPAWN == 0 {
-                    return Err(ErrorCode::NotAllowed);
+                    return Err(moto_rt::E_NOT_ALLOWED);
                 }
 
                 if !suffix.starts_with("debug_name=") {
                     log::debug!("SysHandle::create: bad url: '{}'", url);
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
 
                 let debug_name = if let Some((_, s)) = suffix.split_once('=') {
                     s
                 } else {
                     log::debug!("SysHandle::create: bad url: '{}'", url);
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 };
 
                 const NEW_PROCESS_THRESHOLD: u64 = 1 << 20; // TODO: do we need to be more precise?
                 if crate::mm::oom_for_user(NEW_PROCESS_THRESHOLD) {
-                    return Err(ErrorCode::OutOfMemory);
+                    return Err(moto_rt::E_OUT_OF_MEMORY);
                 }
 
                 let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
@@ -76,7 +76,7 @@ fn sys_handle_create(
                     return Ok(thread.owner().add_object(process.self_object().unwrap()));
                 } else {
                     log::debug!("Error creating process '{}'", url);
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             }
             "shared" => {
@@ -86,7 +86,7 @@ fn sys_handle_create(
         }
     }
     log::debug!("SysHandle::CREATE: bad url: '{}'", url);
-    Err(ErrorCode::InvalidArgument)
+    Err(moto_rt::E_INVALID_ARGUMENT)
 }
 
 fn sys_handle_shared(
@@ -96,14 +96,14 @@ fn sys_handle_shared(
     args: &str,
 ) -> Result<SysHandle, ErrorCode> {
     if parent != SysHandle::SELF {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     /*
     if op == SysObj::OP_CREATE && (thread.owner().capabilities() & moto_sys::caps::CAP_SHARE == 0)
     {
         log::debug!("Create shared {}: no CAP_SHARE.", args);
-        return Err(ErrorCode::NotAllowed);
+        return Err(moto_rt::E_NOT_ALLOWED);
     }
     */
 
@@ -121,7 +121,7 @@ fn sys_handle_shared(
                         address = Some(num);
                     } else {
                         log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
-                        return Err(ErrorCode::InvalidArgument);
+                        return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
                 }
                 "page_type" => match suffix {
@@ -129,7 +129,7 @@ fn sys_handle_shared(
                     "mid" => page_type = Some(PageType::MidPage),
                     _ => {
                         log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
-                        return Err(ErrorCode::InvalidArgument);
+                        return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
                 },
                 "page_num" => {
@@ -137,23 +137,23 @@ fn sys_handle_shared(
                         page_num = Some(num);
                     } else {
                         log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
-                        return Err(ErrorCode::InvalidArgument);
+                        return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
                 }
                 _ => {
                     log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             }
         } else {
             log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
     }
 
     if url.is_none() || address.is_none() || page_type.is_none() || page_num.is_none() {
         log::debug!("SysHandle::CREATE shared: bad arguments: {}", args);
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let obj = match op {
@@ -187,7 +187,7 @@ fn sys_handle_get(
                 Ok(SysHandle::from_u64(thread.owner().capabilities()))
             } else {
                 log::error!("Implement gettings caps for !SELF.");
-                Err(ErrorCode::NotImplemented)
+                Err(moto_rt::E_NOT_IMPLEMENTED)
             }
         }
         "main_thread" => {
@@ -196,20 +196,20 @@ fn sys_handle_get(
                 parent,
             ) {
                 match process.main_thread() {
-                    None => Err(ErrorCode::InvalidArgument),
+                    None => Err(moto_rt::E_INVALID_ARGUMENT),
                     Some(mt) => match mt.self_object() {
-                        None => Err(ErrorCode::InvalidArgument),
+                        None => Err(moto_rt::E_INVALID_ARGUMENT),
                         Some(obj) => Ok(thread.owner().add_object(obj)),
                     },
                 }
             } else {
                 log::error!("bad handle");
-                Err(ErrorCode::InvalidArgument)
+                Err(moto_rt::E_INVALID_ARGUMENT)
             }
         }
         "serial_console" => {
             if parent != SysHandle::KERNEL {
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
             let res = super::serial_console::get_for_process(&thread.owner())?;
 
@@ -222,7 +222,7 @@ fn sys_handle_get(
                 match prefix {
                     "irq_wait" => {
                         if parent != SysHandle::KERNEL {
-                            return Err(ErrorCode::InvalidArgument);
+                            return Err(moto_rt::E_INVALID_ARGUMENT);
                         }
                         if let Ok(irq) = suffix.parse::<u8>() {
                             let res = crate::sched::get_irq_wait_handle(&thread.owner(), irq)?;
@@ -243,7 +243,7 @@ fn sys_handle_get(
                 }
             }
             log::debug!("SysHandle::GET: bad url: '{}'", url);
-            Err(ErrorCode::InvalidArgument)
+            Err(moto_rt::E_INVALID_ARGUMENT)
         }
     }
 }
@@ -260,23 +260,23 @@ fn sys_handle_put(
     }
 
     if arg != 0 {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let this_process = thread.owner();
     if owner == SysHandle::SELF {
         return this_process
             .put_object(&handle)
-            .map_err(|_| ErrorCode::BadHandle);
+            .map_err(|_| moto_rt::E_BAD_HANDLE);
     }
 
     match super::sysobject::object_from_handle::<super::Process>(&this_process, owner) {
         Some(proc) => proc
             .put_object(&handle)
-            .map_err(|_| ErrorCode::InvalidArgument),
+            .map_err(|_| moto_rt::E_INVALID_ARGUMENT),
         None => {
             log::debug!("sys_handle_put: bad process handle");
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
     }
 }
@@ -310,7 +310,7 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             if let Some(proc) = super::shared::peer_owner(thread.owner().pid(), &obj.sys_object) {
                 return ResultBuilder::ok_1(proc.pid().as_u64());
             } else {
-                return ResultBuilder::result(ErrorCode::NotFound);
+                return ResultBuilder::result(moto_rt::E_NOT_FOUND);
             }
         } else {
             return ResultBuilder::ok();
@@ -334,7 +334,7 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
         SysObj::OP_CREATE => {
             const OP_CREATE_MEMORY_THRESHOLD: u64 = 64 << 10; // TODO: do we need to be more precise?
             if !io_manager && crate::mm::oom_for_user(OP_CREATE_MEMORY_THRESHOLD) {
-                return ResultBuilder::result(ErrorCode::OutOfMemory);
+                return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
             }
 
             if args.version > 0 {
@@ -441,7 +441,7 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
 
             if thread.owner().capabilities() & moto_sys::caps::CAP_LOG == 0 {
-                return ResultBuilder::result(ErrorCode::NotAllowed);
+                return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
             }
 
             let curr_log_level = log::max_level() as usize as u64;

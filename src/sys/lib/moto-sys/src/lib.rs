@@ -11,6 +11,7 @@ pub mod sys_mem;
 pub mod sys_obj;
 pub mod sys_ray;
 pub mod syscalls;
+pub use moto_rt::ErrorCode;
 pub use sys_cpu::SysCpu;
 pub use sys_mem::SysMem;
 pub use sys_obj::SysObj;
@@ -74,74 +75,14 @@ pub fn current_pid() -> u64 {
     shared_mem::ProcessStaticPage::get().pid
 }
 
-// Most system-level APIs (syscalls, IO drivers) return 16-bit error codes
-// to make things simple (errno works well enough in Linux/POSIX).
-// Applications that want to use more sophisticated errors are free to do that.
-#[repr(u16)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ErrorCode {
-    Ok = 0,
-    UnspecifiedError = 1, // A generic error.
-    UnknownError = 2,     // Should only be used in from_u16() below.
-    NotReady = 3,
-    NotImplemented = 5,
-    VersionTooHigh = 6,
-    VersionTooLow = 7,
-    InvalidArgument = 8,
-    OutOfMemory = 9,
-    NotAllowed = 10, // Permission error.
-    NotFound = 11,
-    InternalError = 12,
-    TimedOut = 13,
-    AlreadyInUse = 14,
-    UnexpectedEof = 15,
-    InvalidFilename = 16,
-    NotADirectory = 17,
-    BadHandle = 18,
-    FileTooLarge = 19,
-    BufferFull = 20,
-
-    MaxKernelError, // Must be last, so that from_u16() below works.
-}
-
-impl ErrorCode {
-    pub fn is_ok(&self) -> bool {
-        *self == ErrorCode::Ok
-    }
-
-    pub fn is_err(&self) -> bool {
-        *self != ErrorCode::Ok
-    }
-
-    pub fn from_u16(val: u16) -> Self {
-        if val >= Self::MaxKernelError as u16 {
-            Self::UnknownError
-        } else {
-            unsafe { core::mem::transmute(val) }
-        }
-    }
-}
-
-impl From<ErrorCode> for u16 {
-    fn from(value: ErrorCode) -> Self {
-        value as u16
-    }
-}
-
-impl From<u16> for ErrorCode {
-    fn from(value: u16) -> Self {
-        Self::from_u16(value)
-    }
-}
-
 pub fn rdrand() -> Result<u64, ErrorCode> {
     let mut val = 0_u64;
     unsafe {
         let result = core::arch::x86_64::_rdrand64_step(&mut val);
         match result {
             1 => Ok(val),
-            0 => Err(ErrorCode::NotImplemented), // The hardware does not support this.
-            _ => Err(ErrorCode::InternalError),  // This is unexpected.
+            0 => Err(moto_rt::E_NOT_IMPLEMENTED), // The hardware does not support this.
+            _ => Err(moto_rt::E_INTERNAL_ERROR),  // This is unexpected.
         }
     }
 }
@@ -152,8 +93,8 @@ pub fn rdseed() -> Result<u64, ErrorCode> {
         let result = core::arch::x86_64::_rdseed64_step(&mut val);
         match result {
             1 => Ok(val),
-            0 => Err(ErrorCode::NotImplemented), // The hardware does not support this.
-            _ => Err(ErrorCode::InternalError),  // This is unexpected.
+            0 => Err(moto_rt::E_NOT_IMPLEMENTED), // The hardware does not support this.
+            _ => Err(moto_rt::E_INTERNAL_ERROR),  // This is unexpected.
         }
     }
 }

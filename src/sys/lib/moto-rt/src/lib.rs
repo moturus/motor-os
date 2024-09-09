@@ -25,18 +25,18 @@
 //!   as Rust does not support them "natively" (as in rdylib).
 #![no_std]
 
-use core::{
-    alloc::Layout,
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-pub mod time;
+// Mod error is the only one currently shared b/w the kernel and the userspace.
+pub mod error;
+pub use error::*;
 
 // Constants from moto-sys: we replicate them here to avoid depending on moto-sys.
 // NOTE: do not change these numbers unless they are also changed in moto-sys!
+#[doc(hidden)]
 const MOTO_SYS_CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);
+#[doc(hidden)]
 const MOTO_SYS_CUSTOM_USERSPACE_REGION_END: u64 =
     MOTO_SYS_CUSTOM_USERSPACE_REGION_START + (1_u64 << 40);
+#[doc(hidden)]
 const MOTO_SYS_PAGE_SIZE_SMALL: u64 = 4096;
 
 // At this address rt.vdso object will be mapped/loaded into every process/binary.
@@ -53,8 +53,22 @@ pub const RT_VDSO_BYTES_ADDR: u64 = RT_VDSO_START - (1_u64 << 32); // 4GB for RT
 #[doc(hidden)]
 pub const RT_VDSO_VTABLE_VADDR: u64 = RT_VDSO_START - MOTO_SYS_PAGE_SIZE_SMALL;
 
+#[cfg(not(feature = "base"))]
 const RT_VERSION: u64 = 1;
 
+#[cfg(not(feature = "base"))]
+pub mod alloc;
+#[cfg(not(feature = "base"))]
+pub mod thread;
+#[cfg(not(feature = "base"))]
+pub mod time;
+#[cfg(not(feature = "base"))]
+pub mod tls;
+
+#[cfg(not(feature = "base"))]
+use core::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(not(feature = "base"))]
 #[doc(hidden)]
 #[repr(C)]
 pub struct RtVdsoVtableV1 {
@@ -76,8 +90,22 @@ pub struct RtVdsoVtableV1 {
     pub time_nanos_to_ticks: AtomicU64,
     pub time_ticks_in_sec: AtomicU64,
     pub time_abs_ticks_to_nanos: AtomicU64,
+
+    // Thread Local Storage.
+    pub tls_create: AtomicU64,
+    pub tls_set: AtomicU64,
+    pub tls_get: AtomicU64,
+    pub tls_destroy: AtomicU64,
+
+    // Thread management.
+    pub thread_spawn: AtomicU64,
+    pub thread_sleep: AtomicU64,
+    pub thread_yield: AtomicU64,
+    pub thread_set_name: AtomicU64,
+    pub thread_join: AtomicU64,
 }
 
+#[cfg(not(feature = "base"))]
 #[doc(hidden)]
 impl RtVdsoVtableV1 {
     pub fn get() -> &'static Self {
@@ -90,6 +118,7 @@ impl RtVdsoVtableV1 {
     }
 }
 
+#[cfg(not(feature = "base"))]
 #[doc(hidden)]
 pub fn init() {
     assert_ne!(0, RtVdsoVtableV1::get().vdso_entry.load(Ordering::Acquire));
@@ -102,75 +131,23 @@ pub fn init() {
     vdso_entry(RT_VERSION)
 }
 
-#[inline(always)]
-pub unsafe fn alloc(layout: Layout) -> *mut u8 {
-    let vdso_alloc: extern "C" fn(u64, u64) -> u64 = unsafe {
-        core::mem::transmute(
-            RtVdsoVtableV1::get().alloc.load(Ordering::Relaxed) as usize as *const ()
-        )
-    };
-
-    vdso_alloc(layout.size() as u64, layout.align() as u64) as usize as *mut u8
-}
-
-#[inline(always)]
-pub unsafe fn alloc_zeroed(layout: Layout) -> *mut u8 {
-    let vdso_alloc_zeroed: extern "C" fn(u64, u64) -> u64 = unsafe {
-        core::mem::transmute(
-            RtVdsoVtableV1::get().alloc_zeroed.load(Ordering::Relaxed) as usize as *const (),
-        )
-    };
-
-    vdso_alloc_zeroed(layout.size() as u64, layout.align() as u64) as usize as *mut u8
-}
-
-#[inline(always)]
-pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
-    let vdso_dealloc: extern "C" fn(u64, u64, u64) = unsafe {
-        core::mem::transmute(
-            RtVdsoVtableV1::get().dealloc.load(Ordering::Relaxed) as usize as *const (),
-        )
-    };
-
-    vdso_dealloc(
-        ptr as usize as u64,
-        layout.size() as u64,
-        layout.align() as u64,
-    )
-}
-
-#[inline(always)]
-pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-    let vdso_realloc: extern "C" fn(u64, u64, u64, u64) -> u64 = unsafe {
-        core::mem::transmute(
-            RtVdsoVtableV1::get().realloc.load(Ordering::Relaxed) as usize as *const (),
-        )
-    };
-
-    vdso_realloc(
-        ptr as usize as u64,
-        layout.size() as u64,
-        layout.align() as u64,
-        new_size as u64,
-    ) as usize as *mut u8
-}
-
 // This is a temporary function that takes a remote address space handle
 // and loads vdso into it. The function will be removed once load_program()
 // is implemented in vdso.
-// Returns the u16 representation of moto_sys::ErrorCode.
+#[cfg(not(feature = "base"))]
 #[doc(hidden)]
-pub fn load_vdso(address_space: u64) -> Result<(), u16> {
-    let vdso_load: extern "C" fn(u64) -> u64 = unsafe {
+pub fn load_vdso(address_space: u64) -> ErrorCode {
+    let vdso_load: extern "C" fn(u64) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtableV1::get().load_vdso.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    let result = vdso_load(address_space) as u16;
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(result)
-    }
+    vdso_load(address_space)
+}
+
+/// The number of CPUs available.
+#[cfg(not(feature = "base"))]
+pub fn num_cpus() -> usize {
+    todo!()
 }

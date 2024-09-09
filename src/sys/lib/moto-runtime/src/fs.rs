@@ -132,7 +132,7 @@ impl DirEntry {
         file_attr.validate()?;
 
         let fname_bytes = unsafe { raw_channel.get_bytes(&data.fname, data.fname_size as usize)? };
-        let fname = core::str::from_utf8(fname_bytes).map_err(|_| ErrorCode::InternalError)?;
+        let fname = core::str::from_utf8(fname_bytes).map_err(|_| moto_rt::E_INTERNAL_ERROR)?;
 
         let mut abs_path = readdir.path.clone();
         if abs_path != "/" {
@@ -172,7 +172,7 @@ impl FilePermissions {
 
     fn validate(&self) -> Result<(), ErrorCode> {
         if self.file_perm & !0x3 != 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
         Ok(())
     }
@@ -202,11 +202,11 @@ impl FileType {
 
     pub fn validate(&self) -> Result<(), ErrorCode> {
         if (self.file_type & !0x7) != 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         if (self.file_type & 3) == 3 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         Ok(())
@@ -336,7 +336,7 @@ impl File {
 
     pub fn read_all(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         if buf.len() < self.size as usize {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         self.pos.store(0, Ordering::Relaxed);
 
@@ -442,10 +442,10 @@ impl CanonicalPath {
 
     fn normalize(abs_path: &str) -> Result<Self, ErrorCode> {
         if (abs_path.len() == 0) || (abs_path.len() >= MAX_PATH) {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
         if &abs_path[0..1] != "/" {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         if abs_path == "/" {
@@ -464,12 +464,12 @@ impl CanonicalPath {
                 continue;
             }
             if entry.len() != entry.trim().len() {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
 
             if entry == ".." {
                 if components.len() == 0 {
-                    return Err(ErrorCode::InvalidFilename);
+                    return Err(moto_rt::E_INVALID_FILENAME);
                 }
                 components.pop();
             } else {
@@ -500,7 +500,7 @@ impl CanonicalPath {
 
     fn parse(path: &str) -> Result<Self, ErrorCode> {
         if (path.len() == 0) || (path.len() >= MAX_PATH) || (path.len() != path.trim().len()) {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         if path == "/" {
@@ -511,7 +511,7 @@ impl CanonicalPath {
         }
 
         if path.trim_end_matches('/').len() != path.len() {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         if path.starts_with('/') {
@@ -523,7 +523,7 @@ impl CanonicalPath {
                 Ok(cwd) => cwd,
                 Err(_) => {
                     // Can't work with rel paths without cwd.
-                    return Err(ErrorCode::InvalidFilename);
+                    return Err(moto_rt::E_INVALID_FILENAME);
                 }
             }
         };
@@ -571,7 +571,7 @@ impl FsClient {
     fn get() -> Result<&'static FsClient, ErrorCode> {
         let addr = FS_CLIENT.load(Ordering::Relaxed);
         if addr == 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         unsafe { Ok((addr as *const FsClient).as_ref().unwrap_unchecked()) }
@@ -581,7 +581,7 @@ impl FsClient {
         let cwd = Self::get()?.cwd.lock();
         match cwd.as_ref() {
             Some(dir_entry) => Ok(dir_entry.abs_path.clone()),
-            None => super::env::getenv("PWD").ok_or(ErrorCode::NotFound),
+            None => super::env::getenv("PWD").ok_or(moto_rt::E_NOT_FOUND),
         }
     }
 
@@ -607,14 +607,14 @@ impl FsClient {
 
             let resp = unsafe { raw_channel.get::<StatResponse>() };
             if resp.header.result != 0 {
-                return Err(ErrorCode::from(resp.header.result));
+                return Err(resp.header.result);
             }
 
             let file_attr = FileAttr::new(&resp.attr);
             file_attr.validate()?;
 
             if !file_attr.file_type().is_dir() {
-                return Err(ErrorCode::NotADirectory);
+                return Err(moto_rt::E_NOT_A_DIRECTORY);
             }
 
             DirEntry {
@@ -647,7 +647,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<RenameResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from(resp.header.result));
+            return Err(resp.header.result);
         }
 
         Ok(())
@@ -673,7 +673,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<UnlinkResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from(resp.header.result));
+            return Err(resp.header.result);
         }
 
         Ok(())
@@ -699,11 +699,11 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<FileOpenResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from(resp.header.result));
+            return Err(resp.header.result);
         }
 
         if resp.fd == 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         Ok(File {
@@ -725,7 +725,7 @@ impl FsClient {
                     let curr = file.pos.load(Ordering::Relaxed) as i64;
                     let new = curr + n;
                     if (new > (file.size as i64)) || (new < 0) {
-                        return Err(ErrorCode::InvalidArgument);
+                        return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
 
                     if file
@@ -744,14 +744,14 @@ impl FsClient {
             }
             SeekFrom::Start(n) => {
                 if n > file.size {
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
                 file.pos.store(n, Ordering::Relaxed);
                 Ok(n)
             }
             SeekFrom::End(n) => {
                 if (n < 0) && ((-n as u64) > file.size) {
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
                 if n > 0 {
                     SysRay::log(
@@ -763,7 +763,7 @@ impl FsClient {
                         .as_str(),
                     )
                     .ok();
-                    return Err(ErrorCode::from(ErrorCode::NotImplemented));
+                    return Err(moto_rt::E_NOT_IMPLEMENTED);
                 }
                 let new_pos = file.size - ((-n) as u64);
                 file.pos.store(new_pos, Ordering::Relaxed);
@@ -794,7 +794,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<FileReadResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from(resp.header.result));
+            return Err(resp.header.result);
         }
 
         // resp.size may be BLOCK_SIZE if buf is too small.
@@ -811,7 +811,7 @@ impl FsClient {
     fn write(file: &File, buf: &[u8]) -> Result<usize, ErrorCode> {
         if buf.len() == 0 {
             SysRay::log("FS: write request with empty buf").ok();
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
@@ -834,7 +834,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<FileWriteResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from_u16(resp.header.result));
+            return Err(resp.header.result);
         }
 
         file.pos.fetch_add(resp.written as u64, Ordering::Relaxed);
@@ -861,7 +861,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<ReadDirResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from(resp.header.result));
+            return Err(resp.header.result);
         }
 
         ReadDir::from(c_path.abs_path, &resp)
@@ -882,7 +882,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<ReadDirNextResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from(resp.header.result));
+            return Err(resp.header.result);
         }
 
         if resp.entries == 0 {
@@ -938,7 +938,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<StatResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from_u16(resp.header.result));
+            return Err(resp.header.result);
         }
 
         let file_attr = FileAttr::new(&resp.attr);
@@ -966,7 +966,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<MkdirResponse>() };
         if resp.header.result != 0 {
-            return Err(ErrorCode::from_u16(resp.header.result));
+            return Err(resp.header.result);
         }
 
         Ok(())
@@ -988,7 +988,7 @@ fn get_fileserver_url() -> Result<String, ErrorCode> {
     let resp = conn.resp::<GetServerUrlResponse>();
     if resp.header.result != 0 || resp.header.ver != 0 {
         SysRay::log("get_fileserver_url() failed.").ok();
-        return Err(ErrorCode::InternalError);
+        return Err(moto_rt::E_INTERNAL_ERROR);
     }
 
     Ok(unsafe { resp.url() }?.to_owned())

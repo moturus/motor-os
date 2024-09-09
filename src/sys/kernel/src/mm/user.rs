@@ -142,7 +142,7 @@ impl UserAddressSpace {
                 crate::arch::log_backtrace("user OOM");
             }
             self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
-            Err(ErrorCode::OutOfMemory)
+            Err(moto_rt::E_OUT_OF_MEMORY)
         } else {
             Ok(())
         }
@@ -155,7 +155,7 @@ impl UserAddressSpace {
     fn stats_kernel_add(&self, num_pages: u64) -> Result<(), ErrorCode> {
         // TODO: replace the magic constant below with something more intelligent.
         if num_pages >= 65536 {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
         let new_total = bytes + self.total_usage.fetch_add(bytes, Ordering::AcqRel);
@@ -167,7 +167,7 @@ impl UserAddressSpace {
                 bytes
             );
             self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
-            Err(ErrorCode::OutOfMemory)
+            Err(moto_rt::E_OUT_OF_MEMORY)
         } else {
             self.kernel_mem_stats.add(num_pages);
             Ok(())
@@ -219,7 +219,7 @@ impl UserAddressSpace {
         {
             log::debug!("other OOM.");
             self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-            return Err(ErrorCode::OutOfMemory);
+            return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
         // Allocate in self.
@@ -525,7 +525,7 @@ impl UserAddressSpace {
                 VaddrMapStatus::Shared(addr) => addr,
                 _ => {
                     log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
-                    return Err(ErrorCode::InvalidArgument);
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             };
 
@@ -551,7 +551,7 @@ impl UserAddressSpace {
 
     pub fn get_user_page_as_kernel(&self, user_page_addr: u64) -> Result<u64, ErrorCode> {
         if user_page_addr & (PAGE_SIZE_SMALL - 1) != 0 {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         let mapping = self.inner.vaddr_map_status(user_page_addr);
         let phys_start = match mapping {
@@ -559,7 +559,7 @@ impl UserAddressSpace {
             VaddrMapStatus::Shared(addr) => addr,
             _ => {
                 log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
         };
 
@@ -592,7 +592,7 @@ impl UserAddressSpace {
         while remaining_bytes > 0 {
             let phys_start = self.inner.page_table_ref().virt_to_phys(source_start);
             if phys_start.is_none() {
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
             let phys_start = phys_start.unwrap();
 

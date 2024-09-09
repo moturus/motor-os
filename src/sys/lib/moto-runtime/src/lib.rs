@@ -22,10 +22,6 @@ pub mod process;
 pub mod std_rt;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod stdio;
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod thread;
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod tls;
 
 #[cfg(feature = "rustc-dep-of-std")]
 pub use moto_ipc::sync_pipe;

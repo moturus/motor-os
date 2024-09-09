@@ -8,7 +8,8 @@ edition = "2021"
 [dependencies]
 
 # internal dependencies
-moto-sys = { path = "../lib/moto-sys", default-features = false }
+moto-rt  = { path = "../lib/moto-rt" , features = ["base"] }
+moto-sys = { path = "../lib/moto-sys", default-features = false, features = ["base"] }
 frusa    = { path = "../lib/frusa" }
 
 # external dependencies

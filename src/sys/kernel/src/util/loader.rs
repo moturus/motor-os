@@ -76,23 +76,23 @@ pub fn load_elf(
 ) -> Result<u64, ErrorCode> {
     let elf_binary = elfloader::ElfBinary::new(elf_bytes).map_err(|_| -> ErrorCode {
         log::error!("ELF parsing failed.");
-        ErrorCode::InvalidArgument
+        moto_rt::E_INVALID_ARGUMENT
     })?;
 
     if elf_binary.get_arch() != elfloader::Machine::X86_64 {
         log::error!("The ELF binary not X86_64.");
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     if elf_binary.interpreter().is_some() {
         log::error!("The ELF binary has a dynamic interpreter.");
-        return Err(ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let mut elf_loader = Loader { address_space };
     elf_binary.load(&mut elf_loader).map_err(|_| -> ErrorCode {
         log::error!("Could not load the kernel ELF binary.");
-        ErrorCode::InvalidArgument
+        moto_rt::E_INVALID_ARGUMENT
     })?;
 
     Ok(elf_binary.entry_point())

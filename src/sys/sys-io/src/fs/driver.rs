@@ -128,7 +128,7 @@ impl Driver {
                         CMD_MKDIR => Self::on_mkdir(raw_channel),
                         CMD_UNLINK => Self::on_unlink(raw_channel),
                         CMD_RENAME => Self::on_rename(raw_channel),
-                        _ => Err(ErrorCode::InvalidArgument),
+                        _ => Err(moto_rt::E_INVALID_ARGUMENT),
                     };
 
                     if let Err(err) = result {
@@ -162,20 +162,20 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_MKDIR);
 
         if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
@@ -191,20 +191,20 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_UNLINK);
 
         if (req.header.ver != 0) || (req.parent_fd != 0) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
@@ -212,7 +212,7 @@ impl Driver {
             F_UNLINK_FILE => super::filesystem::fs().unlink(fname)?,
             F_UNLINK_DIR => super::filesystem::fs().delete_dir(fname)?,
             F_UNLINK_DIR_ALL => super::filesystem::fs().delete_dir_all(fname)?,
-            _ => return Err(ErrorCode::InvalidArgument),
+            _ => return Err(moto_rt::E_INVALID_ARGUMENT),
         }
 
         let resp = raw_channel.get_mut::<UnlinkResponse>();
@@ -225,7 +225,7 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_RENAME);
 
         if (req.header.ver != 0) || (req.parent_fd != 0) || (req.header.flags != 0) {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let old = req.old(&raw_channel)?;
@@ -247,20 +247,20 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_READDIR);
 
         if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
@@ -294,19 +294,19 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_READDIR_NEXT);
 
         if req.header.ver != 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let pcon = {
             match conn.extension_mut::<PerConnectionData>() {
                 Some(pcon) => pcon,
-                None => return Err(ErrorCode::InternalError),
+                None => return Err(moto_rt::E_INTERNAL_ERROR),
             }
         };
 
         let iter = pcon.get_readdir(req.readdir_fd);
         if iter.is_none() {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
         let iter = iter.unwrap();
 
@@ -362,20 +362,20 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_FILE_OPEN);
 
         if (req.header.ver != 0) || (req.parent_fd != 0) {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
@@ -405,7 +405,7 @@ impl Driver {
                 .as_str(),
             )
             .ok();
-            return Err(ErrorCode::NotImplemented);
+            return Err(moto_rt::E_NOT_IMPLEMENTED);
         }
 
         let mut file = fs().open_file(fname)?;
@@ -439,13 +439,13 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_FILE_READ);
 
         if req.header.ver != 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let pcon = {
             match conn.extension_mut::<PerConnectionData>() {
                 Some(pcon) => pcon,
-                None => return Err(ErrorCode::InternalError),
+                None => return Err(moto_rt::E_INTERNAL_ERROR),
             }
         };
 
@@ -463,7 +463,7 @@ impl Driver {
 
             Ok(())
         } else {
-            Err(ErrorCode::InternalError)
+            Err(moto_rt::E_INTERNAL_ERROR)
         }
     }
 
@@ -475,23 +475,23 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_FILE_WRITE);
 
         if req.header.ver != 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         if ((req.size as usize) + core::mem::size_of::<FileWriteRequest>()) > raw_channel.size() {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let pcon = {
             match conn.extension_mut::<PerConnectionData>() {
                 Some(pcon) => pcon,
-                None => return Err(ErrorCode::InternalError),
+                None => return Err(moto_rt::E_INTERNAL_ERROR),
             }
         };
 
         let p_file = pcon.get_file(req.fd);
         if p_file.is_none() {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let file = p_file.unwrap();
@@ -513,20 +513,20 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_CLOSE_FD);
 
         if req.header.ver != 0 {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let pcon = {
             match conn.extension_mut::<PerConnectionData>() {
                 Some(pcon) => pcon,
-                None => return Err(ErrorCode::InternalError),
+                None => return Err(moto_rt::E_INTERNAL_ERROR),
             }
         };
 
         if req.header.flags == CloseFdRequest::F_READDIR {
             let iter = pcon.get_readdir(req.fd);
             if iter.is_none() {
-                return Err(ErrorCode::InternalError);
+                return Err(moto_rt::E_INTERNAL_ERROR);
             }
 
             drop(iter);
@@ -534,13 +534,13 @@ impl Driver {
         } else if req.header.flags == CloseFdRequest::F_FILE {
             let file = pcon.get_file(req.fd);
             if file.is_none() {
-                return Err(ErrorCode::InternalError);
+                return Err(moto_rt::E_INTERNAL_ERROR);
             }
 
             drop(file);
             pcon.remove_file(req.fd);
         } else {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let resp = raw_channel.get_mut::<CloseFdResponse>();
@@ -553,20 +553,20 @@ impl Driver {
         assert_eq!(req.header.cmd, CMD_STAT);
 
         if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
             Err(_) => {
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
         };
 

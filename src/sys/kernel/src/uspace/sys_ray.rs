@@ -1,4 +1,4 @@
-use moto_sys::{stats::ProcessStatsV1, syscalls::SyscallResult, ErrorCode, SysHandle, SysRay};
+use moto_sys::{stats::ProcessStatsV1, syscalls::SyscallResult, SysHandle, SysRay};
 
 use crate::xray::stats::KProcessStats;
 
@@ -22,13 +22,13 @@ fn sys_query_process_status(thread: &super::process::Thread, args: &SyscallArgs)
             | super::process::ProcessStatus::Running
             | super::process::ProcessStatus::PausedDebuggee
             | super::process::ProcessStatus::Exiting(_) => {
-                ResultBuilder::result(ErrorCode::AlreadyInUse)
+                ResultBuilder::result(moto_rt::E_ALREADY_IN_USE)
             }
             super::process::ProcessStatus::Exited(code) => ResultBuilder::ok_1(code),
             super::process::ProcessStatus::Error(_) => ResultBuilder::ok_1(u32::MAX as u64),
             super::process::ProcessStatus::Killed => ResultBuilder::ok_1(u32::MAX as u64),
         },
-        None => ResultBuilder::result(ErrorCode::InvalidArgument),
+        None => ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT),
     }
 }
 
@@ -57,7 +57,7 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
 
     let address_space = thread.owner().address_space().clone();
 
-    let mut error = ErrorCode::Ok;
+    let mut error = moto_rt::E_OK;
     let error_ref = &mut error;
 
     let now = crate::arch::time::Instant::now().as_u64();
@@ -83,7 +83,7 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
 
     KProcessStats::iterate(pid, flat_list, func);
 
-    if error != ErrorCode::Ok {
+    if error != moto_rt::E_OK {
         return ResultBuilder::result(error);
     }
 
@@ -97,7 +97,7 @@ fn sys_log(
     sz: u64,
 ) -> SyscallResult {
     if (curr_thread.owner().capabilities() & moto_sys::caps::CAP_LOG) == 0 {
-        return ResultBuilder::result(ErrorCode::NotAllowed);
+        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
     }
 
     if flags != 0 {
@@ -119,7 +119,7 @@ fn sys_log(
         Ok(str) => {
             crate::xray::logger::log_user(curr_thread, str);
         }
-        Err(_) => return ResultBuilder::result(ErrorCode::InvalidArgument),
+        Err(_) => return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT),
     };
 
     ResultBuilder::ok()

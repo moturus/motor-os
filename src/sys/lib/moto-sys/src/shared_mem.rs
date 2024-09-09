@@ -140,7 +140,7 @@ impl UserThreadControlBlock {
 pub fn set_current_thread_name(name: &str) -> Result<(), crate::ErrorCode> {
     let bytes = name.as_bytes();
     if bytes.len() > crate::MAX_THREAD_NAME_LEN {
-        return Err(crate::ErrorCode::InvalidArgument);
+        return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
     let utcb = UserThreadControlBlock::get_mut();

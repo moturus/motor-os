@@ -363,12 +363,12 @@ pub mod implementation {
                         pos = (pos + 7) & !7; // Align to 8 bytes.
                         if pos >= buffer.len() {
                             moto_sys::SysRay::log("bad tail entries response (1)").ok();
-                            return Err(ErrorCode::InternalError);
+                            return Err(moto_rt::E_INTERNAL_ERROR);
                         }
                         let curr_buffer = &buffer[pos..];
                         if curr_buffer.len() < size_of::<LogEntryHeader>() {
                             moto_sys::SysRay::log("bad tail entries response (2)").ok();
-                            return Err(ErrorCode::InternalError);
+                            return Err(moto_rt::E_INTERNAL_ERROR);
                         }
 
                         // Safe because we aligned curr_buffer properly and ensured it is large enough.
@@ -382,7 +382,7 @@ pub mod implementation {
                             > buffer.len()
                         {
                             moto_sys::SysRay::log("bad tail entries response (3)").ok();
-                            return Err(ErrorCode::InternalError);
+                            return Err(moto_rt::E_INTERNAL_ERROR);
                         }
 
                         let bytes = &curr_buffer[size_of::<LogEntryHeader>()
@@ -400,7 +400,7 @@ pub mod implementation {
 
                     Ok(result)
                 }
-                e => Err(ErrorCode::from(e)),
+                e => Err(e),
             }
         }
     }

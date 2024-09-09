@@ -206,8 +206,8 @@ pub(super) fn set_relay(
         from: StdioKind,
         to: crate::sync_pipe::RawPipeData,
     }
-    extern "C" fn relay_thread_fn(thread_arg: usize) {
-        let arg = unsafe { Box::from_raw(thread_arg as *mut RelayArg) };
+    extern "C" fn relay_thread_fn(thread_arg: u64) {
+        let arg = unsafe { Box::from_raw(thread_arg as usize as *mut RelayArg) };
         let RelayArg { from, to } = *arg;
 
         if from == StdioKind::Stdin {
@@ -266,7 +266,7 @@ pub(super) fn set_relay(
                         }
                     }
                     Err(err) => {
-                        if err == ErrorCode::TimedOut {
+                        if err == moto_rt::E_TIMED_OUT {
                             continue;
                         }
                         break;
@@ -305,31 +305,24 @@ pub(super) fn set_relay(
                 }
             }
         }
-
-        super::tls::destroy_tls();
-        let _ = moto_sys::SysObj::put(SysHandle::SELF);
     } // relay_thread_fn
 
     let local_copy = to.unsafe_copy();
-    let thread_arg = Box::into_raw(Box::new(RelayArg { from, to })) as usize;
+    let thread_arg = Box::into_raw(Box::new(RelayArg { from, to })) as usize as u64;
 
     #[cfg(debug_assertions)]
     const RELAY_THREAD_STACK_SIZE: usize = 1024 * 16;
     #[cfg(not(debug_assertions))]
     const RELAY_THREAD_STACK_SIZE: usize = 1024 * 4;
 
-    moto_sys::SysCpu::spawn(
-        SysHandle::SELF,
-        RELAY_THREAD_STACK_SIZE as u64,
-        relay_thread_fn as usize as u64,
-        thread_arg as u64,
-    )
-    .map_err(|err| {
-        unsafe {
-            drop(Box::from_raw(thread_arg as *mut RelayArg));
-            local_copy.release(SysHandle::SELF);
-        }
+    moto_rt::thread::spawn(relay_thread_fn, RELAY_THREAD_STACK_SIZE, thread_arg)
+        .map_err(|err| {
+            unsafe {
+                drop(Box::from_raw(thread_arg as *mut RelayArg));
+                local_copy.release(SysHandle::SELF);
+            }
 
-        err
-    })
+            err
+        })
+        .map(|handle| SysHandle::from(handle))
 }

@@ -163,7 +163,7 @@ impl SysMem {
     pub fn alloc_contiguous_pages(size: u64) -> Result<u64, ErrorCode> {
         assert_ne!(size, 0);
         if size > 20 * PAGE_SIZE_MID {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         let (page_size, page_size_log_2) = if size > (PAGE_SIZE_MID >> 1) {
             (PAGE_SIZE_MID, PAGE_SIZE_MID_LOG2)

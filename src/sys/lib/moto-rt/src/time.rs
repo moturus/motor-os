@@ -143,7 +143,6 @@ pub fn since_system_start() -> Duration {
         .unwrap()
 }
 
-#[allow(unused)]
 impl SystemTime {
     pub fn now() -> Self {
         SystemTime {

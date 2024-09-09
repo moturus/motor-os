@@ -138,7 +138,7 @@ impl IoRuntime {
             let msg = match conn.recv() {
                 Ok(sqe) => sqe,
                 Err(err) => {
-                    assert_eq!(err, ErrorCode::NotReady);
+                    assert_eq!(err, moto_rt::E_NOT_READY);
                     break;
                 }
             };
@@ -153,7 +153,7 @@ impl IoRuntime {
                 timeout_wakeup = false;
             }
 
-            if msg.status() != ErrorCode::NotReady {
+            if msg.status() != moto_rt::E_NOT_READY {
                 log::error!(
                     "Dropping conn 0x{:x} due to bad sqe {} {:?}.",
                     endpoint_handle.as_u64(),
@@ -171,9 +171,9 @@ impl IoRuntime {
                         cqe.payload.args_64_mut()[2] = moto_rt::time::Instant::now().as_u64();
                     }
 
-                    cqe.status = ErrorCode::Ok.into();
+                    cqe.status = moto_rt::E_OK;
                     if let Err(err) = conn.send(cqe) {
-                        debug_assert_eq!(err, ErrorCode::NotReady);
+                        debug_assert_eq!(err, moto_rt::E_NOT_READY);
                         self.pending_completions.push_back(PendingCompletion {
                             msg: cqe,
                             endpoint_handle,
@@ -184,9 +184,9 @@ impl IoRuntime {
                     match self.net.process_sqe(conn, msg) {
                         Ok(res) => {
                             if let Some(cqe) = res {
-                                debug_assert_ne!(cqe.status(), ErrorCode::NotReady);
+                                debug_assert_ne!(cqe.status(), moto_rt::E_NOT_READY);
                                 if let Err(err) = conn.send(cqe) {
-                                    debug_assert_eq!(err, ErrorCode::NotReady);
+                                    debug_assert_eq!(err, moto_rt::E_NOT_READY);
                                     self.pending_completions.push_back(PendingCompletion {
                                         msg: cqe,
                                         endpoint_handle,
@@ -279,7 +279,7 @@ impl IoRuntime {
             let wakee = completion.endpoint_handle;
 
             if let Err(err) = conn.0.send(completion.msg) {
-                debug_assert_eq!(err, ErrorCode::NotReady);
+                debug_assert_eq!(err, moto_rt::E_NOT_READY);
                 self.pending_completions.push_back(completion);
             }
 
@@ -444,7 +444,7 @@ impl IoRuntime {
                     self.process_wakeups(handles, false);
                 }
                 Err(err) => {
-                    if err == ErrorCode::TimedOut {
+                    if err == moto_rt::E_TIMED_OUT {
                         if timeout >= core::time::Duration::from_secs(1) {
                             debug_timed_out = true;
                             // #[cfg(debug_assertions)]

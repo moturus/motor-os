@@ -87,6 +87,6 @@ fn get_tcp_stats(conn: &mut LocalServerConnection) {
         resp.socket_stats[idx] = results[idx];
     }
 
-    resp.header.result = moto_sys::ErrorCode::Ok.into();
+    resp.header.result = moto_rt::E_OK;
     let _ = conn.finish_rpc();
 }

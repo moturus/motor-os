@@ -138,12 +138,12 @@ fn process_wake_handles(
 
         if timed_out {
             return SyscallResult {
-                result: ErrorCode::TimedOut as u64,
+                result: moto_rt::E_TIMED_OUT as u64,
                 data,
             };
         } else {
             return SyscallResult {
-                result: ErrorCode::Ok as u64,
+                result: moto_rt::E_OK as u64,
                 data,
             };
         }
@@ -180,7 +180,7 @@ fn process_wake_handles(
     let mut result = ResultBuilder::ok();
     result.result |= SyscallResult::F_HANDLE_ARRAY;
     if timed_out {
-        result.result |= ErrorCode::TimedOut as u64;
+        result.result |= moto_rt::E_TIMED_OUT as u64;
     }
 
     result
@@ -239,7 +239,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     if wake_target != SysHandle::NONE {
         match do_wake(curr, wake_target, SysHandle::NONE, wake_this_cpu) {
             Err(err) => match err {
-                ErrorCode::BadHandle => return ResultBuilder::bad_handle(wake_target),
+                moto_rt::E_BAD_HANDLE => return ResultBuilder::bad_handle(wake_target),
                 _ => return ResultBuilder::result(err),
             },
             _ => {}
@@ -287,7 +287,7 @@ pub(super) fn do_wake(
             waker.debug_name(),
             wakee_thread.as_u64()
         );
-        return Err(ErrorCode::BadHandle);
+        return Err(moto_rt::E_BAD_HANDLE);
     }
 
     if let Some(obj) = waker.owner().get_object(&wake_target) {
@@ -300,7 +300,7 @@ pub(super) fn do_wake(
             waker.debug_name(),
             wakee_thread.as_u64()
         );
-        return Err(ErrorCode::BadHandle);
+        return Err(moto_rt::E_BAD_HANDLE);
     }
 
     if let Some(thread) =
@@ -314,7 +314,7 @@ pub(super) fn do_wake(
             waker.debug_name(),
             wake_target.as_u64()
         );
-        Err(ErrorCode::BadHandle)
+        Err(moto_rt::E_BAD_HANDLE)
     }
 }
 
@@ -342,7 +342,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     if args.flags == SysCpu::F_KILL_PEER {
         if (killer.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
             // This is used by sys-io.
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         if let Some(obj) = killer.owner().get_object(&target) {
             if let Some(victim) = super::shared::peer_owner(killer.owner().pid(), &obj.sys_object) {
@@ -355,7 +355,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
                 return ResultBuilder::ok();
             }
         }
-        return ResultBuilder::result(ErrorCode::BadHandle);
+        return ResultBuilder::result(moto_rt::E_BAD_HANDLE);
     }
 
     if args.flags == SysCpu::F_KILL_PID {
@@ -363,7 +363,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
         if let Some(target_stats) = crate::xray::stats::stats_from_pid(target_pid) {
             if let Some(target) = target_stats.owner.upgrade() {
                 if target.capabilities() & moto_sys::caps::CAP_SYS != 0 {
-                    return ResultBuilder::result(ErrorCode::NotAllowed);
+                    return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
                 } else {
                     log::debug!(
                         "process {} killed by {}",
@@ -374,10 +374,10 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
                     return ResultBuilder::ok();
                 }
             } else {
-                return ResultBuilder::result(ErrorCode::InvalidArgument);
+                return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT);
             }
         } else {
-            return ResultBuilder::result(ErrorCode::InvalidArgument);
+            return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT);
         }
     }
 
@@ -425,7 +425,7 @@ fn sys_spawn_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Syscal
 
     const NEW_THREAD_THRESHOLD: u64 = 1024 * 256; // TODO: do we need to be more precise?
     if crate::mm::oom_for_user(NEW_THREAD_THRESHOLD) {
-        return ResultBuilder::result(ErrorCode::OutOfMemory);
+        return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
     }
 
     let stack_size = args.args[1];
@@ -437,7 +437,7 @@ fn sys_spawn_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Syscal
         .spawn_thread(stack_size, thread_fn, thread_arg)
     {
         Ok(handle) => ResultBuilder::ok_1(handle.as_u64()),
-        Err(ErrorCode::OutOfMemory) => ResultBuilder::result(ErrorCode::OutOfMemory),
+        Err(moto_rt::E_OUT_OF_MEMORY) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
         Err(_) => ResultBuilder::invalid_argument(),
     }
 }
@@ -511,7 +511,7 @@ fn sys_affine_cpu(curr: &super::process::Thread, args: &mut SyscallArgs) -> Sysc
 
     if let Some(0) = cpu {
         if (curr.capabilities() & moto_sys::caps::CAP_IO_MANAGER) == 0 {
-            return ResultBuilder::result(ErrorCode::NotAllowed);
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
     }
 

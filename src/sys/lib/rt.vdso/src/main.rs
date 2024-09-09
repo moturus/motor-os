@@ -2,14 +2,20 @@
 #![no_main]
 
 mod load;
-mod time;
+mod rt_alloc;
+mod rt_thread;
+mod rt_time;
+mod rt_tls;
+
+mod util {
+    pub mod spin;
+}
+
+pub use util::spin;
 
 extern crate alloc;
 
-use core::{
-    alloc::{GlobalAlloc, Layout},
-    sync::atomic::Ordering,
-};
+use core::sync::atomic::Ordering;
 use moto_rt::RtVdsoVtableV1;
 
 #[macro_export]
@@ -21,34 +27,6 @@ macro_rules! moto_log {
         }
     };
 }
-
-struct BackEndAllocator {}
-
-unsafe impl Send for BackEndAllocator {}
-unsafe impl Sync for BackEndAllocator {}
-
-unsafe impl GlobalAlloc for BackEndAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        const PAGE_4K: u64 = 1 << 12;
-        assert_eq!(moto_sys::sys_mem::PAGE_SIZE_SMALL, PAGE_4K);
-
-        let alloc_size = moto_sys::align_up(layout.size() as u64, PAGE_4K);
-        if let Ok(start) = moto_sys::SysMem::alloc(PAGE_4K, alloc_size >> 12) {
-            start as usize as *mut u8
-        } else {
-            core::ptr::null_mut()
-        }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        moto_sys::SysMem::free(ptr as usize as u64).unwrap()
-    }
-}
-
-static BACK_END: BackEndAllocator = BackEndAllocator {};
-
-#[global_allocator]
-static FRUSA: frusa::Frusa4K = frusa::Frusa4K::new(&BACK_END);
 
 use core::panic::PanicInfo;
 
@@ -81,30 +59,34 @@ pub extern "C" fn _rt_entry(version: u64) {
     );
 
     // Memory management.
-    vtable
-        .alloc
-        .store(alloc as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .alloc_zeroed
-        .store(alloc_zeroed as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .dealloc
-        .store(dealloc as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .realloc
-        .store(realloc as *const () as usize as u64, Ordering::Relaxed);
+    vtable.alloc.store(
+        rt_alloc::alloc as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.alloc_zeroed.store(
+        rt_alloc::alloc_zeroed as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.dealloc.store(
+        rt_alloc::dealloc as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.realloc.store(
+        rt_alloc::realloc as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // Time management.
     vtable.time_instant_now.store(
-        time::time_instant_now as *const () as usize as u64,
+        rt_time::time_instant_now as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.time_ticks_to_nanos.store(
-        time::ticks_to_nanos as *const () as usize as u64,
+        rt_time::ticks_to_nanos as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.time_nanos_to_ticks.store(
-        time::nanos_to_ticks as *const () as usize as u64,
+        rt_time::nanos_to_ticks as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.time_ticks_in_sec.store(
@@ -112,34 +94,48 @@ pub extern "C" fn _rt_entry(version: u64) {
         Ordering::Relaxed,
     );
     vtable.time_abs_ticks_to_nanos.store(
-        time::abs_ticks_to_nanos as *const () as usize as u64,
+        rt_time::abs_ticks_to_nanos as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // Thread Local Storage.
+    vtable.tls_create.store(
+        rt_tls::create as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .tls_set
+        .store(rt_tls::set as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .tls_get
+        .store(rt_tls::get as *const () as usize as u64, Ordering::Relaxed);
+    vtable.tls_destroy.store(
+        rt_tls::destroy as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // Thread management.
+    vtable.thread_spawn.store(
+        rt_thread::spawn as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.thread_yield.store(
+        rt_thread::yield_now as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.thread_sleep.store(
+        rt_thread::sleep as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.thread_set_name.store(
+        rt_thread::set_name as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.thread_join.store(
+        rt_thread::join as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-}
-
-unsafe extern "C" fn alloc(size: u64, align: u64) -> u64 {
-    FRUSA.alloc(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize as u64
-}
-
-unsafe extern "C" fn alloc_zeroed(size: u64, align: u64) -> u64 {
-    FRUSA.alloc_zeroed(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
-        as u64
-}
-
-unsafe extern "C" fn dealloc(ptr: u64, size: u64, align: u64) {
-    FRUSA.dealloc(
-        ptr as usize as *mut u8,
-        Layout::from_size_align(size as usize, align as usize).unwrap(),
-    )
-}
-
-unsafe extern "C" fn realloc(ptr: u64, size: u64, align: u64, new_size: u64) -> u64 {
-    FRUSA.realloc(
-        ptr as usize as *mut u8,
-        Layout::from_size_align(size as usize, align as usize).unwrap(),
-        new_size as usize,
-    ) as usize as u64
 }

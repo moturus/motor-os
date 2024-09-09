@@ -445,7 +445,7 @@ impl VmemSegment {
         {
             if self.mapping_options.contains(MappingOptions::GUARD) {
                 log::debug!("#PF: guard page");
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
         }
 
@@ -457,7 +457,7 @@ impl VmemSegment {
 
         if !page.frame.is_null() {
             log::error!("#PF with a frame present.");
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         if error_code == 0 {
@@ -467,7 +467,7 @@ impl VmemSegment {
                 .contains(MappingOptions::USER_ACCESSIBLE)
             {
                 log::debug!("#PF: not readable");
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
         } else if error_code == 2 {
             // Write.
@@ -477,11 +477,11 @@ impl VmemSegment {
                 || !page.mapping_options.contains(MappingOptions::WRITABLE)
             {
                 log::debug!("#PF: not writable");
-                return Err(ErrorCode::InvalidArgument);
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
         } else {
             log::debug!("Unsupported #PF error code: 0x{:x}", error_code + 4);
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         page.frame = super::phys::allocate_frame(PageType::SmallPage)?;

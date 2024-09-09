@@ -39,7 +39,7 @@ impl ResultBuilder {
     #[allow(dead_code)]
     #[inline(always)]
     pub fn ok() -> SyscallResult {
-        Self::result(ErrorCode::Ok)
+        Self::result(moto_rt::E_OK)
     }
 
     #[inline(always)]
@@ -70,25 +70,25 @@ impl ResultBuilder {
         let mut data = [0_u64; 6];
         data[0] = handle.as_u64();
         SyscallResult {
-            result: ErrorCode::BadHandle as u64,
+            result: moto_rt::E_BAD_HANDLE as u64,
             data,
         }
     }
 
     pub fn invalid_argument() -> SyscallResult {
-        Self::result(ErrorCode::InvalidArgument)
+        Self::result(moto_rt::E_INVALID_ARGUMENT)
     }
 
     pub fn not_implemented() -> SyscallResult {
-        Self::result(ErrorCode::NotImplemented)
+        Self::result(moto_rt::E_NOT_IMPLEMENTED)
     }
 
     pub fn version_too_high() -> SyscallResult {
-        Self::result(ErrorCode::VersionTooHigh)
+        Self::result(moto_rt::E_VERSION_TOO_HIGH)
     }
 
     pub fn version_too_low() -> SyscallResult {
-        Self::result(ErrorCode::VersionTooLow)
+        Self::result(moto_rt::E_VERSION_TOO_LOW)
     }
 }
 

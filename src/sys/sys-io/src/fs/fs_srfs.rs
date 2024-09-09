@@ -193,21 +193,21 @@ impl srfs::SyncBlockDevice for DeviceAdapter {
 
 fn to_error_code(error: std::io::Error) -> ErrorCode {
     match error.kind() {
-        std::io::ErrorKind::NotFound => ErrorCode::NotFound,
-        std::io::ErrorKind::PermissionDenied => ErrorCode::NotAllowed,
-        std::io::ErrorKind::AlreadyExists => ErrorCode::AlreadyInUse,
+        std::io::ErrorKind::NotFound => moto_rt::E_NOT_FOUND,
+        std::io::ErrorKind::PermissionDenied => moto_rt::E_NOT_ALLOWED,
+        std::io::ErrorKind::AlreadyExists => moto_rt::E_ALREADY_IN_USE,
         std::io::ErrorKind::WouldBlock => todo!(),
         std::io::ErrorKind::InvalidInput => todo!(),
-        std::io::ErrorKind::InvalidData => ErrorCode::UnknownError,
+        std::io::ErrorKind::InvalidData => moto_rt::E_UNKNOWN,
         std::io::ErrorKind::TimedOut => todo!(),
         std::io::ErrorKind::WriteZero => todo!(),
         // std::io::ErrorKind::Interrupted => todo!(),
         std::io::ErrorKind::Unsupported => todo!(),
         std::io::ErrorKind::UnexpectedEof => todo!(),
-        std::io::ErrorKind::OutOfMemory => ErrorCode::OutOfMemory,
-        std::io::ErrorKind::FileTooLarge => ErrorCode::FileTooLarge,
+        std::io::ErrorKind::OutOfMemory => moto_rt::E_OUT_OF_MEMORY,
+        std::io::ErrorKind::FileTooLarge => moto_rt::E_FILE_TOO_LARGE,
         // std::io::ErrorKind::Other => todo!(),
-        _ => ErrorCode::UnknownError,
+        _ => moto_rt::E_UNKNOWN,
     }
 }
 

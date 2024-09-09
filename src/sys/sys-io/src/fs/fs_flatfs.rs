@@ -24,7 +24,7 @@ impl super::File for FileFlatFs {
     }
 
     fn write_offset(&mut self, _offset: u64, _buf: &[u8]) -> Result<usize, ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 
     fn read_offset(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -33,7 +33,7 @@ impl super::File for FileFlatFs {
             return Ok(0);
         }
         if offset > self.bytes.len() {
-            return Err(ErrorCode::InvalidArgument);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let end = self.bytes.len().min(offset + buf.len());
@@ -142,7 +142,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
             .collect();
 
         if paths.len() == 0 {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         let mut dir = &self.root_dir;
@@ -150,19 +150,19 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
             dir = dir
                 .subdirs
                 .get(paths[idx])
-                .ok_or(ErrorCode::InvalidFilename)?;
+                .ok_or(moto_rt::E_INVALID_FILENAME)?;
         }
 
         let file = *dir
             .files
             .get(paths.last().unwrap())
-            .ok_or(ErrorCode::InvalidFilename)?;
+            .ok_or(moto_rt::E_INVALID_FILENAME)?;
 
         Ok(Box::new(FileFlatFs { bytes: file }))
     }
 
     fn create_file(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 
     fn iter(
@@ -170,7 +170,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         path: &str,
     ) -> Result<Box<dyn super::DirectoryIter>, moto_sys::ErrorCode> {
         if !path.starts_with('/') {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
         let mut dir = &self.root_dir;
 
@@ -184,7 +184,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
                 continue;
             };
 
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         Ok(Box::new(DirectoryIterFlatFs {
@@ -199,7 +199,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         path: &str,
     ) -> Result<moto_runtime::rt_api::fs::FileAttrData, moto_sys::ErrorCode> {
         if !path.starts_with('/') {
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
         let mut curr_directory = &self.root_dir;
         let mut file = None;
@@ -210,7 +210,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
             }
             if file.is_some() {
                 // Cannot continue after a file has been found.
-                return Err(ErrorCode::InvalidFilename);
+                return Err(moto_rt::E_INVALID_FILENAME);
             }
 
             if let Some(subdir) = curr_directory.subdirs.get(name) {
@@ -223,7 +223,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
                 break;
             }
 
-            return Err(ErrorCode::InvalidFilename);
+            return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         match file {
@@ -253,23 +253,23 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
     }
 
     fn mkdir(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 
     fn unlink(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 
     fn delete_dir(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 
     fn delete_dir_all(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 
     fn rename(&'static mut self, _old: &str, _new: &str) -> Result<(), ErrorCode> {
-        Err(ErrorCode::NotAllowed)
+        Err(moto_rt::E_NOT_ALLOWED)
     }
 }
 

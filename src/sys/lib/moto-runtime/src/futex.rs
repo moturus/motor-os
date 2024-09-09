@@ -6,7 +6,6 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
-use moto_sys::ErrorCode;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 
@@ -120,7 +119,7 @@ impl WaitQueue {
         let timed_out = match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, *timeout) {
             Ok(()) => false,
             Err(err) => {
-                assert_eq!(err, ErrorCode::TimedOut);
+                assert_eq!(err, moto_rt::E_TIMED_OUT);
                 true
             }
         };

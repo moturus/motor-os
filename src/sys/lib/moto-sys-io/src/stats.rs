@@ -4,7 +4,7 @@ use std::net::Ipv6Addr;
 
 use moto_ipc::sync::RequestHeader;
 use moto_ipc::sync::ResponseHeader;
-use moto_sys::ErrorCode;
+use moto_rt::ErrorCode;
 
 pub const URL_IO_STATS: &str = "sys-io-stats-service";
 
@@ -144,8 +144,8 @@ impl<const N: usize> GetTcpSocketStatsResponse<N> {
     const _SZ: () = assert!(size_of::<Self>() <= moto_sys::sys_mem::PAGE_SIZE_SMALL as usize);
 
     pub fn socket_stats(&self) -> Result<&[TcpSocketStatsV1], ErrorCode> {
-        let res = ErrorCode::from(self.header.result);
-        if res.is_err() {
+        let res = self.header.result;
+        if res != moto_rt::E_OK {
             return Err(res);
         }
 
@@ -155,7 +155,7 @@ impl<const N: usize> GetTcpSocketStatsResponse<N> {
         if start_addr + len
             > (self as *const _ as usize) + (moto_sys::sys_mem::PAGE_SIZE_SMALL as usize)
         {
-            return Err(ErrorCode::InternalError);
+            return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
         unsafe {
