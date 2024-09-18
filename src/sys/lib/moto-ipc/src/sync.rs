@@ -69,64 +69,55 @@ impl RawChannel {
 
     pub unsafe fn get_at_mut<T: Sized>(
         &self,
-        buf: &mut [T; 0],
+        buf: *mut T,
         size: usize,
     ) -> Result<&mut [T], ErrorCode> {
-        let start = buf.as_mut_ptr();
-        let start_addr = start as usize;
+        let start_addr = buf as usize;
         if (start_addr < self.addr)
             || ((start_addr + core::mem::size_of::<T>() * size) > (self.addr + self.size))
         {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts_mut(start, size))
+        Ok(core::slice::from_raw_parts_mut(buf, size))
     }
 
-    pub unsafe fn get_at<T: Sized>(&self, buf: &[T; 0], size: usize) -> Result<&[T], ErrorCode> {
-        let start = buf.as_ptr();
-        let start_addr = start as usize;
+    pub unsafe fn get_at<T: Sized>(&self, buf: *const T, size: usize) -> Result<&[T], ErrorCode> {
+        let start_addr = buf as usize;
         if (start_addr < self.addr)
             || ((start_addr + core::mem::size_of::<T>() * size) > (self.addr + self.size))
         {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts(start, size))
+        Ok(core::slice::from_raw_parts(buf, size))
     }
 
-    pub unsafe fn get_bytes(&self, buf: &[u8; 0], size: usize) -> Result<&[u8], ErrorCode> {
-        let start = buf.as_ptr();
-        let start_addr = start as usize;
+    pub unsafe fn get_bytes(&self, buf: *const u8, size: usize) -> Result<&[u8], ErrorCode> {
+        let start_addr = buf as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts(start, size))
+        Ok(core::slice::from_raw_parts(buf, size))
     }
 
-    pub unsafe fn get_bytes_mut(
-        &self,
-        buf: &mut [u8; 0],
-        size: usize,
-    ) -> Result<&mut [u8], ErrorCode> {
-        let start = buf.as_mut_ptr();
-        let start_addr = start as usize;
+    pub unsafe fn get_bytes_mut(&self, buf: *mut u8, size: usize) -> Result<&mut [u8], ErrorCode> {
+        let start_addr = buf as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        Ok(core::slice::from_raw_parts_mut(start, size))
+        Ok(core::slice::from_raw_parts_mut(buf, size))
     }
 
-    pub unsafe fn put_bytes(&self, src: &[u8], dst: &mut [u8; 0]) -> Result<(), ErrorCode> {
-        let start = dst.as_mut_ptr();
-        let start_addr = start as usize;
+    pub unsafe fn put_bytes(&self, src: &[u8], dst: *mut u8) -> Result<(), ErrorCode> {
+        let start_addr = dst as usize;
         if (start_addr < self.addr) || ((start_addr + src.len()) > (self.addr + self.size)) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        core::intrinsics::copy_nonoverlapping(src.as_ptr(), start, src.len());
+        core::intrinsics::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         Ok(())
     }
 }

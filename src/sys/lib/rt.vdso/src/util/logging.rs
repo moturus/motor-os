@@ -1,43 +1,30 @@
-pub use moto_sys::*;
-
-pub fn num_cpus() -> u32 {
-    moto_sys::num_cpus()
+macro_rules! moto_log {
+    ($($arg:tt)*) => {
+        {
+            extern crate alloc;
+            moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
+        }
+    };
 }
 
-#[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn moturus_runtime_start() {
-    moto_rt::init();
-}
+pub(crate) use moto_log;
 
-#[cfg(not(test))]
-#[inline(never)]
-pub fn moturus_start_rt() {
-    moturus_runtime_start();
-    let _ = moto_sys::set_current_thread_name("main");
-}
-
-pub fn sys_exit(code: u64) -> ! {
-    SysCpu::exit(code)
-}
-
-pub fn exit(code: i32) -> ! {
-    let code_u32: u32 = unsafe { core::mem::transmute::<i32, u32>(code) };
-    sys_exit(code_u32 as u64)
-}
-
-#[cfg(not(test))]
 use core::panic::PanicInfo;
 
+fn moturus_log_panics_to_kernel() -> bool {
+    true
+}
+
 #[cfg(not(test))]
-#[no_mangle]
 pub fn moturus_log_panic(info: &PanicInfo<'_>) {
     if moturus_log_panics_to_kernel() {
-        SysRay::log("PANIC").ok(); // Log w/o allocations.
+        moto_sys::SysRay::log("PANIC vdso").ok(); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}", info);
-        SysRay::log(msg.as_str()).ok();
-        log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
+        moto_sys::SysRay::log(msg.as_str()).ok();
+        log_backtrace("TBD"); // crate::rt_api::process::binary().unwrap_or("<unknown>"));
     } else {
+        todo!()
+        /*
         use core::fmt::Write;
 
         let mut stderr = super::stdio::StderrRt::new();
@@ -53,6 +40,7 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
         moto_rt::thread::sleep_until(
             moto_rt::time::Instant::now() + core::time::Duration::from_millis(10),
         );
+        */
     }
 }
 
@@ -60,9 +48,8 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
 #[panic_handler]
 fn _panic(info: &PanicInfo<'_>) -> ! {
     moturus_log_panic(info);
-    sys_exit(u64::MAX)
+    moto_sys::SysCpu::exit(u64::MAX)
 }
-
 const BT_DEPTH: usize = 64;
 
 fn get_backtrace() -> [u64; BT_DEPTH] {
@@ -109,57 +96,38 @@ pub fn log_backtrace(binary: &str) {
     let mut writer = alloc::string::String::with_capacity(256);
     let backtrace = get_backtrace();
     write!(&mut writer, "backtrace: {}", binary).ok();
+    let mut in_vdso = false;
     for addr in backtrace {
         if addr == 0 {
             break;
         }
 
-        if addr > (1_u64 << 40) {
-            break;
+        if addr >= moto_rt::RT_VDSO_START {
+            if !in_vdso {
+                in_vdso = true;
+                write!(&mut writer, " \\\n  -- rt.vdso");
+            }
+            write!(
+                &mut writer,
+                " \\\n    0x{:x}",
+                addr - moto_rt::RT_VDSO_START
+            )
+            .ok();
+        } else {
+            if in_vdso {
+                in_vdso = false;
+                write!(&mut writer, " \\\n  ^^^");
+            }
+            write!(&mut writer, " \\\n  0x{:x}", addr).ok();
         }
-
-        write!(&mut writer, " \\\n  0x{:x}", addr).ok();
     }
 
     let _ = write!(&mut writer, "\n\n");
 
     if moturus_log_panics_to_kernel() {
-        let _ = SysRay::log(writer.as_str());
+        let _ = moto_sys::SysRay::log(writer.as_str());
     } else {
-        let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
+        todo!()
+        // let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
     }
-}
-
-#[no_mangle]
-pub extern "C" fn moturus_print_stacktrace() {
-    log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown binary>"));
-    let mut stderr = super::stdio::StderrRt::new();
-    let _ = stderr.flush();
-
-    // At the moment (2024-01-11), stderr.flush() above does nothing.
-    // Wait a bit to let it flush "naturally".
-    // See https://github.com/moturus/motor-os/issues/6
-    moto_rt::thread::sleep_until(
-        moto_rt::time::Instant::now() + core::time::Duration::from_millis(10),
-    );
-}
-
-#[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
-    // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
-    // don't have stdio, so they will override this function to log via SysMem::log().
-    false
-}
-#[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn __stack_chk_fail() -> ! {
-    panic!("__stack_chk_fail")
-}
-
-#[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn __assert_fail() -> ! {
-    // void __assert_fail(const char * assertion, const char * file, unsigned int line, const char * function);
-    panic!("__assert_fail")
 }

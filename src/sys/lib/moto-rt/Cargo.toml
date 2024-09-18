@@ -11,12 +11,14 @@ edition = "2021"
 test = false
 
 [dependencies]
+alloc             = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
 core              = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
 compiler_builtins = { version = "0.1", optional = true }
 
 [features]
 base = []
 rustc-dep-of-std = [
+    "alloc",
     "core",
     "compiler_builtins",
 ]

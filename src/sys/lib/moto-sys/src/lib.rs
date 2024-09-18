@@ -98,13 +98,3 @@ pub fn rdseed() -> Result<u64, ErrorCode> {
         }
     }
 }
-// #[cfg(feature = "userspace")]
-// #[macro_export]
-// macro_rules! moturus_log {
-//     ($($arg:tt)*) => {
-//         {
-//             extern crate alloc;
-//             crate::syscalls::SysMem::log(alloc::format!($($arg)*).as_str()).ok();
-//         }
-//     };
-// }

@@ -2,7 +2,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::filesystem::FileSystem;
 use alloc::sync::Arc;
-use moto_runtime::rt_api;
 use moto_sys::ErrorCode;
 
 const BLOCK_4K: usize = 4096;
@@ -93,19 +92,18 @@ impl super::filesystem::FileSystem for FileSystemSrFS {
         Ok(Box::new(DirectoryIterSrFs { inner }))
     }
 
-    fn stat(&'static mut self, path: &str) -> Result<rt_api::fs::FileAttrData, ErrorCode> {
-        use rt_api::fs::FileAttrData;
+    fn stat(&'static mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+        use moto_rt::fs::FileAttr;
         let attr = self.inner.stat(path).map_err(to_error_code)?;
 
-        Ok(FileAttrData {
+        Ok(FileAttr {
             version: 1,
-            self_size: core::mem::size_of::<FileAttrData>() as u16,
-            file_perm: rt_api::fs::FILE_PERM_READ | rt_api::fs::FILE_PERM_WRITE,
+            perm: moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE,
             file_type: match attr.kind {
-                srfs::EntryKind::Directory => rt_api::fs::FILE_TYPE_DIR,
-                srfs::EntryKind::File => rt_api::fs::FILE_TYPE_FILE,
+                srfs::EntryKind::Directory => moto_rt::fs::FILETYPE_DIRECTORY,
+                srfs::EntryKind::File => moto_rt::fs::FILETYPE_FILE,
             },
-            reserved: 0,
+            _reserved: [0; 7],
             size: attr.size,
             created: to_moto_timestamp(attr.created),
             accessed: 0,
@@ -211,7 +209,7 @@ fn to_error_code(error: std::io::Error) -> ErrorCode {
     }
 }
 
-fn to_moto_timestamp(ts: SystemTime) -> u64 {
+fn to_moto_timestamp(ts: SystemTime) -> u128 {
     let dur = ts.duration_since(UNIX_EPOCH).unwrap();
-    dur.as_nanos() as u64
+    dur.as_nanos()
 }

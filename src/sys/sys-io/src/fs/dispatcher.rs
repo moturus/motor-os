@@ -1,7 +1,7 @@
 use core::sync::atomic::*;
 use moto_ipc::sync::*;
-use moto_runtime::rt_api::fs::*;
 use moto_sys::SysHandle;
+use moto_sys_io::rt_fs::*;
 
 struct Dispatcher {
     ipc_server: LocalServer,

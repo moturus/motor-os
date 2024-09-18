@@ -6,12 +6,12 @@
 #![feature(waker_getters)]
 #![allow(elided_lifetimes_in_paths)]
 
+pub use moto_rt::futex::*;
+
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod args;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod env;
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod fs;
 
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod net;
@@ -31,12 +31,6 @@ pub use std_rt::*;
 
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod rt_api;
-
-#[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
-pub mod futex;
-
-#[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
-pub use futex::*;
 
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod mutex;

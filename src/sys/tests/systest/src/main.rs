@@ -35,7 +35,7 @@ fn test_syscall() {
 }
 
 fn test_futex() {
-    use moto_runtime::futex::*;
+    use moto_rt::futex::*;
 
     static FUTEX: AtomicU32 = AtomicU32::new(0);
     static COUNTER: AtomicU16 = AtomicU16::new(0);

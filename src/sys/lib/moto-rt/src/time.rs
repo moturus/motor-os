@@ -150,12 +150,12 @@ impl SystemTime {
         }
     }
 
-    pub fn as_unix_ts(&self) -> u64 {
-        (self.nanos & (u64::MAX as u128)) as u64
+    pub fn as_u128(&self) -> u128 {
+        self.nanos
     }
 
-    pub fn from_unix_ts(val: u64) -> Self {
-        Self { nanos: val as u128 }
+    pub fn from_u128(val: u128) -> Self {
+        Self { nanos: val }
     }
 
     pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {

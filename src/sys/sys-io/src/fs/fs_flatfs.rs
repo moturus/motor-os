@@ -1,6 +1,5 @@
 use super::filesystem::FileSystem;
 use alloc::sync::Arc;
-use moto_runtime::rt_api;
 use moto_sys::ErrorCode;
 
 const BLOCK_SIZE: u64 = moto_virtio::BLOCK_SIZE as u64;
@@ -194,10 +193,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         }))
     }
 
-    fn stat(
-        &'static mut self,
-        path: &str,
-    ) -> Result<moto_runtime::rt_api::fs::FileAttrData, moto_sys::ErrorCode> {
+    fn stat(&'static mut self, path: &str) -> Result<moto_rt::fs::FileAttr, moto_sys::ErrorCode> {
         if !path.starts_with('/') {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
@@ -227,23 +223,21 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         }
 
         match file {
-            Some(file) => Ok(rt_api::fs::FileAttrData {
+            Some(file) => Ok(moto_rt::fs::FileAttr {
                 version: 0,
-                self_size: core::mem::size_of::<rt_api::fs::FileAttrData>() as u16,
-                file_perm: 0,
-                file_type: rt_api::fs::FILE_TYPE_FILE,
-                reserved: 0,
+                perm: 0,
+                file_type: moto_rt::fs::FILETYPE_FILE,
+                _reserved: [0; 7],
                 size: file.len() as u64,
                 created: 0,
                 accessed: 0,
                 modified: 0,
             }),
-            None => Ok(rt_api::fs::FileAttrData {
+            None => Ok(moto_rt::fs::FileAttr {
                 version: 0,
-                self_size: core::mem::size_of::<rt_api::fs::FileAttrData>() as u16,
-                file_perm: rt_api::fs::FILE_PERM_READ,
-                file_type: rt_api::fs::FILE_TYPE_DIR,
-                reserved: 0,
+                perm: moto_rt::fs::PERM_READ,
+                file_type: moto_rt::fs::FILETYPE_DIRECTORY,
+                _reserved: [0; 7],
                 size: 0,
                 created: 0,
                 accessed: 0,

@@ -2,8 +2,9 @@
 
 use core::sync::atomic::*;
 use moto_ipc::sync::*;
-use moto_runtime::rt_api::fs::*;
-use moto_sys::SysHandle;
+use moto_rt::E_NOT_FOUND;
+use moto_sys::{ErrorCode, SysHandle};
+use moto_sys_io::rt_fs::*;
 
 use super::filesystem::fs;
 
@@ -133,8 +134,9 @@ impl Driver {
 
                     if let Err(err) = result {
                         #[cfg(debug_assertions)]
-                        if cmd != CMD_STAT && cmd != 0 {
+                        if cmd != CMD_STAT && cmd != 0 && cmd != CMD_READDIR_NEXT {
                             // CMD_STAT is often used to probe, so don't spam the log.
+                            // CMD_READDIR_NEXT returns E_NOT_FOUND when the loop ends.
                             crate::moto_log!("fs::driver: command {} failed with {:?}", cmd, err);
                         }
 
@@ -165,7 +167,7 @@ impl Driver {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
+        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
                 return Err(moto_rt::E_INVALID_FILENAME);
@@ -194,7 +196,7 @@ impl Driver {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
+        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
                 return Err(moto_rt::E_INVALID_FILENAME);
@@ -250,7 +252,7 @@ impl Driver {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
+        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
                 return Err(moto_rt::E_INVALID_FILENAME);
@@ -317,39 +319,35 @@ impl Driver {
         resp.header.ver = 0;
 
         if item.is_none() {
-            resp.entries = 0;
-            return Ok(());
+            return Err(E_NOT_FOUND);
         }
 
         let item = item.unwrap_unchecked();
         let (file_type, size) = {
             if item.is_directory() {
-                (moto_runtime::rt_api::fs::FILE_TYPE_DIR, 0)
+                (moto_rt::fs::FILETYPE_DIRECTORY, 0)
             } else {
-                (moto_runtime::rt_api::fs::FILE_TYPE_FILE, item.size()?)
+                (moto_rt::fs::FILETYPE_FILE, item.size()?)
             }
         };
-        let attr = moto_runtime::rt_api::fs::FileAttrData {
+        let attr = moto_rt::fs::FileAttr {
             version: 0,
-            self_size: core::mem::size_of::<moto_runtime::rt_api::fs::FileAttrData>() as u16,
-            file_perm: 0,
-            file_type: file_type,
-            reserved: 0,
-            size: size,
+            perm: 0,
+            file_type,
+            _reserved: [0; 7],
+            size,
             created: 0,
             accessed: 0,
             modified: 0,
         };
 
-        resp.entries = 1;
-        let dir_entry = &mut raw_channel.get_at_mut(&mut resp.dir_entries, 1)?[0];
+        let dir_entry = &mut raw_channel.get_at_mut(&mut resp.dir_entry, 1)?[0];
         dir_entry.version = 0;
-        dir_entry.self_size = core::mem::size_of::<moto_runtime::rt_api::fs::DirEntryData>() as u16;
-        dir_entry.reserved = 0;
+        dir_entry._reserved = 0;
         dir_entry.attr = attr;
-        dir_entry.fd = 0;
         dir_entry.fname_size = item.filename().as_bytes().len() as u16;
-        raw_channel.put_bytes(item.filename().as_bytes(), &mut dir_entry.fname)?;
+        assert!((dir_entry.fname_size as usize) <= moto_rt::fs::MAX_FILENAME_LEN);
+        raw_channel.put_bytes(item.filename().as_bytes(), dir_entry.fname.as_mut_ptr())?;
 
         Ok(())
     }
@@ -365,7 +363,7 @@ impl Driver {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
+        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
                 return Err(moto_rt::E_INVALID_FILENAME);
@@ -380,22 +378,20 @@ impl Driver {
         };
 
         let mut flags = req.header.flags;
-        if flags & FileOpenRequest::F_CREATE_NEW == FileOpenRequest::F_CREATE_NEW {
+        if (flags & moto_rt::fs::O_CREATE_NEW) != 0 {
             fs().create_file(fname)?;
-            flags ^= FileOpenRequest::F_CREATE_NEW;
+            flags ^= moto_rt::fs::O_CREATE_NEW;
         }
 
-        if flags
-            == (FileOpenRequest::F_CREATE | FileOpenRequest::F_TRUNCATE | FileOpenRequest::F_WRITE)
-        {
+        if flags == (moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE) {
             fs().unlink(fname).ok();
             fs().create_file(fname)?;
-            flags = FileOpenRequest::F_WRITE;
+            flags = moto_rt::fs::O_WRITE;
         }
 
-        if flags != FileOpenRequest::F_READ
-            && flags != FileOpenRequest::F_WRITE
-            && flags != FileOpenRequest::F_APPEND
+        if flags != moto_rt::fs::O_READ
+            && flags != moto_rt::fs::O_WRITE
+            && flags != moto_rt::fs::O_APPEND
         {
             moto_sys::SysRay::log(
                 alloc::format!(
@@ -456,7 +452,7 @@ impl Driver {
             let buf_size = (req.max_bytes as usize)
                 .min(raw_channel.size() - core::mem::size_of::<FileReadResponse>());
 
-            let buf = raw_channel.get_bytes_mut(&mut &mut resp.data, buf_size)?;
+            let buf = raw_channel.get_bytes_mut(resp.data.as_mut_ptr(), buf_size)?;
             let bytes_read = file.read_offset(req.offset, buf)?;
 
             resp.size = bytes_read as u32;
@@ -556,7 +552,7 @@ impl Driver {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(&req.fname, req.fname_size as usize) {
+        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
             Ok(bytes) => bytes,
             Err(_) => {
                 return Err(moto_rt::E_INVALID_FILENAME);
