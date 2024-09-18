@@ -515,6 +515,7 @@ name = "moto-rt"
 version = "0.1.0"
 dependencies = [
  "compiler_builtins",
+ "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
 
@@ -694,8 +695,10 @@ version = "0.1.0"
 dependencies = [
  "elfloader",
  "frusa",
+ "moto-ipc",
  "moto-rt",
  "moto-sys",
+ "moto-sys-io",
 ]
 
 [[package]]
@@ -913,6 +916,7 @@ dependencies = [
  "futures",
  "moto-ipc",
  "moto-mpmc",
+ "moto-rt",
  "moto-runtime",
  "moto-sys",
 ]

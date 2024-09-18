@@ -9,18 +9,20 @@ edition = "2021"
 name = "rt"
 path = "src/main.rs"
 
-# [lib]
+[lib]
 # The following magic line makes rust analyzer stop
 # complaining about the panic handler in src/main.rs.
-# test = false
+test = false
 
 [dependencies]
 
 # internal dependencies
-elfloader = { path = "../../../third_party/elfloader" }
-frusa     = { path = "../frusa"     }
-moto-rt   = { path = "../moto-rt"   }
-moto-sys  = { path = "../moto-sys"  }
+elfloader   = { path = "../../../third_party/elfloader" }
+frusa       = { path = "../frusa"       }
+moto-ipc    = { path = "../moto-ipc"    }
+moto-rt     = { path = "../moto-rt"     }
+moto-sys    = { path = "../moto-sys"    }
+moto-sys-io = { path = "../moto-sys-io" }
 
 # external dependencies
 # log = "0.4.21"

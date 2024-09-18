@@ -6,9 +6,7 @@
 // unreasonable to expect third-party libraries to make choices/
 // tradeoffs that are most beneficial for us.
 
-pub use moto_sys::ErrorCode;
-
-pub const MAX_PATH: usize = 2048;
+pub use moto_rt::ErrorCode;
 
 pub const CMD_STAT: u16 = 2;
 pub const CMD_READDIR: u16 = 3;
@@ -23,13 +21,6 @@ pub const CMD_FILE_WRITE: u16 = 102;
 pub const CMD_UNLINK: u16 = 103;
 pub const CMD_RENAME: u16 = 104;
 
-pub const FILE_TYPE_FILE: u8 = 1;
-pub const FILE_TYPE_DIR: u8 = 2;
-pub const FILE_TYPE_SYMLINK: u8 = 4;
-
-pub const FILE_PERM_READ: u16 = 1;
-pub const FILE_PERM_WRITE: u16 = 2;
-
 pub const F_UNLINK_FILE: u32 = 1;
 pub const F_UNLINK_DIR: u32 = 2;
 pub const F_UNLINK_DIR_ALL: u32 = 3;
@@ -40,19 +31,14 @@ pub const FS_URL: &str = "motor-os-fs";
 // provides a url of an actual driver to send all other requests to.
 #[repr(C, align(8))]
 pub struct GetServerUrlRequest {
-    // pub command: u16, // 1
-    // pub version: u16, // 0
-    // pub flags: u32,   // 0
     pub header: moto_ipc::sync::RequestHeader,
 }
 
 #[repr(C, align(8))]
 pub struct GetServerUrlResponse {
-    // pub result: u16,
-    // pub version: u16,
     pub header: moto_ipc::sync::ResponseHeader,
     pub url_size: u16,
-    pub url: [u8; 0],
+    pub url: [u8; Self::MAX_URL_SIZE],
 }
 
 impl GetServerUrlResponse {
@@ -72,10 +58,7 @@ impl GetServerUrlResponse {
 
 #[repr(C, align(8))]
 pub struct CloseFdRequest {
-    // pub command: u16, // CMD_CLOSE_FD
-    // pub version: u16,
-    // pub flags: u16,
-    // pub reserved: u16,
+    // CMD_CLOSE_FD
     pub header: moto_ipc::sync::RequestHeader,
     pub fd: u64,
 }
@@ -92,13 +75,11 @@ pub struct CloseFdResponse {
 
 #[repr(C, align(8))]
 pub struct StatRequest {
-    // pub command: u16, // CMD_STAT, CMD_READDIR, CMD_MKDIR, CMD_FILE_OPEN, or CMD_UNLINK.
-    // pub version: u16,
-    // pub flags: u16,
+    // CMD_STAT, CMD_READDIR, CMD_MKDIR, CMD_FILE_OPEN, or CMD_UNLINK.
     pub header: moto_ipc::sync::RequestHeader,
     pub parent_fd: u64, // if 0, fname should be absolute.
     pub fname_size: u16,
-    pub fname: [u8; 0], // array of bytes with size of fname_size.
+    pub fname: [u8; moto_rt::fs::MAX_PATH_LEN], // array of bytes with size of fname_size.
 }
 
 pub type FileOpenRequest = StatRequest; // Same struct, different command value.
@@ -106,9 +87,6 @@ pub type FileOpenRequest = StatRequest; // Same struct, different command value.
 #[repr(C, align(8))]
 pub struct FileOpenResponse {
     pub header: moto_ipc::sync::ResponseHeader,
-    // pub result: u16, // zero => Ok.
-    // pub version: u16,
-    // pub reserved: u32,
     pub fd: u64,
     pub size: u64,
 }
@@ -122,61 +100,24 @@ pub type MkdirResponse = CloseFdResponse;
 pub type UnlinkRequest = StatRequest;
 pub type UnlinkResponse = CloseFdResponse;
 
-impl FileOpenRequest {
-    // FileOpen flags.
-    pub const F_READ: u32 = 1;
-    pub const F_WRITE: u32 = 2;
-    pub const F_APPEND: u32 = 4;
-    pub const F_TRUNCATE: u32 = 8;
-    pub const F_CREATE: u32 = 0x10;
-    pub const F_CREATE_NEW: u32 = 0x20;
-}
-
-#[repr(C, align(8))]
-pub struct FileAttrData {
-    pub version: u16,
-    pub self_size: u16, // The size of this struct.
-    pub file_perm: u16, // FILE_PERM_*.
-    pub file_type: u8,  // FILE_TYPE_*.
-    pub reserved: u8,
-    pub size: u64,
-    pub created: u64,
-    pub accessed: u64,
-    pub modified: u64,
-}
-
-#[repr(C, align(8))]
+#[repr(C, align(16))]
 pub struct StatResponse {
     pub header: moto_ipc::sync::ResponseHeader,
     pub fd: u64, // zero if CMD_STAT; non-zero if CMD_FILE_OPEN.
-    pub attr: FileAttrData,
+    pub attr: moto_rt::fs::FileAttr,
 }
 
 #[repr(C, align(8))]
 pub struct ReadDirNextRequest {
+    // CMD_READDIR_NEXT.
     pub header: moto_ipc::sync::RequestHeader,
-    // pub command: u16, // CMD_READDIR_NEXT.
-    // pub version: u16,
-    // pub reserved: u32,
     pub readdir_fd: u64,
 }
 
-#[repr(C, align(8))]
-pub struct DirEntryData {
-    pub version: u16,
-    pub self_size: u16,
-    pub reserved: u32,
-    pub attr: FileAttrData,
-    pub fd: u64, // Zero is OK.
-    pub fname_size: u16,
-    pub fname: [u8; 0],
-}
-
-#[repr(C, align(8))]
+#[repr(C, align(16))]
 pub struct ReadDirNextResponse {
     pub header: moto_ipc::sync::ResponseHeader,
-    pub entries: u16,
-    pub dir_entries: [DirEntryData; 0],
+    pub dir_entry: moto_rt::fs::DirEntry,
 }
 
 #[allow(unused)]
@@ -219,7 +160,8 @@ pub struct RenameRequest {
     pub parent_fd: u64,                        // if 0, fname should be absolute.
     pub old_fname_size: u16,
     pub new_fname_size: u16,
-    pub fnames: [u8; 0], // array of bytes with size of fname_size.
+    pub old: [u8; moto_rt::fs::MAX_PATH_LEN],
+    pub new: [u8; moto_rt::fs::MAX_PATH_LEN],
 }
 
 impl RenameRequest {
@@ -237,14 +179,8 @@ impl RenameRequest {
         self.old_fname_size = old.as_bytes().len() as u16;
         self.new_fname_size = new.as_bytes().len() as u16;
         unsafe {
-            raw_channel.put_bytes(old.as_bytes(), &mut self.fnames)?;
-            raw_channel.put_bytes(
-                new.as_bytes(),
-                (((&self.fnames as *const _ as usize) + (self.old_fname_size as usize))
-                    as *mut [u8; 0])
-                    .as_mut()
-                    .unwrap(),
-            )?;
+            raw_channel.put_bytes(old.as_bytes(), self.old.as_mut_ptr())?;
+            raw_channel.put_bytes(new.as_bytes(), self.new.as_mut_ptr())?;
         }
 
         Ok(())
@@ -254,7 +190,7 @@ impl RenameRequest {
         &'a self,
         raw_channel: &'a moto_ipc::sync::RawChannel,
     ) -> Result<&'a str, ErrorCode> {
-        let bytes = raw_channel.get_bytes(&self.fnames, self.old_fname_size as usize)?;
+        let bytes = raw_channel.get_bytes(self.old.as_ptr(), self.old_fname_size as usize)?;
         core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 
@@ -262,13 +198,7 @@ impl RenameRequest {
         &'a self,
         raw_channel: &'a moto_ipc::sync::RawChannel,
     ) -> Result<&'a str, ErrorCode> {
-        let bytes = raw_channel.get_bytes(
-            (((&self.fnames as *const _ as usize) + (self.old_fname_size as usize))
-                as *const [u8; 0])
-                .as_ref()
-                .unwrap(),
-            self.new_fname_size as usize,
-        )?;
+        let bytes = raw_channel.get_bytes(self.new.as_ptr(), self.new_fname_size as usize)?;
         core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 }

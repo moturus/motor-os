@@ -1,78 +1,278 @@
-use super::rt_api::fs::*;
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering;
+
+use super::util::mutex::Mutex;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
-use core::sync::atomic::*;
-use moto_sys::SysRay;
+use alloc::string::ToString;
+use moto_rt::error::*;
+use moto_rt::fs::*;
+use moto_sys_io::rt_fs::*;
 
-#[derive(Debug)]
-pub enum SeekFrom {
-    Start(u64),
-    End(i64),
-    Current(i64),
+pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    let file = match FsClient::file_open(path, opts) {
+        Ok(file) => file,
+        Err(err) => return -(err as i32),
+    };
+
+    FILES.push(alloc::sync::Arc::new(file))
 }
 
-#[derive(Clone, Debug)]
-pub struct FileAttr {
-    size: u64,
-    file_perm: u16,
-    file_type: u8,
-    modified: u64,
-    accessed: u64,
-    created: u64,
+pub extern "C" fn close(rt_fd: i32) -> ErrorCode {
+    let file = if let Some(file) = FILES.pop(rt_fd) {
+        file
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    match FsClient::close_fd(file.fd, CloseFdRequest::F_FILE) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
 }
 
-impl FileAttr {
-    pub fn new(raw_data: &FileAttrData) -> Self {
-        Self {
-            size: raw_data.size,
-            file_type: raw_data.file_type,
-            file_perm: raw_data.file_perm,
-            modified: raw_data.modified,
-            accessed: raw_data.accessed,
-            created: raw_data.created,
+pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
+    let file = if let Some(file) = FILES.get(rt_fd) {
+        file
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    match FsClient::stat(&file.abs_path) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            E_OK
         }
-    }
-
-    pub fn validate(&self) -> Result<(), ErrorCode> {
-        FileType::from_u8(self.file_type).validate()?;
-        FilePermissions::from_u16(self.file_perm).validate()
-    }
-
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    pub fn perm(&self) -> FilePermissions {
-        FilePermissions::from_u16(self.file_perm)
-    }
-
-    pub fn file_type(&self) -> FileType {
-        FileType::from_u8(self.file_type)
-    }
-
-    pub fn modified(&self) -> Result<u64, ErrorCode> {
-        Ok(self.modified)
-    }
-
-    pub fn accessed(&self) -> Result<u64, ErrorCode> {
-        Ok(self.accessed)
-    }
-
-    pub fn created(&self) -> Result<u64, ErrorCode> {
-        Ok(self.created)
+        Err(err) => err,
     }
 }
 
-#[derive(Debug)]
-pub struct ReadDir {
+pub extern "C" fn fsync(rt_fd: i32) -> ErrorCode {
+    E_OK
+}
+
+pub extern "C" fn datasync(rt_fd: i32) -> ErrorCode {
+    E_OK
+}
+
+pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
+    let file = if let Some(file) = FILES.get(rt_fd) {
+        file
+    } else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+    match FsClient::read(&file, buf) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
+pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
+    let file = if let Some(file) = FILES.get(rt_fd) {
+        file
+    } else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
+    match FsClient::write(&file, buf) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
+pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
+    let file = if let Some(file) = FILES.get(rt_fd) {
+        file
+    } else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    match FsClient::seek(&file, offset, whence) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
+pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    match FsClient::mkdir(path) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn unlink(path_ptr: *const u8, path_size: usize) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    match FsClient::unlink(path, F_UNLINK_FILE) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn rename(
+    old_ptr: *const u8,
+    old_size: usize,
+    new_ptr: *const u8,
+    new_size: usize,
+) -> ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    match FsClient::unlink(path, F_UNLINK_DIR) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    match FsClient::unlink(path, F_UNLINK_DIR_ALL) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn set_perm(path_ptr: *const u8, path_size: usize, perm: u64) -> ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn stat(path_ptr: *const u8, path_size: usize, attr: *mut FileAttr) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    match FsClient::stat(path) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            E_OK
+        }
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn canonicalize(
+    in_ptr: *const u8,
+    in_size: usize,
+    out_ptr: *mut u8,
+    out_size: *mut usize,
+) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(in_ptr, in_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    let c_path = match CanonicalPath::parse(path) {
+        Ok(cp) => cp,
+        Err(err) => return err,
+    };
+    match FsClient::stat(c_path.abs_path.as_str()) {
+        Ok(_) => {}
+        Err(err) => return err,
+    }
+
+    let out_bytes = c_path.abs_path.as_bytes();
+    assert!(out_bytes.len() <= moto_rt::fs::MAX_PATH_LEN);
+    unsafe {
+        core::ptr::copy_nonoverlapping(out_bytes.as_ptr(), out_ptr, out_bytes.len());
+        *out_size = out_bytes.len();
+    }
+
+    E_OK
+}
+
+pub extern "C" fn copy(
+    from_ptr: *const u8,
+    from_size: usize,
+    to_ptr: *const u8,
+    to_size: usize,
+) -> i64 {
+    todo!()
+}
+
+pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    let rdr = match FsClient::readdir(path) {
+        Ok(rdr) => rdr,
+        Err(err) => return -(err as i32),
+    };
+
+    READDIRS.push(alloc::sync::Arc::new(rdr))
+}
+
+pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
+    let rdr = if let Some(rdr) = READDIRS.pop(rt_fd) {
+        rdr
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    match FsClient::close_fd(rdr.fd, CloseFdRequest::F_READDIR) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
+    let rdr = if let Some(rdr) = READDIRS.get(rt_fd) {
+        rdr
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    let de = match FsClient::readdir_next(&rdr) {
+        Ok(de) => de,
+        Err(err) => return err,
+    };
+
+    unsafe { *dentry = de };
+    E_OK
+}
+
+pub extern "C" fn getcwd(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCode {
+    let cwd = match FsClient::getcwd() {
+        Ok(cwd) => cwd,
+        Err(err) => return err,
+    };
+    let out_bytes = cwd.as_bytes();
+    assert!(out_bytes.len() <= moto_rt::fs::MAX_PATH_LEN);
+    unsafe {
+        core::ptr::copy_nonoverlapping(out_bytes.as_ptr(), out_ptr, out_bytes.len());
+        *out_size = out_bytes.len();
+    }
+
+    E_OK
+}
+
+pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    match FsClient::chdir(path) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+// ---------------------- implementation details below ------------------------ //
+
+static FILES: crate::util::fd::Descriptors<File> = crate::util::fd::Descriptors::new();
+static READDIRS: crate::util::fd::Descriptors<ReadDir> = crate::util::fd::Descriptors::new();
+
+struct ReadDir {
     path: String,
     fd: u64,
-}
-
-impl Drop for ReadDir {
-    fn drop(&mut self) {
-        FsClient::close_fd(self.fd, CloseFdRequest::F_READDIR).ok();
-    }
 }
 
 impl ReadDir {
@@ -81,352 +281,28 @@ impl ReadDir {
     }
 }
 
+/*
 impl Iterator for ReadDir {
     type Item = Result<DirEntry, ErrorCode>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match FsClient::readdir_next(self) {
-            Ok(result) => match result {
-                Some(entry) => Some(Ok(entry)),
-                None => None,
-            },
+            Ok(entry) => Some(Ok(entry)),
+            Err(E_NOT_FOUND) => None,
             Err(err) => Some(Err(err)),
         }
     }
 }
+    */
 
-pub struct DirEntry {
-    fname_offset: u16, // "" => root.
-    abs_path: String,  // "/" => root.
-    file_attr: FileAttr,
-}
-
-impl DirEntry {
-    pub fn path(&self) -> &str {
-        self.abs_path.as_str()
-    }
-
-    pub fn file_name(&self) -> &str {
-        &self.abs_path.as_str()[(self.fname_offset as usize)..]
-    }
-
-    pub fn metadata(&self) -> Result<FileAttr, ErrorCode> {
-        Ok(self.file_attr.clone())
-    }
-
-    pub fn file_type(&self) -> Result<FileType, ErrorCode> {
-        Ok(self.file_attr.file_type())
-    }
-
-    fn from(
-        readdir: &ReadDir,
-        raw_channel: &moto_ipc::sync::RawChannel,
-        data: &DirEntryData,
-    ) -> Result<Self, ErrorCode> {
-        assert_eq!(0, data.version);
-        assert_eq!(
-            core::mem::size_of::<DirEntryData>(),
-            data.self_size as usize
-        );
-        let file_attr = FileAttr::new(&data.attr);
-        file_attr.validate()?;
-
-        let fname_bytes = unsafe { raw_channel.get_bytes(&data.fname, data.fname_size as usize)? };
-        let fname = core::str::from_utf8(fname_bytes).map_err(|_| moto_rt::E_INTERNAL_ERROR)?;
-
-        let mut abs_path = readdir.path.clone();
-        if abs_path != "/" {
-            abs_path.push('/');
-        }
-        abs_path.push_str(fname);
-        Ok(DirEntry {
-            fname_offset: (abs_path.len() - fname.len()) as u16,
-            abs_path,
-            file_attr,
-        })
-    }
-}
-
-#[derive(Copy, Clone, Debug, Default)]
-pub struct FileTimes {}
-
-impl FileTimes {
-    pub fn set_accessed(&mut self, _unix_ts: u64) {
-        todo!()
-    }
-
-    pub fn set_modified(&mut self, _unix_ts: u64) {
-        todo!()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FilePermissions {
-    file_perm: u16,
-}
-
-impl FilePermissions {
-    pub fn from_u16(val: u16) -> Self {
-        FilePermissions { file_perm: val }
-    }
-
-    fn validate(&self) -> Result<(), ErrorCode> {
-        if self.file_perm & !0x3 != 0 {
-            return Err(moto_rt::E_INTERNAL_ERROR);
-        }
-        Ok(())
-    }
-
-    pub fn readonly(&self) -> bool {
-        self.file_perm & FILE_PERM_WRITE == 0
-    }
-
-    pub fn set_readonly(&mut self, readonly: bool) {
-        if readonly {
-            self.file_perm &= !FILE_PERM_WRITE
-        } else {
-            self.file_perm |= FILE_PERM_WRITE
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq)]
-pub struct FileType {
-    file_type: u8,
-}
-
-impl FileType {
-    pub fn from_u8(val: u8) -> Self {
-        Self { file_type: val }
-    }
-
-    pub fn validate(&self) -> Result<(), ErrorCode> {
-        if (self.file_type & !0x7) != 0 {
-            return Err(moto_rt::E_INTERNAL_ERROR);
-        }
-
-        if (self.file_type & 3) == 3 {
-            return Err(moto_rt::E_INTERNAL_ERROR);
-        }
-
-        Ok(())
-    }
-
-    pub fn is_dir(&self) -> bool {
-        (self.file_type & FILE_TYPE_DIR) != 0
-    }
-
-    pub fn is_file(&self) -> bool {
-        (self.file_type & FILE_TYPE_FILE) != 0
-    }
-
-    pub fn is_symlink(&self) -> bool {
-        (self.file_type & FILE_TYPE_SYMLINK) != 0
-    }
-}
-
-#[derive(Debug)]
-pub struct DirBuilder {}
-
-impl DirBuilder {
-    pub fn new() -> DirBuilder {
-        Self {}
-    }
-
-    pub fn mkdir(&self, path: &str) -> Result<(), ErrorCode> {
-        FsClient::mkdir(path)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct OpenOptions {
-    flags: u32,
-}
-
-impl OpenOptions {
-    const F_READ: u32 = FileOpenRequest::F_READ;
-    const F_WRITE: u32 = FileOpenRequest::F_WRITE;
-    const F_APPEND: u32 = FileOpenRequest::F_APPEND;
-    const F_TRUNCATE: u32 = FileOpenRequest::F_TRUNCATE;
-    const F_CREATE: u32 = FileOpenRequest::F_CREATE;
-    const F_CREATE_NEW: u32 = FileOpenRequest::F_CREATE_NEW;
-
-    pub const fn new() -> OpenOptions {
-        Self { flags: 0 }
-    }
-
-    fn set_flag(&mut self, flag: u32, val: bool) {
-        if val {
-            self.flags |= flag;
-        } else {
-            self.flags &= !flag;
-        }
-    }
-
-    pub fn read(&mut self, read: bool) {
-        self.set_flag(Self::F_READ, read);
-    }
-
-    pub fn write(&mut self, write: bool) {
-        self.set_flag(Self::F_WRITE, write);
-    }
-
-    pub fn append(&mut self, append: bool) {
-        self.set_flag(Self::F_APPEND, append);
-    }
-
-    pub fn truncate(&mut self, truncate: bool) {
-        self.set_flag(Self::F_TRUNCATE, truncate);
-    }
-
-    pub fn create(&mut self, create: bool) {
-        self.set_flag(Self::F_CREATE, create);
-    }
-
-    pub fn create_new(&mut self, create_new: bool) {
-        self.set_flag(Self::F_CREATE_NEW, create_new);
-    }
-}
-
-pub struct File {
-    path: String, // Absolute.
+struct File {
+    // We save the file's abs path because sys-io does not provide a way to
+    // query file attributes by fd, only by path.
+    // TODO: implement get_file_attr by fd, remove abs_path.
+    abs_path: String,
     fd: u64,
     pos: AtomicU64, // Atomic because read operations take &File, but change pos.
-    size: u64,
 }
-
-impl Drop for File {
-    fn drop(&mut self) {
-        FsClient::close_fd(self.fd, CloseFdRequest::F_FILE).ok();
-    }
-}
-
-impl File {
-    pub fn open(path: &str, opts: &OpenOptions) -> Result<File, ErrorCode> {
-        FsClient::file_open(path, opts)
-    }
-
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    pub fn seek(&self, pos: SeekFrom) -> Result<u64, ErrorCode> {
-        FsClient::seek(self, pos)
-    }
-
-    pub fn file_attr(&self) -> Result<FileAttr, ErrorCode> {
-        FsClient::stat(self.path.as_str())
-    }
-
-    pub fn fsync(&self) -> Result<(), ErrorCode> {
-        Ok(())
-    }
-
-    pub fn datasync(&self) -> Result<(), ErrorCode> {
-        Ok(())
-    }
-
-    pub fn truncate(&self, _size: u64) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        FsClient::read(self, buf)
-    }
-
-    pub fn read_all(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        if buf.len() < self.size as usize {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-        self.pos.store(0, Ordering::Relaxed);
-
-        let mut done = 0_usize;
-        while done < self.size as usize {
-            let dst = &mut buf[done..];
-            let sz = FsClient::read(self, dst)?;
-            if sz == 0 {
-                break;
-            }
-            done += sz;
-        }
-
-        Ok(done)
-    }
-
-    pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        let mut written = 0;
-        loop {
-            if written == buf.len() {
-                return Ok(written);
-            }
-
-            let res = FsClient::write(self, &buf[written..]);
-            if let Ok(sz) = res {
-                written += sz;
-            } else {
-                if written > 0 {
-                    return Ok(written);
-                } else {
-                    return res;
-                }
-            }
-        }
-    }
-}
-
-impl core::fmt::Debug for File {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_fmt(core::format_args!("File: '{}'", self.path))
-    }
-}
-
-pub fn readdir(dir: &str) -> Result<ReadDir, ErrorCode> {
-    FsClient::readdir(dir)
-}
-
-pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
-    FsClient::rename(old, new)
-}
-
-pub fn set_perm(_pathname: &str, _perm: FilePermissions) -> Result<(), ErrorCode> {
-    todo!()
-}
-
-pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
-    FsClient::stat(path)
-}
-
-pub fn lstat(path: &str) -> Result<FileAttr, ErrorCode> {
-    SysRay::log(alloc::format!("fs.rs: lstat: {}", path).as_str()).ok();
-    todo!()
-}
-
-pub fn canonicalize(path: &str) -> Result<String, ErrorCode> {
-    let c_path = CanonicalPath::parse(path)?;
-    FsClient::stat(c_path.abs_path.as_str()).map(|_| c_path.abs_path)
-}
-
-pub fn getcwd() -> Result<String, ErrorCode> {
-    FsClient::getcwd()
-}
-
-pub fn chdir(path: &str) -> Result<(), ErrorCode> {
-    FsClient::chdir(path)
-}
-
-pub fn unlink(path: &str) -> Result<(), ErrorCode> {
-    FsClient::unlink(path, F_UNLINK_FILE)
-}
-
-pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
-    FsClient::unlink(path, F_UNLINK_DIR)
-}
-
-pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
-    FsClient::unlink(path, F_UNLINK_DIR_ALL)
-}
-
-// ---------------------- implementation details below ------------------------ //
 
 // Given a path str from the user, figure out the absolute path, filename, etc.
 #[derive(Clone)]
@@ -441,7 +317,7 @@ impl CanonicalPath {
     }
 
     fn normalize(abs_path: &str) -> Result<Self, ErrorCode> {
-        if (abs_path.len() == 0) || (abs_path.len() >= MAX_PATH) {
+        if (abs_path.len() == 0) || (abs_path.len() >= MAX_PATH_LEN) {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
         if &abs_path[0..1] != "/" {
@@ -499,7 +375,7 @@ impl CanonicalPath {
     }
 
     fn parse(path: &str) -> Result<Self, ErrorCode> {
-        if (path.len() == 0) || (path.len() >= MAX_PATH) || (path.len() != path.trim().len()) {
+        if (path.len() == 0) || (path.len() >= MAX_PATH_LEN) || (path.len() != path.trim().len()) {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
 
@@ -519,7 +395,7 @@ impl CanonicalPath {
         }
 
         let mut abs_path = {
-            match getcwd() {
+            match FsClient::getcwd() {
                 Ok(cwd) => cwd,
                 Err(_) => {
                     // Can't work with rel paths without cwd.
@@ -538,12 +414,12 @@ impl CanonicalPath {
 }
 
 struct FsClient {
-    _driver_url: String,
-    conn: super::mutex::Mutex<moto_ipc::sync::ClientConnection>,
-    cwd: super::mutex::Mutex<Option<DirEntry>>,
+    conn: Mutex<moto_ipc::sync::ClientConnection>,
+    cwd: Mutex<String>,
 }
 
-static FS_CLIENT: AtomicUsize = AtomicUsize::new(0);
+static FS_CLIENT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static FS_CLIENT_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 impl FsClient {
     fn new(url: String) -> Result<(), ErrorCode> {
@@ -551,38 +427,40 @@ impl FsClient {
 
         let mut conn = moto_ipc::sync::ClientConnection::new(moto_ipc::sync::ChannelSize::Small)?;
         if let Err(err) = conn.connect(url.as_str()) {
-            SysRay::log("Failed to connect to FS driver.").ok();
+            moto_sys::SysRay::log("Failed to connect to FS driver.").ok();
             return Err(err.into());
         }
 
         let fs_client = Box::leak(Box::new(FsClient {
-            _driver_url: url,
-            conn: super::mutex::Mutex::new(conn),
-            cwd: super::mutex::Mutex::new(None),
+            conn: Mutex::new(conn),
+            cwd: Mutex::new("/".to_owned()),  // TODO: get it from PWD env var.
         }));
         assert_eq!(
             0,
-            FS_CLIENT.swap(fs_client as *const _ as usize, Ordering::AcqRel)
+            FS_CLIENT.swap(fs_client as *const _ as usize, Ordering::SeqCst)
         );
 
         Ok(())
     }
 
     fn get() -> Result<&'static FsClient, ErrorCode> {
-        let addr = FS_CLIENT.load(Ordering::Relaxed);
+        let mut addr = FS_CLIENT.load(Ordering::Relaxed);
         if addr == 0 {
-            return Err(moto_rt::E_INTERNAL_ERROR);
+            let mut initialized = FS_CLIENT_INITIALIZED.lock();
+            if !*initialized {
+                let driver_url = get_fileserver_url()?;
+                FsClient::new(driver_url)?;
+                *initialized = true;
+            }
+            addr = FS_CLIENT.load(Ordering::SeqCst);
+            assert_ne!(addr, 0);
         }
 
         unsafe { Ok((addr as *const FsClient).as_ref().unwrap_unchecked()) }
     }
 
     fn getcwd() -> Result<String, ErrorCode> {
-        let cwd = Self::get()?.cwd.lock();
-        match cwd.as_ref() {
-            Some(dir_entry) => Ok(dir_entry.abs_path.clone()),
-            None => super::env::getenv("PWD").ok_or(moto_rt::E_NOT_FOUND),
-        }
+        Ok(Self::get()?.cwd.lock().clone())
     }
 
     fn chdir(path: &str) -> Result<(), ErrorCode> {
@@ -600,7 +478,7 @@ impl FsClient {
                 req.parent_fd = 0;
 
                 req.fname_size = c_path.abs_path.as_bytes().len() as u16;
-                raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
+                raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
             }
 
             conn.do_rpc(None)?;
@@ -610,21 +488,14 @@ impl FsClient {
                 return Err(resp.header.result);
             }
 
-            let file_attr = FileAttr::new(&resp.attr);
-            file_attr.validate()?;
-
-            if !file_attr.file_type().is_dir() {
+            if resp.attr.file_type != moto_rt::fs::FILETYPE_DIRECTORY {
                 return Err(moto_rt::E_NOT_A_DIRECTORY);
             }
 
-            DirEntry {
-                fname_offset: c_path.fname_offset,
-                abs_path: c_path.abs_path.clone(),
-                file_attr,
-            }
+            c_path.abs_path
         };
 
-        *self_.cwd.lock() = Some(cwd);
+        *self_.cwd.lock() = cwd;
         Ok(())
     }
 
@@ -666,7 +537,7 @@ impl FsClient {
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
-            raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
+            raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
         conn.do_rpc(None)?;
@@ -679,7 +550,7 @@ impl FsClient {
         Ok(())
     }
 
-    fn file_open(path: &str, opts: &OpenOptions) -> Result<File, ErrorCode> {
+    fn file_open(path: &str, opts: u32) -> Result<File, ErrorCode> {
         let c_path = CanonicalPath::parse(path)?;
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
@@ -688,11 +559,11 @@ impl FsClient {
             let req = raw_channel.get_mut::<FileOpenRequest>();
             req.header.cmd = CMD_FILE_OPEN;
             req.header.ver = 0;
-            req.header.flags = opts.flags;
+            req.header.flags = opts;
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
-            raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
+            raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
         conn.do_rpc(None)?;
@@ -707,24 +578,27 @@ impl FsClient {
         }
 
         Ok(File {
-            path: c_path.abs_path,
+            abs_path: c_path.abs_path,
             fd: resp.fd,
             pos: AtomicU64::new(0),
-            size: resp.size,
         })
     }
 
-    fn seek(file: &File, pos: SeekFrom) -> Result<u64, ErrorCode> {
-        match pos {
-            SeekFrom::Current(n) => {
-                if n == 0 {
+    fn seek(file: &File, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
+        let file_size = {
+            let attr = Self::stat(&file.abs_path)?;
+            attr.size
+        };
+        match whence {
+            moto_rt::fs::SEEK_CUR => {
+                if offset == 0 {
                     return Ok(file.pos.load(Ordering::Relaxed));
                 }
 
                 loop {
                     let curr = file.pos.load(Ordering::Relaxed) as i64;
-                    let new = curr + n;
-                    if (new > (file.size as i64)) || (new < 0) {
+                    let new = curr + offset;
+                    if (new > (file_size as i64)) || (new < 0) {
                         return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
 
@@ -742,33 +616,29 @@ impl FsClient {
                     }
                 }
             }
-            SeekFrom::Start(n) => {
-                if n > file.size {
+            moto_rt::fs::SEEK_SET => {
+                if offset < 0 {
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
-                file.pos.store(n, Ordering::Relaxed);
-                Ok(n)
+                if (offset as u64) > file_size {
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                }
+                file.pos.store(offset as u64, Ordering::Relaxed);
+                Ok(offset as u64)
             }
-            SeekFrom::End(n) => {
-                if (n < 0) && ((-n as u64) > file.size) {
+            moto_rt::fs::SEEK_END => {
+                if (offset < 0) && ((-offset as u64) > file_size) {
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
-                if n > 0 {
-                    SysRay::log(
-                        alloc::format!(
-                            "fs.rs: File::seek: '{:?}' => {:?}: Not Implemented",
-                            file,
-                            pos
-                        )
-                        .as_str(),
-                    )
-                    .ok();
+                if offset > 0 {
+                    moto_sys::SysRay::log("fs.rs: File::seek past end Not Implemented").ok();
                     return Err(moto_rt::E_NOT_IMPLEMENTED);
                 }
-                let new_pos = file.size - ((-n) as u64);
+                let new_pos = file_size - ((-offset) as u64);
                 file.pos.store(new_pos, Ordering::Relaxed);
                 Ok(new_pos)
             }
+            _ => Err(E_INVALID_ARGUMENT),
         }
     }
 
@@ -801,7 +671,7 @@ impl FsClient {
         let result_sz = buf.len().min(resp.size as usize);
 
         unsafe {
-            let bytes = raw_channel.get_bytes(&resp.data, result_sz)?;
+            let bytes = raw_channel.get_bytes(resp.data.as_ptr(), result_sz)?;
             core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr(), result_sz);
             file.pos.fetch_add(result_sz as u64, Ordering::Relaxed);
             Ok(result_sz)
@@ -810,7 +680,7 @@ impl FsClient {
 
     fn write(file: &File, buf: &[u8]) -> Result<usize, ErrorCode> {
         if buf.len() == 0 {
-            SysRay::log("FS: write request with empty buf").ok();
+            moto_sys::SysRay::log("FS: write request with empty buf").ok();
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         let mut conn = Self::get()?.conn.lock();
@@ -827,7 +697,9 @@ impl FsClient {
                 (raw_channel.size() - core::mem::size_of::<FileWriteRequest>()).min(buf.len());
             req.size = size as u32;
 
-            raw_channel.put_bytes(&buf[0..size], &mut req.data).unwrap();
+            raw_channel
+                .put_bytes(&buf[0..size], req.data.as_mut_ptr())
+                .unwrap();
         }
 
         conn.do_rpc(None)?;
@@ -854,7 +726,7 @@ impl FsClient {
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
-            raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
+            raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
         conn.do_rpc(None)?;
@@ -867,7 +739,7 @@ impl FsClient {
         ReadDir::from(c_path.abs_path, &resp)
     }
 
-    fn readdir_next(readdir: &ReadDir) -> Result<Option<DirEntry>, ErrorCode> {
+    fn readdir_next(readdir: &ReadDir) -> Result<DirEntry, ErrorCode> {
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
         unsafe {
@@ -885,16 +757,7 @@ impl FsClient {
             return Err(resp.header.result);
         }
 
-        if resp.entries == 0 {
-            return Ok(None);
-        }
-
-        if resp.entries != 1 {
-            panic!("Batched entries not supported yet.");
-        }
-
-        let dentry = unsafe { raw_channel.get_at(&resp.dir_entries, 1)? };
-        Ok(Some(DirEntry::from(readdir, &raw_channel, &dentry[0])?))
+        Ok(resp.dir_entry)
     }
 
     fn close_fd(fd: u64, flags: u32) -> Result<(), ErrorCode> {
@@ -912,7 +775,7 @@ impl FsClient {
 
         let resp = unsafe { raw_channel.get::<CloseFdResponse>() };
         if resp.header.result != 0 {
-            SysRay::log("close_fd: RPC failed.").ok();
+            moto_sys::SysRay::log("close_fd: RPC failed.").ok();
         }
 
         Ok(())
@@ -931,7 +794,7 @@ impl FsClient {
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
-            raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
+            raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
         conn.do_rpc(None)?;
@@ -941,9 +804,7 @@ impl FsClient {
             return Err(resp.header.result);
         }
 
-        let file_attr = FileAttr::new(&resp.attr);
-        file_attr.validate()?;
-        Ok(file_attr)
+        Ok(resp.attr)
     }
 
     fn mkdir(path: &str) -> Result<(), ErrorCode> {
@@ -959,7 +820,7 @@ impl FsClient {
             req.parent_fd = 0;
 
             req.fname_size = c_path.abs_path.as_bytes().len() as u16;
-            raw_channel.put_bytes(c_path.abs_path.as_bytes(), &mut req.fname)?;
+            raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
         conn.do_rpc(None)?;
@@ -987,14 +848,9 @@ fn get_fileserver_url() -> Result<String, ErrorCode> {
 
     let resp = conn.resp::<GetServerUrlResponse>();
     if resp.header.result != 0 || resp.header.ver != 0 {
-        SysRay::log("get_fileserver_url() failed.").ok();
+        moto_sys::SysRay::log("get_fileserver_url() failed.").ok();
         return Err(moto_rt::E_INTERNAL_ERROR);
     }
 
     Ok(unsafe { resp.url() }?.to_owned())
-}
-
-pub(super) fn init() -> Result<(), ErrorCode> {
-    let driver_url = get_fileserver_url()?;
-    FsClient::new(driver_url)
 }

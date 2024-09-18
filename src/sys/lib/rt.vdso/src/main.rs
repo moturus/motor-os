@@ -1,48 +1,31 @@
 #![no_std]
 #![no_main]
+#![allow(unused)]
 
 mod load;
 mod rt_alloc;
+mod rt_fs;
+mod rt_futex;
 mod rt_thread;
 mod rt_time;
 mod rt_tls;
 
+#[macro_use]
 mod util {
+    pub mod fd;
+    #[macro_use]
+    pub mod logging;
+    pub mod mutex;
     pub mod spin;
 }
 
+pub(crate) use util::logging::moto_log;
 pub use util::spin;
 
 extern crate alloc;
 
 use core::sync::atomic::Ordering;
 use moto_rt::RtVdsoVtableV1;
-
-#[macro_export]
-macro_rules! moto_log {
-    ($($arg:tt)*) => {
-        {
-            extern crate alloc;
-            moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
-        }
-    };
-}
-
-use core::panic::PanicInfo;
-
-#[no_mangle]
-pub fn moturus_log_panic(info: &PanicInfo<'_>) {
-    moto_sys::SysRay::log("PANIC").ok(); // Log w/o allocations.
-    let msg = alloc::format!("PANIC: {}", info);
-    moto_sys::SysRay::log(msg.as_str()).ok();
-}
-
-#[cfg(not(test))]
-#[panic_handler]
-fn _panic(info: &PanicInfo<'_>) -> ! {
-    moturus_log_panic(info);
-    moto_sys::SysCpu::exit(u64::MAX)
-}
 
 // The entry point.
 #[no_mangle]
@@ -55,6 +38,10 @@ pub extern "C" fn _rt_entry(version: u64) {
 
     vtable.load_vdso.store(
         load::load_vdso as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.log_to_kernel.store(
+        log_to_kernel as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -98,6 +85,20 @@ pub extern "C" fn _rt_entry(version: u64) {
         Ordering::Relaxed,
     );
 
+    // Futex.
+    vtable.futex_wait.store(
+        rt_futex::futex_wait as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.futex_wake.store(
+        rt_futex::futex_wake as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.futex_wake_all.store(
+        rt_futex::futex_wake_all as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
     // Thread Local Storage.
     vtable.tls_create.store(
         rt_tls::create as *const () as usize as u64,
@@ -136,6 +137,95 @@ pub extern "C" fn _rt_entry(version: u64) {
         Ordering::Relaxed,
     );
 
+    // Filesystem.
+    vtable
+        .fs_open
+        .store(rt_fs::open as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .fs_close
+        .store(rt_fs::close as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_get_file_attr.store(
+        rt_fs::get_file_attr as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .fs_fsync
+        .store(rt_fs::fsync as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_datasync.store(
+        rt_fs::datasync as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_truncate.store(
+        rt_fs::truncate as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .fs_read
+        .store(rt_fs::read as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .fs_write
+        .store(rt_fs::write as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .fs_seek
+        .store(rt_fs::seek as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .fs_mkdir
+        .store(rt_fs::mkdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_unlink.store(
+        rt_fs::unlink as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_rename.store(
+        rt_fs::rename as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .fs_rmdir
+        .store(rt_fs::rmdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_rmdir_all.store(
+        rt_fs::rmdir_all as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_set_perm.store(
+        rt_fs::set_perm as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .fs_stat
+        .store(rt_fs::stat as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_canonicalize.store(
+        rt_fs::canonicalize as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .fs_copy
+        .store(rt_fs::copy as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_opendir.store(
+        rt_fs::opendir as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_closedir.store(
+        rt_fs::closedir as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_readdir.store(
+        rt_fs::readdir as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_getcwd.store(
+        rt_fs::getcwd as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .fs_chdir
+        .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
+
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+}
+
+pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
+    let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
+            moto_sys::SysRay::log(msg).ok();
 }

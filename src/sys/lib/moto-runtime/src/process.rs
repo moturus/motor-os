@@ -150,47 +150,58 @@ pub fn spawn(
     needs_stdin: bool,
 ) -> Result<(Process, StdioPipesRt), ErrorCode> {
     // Open the file.
-    let mut opts = super::fs::OpenOptions::new();
-    opts.read(true);
     let exe = resolve_exe(command.program.as_str())?;
-    let program_bytes = super::fs::File::open(exe.as_str(), &opts)?;
+    let fd = moto_rt::fs::open(exe.as_str(), moto_rt::fs::O_READ)?;
 
     // Check if this is an elf file or a script.
-    let file_sz = program_bytes.size();
+    let file_sz = moto_rt::fs::get_file_attr(fd)
+        .map_err(|e| {
+            moto_rt::fs::close(fd).unwrap();
+            e
+        })?
+        .size;
     if file_sz < 4 {
+        moto_rt::fs::close(fd).unwrap();
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
     let mut buf: [u8; 4] = [0; 4];
 
-    let sz = program_bytes.read(&mut buf)?;
+    let sz = moto_rt::fs::read(fd, &mut buf).map_err(|e| {
+        moto_rt::fs::close(fd).unwrap();
+        e
+    })?;
     if sz != 4 {
+        moto_rt::fs::close(fd).unwrap();
         return Err(moto_rt::E_UNEXPECTED_EOF);
     }
 
     if is_elf(&buf) {
-        program_bytes.seek(super::fs::SeekFrom::Start(0))?;
-        return run_elf(
-            exe,
-            program_bytes,
-            None,
-            command,
-            env,
-            default_stdio,
-            needs_stdin,
-        );
+        moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).map_err(|e| {
+            moto_rt::fs::close(fd).unwrap();
+            e
+        })?;
+        let res = run_elf(exe, fd, None, command, env, default_stdio, needs_stdin);
+        moto_rt::fs::close(fd).unwrap();
+        return res;
     }
 
     if is_script(&buf) {
-        program_bytes.seek(super::fs::SeekFrom::Start(0))?;
-        return run_script(exe, program_bytes, command, env, default_stdio, needs_stdin);
+        moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).map_err(|e| {
+            moto_rt::fs::close(fd).unwrap();
+            e
+        })?;
+        let res = run_script(exe, fd, command, env, default_stdio, needs_stdin);
+        moto_rt::fs::close(fd).unwrap();
+        return res;
     }
 
+    moto_rt::fs::close(fd).unwrap();
     return Err(moto_rt::E_INVALID_ARGUMENT);
 }
 
 fn run_script(
     script: String,
-    program_bytes: super::fs::File,
+    script_fd: moto_rt::RtFd, // Note: the caller closes fd.
     command: &mut CommandRt,
     env: Vec<(String, String)>,
     default_stdio: StdioRt,
@@ -198,7 +209,7 @@ fn run_script(
 ) -> Result<(Process, StdioPipesRt), ErrorCode> {
     let mut buf: [u8; 256] = [0; 256];
 
-    let sz = program_bytes.read(&mut buf)?;
+    let sz = moto_rt::fs::read(script_fd, &mut buf)?;
     assert!(sz <= buf.len());
     let bytes = &buf[0..sz];
     debug_assert!(bytes.len() > 3);
@@ -213,24 +224,45 @@ fn run_script(
         .trim()
         .to_owned();
 
-    let mut opts = super::fs::OpenOptions::new();
-    opts.read(true);
-    let program_bytes = super::fs::File::open(exe.as_str(), &opts)?;
+    let fd = moto_rt::fs::open(exe.as_str(), moto_rt::fs::O_READ)?;
 
-    run_elf(
+    let res = run_elf(
         exe,
-        program_bytes,
+        fd,
         Some(script),
         command,
         env,
         default_stdio,
         needs_stdin,
-    )
+    );
+    moto_rt::fs::close(fd).unwrap();
+    res
+}
+
+fn read_all(fd: moto_rt::RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    let size = moto_rt::fs::get_file_attr(fd)?.size;
+
+    if buf.len() < size as usize {
+        return Err(moto_rt::E_INVALID_ARGUMENT);
+    }
+    moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET)?;
+
+    let mut done = 0_usize;
+    while done < size as usize {
+        let dst = &mut buf[done..];
+        let sz = moto_rt::fs::read(fd, dst)?;
+        if sz == 0 {
+            break;
+        }
+        done += sz;
+    }
+
+    Ok(done)
 }
 
 fn run_elf(
     exe: String,
-    program_bytes: super::fs::File,
+    fd: moto_rt::RtFd, // Note: the caller closes fd.
     prepend_arg: Option<String>,
     command: &mut CommandRt,
     mut env: Vec<(String, String)>,
@@ -244,7 +276,7 @@ fn run_elf(
     //       needed (this is what Linux does, I believe).
 
     // First, load the binary info RAM.
-    let file_sz = program_bytes.size();
+    let file_sz = moto_rt::fs::get_file_attr(fd)?.size;
     if file_sz < 4 {
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
@@ -264,7 +296,7 @@ fn run_elf(
         SysMem::free(buf_addr).unwrap();
     }
 
-    let sz = program_bytes.read_all(buf)?;
+    let sz = read_all(fd, buf)?;
     if sz != file_sz as usize {
         return Err(moto_rt::E_UNEXPECTED_EOF);
     }
@@ -327,7 +359,7 @@ fn run_elf(
 
     if let Some(pwd) = command.current_directory.as_ref() {
         env.push(("PWD".to_owned(), pwd.clone()));
-    } else if let Ok(pwd) = super::fs::getcwd() {
+    } else if let Ok(pwd) = moto_rt::fs::getcwd() {
         env.push(("PWD".to_owned(), pwd));
     }
 
@@ -669,8 +701,8 @@ impl ElfLoader for Loader {
 }
 
 fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
-    if let Ok(attr) = super::fs::stat(exe) {
-        if attr.file_type().is_file() {
+    if let Ok(attr) = moto_rt::fs::stat(exe) {
+        if attr.file_type == moto_rt::fs::FILETYPE_FILE {
             return Ok(exe.to_owned());
         }
     }
@@ -693,7 +725,7 @@ fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
         let mut fname = dir.to_owned();
         fname.push('/');
         fname.push_str(exe);
-        if let Ok(_attr) = super::fs::stat(fname.as_str()) {
+        if let Ok(_attr) = moto_rt::fs::stat(fname.as_str()) {
             return Ok(fname);
         }
     }

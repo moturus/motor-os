@@ -12,7 +12,7 @@ flatfs       = { path = "../lib/flatfs"      }
 moto-ipc     = { path = "../lib/moto-ipc"    }
 moto-rt      = { path = "../lib/moto-rt"     }
 moto-sys     = { path = "../lib/moto-sys"    }
-moto-sys-io  = { path = "../lib/moto-sys-io" }
+moto-sys-io  = { path = "../lib/moto-sys-io", features = ["std"] }
 moto-virtio  = { path = "../lib/virtio"      }
 srfs         = { path = "../lib/srfs"        }
 

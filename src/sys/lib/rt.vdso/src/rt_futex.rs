@@ -1,4 +1,4 @@
-use crate::external::spin;
+use crate::util::spin;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::marker::PhantomPinned;
@@ -8,11 +8,6 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
-
-/// An atomic for use as a futex that is at least 8-bits but may be larger.
-pub type SmallAtomic = AtomicU32;
-/// Must be the underlying type of SmallAtomic
-pub type SmallPrimitive = u32;
 
 // We need to be able to remove from the middle of the list, and Rust's
 // standard List does not have this functionality.
@@ -166,7 +161,11 @@ static FUTEX_WAIT_QUEUES: spin::Mutex<BTreeMap<usize, Arc<WaitQueue>>> =
     spin::Mutex::new(BTreeMap::new());
 
 // Returns false on timeout.
-pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::Duration>) -> bool {
+fn futex_wait_impl(
+    futex: &AtomicU32,
+    expected: u32,
+    timeout: Option<core::time::Duration>,
+) -> bool {
     let timeout = timeout.map(|dur| moto_rt::time::Instant::now() + dur);
 
     let key = futex as *const _ as usize;
@@ -221,7 +220,7 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::
     }
 }
 
-pub fn futex_wake(futex: &AtomicU32) -> bool {
+fn futex_wake_impl(futex: &AtomicU32) -> bool {
     let key = futex as *const _ as usize;
     let queue = {
         let lock = FUTEX_WAIT_QUEUES.lock();
@@ -234,7 +233,7 @@ pub fn futex_wake(futex: &AtomicU32) -> bool {
     queue.wake_one()
 }
 
-pub fn futex_wake_all(futex: &AtomicU32) {
+fn futex_wake_all_impl(futex: &AtomicU32) {
     let key = futex as *const _ as usize;
     let queue = {
         let mut lock = FUTEX_WAIT_QUEUES.lock();
@@ -246,4 +245,29 @@ pub fn futex_wake_all(futex: &AtomicU32) {
     };
 
     queue.wake_all()
+}
+
+pub extern "C" fn futex_wait(futex: *const AtomicU32, expected: u32, timeout: u64) -> u32 {
+    let timo = match timeout {
+        u64::MAX => None,
+        val => Some(core::time::Duration::from_nanos(val)),
+    };
+
+    if futex_wait_impl(unsafe { futex.as_ref().unwrap() }, expected, timo) {
+        1
+    } else {
+        0
+    }
+}
+
+pub extern "C" fn futex_wake(futex: *const AtomicU32) -> u32 {
+    if futex_wake_impl(unsafe { futex.as_ref().unwrap() }) {
+        1
+    } else {
+        0
+    }
+}
+
+pub extern "C" fn futex_wake_all(futex: *const AtomicU32) {
+    futex_wake_all_impl(unsafe { futex.as_ref().unwrap() })
 }

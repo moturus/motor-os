@@ -1,7 +1,6 @@
 // FileSystem. The API is synchronous because we don't have asynchronous
 // FS drivers for now.
 
-use moto_runtime::rt_api;
 use moto_sys::ErrorCode;
 
 pub trait File {
@@ -25,7 +24,7 @@ pub trait FileSystem {
     fn open_file(&'static mut self, path: &str) -> Result<Box<dyn File>, ErrorCode>;
     fn create_file(&'static mut self, path: &str) -> Result<(), ErrorCode>;
     fn iter(&'static mut self, path: &str) -> Result<Box<dyn DirectoryIter>, ErrorCode>;
-    fn stat(&'static mut self, path: &str) -> Result<rt_api::fs::FileAttrData, ErrorCode>;
+    fn stat(&'static mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode>;
     fn mkdir(&'static mut self, path: &str) -> Result<(), ErrorCode>;
     fn unlink(&'static mut self, path: &str) -> Result<(), ErrorCode>;
     fn rename(&'static mut self, old: &str, new: &str) -> Result<(), ErrorCode>;
