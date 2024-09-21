@@ -1,6 +1,6 @@
-use crate::mutex::Mutex;
-use alloc::borrow::ToOwned;
-use alloc::collections::BTreeMap;
+// use crate::mutex::Mutex;
+// use alloc::borrow::ToOwned;
+// use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use moto_sys::syscalls::*;
@@ -22,6 +22,7 @@ pub(super) unsafe fn create_remote_env(
     super::args::create_remote_args(address_space, &Vec::new(), &flat_vec, false)
 }
 
+/*
 struct EnvRt {
     pointer: *mut BTreeMap<String, String>,
 }
@@ -103,7 +104,9 @@ impl EnvRt {
 }
 
 static ENV: Mutex<EnvRt> = Mutex::new(EnvRt::new());
+*/
 
+/*
 pub fn env() -> alloc::vec::Vec<(String, String)> {
     EnvRt::get_all()
 }
@@ -119,3 +122,4 @@ pub fn setenv(key: &str, val: &str) {
 pub fn unsetenv(key: &str) {
     EnvRt::unset(key)
 }
+*/

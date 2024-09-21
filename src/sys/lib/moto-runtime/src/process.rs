@@ -350,7 +350,7 @@ fn run_elf(
         .unwrap();
     }
 
-    // Clear PWD.
+    // Clear PWD. $PWD is a standard env var: try `echo $PWD` in bash.
     for (k, _) in &mut env {
         if k.as_str() == "PWD" {
             *k = "".to_owned(); // Clear the key: see env::create_remote_env().
@@ -713,7 +713,7 @@ fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
         return Ok(exe.to_owned());
     }
 
-    let path = super::env::getenv("PATH").ok_or(moto_rt::E_INVALID_FILENAME)?;
+    let path = moto_rt::process::getenv("PATH").ok_or(moto_rt::E_INVALID_FILENAME)?;
 
     // TODO: be smarter below (colons in quotes; escaped colons, etc.)
     let dirs: Vec<&str> = path.split(':').collect();

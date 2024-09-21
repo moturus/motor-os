@@ -33,7 +33,7 @@ pub use error::*;
 // Constants from moto-sys: we replicate them here to avoid depending on moto-sys.
 // NOTE: do not change these numbers unless they are also changed in moto-sys!
 #[doc(hidden)]
-const MOTO_SYS_CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);
+pub const MOTO_SYS_CUSTOM_USERSPACE_REGION_START: u64 = (1_u64 << 45) + (1_u64 << 40);
 #[doc(hidden)]
 const MOTO_SYS_CUSTOM_USERSPACE_REGION_END: u64 =
     MOTO_SYS_CUSTOM_USERSPACE_REGION_START + (1_u64 << 40);
@@ -63,6 +63,8 @@ pub mod alloc;
 pub mod fs;
 #[cfg(not(feature = "base"))]
 pub mod futex;
+#[cfg(not(feature = "base"))]
+pub mod process;
 #[cfg(not(feature = "base"))]
 pub mod thread;
 #[cfg(not(feature = "base"))]
@@ -113,6 +115,11 @@ pub struct RtVdsoVtableV1 {
     pub futex_wake: AtomicU64,
     pub futex_wake_all: AtomicU64,
 
+    // Process-related.
+    pub proc_get_full_env: AtomicU64,
+    pub proc_getenv: AtomicU64,
+    pub proc_setenv: AtomicU64,
+
     // Thread Local Storage.
     pub tls_create: AtomicU64,
     pub tls_set: AtomicU64,
@@ -153,12 +160,11 @@ pub struct RtVdsoVtableV1 {
 }
 
 #[cfg(not(feature = "base"))]
-const _SIZE_CHECK:() = assert!(size_of::<RtVdsoVtableV1>() <= 4096);
+const _SIZE_CHECK: () = assert!(size_of::<RtVdsoVtableV1>() <= 4096);
 
 #[cfg(not(feature = "base"))]
 #[doc(hidden)]
 impl RtVdsoVtableV1 {
-
     pub fn get() -> &'static Self {
         // Safety: sys-io is supposed to have taken care of this.
         unsafe {

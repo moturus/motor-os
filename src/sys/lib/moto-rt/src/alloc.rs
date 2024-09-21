@@ -54,3 +54,15 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
         new_size as u64,
     ) as usize as *mut u8
 }
+
+// Deallocate a buffer provided by vdso (i.e. no layout info).
+#[doc(hidden)]
+pub(crate) fn raw_dealloc(addr: u64) {
+    let vdso_dealloc: extern "C" fn(u64, u64, u64) = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().dealloc.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_dealloc(addr as u64, 0, 0);
+}
