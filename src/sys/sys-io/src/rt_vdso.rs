@@ -79,6 +79,20 @@ pub fn load() {
         .vdso_bytes_sz
         .store(vdso_bytes_sz, std::sync::atomic::Ordering::Release);
 
+    // ProcessData (zeroed).
+    let addr = moto_sys::SysMem::map(
+        moto_sys::SysHandle::SELF,
+        moto_sys::SysMem::F_CUSTOM_USER
+            | moto_sys::SysMem::F_READABLE
+            | moto_sys::SysMem::F_WRITABLE,
+        u64::MAX,
+        moto_rt::MOTO_SYS_CUSTOM_USERSPACE_REGION_START,
+        moto_sys::sys_mem::PAGE_SIZE_SMALL,
+        1,
+    )
+    .unwrap();
+    assert_eq!(addr, moto_rt::MOTO_SYS_CUSTOM_USERSPACE_REGION_START);
+
     moto_rt::init();
 }
 

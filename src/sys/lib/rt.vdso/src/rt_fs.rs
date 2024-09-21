@@ -281,20 +281,6 @@ impl ReadDir {
     }
 }
 
-/*
-impl Iterator for ReadDir {
-    type Item = Result<DirEntry, ErrorCode>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match FsClient::readdir_next(self) {
-            Ok(entry) => Some(Ok(entry)),
-            Err(E_NOT_FOUND) => None,
-            Err(err) => Some(Err(err)),
-        }
-    }
-}
-    */
-
 struct File {
     // We save the file's abs path because sys-io does not provide a way to
     // query file attributes by fd, only by path.
@@ -415,7 +401,7 @@ impl CanonicalPath {
 
 struct FsClient {
     conn: Mutex<moto_ipc::sync::ClientConnection>,
-    cwd: Mutex<String>,
+    cwd: Mutex<String>, // Current Working Directory.
 }
 
 static FS_CLIENT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -433,7 +419,11 @@ impl FsClient {
 
         let fs_client = Box::leak(Box::new(FsClient {
             conn: Mutex::new(conn),
-            cwd: Mutex::new("/".to_owned()),  // TODO: get it from PWD env var.
+            cwd: Mutex::new(if let Some(cwd) = super::rt_process::EnvRt::get("PWD") {
+                cwd
+            } else {
+                "/".to_owned()
+            }), // TODO: get it from PWD env var.
         }));
         assert_eq!(
             0,

@@ -554,6 +554,9 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    std::env::set_var("foo", "bar");
+    assert_eq!(std::env::var("foo").unwrap(), "bar");
+
     test_thread_names();
     test_cpus();
     tls::test_tls();

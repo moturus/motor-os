@@ -12,6 +12,8 @@ pub struct Subcommand {
 pub fn spawn() -> Subcommand {
     let mut inst = std::process::Command::new(std::env::args().next().unwrap())
         .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -70,6 +72,10 @@ pub fn run_child(args: Vec<String>) -> ! {
     if args.len() != 2 || args[1] != "subcommand" {
         panic!("bad args: {:?}", args)
     }
+
+    assert_eq!(std::env::var("some_key").unwrap(), "some_val");
+    assert_eq!(std::env::var("none_key").unwrap(), "");
+    assert!(std::env::var("bad_key").is_err());
 
     loop {
         let mut cmd = String::new();

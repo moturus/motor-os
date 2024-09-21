@@ -6,6 +6,7 @@ mod load;
 mod rt_alloc;
 mod rt_fs;
 mod rt_futex;
+mod rt_process;
 mod rt_thread;
 mod rt_time;
 mod rt_tls;
@@ -96,6 +97,20 @@ pub extern "C" fn _rt_entry(version: u64) {
     );
     vtable.futex_wake_all.store(
         rt_futex::futex_wake_all as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // Process-related.
+    vtable.proc_get_full_env.store(
+        rt_process::get_full_env as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.proc_getenv.store(
+        rt_process::getenv as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.proc_setenv.store(
+        rt_process::setenv as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -227,5 +242,5 @@ pub extern "C" fn _rt_entry(version: u64) {
 pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
     let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
     let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
-            moto_sys::SysRay::log(msg).ok();
+    moto_sys::SysRay::log(msg).ok();
 }
