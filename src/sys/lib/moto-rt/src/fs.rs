@@ -212,6 +212,21 @@ pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
     }
 }
 
+pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {
+    let vdso_flush: extern "C" fn(i32) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().fs_flush.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let res = vdso_flush(rt_fd);
+    if res == E_OK {
+        Ok(())
+    } else {
+        Err(res)
+    }
+}
+
 pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
     let vdso_seek: extern "C" fn(i32, i64, u8) -> i64 = unsafe {
         core::mem::transmute(
