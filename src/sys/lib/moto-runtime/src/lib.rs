@@ -8,11 +8,6 @@
 
 pub use moto_rt::futex::*;
 
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod args;
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod env;
-
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod net;
 

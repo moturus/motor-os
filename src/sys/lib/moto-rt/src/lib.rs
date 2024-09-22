@@ -116,6 +116,7 @@ pub struct RtVdsoVtableV1 {
     pub futex_wake_all: AtomicU64,
 
     // Process-related.
+    pub proc_args: AtomicU64,
     pub proc_get_full_env: AtomicU64,
     pub proc_getenv: AtomicU64,
     pub proc_setenv: AtomicU64,

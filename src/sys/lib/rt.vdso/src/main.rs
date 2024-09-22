@@ -101,6 +101,10 @@ pub extern "C" fn _rt_entry(version: u64) {
     );
 
     // Process-related.
+    vtable.proc_args.store(
+        rt_process::args as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.proc_get_full_env.store(
         rt_process::get_full_env as *const () as usize as u64,
         Ordering::Relaxed,

@@ -3,6 +3,18 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub unsafe extern "C" fn args() -> u64 {
+    let args: Vec<String> = unsafe {
+        ProcessData::get()
+            .args()
+            .into_iter()
+            .map(|bytes| core::str::from_utf8(bytes).unwrap().to_owned())
+            .collect()
+    };
+
+    encode_args(args)
+}
+
 pub unsafe extern "C" fn get_full_env() -> u64 {
     let (keys, vals) = EnvRt::get_all();
     encode_env(keys, vals)
@@ -265,6 +277,55 @@ fn encode_env(keys: Vec<String>, vals: Vec<String>) -> u64 {
         }
 
         for arg in vals {
+            write_arg(arg.as_str());
+        }
+    }
+
+    result_addr as u64
+}
+
+fn encode_args(args: Vec<String>) -> u64 {
+    let mut needed_len: u32 = 4; // Args num.
+    let mut num_args = 0_u32;
+
+    let mut calc_lengths = |arg: &str| {
+        needed_len += 4;
+        needed_len += ((arg.len() as u32) + 3) & !3_u32;
+        num_args += 1;
+    };
+
+    for arg in &args {
+        if arg.len() == 0 {
+            continue;
+        }
+        calc_lengths(arg.as_str());
+    }
+
+    if num_args == 0 {
+        return 0;
+    }
+
+    let result_addr = crate::rt_alloc::sys_alloc(needed_len as usize) as usize;
+    assert_ne!(result_addr, 0);
+
+    unsafe {
+        let mut pos = result_addr;
+        *((pos as *mut u32).as_mut().unwrap()) = num_args;
+        pos += 4;
+
+        let mut write_arg = |arg: &str| {
+            *((pos as *mut u32).as_mut().unwrap()) = arg.len() as u32;
+            pos += 4;
+
+            let bytes = arg.as_bytes();
+            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            pos += (bytes.len() + 3) & !3_usize;
+        };
+
+        for arg in args {
+            if arg.len() == 0 {
+                continue;
+            }
             write_arg(arg.as_str());
         }
     }

@@ -16,6 +16,30 @@ pub const MAX_ENV_KEY_LEN: usize = 256;
 /// An arbitrarily defined maximum lenth of an environment variable value.
 pub const MAX_ENV_VAL_LEN: usize = 4092;
 
+/// Get all commandline args for the current process.
+pub fn args() -> alloc::vec::Vec<String> {
+    let vdso_args: extern "C" fn() -> u64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().proc_args.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let args_addr = vdso_args();
+    if args_addr == 0 {
+        return alloc::vec::Vec::new();
+    }
+    let raw_vec = unsafe { deserialize_vec(args_addr) };
+
+    let mut result = Vec::new();
+    for idx in 0..raw_vec.len() {
+        let arg = raw_vec[idx].to_vec();
+        result.push(unsafe { String::from_utf8_unchecked(arg) });
+    }
+
+    crate::alloc::raw_dealloc(args_addr);
+    result
+}
+
 /// Get all environment variables for the current process.
 pub fn env() -> alloc::vec::Vec<(String, String)> {
     let vdso_get_full_env: extern "C" fn() -> u64 = unsafe {
