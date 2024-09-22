@@ -143,6 +143,7 @@ pub struct RtVdsoVtableV1 {
     pub fs_truncate: AtomicU64,
     pub fs_read: AtomicU64,
     pub fs_write: AtomicU64,
+    pub fs_flush: AtomicU64,
     pub fs_seek: AtomicU64,
     pub fs_mkdir: AtomicU64,
     pub fs_unlink: AtomicU64,

@@ -89,6 +89,10 @@ pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
     }
 }
 
+pub extern "C" fn flush(_rt_fd: i32) -> ErrorCode {
+    E_OK
+}
+
 pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
     let file = if let Some(file) = FILES.get(rt_fd) {
         file
