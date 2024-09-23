@@ -11,6 +11,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use moto_rt::RtFd;
 
+pub enum Fd {
+    File(crate::rt_fs::File),
+    ReadDir(crate::rt_fs::ReadDir),
+}
+
 type Entry<T> = Mutex<Option<Arc<T>>>;
 
 fn new_entry<T>() -> Entry<T> {
@@ -79,3 +84,5 @@ impl<T> Descriptors<T> {
         res as RtFd
     }
 }
+
+pub static DESCRIPTORS: crate::util::fd::Descriptors<Fd> = crate::util::fd::Descriptors::new();
