@@ -2,6 +2,8 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
 use super::util::mutex::Mutex;
+use crate::util::fd::Fd;
+use crate::util::fd::DESCRIPTORS;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -17,35 +19,41 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
         Err(err) => return -(err as i32),
     };
 
-    FILES.push(alloc::sync::Arc::new(file))
+    DESCRIPTORS.push(alloc::sync::Arc::new(Fd::File(file)))
 }
 
 pub extern "C" fn close(rt_fd: i32) -> ErrorCode {
-    let file = if let Some(file) = FILES.pop(rt_fd) {
-        file
+    let fd = if let Some(fd) = DESCRIPTORS.pop(rt_fd) {
+        fd
     } else {
         return E_BAD_HANDLE;
     };
 
-    match FsClient::close_fd(file.fd, CloseFdRequest::F_FILE) {
-        Ok(()) => E_OK,
-        Err(err) => err,
+    match fd.as_ref() {
+        Fd::File(file) => match FsClient::close_fd(file.fd, CloseFdRequest::F_FILE) {
+            Ok(()) => E_OK,
+            Err(err) => err,
+        },
+        _ => panic!("fd {rt_fd} not a file"), // Can't just return an error, as we've popped the fd.
     }
 }
 
 pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
-    let file = if let Some(file) = FILES.get(rt_fd) {
-        file
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
     } else {
         return E_BAD_HANDLE;
     };
 
-    match FsClient::stat(&file.abs_path) {
-        Ok(a) => {
-            unsafe { *attr = a };
-            E_OK
-        }
-        Err(err) => err,
+    match fd.as_ref() {
+        Fd::File(file) => match FsClient::stat(&file.abs_path) {
+            Ok(a) => {
+                unsafe { *attr = a };
+                E_OK
+            }
+            Err(err) => err,
+        },
+        _ => return E_BAD_HANDLE,
     }
 }
 
@@ -62,30 +70,40 @@ pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
 }
 
 pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
-    let file = if let Some(file) = FILES.get(rt_fd) {
-        file
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
     } else {
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-    match FsClient::read(&file, buf) {
-        Ok(sz) => sz as i64,
-        Err(err) => -(err as i64),
+    match fd.as_ref() {
+        Fd::File(file) => {
+            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+            match FsClient::read(&file, buf) {
+                Ok(sz) => sz as i64,
+                Err(err) => -(err as i64),
+            }
+        }
+        _ => return -(E_BAD_HANDLE as i64),
     }
 }
 
 pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
-    let file = if let Some(file) = FILES.get(rt_fd) {
-        file
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
     } else {
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-    match FsClient::write(&file, buf) {
-        Ok(sz) => sz as i64,
-        Err(err) => -(err as i64),
+    match fd.as_ref() {
+        Fd::File(file) => {
+            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
+            match FsClient::write(&file, buf) {
+                Ok(sz) => sz as i64,
+                Err(err) => -(err as i64),
+            }
+        }
+        _ => return -(E_BAD_HANDLE as i64),
     }
 }
 
@@ -94,15 +112,18 @@ pub extern "C" fn flush(_rt_fd: i32) -> ErrorCode {
 }
 
 pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
-    let file = if let Some(file) = FILES.get(rt_fd) {
-        file
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
     } else {
         return -(E_BAD_HANDLE as i64);
     };
 
-    match FsClient::seek(&file, offset, whence) {
-        Ok(sz) => sz as i64,
-        Err(err) => -(err as i64),
+    match fd.as_ref() {
+        Fd::File(file) => match FsClient::seek(&file, offset, whence) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        _ => return -(E_BAD_HANDLE as i64),
     }
 }
 
@@ -213,11 +234,17 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
         Err(err) => return -(err as i32),
     };
 
-    READDIRS.push(alloc::sync::Arc::new(rdr))
+    DESCRIPTORS.push(alloc::sync::Arc::new(Fd::ReadDir(rdr)))
 }
 
 pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
-    let rdr = if let Some(rdr) = READDIRS.pop(rt_fd) {
+    let fd = if let Some(fd) = DESCRIPTORS.pop(rt_fd) {
+        fd
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    let rdr = if let Fd::ReadDir(rdr) = fd.as_ref() {
         rdr
     } else {
         return E_BAD_HANDLE;
@@ -230,7 +257,13 @@ pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
 }
 
 pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
-    let rdr = if let Some(rdr) = READDIRS.get(rt_fd) {
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    let rdr = if let Fd::ReadDir(rdr) = fd.as_ref() {
         rdr
     } else {
         return E_BAD_HANDLE;
@@ -271,10 +304,7 @@ pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
 
 // ---------------------- implementation details below ------------------------ //
 
-static FILES: crate::util::fd::Descriptors<File> = crate::util::fd::Descriptors::new();
-static READDIRS: crate::util::fd::Descriptors<ReadDir> = crate::util::fd::Descriptors::new();
-
-struct ReadDir {
+pub struct ReadDir {
     path: String,
     fd: u64,
 }
@@ -285,7 +315,7 @@ impl ReadDir {
     }
 }
 
-struct File {
+pub struct File {
     // We save the file's abs path because sys-io does not provide a way to
     // query file attributes by fd, only by path.
     // TODO: implement get_file_attr by fd, remove abs_path.
