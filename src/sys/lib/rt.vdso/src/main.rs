@@ -10,6 +10,7 @@ mod rt_process;
 mod rt_thread;
 mod rt_time;
 mod rt_tls;
+mod stdio;
 
 #[macro_use]
 mod util {
@@ -117,6 +118,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_process::setenv as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.__proc_tmp_set_relay.store(
+        stdio::__tmp_set_relay as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // Thread Local Storage.
     vtable.tls_create.store(
@@ -157,6 +162,10 @@ pub extern "C" fn _rt_entry(version: u64) {
     );
 
     // Filesystem.
+    vtable.fs_is_terminal.store(
+        rt_fs::is_terminal as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable
         .fs_open
         .store(rt_fs::open as *const () as usize as u64, Ordering::Relaxed);
@@ -184,6 +193,9 @@ pub extern "C" fn _rt_entry(version: u64) {
     vtable
         .fs_write
         .store(rt_fs::write as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .fs_flush
+        .store(rt_fs::flush as *const () as usize as u64, Ordering::Relaxed);
     vtable
         .fs_seek
         .store(rt_fs::seek as *const () as usize as u64, Ordering::Relaxed);
@@ -241,6 +253,8 @@ pub extern "C" fn _rt_entry(version: u64) {
 
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    stdio::init();
 }
 
 pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {

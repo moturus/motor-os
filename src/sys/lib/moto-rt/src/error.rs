@@ -25,14 +25,16 @@ pub const E_BUFFER_FULL: u16 = 20;
 pub const E_MAX: u16 = u16::MAX;
 
 #[cfg(not(feature = "base"))]
-pub fn log_to_kernel(path: &str)  {
-    let vdso_log_to_kernel: extern "C" fn(*const u8, usize)  = unsafe {
+pub fn log_to_kernel(msg: &str) {
+    let vdso_log_to_kernel: extern "C" fn(*const u8, usize) = unsafe {
         core::mem::transmute(
-            super::RtVdsoVtableV1::get().log_to_kernel.load(core::sync::atomic::Ordering::Relaxed) as usize as *const (),
+            super::RtVdsoVtableV1::get()
+                .log_to_kernel
+                .load(core::sync::atomic::Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    let bytes = path.as_bytes();
+    let bytes = msg.as_bytes();
     vdso_log_to_kernel(bytes.as_ptr(), bytes.len());
 }
 

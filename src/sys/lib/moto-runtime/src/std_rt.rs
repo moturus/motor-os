@@ -38,14 +38,11 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
         SysRay::log(msg.as_str()).ok();
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
     } else {
-        use core::fmt::Write;
-
-        let mut stderr = super::stdio::StderrRt::new();
-        let _ = stderr.write_str("PANIC\n"); // Log w/o allocations.
+        let _ = moto_rt::fs::write(moto_rt::FD_STDERR, b"PANIC\n"); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}\n", info);
-        let _ = stderr.write_str(msg.as_str());
+        let _ = moto_rt::fs::write(moto_rt::FD_STDERR, msg.as_str().as_bytes());
         log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
-        let _ = stderr.flush();
+        let _ = moto_rt::fs::flush(moto_rt::FD_STDERR);
 
         // At the moment (2024-01-11), stderr.flush() above does nothing.
         // Wait a bit to let it flush "naturally".
@@ -126,15 +123,14 @@ pub fn log_backtrace(binary: &str) {
     if moturus_log_panics_to_kernel() {
         let _ = SysRay::log(writer.as_str());
     } else {
-        let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
+        let _ = moto_rt::fs::write(2, writer.as_str().as_bytes());
     }
 }
 
 #[no_mangle]
 pub extern "C" fn moturus_print_stacktrace() {
     log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown binary>"));
-    let mut stderr = super::stdio::StderrRt::new();
-    let _ = stderr.flush();
+    let _ = moto_rt::fs::flush(moto_rt::FD_STDERR);
 
     // At the moment (2024-01-11), stderr.flush() above does nothing.
     // Wait a bit to let it flush "naturally".

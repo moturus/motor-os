@@ -15,8 +15,6 @@ pub mod net;
 pub mod process;
 #[cfg(feature = "rustc-dep-of-std")]
 pub mod std_rt;
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod stdio;
 
 #[cfg(feature = "rustc-dep-of-std")]
 pub use moto_ipc::sync_pipe;
