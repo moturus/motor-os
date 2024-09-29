@@ -6,6 +6,7 @@
 //! of FDs.
 
 use super::spin::Mutex;
+use crate::stdio::Stdio;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -13,6 +14,7 @@ use moto_rt::RtFd;
 
 pub enum Fd {
     File(crate::rt_fs::File),
+    Stdio(Stdio),
     ReadDir(crate::rt_fs::ReadDir),
 }
 

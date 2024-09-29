@@ -132,6 +132,21 @@ pub fn unsetenv(key: &str) {
     vdso_set(key.as_ptr(), key.len(), 0, usize::MAX);
 }
 
+pub fn __tmp_set_relay(
+    from: crate::RtFd,
+    to: *const u8, /* moto_ipc::sync_pipe::RawPipeData */
+) {
+    let vdso_set_relay: extern "C" fn(crate::RtFd, *const u8) = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .__proc_tmp_set_relay
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_set_relay(from, to);
+}
+
 unsafe fn deserialize_vec(addr: u64) -> Vec<&'static [u8]> {
     assert_ne!(addr, 0);
     // first four bytes: the number of arguments;

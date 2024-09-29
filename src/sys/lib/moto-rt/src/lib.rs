@@ -83,6 +83,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// as c_int, so we have to follow suit to make our lives easier.
 #[cfg(not(feature = "base"))]
 pub type RtFd = i32;
+// Use posix constants: stdio is a posix construct anyway.
+#[cfg(not(feature = "base"))]
+pub const FD_STDIN: RtFd = 0;
+#[cfg(not(feature = "base"))]
+pub const FD_STDOUT: RtFd = 1;
+#[cfg(not(feature = "base"))]
+pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
 #[doc(hidden)]
@@ -120,6 +127,7 @@ pub struct RtVdsoVtableV1 {
     pub proc_get_full_env: AtomicU64,
     pub proc_getenv: AtomicU64,
     pub proc_setenv: AtomicU64,
+    pub __proc_tmp_set_relay: AtomicU64,
 
     // Thread Local Storage.
     pub tls_create: AtomicU64,
@@ -135,6 +143,7 @@ pub struct RtVdsoVtableV1 {
     pub thread_join: AtomicU64,
 
     // Filesystem.
+    pub fs_is_terminal: AtomicU64,
     pub fs_open: AtomicU64,
     pub fs_close: AtomicU64,
     pub fs_get_file_attr: AtomicU64,

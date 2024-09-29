@@ -421,6 +421,7 @@ impl Pipe {
     }
 }
 
+#[repr(C)]
 pub struct RawPipeData {
     pub buf_addr: usize,
     pub buf_size: usize,

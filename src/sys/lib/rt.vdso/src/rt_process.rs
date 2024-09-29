@@ -73,14 +73,15 @@ pub unsafe extern "C" fn setenv(
 }
 
 #[repr(C)]
-struct StdioData {
+#[derive(Clone, Copy)]
+pub struct StdioData {
     pub pipe_addr: u64,
     pub pipe_size: u64,
     pub handle: u64,
 }
 
 #[repr(C)]
-struct ProcessData {
+pub struct ProcessData {
     pub version: u64,
 
     // Stdio.
@@ -95,9 +96,9 @@ struct ProcessData {
 impl ProcessData {
     const ADDR: u64 = moto_rt::MOTO_SYS_CUSTOM_USERSPACE_REGION_START;
 
-    unsafe fn get() -> &'static ProcessData {
+    pub fn get() -> &'static ProcessData {
         let ptr: *const ProcessData = Self::ADDR as *const ProcessData;
-        ptr.as_ref().unwrap()
+        unsafe { ptr.as_ref().unwrap() }
     }
 
     unsafe fn deserialize_vec(addr: u64) -> Vec<&'static [u8]> {

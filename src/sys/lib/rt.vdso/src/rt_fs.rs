@@ -11,6 +11,14 @@ use moto_rt::error::*;
 use moto_rt::fs::*;
 use moto_sys_io::rt_fs::*;
 
+pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
+    if rt_fd <= 2 {
+        1 // TODO: do it properly
+    } else {
+        0
+    }
+}
+
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
@@ -84,6 +92,13 @@ pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
                 Err(err) => -(err as i64),
             }
         }
+        Fd::Stdio(stdio) => {
+            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+            match stdio.read(buf) {
+                Ok(sz) => sz as i64,
+                Err(err) => -(err as i64),
+            }
+        }
         _ => return -(E_BAD_HANDLE as i64),
     }
 }
@@ -99,6 +114,13 @@ pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
         Fd::File(file) => {
             let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
             match FsClient::write(&file, buf) {
+                Ok(sz) => sz as i64,
+                Err(err) => -(err as i64),
+            }
+        }
+        Fd::Stdio(stdio) => {
+            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
+            match stdio.write(buf) {
                 Ok(sz) => sz as i64,
                 Err(err) => -(err as i64),
             }

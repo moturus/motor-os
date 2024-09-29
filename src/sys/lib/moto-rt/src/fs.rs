@@ -97,6 +97,20 @@ impl DirEntry {
     }
 }
 
+pub fn is_terminal(rt_fd: RtFd) -> bool {
+    let vdso_is_terminal: extern "C" fn(i32) -> i32 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().fs_is_terminal.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    match vdso_is_terminal(rt_fd) {
+        0 => false,
+        1 => true,
+        _ => panic!(),
+    }
+}
+
 /// Opens a file at `path` with options specified by `opts`.
 pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
     let vdso_open: extern "C" fn(*const u8, usize, u32) -> i32 = unsafe {

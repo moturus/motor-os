@@ -1,4 +1,3 @@
-use super::stdio::StdioKind;
 use crate::external::elfloader;
 use crate::external::elfloader::*;
 use alloc::borrow::ToOwned;
@@ -504,6 +503,7 @@ fn create_stdio_pipes(
             let (local_data, remote_data) =
                 crate::sync_pipe::make_pair(SysHandle::SELF, remote_process)?;
 
+            /*
             let thread = super::stdio::set_relay(kind, local_data).map_err(|err| {
                 unsafe {
                     remote_data.unsafe_copy().release(remote_process);
@@ -517,6 +517,15 @@ fn create_stdio_pipes(
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
             SysObj::put(thread).unwrap();
+            */
+
+            let pdata = &local_data as *const _ as usize as *const u8;
+            match kind {
+                StdioKind::Stdin => moto_rt::process::__tmp_set_relay(0, pdata),
+                StdioKind::Stdout => moto_rt::process::__tmp_set_relay(1, pdata),
+                StdioKind::Stderr => moto_rt::process::__tmp_set_relay(2, pdata),
+            }
+
             Ok((
                 None,
                 super::rt_api::process::StdioData {
@@ -838,4 +847,20 @@ unsafe fn create_remote_env(
     }
 
     create_remote_args(address_space, &Vec::new(), &flat_vec, false)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum StdioKind {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+impl StdioKind {
+    pub fn is_reader(&self) -> bool {
+        match self {
+            StdioKind::Stdin => true,
+            _ => false,
+        }
+    }
 }
