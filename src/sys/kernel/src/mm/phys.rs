@@ -35,6 +35,10 @@ impl Slabbable for Frame {
     }
 }
 
+pub fn available_small_pages() -> u64 {
+    PhysicalMemory::inst().available_small_pages()
+}
+
 pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
     let res = PhysicalMemory::inst().allocate_frame(kind);
     if res.is_err() {
@@ -466,7 +470,7 @@ impl<S: PageSize> MemoryArea<S> {
             Ok(f) => Ok(f),
             Err(err) => {
                 log::error!(
-                    "OOM: failed to allocate {} frame.\nTotal pages: {}; used pages: {} available: {}.\n",
+                    "OOM: failed to allocate {} frame.\nTotal pages: {}; used pages: {} available bytes: {}.\n",
                     S::as_str(),
                     self.total_pages,
                     self.used_pages.load(Ordering::Acquire),
@@ -574,6 +578,10 @@ impl PhysicalMemory {
             unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize) };
         assert_ne!(addr, 0);
         unsafe { (addr as *const Self).as_ref().unwrap_unchecked() }
+    }
+
+    fn available_small_pages(&'static self) -> u64 {
+        self.small_pages.total_pages - self.small_pages.used_pages.load(Ordering::Relaxed)
     }
 
     fn allocate_frame(&'static self, kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {

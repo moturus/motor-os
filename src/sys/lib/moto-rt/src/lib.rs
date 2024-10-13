@@ -127,7 +127,10 @@ pub struct RtVdsoVtableV1 {
     pub proc_get_full_env: AtomicU64,
     pub proc_getenv: AtomicU64,
     pub proc_setenv: AtomicU64,
-    pub __proc_tmp_set_relay: AtomicU64,
+    pub proc_spawn: AtomicU64,
+    pub proc_kill: AtomicU64,
+    pub proc_wait: AtomicU64,
+    pub proc_status: AtomicU64,
 
     // Thread Local Storage.
     pub tls_create: AtomicU64,

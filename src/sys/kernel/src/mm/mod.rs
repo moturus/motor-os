@@ -33,6 +33,9 @@ pub const fn kernel_offset_virt() -> u64 {
     PAGING_DIRECT_MAP_OFFSET + KERNEL_PHYS_START
 }
 
+// Reserve 2M for system.
+const SMALL_PAGES_RESERVED_FOR_SYSTEM: u64 = 500;
+
 // Slabs are currently only used for phys memory, and are thus never deallocated.
 pub(super) unsafe fn raw_alloc_for_slab<T: Sized>() -> *mut T {
     let result: *mut T = if !memory_initialized() {

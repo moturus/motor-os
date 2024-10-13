@@ -1,7 +1,4 @@
 pub mod net;
-pub mod process;
-
-pub const TEMP_DIR: &str = "/sys/tmp";
 
 #[repr(C, align(8))]
 pub struct RequestHeader {

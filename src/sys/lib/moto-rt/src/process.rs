@@ -6,6 +6,7 @@ use alloc;
 #[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 
+use crate::RtFd;
 use crate::RtVdsoVtableV1;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,6 +16,10 @@ use core::sync::atomic::Ordering;
 pub const MAX_ENV_KEY_LEN: usize = 256;
 /// An arbitrarily defined maximum lenth of an environment variable value.
 pub const MAX_ENV_VAL_LEN: usize = 4092;
+
+pub const STDIO_INHERIT: RtFd = -((crate::error::E_MAX as RtFd) + 1);
+pub const STDIO_NULL: RtFd = -((crate::error::E_MAX as RtFd) + 2);
+pub const STDIO_MAKE_PIPE: RtFd = -((crate::error::E_MAX as RtFd) + 3);
 
 /// Get all commandline args for the current process.
 pub fn args() -> alloc::vec::Vec<String> {
@@ -132,21 +137,6 @@ pub fn unsetenv(key: &str) {
     vdso_set(key.as_ptr(), key.len(), 0, usize::MAX);
 }
 
-pub fn __tmp_set_relay(
-    from: crate::RtFd,
-    to: *const u8, /* moto_ipc::sync_pipe::RawPipeData */
-) {
-    let vdso_set_relay: extern "C" fn(crate::RtFd, *const u8) = unsafe {
-        core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .__proc_tmp_set_relay
-                .load(Ordering::Relaxed) as usize as *const (),
-        )
-    };
-
-    vdso_set_relay(from, to);
-}
-
 unsafe fn deserialize_vec(addr: u64) -> Vec<&'static [u8]> {
     assert_ne!(addr, 0);
     // first four bytes: the number of arguments;
@@ -169,4 +159,264 @@ unsafe fn deserialize_vec(addr: u64) -> Vec<&'static [u8]> {
     }
 
     result
+}
+
+#[allow(unused)]
+#[derive(Default)]
+pub struct SpawnArgs {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: Option<String>,
+    pub stdin: RtFd,
+    pub stdout: RtFd,
+    pub stderr: RtFd,
+}
+
+#[repr(C)]
+pub struct SpawnArgsRt {
+    pub prog_name_addr: u64,
+    pub prog_name_size: u64,
+    pub args: u64, // Encoded.
+    pub env: u64,  // Encoded.
+    pub stdin: RtFd,
+    pub stdout: RtFd,
+    pub stderr: RtFd,
+    pub _reserved: i32,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct SpawnResult {
+    pub handle: u64,
+    pub stdin: RtFd,
+    pub stdout: RtFd,
+    pub stderr: RtFd,
+    pub _reserved: i32,
+}
+
+pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCode> {
+    use alloc::borrow::ToOwned;
+    let vdso_spawn: extern "C" fn(*const SpawnArgsRt, *mut SpawnResult) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().proc_spawn.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut keys = alloc::vec![];
+    let mut vals = alloc::vec![];
+
+    for (k, v) in &args.env {
+        if k == "PWD" {
+            // Ignore the env var.
+            continue;
+        }
+        keys.push(k.clone());
+        vals.push(v.clone());
+    }
+
+    // Set $PWD.
+    let pwd = match args.cwd.as_ref() {
+        Some(cwd) => cwd.clone(),
+        None => {
+            if let Ok(cwd) = super::fs::getcwd() {
+                cwd.clone()
+            } else {
+                "".to_owned()
+            }
+        }
+    };
+    keys.push("PWD".to_owned());
+    vals.push(pwd);
+
+    let (rt_args, args_layout) = encode_args(&args.args);
+    let (env, env_layout) = encode_env(keys, vals);
+
+    let args_rt = SpawnArgsRt {
+        prog_name_addr: args.program.as_str().as_ptr() as usize as u64,
+        prog_name_size: args.program.as_str().len() as u64,
+        args: rt_args,
+        env,
+        stdin: args.stdin,
+        stdout: args.stdout,
+        stderr: args.stderr,
+        _reserved: 0,
+    };
+
+    let mut result_rt = SpawnResult::default();
+    let res = vdso_spawn(&args_rt, &mut result_rt);
+    if let Some(layout) = args_layout {
+        unsafe { crate::alloc::dealloc(args_rt.args as usize as *mut u8, layout) };
+    }
+    if let Some(layout) = env_layout {
+        unsafe { crate::alloc::dealloc(args_rt.env as usize as *mut u8, layout) };
+    }
+
+    if res != crate::E_OK {
+        Err(res)
+    } else {
+        Ok((
+            result_rt.handle,
+            result_rt.stdin,
+            result_rt.stdout,
+            result_rt.stderr,
+        ))
+    }
+}
+
+pub fn kill(handle: u64) -> crate::ErrorCode {
+    let vdso_kill: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().proc_kill.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_kill(handle)
+}
+
+pub fn wait(handle: u64) -> Result<i32, crate::ErrorCode> {
+    let vdso_wait: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().proc_wait.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let result = vdso_wait(handle);
+    if result != crate::E_OK {
+        Err(result)
+    } else {
+        try_wait(handle)
+    }
+}
+fn convert_exit_status(exit_status: u64) -> i32 {
+    if exit_status & 0xffff_ffff_0000_0000 == 0 {
+        // Map u64 to i32.
+        let status_u32: u32 = exit_status as u32;
+        unsafe { core::mem::transmute::<u32, i32>(status_u32) }
+    } else {
+        // The process exited not via Rust's std::process::exit, but
+        // via a lower-level syscall. Don't try to second-guess what
+        // it wanted to say, just return a -1.
+        -1
+    }
+}
+
+pub fn try_wait(handle: u64) -> Result<i32, crate::ErrorCode> {
+    let vdso_status: extern "C" fn(u64, *mut u64) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().proc_status.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut status = 0_u64;
+    let result = vdso_status(handle, &mut status);
+    if result == crate::E_OK {
+        Ok(convert_exit_status(status))
+    } else {
+        Err(result)
+    }
+}
+
+fn encode_env(keys: Vec<String>, vals: Vec<String>) -> (u64, Option<core::alloc::Layout>) {
+    assert_eq!(keys.len(), vals.len());
+
+    let mut needed_len: u32 = 4; // Total num strings.
+    let mut num_args = 0_u32;
+
+    let mut calc_lengths = |arg: &str| {
+        needed_len += 4;
+        needed_len += ((arg.len() as u32) + 3) & !3_u32;
+        num_args += 1;
+    };
+
+    for arg in &keys {
+        calc_lengths(arg.as_str());
+    }
+
+    for arg in &vals {
+        calc_lengths(arg.as_str());
+    }
+
+    if num_args == 0 {
+        return (0, None);
+    }
+
+    let layout = core::alloc::Layout::from_size_align(needed_len as usize, 8).unwrap();
+    let result_addr = unsafe { crate::alloc::alloc(layout) } as usize;
+    assert_ne!(result_addr, 0);
+
+    unsafe {
+        let mut pos = result_addr as usize;
+        *((pos as *mut u32).as_mut().unwrap()) = num_args;
+        pos += 4;
+
+        let mut write_arg = |arg: &str| {
+            *((pos as *mut u32).as_mut().unwrap()) = arg.len() as u32;
+            pos += 4;
+
+            let bytes = arg.as_bytes();
+            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            pos += (bytes.len() + 3) & !3_usize;
+        };
+
+        for arg in keys {
+            write_arg(arg.as_str());
+        }
+
+        for arg in vals {
+            write_arg(arg.as_str());
+        }
+    }
+
+    (result_addr as u64, Some(layout))
+}
+
+fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
+    let mut needed_len: u32 = 4; // Args num.
+    let mut num_args = 0_u32;
+
+    let mut calc_lengths = |arg: &str| {
+        needed_len += 4;
+        needed_len += ((arg.len() as u32) + 3) & !3_u32;
+        num_args += 1;
+    };
+
+    for arg in args {
+        if arg.len() == 0 {
+            continue;
+        }
+        calc_lengths(arg.as_str());
+    }
+
+    if num_args == 0 {
+        return (0, None);
+    }
+
+    let layout = core::alloc::Layout::from_size_align(needed_len as usize, 8).unwrap();
+    let result_addr = unsafe { crate::alloc::alloc(layout) } as usize;
+    assert_ne!(result_addr, 0);
+
+    unsafe {
+        let mut pos = result_addr;
+        *((pos as *mut u32).as_mut().unwrap()) = num_args;
+        pos += 4;
+
+        let mut write_arg = |arg: &str| {
+            *((pos as *mut u32).as_mut().unwrap()) = arg.len() as u32;
+            pos += 4;
+
+            let bytes = arg.as_bytes();
+            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            pos += (bytes.len() + 3) & !3_usize;
+        };
+
+        for arg in args {
+            if arg.len() == 0 {
+                continue;
+            }
+            write_arg(arg.as_str());
+        }
+    }
+
+    (result_addr as u64, Some(layout))
 }

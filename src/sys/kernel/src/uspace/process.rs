@@ -1032,7 +1032,12 @@ impl Thread {
 
     pub fn debug_name(&self) -> String {
         let parent = self.owner.upgrade().unwrap();
-        alloc::format!("{}:{}", parent.debug_name(), self.tid.as_u64())
+        alloc::format!(
+            "{} {}:{}",
+            parent.debug_name(),
+            parent.pid().as_u64(),
+            self.tid.as_u64()
+        )
     }
 
     pub fn capabilities(&self) -> u64 {

@@ -1,4 +1,4 @@
-use crate::{rt_process::ProcessData, spin::Mutex};
+use crate::{rt_process::ProcessData, rt_process::StdioData, spin::Mutex};
 use alloc::{boxed::Box, vec::Vec};
 use moto_ipc::sync_pipe::Pipe;
 use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
@@ -153,7 +153,7 @@ impl Stdio {
 }
 
 // Returns the handle of the relay thread.
-pub unsafe extern "C" fn __tmp_set_relay(from: moto_rt::RtFd, to: *const u8) {
+pub unsafe fn set_relay(from: moto_rt::RtFd, to: *const u8) {
     use moto_ipc::sync_pipe::RawPipeData;
 
     let from = match from {
@@ -311,4 +311,111 @@ pub fn init() {
         inner: Mutex::new(StdioImpl::new(StdioKind::Stderr)),
     })));
     assert_eq!(moto_rt::FD_STDERR, stderr_fd);
+}
+
+pub fn create_child_stdio(
+    remote_process: moto_sys::SysHandle,
+    remote_process_data: *mut ProcessData,
+    args_rt: &moto_rt::process::SpawnArgsRt,
+) -> Result<(RtFd, RtFd, RtFd), ErrorCode> {
+    // If command has stdin/out/err, take those, otherwise use default.
+    let (stdin, stdin_theirs) =
+        create_stdio_pipes(remote_process, args_rt.stdin, moto_rt::FD_STDIN)?;
+    let (stdout, stdout_theirs) =
+        create_stdio_pipes(remote_process, args_rt.stdout, moto_rt::FD_STDOUT)?;
+    let (stderr, stderr_theirs) =
+        create_stdio_pipes(remote_process, args_rt.stderr, moto_rt::FD_STDERR)?;
+
+    unsafe {
+        let pd = remote_process_data.as_mut().unwrap();
+        pd.stdin = stdin_theirs;
+        pd.stdout = stdout_theirs;
+        pd.stderr = stderr_theirs;
+    }
+
+    Ok((stdin, stdout, stderr))
+}
+
+fn create_stdio_pipes(
+    remote_process: moto_sys::SysHandle,
+    stdio: RtFd,
+    kind: RtFd,
+) -> Result<(RtFd, StdioData), ErrorCode> {
+    use crate::util::fd::{Fd, DESCRIPTORS};
+    use alloc::sync::Arc;
+
+    fn null_data() -> StdioData {
+        StdioData {
+            pipe_addr: 0,
+            pipe_size: 0,
+            handle: 0,
+        }
+    }
+    match stdio {
+        moto_rt::process::STDIO_NULL => Ok((moto_rt::process::STDIO_NULL, null_data())),
+        moto_rt::process::STDIO_INHERIT => {
+            let (local_data, remote_data) =
+                moto_ipc::sync_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+
+            /*
+            let thread = super::stdio::set_relay(kind, local_data).map_err(|err| {
+                unsafe {
+                    remote_data.unsafe_copy().release(remote_process);
+                }
+                err
+            })?;
+
+            // These relay threads are "detached" below (we release the handles).
+            // TODO: remote shutdowns are now detected via bad remote handle IPCs.
+            //       Should we set up a protocol to do it explicitly?
+            //       But why? On remote errors/panics we need to handle bad IPCs
+            //       anyway.
+            SysObj::put(thread).unwrap();
+            */
+
+            let pdata = &local_data as *const _ as usize as *const u8;
+            unsafe { set_relay(kind, pdata) };
+
+            Ok((
+                moto_rt::process::STDIO_NULL,
+                StdioData {
+                    pipe_addr: remote_data.buf_addr as u64,
+                    pipe_size: remote_data.buf_size as u64,
+                    handle: remote_data.ipc_handle,
+                },
+            ))
+        }
+        moto_rt::process::STDIO_MAKE_PIPE => {
+            let (local_data, remote_data) =
+                moto_ipc::sync_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+            if kind == moto_rt::FD_STDIN {
+                let pipe = unsafe {
+                    moto_ipc::sync_pipe::Pipe::Writer(moto_ipc::sync_pipe::Writer::new(local_data))
+                };
+                let pipe_fd = DESCRIPTORS.push(Arc::new(Fd::Pipe(Mutex::new(pipe))));
+                Ok((
+                    pipe_fd,
+                    StdioData {
+                        pipe_addr: remote_data.buf_addr as u64,
+                        pipe_size: remote_data.buf_size as u64,
+                        handle: remote_data.ipc_handle,
+                    },
+                ))
+            } else {
+                let pipe = unsafe {
+                    moto_ipc::sync_pipe::Pipe::Reader(moto_ipc::sync_pipe::Reader::new(local_data))
+                };
+                let pipe_fd = DESCRIPTORS.push(Arc::new(Fd::Pipe(Mutex::new(pipe))));
+                Ok((
+                    pipe_fd,
+                    StdioData {
+                        pipe_addr: remote_data.buf_addr as u64,
+                        pipe_size: remote_data.buf_size as u64,
+                        handle: remote_data.ipc_handle,
+                    },
+                ))
+            }
+        }
+        fd => panic!("fd: {fd}"),
+    }
 }

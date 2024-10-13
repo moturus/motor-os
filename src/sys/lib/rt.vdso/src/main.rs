@@ -18,6 +18,7 @@ mod util {
     #[macro_use]
     pub mod logging;
     pub mod mutex;
+    pub mod scopeguard;
     pub mod spin;
 }
 
@@ -118,8 +119,20 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_process::setenv as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.__proc_tmp_set_relay.store(
-        stdio::__tmp_set_relay as *const () as usize as u64,
+    vtable.proc_spawn.store(
+        rt_process::spawn as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.proc_kill.store(
+        rt_process::kill as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.proc_wait.store(
+        rt_process::wait as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.proc_status.store(
+        rt_process::status as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

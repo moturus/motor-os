@@ -15,6 +15,7 @@ use moto_rt::RtFd;
 pub enum Fd {
     File(crate::rt_fs::File),
     Stdio(Stdio),
+    Pipe(Mutex<moto_ipc::sync_pipe::Pipe>),
     ReadDir(crate::rt_fs::ReadDir),
 }
 

@@ -501,7 +501,11 @@ impl UserAddressSpace {
     }
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
-        self.inner.fix_pagefault(pf_addr, error_code)
+        if super::phys::available_small_pages() < super::SMALL_PAGES_RESERVED_FOR_SYSTEM {
+            Err(moto_rt::E_OUT_OF_MEMORY)
+        } else {
+            self.inner.fix_pagefault(pf_addr, error_code)
+        }
     }
 
     pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {

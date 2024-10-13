@@ -242,7 +242,7 @@ impl VmemRegion {
 
             Ok(sz)
         } else {
-            panic!()
+            Err(moto_rt::E_INVALID_ARGUMENT)
         }
     }
 
