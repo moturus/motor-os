@@ -63,9 +63,10 @@ pub fn env() -> alloc::vec::Vec<(String, String)> {
     assert_eq!(0, raw_vec.len() & 1);
 
     let mut result = Vec::new();
-    for idx in 0..(raw_vec.len() >> 1) {
-        let key = raw_vec[2 * idx].to_vec();
-        let val = raw_vec[2 * idx + 1].to_vec();
+    let num_keys = raw_vec.len() >> 1;
+    for idx in 0..num_keys {
+        let key = raw_vec[idx].to_vec();
+        let val = raw_vec[idx + num_keys].to_vec();
         result.push(unsafe {
             (
                 String::from_utf8_unchecked(key),
