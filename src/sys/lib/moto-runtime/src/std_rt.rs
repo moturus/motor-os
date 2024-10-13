@@ -26,6 +26,10 @@ pub fn exit(code: i32) -> ! {
     sys_exit(code_u32 as u64)
 }
 
+fn binary() -> alloc::string::String {
+    moto_rt::process::args().swap_remove(0)
+}
+
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 
@@ -36,12 +40,12 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
         SysRay::log("PANIC").ok(); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}", info);
         SysRay::log(msg.as_str()).ok();
-        log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
+        log_backtrace(binary().as_str());
     } else {
         let _ = moto_rt::fs::write(moto_rt::FD_STDERR, b"PANIC\n"); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}\n", info);
         let _ = moto_rt::fs::write(moto_rt::FD_STDERR, msg.as_str().as_bytes());
-        log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
+        log_backtrace(binary().as_str());
         let _ = moto_rt::fs::flush(moto_rt::FD_STDERR);
 
         // At the moment (2024-01-11), stderr.flush() above does nothing.
@@ -129,7 +133,7 @@ pub fn log_backtrace(binary: &str) {
 
 #[no_mangle]
 pub extern "C" fn moturus_print_stacktrace() {
-    log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown binary>"));
+    log_backtrace(binary().as_str());
     let _ = moto_rt::fs::flush(moto_rt::FD_STDERR);
 
     // At the moment (2024-01-11), stderr.flush() above does nothing.

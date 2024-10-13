@@ -16,6 +16,8 @@ use core::sync::atomic::Ordering;
 #[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 
+pub const TEMP_DIR: &str = "/sys/tmp";
+
 /// The maximum length of a file/directory absolute path, in bytes.
 /// Relatively short so that two paths can fit into a page, with some
 /// extra fields (for RPC rename request). Although Linux and Windows

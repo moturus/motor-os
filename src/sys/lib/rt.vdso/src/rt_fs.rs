@@ -99,7 +99,14 @@ pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
                 Err(err) => -(err as i64),
             }
         }
-        _ => return -(E_BAD_HANDLE as i64),
+        Fd::Pipe(pipe) => {
+            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+            match pipe.lock().read(buf) {
+                Ok(sz) => sz as i64,
+                Err(err) => -(err as i64),
+            }
+        }
+        Fd::ReadDir(read_dir) => panic!("use readdir() to read dir"),
     }
 }
 
@@ -125,7 +132,14 @@ pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
                 Err(err) => -(err as i64),
             }
         }
-        _ => return -(E_BAD_HANDLE as i64),
+        Fd::Pipe(pipe) => {
+            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
+            match pipe.lock().write(buf) {
+                Ok(sz) => sz as i64,
+                Err(err) => -(err as i64),
+            }
+        }
+        Fd::ReadDir(read_dir) => panic!("can't write to ReadDir"),
     }
 }
 
