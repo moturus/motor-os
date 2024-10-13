@@ -98,3 +98,16 @@ pub fn rdseed() -> Result<u64, ErrorCode> {
         }
     }
 }
+
+#[allow(unused)]
+macro_rules! moto_log {
+    ($($arg:tt)*) => {
+        {
+            extern crate alloc;
+            crate::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
+        }
+    };
+}
+
+#[allow(unused)]
+pub(crate) use moto_log;

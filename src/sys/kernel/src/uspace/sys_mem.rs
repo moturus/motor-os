@@ -49,6 +49,12 @@ fn sys_map(
     let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
 
     if !io_manager && crate::mm::oom_for_user(page_size * num_pages) {
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "User OOM: {} {}",
+            curr_thread.debug_name(),
+            address_space.user_mem_stats().total()
+        );
         return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
     }
 

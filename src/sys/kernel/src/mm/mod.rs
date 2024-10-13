@@ -447,6 +447,10 @@ fn allocate_kernel_stack() -> u64 {
 }
 
 pub fn oom_for_user(would_allocate: u64) -> bool {
-    const RESERVED_MEMORY: u64 = 1 << 20; // Reserve 1M for the kernel & sys-io.
-    (phys::PhysStats::get().available() + would_allocate) < RESERVED_MEMORY
+    let available = phys::available_small_pages() << 12;
+    if available <= would_allocate {
+        true
+    } else {
+        (available - would_allocate) <= (SMALL_PAGES_RESERVED_FOR_SYSTEM << 12)
+    }
 }

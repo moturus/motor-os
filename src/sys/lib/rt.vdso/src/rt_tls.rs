@@ -83,7 +83,7 @@ pub unsafe extern "C" fn tmp_on_thread_exiting() {
         }
 
         // Drop the map.
-        let _ = alloc::boxed::Box::from_raw(ptr);
+        core::mem::drop(alloc::boxed::Box::from_raw(ptr));
         tcb.tls = 0;
     }
 }

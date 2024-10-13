@@ -563,9 +563,10 @@ fn main() {
     test_caps();
     spawn_wait_kill::test_pid_kill();
     test_oom();
+    std::thread::sleep(Duration::new(1, 10_000_000));
 
-    tcp::test_tcp_loopback();
     spawn_wait_kill::test();
+    tcp::test_tcp_loopback();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
     // channel_test::test_io_channel();

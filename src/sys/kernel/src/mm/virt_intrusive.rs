@@ -349,6 +349,7 @@ impl VmemSegment {
                 Ok(page) => page,
                 Err(err) => {
                     self.clear();
+                    log::error!("failed to allocate a frame");
                     return Err(err);
                 }
             };
@@ -381,6 +382,7 @@ impl VmemSegment {
                         page_mut.clear();
                         self.address_space().page_allocator.free_page(page);
                         self.clear();
+                        log::error!("failed to allocate a frame");
                         return Err(err);
                     }
                 };
