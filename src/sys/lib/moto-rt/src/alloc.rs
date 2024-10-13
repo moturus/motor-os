@@ -66,3 +66,17 @@ pub(crate) fn raw_dealloc(addr: u64) {
 
     vdso_dealloc(addr as u64, 0, 0);
 }
+
+#[inline(always)]
+pub fn release_handle(handle: u64) -> Result<(), crate::ErrorCode> {
+    let vdso_release_handle: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().release_handle.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    match vdso_release_handle(handle) {
+        crate::E_OK => Ok(()),
+        err => Err(err),
+    }
+}

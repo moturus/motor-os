@@ -153,7 +153,7 @@ impl Stdio {
 }
 
 // Returns the handle of the relay thread.
-pub unsafe fn set_relay(from: moto_rt::RtFd, to: *const u8) {
+pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorCode> {
     use moto_ipc::sync_pipe::RawPipeData;
 
     let from = match from {
@@ -267,20 +267,12 @@ pub unsafe fn set_relay(from: moto_rt::RtFd, to: *const u8) {
     #[cfg(not(debug_assertions))]
     const RELAY_THREAD_STACK_SIZE: usize = 1024 * 4;
 
-    let _ = match moto_sys::SysCpu::spawn(
+    moto_sys::SysCpu::spawn(
         SysHandle::SELF,
         RELAY_THREAD_STACK_SIZE as u64,
         relay_thread_fn as usize as u64,
         thread_arg,
-    ) {
-        Ok(sys_handle) => {
-            assert!(u64::from(sys_handle) > (moto_rt::E_MAX as u64));
-            sys_handle.as_u64()
-        }
-        Err(err) => u16::from(err) as u64,
-    };
-    // let _ = crate::rt_thread::spawn(relay_thread_fn, RELAY_THREAD_STACK_SIZE, thread_arg);
-    /*
+    )
     .map_err(|err| {
         unsafe {
             drop(Box::from_raw(thread_arg as *mut RelayArg));
@@ -290,7 +282,6 @@ pub unsafe fn set_relay(from: moto_rt::RtFd, to: *const u8) {
         err
     })
     .map(|handle| SysHandle::from(handle))
-    */
 }
 
 pub fn init() {
@@ -357,8 +348,8 @@ fn create_stdio_pipes(
             let (local_data, remote_data) =
                 moto_ipc::sync_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
 
-            /*
-            let thread = super::stdio::set_relay(kind, local_data).map_err(|err| {
+            let pdata = &local_data as *const _ as usize as *const u8;
+            let thread = set_relay(kind, pdata).map_err(|err| {
                 unsafe {
                     remote_data.unsafe_copy().release(remote_process);
                 }
@@ -370,11 +361,7 @@ fn create_stdio_pipes(
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            SysObj::put(thread).unwrap();
-            */
-
-            let pdata = &local_data as *const _ as usize as *const u8;
-            unsafe { set_relay(kind, pdata) };
+            moto_sys::SysObj::put(thread).unwrap();
 
             Ok((
                 moto_rt::process::STDIO_NULL,

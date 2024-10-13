@@ -109,6 +109,7 @@ pub struct RtVdsoVtableV1 {
     pub alloc_zeroed: AtomicU64,
     pub realloc: AtomicU64,
     pub dealloc: AtomicU64,
+    pub release_handle: AtomicU64,
 
     // Time management.
     pub time_instant_now: AtomicU64,

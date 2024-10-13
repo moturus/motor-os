@@ -134,7 +134,7 @@ impl UserAddressSpace {
         if new_total > self.max_memory.load(Ordering::Relaxed) {
             #[cfg(debug_assertions)]
             {
-                log::debug!(
+                log::error!(
                     "user OOM: user usage {} when allocating {}",
                     new_total,
                     bytes
@@ -385,6 +385,7 @@ impl UserAddressSpace {
         self.inner
             .vmem_allocate_pages(VmemKind::User, num_pages, None)
             .or_else(|err| {
+                log::error!("failed to allocate {num_pages} pages");
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
                 Err(err)
             })

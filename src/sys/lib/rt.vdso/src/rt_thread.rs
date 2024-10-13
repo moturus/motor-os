@@ -19,6 +19,7 @@ pub extern "C" fn spawn(
             let thread_fn = rt_args.thread_fn;
             thread_fn(rt_args.thread_arg);
             super::rt_tls::tmp_on_thread_exiting();
+            core::mem::drop(rt_args);
         }
         let _ = moto_sys::SysObj::put(SysHandle::SELF);
         unreachable!()

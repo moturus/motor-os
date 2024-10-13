@@ -62,3 +62,10 @@ pub unsafe extern "C" fn realloc(ptr: u64, size: u64, align: u64, new_size: u64)
         new_size as usize,
     ) as usize as u64
 }
+
+pub extern "C" fn release_handle(handle: u64) -> moto_rt::ErrorCode {
+    match moto_sys::SysObj::put(handle.into()) {
+        Ok(()) => moto_rt::E_OK,
+        Err(err) => err,
+    }
+}

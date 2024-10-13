@@ -65,6 +65,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_alloc::realloc as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.release_handle.store(
+        rt_alloc::release_handle as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // Time management.
     vtable.time_instant_now.store(
