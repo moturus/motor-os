@@ -59,7 +59,7 @@ More specifically, these things work:
   * * stacks are guarded
   * * page faults in the userspace work and are properly handled (only stack memory allocations are currently lazy)
 * I/O subsystem (in the userspace)
-  * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/lib/virtio">drivers</a>
+  * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio">drivers</a>
   * two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs">flatfs</a>)
   * <a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking (TCP only at the moment)
     * max host-guest TCP throughput is about 10Gbps at the moment
