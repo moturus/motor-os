@@ -32,10 +32,17 @@ pub trait FileSystem {
     fn delete_dir_all(&'static mut self, path: &str) -> Result<(), ErrorCode>;
 }
 
-static mut FS: Option<Box<dyn FileSystem>> = None;
+// We can't have a pointer to dyn FileSystem, but we can have a pointer
+// to a struct around it.
+struct FsHolder {
+    ptr: Box<dyn FileSystem>,
+}
+
+static FS: std::sync::atomic::AtomicPtr<FsHolder> =
+    std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 pub fn fs() -> &'static mut Box<dyn FileSystem> {
-    unsafe { FS.as_mut().unwrap() }
+    unsafe { &mut (*FS.load(std::sync::atomic::Ordering::Relaxed)).ptr }
 }
 
 pub fn init() {
@@ -106,11 +113,9 @@ pub fn init() {
         panic!("Couldn't find a data partition.");
     }
 
-    unsafe {
-        core::mem::swap(
-            std::ptr::addr_of_mut!(FS).as_mut().unwrap_unchecked(),
-            &mut fs,
-        )
-    };
-    assert!(fs.is_none());
+    let holder = Box::leak(Box::new(FsHolder { ptr: fs.unwrap() }));
+
+    assert!(FS
+        .swap(holder, std::sync::atomic::Ordering::Relaxed)
+        .is_null());
 }
