@@ -468,7 +468,7 @@ where
     /// subslice.index_mut(0).write(6);
     /// assert_eq!(subslice.index(0).read(), 6);
     /// ```
-    pub fn index_mut<'a, I>(&'a mut self, index: I) -> Volatile<&mut I::Output, A>
+    pub fn index_mut<'a, I>(&'a mut self, index: I) -> Volatile<&'a mut I::Output, A>
     where
         I: SliceIndex<[T]>,
         R: DerefMut,

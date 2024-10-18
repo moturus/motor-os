@@ -95,14 +95,18 @@ pub const FD_STDERR: RtFd = 2;
 #[doc(hidden)]
 #[repr(C)]
 pub struct RtVdsoVtableV1 {
+    // This function is called to initialize this VTable
+    // (i.e. all fields other than vdso_entry and vdso_bytes_sz).
+    // Initialized by the loader/parent.
     pub vdso_entry: AtomicU64,
+
+    // The size of vdso bytes (the address is fixed at RT_VDSO_BYTES_ADDR).
+    // Initialized by the loader/parent.
     pub vdso_bytes_sz: AtomicU64,
 
-    // Self-replicate into a remote address space.
-    pub load_vdso: AtomicU64,
-
-    // Logging facility.
+    // Some utilities.
     pub log_to_kernel: AtomicU64,
+    pub fill_random_bytes: AtomicU64,
 
     // Memory management.
     pub alloc: AtomicU64,
@@ -203,19 +207,17 @@ pub fn init() {
     vdso_entry(RT_VERSION)
 }
 
-// This is a temporary function that takes a remote address space handle
-// and loads vdso into it. The function will be removed once load_program()
-// is implemented in vdso.
 #[cfg(not(feature = "base"))]
-#[doc(hidden)]
-pub fn load_vdso(address_space: u64) -> ErrorCode {
-    let vdso_load: extern "C" fn(u64) -> ErrorCode = unsafe {
+pub fn fill_random_bytes(bytes: &mut [u8]) {
+    let vdso_fill_random_bytes: extern "C" fn(*mut u8, usize) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().load_vdso.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtableV1::get()
+                .fill_random_bytes
+                .load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    vdso_load(address_space)
+    vdso_fill_random_bytes(bytes.as_mut_ptr(), bytes.len())
 }
 
 /// The number of CPUs available.

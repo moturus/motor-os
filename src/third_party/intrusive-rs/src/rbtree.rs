@@ -2043,7 +2043,7 @@ where
     /// Panics if the new element is already linked to a different intrusive
     /// collection.
     #[inline]
-    pub fn insert<'a>(&'a mut self, val: <A::PointerOps as PointerOps>::Pointer) -> CursorMut<'_, A>
+    pub fn insert<'a>(&'a mut self, val: <A::PointerOps as PointerOps>::Pointer) -> CursorMut<'a, A>
     where
         <A as KeyAdapter<'a>>::Key: Ord,
     {

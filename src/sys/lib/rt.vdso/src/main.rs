@@ -27,7 +27,7 @@ pub use util::spin;
 
 extern crate alloc;
 
-use core::sync::atomic::Ordering;
+use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtableV1;
 
 // The entry point.
@@ -39,12 +39,13 @@ pub extern "C" fn _rt_entry(version: u64) {
     let self_addr = _rt_entry as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
-    vtable.load_vdso.store(
-        load::load_vdso as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
     vtable.log_to_kernel.store(
         log_to_kernel as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    vtable.fill_random_bytes.store(
+        fill_random_bytes as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -278,4 +279,26 @@ pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
     let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
     let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
     moto_sys::SysRay::log(msg).ok();
+}
+
+pub extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
+    let mut curr_pos = 0_usize;
+    let mut remainder = size;
+    unsafe {
+        while remainder > 0 {
+            let mut val = 0_u64;
+            let _ = core::arch::x86_64::_rdrand64_step(&mut val);
+            if val == 0 {
+                panic!("rdrand64_step failed");
+            }
+            let to_copy = remainder.min(8);
+            copy_nonoverlapping(
+                &val as *const u64 as usize as *const u8,
+                ptr.add(curr_pos),
+                to_copy,
+            );
+            remainder -= to_copy;
+            curr_pos += to_copy;
+        }
+    }
 }

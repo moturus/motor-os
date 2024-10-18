@@ -2,7 +2,6 @@
 #![allow(internal_features)]
 #![feature(alloc_error_handler)]
 #![feature(stmt_expr_attributes)]
-#![feature(const_mut_refs)]
 #![feature(core_intrinsics)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]

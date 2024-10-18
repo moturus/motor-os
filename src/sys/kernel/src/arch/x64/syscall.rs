@@ -2,6 +2,7 @@ use crate::uspace::process::Thread;
 use crate::uspace::process::ThreadOffCpuReason;
 use crate::util::UnsafeRef;
 use core::arch::asm;
+use core::arch::naked_asm;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[macro_export]
@@ -569,7 +570,7 @@ extern "C" fn syscall_handler_rust(
 #[naked]
 unsafe extern "C" fn spawn_usermode_thread_asm() {
     // rdi, rsi, rdx = TCB, rcx, r8, r9
-    asm!(
+    naked_asm!(
         "cli", // Disable interrupts; sysretq enables them.
         push_preserved_registers!(),
         "mov gs:[40], rsp",    //  ; save kernel's RSP
@@ -612,13 +613,12 @@ unsafe extern "C" fn spawn_usermode_thread_asm() {
         // xor rax, rax
         // ",
         "sysretq",
-        options(noreturn)
     );
 }
 
 #[naked]
 unsafe extern "C" fn syscall_handler_asm() {
-    asm!(
+    naked_asm!(
         "cli", // Disable interrupts.
         // incoming arguments: rdi, rsi, rdx, r10, r8, r9
         // standard arguments: rdi, rsi, rdx, rcx, r8, r9
@@ -702,13 +702,12 @@ unsafe extern "C" fn syscall_handler_asm() {
         "ret",
         RES_EXIT = const(crate::uspace::syscall::RES_EXIT),
         RESULT = const(TOCR_EXITED),
-        options(noreturn)
     );
 }
 
 #[naked]
 unsafe extern "C" fn syscall_pause_asm() {
-    asm!(
+    naked_asm!(
         // We are now in syscall, with syscall stack.
         push_preserved_registers!(),
 
@@ -723,13 +722,12 @@ unsafe extern "C" fn syscall_pause_asm() {
         "mov rax, {RESULT}",
         "ret",
         RESULT = const(TOCR_PAUSED),
-        options(noreturn)
     );
 }
 
 #[naked]
 unsafe extern "C" fn syscall_resume_asm() {
-    asm!(
+    naked_asm!(
         // We are now in kernel.
         push_preserved_registers!(),
         // Save the kernel RSP, restore the syscall RSP.
@@ -741,27 +739,25 @@ unsafe extern "C" fn syscall_resume_asm() {
         ",
         pop_preserved_registers!(),
         "ret",
-        options(noreturn)
     );
 }
 
 #[naked]
 unsafe extern "C" fn syscall_exit_asm() -> ! {
-    asm!(
+    naked_asm!(
         // Restore the kernel RSP.
         "mov rsp, gs:[40]",
         pop_preserved_registers!(),
         "mov rax, {RESULT}",
         "ret",
         RESULT = const(TOCR_EXITED),
-        options(noreturn)
     );
 }
 
 #[naked]
 pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) -> ! {
     unsafe {
-        asm!(
+        naked_asm!(
             "cli",
             // Restore the kernel page table.
             "mov rax, gs:[24]", // KPT
@@ -772,7 +768,6 @@ pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) 
             "mov rax, rdi",
             "sti",
             "ret",
-            options(noreturn)
         )
     }
 }
@@ -780,7 +775,7 @@ pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) 
 #[naked]
 pub extern "C" fn preempt_current_thread_asm() -> ! {
     unsafe {
-        asm!(
+        naked_asm!(
             "cli",
             // Restore the kernel page table.
             "mov rax, gs:[24]",  // KPT
@@ -799,14 +794,13 @@ pub extern "C" fn preempt_current_thread_asm() -> ! {
             "sti",
             "ret",
             RESULT = const(TOCR_PREEMPTED),
-            options(noreturn)
         )
     }
 }
 
 #[naked]
 unsafe extern "C" fn resume_preempted_thread_asm() {
-    asm!(
+    naked_asm!(
         "cli", // Disable interrupts; iretq enables them.
         // We are now in kernel.
         push_preserved_registers!(),
@@ -837,7 +831,6 @@ unsafe extern "C" fn resume_preempted_thread_asm() {
         swapgs
         iretq
         ",
-        options(noreturn)
     );
 }
 

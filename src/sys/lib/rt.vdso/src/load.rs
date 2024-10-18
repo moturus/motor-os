@@ -4,7 +4,7 @@ use alloc::collections::btree_map::BTreeMap;
 use elfloader::ElfBinary;
 use moto_sys::{sys_mem, ErrorCode, SysHandle, SysMem};
 
-pub extern "C" fn load_vdso(address_space: u64) -> ErrorCode {
+pub fn load_vdso(address_space: u64) -> ErrorCode {
     let address_space = SysHandle::from_u64(address_space);
 
     let entry_point = match load_binary(address_space) {
