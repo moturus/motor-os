@@ -5,6 +5,7 @@ use crate::util::StaticPerCpu;
 use crate::util::StaticRef;
 use alloc::boxed::Box;
 use core::arch::asm;
+use core::arch::naked_asm;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 // Note: we use super::serial::write_serial_!() below instead of raw_log!()
@@ -135,7 +136,7 @@ macro_rules! naked_irq_handler {
     ($handler_name: ident, $irqnum:literal) => {
         #[naked]
         unsafe extern "C" fn $handler_name() {
-            asm!(
+            naked_asm!(
                 // Some IRQs have error code on stack, some don't. This handler
                 // deals with those that don't. As we use the same struct IrqStack,
                 // which has error code, we manually adjust rsp to accommodate
@@ -150,7 +151,6 @@ macro_rules! naked_irq_handler {
                 pop_irq_registers!(),
                 "add rsp, 8", // See "sub rsp, 8" above.
                 "iretq",
-                options(noreturn)
             );
         }
     };
@@ -678,7 +678,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
 
 #[naked]
 unsafe extern "C" fn page_fault_handler_asm() {
-    asm!(
+    naked_asm!(
         push_irq_registers!(),
         "
         mov rdi, rsp
@@ -686,7 +686,6 @@ unsafe extern "C" fn page_fault_handler_asm() {
         ",
         pop_irq_registers!(),
         "iretq",
-        options(noreturn)
     );
 }
 

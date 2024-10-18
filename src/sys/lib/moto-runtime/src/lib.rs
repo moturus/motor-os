@@ -3,7 +3,6 @@
 #![feature(core_intrinsics)]
 #![feature(exposed_provenance)]
 #![feature(linkage)]
-#![feature(waker_getters)]
 #![allow(elided_lifetimes_in_paths)]
 
 pub use moto_rt::futex::*;

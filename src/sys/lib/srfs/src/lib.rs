@@ -19,7 +19,6 @@
 //! 
 //! Contributions are welcome.
 
-#![feature(const_option)]
 #![feature(io_error_more)]
 
 extern crate alloc;

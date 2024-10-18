@@ -552,7 +552,7 @@ fn run_elf(
         &full_url,
     )?);
     let load_result = load_binary(buf, address_space.syshandle())?;
-    let res = moto_rt::load_vdso(address_space.syshandle().as_u64());
+    let res = crate::load::load_vdso(address_space.syshandle().as_u64());
     if res != moto_rt::E_OK {
         return Err(res);
     };

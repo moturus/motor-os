@@ -2,9 +2,13 @@ use crate::RtVdsoVtableV1;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// An atomic for use as a futex that is at least 8-bits but may be larger.
-pub type SmallAtomic = AtomicU32;
-/// Must be the underlying type of SmallAtomic
+pub type Futex = AtomicU32;
+/// An atomic for use as a futex that is at least 8-bits but may be larger.
+pub type SmallFutex = AtomicU32;
+/// Must be the underlying type of Futex.
 pub type SmallPrimitive = u32;
+/// Must be the underlying type of Futex.
+pub type Primitive = u32;
 
 /// Returns false on timeout.
 pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::Duration>) -> bool {

@@ -1,5 +1,6 @@
 use crate::pvh::PvhStartInfo;
 use core::alloc::Layout;
+use core::sync::atomic::Ordering;
 
 /* KLoader memory layout is very simple:
  * [0..1M) is reserved for early boot stages/bios/firmware.
@@ -42,7 +43,7 @@ pub const KERNEL_PHYS_START: usize = HEAP_START + (ONE_MB * 2);
 #[no_mangle]
 pub static BOOTUP_STACK_START: u32 = HEAP_START as u32;
 
-static mut ALLOCATED_HEAP: usize = 0;
+static ALLOCATED_HEAP: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 pub fn align_up(val: usize, align: usize) -> usize {
     assert!(align.is_power_of_two());
@@ -115,10 +116,7 @@ fn set_heap_start(start: usize) {
     // Allow allocations only on bsp.
     assert_eq!(0, crate::cpuid::apic_id_32());
 
-    unsafe {
-        assert_eq!(ALLOCATED_HEAP, 0);
-        ALLOCATED_HEAP = start;
-    }
+    assert_eq!(ALLOCATED_HEAP.swap(start, Ordering::Relaxed), 0);
 }
 
 struct BumpAllocator {}
@@ -136,13 +134,12 @@ pub unsafe fn alloc(layout: Layout) -> usize {
     assert_eq!(0, crate::cpuid::apic_id_32());
 
     // set_heap_start() must have been called.
-    assert_ne!(ALLOCATED_HEAP, 0);
+    assert_ne!(ALLOCATED_HEAP.load(Ordering::Relaxed), 0);
 
-    let start = align_up(ALLOCATED_HEAP, layout.align());
-    ALLOCATED_HEAP = start + layout.size();
+    let start = align_up(ALLOCATED_HEAP.load(Ordering::Relaxed), layout.align());
+    ALLOCATED_HEAP.store(start + layout.size(), Ordering::Relaxed);
 
-    //
-    assert!(ALLOCATED_HEAP < (PAGING_DIRECT_MAP_OFFSET as usize) + HEAP_START + HEAP_SZ);
+    assert!(ALLOCATED_HEAP.load(Ordering::Relaxed) < ((PAGING_DIRECT_MAP_OFFSET as usize) + HEAP_START + HEAP_SZ));
 
     start
 }
@@ -182,6 +179,7 @@ pub fn init(pvh: &'static PvhStartInfo) {
         assert_eq!(0, pte & ((1 << 12) - 1));
 
         pte |= PTE::PRESENT | PTE::WRITABLE;
+        #[allow(static_mut_refs)]
         L4_TABLE.set(idx_l4, PTE::from_u64(pte));
 
         // validate.

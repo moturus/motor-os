@@ -91,7 +91,7 @@ pub fn load_kernel_bsp(pvh: &'static crate::pvh::PvhStartInfo, num_cpus: u32, st
 #[naked]
 unsafe extern "C" fn jump_to_kernel(arg0: u64, entry_point: u64) -> ! {
     // rdi, rsi, rdx
-    core::arch::asm!("call rsi", options(noreturn))
+    core::arch::naked_asm!("call rsi")
 }
 
 pub fn jump_into_kernel_ap() -> ! {
