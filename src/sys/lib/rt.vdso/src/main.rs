@@ -276,6 +276,7 @@ pub extern "C" fn _rt_entry(version: u64) {
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
+    let _ = moto_sys::set_current_thread_name("main");
     stdio::init();
 }
 

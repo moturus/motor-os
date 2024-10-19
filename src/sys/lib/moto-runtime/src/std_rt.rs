@@ -4,19 +4,6 @@ pub fn num_cpus() -> u32 {
     moto_sys::num_cpus()
 }
 
-#[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn moturus_runtime_start() {
-    moto_rt::init();
-}
-
-#[cfg(not(test))]
-#[inline(never)]
-pub fn moturus_start_rt() {
-    moturus_runtime_start();
-    let _ = moto_sys::set_current_thread_name("main");
-}
-
 fn binary() -> alloc::string::String {
     moto_rt::process::args().swap_remove(0)
 }

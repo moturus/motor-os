@@ -24,6 +24,7 @@
 //!   Motor OS, which is based on Rust, does not support dynamic libraries,
 //!   as Rust does not support them "natively" (as in rdylib).
 #![no_std]
+#![feature(linkage)]
 
 // Mod error is the only one currently shared b/w the kernel and the userspace.
 #[macro_use]
@@ -206,6 +207,25 @@ pub fn init() {
     };
 
     vdso_entry(RT_VERSION)
+}
+
+#[cfg(not(feature = "base"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn moturus_runtime_start() {
+    // This function is a weak symbol because sys-io re-defines
+    // moturus_runtime_start(): sys-io is loaded by the kernel and has its
+    // own runtime initialization dance that is different from all other
+    // userspace processes.
+    init();
+}
+
+#[cfg(not(feature = "base"))]
+#[doc(hidden)]
+pub fn start() {
+    // Called by Rust stdlib in moturus_start (sys/pal/moturus/mod.rs)
+    // before main is called.
+    moturus_runtime_start();
 }
 
 #[cfg(not(feature = "base"))]
