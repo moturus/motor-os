@@ -2,6 +2,10 @@
 name = "moto-rt"
 authors = ["The Moturus Project Developers"]
 license = "MIT OR Apache-2.0"
+keywords = ["moturus", "motor-os"]
+readme = "README.md"
+repository = "https://github.com/moturus/motor-os"
+description = "Motor OS Runtime."
 version = "0.1.0"
 edition = "2021"
 
