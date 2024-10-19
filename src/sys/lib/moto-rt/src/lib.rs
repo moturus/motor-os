@@ -136,6 +136,7 @@ pub struct RtVdsoVtableV1 {
     pub proc_kill: AtomicU64,
     pub proc_wait: AtomicU64,
     pub proc_status: AtomicU64,
+    pub proc_exit: AtomicU64,
 
     // Thread Local Storage.
     pub tls_create: AtomicU64,

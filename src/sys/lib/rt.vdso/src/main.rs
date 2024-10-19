@@ -140,6 +140,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_process::status as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.proc_exit.store(
+        rt_process::exit as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // Thread Local Storage.
     vtable.tls_create.store(

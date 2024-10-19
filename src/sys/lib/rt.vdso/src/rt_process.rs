@@ -105,6 +105,11 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
     }
 }
 
+pub extern "C" fn exit(code: i32) -> ! {
+    let code = unsafe { core::mem::transmute::<i32, u32>(code) } as u64;
+    moto_sys::SysCpu::exit(code)
+}
+
 fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
     if let Ok(attr) = moto_rt::fs::stat(exe) {
         if attr.file_type == moto_rt::fs::FILETYPE_FILE {

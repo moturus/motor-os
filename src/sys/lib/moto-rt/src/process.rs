@@ -318,6 +318,16 @@ pub fn try_wait(handle: u64) -> Result<i32, crate::ErrorCode> {
     }
 }
 
+pub fn exit(code: i32) -> ! {
+    let vdso_exit: extern "C" fn(i32) -> ! = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().proc_exit.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_exit(code)
+}
+
 fn encode_env(keys: Vec<String>, vals: Vec<String>) -> (u64, Option<core::alloc::Layout>) {
     assert_eq!(keys.len(), vals.len());
 

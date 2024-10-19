@@ -17,15 +17,6 @@ pub fn moturus_start_rt() {
     let _ = moto_sys::set_current_thread_name("main");
 }
 
-pub fn sys_exit(code: u64) -> ! {
-    SysCpu::exit(code)
-}
-
-pub fn exit(code: i32) -> ! {
-    let code_u32: u32 = unsafe { core::mem::transmute::<i32, u32>(code) };
-    sys_exit(code_u32 as u64)
-}
-
 fn binary() -> alloc::string::String {
     moto_rt::process::args().swap_remove(0)
 }
@@ -61,7 +52,7 @@ pub fn moturus_log_panic(info: &PanicInfo<'_>) {
 #[panic_handler]
 fn _panic(info: &PanicInfo<'_>) -> ! {
     moturus_log_panic(info);
-    sys_exit(u64::MAX)
+    moto_rt::process::exit(-1)
 }
 
 const BT_DEPTH: usize = 64;

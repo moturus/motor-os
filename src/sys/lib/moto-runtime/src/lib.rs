@@ -37,21 +37,6 @@ mod external;
 // Needed by bitflags!.
 pub extern crate core as _core;
 
-#[cfg(feature = "rustc-dep-of-std")]
-pub fn hashmap_random_keys() -> (u64, u64) {
-    let mut val1 = 0_u64;
-    let mut val2 = 0_u64;
-    unsafe {
-        let _ = core::arch::x86_64::_rdrand64_step(&mut val1);
-        let _ = core::arch::x86_64::_rdrand64_step(&mut val2);
-    }
-    if val1 != 0 && val2 != 0 {
-        (val1, val2)
-    } else {
-        (7, 13)
-    }
-}
-
 pub fn print_stacktace() {
     extern "C" {
         fn moturus_print_stacktrace();
