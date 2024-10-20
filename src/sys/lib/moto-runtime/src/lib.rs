@@ -10,12 +10,6 @@ pub use moto_rt::futex::*;
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod net;
 
-#[cfg(feature = "rustc-dep-of-std")]
-pub mod std_rt;
-
-#[cfg(feature = "rustc-dep-of-std")]
-pub use std_rt::*;
-
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod rt_api;
 
@@ -27,9 +21,6 @@ extern crate alloc;
 
 #[cfg(any(feature = "rustc-dep-of-std", feature = "rt-api"))]
 pub mod util;
-
-#[cfg(feature = "rustc-dep-of-std")]
-mod libc;
 
 #[allow(unused)]
 mod external;

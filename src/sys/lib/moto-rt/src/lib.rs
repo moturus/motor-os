@@ -58,6 +58,11 @@ pub const RT_VDSO_VTABLE_VADDR: u64 = RT_VDSO_START - MOTO_SYS_PAGE_SIZE_SMALL;
 #[cfg(not(feature = "base"))]
 const RT_VERSION: u64 = 1;
 
+// Rust's dependency on libc runs deep, without these many binaries
+// fail to link.
+#[cfg(feature = "rustc-dep-of-std")]
+mod libc;
+
 #[cfg(not(feature = "base"))]
 pub mod alloc;
 #[cfg(not(feature = "base"))]
@@ -107,6 +112,7 @@ pub struct RtVdsoVtableV1 {
 
     // Some utilities.
     pub log_to_kernel: AtomicU64,
+    pub log_backtrace: AtomicU64,
     pub fill_random_bytes: AtomicU64,
 
     // Memory management.
@@ -245,4 +251,12 @@ pub fn fill_random_bytes(bytes: &mut [u8]) {
 #[cfg(not(feature = "base"))]
 pub fn num_cpus() -> usize {
     todo!()
+}
+
+#[cfg(not(test))]
+#[cfg(feature = "rustc-dep-of-std")]
+#[panic_handler]
+fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    error::log_panic(info);
+    process::exit(-1)
 }

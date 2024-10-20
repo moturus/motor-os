@@ -9,47 +9,31 @@ macro_rules! moto_log {
 
 pub(crate) use moto_log;
 
-use core::panic::PanicInfo;
-
-fn moturus_log_panics_to_kernel() -> bool {
-    true
+pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
+    let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
+    moto_sys::SysRay::log(msg).ok();
 }
 
-#[cfg(not(test))]
-pub fn moturus_log_panic(info: &PanicInfo<'_>) {
-    if moturus_log_panics_to_kernel() {
-        moto_sys::SysRay::log("PANIC vdso").ok(); // Log w/o allocations.
-        let msg = alloc::format!("PANIC: {}", info);
-        moto_sys::SysRay::log(msg.as_str()).ok();
-        log_backtrace("TBD"); // crate::rt_api::process::binary().unwrap_or("<unknown>"));
-    } else {
-        todo!()
-        /*
-        use core::fmt::Write;
-
-        let mut stderr = super::stdio::StderrRt::new();
-        let _ = stderr.write_str("PANIC\n"); // Log w/o allocations.
-        let msg = alloc::format!("PANIC: {}\n", info);
-        let _ = stderr.write_str(msg.as_str());
-        log_backtrace(crate::rt_api::process::binary().unwrap_or("<unknown>"));
-        let _ = stderr.flush();
-
-        // At the moment (2024-01-11), stderr.flush() above does nothing.
-        // Wait a bit to let it flush "naturally".
-        // See https://github.com/moturus/motor-os/issues/6
-        moto_rt::thread::sleep_until(
-            moto_rt::time::Instant::now() + core::time::Duration::from_millis(10),
-        );
-        */
-    }
-}
-
+// This panic handler is active only for code running here in VDSO.
 #[cfg(not(test))]
 #[panic_handler]
-fn _panic(info: &PanicInfo<'_>) -> ! {
-    moturus_log_panic(info);
+fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    moto_rt::error::log_panic(info);
     moto_sys::SysCpu::exit(u64::MAX)
 }
+
+/*
+// This panic handler is active only for code running here in VDSO.
+#[cfg(not(test))]
+pub fn moturus_log_panic(info: &PanicInfo<'_>) {
+    moto_sys::SysRay::log("PANIC VDSO").ok(); // Log w/o allocations.
+    let msg = alloc::format!("PANIC VDSO: {}", info);
+    moto_sys::SysRay::log(msg.as_str()).ok();
+    log_backtrace(-1);
+}
+*/
+
 const BT_DEPTH: usize = 64;
 
 fn get_backtrace() -> [u64; BT_DEPTH] {
@@ -91,11 +75,14 @@ fn get_backtrace() -> [u64; BT_DEPTH] {
     backtrace
 }
 
-pub fn log_backtrace(binary: &str) {
+pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
     use core::fmt::Write;
     let mut writer = alloc::string::String::with_capacity(256);
     let backtrace = get_backtrace();
-    write!(&mut writer, "backtrace: {}", binary).ok();
+    write!(&mut writer, "backtrace: {}", unsafe {
+        crate::rt_process::ProcessData::binary()
+    })
+    .ok();
     let mut in_vdso = false;
     for addr in backtrace {
         if addr == 0 {
@@ -124,10 +111,10 @@ pub fn log_backtrace(binary: &str) {
 
     let _ = write!(&mut writer, "\n\n");
 
-    if moturus_log_panics_to_kernel() {
-        let _ = moto_sys::SysRay::log(writer.as_str());
+    let msg = writer.as_str();
+    if rt_fd < 0 {
+        let _ = moto_sys::SysRay::log(msg);
     } else {
-        todo!()
-        // let _ = super::stdio::StderrRt::new().write_str(writer.as_str());
+        let _ = crate::rt_fs::write(rt_fd, msg.as_ptr(), msg.len());
     }
 }

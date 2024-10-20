@@ -40,7 +40,12 @@ pub extern "C" fn _rt_entry(version: u64) {
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
     vtable.log_to_kernel.store(
-        log_to_kernel as *const () as usize as u64,
+        util::logging::log_to_kernel as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    vtable.log_backtrace.store(
+        util::logging::log_backtrace as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -278,12 +283,6 @@ pub extern "C" fn _rt_entry(version: u64) {
 
     let _ = moto_sys::set_current_thread_name("main");
     stdio::init();
-}
-
-pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
-    let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
-    moto_sys::SysRay::log(msg).ok();
 }
 
 pub extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {

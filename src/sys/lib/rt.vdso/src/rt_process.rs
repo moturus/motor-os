@@ -775,6 +775,33 @@ impl ProcessData {
         Self::deserialize_vec(self.args)
     }
 
+    pub unsafe fn binary() -> &'static str {
+        let ptr: *const ProcessData = Self::ADDR as *const ProcessData;
+        if ptr.is_null() {
+            // Only sys-io has no args; every other process has them.
+            return "sys-io";
+        }
+
+        let pdata = ptr.as_ref().unwrap();
+        if pdata.args == 0 {
+            // Only sys-io has no args; every other process has them.
+            return "sys-io";
+        }
+
+        // See deserialize_vec() above.
+        // first four bytes: the number of arguments;
+        // then arguments, aligned at four bytes: size (four bytes), bytes.
+
+        let mut pos = pdata.args as usize;
+        assert_eq!(pos & 3, 0);
+        pos += 4;
+
+        let len = *((pos as *const u32).as_ref().unwrap());
+        pos += 4;
+        let bytes: &[u8] = core::slice::from_raw_parts(pos as *const u8, len as usize);
+        core::str::from_utf8(bytes).unwrap()
+    }
+
     pub unsafe fn env(&self) -> Vec<(&[u8], &[u8])> {
         if self.env == 0 {
             return Vec::new();
