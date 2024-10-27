@@ -113,6 +113,10 @@ pub fn is_terminal(rt_fd: RtFd) -> bool {
     }
 }
 
+pub fn duplicate(_rt_fd: RtFd) -> Result<RtFd, ErrorCode> {
+    Err(crate::E_NOT_IMPLEMENTED)
+}
+
 /// Opens a file at `path` with options specified by `opts`.
 pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
     let vdso_open: extern "C" fn(*const u8, usize, u32) -> i32 = unsafe {
@@ -338,6 +342,21 @@ pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
 
     let bytes = path.as_bytes();
     match vdso_set_perm(bytes.as_ptr(), bytes.len(), perm) {
+        E_OK => Ok(()),
+        err => Err(err),
+    }
+}
+
+pub fn set_file_perm(rt_fd: RtFd, perm: u64) -> Result<(), ErrorCode> {
+    let vdso_set_file_perm: extern "C" fn(i32, u64) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .fs_set_file_perm
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    match vdso_set_file_perm(rt_fd, perm) {
         E_OK => Ok(()),
         err => Err(err),
     }

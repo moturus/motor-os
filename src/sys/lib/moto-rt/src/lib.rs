@@ -70,6 +70,13 @@ pub mod fs;
 #[cfg(not(feature = "base"))]
 pub mod futex;
 #[cfg(not(feature = "base"))]
+pub mod net;
+
+#[cfg(not(feature = "base"))]
+#[allow(nonstandard_style)]
+pub mod netc;
+
+#[cfg(not(feature = "base"))]
 pub mod process;
 #[cfg(not(feature = "base"))]
 pub mod thread;
@@ -162,6 +169,7 @@ pub struct RtVdsoVtableV1 {
     pub fs_is_terminal: AtomicU64,
     pub fs_open: AtomicU64,
     pub fs_close: AtomicU64,
+    pub fs_set_file_perm: AtomicU64, // todo
     pub fs_get_file_attr: AtomicU64,
     pub fs_fsync: AtomicU64,
     pub fs_datasync: AtomicU64,
@@ -184,6 +192,22 @@ pub struct RtVdsoVtableV1 {
     pub fs_readdir: AtomicU64,
     pub fs_getcwd: AtomicU64,
     pub fs_chdir: AtomicU64,
+    pub fs_duplicate: AtomicU64, // todo
+
+    // Net.
+    pub net_dns_lookup: AtomicU64,
+    pub net_bind: AtomicU64,
+    pub net_accept: AtomicU64,
+    pub net_tcp_connect: AtomicU64,
+    pub net_udp_connect: AtomicU64,
+    pub net_socket_addr: AtomicU64,
+    pub net_peer_addr: AtomicU64,
+    pub net_setsockopt: AtomicU64,
+    pub net_getsockopt: AtomicU64,
+    pub net_peek: AtomicU64,
+    pub net_udp_recv_from: AtomicU64,
+    pub net_udp_peek_from: AtomicU64,
+    pub net_udp_send_to: AtomicU64,
 }
 
 #[cfg(not(feature = "base"))]
