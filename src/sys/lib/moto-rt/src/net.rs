@@ -1,6 +1,10 @@
 use super::netc;
+use crate::ok_or_error;
+use crate::to_result;
 use crate::ErrorCode;
 use crate::RtFd;
+use crate::RtVdsoVtableV1;
+use core::sync::atomic::Ordering;
 use core::time::Duration;
 
 #[cfg(not(feature = "rustc-dep-of-std"))]
@@ -12,20 +16,46 @@ pub const SHUTDOWN_WRITE: u8 = 2;
 pub const PROTO_TCP: u8 = 1;
 pub const PROTO_UDP: u8 = 2;
 
-pub fn bind(_proto: u8, _addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
-    todo!()
+pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
+    let vdso_bind: extern "C" fn(u8, *const netc::sockaddr) -> RtFd = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().net_bind.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    to_result!(vdso_bind(proto, addr))
 }
 
 pub fn accept(_rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
     todo!()
 }
 
-pub fn tcp_connect(_addr: &netc::sockaddr, _timeout: Duration) -> Result<RtFd, ErrorCode> {
-    todo!()
+pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, ErrorCode> {
+    let vdso_tcp_connect: extern "C" fn(*const netc::sockaddr, u64) -> RtFd = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .net_tcp_connect
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let timeout = match timeout.as_nanos() {
+        x if x >= (u64::MAX as u128) => u64::MAX,
+        x => x as u64,
+    };
+    to_result!(vdso_tcp_connect(addr, timeout))
 }
 
-pub fn udp_connect(_addr: &netc::sockaddr) -> Result<(), ErrorCode> {
-    todo!()
+pub fn udp_connect(addr: &netc::sockaddr) -> Result<(), ErrorCode> {
+    let vdso_udp_connect: extern "C" fn(*const netc::sockaddr) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .net_udp_connect
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_udp_connect(addr))
 }
 
 pub fn socket_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
@@ -181,27 +211,46 @@ pub fn lookup_host(
     host: &str,
     port: u16,
 ) -> Result<(u16, alloc::collections::VecDeque<netc::sockaddr>), ErrorCode> {
-    use core::net::Ipv4Addr;
-    use core::net::SocketAddrV4;
-    use core::str::FromStr;
-
-    // TODO: move to vdso.
-    let addr = if host == "localhost" {
-        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port)
-    } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
-        SocketAddrV4::new(addr_v4, port)
-    } else {
-        #[cfg(debug_assertions)]
-        crate::moto_log!(
-            "LookupHost::try_from: {}:{}: DNS lookup not implemented",
-            host,
-            port
-        );
-        return Err(crate::E_NOT_IMPLEMENTED);
+    let vdso_lookup: extern "C" fn(
+        /* host_bytes */ *const u8,
+        /* host_bytes_sz */ usize,
+        /* port */ u16,
+        /* result_addr */ *mut usize,
+        /* result_len */ *mut usize,
+    ) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().dns_lookup.load(Ordering::Relaxed) as usize as *const (),
+        )
     };
 
-    let addr = netc::sockaddr { v4: addr.into() };
+    let mut result_addr: usize = 0;
+    let mut result_num: usize = 0;
+
+    let res = vdso_lookup(
+        host.as_bytes().as_ptr(),
+        host.len(),
+        port,
+        &mut result_addr,
+        &mut result_num,
+    );
+    if res != crate::E_OK {
+        return Err(res);
+    }
+
+    let addresses: &[netc::sockaddr] =
+        unsafe { core::slice::from_raw_parts(result_addr as *const netc::sockaddr, result_num) };
+
     let mut vecdec = alloc::collections::VecDeque::new();
-    vecdec.push_back(addr);
+    for addr in addresses {
+        vecdec.push_back(*addr);
+    }
+
+    let layout = core::alloc::Layout::from_size_align(
+        core::mem::size_of::<netc::sockaddr>() * result_num,
+        16,
+    )
+    .unwrap();
+    unsafe { crate::alloc::dealloc(result_addr as *mut u8, layout) };
+
     Ok((port, vecdec))
 }

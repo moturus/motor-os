@@ -7,6 +7,7 @@ use crate::util::fd::DESCRIPTORS;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
+use moto_rt::RtFd;
 use moto_rt::error::*;
 use moto_rt::fs::*;
 use moto_sys_io::rt_fs::*;
@@ -17,6 +18,10 @@ pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
     } else {
         0
     }
+}
+
+pub extern "C" fn duplicate(_rt_fd: RtFd) -> RtFd {
+    todo!()
 }
 
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
@@ -209,6 +214,10 @@ pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> ErrorCode 
 }
 
 pub extern "C" fn set_perm(path_ptr: *const u8, path_size: usize, perm: u64) -> ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn set_file_perm(_rt_fd: RtFd, _perm: u64) -> ErrorCode {
     todo!()
 }
 

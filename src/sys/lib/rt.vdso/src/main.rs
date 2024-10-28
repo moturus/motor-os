@@ -1,11 +1,13 @@
 #![no_std]
 #![no_main]
 #![allow(unused)]
+#![feature(str_from_raw_parts)]
 
 mod load;
 mod rt_alloc;
 mod rt_fs;
 mod rt_futex;
+mod rt_net;
 mod rt_process;
 mod rt_thread;
 mod rt_time;
@@ -248,6 +250,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_fs::set_perm as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.fs_set_file_perm.store(
+        rt_fs::set_file_perm as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable
         .fs_stat
         .store(rt_fs::stat as *const () as usize as u64, Ordering::Relaxed);
@@ -277,6 +283,24 @@ pub extern "C" fn _rt_entry(version: u64) {
     vtable
         .fs_chdir
         .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_duplicate.store(
+        rt_fs::duplicate as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // Networking.
+    vtable.dns_lookup.store(
+        rt_net::dns_lookup as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_bind.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_tcp_connect.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -305,4 +329,9 @@ pub extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
             curr_pos += to_copy;
         }
     }
+}
+
+pub extern "C" fn vdso_unimplemented() {
+    moto_log!("VDSO: unimplemented");
+    panic!("unimplemented")
 }

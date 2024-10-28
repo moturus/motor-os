@@ -88,3 +88,25 @@ pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
     // don't have stdio, so they will override this function to log via SysMem::log().
     false
 }
+
+#[cfg(not(feature = "base"))]
+pub fn ok_or_error(val: ErrorCode) -> Result<(), ErrorCode> {
+    if val == E_OK {
+        Ok(())
+    } else {
+        Err(val)
+    }
+}
+
+#[cfg(not(feature = "base"))]
+#[macro_export]
+macro_rules! to_result {
+    ($arg:expr) => {{
+        let res = $arg;
+        if res < 0 {
+            Err((-res) as ErrorCode)
+        } else {
+            Ok(unsafe { res.try_into().unwrap_unchecked() })
+        }
+    }};
+}
