@@ -38,10 +38,9 @@ pub trait IoSubsystem {
 pub static STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub fn start() {
-    internal_queue::init();
     io_thread::start();
     while STARTED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        moto_runtime::futex_wait(&STARTED, 0, None);
+        moto_rt::futex::futex_wait(&STARTED, 0, None);
     }
     io_stats::spawn_stats_service();
 }

@@ -8,11 +8,11 @@ edition = "2021"
 
 [dependencies]
 moto-rt      = { path = "../../lib/moto-rt"     }
-moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 moto-ipc     = { path = "../../lib/moto-ipc"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-mpmc    = { path = "../../lib/moto-mpmc"   }
 
+crossbeam = "0.8.4"
 futures = "0.3"
 
 [features]

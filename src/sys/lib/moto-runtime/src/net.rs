@@ -8,7 +8,7 @@
 //     for the cloud use case vs a general purpose thingy, whatever that is,
 //     that Linux targets.
 //
-// Note: there are several fence(SeqCst) below that appear unneded. However,
+// Note: there are several fence(SeqCst) below that appear unneeded. However,
 //       without them (at least some of them; all permutations haven't been tested)
 //       weird things happens that are not happening with them, related to
 //       memory on stack. Maybe there is a bug in _this_ code that these fences
@@ -18,24 +18,23 @@
 //       for performance and robustness.
 
 use super::util::moturus_log;
-use crate::rt_api;
-use crate::rt_api::net::IO_SUBCHANNELS;
+// use crate::rt_api;
+// use crate::rt_api::net::IO_SUBCHANNELS;
 use crate::util::CachePadded;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
-use core::net::Ipv4Addr;
-use core::net::Ipv6Addr;
 use core::net::SocketAddr;
-use core::net::SocketAddrV4;
 use core::sync::atomic::*;
 use core::time::Duration;
 use moto_ipc::io_channel;
 use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
+use moto_sys_io::api_net;
+use moto_sys_io::api_net::IO_SUBCHANNELS;
 
 static NET: crate::util::SpinLock<NetRuntime> = crate::util::SpinLock::new(NetRuntime {
     full_channels: BTreeMap::new(),
@@ -1318,204 +1317,5 @@ impl TcpListener {
 impl core::fmt::Debug for TcpListener {
     fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         todo!()
-    }
-}
-
-pub struct UdpSocket {}
-
-impl UdpSocket {
-    pub fn bind(_: &SocketAddr) -> Result<UdpSocket, ErrorCode> {
-        todo!()
-    }
-
-    pub fn peer_addr(&self) -> Result<SocketAddr, ErrorCode> {
-        todo!()
-    }
-
-    pub fn socket_addr(&self) -> Result<SocketAddr, ErrorCode> {
-        todo!()
-    }
-
-    pub fn recv_from(&self, _: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
-        todo!()
-    }
-
-    pub fn peek_from(&self, _: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
-        todo!()
-    }
-
-    pub fn send_to(&self, _: &[u8], _: &SocketAddr) -> Result<usize, ErrorCode> {
-        todo!()
-    }
-
-    pub fn duplicate(&self) -> Result<UdpSocket, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_read_timeout(&self, _: Option<Duration>) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_write_timeout(&self, _: Option<Duration>) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn read_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
-    }
-
-    pub fn write_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_broadcast(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn broadcast(&self) -> Result<bool, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_multicast_loop_v4(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn multicast_loop_v4(&self) -> Result<bool, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_multicast_ttl_v4(&self, _: u32) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn multicast_ttl_v4(&self) -> Result<u32, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_multicast_loop_v6(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn multicast_loop_v6(&self) -> Result<bool, ErrorCode> {
-        todo!()
-    }
-
-    pub fn join_multicast_v4(&self, _: &Ipv4Addr, _: &Ipv4Addr) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn join_multicast_v6(&self, _: &Ipv6Addr, _: u32) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn leave_multicast_v4(&self, _: &Ipv4Addr, _: &Ipv4Addr) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn leave_multicast_v6(&self, _: &Ipv6Addr, _: u32) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_ttl(&self, _: u32) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn ttl(&self) -> Result<u32, ErrorCode> {
-        todo!()
-    }
-
-    pub fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
-        todo!()
-    }
-
-    pub fn set_nonblocking(&self, _: bool) -> Result<(), ErrorCode> {
-        todo!()
-    }
-
-    pub fn recv(&self, _: &mut [u8]) -> Result<usize, ErrorCode> {
-        todo!()
-    }
-
-    pub fn peek(&self, _: &mut [u8]) -> Result<usize, ErrorCode> {
-        todo!()
-    }
-
-    pub fn send(&self, _: &[u8]) -> Result<usize, ErrorCode> {
-        todo!()
-    }
-
-    pub fn connect(&self, _addr: &SocketAddr) -> Result<(), ErrorCode> {
-        todo!()
-    }
-}
-
-impl core::fmt::Debug for UdpSocket {
-    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!()
-    }
-}
-
-pub struct LookupHost {
-    addr: SocketAddr,
-    next: Option<SocketAddr>,
-}
-
-impl LookupHost {
-    pub fn port(&self) -> u16 {
-        self.addr.port()
-    }
-
-    fn new(addr: SocketAddr) -> Self {
-        Self {
-            addr: addr.clone(),
-            next: Some(addr),
-        }
-    }
-}
-
-impl Iterator for LookupHost {
-    type Item = SocketAddr;
-    fn next(&mut self) -> Option<SocketAddr> {
-        self.next.take()
-    }
-}
-
-impl TryFrom<&str> for LookupHost {
-    type Error = ErrorCode;
-
-    fn try_from(v: &str) -> Result<LookupHost, ErrorCode> {
-        // Split the string by ':' and convert the second part to u16.
-        let (host, port_str) = v.rsplit_once(':').ok_or(moto_rt::E_INVALID_ARGUMENT)?;
-        let port: u16 = port_str.parse().map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
-        (host, port).try_into()
-    }
-}
-
-impl<'a> TryFrom<(&'a str, u16)> for LookupHost {
-    type Error = ErrorCode;
-
-    fn try_from(host_port: (&'a str, u16)) -> Result<LookupHost, ErrorCode> {
-        use core::str::FromStr;
-
-        let (host, port) = host_port;
-
-        if host == "localhost" {
-            Ok(LookupHost::new(SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(127, 0, 0, 1),
-                port,
-            ))))
-        } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
-            Ok(LookupHost::new(SocketAddr::V4(SocketAddrV4::new(
-                addr_v4, port,
-            ))))
-        } else {
-            #[cfg(debug_assertions)]
-            crate::util::moturus_log!(
-                "LookupHost::try_from: {}:{}: DNS lookup not implemented",
-                host,
-                port
-            );
-            Err(moto_rt::E_NOT_IMPLEMENTED)
-        }
     }
 }

@@ -5,7 +5,6 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 
 use moto_ipc::io_channel;
-use moto_runtime::rt_api;
 use moto_sys::*;
 
 use super::IoSubsystem;
@@ -180,7 +179,7 @@ impl IoRuntime {
                         });
                     }
                 }
-                rt_api::net::CMD_MIN..=rt_api::net::CMD_MAX => {
+                moto_sys_io::api_net::CMD_MIN..=moto_sys_io::api_net::CMD_MAX => {
                     match self.net.process_sqe(conn, msg) {
                         Ok(res) => {
                             if let Some(cqe) = res {
@@ -351,7 +350,7 @@ impl IoRuntime {
         self.spawn_listeners_if_needed();
 
         super::STARTED.store(1, std::sync::atomic::Ordering::Release);
-        moto_runtime::futex_wake(&super::STARTED);
+        moto_rt::futex::futex_wake(&super::STARTED);
 
         let mut busy_polling_iter = 0_u32;
         let mut debug_timed_out = false;

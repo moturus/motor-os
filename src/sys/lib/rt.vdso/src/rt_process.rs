@@ -899,7 +899,7 @@ impl EnvRt {
     }
 }
 
-static ENV: crate::util::mutex::Mutex<EnvRt> = crate::util::mutex::Mutex::new(EnvRt::new());
+static ENV: moto_rt::mutex::Mutex<EnvRt> = moto_rt::mutex::Mutex::new(EnvRt::new());
 
 fn encode_env(keys: Vec<String>, vals: Vec<String>) -> Result<u64, ErrorCode> {
     assert_eq!(keys.len(), vals.len());

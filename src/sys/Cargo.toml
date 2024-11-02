@@ -8,7 +8,7 @@ members = [
   "lib/moto-log",
   "lib/moto-mpmc",
   "lib/moto-rt",
-  "lib/moto-runtime",
+  # "lib/moto-runtime",
   "lib/moto-sys",
   "lib/moto-sys-io",
   "lib/srfs",
@@ -35,7 +35,7 @@ resolver = "2"
 flatfs       = { path = "lib/flatfs"          }
 moto-ipc     = { path = "lib/moto-ipc"        }
 moto-log     = { path = "lib/moto-log"        }
-moto-runtime = { path = "lib/moto-runtime"    }
+# moto-runtime = { path = "lib/moto-runtime"    }
 moto-sys     = { path = "lib/moto-sys"        }
 moto-sys-io  = { path = "lib/moto-sys-io"     }
 moto-virtio  = { path = "lib/virtio"          }

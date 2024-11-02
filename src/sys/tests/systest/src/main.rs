@@ -73,7 +73,7 @@ fn test_futex() {
 }
 
 fn test_rt_mutex() {
-    use moto_runtime::mutex::Mutex;
+    use moto_rt::mutex::Mutex;
 
     static COUNTER: Mutex<u64> = Mutex::new(0);
     const THREADS: u16 = 40;
@@ -564,9 +564,11 @@ fn main() {
     spawn_wait_kill::test_pid_kill();
     test_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
+    test_rt_mutex();
+    test_futex();
 
-    spawn_wait_kill::test();
     tcp::test_tcp_loopback();
+    spawn_wait_kill::test();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
     // channel_test::test_io_channel();
@@ -583,8 +585,6 @@ fn main() {
     test_thread();
     test_ipc();
     test_pipes();
-    test_futex();
-    test_rt_mutex();
 
     println!("PASS");
 

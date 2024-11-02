@@ -1,4 +1,6 @@
 use moto_rt::error::*;
+use moto_rt::netc;
+use moto_rt::RtFd;
 
 pub unsafe extern "C" fn dns_lookup(
     host_bytes: *const u8,
@@ -32,4 +34,16 @@ pub unsafe extern "C" fn dns_lookup(
     *result_addr = res_addr as usize;
     *result_len = 1;
     E_OK
+}
+
+pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
+    todo!()
+}
+
+pub extern "C" fn accept(listener: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
+    todo!()
+}
+
+pub extern "C" fn tcp_connect(addr: *const netc::sockaddr, timeout_ns: u64) -> RtFd {
+    todo!()
 }

@@ -19,7 +19,6 @@ mod util {
     pub mod fd;
     #[macro_use]
     pub mod logging;
-    pub mod mutex;
     pub mod scopeguard;
     pub mod spin;
 }
@@ -293,11 +292,18 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_net::dns_lookup as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.net_bind.store(
-        vdso_unimplemented as *const () as usize as u64,
+    vtable
+        .net_bind
+        .store(rt_net::bind as *const () as usize as u64, Ordering::Relaxed);
+    vtable.net_accept.store(
+        rt_net::accept as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_tcp_connect.store(
+        rt_net::tcp_connect as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_connect.store(
         vdso_unimplemented as *const () as usize as u64,
         Ordering::Relaxed,
     );

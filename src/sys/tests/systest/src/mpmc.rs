@@ -69,7 +69,7 @@ pub fn test_mpmc() {
     t6.join().unwrap();
 
     let elapsed = start.elapsed();
-    let cpu_usage = moto_runtime::util::get_cpu_usage();
+    let cpu_usage = get_cpu_usage();
 
     println!(
         "test_mpmc: {:.3} MIOPS",
@@ -83,7 +83,7 @@ pub fn test_mpmc() {
 }
 
 pub fn test_array_queue() {
-    use moto_runtime::util::ArrayQueue;
+    use crossbeam::queue::ArrayQueue;
 
     let queue = std::sync::Arc::new(ArrayQueue::<Msg>::new(128));
     let queue_2 = queue.clone();
@@ -113,7 +113,6 @@ pub fn test_array_queue() {
         }
     });
 
-
     // Receive inline.
     let mut s1_count = 0;
     let mut s2_count = 0;
@@ -140,7 +139,7 @@ pub fn test_array_queue() {
     sender1.join().unwrap();
     sender2.join().unwrap();
     let elapsed = start.elapsed();
-    let cpu_usage = moto_runtime::util::get_cpu_usage();
+    let cpu_usage = get_cpu_usage();
 
     println!(
         "test_array_queue: {:.3} MIOPS",
@@ -151,4 +150,16 @@ pub fn test_array_queue() {
         print!("{: >5.1}% ", (*n) * 100.0);
     }
     println!();
+}
+
+fn get_cpu_usage() -> Vec<f32> {
+    let num_cpus = moto_sys::KernelStaticPage::get().num_cpus;
+
+    let mut cpu_usage = Vec::new();
+    for _ in 0..num_cpus {
+        cpu_usage.push(0.0_f32);
+    }
+
+    moto_sys::stats::get_cpu_usage(&mut cpu_usage[..]).unwrap();
+    cpu_usage
 }

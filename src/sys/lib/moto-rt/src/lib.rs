@@ -70,6 +70,8 @@ pub mod fs;
 #[cfg(not(feature = "base"))]
 pub mod futex;
 #[cfg(not(feature = "base"))]
+pub mod mutex;
+#[cfg(not(feature = "base"))]
 pub mod net;
 
 #[cfg(not(feature = "base"))]

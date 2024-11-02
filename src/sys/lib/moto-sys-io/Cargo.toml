@@ -13,7 +13,6 @@ edition = "2021"
 moto-ipc = { path = "../moto-ipc" }
 moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }
-moto-runtime = { path = "../../lib/moto-runtime", features = ["rt-api"] }
 smoltcp = { version = "0.11.0", optional = true }
 
 [features]

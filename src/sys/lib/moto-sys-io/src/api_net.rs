@@ -1,4 +1,3 @@
-/*
 // Spec for client-server Networking IPC.
 
 use core::net::IpAddr;
@@ -237,4 +236,3 @@ pub fn put_socket_addr(payload: &mut io_channel::Payload, addr: &SocketAddr) {
         }
     }
 }
-*/

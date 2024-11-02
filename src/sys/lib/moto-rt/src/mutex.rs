@@ -45,7 +45,7 @@ impl<T: ?Sized> Mutex<T> {
                 core::hint::spin_loop();
                 continue;
             }
-            moto_rt::futex_wait(&self.lock, LOCKED, None);
+            crate::futex_wait(&self.lock, LOCKED, None);
         }
     }
 
@@ -80,6 +80,6 @@ impl<'a, T: ?Sized> DerefMut for MutexGuard<'a, T> {
 impl<'a, T: ?Sized> Drop for MutexGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.store(UNLOCKED, Ordering::Release);
-        moto_rt::futex_wake(self.lock);
+        crate::futex_wake(self.lock);
     }
 }

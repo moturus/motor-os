@@ -10,24 +10,7 @@ description = "Motor OS Runtime."
 edition = "2021"
 
 [dependencies]
-alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
-core  = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
-compiler_builtins = { version = "0.1", optional = true }
-moto-rt   = { path = "../moto-rt"  , optional = true }
-moto-ipc  = { path = "../moto-ipc" , optional = true }
-moto-sys  = { path = "../moto-sys" , optional = true }
-
-[features]
-rustc-dep-of-std = [
-    "alloc",
-    "core",
-    "compiler_builtins",
-    "moto-ipc/rustc-dep-of-std",
-    "moto-rt/rustc-dep-of-std",
-    "moto-sys/rustc-dep-of-std",
-]
-rt-api = [
-    "moto-ipc",
-    "moto-rt",
-    "moto-sys/userspace",
-]
+moto-rt   = { path = "../moto-rt"  }
+moto-ipc  = { path = "../moto-ipc" }
+moto-sys  = { path = "../moto-sys" }
+moto-sys-io = { path = "../moto-sys-io" }

@@ -4,7 +4,7 @@ use core::sync::atomic::*;
 use moto_ipc::sync::*;
 use moto_rt::E_NOT_FOUND;
 use moto_sys::{ErrorCode, SysHandle};
-use moto_sys_io::rt_fs::*;
+use moto_sys_io::api_fs::*;
 
 use super::filesystem::fs;
 
@@ -89,7 +89,7 @@ impl Driver {
         moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
 
         super::STARTED.store(1, Ordering::Release);
-        moto_runtime::futex_wake(&super::STARTED);
+        moto_rt::futex::futex_wake(&super::STARTED);
 
         let self_ = Self::get();
         loop {

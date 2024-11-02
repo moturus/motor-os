@@ -1,16 +1,16 @@
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
-use super::util::mutex::Mutex;
 use crate::util::fd::Fd;
 use crate::util::fd::DESCRIPTORS;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
-use moto_rt::RtFd;
 use moto_rt::error::*;
 use moto_rt::fs::*;
-use moto_sys_io::rt_fs::*;
+use moto_rt::mutex::Mutex;
+use moto_rt::RtFd;
+use moto_sys_io::api_fs::*;
 
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
     if rt_fd <= 2 {

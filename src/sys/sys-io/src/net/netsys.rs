@@ -8,8 +8,8 @@ use std::{
 use crate::runtime::IoSubsystem;
 use crate::runtime::PendingCompletion;
 use moto_ipc::io_channel;
-use moto_runtime::rt_api::{self, net::TcpState};
 use moto_sys::{ErrorCode, SysHandle};
+use moto_sys_io::api_net::{self, TcpState};
 
 use super::socket::MotoSocket;
 use super::socket::SocketId;
@@ -105,7 +105,7 @@ impl NetSys {
             return sqe;
         }
 
-        let socket_addr = match rt_api::net::get_socket_addr(&sqe.payload) {
+        let socket_addr = match api_net::get_socket_addr(&sqe.payload) {
             Ok(addr) => addr,
             Err(err) => {
                 sqe.status = err.into();
@@ -351,7 +351,7 @@ impl NetSys {
                 "drop_tcp_socket(): socket {} not found.",
                 u64::from(socket_id)
             );
-            moto_runtime::print_stacktace();
+            moto_rt::error::log_backtrace(-1);
             return;
         };
         let smol_socket = self.devices[moto_socket.device_idx]
@@ -461,7 +461,7 @@ impl NetSys {
             // we respond to the accept() request explicitly.
             moto_socket.state = TcpState::ReadWrite;
             req.handle = socket_id.into();
-            rt_api::net::put_socket_addr(&mut req.payload, &socket_addr);
+            api_net::put_socket_addr(&mut req.payload, &socket_addr);
             req.status = moto_rt::E_OK;
             self.pending_completions.push_back(PendingCompletion {
                 msg: req,
@@ -532,7 +532,7 @@ impl NetSys {
             Ok(socket)
         } else {
             const RX_BUF_SZ: usize =
-                io_channel::PAGE_SIZE * (rt_api::net::TCP_RX_MAX_INFLIGHT as usize);
+                io_channel::PAGE_SIZE * (api_net::TCP_RX_MAX_INFLIGHT as usize);
             let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; RX_BUF_SZ]);
             let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 16384 * 2]);
 
@@ -552,7 +552,7 @@ impl NetSys {
         conn: &Rc<io_channel::ServerConnection>,
         mut sqe: io_channel::Msg,
     ) -> Option<io_channel::Msg> {
-        let remote_addr = match rt_api::net::get_socket_addr(&sqe.payload) {
+        let remote_addr = match api_net::get_socket_addr(&sqe.payload) {
             Ok(addr) => addr,
             Err(err) => {
                 sqe.status = err.into();
@@ -560,7 +560,7 @@ impl NetSys {
             }
         };
 
-        let timeout = rt_api::net::tcp_stream_connect_timeout(&sqe);
+        let timeout = api_net::tcp_stream_connect_timeout(&sqe);
         if let Some(timo) = timeout {
             if timo <= moto_rt::time::Instant::now() {
                 sqe.status = moto_rt::E_TIMED_OUT;
@@ -795,7 +795,7 @@ impl NetSys {
             return sqe;
         }
 
-        if options == rt_api::net::TCP_OPTION_NODELAY {
+        if options == api_net::TCP_OPTION_NODELAY {
             let nodelay_u64 = sqe.payload.args_64()[1];
             let nodelay = match nodelay_u64 {
                 1 => true,
@@ -814,7 +814,7 @@ impl NetSys {
             return sqe;
         }
 
-        if options == rt_api::net::TCP_OPTION_TTL {
+        if options == api_net::TCP_OPTION_TTL {
             let ttl = sqe.payload.args_32()[2];
             if ttl == 0 || ttl > 255 {
                 sqe.status = moto_rt::E_INVALID_ARGUMENT;
@@ -829,13 +829,11 @@ impl NetSys {
             return sqe;
         }
 
-        let shut_rd =
-            (options & rt_api::net::TCP_OPTION_SHUT_RD != 0) && moto_socket.state.can_read();
-        options ^= rt_api::net::TCP_OPTION_SHUT_RD;
+        let shut_rd = (options & api_net::TCP_OPTION_SHUT_RD != 0) && moto_socket.state.can_read();
+        options ^= api_net::TCP_OPTION_SHUT_RD;
 
-        let shut_wr =
-            (options & rt_api::net::TCP_OPTION_SHUT_WR != 0) && moto_socket.state.can_write();
-        options ^= rt_api::net::TCP_OPTION_SHUT_WR;
+        let shut_wr = (options & api_net::TCP_OPTION_SHUT_WR != 0) && moto_socket.state.can_write();
+        options ^= api_net::TCP_OPTION_SHUT_WR;
 
         if options != 0 {
             sqe.status = moto_rt::E_INVALID_ARGUMENT;
@@ -922,7 +920,7 @@ impl NetSys {
         }
 
         match options {
-            rt_api::net::TCP_OPTION_NODELAY => {
+            api_net::TCP_OPTION_NODELAY => {
                 let smol_socket = self.devices[moto_socket.device_idx]
                     .sockets
                     .get::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -930,7 +928,7 @@ impl NetSys {
                 sqe.payload.args_64_mut()[0] = if nodelay { 1 } else { 0 };
                 sqe.status = moto_rt::E_OK;
             }
-            rt_api::net::TCP_OPTION_TTL => {
+            api_net::TCP_OPTION_TTL => {
                 let smol_socket = self.devices[moto_socket.device_idx]
                     .sockets
                     .get::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -1014,7 +1012,7 @@ impl NetSys {
     ) -> PendingCompletion {
         let (io_page, sz) = (x_buf.page, x_buf.consumed);
         let mut msg =
-            moto_runtime::rt_api::net::tcp_stream_rx_msg(socket_id.into(), io_page, sz, rx_seq);
+            moto_sys_io::api_net::tcp_stream_rx_msg(socket_id.into(), io_page, sz, rx_seq);
         msg.status = moto_rt::E_OK;
 
         PendingCompletion {
@@ -1059,7 +1057,7 @@ impl NetSys {
                 self.conn_tcp_sockets.insert(endpoint_handle, conn_sockets);
             }
             msg.handle = moto_socket.id.into();
-            rt_api::net::put_socket_addr(&mut msg.payload, &remote_addr);
+            api_net::put_socket_addr(&mut msg.payload, &remote_addr);
             msg.status = moto_rt::E_OK;
             self.pending_completions.push_back(PendingCompletion {
                 msg,
@@ -1127,7 +1125,7 @@ impl NetSys {
         // Note: we don't generate the state change event because we have an explicit completion below.
         moto_socket.state = TcpState::ReadWrite;
         cqe.handle = moto_socket.id.into();
-        rt_api::net::put_socket_addr(&mut cqe.payload, &local_addr);
+        api_net::put_socket_addr(&mut cqe.payload, &local_addr);
         cqe.status = moto_rt::E_OK;
         self.pending_completions.push_back(PendingCompletion {
             msg: cqe,
@@ -1412,7 +1410,7 @@ impl NetSys {
     fn on_socket_state_changed(&mut self, socket_id: SocketId) {
         let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
         let mut msg = io_channel::Msg::new();
-        msg.command = rt_api::net::EVT_TCP_STREAM_STATE_CHANGED;
+        msg.command = api_net::EVT_TCP_STREAM_STATE_CHANGED;
         msg.handle = moto_socket.id.into();
         msg.payload.args_32_mut()[0] = moto_socket.state.into();
         msg.status = moto_rt::E_OK;
@@ -1441,7 +1439,7 @@ impl NetSys {
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
         if moto_socket.rx_ack == u64::MAX
-            || (moto_socket.rx_seq > (moto_socket.rx_ack + rt_api::net::TCP_RX_MAX_INFLIGHT))
+            || (moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT))
         {
             #[cfg(debug_assertions)]
             if moto_socket.rx_ack != u64::MAX {
@@ -1509,7 +1507,7 @@ impl NetSys {
                 moto_socket.rx_seq,
             ));
 
-            if moto_socket.rx_seq > (moto_socket.rx_ack + rt_api::net::TCP_RX_MAX_INFLIGHT) {
+            if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
                 break;
             }
         }
@@ -1529,7 +1527,7 @@ impl NetSys {
                 moto_socket.rx_seq += 1;
 
                 let mut msg = io_channel::Msg::new();
-                msg.command = rt_api::net::CMD_TCP_STREAM_RX;
+                msg.command = api_net::CMD_TCP_STREAM_RX;
                 msg.handle = moto_socket.id.into();
                 msg.payload.shared_pages_mut()[0] = u16::MAX;
                 msg.payload.args_64_mut()[1] = 0;
@@ -1624,22 +1622,18 @@ impl IoSubsystem for NetSys {
         // log::debug!("{}:{} got SQE cmd {}", file!(), line!(), msg.command);
 
         match msg.command {
-            rt_api::net::CMD_TCP_LISTENER_BIND => Ok(Some(self.tcp_listener_bind(conn, msg))),
-            rt_api::net::CMD_TCP_LISTENER_ACCEPT => self.tcp_listener_accept(conn, msg),
-            rt_api::net::CMD_TCP_LISTENER_DROP => self.tcp_listener_drop(conn, msg).map(|_| None),
-            rt_api::net::CMD_TCP_STREAM_CONNECT => Ok(self.tcp_stream_connect(conn, msg)),
-            rt_api::net::CMD_TCP_STREAM_TX => {
+            api_net::CMD_TCP_LISTENER_BIND => Ok(Some(self.tcp_listener_bind(conn, msg))),
+            api_net::CMD_TCP_LISTENER_ACCEPT => self.tcp_listener_accept(conn, msg),
+            api_net::CMD_TCP_LISTENER_DROP => self.tcp_listener_drop(conn, msg).map(|_| None),
+            api_net::CMD_TCP_STREAM_CONNECT => Ok(self.tcp_stream_connect(conn, msg)),
+            api_net::CMD_TCP_STREAM_TX => {
                 self.tcp_stream_write(conn, msg);
                 Ok(None)
             }
-            rt_api::net::CMD_TCP_STREAM_RX_ACK => self.tcp_stream_rx_ack(conn, msg).map(|_| None),
-            rt_api::net::CMD_TCP_STREAM_SET_OPTION => {
-                Ok(Some(self.tcp_stream_set_option(conn, msg)))
-            }
-            rt_api::net::CMD_TCP_STREAM_GET_OPTION => {
-                Ok(Some(self.tcp_stream_get_option(conn, msg)))
-            }
-            rt_api::net::CMD_TCP_STREAM_CLOSE => Ok(self.tcp_stream_close(conn, msg)),
+            api_net::CMD_TCP_STREAM_RX_ACK => self.tcp_stream_rx_ack(conn, msg).map(|_| None),
+            api_net::CMD_TCP_STREAM_SET_OPTION => Ok(Some(self.tcp_stream_set_option(conn, msg))),
+            api_net::CMD_TCP_STREAM_GET_OPTION => Ok(Some(self.tcp_stream_get_option(conn, msg))),
+            api_net::CMD_TCP_STREAM_CLOSE => Ok(self.tcp_stream_close(conn, msg)),
             _ => {
                 #[cfg(debug_assertions)]
                 log::debug!(
@@ -1741,9 +1735,7 @@ impl IoSubsystem for NetSys {
             .unwrap();
 
         let start_id = SocketId::from(payload.start_id);
-
-        let mut results = payload.results.lock(line!());
-        assert_eq!(0, results.len());
+        let mut results = Vec::new();
 
         for &socket_id in self.socket_ids.range(start_id..) {
             let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
@@ -1784,5 +1776,7 @@ impl IoSubsystem for NetSys {
                 break;
             }
         }
+
+        payload.results.swap(results);
     }
 }

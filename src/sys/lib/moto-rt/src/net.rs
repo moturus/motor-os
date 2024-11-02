@@ -26,8 +26,20 @@ pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
     to_result!(vdso_bind(proto, addr))
 }
 
-pub fn accept(_rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
-    todo!()
+pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
+    let vdso_accept: extern "C" fn(RtFd, *mut netc::sockaddr) -> RtFd = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().net_accept.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
+    let res = vdso_accept(rt_fd, &mut addr);
+    if res < 0 {
+        return Err(-res as ErrorCode);
+    }
+
+    Ok((res, addr))
 }
 
 pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, ErrorCode> {
