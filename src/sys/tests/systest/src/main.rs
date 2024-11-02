@@ -172,9 +172,9 @@ fn test_ipc() {
         assert_eq!(resp.data ^ (0xdeadbeef ^ idx), u64::MAX);
     }
     let stop = std::time::Instant::now();
-    // moto_sys::syscalls::SysCtl::set_log_level(prev_log_level).unwrap();
 
-    let mut cpu_usage: [f32; 16] = [0.0; 16];
+    let num_cpus = moto_sys::KernelStaticPage::get().num_cpus;
+    let mut cpu_usage = vec![0.0; num_cpus as usize];
     moto_sys::stats::get_cpu_usage(&mut cpu_usage).unwrap();
 
     conn.disconnect();
@@ -567,7 +567,6 @@ fn main() {
     test_rt_mutex();
     test_futex();
 
-    tcp::test_tcp_loopback();
     spawn_wait_kill::test();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
@@ -586,6 +585,7 @@ fn main() {
     test_ipc();
     test_pipes();
 
+    tcp::test_tcp_loopback();
     println!("PASS");
 
     std::thread::sleep(Duration::new(0, 10_000_000));

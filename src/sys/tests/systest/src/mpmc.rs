@@ -154,11 +154,7 @@ pub fn test_array_queue() {
 
 fn get_cpu_usage() -> Vec<f32> {
     let num_cpus = moto_sys::KernelStaticPage::get().num_cpus;
-
-    let mut cpu_usage = Vec::new();
-    for _ in 0..num_cpus {
-        cpu_usage.push(0.0_f32);
-    }
+    let mut cpu_usage = vec![0.0; num_cpus as usize];
 
     moto_sys::stats::get_cpu_usage(&mut cpu_usage[..]).unwrap();
     cpu_usage

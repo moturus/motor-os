@@ -8,7 +8,6 @@ members = [
   "lib/moto-log",
   "lib/moto-mpmc",
   "lib/moto-rt",
-  # "lib/moto-runtime",
   "lib/moto-sys",
   "lib/moto-sys-io",
   "lib/srfs",
