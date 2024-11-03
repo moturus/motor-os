@@ -89,29 +89,26 @@ pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
         return -(E_BAD_HANDLE as i64);
     };
 
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
     match fd.as_ref() {
-        Fd::File(file) => {
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-            match FsClient::read(&file, buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Stdio(stdio) => {
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-            match stdio.read(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Pipe(pipe) => {
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-            match pipe.lock().read(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::ReadDir(read_dir) => panic!("use readdir() to read dir"),
+        Fd::File(file) => match FsClient::read(&file, buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Stdio(stdio) => match stdio.read(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Pipe(pipe) => match pipe.lock().read(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::ReadDir(read_dir) => -(E_BAD_HANDLE as i64),
+        Fd::TcpStream(stream) => match stream.read(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::TcpListener(_) => -(E_BAD_HANDLE as i64),
     }
 }
 
@@ -122,29 +119,26 @@ pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
         return -(E_BAD_HANDLE as i64);
     };
 
+    let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
     match fd.as_ref() {
-        Fd::File(file) => {
-            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-            match FsClient::write(&file, buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Stdio(stdio) => {
-            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-            match stdio.write(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Pipe(pipe) => {
-            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-            match pipe.lock().write(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::ReadDir(read_dir) => panic!("can't write to ReadDir"),
+        Fd::File(file) => match FsClient::write(&file, buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Stdio(stdio) => match stdio.write(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Pipe(pipe) => match pipe.lock().write(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::ReadDir(read_dir) => -(E_BAD_HANDLE as i64),
+        Fd::TcpStream(stream) => match stream.write(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::TcpListener(_) => -(E_BAD_HANDLE as i64),
     }
 }
 

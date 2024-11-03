@@ -554,6 +554,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    tcp::test_tcp_loopback();
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
@@ -585,7 +586,6 @@ fn main() {
     test_ipc();
     test_pipes();
 
-    tcp::test_tcp_loopback();
     println!("PASS");
 
     std::thread::sleep(Duration::new(0, 10_000_000));

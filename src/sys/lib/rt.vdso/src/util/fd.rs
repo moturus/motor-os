@@ -17,6 +17,8 @@ pub enum Fd {
     Stdio(Stdio),
     Pipe(Mutex<moto_ipc::sync_pipe::Pipe>),
     ReadDir(crate::rt_fs::ReadDir),
+    TcpStream(Arc<crate::rt_net::TcpStream>),
+    TcpListener(Arc<crate::rt_net::TcpListener>),
 }
 
 type Entry<T> = Mutex<Option<Arc<T>>>;

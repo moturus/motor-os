@@ -729,6 +729,8 @@ dependencies = [
 name = "rt"
 version = "0.1.0"
 dependencies = [
+ "crossbeam",
+ "crossbeam-queue",
  "elfloader",
  "frusa",
  "moto-ipc",
