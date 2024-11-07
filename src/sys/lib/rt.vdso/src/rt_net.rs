@@ -89,6 +89,99 @@ pub extern "C" fn tcp_connect(addr: *const netc::sockaddr, timeout_ns: u64) -> R
     DESCRIPTORS.push(alloc::sync::Arc::new(Fd::TcpStream(stream)))
 }
 
+pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    let Fd::TcpStream(tcp_stream) = fd.as_ref() else {
+        return E_BAD_HANDLE;
+    };
+
+    match option {
+        moto_rt::net::SO_RCVTIMEO => {
+            assert_eq!(len, core::mem::size_of::<u64>());
+            let timeout = *(ptr as *const u64);
+            tcp_stream.set_read_timeout(timeout);
+            moto_rt::E_OK
+        }
+        moto_rt::net::SO_SNDTIMEO => {
+            assert_eq!(len, core::mem::size_of::<u64>());
+            let timeout = *(ptr as *const u64);
+            tcp_stream.set_write_timeout(timeout);
+            moto_rt::E_OK
+        }
+        moto_rt::net::SO_SHUTDOWN => {
+            assert_eq!(len, 1);
+            let val = *(ptr as *const u8);
+            let read = val & moto_rt::net::SHUTDOWN_READ != 0;
+            let write = val & moto_rt::net::SHUTDOWN_WRITE != 0;
+            tcp_stream.shutdown(read, write)
+        }
+        moto_rt::net::SO_NODELAY => {
+            assert_eq!(len, 1);
+            let nodelay = *(ptr as *const u8);
+            tcp_stream.set_nodelay(nodelay)
+        }
+        moto_rt::net::SO_TTL => {
+            assert_eq!(len, 4);
+            let ttl = *(ptr as *const u32);
+            tcp_stream.set_ttl(ttl)
+        }
+        _ => panic!("unrecognized option {option}"),
+    }
+}
+
+pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    let Fd::TcpStream(tcp_stream) = fd.as_ref() else {
+        return E_BAD_HANDLE;
+    };
+
+    match option {
+        moto_rt::net::SO_RCVTIMEO => {
+            assert_eq!(len, core::mem::size_of::<u64>());
+            let timeout = tcp_stream.read_timeout();
+            *(ptr as *mut u64) = timeout;
+            moto_rt::E_OK
+        }
+        moto_rt::net::SO_SNDTIMEO => {
+            assert_eq!(len, core::mem::size_of::<u64>());
+            let timeout = tcp_stream.write_timeout();
+            *(ptr as *mut u64) = timeout;
+            moto_rt::E_OK
+        }
+        moto_rt::net::SO_NODELAY => {
+            assert_eq!(len, 1);
+            match tcp_stream.nodelay() {
+                Ok(nodelay) => {
+                    *(ptr as *mut u8) = nodelay;
+                    moto_rt::E_OK
+                }
+                Err(err) => err,
+            }
+        }
+        moto_rt::net::SO_TTL => {
+            assert_eq!(len, 4);
+            match tcp_stream.ttl() {
+                Ok(ttl) => {
+                    *(ptr as *mut u32) = ttl;
+                    moto_rt::E_OK
+                }
+                Err(err) => err,
+            }
+        }
+        _ => panic!("unrecognized option {option}"),
+    }
+}
+
 // -------------------------------- implementation details ------------------------------ //
 
 // Note: we have an IO thread per net channel instead of a single IO thread:
@@ -738,52 +831,20 @@ impl TcpStream {
         Ok(inner)
     }
 
-    fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), ErrorCode> {
-        let timo_ns = if let Some(timo) = timeout {
-            if timo.as_nanos() > (u64::MAX as u128) {
-                u64::MAX
-            } else {
-                timo.as_nanos() as u64
-            }
-        } else {
-            u64::MAX
-        };
-
-        self.rx_timeout_ns.store(timo_ns, Ordering::Relaxed);
-        Ok(())
+    fn set_read_timeout(&self, timeout_ns: u64) {
+        self.rx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
     }
 
-    fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<(), ErrorCode> {
-        let timo_ns = if let Some(timo) = timeout {
-            if timo.as_nanos() > (u64::MAX as u128) {
-                u64::MAX
-            } else {
-                timo.as_nanos() as u64
-            }
-        } else {
-            u64::MAX
-        };
-
-        self.tx_timeout_ns.store(timo_ns, Ordering::Relaxed);
-        Ok(())
+    fn set_write_timeout(&self, timeout_ns: u64) {
+        self.tx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
     }
 
-    fn read_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        let timo_ns = self.rx_timeout_ns.load(Ordering::Relaxed);
-        if timo_ns == u64::MAX {
-            Ok(None)
-        } else {
-            Ok(Some(Duration::from_nanos(timo_ns)))
-        }
+    fn read_timeout(&self) -> u64 {
+        self.rx_timeout_ns.load(Ordering::Relaxed)
     }
 
-    fn write_timeout(&self) -> Result<Option<Duration>, ErrorCode> {
-        let timo_ns = self.tx_timeout_ns.load(Ordering::Relaxed);
-        if timo_ns == u64::MAX {
-            Ok(None)
-        } else {
-            Ok(Some(Duration::from_nanos(timo_ns)))
-        }
+    fn write_timeout(&self) -> u64 {
+        self.tx_timeout_ns.load(Ordering::Relaxed)
     }
 
     fn peek(&self, _buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -1093,7 +1154,7 @@ impl TcpStream {
         Ok(self.local_addr)
     }
 
-    fn shutdown(&self, read: bool, write: bool) -> Result<(), ErrorCode> {
+    fn shutdown(&self, read: bool, write: bool) -> ErrorCode {
         assert!(read || write);
         let mut option = 0_u64;
         if read {
@@ -1112,9 +1173,9 @@ impl TcpStream {
         if resp.status() == moto_rt::E_OK {
             self.tcp_state
                 .store(resp.payload.args_32()[5], Ordering::Relaxed);
-            Ok(())
+            moto_rt::E_OK
         } else {
-            Err(resp.status())
+            resp.status()
         }
     }
 
@@ -1136,24 +1197,16 @@ impl TcpStream {
         Ok(Some(Duration::ZERO)) // see set_linger() above.
     }
 
-    fn set_nodelay(&self, nodelay: bool) -> Result<(), ErrorCode> {
+    fn set_nodelay(&self, nodelay: u8) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
         req.handle = self.handle;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
-        req.payload.args_64_mut()[1] = if nodelay { 1 } else { 0 };
-        // crate::moto_log!("set_nodelay will send");
-        let resp = self.channel.send_receive(req);
-        // crate::moto_log!("set_nodelay received");
-
-        if resp.status() == moto_rt::E_OK {
-            Ok(())
-        } else {
-            Err(resp.status())
-        }
+        req.payload.args_64_mut()[1] = nodelay as u64;
+        self.channel.send_receive(req).status()
     }
 
-    fn nodelay(&self) -> Result<bool, ErrorCode> {
+    fn nodelay(&self) -> Result<u8, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_GET_OPTION;
         req.handle = self.handle;
@@ -1162,31 +1215,19 @@ impl TcpStream {
 
         if resp.status() == moto_rt::E_OK {
             let res = resp.payload.args_64()[0];
-            if res == 1 {
-                Ok(true)
-            } else if res == 0 {
-                Ok(false)
-            } else {
-                panic!("Unexpected nodelay value: {}", res)
-            }
+            Ok(res as u8)
         } else {
             Err(resp.status())
         }
     }
 
-    fn set_ttl(&self, ttl: u32) -> Result<(), ErrorCode> {
+    fn set_ttl(&self, ttl: u32) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
         req.handle = self.handle;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_32_mut()[2] = ttl;
-        let resp = self.channel.send_receive(req);
-
-        if resp.status() == moto_rt::E_OK {
-            Ok(())
-        } else {
-            Err(resp.status())
-        }
+        self.channel.send_receive(req).status()
     }
 
     fn ttl(&self) -> Result<u32, ErrorCode> {

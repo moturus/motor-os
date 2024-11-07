@@ -196,6 +196,9 @@ pub fn test_tcp_loopback() {
     client_iter();
     client_iter();
     client_iter();
+    std::thread::sleep(Duration::from_millis(100));
+    println!("will test latency");
+    std::thread::sleep(Duration::from_millis(100));
     test_io_latency();
 
     stop.store(true, Ordering::Release);

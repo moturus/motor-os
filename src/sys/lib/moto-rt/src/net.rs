@@ -16,6 +16,32 @@ pub const SHUTDOWN_WRITE: u8 = 2;
 pub const PROTO_TCP: u8 = 1;
 pub const PROTO_UDP: u8 = 2;
 
+pub const SO_RCVTIMEO: u64 = 1;
+pub const SO_SNDTIMEO: u64 = 2;
+pub const SO_SHUTDOWN: u64 = 3;
+pub const SO_NODELAY: u64 = 4;
+pub const SO_TTL: u64 = 5;
+
+fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
+    let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().net_setsockopt.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_setsockopt(rt_fd, opt, ptr, len))
+}
+
+fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
+    let vdso_getsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().net_getsockopt.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_getsockopt(rt_fd, opt, ptr, len))
+}
+
 pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
     let vdso_bind: extern "C" fn(u8, *const netc::sockaddr) -> RtFd = unsafe {
         core::mem::transmute(
@@ -51,10 +77,7 @@ pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, Err
         )
     };
 
-    let timeout = match timeout.as_nanos() {
-        x if x >= (u64::MAX as u128) => u64::MAX,
-        x => x as u64,
-    };
+    let timeout = timeout.as_nanos().try_into().unwrap_or(u64::MAX);
     to_result!(vdso_tcp_connect(addr, timeout))
 }
 
@@ -78,12 +101,14 @@ pub fn peer_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
     todo!()
 }
 
-pub fn set_ttl(_rt_fd: RtFd, _ttl: u32) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_ttl(rt_fd: RtFd, ttl: u32) -> Result<(), ErrorCode> {
+    setsockopt(rt_fd, SO_TTL, &ttl as *const _ as usize, 4)
 }
 
-pub fn ttl(_rt_fd: RtFd) -> Result<u32, ErrorCode> {
-    todo!()
+pub fn ttl(rt_fd: RtFd) -> Result<u32, ErrorCode> {
+    let mut ttl = 0_u32;
+    getsockopt(rt_fd, SO_TTL, &mut ttl as *mut _ as usize, 4)?;
+    Ok(ttl)
 }
 
 pub fn set_only_v6(_rt_fd: RtFd, _only_v6: bool) -> Result<(), ErrorCode> {
@@ -107,24 +132,78 @@ pub fn peek(_rt_fd: RtFd, _buf: &mut [u8]) -> Result<usize, ErrorCode> {
     todo!()
 }
 
-pub fn set_read_timeout(_rt_fd: RtFd, _timeout: Option<Duration>) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {
+    let timeout: u64 = match timeout {
+        Some(dur) => dur.as_nanos().try_into().unwrap_or(u64::MAX),
+        None => u64::MAX,
+    };
+
+    if timeout == 0 {
+        return Err(crate::E_INVALID_ARGUMENT);
+    }
+
+    setsockopt(
+        rt_fd,
+        SO_RCVTIMEO,
+        &timeout as *const _ as usize,
+        core::mem::size_of::<u64>(),
+    )
 }
 
-pub fn read_timeout(_rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
-    todo!()
+pub fn read_timeout(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
+    let mut timeout_ns = 0_u64;
+
+    getsockopt(
+        rt_fd,
+        SO_RCVTIMEO,
+        &mut timeout_ns as *mut _ as usize,
+        core::mem::size_of::<u64>(),
+    )?;
+
+    if timeout_ns == u64::MAX {
+        Ok(None)
+    } else {
+        Ok(Some(Duration::from_nanos(timeout_ns)))
+    }
 }
 
-pub fn set_write_timeout(_rt_fd: RtFd, _timeout: Option<Duration>) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_write_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {
+    let timeout: u64 = match timeout {
+        Some(dur) => dur.as_nanos().try_into().unwrap_or(u64::MAX),
+        None => u64::MAX,
+    };
+
+    setsockopt(
+        rt_fd,
+        SO_SNDTIMEO,
+        &timeout as *const _ as usize,
+        core::mem::size_of::<u64>(),
+    )
 }
 
-pub fn write_timeout(_rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
-    todo!()
+pub fn write_timeout(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
+    let mut timeout_ns = 0_u64;
+
+    getsockopt(
+        rt_fd,
+        SO_SNDTIMEO,
+        &mut timeout_ns as *mut _ as usize,
+        core::mem::size_of::<u64>(),
+    )?;
+
+    if timeout_ns == u64::MAX {
+        Ok(None)
+    } else {
+        Ok(Some(Duration::from_nanos(timeout_ns)))
+    }
 }
 
-pub fn shutdown(_rt_fd: RtFd, _shutdown: u8) -> Result<(), ErrorCode> {
-    todo!()
+pub fn shutdown(rt_fd: RtFd, shutdown: u8) -> Result<(), ErrorCode> {
+    if 0 != ((shutdown & !SHUTDOWN_READ) & !SHUTDOWN_WRITE) {
+        return Err(crate::E_INVALID_ARGUMENT);
+    }
+
+    setsockopt(rt_fd, SO_SHUTDOWN, &shutdown as *const _ as usize, 1)
 }
 
 pub fn set_linger(_rt_fd: RtFd, _timeout: Option<Duration>) -> Result<(), ErrorCode> {
@@ -135,12 +214,19 @@ pub fn linger(_rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
     todo!()
 }
 
-pub fn set_nodelay(_rt_fd: RtFd, _nodelay: bool) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_nodelay(rt_fd: RtFd, nodelay: bool) -> Result<(), ErrorCode> {
+    let nodelay = if nodelay { 1 } else { 0 };
+    setsockopt(rt_fd, SO_NODELAY, &nodelay as *const _ as usize, 1)
 }
 
-pub fn nodelay(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
-    todo!()
+pub fn nodelay(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+    let mut nodelay = 0_u8;
+    getsockopt(rt_fd, SO_NODELAY, &mut nodelay as *mut _ as usize, 1)?;
+    match nodelay {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => panic!("bad nodelay {nodelay}"),
+    }
 }
 
 pub fn set_udp_broadcast(_rt_fd: RtFd, _broadcast: bool) -> Result<(), ErrorCode> {
