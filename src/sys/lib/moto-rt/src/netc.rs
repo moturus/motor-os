@@ -27,7 +27,7 @@ impl From<core::net::SocketAddrV4> for sockaddr_in {
     fn from(addr: core::net::SocketAddrV4) -> sockaddr_in {
         sockaddr_in {
             sin_family: AF_INET,
-            sin_port: addr.port(),
+            sin_port: addr.port().to_be(),
             sin_addr: in_addr {
                 s_addr: u32::from_ne_bytes(addr.ip().octets()),
             },
@@ -38,7 +38,7 @@ impl From<core::net::SocketAddrV4> for sockaddr_in {
 impl Into<core::net::SocketAddrV4> for sockaddr_in {
     fn into(self: sockaddr_in) -> core::net::SocketAddrV4 {
         assert_eq!(self.sin_family, AF_INET);
-        core::net::SocketAddrV4::new(self.sin_addr.into(), self.sin_port)
+        core::net::SocketAddrV4::new(self.sin_addr.into(), u16::from_be(self.sin_port))
     }
 }
 
@@ -76,7 +76,7 @@ impl Into<core::net::SocketAddrV6> for sockaddr_in6 {
         assert_eq!(self.sin6_family, AF_INET6);
         core::net::SocketAddrV6::new(
             self.sin6_addr.into(),
-            self.sin6_port,
+            u16::from_be(self.sin6_port),
             self.sin6_flowinfo,
             self.sin6_scope_id,
         )
