@@ -6,6 +6,7 @@ use crate::util::fd::DESCRIPTORS;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use moto_rt::error::*;
 use moto_rt::fs::*;
 use moto_rt::mutex::Mutex;
@@ -20,8 +21,19 @@ pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
     }
 }
 
-pub extern "C" fn duplicate(_rt_fd: RtFd) -> RtFd {
-    todo!()
+pub extern "C" fn duplicate(rt_fd: RtFd) -> RtFd {
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
+    } else {
+        return -(E_BAD_HANDLE as RtFd);
+    };
+
+    match fd.as_ref() {
+        Fd::TcpListener(listener) => todo!(),
+        Fd::TcpStream(stream) =>
+            DESCRIPTORS.push(Arc::new(Fd::TcpStream(stream.clone()))),
+        _ => -(E_BAD_HANDLE as RtFd),
+    }
 }
 
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {

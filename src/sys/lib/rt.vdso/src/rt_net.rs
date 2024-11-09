@@ -182,6 +182,21 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     }
 }
 
+pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
+    } else {
+        return E_BAD_HANDLE;
+    };
+
+    let Fd::TcpStream(tcp_stream) = fd.as_ref() else {
+        return E_BAD_HANDLE;
+    };
+
+    *addr = (*tcp_stream.peer_addr()).into();
+    E_OK
+}
+
 // -------------------------------- implementation details ------------------------------ //
 
 // Note: we have an IO thread per net channel instead of a single IO thread:
@@ -1146,8 +1161,8 @@ impl TcpStream {
         Ok(write_sz)
     }
 
-    fn peer_addr(&self) -> Result<SocketAddr, ErrorCode> {
-        Ok(self.remote_addr)
+    fn peer_addr(&self) -> &SocketAddr {
+        &self.remote_addr
     }
 
     fn socket_addr(&self) -> Result<SocketAddr, ErrorCode> {

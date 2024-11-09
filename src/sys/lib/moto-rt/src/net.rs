@@ -97,8 +97,22 @@ pub fn socket_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
     todo!()
 }
 
-pub fn peer_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
-    todo!()
+pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
+    let vdso_peer_addr: extern "C" fn(RtFd, *mut netc::sockaddr) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .net_peer_addr
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
+    let res = vdso_peer_addr(rt_fd, &mut addr);
+    if res != crate::E_OK {
+        return Err(res as ErrorCode);
+    }
+
+    Ok(addr)
 }
 
 pub fn set_ttl(rt_fd: RtFd, ttl: u32) -> Result<(), ErrorCode> {
