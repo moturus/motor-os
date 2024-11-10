@@ -59,6 +59,9 @@ pub extern "C" fn close(rt_fd: i32) -> ErrorCode {
             Ok(()) => E_OK,
             Err(err) => err,
         },
+        Fd::TcpListener(_) | Fd::TcpStream(_) =>
+            // drop will work
+            E_OK,
         _ => panic!("fd {rt_fd} not a file"), // Can't just return an error, as we've popped the fd.
     }
 }
