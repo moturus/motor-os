@@ -62,7 +62,7 @@ Build Rust Motūrus target/toolchain:
 
 ```
 $ cd $MOTORH/rust
-$ ./x.py build --stage 2 library
+$ ./x.py build --stage 2 clippy library
 ```
 
 Register the new toolchain:
