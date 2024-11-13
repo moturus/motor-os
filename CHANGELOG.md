@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2024-11-12
+
+The migration from moto-runtime to moto-rt/rt.vdso (see below) is complete.
+
 ## 2024-09-02
 
 Motor OS Runtime Library
