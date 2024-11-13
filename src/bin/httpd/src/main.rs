@@ -47,7 +47,7 @@ const MAX_BAD_CACHE_LEN: usize = 4096;
 const MAX_HEADER_LEN: usize = 4096 * 4;
 const MAX_HEADERS: usize = 64;
 
-const BINARY_CONTENT_TYPES: std::sync::LazyLock<HashMap<&'static str, &'static str>> =
+static BINARY_CONTENT_TYPES: std::sync::LazyLock<HashMap<&'static str, &'static str>> =
     std::sync::LazyLock::new(|| {
         let mut types = HashMap::new();
         types.insert("png", "image/png");
@@ -66,9 +66,8 @@ fn get_txt_file(pb: PathBuf) -> Option<String> {
         }
 
         let map = cache.as_mut().unwrap();
-        match map.get(&pb) {
-            Some(s) => return Some(s.clone()),
-            None => {}
+        if let Some(s) = map.get(&pb) {
+            return Some(s.clone());
         }
     }
 
@@ -116,9 +115,8 @@ fn get_img_file(pb: PathBuf) -> Option<Vec<u8>> {
         }
 
         let map = cache.as_mut().unwrap();
-        match map.get(&pb) {
-            Some(v) => return Some(v.clone()),
-            None => {}
+        if let Some(v) = map.get(&pb) {
+            return Some(v.clone());
         }
     }
 
@@ -223,7 +221,7 @@ fn read_line(reader: &mut dyn std::io::Read) -> Result<String, u32> {
             return Err(400);
         }
 
-        line.push(b.try_into().unwrap());
+        line.push(b.into());
 
         // Lines are only read as the first/status line and as headers.
         if line.len() > MAX_HEADER_LEN {
@@ -272,13 +270,13 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
 
     let request_path = {
         let mut url = request.url.as_str();
-        if url.find("..").is_some() {
+        if url.contains("..") {
             // Somebody is naughty.
             log_request(400, request.url.as_bytes());
             return write_error(400, writer);
         }
 
-        if url.find("?").is_some() {
+        if url.contains("?") {
             // We don't accept/support dynamic content.
             log_request(421, request.url.as_bytes());
             return write_error(421, writer); // Misdirected request.
@@ -304,7 +302,7 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
         return write_error(404, writer);
     }
 
-    if path_str.find("..").is_some() {
+    if path_str.contains("..") {
         log_request(404, request.url.as_bytes());
         return write_error(404, writer);
     }
@@ -321,15 +319,12 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
                 )
                 .map_err(|err| {
                     println!("write headers failed with erro {:?}", err);
-                    ()
                 })?;
                 writer.write_all(&bytes).map_err(|err| {
                     println!("write bytes failed with err {:?}", err);
-                    ()
                 })?;
                 return writer.flush().map_err(|err| {
                     println!("writer flush failed with err {:?}", err);
-                    ()
                 });
             }
             log_request(404, request.url.as_bytes());
@@ -349,15 +344,12 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
         writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-type: text/html;charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             bytes.len()).as_bytes()).map_err(|err| {
                 println!("write headers failed with erro {:?}", err);
-                ()
             })?;
         writer.write_all(bytes).map_err(|err| {
             println!("write bytes failed with err {:?}", err);
-            ()
         })?;
         return writer.flush().map_err(|err| {
             println!("writer flush failed with err {:?}", err);
-            ()
         });
     }
 
@@ -499,11 +491,9 @@ impl std::io::Write for ClientConnection {
                         while tls_conn.wants_write() {
                             let _ = tls_conn.write_tls(tcp_stream)?;
                         }
-                        return Ok(sz);
+                        Ok(sz)
                     }
-                    Err(err) => {
-                        return Err(err);
-                    }
+                    Err(err) => Err(err),
                 }
             }
         }
@@ -541,7 +531,7 @@ impl Drop for ClientConnection {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    std::thread::spawn(move || input_listener());
+    std::thread::spawn(input_listener);
 
     let args = Args::parse();
 
