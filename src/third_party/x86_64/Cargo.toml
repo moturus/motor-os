@@ -60,8 +60,7 @@ path = "../bitflags"
 # version = "1.0.4"
 
 [dependencies.rustversion]
-path = "../rustversion"
-# version = "1.0.5"
+version = "1.0.5"
 
 [dependencies.volatile]
 path = "../volatile"

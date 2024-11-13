@@ -24,6 +24,7 @@
 //!   Motor OS, which is based on Rust, does not support dynamic libraries,
 //!   as Rust does not support them "natively" (as in rdylib).
 #![no_std]
+#![feature(linkage)]
 
 // Mod error is the only one currently shared b/w the kernel and the userspace.
 #[macro_use]
@@ -57,12 +58,26 @@ pub const RT_VDSO_VTABLE_VADDR: u64 = RT_VDSO_START - MOTO_SYS_PAGE_SIZE_SMALL;
 #[cfg(not(feature = "base"))]
 const RT_VERSION: u64 = 1;
 
+// Rust's dependency on libc runs deep, without these many binaries
+// fail to link.
+#[cfg(feature = "rustc-dep-of-std")]
+mod libc;
+
 #[cfg(not(feature = "base"))]
 pub mod alloc;
 #[cfg(not(feature = "base"))]
 pub mod fs;
 #[cfg(not(feature = "base"))]
 pub mod futex;
+#[cfg(not(feature = "base"))]
+pub mod mutex;
+#[cfg(not(feature = "base"))]
+pub mod net;
+
+#[cfg(not(feature = "base"))]
+#[allow(nonstandard_style)]
+pub mod netc;
+
 #[cfg(not(feature = "base"))]
 pub mod process;
 #[cfg(not(feature = "base"))]
@@ -106,6 +121,7 @@ pub struct RtVdsoVtableV1 {
 
     // Some utilities.
     pub log_to_kernel: AtomicU64,
+    pub log_backtrace: AtomicU64,
     pub fill_random_bytes: AtomicU64,
 
     // Memory management.
@@ -136,6 +152,7 @@ pub struct RtVdsoVtableV1 {
     pub proc_kill: AtomicU64,
     pub proc_wait: AtomicU64,
     pub proc_status: AtomicU64,
+    pub proc_exit: AtomicU64,
 
     // Thread Local Storage.
     pub tls_create: AtomicU64,
@@ -168,6 +185,7 @@ pub struct RtVdsoVtableV1 {
     pub fs_rmdir: AtomicU64,
     pub fs_rmdir_all: AtomicU64,
     pub fs_set_perm: AtomicU64,
+    pub fs_set_file_perm: AtomicU64,
     pub fs_stat: AtomicU64,
     pub fs_canonicalize: AtomicU64,
     pub fs_copy: AtomicU64,
@@ -176,6 +194,22 @@ pub struct RtVdsoVtableV1 {
     pub fs_readdir: AtomicU64,
     pub fs_getcwd: AtomicU64,
     pub fs_chdir: AtomicU64,
+    pub fs_duplicate: AtomicU64,
+
+    // Networking.
+    pub dns_lookup: AtomicU64,
+    pub net_bind: AtomicU64,
+    pub net_accept: AtomicU64,
+    pub net_tcp_connect: AtomicU64,
+    pub net_udp_connect: AtomicU64,
+    pub net_socket_addr: AtomicU64,
+    pub net_peer_addr: AtomicU64,
+    pub net_setsockopt: AtomicU64,
+    pub net_getsockopt: AtomicU64,
+    pub net_peek: AtomicU64,
+    pub net_udp_recv_from: AtomicU64,
+    pub net_udp_peek_from: AtomicU64,
+    pub net_udp_send_to: AtomicU64,
 }
 
 #[cfg(not(feature = "base"))]
@@ -208,6 +242,25 @@ pub fn init() {
 }
 
 #[cfg(not(feature = "base"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn moturus_runtime_start() {
+    // This function is a weak symbol because sys-io re-defines
+    // moturus_runtime_start(): sys-io is loaded by the kernel and has its
+    // own runtime initialization dance that is different from all other
+    // userspace processes.
+    init();
+}
+
+#[cfg(not(feature = "base"))]
+#[doc(hidden)]
+pub fn start() {
+    // Called by Rust stdlib in moturus_start (sys/pal/moturus/mod.rs)
+    // before main is called.
+    moturus_runtime_start();
+}
+
+#[cfg(not(feature = "base"))]
 pub fn fill_random_bytes(bytes: &mut [u8]) {
     let vdso_fill_random_bytes: extern "C" fn(*mut u8, usize) = unsafe {
         core::mem::transmute(
@@ -224,4 +277,12 @@ pub fn fill_random_bytes(bytes: &mut [u8]) {
 #[cfg(not(feature = "base"))]
 pub fn num_cpus() -> usize {
     todo!()
+}
+
+#[cfg(not(test))]
+#[cfg(feature = "rustc-dep-of-std")]
+#[panic_handler]
+fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    error::log_panic(info);
+    process::exit(-1)
 }

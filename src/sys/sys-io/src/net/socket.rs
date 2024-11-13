@@ -40,7 +40,7 @@ pub(super) struct MotoSocket {
     pub rx_seq: u64,
     pub rx_ack: u64,
 
-    pub state: moto_runtime::rt_api::net::TcpState,
+    pub state: moto_sys_io::api_net::TcpState,
 
     // When the socket becomes CloseWait or Closed, sys-io notifies the client once.
     pub rx_closed_notified: bool,

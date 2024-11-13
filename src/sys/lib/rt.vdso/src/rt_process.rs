@@ -105,6 +105,11 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
     }
 }
 
+pub extern "C" fn exit(code: i32) -> ! {
+    let code = unsafe { core::mem::transmute::<i32, u32>(code) } as u64;
+    moto_sys::SysCpu::exit(code)
+}
+
 fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
     if let Ok(attr) = moto_rt::fs::stat(exe) {
         if attr.file_type == moto_rt::fs::FILETYPE_FILE {
@@ -770,6 +775,33 @@ impl ProcessData {
         Self::deserialize_vec(self.args)
     }
 
+    pub unsafe fn binary() -> &'static str {
+        let ptr: *const ProcessData = Self::ADDR as *const ProcessData;
+        if ptr.is_null() {
+            // Only sys-io has no args; every other process has them.
+            return "sys-io";
+        }
+
+        let pdata = ptr.as_ref().unwrap();
+        if pdata.args == 0 {
+            // Only sys-io has no args; every other process has them.
+            return "sys-io";
+        }
+
+        // See deserialize_vec() above.
+        // first four bytes: the number of arguments;
+        // then arguments, aligned at four bytes: size (four bytes), bytes.
+
+        let mut pos = pdata.args as usize;
+        assert_eq!(pos & 3, 0);
+        pos += 4;
+
+        let len = *((pos as *const u32).as_ref().unwrap());
+        pos += 4;
+        let bytes: &[u8] = core::slice::from_raw_parts(pos as *const u8, len as usize);
+        core::str::from_utf8(bytes).unwrap()
+    }
+
     pub unsafe fn env(&self) -> Vec<(&[u8], &[u8])> {
         if self.env == 0 {
             return Vec::new();
@@ -867,7 +899,7 @@ impl EnvRt {
     }
 }
 
-static ENV: crate::util::mutex::Mutex<EnvRt> = crate::util::mutex::Mutex::new(EnvRt::new());
+static ENV: moto_rt::mutex::Mutex<EnvRt> = moto_rt::mutex::Mutex::new(EnvRt::new());
 
 fn encode_env(keys: Vec<String>, vals: Vec<String>) -> Result<u64, ErrorCode> {
     assert_eq!(keys.len(), vals.len());

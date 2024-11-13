@@ -1,5 +1,3 @@
-use moto_runtime::moturus_log;
-
 // use moto_sys::caps::{CAP_IO_MANAGER, CAP_LOG, CAP_SHARE, CAP_SPAWN};
 use moto_sys::*;
 
@@ -107,5 +105,5 @@ fn main() {
         .unwrap();
     tty.wait().unwrap();
 
-    moturus_log!("tty stopped. Shutting down.");
+    let _ = moto_sys::SysRay::log("tty stopped. Shutting down.");
 }

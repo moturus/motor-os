@@ -172,7 +172,7 @@ fn input_listener() {
             match *b {
                 3 /* ^C */ | 27 /* esc */ | b'q' | b'Q' =>
                     { SLEEP.store(2, Ordering::Release);
-                        moto_runtime::futex_wake(&SLEEP);
+                        moto_rt::futex::futex_wake(&SLEEP);
                     }
                 b' ' => {
                     match MODE.load(Ordering::Acquire) {
@@ -182,7 +182,7 @@ fn input_listener() {
                         _ => unreachable!()
                     }
                     SLEEP.store(1, Ordering::Release);
-                        moto_runtime::futex_wake(&SLEEP);
+                        moto_rt::futex::futex_wake(&SLEEP);
                 }
                 _ => {}
             }
@@ -432,7 +432,7 @@ pub fn do_command(args: &[String]) {
     loop {
         tick(&mut ctx);
 
-        moto_runtime::futex_wait(&SLEEP, 0, Some(Duration::new(1, 0)));
+        moto_rt::futex::futex_wait(&SLEEP, 0, Some(Duration::new(1, 0)));
         let sleep = SLEEP.load(Ordering::Acquire);
         if sleep == 2 {
             std::process::exit(0);

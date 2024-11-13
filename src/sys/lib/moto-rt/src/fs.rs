@@ -9,6 +9,8 @@
 //! different here and expose a POSIXy FS API.
 
 use crate::error::*;
+use crate::ok_or_error;
+use crate::to_result;
 use crate::RtFd;
 use crate::RtVdsoVtableV1;
 use core::sync::atomic::Ordering;
@@ -113,6 +115,16 @@ pub fn is_terminal(rt_fd: RtFd) -> bool {
     }
 }
 
+pub fn duplicate(rt_fd: RtFd) -> Result<RtFd, ErrorCode> {
+    let vdso_duplicate: extern "C" fn(RtFd) -> RtFd = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().fs_duplicate.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    to_result!(vdso_duplicate(rt_fd))
+}
+
 /// Opens a file at `path` with options specified by `opts`.
 pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
     let vdso_open: extern "C" fn(*const u8, usize, u32) -> i32 = unsafe {
@@ -122,12 +134,7 @@ pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    let res = vdso_open(bytes.as_ptr(), bytes.len(), opts);
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(res)
-    }
+    to_result!(vdso_open(bytes.as_ptr(), bytes.len(), opts))
 }
 
 pub fn close(rt_fd: RtFd) -> Result<(), ErrorCode> {
@@ -137,10 +144,7 @@ pub fn close(rt_fd: RtFd) -> Result<(), ErrorCode> {
         )
     };
 
-    match vdso_close(rt_fd) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_close(rt_fd))
 }
 
 pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr, ErrorCode> {
@@ -166,10 +170,7 @@ pub fn fsync(rt_fd: RtFd) -> Result<(), ErrorCode> {
         )
     };
 
-    match vdso_fsync(rt_fd) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_fsync(rt_fd))
 }
 
 pub fn datasync(rt_fd: RtFd) -> Result<(), ErrorCode> {
@@ -179,10 +180,7 @@ pub fn datasync(rt_fd: RtFd) -> Result<(), ErrorCode> {
         )
     };
 
-    match vdso_datasync(rt_fd) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_datasync(rt_fd))
 }
 
 pub fn truncate(rt_fd: RtFd, size: u64) -> Result<(), ErrorCode> {
@@ -192,10 +190,7 @@ pub fn truncate(rt_fd: RtFd, size: u64) -> Result<(), ErrorCode> {
         )
     };
 
-    match vdso_truncate(rt_fd, size) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_truncate(rt_fd, size))
 }
 
 pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -205,12 +200,7 @@ pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         )
     };
 
-    let res = vdso_read(rt_fd, buf.as_mut_ptr(), buf.len());
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(res as usize)
-    }
+    to_result!(vdso_read(rt_fd, buf.as_mut_ptr(), buf.len()))
 }
 
 pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
@@ -220,12 +210,7 @@ pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
         )
     };
 
-    let res = vdso_write(rt_fd, buf.as_ptr(), buf.len());
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(res as usize)
-    }
+    to_result!(vdso_write(rt_fd, buf.as_ptr(), buf.len()))
 }
 
 pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {
@@ -235,12 +220,7 @@ pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {
         )
     };
 
-    let res = vdso_flush(rt_fd);
-    if res == E_OK {
-        Ok(())
-    } else {
-        Err(res)
-    }
+    ok_or_error(vdso_flush(rt_fd))
 }
 
 pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
@@ -250,12 +230,7 @@ pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
         )
     };
 
-    let res = vdso_seek(rt_fd, offset, whence);
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(res as u64)
-    }
+    to_result!(vdso_seek(rt_fd, offset, whence))
 }
 
 pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
@@ -266,10 +241,7 @@ pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    match vdso_mkdir(bytes.as_ptr(), bytes.len()) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_mkdir(bytes.as_ptr(), bytes.len()))
 }
 
 pub fn unlink(path: &str) -> Result<(), ErrorCode> {
@@ -280,10 +252,7 @@ pub fn unlink(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    match vdso_unlink(bytes.as_ptr(), bytes.len()) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_unlink(bytes.as_ptr(), bytes.len()))
 }
 
 pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
@@ -295,10 +264,12 @@ pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
 
     let old = old.as_bytes();
     let new = new.as_bytes();
-    match vdso_rename(old.as_ptr(), old.len(), new.as_ptr(), new.len()) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_rename(
+        old.as_ptr(),
+        old.len(),
+        new.as_ptr(),
+        new.len(),
+    ))
 }
 
 pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
@@ -309,10 +280,7 @@ pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    match vdso_rmdir(bytes.as_ptr(), bytes.len()) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_rmdir(bytes.as_ptr(), bytes.len()))
 }
 
 pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
@@ -323,10 +291,7 @@ pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    match vdso_rmdir_all(bytes.as_ptr(), bytes.len()) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_rmdir_all(bytes.as_ptr(), bytes.len()))
 }
 
 pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
@@ -337,10 +302,19 @@ pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    match vdso_set_perm(bytes.as_ptr(), bytes.len(), perm) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_set_perm(bytes.as_ptr(), bytes.len(), perm))
+}
+
+pub fn set_file_perm(rt_fd: RtFd, perm: u64) -> Result<(), ErrorCode> {
+    let vdso_set_file_perm: extern "C" fn(RtFd, u64) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get()
+                .fs_set_file_perm
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_set_file_perm(rt_fd, perm))
 }
 
 pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
@@ -388,12 +362,7 @@ pub fn copy(from: &str, to: &str) -> Result<u64, ErrorCode> {
 
     let from = from.as_bytes();
     let to = to.as_bytes();
-    let res = vdso_copy(from.as_ptr(), from.len(), to.as_ptr(), to.len());
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(res as u64)
-    }
+    to_result!(vdso_copy(from.as_ptr(), from.len(), to.as_ptr(), to.len()))
 }
 
 pub fn opendir(path: &str) -> Result<RtFd, ErrorCode> {
@@ -404,12 +373,7 @@ pub fn opendir(path: &str) -> Result<RtFd, ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    let res = vdso_opendir(bytes.as_ptr(), bytes.len());
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(res)
-    }
+    to_result!(vdso_opendir(bytes.as_ptr(), bytes.len()))
 }
 
 pub fn closedir(rt_fd: RtFd) -> Result<(), ErrorCode> {
@@ -419,10 +383,7 @@ pub fn closedir(rt_fd: RtFd) -> Result<(), ErrorCode> {
         )
     };
 
-    match vdso_closedir(rt_fd) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_closedir(rt_fd))
 }
 
 pub fn readdir(rt_fd: RtFd) -> Result<Option<DirEntry>, ErrorCode> {
@@ -465,8 +426,5 @@ pub fn chdir(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    match vdso_chdir(bytes.as_ptr(), bytes.len()) {
-        E_OK => Ok(()),
-        err => Err(err),
-    }
+    ok_or_error(vdso_chdir(bytes.as_ptr(), bytes.len()))
 }

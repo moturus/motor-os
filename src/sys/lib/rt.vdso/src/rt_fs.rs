@@ -1,21 +1,38 @@
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
-use super::util::mutex::Mutex;
 use crate::util::fd::Fd;
 use crate::util::fd::DESCRIPTORS;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use moto_rt::error::*;
 use moto_rt::fs::*;
-use moto_sys_io::rt_fs::*;
+use moto_rt::mutex::Mutex;
+use moto_rt::RtFd;
+use moto_sys_io::api_fs::*;
 
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
     if rt_fd <= 2 {
         1 // TODO: do it properly
     } else {
         0
+    }
+}
+
+pub extern "C" fn duplicate(rt_fd: RtFd) -> RtFd {
+    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
+        fd
+    } else {
+        return -(E_BAD_HANDLE as RtFd);
+    };
+
+    match fd.as_ref() {
+        Fd::TcpListener(listener) => todo!(),
+        Fd::TcpStream(stream) =>
+            DESCRIPTORS.push(Arc::new(Fd::TcpStream(stream.clone()))),
+        _ => -(E_BAD_HANDLE as RtFd),
     }
 }
 
@@ -42,6 +59,9 @@ pub extern "C" fn close(rt_fd: i32) -> ErrorCode {
             Ok(()) => E_OK,
             Err(err) => err,
         },
+        Fd::TcpListener(_) | Fd::TcpStream(_) =>
+            // drop will work
+            E_OK,
         _ => panic!("fd {rt_fd} not a file"), // Can't just return an error, as we've popped the fd.
     }
 }
@@ -84,29 +104,26 @@ pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
         return -(E_BAD_HANDLE as i64);
     };
 
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
     match fd.as_ref() {
-        Fd::File(file) => {
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-            match FsClient::read(&file, buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Stdio(stdio) => {
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-            match stdio.read(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Pipe(pipe) => {
-            let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-            match pipe.lock().read(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::ReadDir(read_dir) => panic!("use readdir() to read dir"),
+        Fd::File(file) => match FsClient::read(&file, buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Stdio(stdio) => match stdio.read(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Pipe(pipe) => match pipe.lock().read(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::ReadDir(read_dir) => -(E_BAD_HANDLE as i64),
+        Fd::TcpStream(stream) => match stream.read(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::TcpListener(_) => -(E_BAD_HANDLE as i64),
     }
 }
 
@@ -117,29 +134,26 @@ pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
         return -(E_BAD_HANDLE as i64);
     };
 
+    let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
     match fd.as_ref() {
-        Fd::File(file) => {
-            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-            match FsClient::write(&file, buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Stdio(stdio) => {
-            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-            match stdio.write(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::Pipe(pipe) => {
-            let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-            match pipe.lock().write(buf) {
-                Ok(sz) => sz as i64,
-                Err(err) => -(err as i64),
-            }
-        }
-        Fd::ReadDir(read_dir) => panic!("can't write to ReadDir"),
+        Fd::File(file) => match FsClient::write(&file, buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Stdio(stdio) => match stdio.write(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::Pipe(pipe) => match pipe.lock().write(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::ReadDir(read_dir) => -(E_BAD_HANDLE as i64),
+        Fd::TcpStream(stream) => match stream.write(buf) {
+            Ok(sz) => sz as i64,
+            Err(err) => -(err as i64),
+        },
+        Fd::TcpListener(_) => -(E_BAD_HANDLE as i64),
     }
 }
 
@@ -209,6 +223,10 @@ pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> ErrorCode 
 }
 
 pub extern "C" fn set_perm(path_ptr: *const u8, path_size: usize, perm: u64) -> ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn set_file_perm(_rt_fd: RtFd, _perm: u64) -> ErrorCode {
     todo!()
 }
 

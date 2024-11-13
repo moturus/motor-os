@@ -21,7 +21,7 @@ pub struct TcpSocketStatsV1 {
     pub remote_addr: [u8; 16], // All zeroes if not known.
     pub remote_port: u16,      // Zero if not known.
 
-    pub tcp_state: moto_runtime::rt_api::net::TcpState,
+    pub tcp_state: crate::api_net::TcpState,
     pub smoltcp_state: smoltcp::socket::tcp::State,
 }
 
@@ -35,7 +35,7 @@ impl Default for TcpSocketStatsV1 {
             local_port: 0,
             remote_addr: [0; 16],
             remote_port: 0,
-            tcp_state: moto_runtime::rt_api::net::TcpState::Closed,
+            tcp_state: crate::api_net::TcpState::Closed,
             smoltcp_state: smoltcp::socket::tcp::State::Closed,
         }
     }

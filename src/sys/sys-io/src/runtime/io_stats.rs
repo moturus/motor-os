@@ -61,7 +61,7 @@ fn process_ipc(service: &mut moto_ipc::sync::LocalServer, waker: moto_sys::SysHa
 
 pub struct GetTcpStatsPayload {
     pub start_id: u64,
-    pub results: moto_runtime::util::SpinLock<Vec<TcpSocketStatsV1>>,
+    pub results: crossbeam::atomic::AtomicCell<Vec<TcpSocketStatsV1>>,
 }
 
 fn get_tcp_stats(conn: &mut LocalServerConnection) {
@@ -70,7 +70,7 @@ fn get_tcp_stats(conn: &mut LocalServerConnection) {
 
     let payload = Arc::new(GetTcpStatsPayload {
         start_id,
-        results: moto_runtime::util::SpinLock::new(Vec::new()),
+        results: crossbeam::atomic::AtomicCell::new(Vec::new()),
     });
 
     super::internal_queue::call(CMD_TCP_STATS, payload.clone());
@@ -78,8 +78,7 @@ fn get_tcp_stats(conn: &mut LocalServerConnection) {
     let resp =
         conn.resp::<GetTcpSocketStatsResponse<{ moto_sys_io::stats::MAX_TCP_SOCKET_STATS }>>();
 
-    let mut results = vec![];
-    core::mem::swap(&mut *payload.results.lock(line!()), &mut results);
+    let results = payload.results.swap(Vec::new());
     assert!(results.len() <= moto_sys_io::stats::MAX_TCP_SOCKET_STATS);
     resp.num_results = results.len() as u64;
 

@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use moto_runtime::mutex::Mutex;
+use moto_rt::mutex::Mutex;
 
 use crate::context::Context;
 use crate::select::{Operation, Selected};

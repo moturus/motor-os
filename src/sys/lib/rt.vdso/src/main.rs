@@ -1,11 +1,13 @@
 #![no_std]
 #![no_main]
 #![allow(unused)]
+#![feature(str_from_raw_parts)]
 
 mod load;
 mod rt_alloc;
 mod rt_fs;
 mod rt_futex;
+mod rt_net;
 mod rt_process;
 mod rt_thread;
 mod rt_time;
@@ -17,7 +19,6 @@ mod util {
     pub mod fd;
     #[macro_use]
     pub mod logging;
-    pub mod mutex;
     pub mod scopeguard;
     pub mod spin;
 }
@@ -40,7 +41,12 @@ pub extern "C" fn _rt_entry(version: u64) {
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
     vtable.log_to_kernel.store(
-        log_to_kernel as *const () as usize as u64,
+        util::logging::log_to_kernel as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    vtable.log_backtrace.store(
+        util::logging::log_backtrace as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -138,6 +144,10 @@ pub extern "C" fn _rt_entry(version: u64) {
     );
     vtable.proc_status.store(
         rt_process::status as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.proc_exit.store(
+        rt_process::exit as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -239,6 +249,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_fs::set_perm as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.fs_set_file_perm.store(
+        rt_fs::set_file_perm as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable
         .fs_stat
         .store(rt_fs::stat as *const () as usize as u64, Ordering::Relaxed);
@@ -268,17 +282,49 @@ pub extern "C" fn _rt_entry(version: u64) {
     vtable
         .fs_chdir
         .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_duplicate.store(
+        rt_fs::duplicate as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // Networking.
+    vtable.dns_lookup.store(
+        rt_net::dns_lookup as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable
+        .net_bind
+        .store(rt_net::bind as *const () as usize as u64, Ordering::Relaxed);
+    vtable.net_accept.store(
+        rt_net::accept as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_tcp_connect.store(
+        rt_net::tcp_connect as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_connect.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_peer_addr.store(
+        rt_net::peer_addr as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_setsockopt.store(
+        rt_net::setsockopt as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_getsockopt.store(
+        rt_net::getsockopt as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 
+    let _ = moto_sys::set_current_thread_name("main");
     stdio::init();
-}
-
-pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, size) };
-    let msg = unsafe { core::str::from_utf8_unchecked(bytes) };
-    moto_sys::SysRay::log(msg).ok();
 }
 
 pub extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
@@ -301,4 +347,9 @@ pub extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
             curr_pos += to_copy;
         }
     }
+}
+
+pub extern "C" fn vdso_unimplemented() {
+    moto_log!("VDSO: unimplemented");
+    panic!("unimplemented")
 }

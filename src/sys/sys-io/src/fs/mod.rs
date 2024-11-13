@@ -15,7 +15,7 @@ pub fn init() {
     set_temp_dir();
     dispatcher::start().unwrap();
     while STARTED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        moto_runtime::futex_wait(&STARTED, 0, None);
+        moto_rt::futex::futex_wait(&STARTED, 0, None);
     }
     #[cfg(debug_assertions)]
     crate::moto_log!("FS initialized");

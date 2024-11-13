@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 # Internal.
-moto-runtime = { path = "../lib/moto-runtime", features = ["rt-api"] }
 flatfs       = { path = "../lib/flatfs"      }
 moto-ipc     = { path = "../lib/moto-ipc"    }
 moto-rt      = { path = "../lib/moto-rt"     }
@@ -18,6 +17,7 @@ srfs         = { path = "../lib/srfs"        }
 
 # External.
 elfloader    = { path = "../../third_party/elfloader" }
+crossbeam    = "0.8.4"
 ipnetwork    = "0.20.0"
 log          = "0.4.20"
 serde        = { version = "1.0.*", features = ["derive"] }

@@ -178,6 +178,56 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
+name = "crossbeam"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
+dependencies = [
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33480d6946193aa8033910124896ca395333cae7e2d1113d1fef6c3272217df2"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613f8cc01fe9cf1a3eb3d7f488fd2fa8388403e97039e2f73692932e291a770d"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df0346b5d5e76ac2fe4e327c5fd1118d6be7c51dfb18f9b7922923f287471e35"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -506,7 +556,6 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
  "moto-rt",
- "moto-runtime",
  "moto-sys",
 ]
 
@@ -515,18 +564,6 @@ name = "moto-rt"
 version = "0.1.0"
 dependencies = [
  "compiler_builtins",
- "rustc-std-workspace-alloc",
- "rustc-std-workspace-core",
-]
-
-[[package]]
-name = "moto-runtime"
-version = "0.2.9"
-dependencies = [
- "compiler_builtins",
- "moto-ipc",
- "moto-rt",
- "moto-sys",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -547,7 +584,6 @@ version = "0.2.4"
 dependencies = [
  "moto-ipc",
  "moto-rt",
- "moto-runtime",
  "moto-sys",
  "smoltcp",
 ]
@@ -693,6 +729,8 @@ dependencies = [
 name = "rt"
 version = "0.1.0"
 dependencies = [
+ "crossbeam",
+ "crossbeam-queue",
  "elfloader",
  "frusa",
  "moto-ipc",
@@ -715,7 +753,9 @@ checksum = "1956f5517128a2b6f23ab2dadf1a976f4f5b27962e7724c2bf3d45e539ec098c"
 
 [[package]]
 name = "rustversion"
-version = "1.0.6"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e819f2bc632f285be6d7cd36e25940d45b2391dd6d9b939e79de557f7014248"
 
 [[package]]
 name = "scopeguard"
@@ -850,7 +890,6 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
- "moto-runtime",
  "moto-sys",
 ]
 
@@ -858,13 +897,13 @@ dependencies = [
 name = "sys-io"
 version = "0.1.0"
 dependencies = [
+ "crossbeam",
  "elfloader",
  "flatfs",
  "ipnetwork",
  "log",
  "moto-ipc",
  "moto-rt",
- "moto-runtime",
  "moto-sys",
  "moto-sys-io",
  "moto-virtio",
@@ -903,7 +942,6 @@ version = "0.1.0"
 dependencies = [
  "moto-ipc",
  "moto-rt",
- "moto-runtime",
  "moto-sys",
  "moto-sys-io",
  "time",
@@ -913,11 +951,11 @@ dependencies = [
 name = "systest"
 version = "0.1.0"
 dependencies = [
+ "crossbeam",
  "futures",
  "moto-ipc",
  "moto-mpmc",
  "moto-rt",
- "moto-runtime",
  "moto-sys",
 ]
 

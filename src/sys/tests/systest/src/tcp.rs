@@ -21,7 +21,7 @@ fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
                 for byte in &mut data {
                     *byte = 255 - *byte;
                 }
-                stream.write(&data[0..size]).unwrap();
+                stream.write_all(&data[0..size]).unwrap();
             }
             Err(_) => {
                 break;
@@ -61,7 +61,7 @@ fn client_iter() {
     let mut stream =
         std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
-    assert_eq!(tx.len(), stream.write(&tx).unwrap());
+    stream.write_all(&tx).unwrap();
 
     let mut rx = [0 as u8; 8];
     match stream.read_exact(&mut rx) {
@@ -131,7 +131,7 @@ fn test_read_timeout() {
     let mut stream =
         std::net::TcpStream::connect_timeout(&addrs[0], Duration::from_millis(1000)).unwrap();
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
-    stream.write(&tx).unwrap();
+    stream.write_all(&tx).unwrap();
 
     assert!(stream.read_timeout().unwrap().is_none());
     stream
@@ -196,6 +196,9 @@ pub fn test_tcp_loopback() {
     client_iter();
     client_iter();
     client_iter();
+    std::thread::sleep(Duration::from_millis(100));
+    println!("will test latency");
+    std::thread::sleep(Duration::from_millis(100));
     test_io_latency();
 
     stop.store(true, Ordering::Release);

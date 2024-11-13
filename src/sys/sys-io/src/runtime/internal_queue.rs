@@ -1,6 +1,5 @@
 //! Internal queue to let threads inside sys-io communicate.
-use moto_runtime::util::ArrayQueue;
-use moto_runtime::util::SpinLock;
+use crossbeam::queue::ArrayQueue;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::{any::Any, sync::Arc};
@@ -25,16 +24,13 @@ impl Msg {
 
     pub fn mark_done(self) {
         self.futex_waiter.store(Self::READY, Ordering::Release);
-        moto_runtime::futex_wake(&self.futex_waiter);
+        moto_rt::futex::futex_wake(&self.futex_waiter);
     }
 }
 
-static QUEUE: SpinLock<Option<ArrayQueue<Msg>>> = SpinLock::new(None);
 const QUEUE_SIZE: usize = 64;
-
-pub fn init() {
-    *QUEUE.lock(line!()) = Some(ArrayQueue::new(QUEUE_SIZE));
-}
+static QUEUE: std::sync::LazyLock<ArrayQueue<Msg>> =
+    std::sync::LazyLock::new(|| ArrayQueue::new(QUEUE_SIZE));
 
 pub fn call(cmd: u16, payload: Payload) {
     let futex_waiter = Arc::new(AtomicU32::new(Msg::NOT_READY));
@@ -44,7 +40,7 @@ pub fn call(cmd: u16, payload: Payload) {
         payload,
     };
     loop {
-        match QUEUE.lock(line!()).as_ref().unwrap().push(msg) {
+        match QUEUE.push(msg) {
             Ok(_) => break,
             Err(m) => msg = m,
         }
@@ -56,10 +52,10 @@ pub fn call(cmd: u16, payload: Payload) {
     )
     .unwrap();
 
-    moto_runtime::futex_wait(&futex_waiter, Msg::NOT_READY, None);
+    moto_rt::futex::futex_wait(&futex_waiter, Msg::NOT_READY, None);
     assert_eq!(Msg::READY, futex_waiter.load(Ordering::Relaxed));
 }
 
 pub fn pop_msg() -> Option<Msg> {
-    QUEUE.lock(line!()).as_ref().unwrap().pop()
+    QUEUE.pop()
 }

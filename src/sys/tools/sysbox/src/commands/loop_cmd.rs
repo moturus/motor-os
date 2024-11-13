@@ -44,7 +44,7 @@ fn input_listener(input_queue: Arc<Mutex<VecDeque<u8>>>, input_futex: Arc<Atomic
             assert_eq!(val, EVENT_INPUT);
             continue;
         }
-        moto_runtime::futex_wake(&input_futex);
+        moto_rt::futex::futex_wake(&input_futex);
     }
 }
 
@@ -55,7 +55,7 @@ fn child_listener(mut child: std::process::Child, child_futex: Arc<AtomicU32>) {
         std::process::exit(1);
     }
     child_futex.store(EVENT_CHILD_EXIT, Ordering::Release);
-    moto_runtime::futex_wake(&child_futex);
+    moto_rt::futex::futex_wake(&child_futex);
 }
 
 fn child_input_relay(
@@ -77,7 +77,7 @@ fn child_input_relay(
             let _ = child_stdin.write_all(b2);
         }
 
-        moto_runtime::futex_wait(futex, EVENT_NONE, None);
+        moto_rt::futex::futex_wait(futex, EVENT_NONE, None);
         match futex.load(Ordering::Acquire) {
             EVENT_INPUT => {
                 let _ = futex.compare_exchange(

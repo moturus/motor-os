@@ -48,3 +48,65 @@ macro_rules! moto_log {
         }
     };
 }
+
+/// Log backtrace to rt_fd. If rt_fd is < 0, logs to the kernel log.
+#[cfg(not(feature = "base"))]
+pub fn log_backtrace(rt_fd: crate::RtFd) {
+    let vdso_log_backtrace: extern "C" fn(crate::RtFd) = unsafe {
+        core::mem::transmute(
+            super::RtVdsoVtableV1::get()
+                .log_backtrace
+                .load(core::sync::atomic::Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_log_backtrace(rt_fd);
+}
+
+#[cfg(not(feature = "base"))]
+pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
+    if moturus_log_panics_to_kernel() {
+        log_to_kernel("PANIC"); // Log w/o allocations.
+        moto_log!("PANIC: {}", info);
+        log_backtrace(-1);
+    } else {
+        #[cfg(not(feature = "rustc-dep-of-std"))]
+        extern crate alloc;
+
+        let _ = crate::fs::write(crate::FD_STDERR, b"PANIC\n"); // Log w/o allocations.
+        let msg = alloc::format!("PANIC: {}\n", info);
+        let _ = crate::fs::write(crate::FD_STDERR, msg.as_str().as_bytes());
+        log_backtrace(crate::FD_STDERR);
+    }
+}
+
+#[cfg(not(feature = "base"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
+    // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
+    // don't have stdio, so they will override this function to log via SysMem::log().
+    false
+}
+
+#[cfg(not(feature = "base"))]
+pub fn ok_or_error(val: ErrorCode) -> Result<(), ErrorCode> {
+    if val == E_OK {
+        Ok(())
+    } else {
+        Err(val)
+    }
+}
+
+#[cfg(not(feature = "base"))]
+#[macro_export]
+macro_rules! to_result {
+    ($arg:expr) => {{
+        let res = $arg;
+        if res < 0 {
+            Err((-res) as ErrorCode)
+        } else {
+            Ok(unsafe { res.try_into().unwrap_unchecked() })
+        }
+    }};
+}

@@ -2,11 +2,11 @@ use moto_sys::*;
 use std::{collections::BTreeMap, sync::atomic::AtomicU64};
 
 struct Mapper {
-    virt_to_phys_map: moto_runtime::mutex::Mutex<BTreeMap<u64, u64>>,
+    virt_to_phys_map: std::sync::Mutex<BTreeMap<u64, u64>>,
     map_requests: AtomicU64,
 }
 static MAPPER: Mapper = Mapper {
-    virt_to_phys_map: moto_runtime::mutex::Mutex::new(BTreeMap::new()),
+    virt_to_phys_map: std::sync::Mutex::new(BTreeMap::new()),
     map_requests: AtomicU64::new(0),
 };
 
@@ -14,7 +14,7 @@ impl moto_virtio::KernelAdapter for Mapper {
     fn virt_to_phys(&self, virt_addr: u64) -> Result<u64, ()> {
         let page_addr = virt_addr & !(sys_mem::PAGE_SIZE_SMALL - 1);
         let offset = virt_addr & (sys_mem::PAGE_SIZE_SMALL - 1);
-        if let Some(phys_addr) = self.virt_to_phys_map.lock().get(&page_addr) {
+        if let Some(phys_addr) = self.virt_to_phys_map.lock().unwrap().get(&page_addr) {
             return Ok(offset + *phys_addr);
         }
 
@@ -30,7 +30,10 @@ impl moto_virtio::KernelAdapter for Mapper {
         assert!(requests < 1_000_000);
 
         let phys_addr = SysMem::virt_to_phys(page_addr).unwrap();
-        self.virt_to_phys_map.lock().insert(page_addr, phys_addr);
+        self.virt_to_phys_map
+            .lock()
+            .unwrap()
+            .insert(page_addr, phys_addr);
 
         Ok(offset + phys_addr)
     }

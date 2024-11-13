@@ -73,7 +73,7 @@ fn test_futex() {
 }
 
 fn test_rt_mutex() {
-    use moto_runtime::mutex::Mutex;
+    use moto_rt::mutex::Mutex;
 
     static COUNTER: Mutex<u64> = Mutex::new(0);
     const THREADS: u16 = 40;
@@ -172,9 +172,9 @@ fn test_ipc() {
         assert_eq!(resp.data ^ (0xdeadbeef ^ idx), u64::MAX);
     }
     let stop = std::time::Instant::now();
-    // moto_sys::syscalls::SysCtl::set_log_level(prev_log_level).unwrap();
 
-    let mut cpu_usage: [f32; 16] = [0.0; 16];
+    let num_cpus = moto_sys::KernelStaticPage::get().num_cpus;
+    let mut cpu_usage = vec![0.0; num_cpus as usize];
     moto_sys::stats::get_cpu_usage(&mut cpu_usage).unwrap();
 
     conn.disconnect();
@@ -554,6 +554,7 @@ fn main() {
 
     std::thread::spawn(|| input_listener());
 
+    tcp::test_tcp_loopback();
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
@@ -564,9 +565,10 @@ fn main() {
     spawn_wait_kill::test_pid_kill();
     test_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
+    test_rt_mutex();
+    test_futex();
 
     spawn_wait_kill::test();
-    tcp::test_tcp_loopback();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
     // channel_test::test_io_channel();
@@ -583,8 +585,6 @@ fn main() {
     test_thread();
     test_ipc();
     test_pipes();
-    test_futex();
-    test_rt_mutex();
 
     println!("PASS");
 
