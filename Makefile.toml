@@ -285,6 +285,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/systest" "${MOTO_BIN}/sys
 cwd = "./src/bin/rush"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/rush" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/rush"
 '''
 
@@ -292,6 +293,7 @@ strip -o "${MOTO_BIN}/rush" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/ru
 cwd = "./src/bin/rush"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/rush" "${MOTO_BIN}/rush"
 '''
 
