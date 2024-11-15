@@ -81,6 +81,13 @@ impl Drop for CpuStatsV1 {
 }
 
 #[cfg(feature = "userspace")]
+impl Default for CpuStatsV1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "userspace")]
 impl CpuStatsV1 {
     pub fn new() -> Self {
         let page_addr = crate::SysMem::alloc(sys_mem::PAGE_SIZE_SMALL, 1).unwrap();
@@ -108,7 +115,7 @@ impl CpuStatsV1 {
         self.num_entries
     }
 
-    pub fn entry<'a>(&'a self, pos: usize) -> CpuStatsEntryV1<'a> {
+    pub fn entry(&self, pos: usize) -> CpuStatsEntryV1<'_> {
         assert!(pos < (self.num_entries as usize));
 
         unsafe {
@@ -155,8 +162,9 @@ pub fn get_cpu_usage(buf: &mut [f32]) -> Result<(), ErrorCode> {
 }
 
 #[repr(u16)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub enum ThreadStatus {
+    #[default]
     Unknown = 0,
     Created = 1,
     LiveRunning,
@@ -165,12 +173,6 @@ pub enum ThreadStatus {
     LiveSyscall,
     LiveInWait,
     Dead,
-}
-
-impl Default for ThreadStatus {
-    fn default() -> Self {
-        ThreadStatus::Unknown
-    }
 }
 
 #[repr(C)]

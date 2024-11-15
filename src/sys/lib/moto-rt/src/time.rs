@@ -67,7 +67,7 @@ impl Instant {
     }
 
     pub fn elapsed(&self) -> Duration {
-        Instant::now().duration_since(self.clone())
+        Instant::now().duration_since(*self)
     }
 
     pub const fn infinite_future() -> Self {

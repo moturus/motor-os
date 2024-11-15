@@ -202,6 +202,8 @@ impl SysCpu {
             args[next_arg] = wait_handles.as_ptr() as usize as u64;
             args[next_arg + 1] = wait_handles.len() as u64;
         } else {
+            // Can't iterate over wait_handles because of the borrow checker.
+            #[allow(clippy::needless_range_loop)]
             for idx in 0..wait_handles.len() {
                 args[next_arg] = wait_handles[idx].as_u64();
                 next_arg += 1;
@@ -225,6 +227,9 @@ impl SysCpu {
     fn process_result(result: &SyscallResult, handles: &mut [SysHandle]) -> Result<(), ErrorCode> {
         // If the condition below is false, the kernel has properly put data in @handles.
         if result.result & SyscallResult::F_HANDLE_ARRAY == 0 {
+            // Clippy suggests ```for (idx, <item>) in handles.iter_mut().enumerate()```,
+            // which is much less easy to read that this.
+            #[allow(clippy::needless_range_loop)]
             for idx in 0..handles.len() {
                 if idx < 6 {
                     handles[idx] = SysHandle::from_u64(result.data[idx]);

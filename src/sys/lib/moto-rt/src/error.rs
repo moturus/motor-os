@@ -75,7 +75,7 @@ pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
 
         let _ = crate::fs::write(crate::FD_STDERR, b"PANIC\n"); // Log w/o allocations.
         let msg = alloc::format!("PANIC: {}\n", info);
-        let _ = crate::fs::write(crate::FD_STDERR, msg.as_str().as_bytes());
+        let _ = crate::fs::write(crate::FD_STDERR, msg.as_bytes());
         log_backtrace(crate::FD_STDERR);
     }
 }

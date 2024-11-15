@@ -36,8 +36,8 @@ pub fn args() -> alloc::vec::Vec<String> {
     let raw_vec = unsafe { deserialize_vec(args_addr) };
 
     let mut result = Vec::new();
-    for idx in 0..raw_vec.len() {
-        let arg = raw_vec[idx].to_vec();
+    for entry in &raw_vec {
+        let arg = entry.to_vec();
         result.push(unsafe { String::from_utf8_unchecked(arg) });
     }
 
@@ -353,7 +353,7 @@ fn encode_env(keys: Vec<String>, vals: Vec<String>) -> (u64, Option<core::alloc:
     }
 
     let layout = core::alloc::Layout::from_size_align(needed_len as usize, 8).unwrap();
-    let result_addr = unsafe { crate::alloc::alloc(layout) } as usize;
+    let result_addr = crate::alloc::alloc(layout) as usize;
     assert_ne!(result_addr, 0);
 
     unsafe {
@@ -393,7 +393,7 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
     };
 
     for arg in args {
-        if arg.len() == 0 {
+        if arg.is_empty() {
             continue;
         }
         calc_lengths(arg.as_str());
@@ -404,7 +404,7 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
     }
 
     let layout = core::alloc::Layout::from_size_align(needed_len as usize, 8).unwrap();
-    let result_addr = unsafe { crate::alloc::alloc(layout) } as usize;
+    let result_addr = crate::alloc::alloc(layout) as usize;
     assert_ne!(result_addr, 0);
 
     unsafe {
@@ -422,7 +422,7 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
         };
 
         for arg in args {
-            if arg.len() == 0 {
+            if arg.is_empty() {
                 continue;
             }
             write_arg(arg.as_str());

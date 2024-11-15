@@ -8,9 +8,9 @@ pub struct in_addr {
     pub s_addr: u32,
 }
 
-impl Into<core::net::Ipv4Addr> for in_addr {
-    fn into(self: in_addr) -> core::net::Ipv4Addr {
-        core::net::Ipv4Addr::from(self.s_addr.to_ne_bytes())
+impl From<in_addr> for core::net::Ipv4Addr {
+    fn from(addr: in_addr) -> Self {
+        core::net::Ipv4Addr::from(addr.s_addr.to_ne_bytes())
     }
 }
 
@@ -35,10 +35,10 @@ impl From<core::net::SocketAddrV4> for sockaddr_in {
     }
 }
 
-impl Into<core::net::SocketAddrV4> for sockaddr_in {
-    fn into(self: sockaddr_in) -> core::net::SocketAddrV4 {
-        assert_eq!(self.sin_family, AF_INET);
-        core::net::SocketAddrV4::new(self.sin_addr.into(), u16::from_be(self.sin_port))
+impl From<sockaddr_in> for core::net::SocketAddrV4 {
+    fn from(addr: sockaddr_in) -> core::net::SocketAddrV4 {
+        assert_eq!(addr.sin_family, AF_INET);
+        core::net::SocketAddrV4::new(addr.sin_addr.into(), u16::from_be(addr.sin_port))
     }
 }
 
@@ -48,9 +48,9 @@ pub struct in6_addr {
     pub s6_addr: [u8; 16],
 }
 
-impl Into<core::net::Ipv6Addr> for in6_addr {
-    fn into(self: in6_addr) -> core::net::Ipv6Addr {
-        core::net::Ipv6Addr::from(self.s6_addr)
+impl From<in6_addr> for core::net::Ipv6Addr {
+    fn from(addr: in6_addr) -> core::net::Ipv6Addr {
+        core::net::Ipv6Addr::from(addr.s6_addr)
     }
 }
 
@@ -71,14 +71,14 @@ impl From<core::net::SocketAddrV6> for sockaddr_in6 {
     }
 }
 
-impl Into<core::net::SocketAddrV6> for sockaddr_in6 {
-    fn into(self: sockaddr_in6) -> core::net::SocketAddrV6 {
-        assert_eq!(self.sin6_family, AF_INET6);
+impl From<sockaddr_in6> for core::net::SocketAddrV6 {
+    fn from(addr: sockaddr_in6) -> core::net::SocketAddrV6 {
+        assert_eq!(addr.sin6_family, AF_INET6);
         core::net::SocketAddrV6::new(
-            self.sin6_addr.into(),
-            u16::from_be(self.sin6_port),
-            self.sin6_flowinfo,
-            self.sin6_scope_id,
+            addr.sin6_addr.into(),
+            u16::from_be(addr.sin6_port),
+            addr.sin6_flowinfo,
+            addr.sin6_scope_id,
         )
     }
 }
@@ -103,12 +103,12 @@ impl From<core::net::SocketAddr> for sockaddr {
     }
 }
 
-impl Into<core::net::SocketAddr> for sockaddr {
-    fn into(self: sockaddr) -> core::net::SocketAddr {
+impl From<sockaddr> for core::net::SocketAddr {
+    fn from(addr: sockaddr) -> core::net::SocketAddr {
         unsafe {
-            match self.v4.sin_family {
-                AF_INET => core::net::SocketAddr::V4(self.v4.into()),
-                AF_INET6 => core::net::SocketAddr::V6(self.v6.into()),
+            match addr.v4.sin_family {
+                AF_INET => core::net::SocketAddr::V4(addr.v4.into()),
+                AF_INET6 => core::net::SocketAddr::V6(addr.v6.into()),
                 _ => panic!(),
             }
         }

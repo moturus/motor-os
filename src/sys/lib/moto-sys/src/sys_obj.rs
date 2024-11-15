@@ -190,7 +190,7 @@ impl SysObj {
         if result.is_ok() {
             Ok(())
         } else {
-            Err(result.error_code().into())
+            Err(result.error_code())
         }
     }
 
@@ -210,7 +210,7 @@ impl SysObj {
         if result.is_ok() {
             Ok(result.data[0])
         } else {
-            Err(result.error_code().into())
+            Err(result.error_code())
         }
     }
 }

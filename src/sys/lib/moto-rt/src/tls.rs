@@ -18,6 +18,9 @@ pub fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key {
     })
 }
 
+/// # Safety
+///
+/// It is kinda safe, but stdlib wraps it in 'unsafe' and fails to compile if we dont' mark it safe.
 #[inline]
 pub unsafe fn set(key: Key, value: *mut u8) {
     let vdso_set: extern "C" fn(Key, *mut u8) = unsafe {
@@ -29,6 +32,9 @@ pub unsafe fn set(key: Key, value: *mut u8) {
     vdso_set(key, value)
 }
 
+/// # Safety
+///
+/// It is kinda safe, but stdlib wraps it in 'unsafe' and fails to compile if we dont' mark it safe.
 #[inline]
 pub unsafe fn get(key: Key) -> *mut u8 {
     let vdso_get: extern "C" fn(Key) -> *mut u8 = unsafe {
@@ -40,6 +46,9 @@ pub unsafe fn get(key: Key) -> *mut u8 {
     vdso_get(key)
 }
 
+/// # Safety
+///
+/// It is kinda safe, but stdlib wraps it in 'unsafe' and fails to compile if we dont' mark it safe.
 #[inline]
 pub unsafe fn destroy(key: Key) {
     let vdso_destroy: extern "C" fn(Key) = unsafe {

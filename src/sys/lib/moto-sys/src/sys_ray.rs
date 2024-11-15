@@ -51,12 +51,10 @@ impl SysRay {
 
         if result.is_ok() {
             Ok(Some(result.data[0]))
+        } else if result.error_code() == moto_rt::E_ALREADY_IN_USE {
+            Ok(None)
         } else {
-            if result.error_code() == moto_rt::E_ALREADY_IN_USE {
-                Ok(None)
-            } else {
-                Err(moto_rt::E_NOT_FOUND)
-            }
+            Err(moto_rt::E_NOT_FOUND)
         }
     }
 
@@ -66,7 +64,7 @@ impl SysRay {
         flat_list: bool,
         buf: &mut [super::stats::ProcessStatsV1],
     ) -> Result<usize, ErrorCode> {
-        if buf.len() < 1 {
+        if buf.is_empty() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
@@ -264,7 +262,7 @@ impl SysRay {
     #[cfg(feature = "userspace")]
     pub fn log(msg: &str) -> Result<(), ErrorCode> {
         let bytes = msg.as_bytes();
-        if bytes.len() == 0 {
+        if bytes.is_empty() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
