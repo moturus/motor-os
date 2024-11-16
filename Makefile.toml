@@ -271,7 +271,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sysbox" "${MOTO_BIN}/sysb
 cwd = "./src/sys/tests/systest"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
-# cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/systest" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/systest"
 '''
 
@@ -279,6 +279,7 @@ strip -o "${MOTO_BIN}/systest" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug
 cwd = "./src/sys/tests/systest"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/systest" "${MOTO_BIN}/systest"
 '''
 

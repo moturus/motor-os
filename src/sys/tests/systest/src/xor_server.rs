@@ -24,10 +24,8 @@ fn thread_fn() {
             }
         };
 
-        for idx in 0..wakers.len() {
-            let waker = wakers[idx];
-
-            let conn = xor_server.get_connection(waker).unwrap();
+        for waker in &wakers {
+            let conn = xor_server.get_connection(*waker).unwrap();
             assert!(conn.connected());
             if !conn.have_req() {
                 continue;
@@ -40,7 +38,7 @@ fn thread_fn() {
             resp.data = data;
             resp.header.result = 0;
             let _ = conn.finish_rpc();
-            client = waker;
+            client = *waker;
         }
     }
 }

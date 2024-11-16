@@ -28,7 +28,7 @@ impl Subcommand {
     pub fn do_exit(&mut self, code: i32) {
         use std::io::Write;
         self.stdin
-            .write(format!("exit {}\n", code).as_bytes())
+            .write_all(format!("exit {}\n", code).as_bytes())
             .unwrap();
         self.stdin.flush().unwrap();
     }
@@ -40,14 +40,14 @@ impl Subcommand {
     pub fn spin(&mut self, duration: std::time::Duration) {
         use std::io::Write;
         self.stdin
-            .write(format!("spin {}\n", duration.as_micros()).as_bytes())
+            .write_all(format!("spin {}\n", duration.as_micros()).as_bytes())
             .unwrap();
         self.stdin.flush().unwrap();
     }
 
     pub fn oom(&mut self) {
         use std::io::Write;
-        self.stdin.write(format!("oom\n").as_bytes()).unwrap();
+        self.stdin.write_all(b"oom\n").unwrap();
         self.stdin.flush().unwrap();
     }
 
@@ -61,9 +61,7 @@ impl Subcommand {
 
     pub fn start_xor_service(&mut self) {
         use std::io::Write;
-        self.stdin
-            .write(format!("xor_service\n").as_bytes())
-            .unwrap();
+        self.stdin.write_all(b"xor_service\n").unwrap();
         self.stdin.flush().unwrap();
     }
 }

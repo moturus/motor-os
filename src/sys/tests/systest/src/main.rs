@@ -46,9 +46,9 @@ fn test_futex() {
 
     for _idx in 0..THREADS {
         threads.push(std::thread::spawn(|| {
-            while !FUTEX
+            while FUTEX
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
+                .is_err()
             {
                 futex_wait(&FUTEX, 1, None);
             }
@@ -100,7 +100,7 @@ fn test_reentrant_mutex() {
     let _lock1 = std::io::stdout().lock();
     let mut lock2 = std::io::stdout().lock();
     lock2
-        .write("test_reentrant_stdout lock PASS\n".as_bytes())
+        .write_all(b"test_reentrant_stdout lock PASS\n")
         .unwrap();
 }
 
@@ -208,8 +208,7 @@ fn test_pipes() {
     let reader_thread = std::thread::spawn(move || {
         let mut step = 1_usize;
         loop {
-            let mut buf: Vec<u8> = vec![];
-            buf.resize(step % 8176 + 17, 0);
+            let mut buf: Vec<u8> = vec![0; step % 8176 + 17];
 
             let read = reader.read(buf.as_mut_slice()).unwrap();
             assert!(read > 0);
@@ -276,10 +275,12 @@ fn test_lazy_memory_map() {
     let buf = unsafe {
         core::slice::from_raw_parts_mut(addr as usize as *mut u8, sys_mem::PAGE_SIZE_SMALL as usize)
     };
+    #[allow(clippy::needless_range_loop)]
     for idx in 0..buf.len() {
         assert_eq!(0, buf[idx]);
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
+    #[allow(clippy::needless_range_loop)]
     for idx in 0..buf.len() {
         buf[idx] = (idx % (u8::MAX as usize)) as u8;
         assert_eq!(buf[idx], (idx % (u8::MAX as usize)) as u8);
@@ -412,9 +413,9 @@ fn test_file_write() {
         .write(true)
         .create_new(true)
         .open(path.clone())
-        .expect(format!("Failed to create {:?}", path).as_str());
+        .unwrap_or_else(|_| panic!("Failed to create {:?}", path));
 
-    file.write(WRITTEN.as_bytes()).unwrap();
+    file.write_all(WRITTEN.as_bytes()).unwrap();
     std::mem::drop(file); // Close it.
 
     // Read.
@@ -552,7 +553,7 @@ fn main() {
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
 
-    std::thread::spawn(|| input_listener());
+    std::thread::spawn(input_listener);
 
     tcp::test_tcp_loopback();
     std::env::set_var("foo", "bar");

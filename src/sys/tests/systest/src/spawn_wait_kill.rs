@@ -38,7 +38,7 @@ pub fn test_pid_kill() {
         Ok(cnt) => cnt,
         Err(err) => {
             eprintln!("PS failed.");
-            std::process::exit(err as u16 as i32);
+            std::process::exit(err as i32);
         }
     };
 

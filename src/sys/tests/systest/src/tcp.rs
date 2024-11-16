@@ -8,7 +8,7 @@ use std::time::Duration;
 
 fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
     stream.set_read_timeout(Some(Duration::from_millis(1000)));
-    let mut data = [0 as u8; 17];
+    let mut data = [0_u8; 17];
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -63,7 +63,7 @@ fn client_iter() {
     let tx: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     stream.write_all(&tx).unwrap();
 
-    let mut rx = [0 as u8; 8];
+    let mut rx = [0_u8; 8];
     match stream.read_exact(&mut rx) {
         Ok(_) => {
             assert_eq!(rx, [254, 253, 252, 251, 250, 249, 248, 247]);
@@ -115,7 +115,7 @@ fn test_read_timeout() {
             .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
         // Read, don't write.
-        let mut data = [0 as u8; 64];
+        let mut data = [0_u8; 64];
         while !stop_listener.load(Ordering::Relaxed) {
             let _ = stream.read(&mut data);
         }
@@ -138,7 +138,7 @@ fn test_read_timeout() {
         .set_read_timeout(Some(Duration::from_millis(600)))
         .unwrap();
 
-    let mut rx = [0 as u8; 8];
+    let mut rx = [0_u8; 8];
     let start = std::time::Instant::now();
     match stream.read(&mut rx) {
         Ok(_) => {
