@@ -44,7 +44,7 @@ fn input_listener() {
 
 #[allow(unused)]
 fn spawn_generic_input_listener() {
-    std::thread::spawn(|| input_listener());
+    std::thread::spawn(input_listener);
 }
 
 fn main() {

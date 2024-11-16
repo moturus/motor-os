@@ -71,7 +71,7 @@ fn child_input_relay(
                 bytes.push_back(b);
             }
         }
-        if bytes.len() > 0 {
+        if !bytes.is_empty() {
             let (b1, b2) = bytes.as_slices();
             let _ = child_stdin.write_all(b1);
             let _ = child_stdin.write_all(b2);
@@ -116,8 +116,8 @@ pub fn do_command(args: &[String]) {
     loop {
         let mut cmd = std::process::Command::new(args[1].as_str());
 
-        for idx in 2..args.len() {
-            cmd.arg(args[idx].as_str());
+        for arg in &args[2..] {
+            cmd.arg(arg);
         }
 
         cmd.stdin(std::process::Stdio::piped());

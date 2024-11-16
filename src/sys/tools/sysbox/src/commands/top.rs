@@ -101,10 +101,7 @@ fn print_preamble(ctx: &Context) -> u32 {
         ),
     );
 
-    write_line(
-        2,
-        &format!("    press [space] to toggle, 'q' or [esc] to exit"),
-    );
+    write_line(2, "    press [space] to toggle, 'q' or [esc] to exit");
 
     2
 }
@@ -146,7 +143,7 @@ fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: u64) -> String {
         }
     }
 
-    if cmd_cache.len() == 0 {
+    if cmd_cache.is_empty() {
         update_cache(cmd_cache, moto_sys::stats::PID_SYSTEM);
     }
 
@@ -277,7 +274,7 @@ fn calc_values(ctx: &Context) -> HashMap<u64, Vec<(f64, f64)>> {
     let total_diff = ctx.elapsed.as_secs_f64();
     assert_ne!(total_diff, 0.0);
 
-    for (_, line) in &mut values {
+    for line in values.values_mut() {
         for (k, u) in line {
             *k /= total_diff;
             *u /= total_diff;
@@ -410,7 +407,7 @@ pub fn do_command(args: &[String]) {
         print_usage_and_exit(1);
     }
 
-    std::thread::spawn(|| input_listener());
+    std::thread::spawn(input_listener);
     let cmd_cache: HashMap<u64, String> = HashMap::new();
 
     let stats_prev = CpuStatsV1::new();

@@ -24,10 +24,10 @@ fn cat_file(fname: &str) {
     match std::fs::read(Path::new(fname)) {
         Ok(bytes) => match std::str::from_utf8(bytes.as_ref()) {
             Ok(s) => print!("{}", s),
-            Err(_) => print!("Can't cat a binary file '{}'.\n", fname),
+            Err(_) => println!("Can't cat a binary file '{}'.", fname),
         },
         Err(err) => {
-            print!("cat: error reading file '{}': {:?}.\n", fname, err);
+            println!("cat: error reading file '{}': {:?}.", fname, err);
         }
     }
 }

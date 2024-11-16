@@ -46,6 +46,9 @@ impl GetServerUrlResponse {
     // but small enough not to cause overflow.
     const MAX_URL_SIZE: usize = 256;
 
+    /// # Safety
+    ///
+    /// Assumes self was properly initialized.
     pub unsafe fn url(&self) -> Result<&str, u16> {
         if (self.url_size as usize) > Self::MAX_URL_SIZE {
             return Err(u16::MAX);
@@ -186,6 +189,9 @@ impl RenameRequest {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// Assumes self was properly initialized.
     pub unsafe fn old<'a>(
         &'a self,
         raw_channel: &'a moto_ipc::sync::RawChannel,
@@ -194,6 +200,10 @@ impl RenameRequest {
         core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 
+    /// # Safety
+    ///
+    /// Assumes self was properly initialized.
+    #[allow(clippy::new_ret_no_self)]
     pub unsafe fn new<'a>(
         &'a self,
         raw_channel: &'a moto_ipc::sync::RawChannel,

@@ -257,6 +257,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-tty" "${MOTO_BIN}/sys
 cwd = "./src/sys/tools/sysbox"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sysbox" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sysbox"
 '''
 
@@ -264,6 +265,7 @@ strip -o "${MOTO_BIN}/sysbox" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/
 cwd = "./src/sys/tools/sysbox"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sysbox" "${MOTO_BIN}/sysbox"
 '''
 

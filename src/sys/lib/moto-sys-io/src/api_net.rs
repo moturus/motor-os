@@ -9,7 +9,7 @@ use moto_sys::ErrorCode;
 
 pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX;
 
-pub const CMD_TCP_LISTENER_BIND: u16 = CMD_MIN + 0;
+pub const CMD_TCP_LISTENER_BIND: u16 = CMD_MIN; // + 0;
 pub const CMD_TCP_LISTENER_ACCEPT: u16 = CMD_MIN + 1;
 pub const CMD_TCP_LISTENER_SET_OPTION: u16 = CMD_MIN + 2;
 pub const CMD_TCP_LISTENER_GET_OPTION: u16 = CMD_MIN + 3;
@@ -34,6 +34,8 @@ pub const TCP_OPTION_TTL: u64 = 1 << 3;
 
 pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
 
+/// The number of subchannels per channel.
+///
 /// Each IO Channel in moto_ipc::io_channel has 64 pages (for the server and for the client).
 /// Using the full channel per socket is wasteful, so channels are split into subchannels.
 /// A channel can be split into 2^0, 2^1, 2^2, ... 2^6 subchannels (technically, we
@@ -86,16 +88,16 @@ impl TryFrom<u32> for TcpState {
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         if value < (Self::_Max as u32) {
-            Ok(unsafe { core::mem::transmute(value) })
+            Ok(unsafe { core::mem::transmute::<u32, TcpState>(value) })
         } else {
             Err(())
         }
     }
 }
 
-impl Into<u32> for TcpState {
-    fn into(self) -> u32 {
-        self as u32
+impl From<TcpState> for u32 {
+    fn from(val: TcpState) -> u32 {
+        val as u32
     }
 }
 
@@ -109,7 +111,9 @@ impl TcpState {
     }
 }
 
-/// Prepare CMD_TCP_LISTENER_BIND IO message. `num_listeners` indicate the number of
+/// Prepare CMD_TCP_LISTENER_BIND IO message.
+///
+/// `num_listeners` indicate the number of
 /// outstanding listening sockets to create: each incoming connection consumes one
 /// socket, and a new listener is created. But if several incoming connections happen
 /// at once, they can consume all outstanding listeners so that new incoming connections

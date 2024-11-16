@@ -12,8 +12,8 @@ pub fn do_command(args: &[String]) {
 
     let mut cmd = std::process::Command::new(args[1].as_str());
 
-    for idx in 2..args.len() {
-        cmd.arg(args[idx].as_str());
+    for arg in &args[2..] {
+        cmd.arg(arg);
     }
 
     let start = std::time::Instant::now();

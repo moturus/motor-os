@@ -190,5 +190,5 @@ fn list_plain(dir: &str, list_dots: bool) {
             print!("? {}", fname);
         }
     }
-    println!("");
+    println!();
 }

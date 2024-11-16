@@ -28,16 +28,13 @@ pub fn do_command(args: &[String]) {
     }
     let old_path = std::path::Path::new(old);
 
-    let new_dir;
-    match new.chars().last() {
-        Some(c) => {
-            new_dir = c == '/';
-        }
+    let new_dir = match new.chars().last() {
+        Some(c) => c == '/',
         None => {
             eprintln!("mv: empty second arg??");
             std::process::exit(1);
         }
-    }
+    };
 
     if new_dir {
         // Need to add the filename, otherwise the last slash is lost,

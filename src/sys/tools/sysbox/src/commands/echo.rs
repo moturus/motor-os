@@ -8,5 +8,5 @@ pub fn do_command(args: &[String]) {
         }
     }
 
-    print!("\n");
+    println!();
 }
