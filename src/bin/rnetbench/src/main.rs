@@ -106,9 +106,9 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
         if bytes_read == 0 {
             break;
         }
-        for idx in 0..bytes_read {
-            if ((counter & 0xff) as u8) != buffer[idx] {
-                panic!("bad data: counter: {counter} data: {}", buffer[idx]);
+        for b in &buffer[0..bytes_read] {
+            if ((counter & 0xff) as u8) != *b {
+                panic!("bad data: counter: {counter} data: {}", *b);
             }
             counter += 1;
         }
@@ -152,8 +152,8 @@ fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Du
 
         let len = (rdrand() as usize) % data.len();
 
-        for idx in 0..len {
-            data[idx] = (counter & 0xff) as u8;
+        for b in &mut data[0..len] {
+            *b = (counter & 0xff) as u8;
             counter += 1;
         }
 

@@ -26,12 +26,10 @@ fn do_run(port: u16) -> Result<()> {
         port
     );
 
-    for tcp_stream in listener.incoming() {
-        if let Ok(stream) = tcp_stream {
-            let _ = std::thread::spawn(|| {
-                let _ = handle_connection(stream);
-            });
-        }
+    for tcp_stream in listener.incoming().flatten() {
+        let _ = std::thread::spawn(|| {
+            let _ = handle_connection(tcp_stream);
+        });
     }
 
     unreachable!()
