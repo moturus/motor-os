@@ -386,12 +386,10 @@ impl Pipe {
                 size += sz;
                 temp_vec.truncate(sz);
                 buf.append(&mut temp_vec);
+            } else if size != 0 {
+                return Ok(size);
             } else {
-                if size != 0 {
-                    return Ok(size);
-                } else {
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
-                }
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
         }
     }

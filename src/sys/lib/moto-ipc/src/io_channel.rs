@@ -121,6 +121,12 @@ impl Debug for Msg {
     }
 }
 
+impl Default for Msg {
+    fn default() -> Self {
+        Msg::new()
+    }
+}
+
 impl Msg {
     pub fn new() -> Self {
         let mut result: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
@@ -153,9 +159,9 @@ enum SubChannel {
     Server(u64),
 }
 
-impl Into<SubChannelType> for SubChannel {
-    fn into(self) -> SubChannelType {
-        match self {
+impl From<SubChannel> for SubChannelType {
+    fn from(val: SubChannel) -> SubChannelType {
+        match val {
             SubChannel::Client(_) => SubChannelType::Client,
             SubChannel::Server(_) => SubChannelType::Server,
         }
@@ -391,11 +397,8 @@ impl ClientConnection {
             64
         );
 
-        let server_handle =
-            SysObj::get(SysHandle::SELF, SysObj::F_WAKE_PEER, &full_url).map_err(|err| {
-                SysMem::free(addr).unwrap();
-                err
-            })?;
+        let server_handle = SysObj::get(SysHandle::SELF, SysObj::F_WAKE_PEER, &full_url)
+            .inspect_err(|_| SysMem::free(addr).unwrap())?;
 
         let self_ = Self {
             raw_channel: AtomicPtr::new(addr as usize as *mut RawChannel),
@@ -456,21 +459,24 @@ impl ClientConnection {
             slot = &mut raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
-            if stamp == pos {
-                match raw_channel.client_queue_head.compare_exchange_weak(
-                    pos,
-                    pos + 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(head) => pos = head, // continue
+            match stamp.cmp(&pos) {
+                core::cmp::Ordering::Equal => {
+                    match raw_channel.client_queue_head.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(head) => pos = head, // continue
+                    }
                 }
-            } else if stamp < pos {
-                return Err(moto_rt::E_NOT_READY); // The queue is full.
-            } else {
+                // The queue is full.
+                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY),
                 // We lost the race - continue.
-                pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
+                core::cmp::Ordering::Greater => {
+                    pos = raw_channel.client_queue_head.load(Ordering::Relaxed)
+                }
             }
         }
 
@@ -490,21 +496,23 @@ impl ClientConnection {
             slot = &mut raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
-            if stamp == (pos + 1) {
-                match raw_channel.server_queue_tail.compare_exchange_weak(
-                    pos,
-                    pos + 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(tail) => pos = tail, // continue
+            match stamp.cmp(&(pos + 1)) {
+                core::cmp::Ordering::Equal => {
+                    match raw_channel.server_queue_tail.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(tail) => pos = tail, // continue
+                    }
                 }
-            } else if stamp < (pos + 1) {
-                return Err(moto_rt::E_NOT_READY); // The queue is empty.
-            } else {
-                // We lost the race - continue.
-                pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
+                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is empty.
+                core::cmp::Ordering::Greater => {
+                    // We lost the race - continue.
+                    pos = raw_channel.server_queue_tail.load(Ordering::Relaxed)
+                }
             }
         }
 
@@ -589,10 +597,8 @@ impl ServerConnection {
             64
         );
 
-        let wait_handle = SysObj::create(SysHandle::SELF, 0, &full_url).map_err(|err| {
-            SysMem::free(addr).unwrap();
-            err
-        })?;
+        let wait_handle = SysObj::create(SysHandle::SELF, 0, &full_url)
+            .inspect_err(|_| SysMem::free(addr).unwrap())?;
 
         Ok(Self {
             raw_channel: addr as usize as *mut RawChannel,
@@ -619,21 +625,23 @@ impl ServerConnection {
             slot = &mut raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
-            if stamp == (pos + 1) {
-                match raw_channel.client_queue_tail.compare_exchange_weak(
-                    pos,
-                    pos + 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(tail) => pos = tail, // continue
+            pos = match stamp.cmp(&(pos + 1)) {
+                core::cmp::Ordering::Equal => {
+                    match raw_channel.client_queue_tail.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(tail) => tail, // continue
+                    }
                 }
-            } else if stamp < (pos + 1) {
-                return Err(moto_rt::E_NOT_READY); // The queue is empty.
-            } else {
-                // We lost the race - continue.
-                pos = raw_channel.client_queue_tail.load(Ordering::Relaxed);
+                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is empty.
+                core::cmp::Ordering::Greater => {
+                    // We lost the race - continue.
+                    raw_channel.client_queue_tail.load(Ordering::Relaxed)
+                }
             }
         }
 
