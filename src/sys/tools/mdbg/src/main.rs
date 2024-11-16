@@ -47,7 +47,7 @@ fn _get_backtrace() -> [u64; BT_DEPTH] {
     rbp = unsafe { *(rbp as *mut u64) };
     let mut prev = 0_u64;
 
-    for idx in 0..BT_DEPTH {
+    for entry in &mut backtrace {
         if prev == rbp {
             break;
         }
@@ -59,7 +59,7 @@ fn _get_backtrace() -> [u64; BT_DEPTH] {
         }
         prev = rbp;
         unsafe {
-            backtrace[idx] = *((rbp + 8) as *mut u64);
+            *entry = *((rbp + 8) as *mut u64);
             rbp = *(rbp as *mut u64);
         }
     }
@@ -219,9 +219,9 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_rt::ErrorCode> {
             break;
         }
 
-        for idx in 0..sz {
-            all_tids.push_back(tids[idx]);
-            print_stack_trace(&proc_name, dbg_handle, tids[idx]);
+        for tid in &tids[..sz] {
+            all_tids.push_back(*tid);
+            print_stack_trace(&proc_name, dbg_handle, *tid);
         }
         start_tid = tids[sz - 1] + 1;
     }
@@ -250,8 +250,8 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_rt::ErrorCode> {
             break;
         }
 
-        for idx in 0..sz {
-            if let Err(err) = SysRay::dbg_resume_thread(dbg_handle, tids[idx]) {
+        for tid in &tids[..sz] {
+            if let Err(err) = SysRay::dbg_resume_thread(dbg_handle, *tid) {
                 assert!(
                     err == moto_rt::E_ALREADY_IN_USE
                         || err == moto_rt::E_NOT_FOUND

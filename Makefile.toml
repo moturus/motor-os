@@ -333,6 +333,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/kibim" "${MOTO_BIN}/kibim
 cwd = "./src/sys/tools/mdbg"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/mdbg" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/mdbg"
 '''
 
@@ -340,6 +341,7 @@ strip -o "${MOTO_BIN}/mdbg" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/md
 cwd = "./src/sys/tools/mdbg"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/mdbg" "${MOTO_BIN}/mdbg"
 '''
 
