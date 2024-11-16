@@ -1,7 +1,6 @@
 //! Reference counter for channels.
 
 use alloc::boxed::Box;
-use core::isize;
 use core::ops;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

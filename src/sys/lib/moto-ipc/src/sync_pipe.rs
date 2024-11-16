@@ -33,7 +33,7 @@ impl PipeBuffer {
         assert!(buf_addr & (Self::CACHELINE_SIZE - 1) == 0); // Require cacheline alignment.
         assert!(buf_size & (Self::CACHELINE_SIZE - 1) == 0); // Require cacheline alignment.
         assert!((buf_size >> 1) + Self::DATA_OFFSET < buf_size);
-        assert!(is_power_of_two(buf_size));
+        assert!(buf_size.is_power_of_two());
 
         assert!(Self::version(buf_addr) == 0);
 
@@ -179,11 +179,10 @@ pub struct Writer {
     buffer: PipeBuffer,
 }
 
-const fn is_power_of_two(val: usize) -> bool {
-    (val & (val - 1)) == 0
-}
-
 impl Reader {
+    /// # Safety
+    ///
+    /// Assumes pipe_data is properly initialized.
     pub unsafe fn new(pipe_data: RawPipeData) -> Reader {
         Reader {
             buffer: PipeBuffer::new(
@@ -208,7 +207,7 @@ impl Reader {
         timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         self.buffer.assert_invariants();
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
@@ -266,6 +265,9 @@ impl Reader {
 }
 
 impl Writer {
+    /// # Safety
+    ///
+    /// Assumes pipe_data is properly initialized.
     pub unsafe fn new(pipe_data: RawPipeData) -> Writer {
         Writer {
             buffer: PipeBuffer::new(
@@ -293,7 +295,7 @@ impl Writer {
             return Err(self.buffer.error_code);
         }
         self.buffer.assert_invariants();
-        if buf.len() == 0 {
+        if buf.is_empty() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
@@ -308,7 +310,7 @@ impl Writer {
                     timeout,
                 ) {
                     self.buffer.error_code = err;
-                    written = written.checked_sub(self.buffer.unwrite()).unwrap_or(0);
+                    written = written.saturating_sub(self.buffer.unwrite());
                     if written > 0 {
                         return Ok(written);
                     } else {
@@ -322,7 +324,7 @@ impl Writer {
                 if let Err(err) = SysCpu::wake(self.buffer.ipc_handle) {
                     // Cache the error.
                     self.buffer.error_code = err;
-                    written = written.checked_sub(self.buffer.unwrite()).unwrap_or(0);
+                    written = written.saturating_sub(self.buffer.unwrite());
                     if written > 0 {
                         return Ok(written);
                     } else {
@@ -339,9 +341,11 @@ impl Writer {
     }
 }
 
+#[derive(Default)]
 pub enum Pipe {
     Reader(Reader),
     Writer(Writer),
+    #[default]
     Empty,
     Null,
 }
@@ -352,10 +356,7 @@ impl Pipe {
     }
 
     pub const fn empty(&self) -> bool {
-        match self {
-            Self::Empty => true,
-            _ => false,
-        }
+        matches!(self, Self::Empty)
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -427,7 +428,11 @@ pub struct RawPipeData {
 }
 
 impl RawPipeData {
-    // Release self (memory, handle).
+    /// Release self (memory, handle).
+    ///
+    /// # Safety
+    ///
+    /// self must be properly initialized.
     pub unsafe fn release(self, owner_process: SysHandle) {
         moto_sys::SysObj::put_remote(owner_process, SysHandle::from_u64(self.ipc_handle)).unwrap();
 
@@ -465,12 +470,9 @@ pub fn make_pair(
         1,
     )?;
 
-    let (h1, h2) = SysObj::create_ipc_pair(process_1, process_2, 0).map_err(|err| {
+    let (h1, h2) = SysObj::create_ipc_pair(process_1, process_2, 0).inspect_err(|_| {
         SysMem::unmap(remote_process, 0, u64::MAX, remote).unwrap();
-
         SysMem::unmap(SysHandle::SELF, 0, u64::MAX, local).unwrap();
-
-        err
     })?;
 
     if process_1 == SysHandle::SELF {

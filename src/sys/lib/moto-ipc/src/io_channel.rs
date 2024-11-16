@@ -665,22 +665,24 @@ impl ServerConnection {
             slot = &mut raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
-            if stamp == pos {
-                match raw_channel.server_queue_head.compare_exchange_weak(
-                    pos,
-                    pos + 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(head) => pos = head, // continue
+            pos = match stamp.cmp(&pos) {
+                core::cmp::Ordering::Equal => {
+                    match raw_channel.server_queue_head.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(head) => head, // continue
+                    }
                 }
-            } else if stamp < pos {
-                return Err(moto_rt::E_NOT_READY); // The queue is full.
-            } else {
+                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is full.
                 // We lost the race - continue.
-                pos = raw_channel.server_queue_head.load(Ordering::Relaxed);
-            }
+                core::cmp::Ordering::Greater => {
+                    raw_channel.server_queue_head.load(Ordering::Relaxed)
+                }
+            };
         }
 
         slot.msg = sqe;
@@ -692,8 +694,10 @@ impl ServerConnection {
         self.wait_handle
     }
 
-    // Unsafe because it assumes wait on wait_handle succeeded. Otherwise
-    // raw_buf pointer could still be unmapped.
+    /// # Safety
+    ///
+    /// Unsafe because it assumes wait on wait_handle succeeded. Otherwise
+    /// raw_buf pointer could still be unmapped.
     pub unsafe fn accept(&mut self) -> Result<(), ErrorCode> {
         assert_eq!(self.status, ServerStatus::Created);
 

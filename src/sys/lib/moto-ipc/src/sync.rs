@@ -57,16 +57,26 @@ impl RawChannel {
         self.size
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized and contains T.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut<T: Sized>(&self) -> &mut T {
         assert!(core::mem::size_of::<T>() <= self.size);
         (self.addr as *mut T).as_mut().unwrap_unchecked()
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized and contains T.
     pub unsafe fn get<T: Sized>(&self) -> &T {
         assert!(core::mem::size_of::<T>() <= self.size);
         (self.addr as *const T).as_ref().unwrap_unchecked()
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized and contains T.
     pub unsafe fn get_at_mut<T: Sized>(
         &self,
         buf: *mut T,
@@ -82,6 +92,9 @@ impl RawChannel {
         Ok(core::slice::from_raw_parts_mut(buf, size))
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized and contains T.
     pub unsafe fn get_at<T: Sized>(&self, buf: *const T, size: usize) -> Result<&[T], ErrorCode> {
         let start_addr = buf as usize;
         if (start_addr < self.addr)
@@ -93,6 +106,9 @@ impl RawChannel {
         Ok(core::slice::from_raw_parts(buf, size))
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized.
     pub unsafe fn get_bytes(&self, buf: *const u8, size: usize) -> Result<&[u8], ErrorCode> {
         let start_addr = buf as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {
@@ -102,6 +118,9 @@ impl RawChannel {
         Ok(core::slice::from_raw_parts(buf, size))
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized.
     pub unsafe fn get_bytes_mut(&self, buf: *mut u8, size: usize) -> Result<&mut [u8], ErrorCode> {
         let start_addr = buf as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {
@@ -111,6 +130,9 @@ impl RawChannel {
         Ok(core::slice::from_raw_parts_mut(buf, size))
     }
 
+    /// # Safety
+    ///
+    /// Assumes RawChannel is properly initialized.
     pub unsafe fn put_bytes(&self, src: &[u8], dst: *mut u8) -> Result<(), ErrorCode> {
         let start_addr = dst as usize;
         if (start_addr < self.addr) || ((start_addr + src.len()) > (self.addr + self.size)) {
@@ -124,8 +146,8 @@ impl RawChannel {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ClientConnectionStatus {
-    CONNECTED,
-    NONE,
+    Connected,
+    None,
 }
 
 pub struct ClientConnection {
@@ -178,7 +200,7 @@ impl ClientConnection {
         };
 
         let self_ = Self {
-            status: ClientConnectionStatus::NONE,
+            status: ClientConnectionStatus::None,
             handle: SysHandle::NONE,
             smem_addr: addr,
             channel_size,
@@ -194,7 +216,7 @@ impl ClientConnection {
     }
 
     pub fn connect(&mut self, url: &str) -> Result<(), ErrorCode> {
-        assert_eq!(self.status, ClientConnectionStatus::NONE);
+        assert_eq!(self.status, ClientConnectionStatus::None);
         assert_eq!(self.handle, SysHandle::NONE);
 
         self.req::<RequestHeader>().seq.store(0, Ordering::Release);
@@ -210,7 +232,7 @@ impl ClientConnection {
             }
         );
         self.handle = SysObj::get(SysHandle::SELF, 0, &full_url)?;
-        self.status = ClientConnectionStatus::CONNECTED;
+        self.status = ClientConnectionStatus::Connected;
         Ok(())
     }
 
@@ -218,7 +240,7 @@ impl ClientConnection {
         if self.handle != SysHandle::NONE {
             SysObj::put(self.handle).unwrap();
             self.handle = SysHandle::NONE;
-            self.status = ClientConnectionStatus::NONE;
+            self.status = ClientConnectionStatus::None;
 
             self.req::<RequestHeader>().seq.store(0, Ordering::Relaxed);
             self.seq = 0;
@@ -226,7 +248,7 @@ impl ClientConnection {
     }
 
     pub fn connected(&self) -> bool {
-        self.status == ClientConnectionStatus::CONNECTED
+        self.status == ClientConnectionStatus::Connected
     }
 
     pub fn data(&self) -> &[u8] {
@@ -307,9 +329,9 @@ impl ClientConnection {
 
 #[derive(Eq, PartialEq, Debug)]
 enum LocalServerConnectionStatus {
-    LISTENING,
-    CONNECTED,
-    NONE,
+    Listening,
+    Connected,
+    None,
 }
 
 pub struct LocalServerConnection {
@@ -363,7 +385,7 @@ impl LocalServerConnection {
         };
 
         Ok(Self {
-            status: LocalServerConnectionStatus::NONE,
+            status: LocalServerConnectionStatus::None,
             handle: SysHandle::NONE,
             smem_addr: addr,
             channel_size,
@@ -373,7 +395,7 @@ impl LocalServerConnection {
     }
 
     fn start_listening(&mut self, url: &str) -> Result<(), ErrorCode> {
-        assert_eq!(self.status, LocalServerConnectionStatus::NONE);
+        assert_eq!(self.status, LocalServerConnectionStatus::None);
         assert_eq!(self.handle, SysHandle::NONE);
 
         let full_url = alloc::format!(
@@ -386,7 +408,7 @@ impl LocalServerConnection {
             }
         );
         self.handle = SysObj::create(SysHandle::SELF, 0, &full_url)?;
-        self.status = LocalServerConnectionStatus::LISTENING;
+        self.status = LocalServerConnectionStatus::Listening;
 
         Ok(())
     }
@@ -420,11 +442,11 @@ impl LocalServerConnection {
         }
     }
 
-    pub fn extension<'a, T: 'static>(&'a self) -> Option<&'a T> {
+    pub fn extension<T: 'static>(&self) -> Option<&T> {
         self.extension.downcast_ref::<T>()
     }
 
-    pub fn extension_mut<'a, T: 'static>(&'a mut self) -> Option<&'a mut T> {
+    pub fn extension_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.extension.downcast_mut::<T>()
     }
 
@@ -433,18 +455,18 @@ impl LocalServerConnection {
     }
 
     pub fn connected(&self) -> bool {
-        self.status == LocalServerConnectionStatus::CONNECTED
+        self.status == LocalServerConnectionStatus::Connected
     }
 
     pub fn disconnect(&mut self) {
         match self.status {
-            LocalServerConnectionStatus::LISTENING | LocalServerConnectionStatus::CONNECTED => {
+            LocalServerConnectionStatus::Listening | LocalServerConnectionStatus::Connected => {
                 SysObj::put(self.handle).unwrap();
                 self.handle = SysHandle::NONE;
-                self.status = LocalServerConnectionStatus::NONE;
+                self.status = LocalServerConnectionStatus::None;
                 self.seq = 0;
             }
-            LocalServerConnectionStatus::NONE => {}
+            LocalServerConnectionStatus::None => {}
         }
     }
 
@@ -457,10 +479,9 @@ impl LocalServerConnection {
             self.seq += 2;
             assert_eq!(self.seq, seq + 1);
             assert_eq!(0, self.seq & 1);
-            SysCpu::wake(self.handle).map_err(|err| {
-                assert_eq!(err, moto_rt::E_BAD_HANDLE);
+            SysCpu::wake(self.handle).inspect_err(|err| {
+                assert_eq!(*err, moto_rt::E_BAD_HANDLE);
                 self.disconnect();
-                err
             })
         } else {
             Err(moto_rt::E_INVALID_ARGUMENT)
@@ -540,7 +561,7 @@ impl LocalServer {
     fn add_listener(&mut self) -> Result<(), ErrorCode> {
         let mut listener = LocalServerConnection::new(self.channel_size)?;
         listener.start_listening(self.url.as_str())?;
-        self.listeners.insert(listener.handle.clone(), listener);
+        self.listeners.insert(listener.handle, listener);
         Ok(())
     }
 
@@ -560,16 +581,16 @@ impl LocalServer {
         );
 
         for k in self.listeners.keys() {
-            waiters.push(k.clone());
+            waiters.push(*k);
         }
 
         let mut bad_connections = Vec::new();
         for k in self.active_conns.keys() {
             let conn = self.active_conns.get(k).unwrap();
             if !conn.connected() {
-                bad_connections.push(k.clone());
+                bad_connections.push(*k);
             } else {
-                waiters.push(k.clone());
+                waiters.push(*k);
             }
         }
         for k in bad_connections {
@@ -577,7 +598,7 @@ impl LocalServer {
         }
 
         for k in extra_waiters {
-            waiters.push(k.clone());
+            waiters.push(*k);
         }
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -588,10 +609,10 @@ impl LocalServer {
                 if *waiter == SysHandle::NONE {
                     continue;
                 }
-                if let Some(mut conn) = self.active_conns.remove(&waiter) {
+                if let Some(mut conn) = self.active_conns.remove(waiter) {
                     assert!(conn.connected());
                     conn.disconnect();
-                } else if let Some(mut listener) = self.listeners.remove(&waiter) {
+                } else if let Some(mut listener) = self.listeners.remove(waiter) {
                     // A remote process can connect to the listener and then drop.
                     listener.disconnect();
                 } else {
@@ -606,11 +627,11 @@ impl LocalServer {
             if *h == SysHandle::NONE {
                 break;
             }
-            let handle = h.clone();
+            let handle = *h;
             if let Some(mut conn) = self.listeners.remove(&handle) {
-                assert_eq!(conn.status, LocalServerConnectionStatus::LISTENING);
-                conn.status = LocalServerConnectionStatus::CONNECTED;
-                let prev = self.active_conns.insert(handle.clone(), conn);
+                assert_eq!(conn.status, LocalServerConnectionStatus::Listening);
+                conn.status = LocalServerConnectionStatus::Connected;
+                let prev = self.active_conns.insert(handle, conn);
                 assert!(prev.is_none());
             }
             wakers.push(handle);
