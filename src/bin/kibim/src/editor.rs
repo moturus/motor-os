@@ -8,7 +8,9 @@ use std::{fs::File, path::Path, thread, time::Instant};
 use crate::row::{HlState, Row};
 use crate::{ansi_escape::*, syntax::Conf as SyntaxConf, sys, terminal, Config, Error};
 
-const fn ctrl_key(key: u8) -> u8 { key & 0x1f }
+const fn ctrl_key(key: u8) -> u8 {
+    key & 0x1f
+}
 const EXIT: u8 = ctrl_key(b'Q');
 const DELETE_BIS: u8 = ctrl_key(b'H');
 const REFRESH_SCREEN: u8 = ctrl_key(b'L');
@@ -72,13 +74,19 @@ struct CursorState {
 }
 
 impl CursorState {
-    fn move_to_next_line(&mut self) { (self.x, self.y) = (0, self.y + 1); }
+    fn move_to_next_line(&mut self) {
+        (self.x, self.y) = (0, self.y + 1);
+    }
 
     /// Scroll the terminal window vertically and horizontally (i.e. adjusting the row offset and
     /// the column offset) so that the cursor can be shown.
     fn scroll(&mut self, rx: usize, screen_rows: usize, screen_cols: usize) {
-        self.roff = self.roff.clamp(self.y.saturating_sub(screen_rows.saturating_sub(1)), self.y);
-        self.coff = self.coff.clamp(rx.saturating_sub(screen_cols.saturating_sub(1)), rx);
+        self.roff = self
+            .roff
+            .clamp(self.y.saturating_sub(screen_rows.saturating_sub(1)), self.y);
+        self.coff = self
+            .coff
+            .clamp(rx.saturating_sub(screen_cols.saturating_sub(1)), rx);
     }
 }
 
@@ -134,7 +142,12 @@ struct StatusMessage {
 
 impl StatusMessage {
     /// Create a new status message and set time to the current date/time.
-    fn new(msg: String) -> Self { Self { msg, time: Instant::now() } }
+    fn new(msg: String) -> Self {
+        Self {
+            msg,
+            time: Instant::now(),
+        }
+    }
 }
 
 /// Pretty-format a size in bytes.
@@ -148,7 +161,12 @@ fn format_size(n: u64) -> String {
     // Compute the size with two decimal places (rounded down) as the last two digits of q
     // This avoid float formatting reducing the binary size
     let q = 100 * n / (1024 << ((i - 1) * 10));
-    format!("{}.{:02}{}B", q / 100, q % 100, b" kMGTPEZ"[i as usize] as char)
+    format!(
+        "{}.{:02}{}B",
+        q / 100,
+        q % 100,
+        b" kMGTPEZ"[i as usize] as char
+    )
 }
 
 /// `slice_find` returns the index of `needle` in slice `s` if `needle` is a subslice of `s`,
@@ -180,11 +198,15 @@ impl Editor {
     }
 
     /// Return the current row if the cursor points to an existing row, `None` otherwise.
-    fn current_row(&self) -> Option<&Row> { self.rows.get(self.cursor.y) }
+    fn current_row(&self) -> Option<&Row> {
+        self.rows.get(self.cursor.y)
+    }
 
     /// Return the position of the cursor, in terms of rendered characters (as opposed to
     /// `self.cursor.x`, which is the position of the cursor in terms of bytes).
-    fn rx(&self) -> usize { self.current_row().map_or(0, |r| r.cx2rx[self.cursor.x]) }
+    fn rx(&self) -> usize {
+        self.current_row().map_or(0, |r| r.cx2rx[self.cursor.x])
+    }
 
     /// Move the cursor following an arrow key (← → ↑ ↓).
     fn move_cursor(&mut self, key: &AKey, ctrl: bool) {
@@ -200,8 +222,9 @@ impl Editor {
             // ← at the beginning of the line: move to the end of the previous line. The x
             // position will be adjusted after this `match` to accommodate the current row
             // length, so we can just set here to the maximum possible value here.
-            (AKey::Left, _) if self.cursor.y > 0 =>
-                (self.cursor.y, cursor_x) = (self.cursor.y - 1, usize::MAX),
+            (AKey::Left, _) if self.cursor.y > 0 => {
+                (self.cursor.y, cursor_x) = (self.cursor.y - 1, usize::MAX)
+            }
             (AKey::Right, Some(row)) if self.cursor.x < row.chars.len() => {
                 cursor_x += row.get_char_size(row.cx2rx[cursor_x]);
                 // → moving to next word
@@ -224,7 +247,10 @@ impl Editor {
     /// might be illegal (x is further right than the last character of the row). If that is the
     /// case, clamp `self.cursor.x`.
     fn update_cursor_x_position(&mut self) {
-        self.cursor.x = self.cursor.x.min(self.current_row().map_or(0, |row| row.chars.len()));
+        self.cursor.x = self
+            .cursor
+            .x
+            .min(self.current_row().map_or(0, |row| row.chars.len()));
     }
 
     /// Run a loop to obtain the key that was pressed. At each iteration of the loop (until a key is
@@ -324,7 +350,11 @@ impl Editor {
     /// has changed during the update (for instance, it is now in "multi-line comment" state, keep
     /// updating the next rows
     fn update_row(&mut self, y: usize, ignore_following_rows: bool) {
-        let mut hl_state = if y > 0 { self.rows[y - 1].hl_state } else { HlState::Normal };
+        let mut hl_state = if y > 0 {
+            self.rows[y - 1].hl_state
+        } else {
+            HlState::Normal
+        };
         for row in self.rows.iter_mut().skip(y) {
             let previous_hl_state = row.hl_state;
             hl_state = row.update(&self.syntax, hl_state, self.config.tab_stop);
@@ -384,10 +414,17 @@ impl Editor {
             let row = &mut self.rows[self.cursor.y];
             // Obtain the number of bytes to be removed: could be 1-4 (UTF-8 character size).
             let n_bytes_to_remove = row.get_char_size(row.cx2rx[self.cursor.x] - 1);
-            row.chars.splice(self.cursor.x - n_bytes_to_remove..self.cursor.x, iter::empty());
+            row.chars.splice(
+                self.cursor.x - n_bytes_to_remove..self.cursor.x,
+                iter::empty(),
+            );
             self.update_row(self.cursor.y, false);
             self.cursor.x -= n_bytes_to_remove;
-            self.dirty = if self.is_empty() { self.file_name.is_some() } else { true };
+            self.dirty = if self.is_empty() {
+                self.file_name.is_some()
+            } else {
+                true
+            };
             self.n_bytes -= n_bytes_to_remove as u64;
         } else if self.cursor.y < self.rows.len() && self.cursor.y > 0 {
             let row = self.rows.remove(self.cursor.y);
@@ -434,9 +471,13 @@ impl Editor {
         if self.cursor.y == self.rows.len() {
             self.rows.push(Row::new(self.copied_row.clone()));
         } else {
-            self.rows.insert(self.cursor.y + 1, Row::new(self.copied_row.clone()));
+            self.rows
+                .insert(self.cursor.y + 1, Row::new(self.copied_row.clone()));
         }
-        self.update_row(self.cursor.y + usize::from(self.cursor.y + 1 != self.rows.len()), false);
+        self.update_row(
+            self.cursor.y + usize::from(self.cursor.y + 1 != self.rows.len()),
+            false,
+        );
         (self.cursor.y, self.dirty) = (self.cursor.y + 1, true);
         // The line number has changed
         self.update_screen_cols();
@@ -460,7 +501,12 @@ impl Editor {
                 // this case, so we need to check the last byte directly.
                 let mut file = File::open(path)?;
                 file.seek(io::SeekFrom::End(0))?;
-                if file.bytes().next().transpose()?.map_or(true, |b| b == b'\n') {
+                if file
+                    .bytes()
+                    .next()
+                    .transpose()?
+                    .map_or(true, |b| b == b'\n')
+                {
                     self.rows.push(Row::new(Vec::new()));
                 }
                 self.update_all_rows();
@@ -482,7 +528,7 @@ impl Editor {
             file.write_all(&row.chars)?;
             written += row.chars.len();
             if i != (self.rows.len() - 1) {
-                file.write_all(&[b'\n'])?;
+                file.write_all(b"\n")?;
                 written += 1;
             }
         }
@@ -521,14 +567,22 @@ impl Editor {
     fn draw_left_padding<T: Display>(&self, buffer: &mut String, val: T) -> Result<(), Error> {
         if self.ln_pad >= 2 {
             // \x1b[38;5;240m: Dark grey color; \u{2502}: pipe "│"
-            write!(buffer, "\x1b[38;5;240m{:>2$} \u{2502}{}", val, RESET_FMT, self.ln_pad - 2)?;
+            write!(
+                buffer,
+                "\x1b[38;5;240m{:>2$} \u{2502}{}",
+                val,
+                RESET_FMT,
+                self.ln_pad - 2
+            )?;
         }
         Ok(())
     }
 
     /// Return whether the file being edited is empty or not. If there is more than one row, even if
     /// all the rows are empty, `is_empty` returns `false`, since the text contains new lines.
-    fn is_empty(&self) -> bool { self.rows.len() <= 1 && self.n_bytes == 0 }
+    fn is_empty(&self) -> bool {
+        self.rows.len() <= 1 && self.n_bytes == 0
+    }
 
     /// Draw rows of text and empty rows on the terminal, by adding characters to the buffer.
     fn draw_rows(&self, buffer: &mut String) -> Result<(), Error> {
@@ -556,18 +610,27 @@ impl Editor {
     fn draw_status_bar(&self, buffer: &mut String) -> Result<(), Error> {
         // Left part of the status bar
         let modified = if self.dirty { " (modified)" } else { "" };
-        let mut left =
-            format!("{:.30}{modified}", self.file_name.as_deref().unwrap_or("[No Name]"));
+        let mut left = format!(
+            "{:.30}{modified}",
+            self.file_name.as_deref().unwrap_or("[No Name]")
+        );
         left.truncate(self.window_width);
 
         // Right part of the status bar
         let size = format_size(self.n_bytes + self.rows.len().saturating_sub(1) as u64);
-        let right =
-            format!("{} | {size} | {}:{}", self.syntax.name, self.cursor.y + 1, self.rx() + 1);
+        let right = format!(
+            "{} | {size} | {}:{}",
+            self.syntax.name,
+            self.cursor.y + 1,
+            self.rx() + 1
+        );
 
         // Draw
         let rw = self.window_width.saturating_sub(left.len());
-        write!(buffer, "{REVERSE_VIDEO}{left}{right:>rw$.rw$}{RESET_FMT}\r\n")?;
+        write!(
+            buffer,
+            "{REVERSE_VIDEO}{left}{right:>rw$.rw$}{RESET_FMT}\r\n"
+        )?;
         Ok(())
     }
 
@@ -575,7 +638,11 @@ impl Editor {
     fn draw_message_bar(&self, buffer: &mut String) {
         buffer.push_str(CLEAR_LINE_RIGHT_OF_CURSOR);
         let msg_duration = self.config.message_dur;
-        if let Some(sm) = self.status_msg.as_ref().filter(|sm| sm.time.elapsed() < msg_duration) {
+        if let Some(sm) = self
+            .status_msg
+            .as_ref()
+            .filter(|sm| sm.time.elapsed() < msg_duration)
+        {
             buffer.push_str(&sm.msg[..sm.msg.len().min(self.window_width)]);
         }
     }
@@ -583,17 +650,24 @@ impl Editor {
     /// Refresh the screen: update the offsets, draw the rows, the status bar, the message bar, and
     /// move the cursor to the correct position.
     fn refresh_screen(&mut self) -> Result<(), Error> {
-        self.cursor.scroll(self.rx(), self.screen_rows, self.screen_cols);
+        self.cursor
+            .scroll(self.rx(), self.screen_rows, self.screen_cols);
         let mut buffer = format!("{HIDE_CURSOR}{MOVE_CURSOR_TO_START}");
         self.draw_rows(&mut buffer)?;
         self.draw_status_bar(&mut buffer)?;
         self.draw_message_bar(&mut buffer);
         let (cursor_x, cursor_y) = if self.prompt_mode.is_none() {
             // If not in prompt mode, position the cursor according to the `cursor` attributes.
-            (self.rx() - self.cursor.coff + 1 + self.ln_pad, self.cursor.y - self.cursor.roff + 1)
+            (
+                self.rx() - self.cursor.coff + 1 + self.ln_pad,
+                self.cursor.y - self.cursor.roff + 1,
+            )
         } else {
             // If in prompt mode, position the cursor on the prompt line at the end of the line.
-            (self.status_msg.as_ref().map_or(0, |sm| sm.msg.len() + 1), self.screen_rows + 2)
+            (
+                self.status_msg.as_ref().map_or(0, |sm| sm.msg.len() + 1),
+                self.screen_rows + 2,
+            )
         };
         // Finally, print `buffer` and move the cursor
         print!("{buffer}\x1b[{cursor_y};{cursor_x}H{SHOW_CURSOR}");
@@ -647,8 +721,9 @@ impl Editor {
                 }
                 None => prompt_mode = Some(PromptMode::Save(String::new())),
             },
-            Key::Char(FIND) =>
-                prompt_mode = Some(PromptMode::Find(String::new(), self.cursor.clone(), None)),
+            Key::Char(FIND) => {
+                prompt_mode = Some(PromptMode::Find(String::new(), self.cursor.clone(), None))
+            }
             Key::Char(GOTO) => prompt_mode = Some(PromptMode::GoTo(String::new())),
             Key::Char(DUPLICATE) => self.duplicate_current_row(),
             Key::Char(CUT) => {
@@ -775,8 +850,9 @@ impl PromptMode {
                 match process_prompt_keypress(b, key) {
                     PromptState::Active(query) => {
                         let (last_match, forward) = match key {
-                            Key::Arrow(AKey::Right | AKey::Down) | Key::Char(FIND) =>
-                                (last_match, true),
+                            Key::Arrow(AKey::Right | AKey::Down) | Key::Char(FIND) => {
+                                (last_match, true)
+                            }
                             Key::Arrow(AKey::Left | AKey::Up) => (last_match, false),
                             _ => (None, true),
                         };
@@ -793,7 +869,8 @@ impl PromptMode {
                 PromptState::Active(b) => return Ok(Some(Self::GoTo(b))),
                 PromptState::Cancelled => (),
                 PromptState::Completed(b) => {
-                    let mut split = b.splitn(2, ':')
+                    let mut split = b
+                        .splitn(2, ':')
                         // saturating_sub: Lines and cols are 1-indexed
                         .map(|u| u.trim().parse().map(|s: usize| s.saturating_sub(1)));
                     match (split.next().transpose(), split.next().transpose()) {
