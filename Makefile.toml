@@ -360,6 +360,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/rnetbench" "${MOTO_BIN}/r
 [tasks.make_img_debug]
 cwd = "./src/imager"
 script = '''
+cargo clippy
 cargo run --release -- ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY} debug
 cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/src/vm_scripts/"* \
    "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/vm_images/debug/"
@@ -368,6 +369,7 @@ cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/src/vm_scripts/"* \
 [tasks.make_img_release]
 cwd = "./src/imager"
 script = '''
+cargo clippy
 cargo run --release -- ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY} release
 cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/src/vm_scripts/"* \
    "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/vm_images/release/"

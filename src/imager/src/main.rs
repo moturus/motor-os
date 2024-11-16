@@ -20,7 +20,7 @@ use std::io::{self, Seek, SeekFrom};
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
-static BIN_FULL: [&'static str; 10] = [
+static BIN_FULL: [&str; 10] = [
     "bin/httpd",
     "bin/kibim",
     "bin/rush",
@@ -34,7 +34,7 @@ static BIN_FULL: [&'static str; 10] = [
 ];
 
 // For the "web" image.
-static BIN_WEB: [&'static str; 4] = ["bin/httpd", "sys/sys-init", "sys/sys-log", "sys/sys-tty"];
+static BIN_WEB: [&str; 4] = ["bin/httpd", "sys/sys-init", "sys/sys-log", "sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
@@ -160,7 +160,7 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
     // Write the header.
     let header_bytes =
         unsafe { core::slice::from_raw_parts(initrd_header.as_ptr() as *const u8, 512) };
-    initrd.write(header_bytes).unwrap();
+    initrd.write_all(header_bytes).unwrap();
     initrd.flush().unwrap();
     assert_eq!(
         header.kloader_start,
@@ -176,7 +176,7 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
 
     // Add padding.
     for _ in 0..(header.kernel_start - header.kloader_end) {
-        initrd.write(&[0_u8; 1]).unwrap();
+        initrd.write_all(&[0_u8; 1]).unwrap();
     }
 
     // Write the kernel.
@@ -190,7 +190,7 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
 
     // Add padding.
     for _ in 0..(header.sys_io_start - header.kernel_end) {
-        initrd.write(&[0_u8; 1]).unwrap();
+        initrd.write_all(&[0_u8; 1]).unwrap();
     }
 
     // Write sys-io.
@@ -212,9 +212,7 @@ fn set_partition(
 ) -> u32 {
     let data = File::open(partition).unwrap();
     let size = data.metadata().unwrap().len();
-    let sectors = ((size + u64::from(SECTOR_SIZE) - 1) / u64::from(SECTOR_SIZE))
-        .try_into()
-        .unwrap();
+    let sectors = size.div_ceil(u64::from(SECTOR_SIZE)).try_into().unwrap();
 
     mbr[idx] = mbrman::MBRPartitionEntry {
         boot: BOOT_ACTIVE,
@@ -295,28 +293,26 @@ fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
 
     for entry in dir_to_add
         .read_dir()
-        .expect(format!("Error reading dir {:?}", dir_to_add).as_str())
+        .unwrap_or_else(|_| panic!("Error reading dir {:?}", dir_to_add))
+        .flatten()
     {
-        if let Ok(entry) = entry {
-            let key = entry.path();
-            let value = dest_path.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                // Recurse.
-                add_static_dir(files, key, value.as_path());
-            } else if entry.file_type().unwrap().is_file() {
-                files.insert(key, value.as_os_str().to_str().unwrap().to_owned());
-            }
+        let key = entry.path();
+        let value = dest_path.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            // Recurse.
+            add_static_dir(files, key, value.as_path());
+        } else if entry.file_type().unwrap().is_file() {
+            files.insert(key, value.as_os_str().to_str().unwrap().to_owned());
         }
     }
 }
 
 fn print_usage_and_exit() -> ! {
     eprintln!(
-        "{}",
-        r#"
+        "
 Motūrus OS image builder usage:
     imager $MOTORH debug|release
-"#
+"
     );
     std::process::exit(1);
 }
