@@ -2,7 +2,6 @@
 
 use core::sync::atomic::*;
 
-use super::offset_of;
 use super::pci;
 use super::pci::le16;
 use super::pci::le32;
@@ -11,27 +10,28 @@ use super::pci::PciBar;
 use super::pci::PciDevice;
 use super::pci::PciDeviceID;
 use super::virtio_queue::Virtqueue;
+use core::mem::offset_of;
 
 #[derive(Debug)]
 pub enum VirtioDeviceKind {
-    UNKNOWN(u16),
-    NET,
-    BLOCK,
-    MEM,
-    CONSOLE,
-    RNG,
+    Unknown(u16),
+    Net,
+    Block,
+    Mem,
+    Console,
+    Rng,
 }
 
 impl VirtioDeviceKind {
     fn from_device_id(device_id: u16) -> Self {
         match device_id {
             // We work only with standard/modern VirtIO devices.
-            0x1041 => VirtioDeviceKind::NET,
-            0x1042 => VirtioDeviceKind::BLOCK,
-            0x1045 => VirtioDeviceKind::MEM,
-            0x1043 => VirtioDeviceKind::CONSOLE,
-            0x1044 => VirtioDeviceKind::RNG,
-            x => VirtioDeviceKind::UNKNOWN(x),
+            0x1041 => VirtioDeviceKind::Net,
+            0x1042 => VirtioDeviceKind::Block,
+            0x1045 => VirtioDeviceKind::Mem,
+            0x1043 => VirtioDeviceKind::Console,
+            0x1044 => VirtioDeviceKind::Rng,
+            x => VirtioDeviceKind::Unknown(x),
         }
     }
 }
@@ -174,7 +174,7 @@ impl VirtioDevice {
         }
 
         let kind = VirtioDeviceKind::from_device_id(device_id.device_id());
-        if let VirtioDeviceKind::UNKNOWN(x) = kind {
+        if let VirtioDeviceKind::Unknown(x) = kind {
             log::warn!(
                 "Skipping VirtIO device_id with unknown device_id id 0x{:x}",
                 x
@@ -254,7 +254,7 @@ impl VirtioDevice {
         let mut device_cfg: Option<VirtioPciCap> = None;
         for cap in &virtio_caps {
             if cap.cfg_type == VIRTIO_PCI_CAP_DEVICE_CFG {
-                device_cfg = Some(cap.clone());
+                device_cfg = Some(*cap);
                 if cap.bar != common_cfg.bar {
                     pci_device.bars[cap.bar as usize] = Some(PciBar::init(device_id, cap.bar));
                 }
@@ -266,7 +266,7 @@ impl VirtioDevice {
         let mut notify_cfg = None;
         for cap in &virtio_caps {
             if cap.cfg_type == VIRTIO_PCI_CAP_NOTIFY_CFG {
-                notify_cfg = Some(cap.clone());
+                notify_cfg = Some(*cap);
                 if cap.bar != common_cfg.bar {
                     pci_device.bars[cap.bar as usize] = Some(PciBar::init(device_id, cap.bar));
                 }
@@ -276,7 +276,7 @@ impl VirtioDevice {
         Ok(alloc::boxed::Box::new(VirtioDevice {
             pci_device,
             kind,
-            common_cfg: common_cfg.clone(),
+            common_cfg: *common_cfg,
             device_cfg,
             notify_cfg,
             msix: None,
@@ -295,11 +295,11 @@ impl VirtioDevice {
 
         // Enable MSI-X.
         let caps = self.pci_device.id.find_capabilities(pci::PCI_CAP_MSIX);
-        if caps.len() > 0 {
+        if !caps.is_empty() {
             self.enable_msix(caps[0]);
         } else {
             let caps = self.pci_device.id.find_capabilities(pci::PCI_CAP_MSI);
-            if caps.len() > 0 {
+            if !caps.is_empty() {
                 moto_sys::SysRay::log(
                     alloc::format!(
                         "VirtIO {:?} device has MSI but not MSI-X capability.",
@@ -480,7 +480,7 @@ impl VirtioDevice {
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
-        let feature_select_offset = self.common_cfg.offset as u64 + 0;
+        let feature_select_offset = self.common_cfg.offset as u64;
         let feature_offset = self.common_cfg.offset as u64 + 4;
 
         cfg_bar.write_u32(feature_select_offset, 0);
@@ -577,7 +577,7 @@ impl VirtioDevice {
         let msi_msg_data: u32 = (1 << 14) | (irq_num as u32);
 
         let offset = (msix.table_offset as u64) + (16 * irq_idx as usize) as u64;
-        table_bar.write_u64(offset + 0, msi_msg_addr);
+        table_bar.write_u64(offset, msi_msg_addr);
         table_bar.write_u32(offset + 8, msi_msg_data);
         let offset = (msix.table_offset as u64) + (16 * irq_idx as usize + 12) as u64;
         let mut entry_ctrl = table_bar.read_u32(offset);
@@ -739,19 +739,19 @@ pub fn init_virtio_devices(mapper: &'static dyn super::KernelAdapter) {
 
     let pci_devices = pci::brute_force_scan();
     for dev in &pci_devices {
-        if let Ok(mut device) = VirtioDevice::parse(dev.clone()) {
+        if let Ok(mut device) = VirtioDevice::parse(*dev) {
             device.init();
             device.reset();
             device.acknowledge_device();
 
             match device.kind {
-                VirtioDeviceKind::BLOCK => {
+                VirtioDeviceKind::Block => {
                     super::virtio_blk::Blk::init(device);
                 }
-                VirtioDeviceKind::NET => {
+                VirtioDeviceKind::Net => {
                     super::virtio_net::NetDev::init(device);
                 }
-                VirtioDeviceKind::RNG => {
+                VirtioDeviceKind::Rng => {
                     super::virtio_rng::Rng::init(device);
                 }
                 _ => {}

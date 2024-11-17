@@ -77,7 +77,7 @@ impl SyncFileSystem {
     }
 
     pub fn open_fs(mut block_device: Box<dyn SyncBlockDevice>) -> Result<Self, FsError> {
-        let mut block = Box::new(Block::new_uninit());
+        let mut block = Box::new(Block::new_zeroed());
         block_device.read_block(0, block.as_bytes_mut())?;
         let superblock = Superblock::from(block)?;
 
@@ -148,7 +148,7 @@ impl SyncFileSystem {
         let prev_size = meta.size;
 
         // Update the parent dir.
-        if prev_size < MAX_ENTRIES_IN_META_BLOCK as u64 {
+        if prev_size < MAX_ENTRIES_IN_META_BLOCK {
             // Stick the new block entry into the meta block.
             let parent_block = self.blockcache.get_mut(parent_id.block_no);
             let meta = unsafe { parent_block.block_mut().get_mut::<EntryMetadata>() };
@@ -351,9 +351,8 @@ impl SyncFileSystem {
         self.blockcache.write(block_no)?;
 
         self.add_directory_entry_inner(parent_id, new_id, name)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
 
         // Commit.
@@ -369,7 +368,7 @@ impl SyncFileSystem {
         meta.validate_dir(parent)?;
         let num_entries = meta.size;
 
-        if pos as u64 >= meta.size {
+        if pos >= meta.size {
             return Err(FsError::NotFound);
         }
 
@@ -403,12 +402,11 @@ impl SyncFileSystem {
             (pos % MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST) / MAX_ENTRIES_IN_DATA_BLOCK;
         let data_block_no = link_block.block().get_datablock_no_in_link(data_block_idx);
 
-        return self
-            .blockcache
+        self.blockcache
             .read(data_block_no)?
             .block()
             .get_dir_entry((pos % MAX_ENTRIES_IN_DATA_BLOCK) as usize)
-            .to_owned();
+            .to_owned()
     }
 
     pub fn get_directory_entry_by_name(
@@ -419,7 +417,7 @@ impl SyncFileSystem {
         self.error?;
         let (block_no, entry_pos) = self.find_entry_by_name(parent, name)?;
         let block = self.blockcache.read(block_no).unwrap();
-        Ok(block.block().get_dir_entry(entry_pos).to_owned()?)
+        block.block().get_dir_entry(entry_pos).to_owned()
     }
 
     /// Get the number of directory entries (children).
@@ -429,7 +427,7 @@ impl SyncFileSystem {
         let meta = unsafe { block.block().get::<EntryMetadata>() };
         meta.validate_dir(dir)?;
 
-        Ok(meta.size as u64)
+        Ok(meta.size)
     }
 
     /// Get file size.
@@ -727,9 +725,8 @@ impl SyncFileSystem {
 
         // Move to the new parent.
         self.add_directory_entry_inner(new_parent, entry_id, new_name)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
 
         #[cfg(debug_assertions)]
@@ -759,9 +756,8 @@ impl SyncFileSystem {
         }
 
         self.remove_directory_entry_inner(old_parent, entry_id)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
         if self.superblock.header().txn_link_block != 0 {
             self.free_txn_block(BlockType::Links)?;
@@ -818,9 +814,8 @@ impl SyncFileSystem {
         fbh.txn_meta_block = entry_id.block_no;
 
         self.remove_directory_entry_inner(parent_id, entry_id)
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
 
         // Commit.
@@ -1006,17 +1001,16 @@ impl SyncFileSystem {
                     (new_end - offset) as usize,
                 );
             }
-            self.blockcache.write(file_id.block_no).map_err(|e| {
+            self.blockcache.write(file_id.block_no).inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
             return Ok((new_end - offset) as usize);
         }
 
         if new_size == prev_size {
-            return self.update_file(file_id, offset, buf);
+            self.update_file(file_id, offset, buf)
         } else {
-            return self.append(file_id, offset, buf);
+            self.append(file_id, offset, buf)
         }
     }
 
@@ -1038,7 +1032,7 @@ impl SyncFileSystem {
             return Ok(0);
         }
         let end = file_size.min(offset + (buf.len() as u64));
-        if file_size <= (MAX_BYTES_IN_META_BLOCK as u64) {
+        if file_size <= MAX_BYTES_IN_META_BLOCK {
             // We are still in the main block.
             unsafe {
                 copy_nonoverlapping(
@@ -1063,7 +1057,7 @@ impl SyncFileSystem {
                 (new_end - offset) as usize,
             );
         }
-        return Ok((new_end - offset) as usize);
+        Ok((new_end - offset) as usize)
     }
 
     fn append(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize, FsError> {
@@ -1110,9 +1104,8 @@ impl SyncFileSystem {
                     (new_size - prev_size) as usize,
                 );
             }
-            self.blockcache.write(data_block_no).map_err(|e| {
+            self.blockcache.write(data_block_no).inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
 
             // Update the meta.
@@ -1123,9 +1116,8 @@ impl SyncFileSystem {
             let meta = unsafe { meta_block.block_mut().get_mut::<EntryMetadata>() };
             meta.size = new_size;
             meta.set_crc32();
-            self.blockcache.write(file_id.block_no).map_err(|e| {
+            self.blockcache.write(file_id.block_no).inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })?;
 
             // Commit the txn.
@@ -1173,9 +1165,8 @@ impl SyncFileSystem {
                 (new_size - prev_size) as usize,
             );
         }
-        self.blockcache.write(data_block_no).map_err(|e| {
+        self.blockcache.write(data_block_no).inspect_err(|_| {
             let _ = self.make_error();
-            e
         })?;
 
         if new_size <= MAX_BYTES_ONLY_DATA_BLOCKS {
@@ -1190,10 +1181,10 @@ impl SyncFileSystem {
                 || (prev_size == MAX_BYTES_ONLY_DATA_BLOCKS);
 
             if need_new_link_block {
-                let link_block_no = self.allocate_txn_block(BlockType::Links).map_err(|e| {
-                    let _ = self.make_error();
-                    e
-                })?;
+                let link_block_no =
+                    self.allocate_txn_block(BlockType::Links).inspect_err(|_| {
+                        let _ = self.make_error();
+                    })?;
 
                 let (link_block, data_block_idx) = if prev_size == MAX_BYTES_ONLY_DATA_BLOCKS {
                     let meta_block = *self.blockcache.get(file_id.block_no).block();
@@ -1216,9 +1207,8 @@ impl SyncFileSystem {
                 link_block
                     .block_mut()
                     .set_datablock_no_in_link(data_block_idx, data_block_no);
-                self.blockcache.write(link_block_no).map_err(|e| {
+                self.blockcache.write(link_block_no).inspect_err(|_| {
                     let _ = self.make_error();
-                    e
                 })?;
 
                 let link_block_idx = prev_size >> BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST.ilog2();
@@ -1244,9 +1234,8 @@ impl SyncFileSystem {
                     .unwrap()
                     .block_mut()
                     .set_datablock_no_in_link(data_block_idx, data_block_no);
-                self.blockcache.write(link_block_no).map_err(|e| {
+                self.blockcache.write(link_block_no).inspect_err(|_| {
                     let _ = self.make_error();
-                    e
                 })?;
             }
         } else {
@@ -1257,25 +1246,23 @@ impl SyncFileSystem {
 
             if need_new_list_of_links_block {
                 // Always a new link block here.
-                let link_block_no = self.allocate_txn_block(BlockType::Links).map_err(|e| {
-                    let _ = self.make_error();
-                    e
-                })?;
+                let link_block_no =
+                    self.allocate_txn_block(BlockType::Links).inspect_err(|_| {
+                        let _ = self.make_error();
+                    })?;
                 let link_block = self.blockcache.get_block_uninit(link_block_no);
 
                 link_block
                     .block_mut()
                     .set_datablock_no_in_link(0, data_block_no);
-                self.blockcache.write(link_block_no).map_err(|e| {
+                self.blockcache.write(link_block_no).inspect_err(|_| {
                     let _ = self.make_error();
-                    e
                 })?;
 
                 let list_of_links_block_no = self
                     .allocate_txn_block(BlockType::ListOfLinks)
-                    .map_err(|e| {
+                    .inspect_err(|_| {
                         let _ = self.make_error();
-                        e
                     })?;
                 let (list_of_links_block, link_block_idx) =
                     if prev_size == MAX_BYTES_SINGLE_LEVEL_LIST_BLOCKS {
@@ -1300,10 +1287,11 @@ impl SyncFileSystem {
                 list_of_links_block
                     .block_mut()
                     .set_datablock_no_in_link(link_block_idx, link_block_no);
-                self.blockcache.write(list_of_links_block_no).map_err(|e| {
-                    let _ = self.make_error();
-                    e
-                })?;
+                self.blockcache
+                    .write(list_of_links_block_no)
+                    .inspect_err(|_| {
+                        let _ = self.make_error();
+                    })?;
 
                 let list_of_links_block_idx =
                     prev_size >> BYTES_COVERED_BY_SECOND_LEVEL_BLOCKLIST.ilog2();
@@ -1330,28 +1318,28 @@ impl SyncFileSystem {
                     >> BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST.ilog2();
 
                 if need_new_link_block {
-                    let link_block_no = self.allocate_txn_block(BlockType::Links).map_err(|e| {
-                        let _ = self.make_error();
-                        e
-                    })?;
+                    let link_block_no =
+                        self.allocate_txn_block(BlockType::Links).inspect_err(|_| {
+                            let _ = self.make_error();
+                        })?;
                     let link_block = self.blockcache.get_block_uninit(link_block_no);
 
                     link_block
                         .block_mut()
                         .set_datablock_no_in_link(0, data_block_no);
-                    self.blockcache.write(link_block_no).map_err(|e| {
+                    self.blockcache.write(link_block_no).inspect_err(|_| {
                         let _ = self.make_error();
-                        e
                     })?;
 
                     let list_of_links_block = self.blockcache.get_mut(list_of_links_block_no);
                     list_of_links_block
                         .block_mut()
                         .set_datablock_no_in_link(link_block_idx, link_block_no);
-                    self.blockcache.write(list_of_links_block_no).map_err(|e| {
-                        let _ = self.make_error();
-                        e
-                    })?;
+                    self.blockcache
+                        .write(list_of_links_block_no)
+                        .inspect_err(|_| {
+                            let _ = self.make_error();
+                        })?;
                 } else {
                     let link_block_no = self
                         .blockcache
@@ -1369,9 +1357,8 @@ impl SyncFileSystem {
                         .unwrap()
                         .block_mut()
                         .set_datablock_no_in_link(data_block_idx, data_block_no);
-                    self.blockcache.write(link_block_no).map_err(|e| {
+                    self.blockcache.write(link_block_no).inspect_err(|_| {
                         let _ = self.make_error();
-                        e
                     })?;
                 }
             }
@@ -1382,13 +1369,12 @@ impl SyncFileSystem {
         let meta = unsafe { meta_block.block_mut().get_mut::<EntryMetadata>() };
         meta.size = new_size;
         meta.set_crc32();
-        self.blockcache.write(file_id.block_no).map_err(|e| {
+        self.blockcache.write(file_id.block_no).inspect_err(|_| {
             let _ = self.make_error();
-            e
         })?;
 
         self.commit_txn()?;
-        return Ok((new_size - prev_size) as usize);
+        Ok((new_size - prev_size) as usize)
     }
 
     fn update_file(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize, FsError> {
@@ -1405,7 +1391,7 @@ impl SyncFileSystem {
             );
         }
         self.blockcache.write(data_block_no)?;
-        return Ok((new_end - offset) as usize);
+        Ok((new_end - offset) as usize)
     }
 
     fn find_data_block(&mut self, file_id: EntryId, offset: u64) -> Result<u64, FsError> {
@@ -1452,7 +1438,7 @@ impl SyncFileSystem {
         let link_block = self.blockcache.read(link_block_no)?;
         let data_block_idx =
             (offset & (BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST - 1)) >> BLOCK_SIZE.ilog2();
-        return Ok(link_block.block().get_datablock_no_in_link(data_block_idx));
+        Ok(link_block.block().get_datablock_no_in_link(data_block_idx))
     }
 
     fn find_entry_by_id(
@@ -1506,8 +1492,7 @@ impl SyncFileSystem {
         }
 
         if num_entries <= MAX_ENTRIES_ONLY_DATA_BLOCKS {
-            let num_blocks =
-                (num_entries + MAX_ENTRIES_IN_DATA_BLOCK - 1) / MAX_ENTRIES_IN_DATA_BLOCK;
+            let num_blocks = num_entries.div_ceil(MAX_ENTRIES_IN_DATA_BLOCK);
             assert!(num_blocks <= MAX_LINKS_IN_META_BLOCK);
 
             // Copy links out so that we don't have to juggle cached blocks.
@@ -1532,10 +1517,9 @@ impl SyncFileSystem {
             return Err(FsError::NotFound);
         }
 
-        let num_link_blocks = (num_entries + MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST - 1)
-            / MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST;
+        let num_link_blocks = num_entries.div_ceil(MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST);
         assert!(num_link_blocks <= MAX_LINKS_IN_META_BLOCK);
-        let num_blocks = (num_entries + MAX_ENTRIES_IN_DATA_BLOCK - 1) / MAX_ENTRIES_IN_DATA_BLOCK;
+        let num_blocks = num_entries.div_ceil(MAX_ENTRIES_IN_DATA_BLOCK);
 
         // Copy links out so that we don't have to juggle cached blocks.
         let link_block_nos = *parent_block.block();
@@ -1565,13 +1549,13 @@ impl SyncFileSystem {
                 }
             }
         }
-        return Err(FsError::NotFound);
+        Err(FsError::NotFound)
     }
 
     fn make_error(&mut self) -> Result<(), FsError> {
         assert!(self.error.is_ok());
         self.error = Err(FsError::ValidationFailed);
-        return self.error;
+        self.error
     }
 
     fn save_superblock(&mut self) -> Result<(), FsError> {
@@ -1579,9 +1563,8 @@ impl SyncFileSystem {
         self.superblock.header_mut().set_crc32();
         self.blockcache
             .write_uncached_block(0, self.superblock.block())
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = self.make_error();
-                e
             })
     }
 
@@ -1590,9 +1573,8 @@ impl SyncFileSystem {
         let meta = unsafe { block.block_mut().get_mut::<EntryMetadata>() };
         meta.size += 1;
         meta.set_crc32();
-        self.blockcache.write(block_no).map_err(|e| {
-            let _ = self.make_error(); // We cannot recover from this.
-            e
+        self.blockcache.write(block_no).inspect_err(|_| {
+            let _ = self.make_error();
         })
     }
 

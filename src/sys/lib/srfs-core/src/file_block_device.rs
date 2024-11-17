@@ -18,7 +18,7 @@ impl FileBlockDevice {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let len = file.metadata()?.len();
-        if len & (BLOCK_SIZE as u64 - 1) != 0 {
+        if len & (BLOCK_SIZE - 1) != 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
 
@@ -56,7 +56,7 @@ impl crate::SyncBlockDevice for FileBlockDevice {
         }
 
         self.file
-            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE as u64))
+            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE))
             .map_err(|_| FsError::IoError)?;
 
         let read = self.file.read(buf).map_err(|_| FsError::IoError)?;
@@ -77,7 +77,7 @@ impl crate::SyncBlockDevice for FileBlockDevice {
         }
 
         self.file
-            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE as u64))
+            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE))
             .map_err(|_| FsError::IoError)?;
 
         let written = self.file.write(buf).map_err(|_| FsError::IoError)?;

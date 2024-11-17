@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 pub const PARTITION_ID: u8 = 0x2c;
 
+#[derive(Default)]
 pub struct Writer {
     files: BTreeMap<String, Vec<u8>>,
 }
@@ -160,7 +161,8 @@ fn add_file<'a>(dir: &'_ mut Dir<'a>, name: &'a str, bytes: &'a [u8]) -> Result<
 }
 
 /// Unpacks buf into a directory tree. buf MUST be aligned at 8 bytes.
-pub fn unpack<'a>(buf: &'a [u8]) -> Result<Dir<'a>, ()> {
+#[allow(clippy::result_unit_err)]
+pub fn unpack(buf: &[u8]) -> Result<Dir<'_>, ()> {
     if buf.len() < core::mem::size_of::<FlatFsHeader>() {
         return Err(());
     }

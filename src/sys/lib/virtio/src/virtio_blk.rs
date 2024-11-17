@@ -102,7 +102,7 @@ impl Blk {
         let cfg_bar: &PciBar = self.dev.pci_device.bars[device_cfg.bar as usize]
             .as_ref()
             .unwrap();
-        let capacity = cfg_bar.read_u64(device_cfg.offset as u64 + 0);
+        let capacity = cfg_bar.read_u64(device_cfg.offset as u64);
         self.capacity = capacity;
 
         Ok(())
@@ -394,7 +394,7 @@ impl super::BlockDevice for VirtioDrive {
         let mut guard = BLK.lock();
         let blk = guard.get_mut(self.blk_idx as usize).unwrap();
 
-        let start_block = (address >> BLOCK_SIZE_LOG2) as u64;
+        let start_block = address >> BLOCK_SIZE_LOG2;
         if start_block + (number_of_blocks as u64) > blk.capacity {
             log::error!(
                 "Read past volume end: start: 0x{:x} blocks: 0x{:x} capacity: 0x{:x}",
@@ -429,7 +429,7 @@ impl super::BlockDevice for VirtioDrive {
         let mut guard = BLK.lock();
         let blk = guard.get_mut(self.blk_idx as usize).unwrap();
 
-        let start_block = (address >> BLOCK_SIZE_LOG2) as u64;
+        let start_block = address >> BLOCK_SIZE_LOG2;
         if start_block + (number_of_blocks as u64) > blk.capacity {
             log::error!(
                 "Write past volume end: start: 0x{:x} blocks: 0x{:x} capacity: 0x{:x}",

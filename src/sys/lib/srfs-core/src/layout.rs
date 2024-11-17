@@ -27,16 +27,16 @@
 ///     blocks which list data blocks;
 ///   - file sizes above that are currently not supported, but it will be easy to continue with
 ///     the same approach.
-use core::{mem::MaybeUninit, ptr::copy_nonoverlapping};
+use core::ptr::copy_nonoverlapping;
 
 #[cfg(feature = "std")]
 extern crate std;
 
 use super::*;
 
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::borrow::ToOwned;
 
 use crc::CRC_32_ISO_HDLC;
 
@@ -163,6 +163,7 @@ impl DirEntryInternal {
         self.name_len = bytes.len() as u8;
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_owned(&self) -> Result<DirEntry, FsError> {
         Ok(DirEntry {
             id: self.id,
@@ -411,7 +412,7 @@ impl SuperblockHeader {
         if self.magic == MAGIC {
             Ok(())
         } else {
-            return Err(FsError::ValidationFailed);
+            Err(FsError::ValidationFailed)
         }
     }
 }
@@ -425,13 +426,6 @@ pub(crate) struct Block {
 const _: () = assert!(core::mem::size_of::<Block>() as u64 == BLOCK_SIZE);
 
 impl Block {
-    pub const fn new_uninit() -> Self {
-        #[allow(invalid_value)]
-        unsafe {
-            MaybeUninit::<Self>::uninit().assume_init()
-        }
-    }
-
     pub const fn new_zeroed() -> Self {
         Self { bytes: [0; 4096] }
     }

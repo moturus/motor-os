@@ -15,7 +15,7 @@ impl Default for CachedBlock {
         Self {
             block_no: u64::MAX,
             dirty: false,
-            block: Box::pin(Block::new_uninit()),
+            block: Box::pin(Block::new_zeroed()),
         }
     }
 }

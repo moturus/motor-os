@@ -20,21 +20,6 @@ pub use virtio_device::init_virtio_devices;
 
 pub(crate) use virtio_device::mapper;
 
-#[macro_export]
-macro_rules! offset_of {
-    ($struct:ty, $($field:tt)+) => ({
-        let val = ::core::mem::MaybeUninit::<$struct>::uninit();
-        let val: $struct = unsafe { val.assume_init() };
-
-        let base_ptr = core::ptr::addr_of!(val);
-        let field_ptr = core::ptr::addr_of!(val.$($field)*);
-
-        ::core::mem::forget(val);
-
-        (field_ptr as usize) - (base_ptr as usize)
-    });
-}
-
 pub const fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
 }
@@ -45,17 +30,11 @@ pub fn nop() {
     }
 }
 
-#[macro_export]
-macro_rules! is_power_of_two {
-    ($num: expr) => {
-        ($num) & (($num) - 1) == 0
-    };
-}
-
 pub const BLOCK_SIZE: usize = 512;
 pub const BLOCK_SIZE_LOG2: usize = 9;
 
 // This is the block device interface exposed by the library: see crate::lsblk().
+#[allow(clippy::result_unit_err)]
 pub trait BlockDevice {
     // buf must be aligned at BLOCK_SIZE.
     fn read(&self, buf: &mut [u8], address: u64, number_of_blocks: usize) -> Result<(), ()>;
@@ -67,6 +46,7 @@ pub type WaitHandle = u64;
 
 // This is the kernel/syscall interface consumed by the library:
 // see crate::init_virtio_devices().
+#[allow(clippy::result_unit_err)]
 pub trait KernelAdapter {
     fn virt_to_phys(&self, virt_addr: u64) -> Result<u64, ()>;
     fn mmio_map(&self, phys_addr: u64, sz: u64) -> Result<u64, ()>;

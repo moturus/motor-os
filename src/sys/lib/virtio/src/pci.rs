@@ -53,8 +53,7 @@ impl PciDeviceID {
         let func = self.func as u32;
         let offset = offset as u32;
 
-        let address =
-            ((bus << 16) | (slot << 11) | (func << 8) | (offset & 0xfc) | 0x80000000) as u32;
+        let address = (bus << 16) | (slot << 11) | (func << 8) | (offset & 0xfc) | 0x80000000;
         let port = 0xcf8_u16;
 
         unsafe {
@@ -361,7 +360,7 @@ pub(super) fn brute_force_scan() -> Vec<PciDeviceID> {
                 continue;
             }
 
-            result.push(dev.clone());
+            result.push(dev);
 
             if (dev.header_type() & 0x80) != 0 {
                 // Multi-function: check functions 1 to 7.

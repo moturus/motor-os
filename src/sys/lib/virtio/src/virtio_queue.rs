@@ -2,7 +2,6 @@
 
 use crate::virtio_device::mapper;
 
-use super::is_power_of_two;
 use super::virtio_device::VirtioDevice;
 
 use super::{le16, le32, le64};
@@ -117,7 +116,7 @@ impl Virtqueue {
         queue_size: u16,
     ) -> Result<Self, ()> {
         assert!(queue_size > 0);
-        if !is_power_of_two!(queue_size) {
+        if !queue_size.is_power_of_two() {
             log::error!(
                 "VirtQueue size for device {:?} is not a power of two: 0x{:x}",
                 dev.pci_device.id,
@@ -191,9 +190,7 @@ impl Virtqueue {
         assert!(self.wait_handles.len() <= 2);
         let mut handles = [0_u64; 2];
 
-        for idx in 0..self.wait_handles.len() {
-            handles[idx] = self.wait_handles[idx];
-        }
+        handles[..self.wait_handles.len()].copy_from_slice(&self.wait_handles);
         mapper().wait(&mut handles)
     }
 

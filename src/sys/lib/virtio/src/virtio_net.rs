@@ -52,6 +52,7 @@ impl Drop for RxPacket {
 }
 
 impl RxPacket {
+    #[allow(clippy::mut_from_ref)]
     pub fn bytes_mut(&self) -> &mut [u8] {
         let netdev: &'static mut NetDev = unsafe { &mut *self.netdev };
         &mut netdev.rx_bufs[self.idx as usize][NET_HEADER_LEN..(self.len as usize)]
@@ -70,6 +71,7 @@ impl Drop for TxPacket {
 }
 
 impl TxPacket {
+    #[allow(clippy::mut_from_ref)]
     pub fn bytes_mut(&self) -> &mut [u8] {
         let netdev: &'static mut NetDev = unsafe { &mut *self.netdev };
         &mut netdev.tx_bufs[self.idx as usize][NET_HEADER_LEN..2048]
@@ -353,14 +355,10 @@ impl NetDev {
             while let Some(idx) = txq.get_completed_tx_buf() {
                 self.tx_buf_freelist.push_back(idx as u8);
             }
-            if let Some(idx) = self.tx_buf_freelist.pop_front() {
-                Some(TxPacket {
-                    idx,
-                    netdev: self as *mut _,
-                })
-            } else {
-                None
-            }
+            self.tx_buf_freelist.pop_front().map(|idx| TxPacket {
+                idx,
+                netdev: self as *mut _,
+            })
         }
     }
 

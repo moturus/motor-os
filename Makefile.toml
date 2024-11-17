@@ -200,6 +200,7 @@ script = '''
 cwd = "./src/sys/sys-io"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+# cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-io" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-io"
 '''
 
@@ -208,6 +209,7 @@ cwd = "./src/sys/sys-io"
 script = '''
 # CARGO_LOG=cargo::core::compiler::fingerprint=info \
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+# cargo +dev-x86_64-unknown-moturus build --clippy --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-io" "${MOTO_BIN}/sys-io"
 '''
 
