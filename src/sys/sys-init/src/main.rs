@@ -69,7 +69,9 @@ fn main() {
     let config = config.unwrap();
 
     if let Some(log) = &config.log {
-        std::process::Command::new(log.as_str())
+        // We just spawn sys-log, don't track/wait. Should we?
+        #[allow(clippy::zombie_processes)]
+        let _ = std::process::Command::new(log.as_str())
             .env(
                 moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
                 format!("0x{:x}", moto_sys::caps::CAP_LOG),
@@ -78,7 +80,7 @@ fn main() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect(format!("Error spawning {}", log).as_str());
+            .unwrap_or_else(|_| panic!("Error spawning {}", log));
 
         // The logserver has just started. It needs time to start
         // listening, so we need to retry a few times.

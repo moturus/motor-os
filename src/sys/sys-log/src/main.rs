@@ -113,7 +113,7 @@ impl LogServer {
 
     fn process_get_tail_entries_request(
         conn: &mut LocalServerConnection,
-        records: &Vec<Option<LogRecord>>,
+        records: &[Option<LogRecord>],
         next_record_id: usize,
     ) -> Result<(), ()> {
         use moto_log::implementation::*;
@@ -149,7 +149,7 @@ impl LogServer {
 
                 // Safe because we are sure the memory is available and aligned properly.
                 let header = unsafe {
-                    ((&mut out_buf[pos..]).as_mut_ptr() as *mut LogEntryHeader)
+                    (out_buf[pos..].as_mut_ptr() as *mut LogEntryHeader)
                         .as_mut()
                         .unwrap()
                 };
@@ -159,8 +159,7 @@ impl LogServer {
                 header.payload_size = record.msg.len() as u32;
 
                 pos += size_of::<LogEntryHeader>();
-                (&mut out_buf[pos..(pos + record.msg.len())])
-                    .copy_from_slice(record.msg.as_bytes());
+                out_buf[pos..(pos + record.msg.len())].copy_from_slice(record.msg.as_bytes());
 
                 pos += record.msg.len();
                 pos = (pos + 7) & !7; // Align to 8 bytes.
@@ -223,13 +222,10 @@ impl LogServer {
             _ => Err(()),
         };
 
-        if res.is_err() {
-            if conn.connected() {
-                unsafe {
-                    conn.raw_channel().get_mut::<ResponseHeader>().result =
-                        moto_rt::E_INVALID_ARGUMENT
-                };
-            }
+        if res.is_err() && conn.connected() {
+            unsafe {
+                conn.raw_channel().get_mut::<ResponseHeader>().result = moto_rt::E_INVALID_ARGUMENT
+            };
         }
 
         let _ = conn.finish_rpc();
@@ -250,8 +246,7 @@ impl LogServer {
     }
 
     fn start() -> ! {
-        let mut records = vec![];
-        records.reserve(Self::MAX_RECORDS);
+        let mut records = Vec::with_capacity(Self::MAX_RECORDS);
         for _ in 0..Self::MAX_RECORDS {
             records.push(None);
         }

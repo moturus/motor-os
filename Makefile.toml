@@ -215,6 +215,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-io" "${MOTO_BIN}/sys-
 cwd = "./src/sys/sys-init"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-init" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-init"
 '''
 
@@ -222,6 +223,7 @@ strip -o "${MOTO_BIN}/sys-init" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debu
 cwd = "./src/sys/sys-init"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-init" "${MOTO_BIN}/sys-init"
 '''
 
@@ -229,6 +231,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-init" "${MOTO_BIN}/sy
 cwd = "./src/sys/sys-log"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-log" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-log"
 '''
 
@@ -236,6 +239,7 @@ strip -o "${MOTO_BIN}/sys-log" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug
 cwd = "./src/sys/sys-log"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-log" "${MOTO_BIN}/sys-log"
 '''
 
@@ -243,6 +247,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-log" "${MOTO_BIN}/sys
 cwd = "./src/sys/sys-tty"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
 strip -o "${MOTO_BIN}/sys-tty" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/sys-tty"
 '''
 
@@ -250,6 +255,7 @@ strip -o "${MOTO_BIN}/sys-tty" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug
 cwd = "./src/sys/sys-tty"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/sys-tty" "${MOTO_BIN}/sys-tty"
 '''
 

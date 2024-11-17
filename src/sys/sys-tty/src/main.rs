@@ -44,9 +44,9 @@ fn main() {
     log::debug!("sys-tty started");
 
     let config = read_config();
-    let words: Vec<_> = config.trim().split_whitespace().collect();
+    let words: Vec<_> = config.split_whitespace().collect();
 
-    if words.len() == 0 {
+    if words.is_empty() {
         moto_sys::SysRay::log("Error: empty config.").ok();
         std::process::exit(1);
     }
@@ -96,10 +96,10 @@ fn main() {
                             write_serial_raw(b"^C");
                         }
                         if c != 13 {
-                            child_stdin.write(&[c]).ok();
+                            child_stdin.write_all(&[c]).ok();
                         } else {
                             // Insert newline.
-                            child_stdin.write(&[c, 10]).ok();
+                            child_stdin.write_all(&[c, 10]).ok();
                         }
                     }
                 }

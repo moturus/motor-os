@@ -127,7 +127,9 @@ pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
         match unsafe { (BASIC_LOGGER.load(Ordering::Relaxed) as *const BasicLogger).as_ref() } {
             Some(obj) => obj,
             None => {
-                return Err(StdError::from(format!("Moturus logging not initialized.")));
+                return Err(StdError::from(
+                    "Moturus logging not initialized.".to_string(),
+                ));
             }
         };
 
@@ -146,9 +148,7 @@ pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
         Err(e) => return Err(StdError::from(format!("Bad GetUtf8TailResponse: {:?}", e))),
     };
 
-    let mut result = vec![];
-    result.reserve(resp.len());
-
+    let mut result = Vec::with_capacity(resp.len());
     for idx in (0..resp.len()).rev() {
         let entry = &resp[idx];
         result.push(LogEntry {
@@ -200,8 +200,8 @@ pub mod implementation {
 
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to_mut::<Self>() };
-            assert_eq!(prefix.len(), 0);
-            assert!(data.len() > 0);
+            assert!(prefix.is_empty());
+            assert!(!data.is_empty());
 
             let req = &mut data[0];
             req.header.cmd = CMD_CONNECT;
@@ -225,11 +225,11 @@ pub mod implementation {
 
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to::<Self>() };
-            assert_eq!(prefix.len(), 0);
+            assert!(prefix.is_empty());
 
             match data[0].header.result {
                 0 => Ok(data[0].tag_id),
-                e => Err(e.into()),
+                e => Err(e),
             }
         }
     }
@@ -249,8 +249,8 @@ pub mod implementation {
 
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to_mut::<Self>() };
-            assert_eq!(prefix.len(), 0);
-            assert!(data.len() > 0);
+            assert!(prefix.is_empty());
+            assert!(!data.is_empty());
 
             let req = &mut data[0];
             req.header.cmd = CMD_LOG;
@@ -293,7 +293,7 @@ pub mod implementation {
 
             match data[0].header.result {
                 0 => Ok(()),
-                e => Err(e.into()),
+                e => Err(e),
             }
         }
     }
@@ -320,8 +320,8 @@ pub mod implementation {
         pub fn prepare(buffer: &mut [u8], log_level: u8, tag_id: u64) {
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to_mut::<Self>() };
-            assert_eq!(prefix.len(), 0);
-            assert!(data.len() > 0);
+            assert!(prefix.is_empty());
+            assert!(!data.is_empty());
 
             let req = &mut data[0];
             req.header.cmd = CMD_GET_TAIL_ENTRIES;
@@ -345,19 +345,18 @@ pub mod implementation {
     }
 
     impl GetTailEntriesResponse {
-        pub fn parse<'a>(buffer: &'a [u8]) -> Result<Vec<LogEntry<'a>>, ErrorCode> {
+        pub fn parse(buffer: &[u8]) -> Result<Vec<LogEntry<'_>>, ErrorCode> {
             assert!(buffer.len() >= size_of::<Self>());
 
             // Safe because Self is POD, so transmuting into it is safe.
             let (prefix, data, _) = unsafe { buffer.align_to::<Self>() };
-            assert_eq!(prefix.len(), 0);
+            assert!(prefix.is_empty());
 
             match data[0].header.result {
                 0 => {
                     let mut pos = size_of::<Self>();
                     let num_entries = data[0].num_entries as usize;
-                    let mut result = vec![];
-                    result.reserve(num_entries);
+                    let mut result = Vec::with_capacity(num_entries);
 
                     for _ in 0..num_entries {
                         pos = (pos + 7) & !7; // Align to 8 bytes.
