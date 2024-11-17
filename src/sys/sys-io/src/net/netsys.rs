@@ -108,13 +108,13 @@ impl NetSys {
         let socket_addr = match api_net::get_socket_addr(&sqe.payload) {
             Ok(addr) => addr,
             Err(err) => {
-                sqe.status = err.into();
+                sqe.status = err;
                 return sqe;
             }
         };
 
         // Verify that we are not listening on that address yet.
-        for (_, listener) in &self.tcp_listeners {
+        for listener in self.tcp_listeners.values() {
             if *listener.socket_addr() == socket_addr {
                 sqe.status = moto_rt::E_ALREADY_IN_USE;
                 return sqe;
@@ -163,7 +163,7 @@ impl NetSys {
                     .unwrap()
             }
         };
-        assert!(conn_listeners.insert(listener_id.into()));
+        assert!(conn_listeners.insert(listener_id));
 
         #[cfg(debug_assertions)]
         log::debug!(
@@ -185,7 +185,7 @@ impl NetSys {
                             num_listeners,
                         ) {
                             self.drop_tcp_listener(listener_id);
-                            sqe.status = err.into();
+                            sqe.status = err;
                             return sqe;
                         }
                     }
@@ -196,7 +196,7 @@ impl NetSys {
                     self.start_listening_on_device(listener_id, idx, socket_addr, num_listeners)
                 {
                     self.drop_tcp_listener(listener_id);
-                    sqe.status = err.into();
+                    sqe.status = err;
                     return sqe;
                 }
             }
@@ -555,7 +555,7 @@ impl NetSys {
         let remote_addr = match api_net::get_socket_addr(&sqe.payload) {
             Ok(addr) => addr,
             Err(err) => {
-                sqe.status = err.into();
+                sqe.status = err;
                 return Some(sqe);
             }
         };
@@ -602,7 +602,7 @@ impl NetSys {
         let mut moto_socket = match self.new_socket_for_device(device_idx, conn.clone()) {
             Ok(s) => s,
             Err(err) => {
-                sqe.status = err.into();
+                sqe.status = err;
                 return Some(sqe);
             }
         };
@@ -892,7 +892,7 @@ impl NetSys {
         }
 
         sqe.status = moto_rt::E_OK;
-        return sqe;
+        sqe
     }
 
     fn tcp_stream_get_option(
@@ -993,9 +993,8 @@ impl NetSys {
     // Find the device to route through.
     fn find_route(&self, ip_addr: &IpAddr) -> Option<(usize, IpAddr)> {
         // First, look through local addresses.
-        match self.ip_addresses.get(ip_addr) {
-            Some(device_idx) => return Some((*device_idx, *ip_addr)),
-            None => {}
+        if let Some(device_idx) = self.ip_addresses.get(ip_addr) {
+            return Some((*device_idx, *ip_addr));
         }
 
         // If not found, look through routes.
@@ -1743,19 +1742,21 @@ impl IoSubsystem for NetSys {
                 .sockets
                 .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
-            let mut stats = moto_sys_io::stats::TcpSocketStatsV1::default();
-            stats.id = moto_socket.id.into();
-            stats.device_id = device_idx as u64;
-            stats.pid = moto_socket.pid;
+            let mut stats = moto_sys_io::stats::TcpSocketStatsV1 {
+                id: moto_socket.id.into(),
+                device_id: device_idx as u64,
+                pid: moto_socket.pid,
+                ..Default::default()
+            };
 
             let local_addr = if let Some(e) = smol_socket.local_endpoint() {
                 Some(super::smoltcp_helpers::socket_addr_from_endpoint(e))
             } else {
-                moto_socket.listening_on.clone()
+                moto_socket.listening_on
             };
             let remote_addr = smol_socket
                 .remote_endpoint()
-                .map(|e| super::smoltcp_helpers::socket_addr_from_endpoint(e));
+                .map(super::smoltcp_helpers::socket_addr_from_endpoint);
 
             if let Some(addr) = local_addr {
                 stats.local_port = addr.port();
@@ -1767,7 +1768,7 @@ impl IoSubsystem for NetSys {
                 stats.remote_addr = super::smoltcp_helpers::addr_to_octets(addr.ip());
             }
 
-            stats.tcp_state = moto_socket.state.try_into().unwrap();
+            stats.tcp_state = moto_socket.state;
             stats.smoltcp_state = smol_socket.state();
 
             results.push(stats);

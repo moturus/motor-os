@@ -24,7 +24,7 @@ impl std::fmt::Debug for MacAddress {
 }
 
 fn ox_char_to_byte(b: u8) -> Result<u8, String> {
-    if (b'0'..=b'9').contains(&b) {
+    if b.is_ascii_digit() {
         return Ok(b - b'0');
     }
     if (b'a'..=b'f').contains(&b) {

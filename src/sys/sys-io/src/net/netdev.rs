@@ -15,6 +15,7 @@ struct VirtioRxToken {
 }
 
 impl VirtioRxToken {
+    #[allow(clippy::mut_from_ref)]
     fn dev(&self) -> &mut VirtioSmoltcpDevice {
         unsafe { self.dev.as_mut().unwrap() }
     }
@@ -45,6 +46,7 @@ struct VirtioTxToken {
 }
 
 impl VirtioTxToken {
+    #[allow(clippy::mut_from_ref)]
     fn dev(&self) -> &mut VirtioSmoltcpDevice {
         unsafe { self.dev.as_mut().unwrap() }
     }
@@ -157,11 +159,13 @@ impl VirtioSmoltcpDevice {
 }
 
 impl smoltcp::phy::Device for VirtioSmoltcpDevice {
-    type RxToken<'a> = VirtioRxToken
+    type RxToken<'a>
+        = VirtioRxToken
     where
         Self: 'a;
 
-    type TxToken<'a> = VirtioTxToken
+    type TxToken<'a>
+        = VirtioTxToken
     where
         Self: 'a;
 
@@ -173,10 +177,8 @@ impl smoltcp::phy::Device for VirtioSmoltcpDevice {
         self.poll_virtio_rx();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        if self.rx_packet.is_none() {
-            // No bytes to read.
-            return None;
-        }
+        self.rx_packet.as_ref()?;
+
         Some((
             VirtioRxToken {
                 dev: self as *mut Self,

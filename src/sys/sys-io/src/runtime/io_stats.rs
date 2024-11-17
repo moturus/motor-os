@@ -82,9 +82,7 @@ fn get_tcp_stats(conn: &mut LocalServerConnection) {
     assert!(results.len() <= moto_sys_io::stats::MAX_TCP_SOCKET_STATS);
     resp.num_results = results.len() as u64;
 
-    for idx in 0..results.len() {
-        resp.socket_stats[idx] = results[idx];
-    }
+    resp.socket_stats[..results.len()].copy_from_slice(&results[..]);
 
     resp.header.result = moto_rt::E_OK;
     let _ = conn.finish_rpc();

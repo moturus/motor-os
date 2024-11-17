@@ -52,12 +52,12 @@ impl IoRuntime {
 
     fn update_handles(&mut self) {
         self.all_handles.clear();
-        let mut handles: Vec<SysHandle> = self.connections.keys().map(|h| *h).collect();
+        let mut handles: Vec<SysHandle> = self.connections.keys().copied().collect();
         for handle in &self.net_handles {
             handles.push(*handle);
         }
 
-        let mut listener_handles: Vec<SysHandle> = self.listeners.keys().map(|h| *h).collect();
+        let mut listener_handles: Vec<SysHandle> = self.listeners.keys().copied().collect();
         handles.append(&mut listener_handles);
 
         core::mem::swap(&mut self.all_handles, &mut handles);
