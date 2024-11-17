@@ -99,7 +99,7 @@ impl Iterator for DirectoryIterFlatFs {
                 path.push('/');
                 path.push_str(name);
                 return Some(Box::new(DirectoryEntryFlatFs {
-                    name: *name,
+                    name,
                     path,
                     file: None,
                     dir: Some(dir),
@@ -114,9 +114,9 @@ impl Iterator for DirectoryIterFlatFs {
                 path.push('/');
                 path.push_str(name);
                 return Some(Box::new(DirectoryEntryFlatFs {
-                    name: *name,
+                    name,
                     path,
-                    file: Some(FileFlatFs { bytes: *file }),
+                    file: Some(FileFlatFs { bytes: file }),
                     dir: None,
                 }));
             }
@@ -140,16 +140,13 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
             .filter(|name| !name.is_empty())
             .collect();
 
-        if paths.len() == 0 {
+        if paths.is_empty() {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
 
         let mut dir = &self.root_dir;
-        for idx in 0..(paths.len() - 1) {
-            dir = dir
-                .subdirs
-                .get(paths[idx])
-                .ok_or(moto_rt::E_INVALID_FILENAME)?;
+        for path in &paths[..(paths.len() - 1)] {
+            dir = dir.subdirs.get(path).ok_or(moto_rt::E_INVALID_FILENAME)?;
         }
 
         let file = *dir

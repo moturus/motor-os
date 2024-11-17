@@ -44,7 +44,7 @@ pub struct ReadDir {
 }
 
 impl ReadDir {
-    pub(crate) fn read_dir(path: &str, fs: Rc<RefCell<FileSystemInner>>) -> Result<Self> {
+    pub(crate) fn new(path: &str, fs: Rc<RefCell<FileSystemInner>>) -> Result<Self> {
         let parent = fs.borrow_mut().get_entry(path)?;
         if parent.kind() != EntryKind::Directory {
             return Err(ErrorKind::NotADirectory.into());

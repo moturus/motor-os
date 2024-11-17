@@ -24,13 +24,13 @@ impl std::fmt::Debug for MacAddress {
 }
 
 fn ox_char_to_byte(b: u8) -> Result<u8, String> {
-    if b >= b'0' && b <= b'9' {
+    if (b'0'..=b'9').contains(&b) {
         return Ok(b - b'0');
     }
-    if b >= b'a' && b <= b'f' {
+    if (b'a'..=b'f').contains(&b) {
         return Ok(b - b'a' + 10);
     }
-    if b >= b'A' && b <= b'F' {
+    if (b'A'..=b'F').contains(&b) {
         return Ok(b - b'A' + 10);
     }
 

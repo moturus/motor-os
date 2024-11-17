@@ -102,8 +102,7 @@ impl Driver {
                 }
             };
 
-            for idx in 0..wakers.len() {
-                let waker = &wakers[idx];
+            for waker in &wakers {
                 let conn = self_.ipc_server.get_connection(*waker);
                 if conn.is_none() {
                     continue;
@@ -150,7 +149,7 @@ impl Driver {
                         }
                         let raw_channel = conn.raw_channel();
                         let resp = raw_channel.get_mut::<ResponseHeader>();
-                        resp.result = err as u16;
+                        resp.result = err;
                     }
                 }
 
@@ -525,7 +524,6 @@ impl Driver {
                 return Err(moto_rt::E_INTERNAL_ERROR);
             }
 
-            drop(iter);
             pcon.remove_readdir(req.fd);
         } else if req.header.flags == CloseFdRequest::F_FILE {
             let file = pcon.get_file(req.fd);
@@ -533,7 +531,6 @@ impl Driver {
                 return Err(moto_rt::E_INTERNAL_ERROR);
             }
 
-            drop(file);
             pcon.remove_file(req.fd);
         } else {
             return Err(moto_rt::E_INTERNAL_ERROR);

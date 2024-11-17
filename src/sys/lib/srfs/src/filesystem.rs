@@ -32,7 +32,7 @@ impl FileSystemInner {
     }
 
     fn create_dir_all(&mut self, path: &str) -> Result<()> {
-        if path.len() == 0 {
+        if path.is_empty() {
             return Err(ErrorKind::InvalidFilename.into());
         }
 
@@ -74,7 +74,7 @@ impl FileSystemInner {
             .map_err(error::to_ioerror)
     }
 
-    fn split_parent_child<'a, 'b>(&'a mut self, path: &'b str) -> Result<(EntryId, &'b str)> {
+    fn split_parent_child<'b>(&mut self, path: &'b str) -> Result<(EntryId, &'b str)> {
         let (dir, filename) = if let Some(pair) = path.rsplit_once('/') {
             pair
         } else {
@@ -261,7 +261,7 @@ impl FileSystem {
     }
 
     pub fn read_dir(&mut self, path: &str) -> Result<crate::ReadDir> {
-        crate::readdir::ReadDir::read_dir(path, self.inner.clone())
+        crate::readdir::ReadDir::new(path, self.inner.clone())
     }
 
     pub fn unlink(&mut self, path: &str) -> Result<()> {

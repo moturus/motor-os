@@ -1522,30 +1522,29 @@ impl NetSys {
         // no cached RX packets. The code below delivers a zero-sized RX packet to that end.
         if smol_socket.recv_queue() == 0
             && (moto_socket.state == TcpState::WriteOnly || moto_socket.state == TcpState::Closed)
+            && !moto_socket.rx_closed_notified
         {
-            if !moto_socket.rx_closed_notified {
-                moto_socket.rx_seq += 1;
+            moto_socket.rx_seq += 1;
 
-                let mut msg = io_channel::Msg::new();
-                msg.command = api_net::CMD_TCP_STREAM_RX;
-                msg.handle = moto_socket.id.into();
-                msg.payload.shared_pages_mut()[0] = u16::MAX;
-                msg.payload.args_64_mut()[1] = 0;
-                msg.payload.args_64_mut()[2] = moto_socket.rx_seq;
-                msg.status = moto_rt::E_OK;
+            let mut msg = io_channel::Msg::new();
+            msg.command = api_net::CMD_TCP_STREAM_RX;
+            msg.handle = moto_socket.id.into();
+            msg.payload.shared_pages_mut()[0] = u16::MAX;
+            msg.payload.args_64_mut()[1] = 0;
+            msg.payload.args_64_mut()[2] = moto_socket.rx_seq;
+            msg.status = moto_rt::E_OK;
 
-                self.pending_completions.push_back(PendingCompletion {
-                    msg,
-                    endpoint_handle: moto_socket.conn.wait_handle(),
-                });
-                moto_socket.rx_closed_notified = true;
-                log::debug!(
-                    "{}:{} RX Closed for socket 0x{:x}",
-                    file!(),
-                    line!(),
-                    u64::from(socket_id)
-                );
-            }
+            self.pending_completions.push_back(PendingCompletion {
+                msg,
+                endpoint_handle: moto_socket.conn.wait_handle(),
+            });
+            moto_socket.rx_closed_notified = true;
+            log::debug!(
+                "{}:{} RX Closed for socket 0x{:x}",
+                file!(),
+                line!(),
+                u64::from(socket_id)
+            );
         }
     }
 

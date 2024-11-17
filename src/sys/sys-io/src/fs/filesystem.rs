@@ -47,7 +47,7 @@ pub fn fs() -> &'static mut Box<dyn FileSystem> {
 
 pub fn init() {
     let mut drives = moto_virtio::lsblk();
-    if drives.len() == 0 {
+    if drives.is_empty() {
         log::error!("No drives found");
         panic!("No drives found");
     }
@@ -58,8 +58,7 @@ pub fn init() {
     }
 
     const BLOCK_SIZE: usize = 512;
-    let mut block = alloc::vec::Vec::<u8>::with_capacity(BLOCK_SIZE);
-    unsafe { block.set_len(BLOCK_SIZE) }; // Safe because we just allocated with the same len.
+    let mut block = vec![0; BLOCK_SIZE];
 
     let mut fs: Option<Box<dyn FileSystem>> = None;
     for drive in &mut drives {

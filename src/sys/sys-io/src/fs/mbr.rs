@@ -86,6 +86,7 @@ impl Mbr {
             return Err("MBR suffix wrong.");
         }
         let mut entries = [PartitionTableEntry::empty(); MAX_ENTRIES];
+        #[allow(clippy::needless_range_loop)]
         for idx in 0..MAX_ENTRIES {
             let offset = TABLE_OFFSET + idx * ENTRY_SIZE;
             let partition_type = PartitionType::from_mbr_tag_byte(bytes[offset + 4]);

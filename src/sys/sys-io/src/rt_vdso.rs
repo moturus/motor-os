@@ -5,7 +5,7 @@ struct AlignedBytes<B: ?Sized> {
     bytes: B,
 }
 
-static VDSO_BIN: &'static AlignedBytes<[u8]> = &AlignedBytes {
+static VDSO_BIN: &AlignedBytes<[u8]> = &AlignedBytes {
     bytes: *include_bytes!("../../lib/rt.vdso/rt.vdso"),
 };
 
@@ -106,7 +106,7 @@ impl ElfLoader for VsdoLoader {
         // is mostly security theader: https://grsecurity.net/kaslr_an_exercise_in_cargo_cult_security
         for header in load_headers {
             let vaddr_start =
-                RT_VDSO_START + header.virtual_addr() & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
+                (RT_VDSO_START + header.virtual_addr()) & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
             let vaddr_end = moto_sys::align_up(
                 RT_VDSO_START + header.virtual_addr() + header.mem_size(),
                 moto_sys::sys_mem::PAGE_SIZE_SMALL,
