@@ -73,7 +73,7 @@ pub fn enter_unreal_mode() {
     }
 }
 
-pub fn enter_protected_mode_and_jump_to_stage_3(entry_point: u32, ebx: u32) {
+pub fn enter_protected_mode_and_jump_to_stage_3(entry_point: u32, ebx: u32) -> ! {
     // unsafe { asm!("cli") };
     assert_eq!(GDT.zero, 0);
     assert_eq!(GDT.code, GDT_CODE);
@@ -118,6 +118,8 @@ pub fn enter_protected_mode_and_jump_to_stage_3(entry_point: u32, ebx: u32) {
             out(reg) _,
         );
     }
+
+    unreachable!()
 }
 
 fn set_protected_mode_bit() -> u32 {

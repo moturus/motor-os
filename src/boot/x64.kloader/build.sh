@@ -16,6 +16,10 @@ cargo build --target kloader.json \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --color=always 2>&1
 
+cargo clippy --target kloader.json \
+    -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
+    --color=always 2>&1
+
 # The binary is used inside initd.
 objcopy -I elf64-x86-64 -O binary "${TARGET_DIR}/kloader/debug/kloader" \
     "${BIN_DIR}/kloader.bin"
@@ -38,8 +42,11 @@ else
 echo "kloader release build"
 
 
-# cargo build --release --target kloader.json \
 cargo build --release --no-default-features --target kloader.json \
+    -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
+    --color=always 2>&1
+
+cargo clippy --release --no-default-features --target kloader.json \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --color=always 2>&1
 

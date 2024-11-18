@@ -61,6 +61,8 @@ pub fn application_processors(maybe_rdsp: u64) -> uCpus {
 
     // We assume that all logical CPUs are in [1..num_cpus).
     processors.sort();
+
+    #[allow(clippy::needless_range_loop)]
     for idx in 0..processors.len() {
         assert_eq!(idx + 1, processors[idx] as usize);
     }

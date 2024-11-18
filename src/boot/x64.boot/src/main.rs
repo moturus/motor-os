@@ -136,11 +136,9 @@ fn start(disk_number: u16, partition_table_start: *const u8) -> ! {
     let pvh = PvhStartInfo::new(memory_map, &initrd_mod);
 
     enter_protected_mode_and_jump_to_stage_3(
-        INITRD_ADDR + 512 as u32,
+        INITRD_ADDR + 512_u32,
         &pvh as *const _ as usize as u32,
-    );
-
-    loop {}
+    )
 }
 
 #[cold]

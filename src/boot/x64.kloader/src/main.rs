@@ -88,7 +88,7 @@ fn start_aps(num_cpus: uCpus) {
             *ap_page_table = l4.start_address().as_u64();
             *ap_stack_start = stack_start;
             *ap_stack_end = stack_start + 4096;
-            *ap_code = ap_start as u64;
+            *ap_code = ap_start as usize as u64;
             *ap_gdt = &gdt::GDT64_PTR as *const gdt::Pointer as usize as u64;
         }
 

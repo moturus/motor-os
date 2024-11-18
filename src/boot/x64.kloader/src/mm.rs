@@ -35,7 +35,7 @@ const ONE_MB: usize = 1 << 20;
 // Heap starts at 32M.
 const HEAP_START: usize = ONE_MB * 32;
 // No more than 1M for heap.
-const HEAP_SZ: usize = ONE_MB as usize;
+const HEAP_SZ: usize = ONE_MB;
 
 // We load the kernel at 34MB phys and PAGING_DIRECT_MAP_OFFSET + 34MB virt.
 pub const KERNEL_PHYS_START: usize = HEAP_START + (ONE_MB * 2);
@@ -61,6 +61,7 @@ pub const fn kernel_offset() -> u64 {
     PAGING_DIRECT_MAP_OFFSET + (KERNEL_PHYS_START as u64)
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PTE {
@@ -68,9 +69,9 @@ struct PTE {
 }
 
 impl PTE {
-    const PRESENT: u64 = 0b_00_000_001; // bit 0.
-    const WRITABLE: u64 = 0b_00_000_010; // bit 1.
-    const HUGE: u64 = 0b_10_000_000; // bit 7.
+    const PRESENT: u64 = 0b_0000_0001; // bit 0.
+    const WRITABLE: u64 = 0b_0000_0010; // bit 1.
+    const HUGE: u64 = 0b_1000_0000; // bit 7.
 
     #[inline]
     const fn empty() -> Self {
@@ -139,7 +140,10 @@ pub unsafe fn alloc(layout: Layout) -> usize {
     let start = align_up(ALLOCATED_HEAP.load(Ordering::Relaxed), layout.align());
     ALLOCATED_HEAP.store(start + layout.size(), Ordering::Relaxed);
 
-    assert!(ALLOCATED_HEAP.load(Ordering::Relaxed) < ((PAGING_DIRECT_MAP_OFFSET as usize) + HEAP_START + HEAP_SZ));
+    assert!(
+        ALLOCATED_HEAP.load(Ordering::Relaxed)
+            < ((PAGING_DIRECT_MAP_OFFSET as usize) + HEAP_START + HEAP_SZ)
+    );
 
     start
 }

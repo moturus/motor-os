@@ -65,7 +65,7 @@ pub fn vmm_exit() -> ! {
     write_to_port(0xf4, 0x10);
 
     // The above did not work, so just loop.
-    // Note that
+    #[allow(clippy::empty_loop)]
     loop {}
 }
 
