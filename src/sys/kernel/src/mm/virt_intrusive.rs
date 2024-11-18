@@ -285,7 +285,7 @@ impl VmemSegment {
         }
     }
 
-    pub(super) fn unmap(mut self: Self) -> u64 {
+    pub(super) fn unmap(mut self) -> u64 {
         // Note: it is important to unmap pages before freeing the segment
         // in the VMemRegion, otherwise a concurrent allocation may try
         // to map a page that is not yet unmapped.
@@ -442,13 +442,12 @@ impl VmemSegment {
     pub(super) fn fix_pagefault(&mut self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         debug_assert!(self.segment.contains(pf_addr));
 
-        if ((pf_addr & !(PAGE_SIZE_SMALL - 1)) == self.segment.start)
-            || (pf_addr >= (self.segment.end() - PAGE_SIZE_SMALL))
+        if (((pf_addr & !(PAGE_SIZE_SMALL - 1)) == self.segment.start)
+            || (pf_addr >= (self.segment.end() - PAGE_SIZE_SMALL)))
+            && self.mapping_options.contains(MappingOptions::GUARD)
         {
-            if self.mapping_options.contains(MappingOptions::GUARD) {
-                log::debug!("#PF: guard page");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
+            log::debug!("#PF: guard page");
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         debug_assert_eq!(error_code & 4, 4);

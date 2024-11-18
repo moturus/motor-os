@@ -60,10 +60,8 @@ impl MemStats {
 
         if self.user_stats {
             SYSTEM_STATS.mem_stats_user.add_simple(num_pages);
-        } else {
-            if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
-                SYSTEM_STATS.mem_stats_kernel.add_simple(num_pages);
-            }
+        } else if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
+            SYSTEM_STATS.mem_stats_kernel.add_simple(num_pages);
         }
     }
 
@@ -77,10 +75,8 @@ impl MemStats {
 
         if self.user_stats {
             SYSTEM_STATS.mem_stats_user.sub_simple(num_pages);
-        } else {
-            if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
-                SYSTEM_STATS.mem_stats_kernel.sub_simple(num_pages);
-            }
+        } else if core::intrinsics::likely(SYSTEM_STATS.is_set()) {
+            SYSTEM_STATS.mem_stats_kernel.sub_simple(num_pages);
         }
     }
 
@@ -359,10 +355,8 @@ impl KProcessStats {
         F: FnMut(&Self) -> bool,
     {
         if flat {
-            if start.as_u64() == PID_SYSTEM {
-                if !func(SYSTEM_STATS.as_ref()) {
-                    return;
-                }
+            if start.as_u64() == PID_SYSTEM && !func(SYSTEM_STATS.as_ref()) {
+                return;
             }
             let child_lock = SYSTEM_STATS.children.lock(line!());
             for entry in child_lock.range(start..) {

@@ -501,12 +501,10 @@ fn sys_affine_cpu(curr: &super::process::Thread, args: &mut SyscallArgs) -> Sysc
     let arg0 = args.args[0];
     let cpu = if arg0 == u64::MAX {
         None
+    } else if arg0 >= (crate::arch::num_cpus() as u64) {
+        return ResultBuilder::invalid_argument();
     } else {
-        if arg0 >= (crate::arch::num_cpus() as u64) {
-            return ResultBuilder::invalid_argument();
-        } else {
-            Some(arg0 as uCpus)
-        }
+        Some(arg0 as uCpus)
     };
 
     if let Some(0) = cpu {

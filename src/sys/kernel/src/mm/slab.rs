@@ -133,8 +133,8 @@ impl<T: Slabbable> Slab4096<T> {
         slab_ref.refs = refs;
         if !refs.is_null() {
             let refs = refs.as_ref().unwrap();
-            for idx in 0..Self::NUM_ELEMENTS {
-                refs[idx].store(0, Ordering::Relaxed);
+            for entry in refs {
+                entry.store(0, Ordering::Relaxed);
             }
         }
 

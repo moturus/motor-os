@@ -67,7 +67,7 @@ impl Instant {
     }
 
     pub fn elapsed(&self) -> Duration {
-        Instant::now().duration_since(self.clone())
+        Instant::now().duration_since(*self)
     }
 
     pub const fn infinite_future() -> Self {
@@ -245,7 +245,7 @@ fn tsc_to_nanos(tsc: u64) -> u64 {
         nanos >>= -tsc_shift;
     }
 
-    nanos * (GLOBALS.tsc_mul.load(Ordering::Relaxed) as u64) >> 32
+    (nanos * (GLOBALS.tsc_mul.load(Ordering::Relaxed) as u64)) >> 32
 }
 
 fn nanos_to_tsc(nanos: u64) -> u64 {
@@ -253,19 +253,17 @@ fn nanos_to_tsc(nanos: u64) -> u64 {
 
     // TODO: optimize?
     // TODO: fix panic on overflow.
-    let mut res = if nanos >= (1u64 << 32) {
+    let res = if nanos >= (1u64 << 32) {
         (nanos >> 4) * ((1u64 << 36) / (GLOBALS.tsc_mul.load(Ordering::Relaxed) as u64))
     } else {
         (nanos << 32) / (GLOBALS.tsc_mul.load(Ordering::Relaxed) as u64)
     };
 
     if tsc_shift >= 0 {
-        res >>= tsc_shift;
+        res >> tsc_shift
     } else {
-        res <<= -tsc_shift;
+        res << -tsc_shift
     }
-
-    return res;
 }
 
 pub fn system_start_time() -> super::time::Instant {

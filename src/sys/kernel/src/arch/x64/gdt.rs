@@ -26,7 +26,7 @@ fn new_tss() -> &'static TaskStateSegment {
     };
 
     let mut tss = TaskStateSegment::new();
-    tss.privilege_stack_table[0 as usize] = new_stack();
+    tss.privilege_stack_table[0] = new_stack();
     tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = new_stack();
     tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = new_stack();
     tss.interrupt_stack_table[BREAKPOINT_IST_INDEX as usize] = new_stack();

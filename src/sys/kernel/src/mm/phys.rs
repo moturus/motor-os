@@ -103,7 +103,7 @@ struct DesignatedSegment<S: PageSize> {
 impl<S: PageSize> DesignatedSegment<S> {
     fn new(segment: &MemorySegment) -> Self {
         let res = DesignatedSegment {
-            segment: segment.clone(),
+            segment: *segment,
             used_bitmap: AtomicU64::new(0),
             num_pages: (segment.size >> S::SIZE_LOG2) as u8,
             _unused: PhantomData {},
@@ -144,10 +144,8 @@ impl<S: PageSize> DesignatedSegment<S> {
 
         let mut freed_frames = 0_u64;
         while start < end {
-            if start != l4_phys_addr && start != l3_phys_addr {
-                if self.deallocate_frame(start) {
-                    freed_frames += 1;
-                }
+            if start != l4_phys_addr && start != l3_phys_addr && self.deallocate_frame(start) {
+                freed_frames += 1;
             }
             start += S::SIZE;
         }
@@ -569,13 +567,12 @@ impl PhysicalMemory {
     // and, maybe, sys-io are allowed to use MID pages, so the number is small.
     const MID_PAGES: usize = 4;
     const MID_PAGES_SEGMENT: MemorySegment = MemorySegment {
-        start: (super::ONE_MB * 2) as u64,
+        start: super::ONE_MB * 2,
         size: (Self::MID_PAGES << PAGE_SIZE_MID_LOG2) as u64,
     };
 
     fn inst() -> &'static Self {
-        let addr =
-            unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize) };
+        let addr = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM)) };
         assert_ne!(addr, 0);
         unsafe { (addr as *const Self).as_ref().unwrap_unchecked() }
     }
@@ -600,13 +597,11 @@ impl PhysicalMemory {
     }
 
     fn allocate_frameless(&'static self, kind: PageType) -> Result<u64, ErrorCode> {
-        let result = match kind {
+        match kind {
             PageType::SmallPage => self.small_pages.allocate_frame(),
             PageType::MidPage => self.mid_pages.allocate_frame(),
             _ => panic!(),
-        };
-
-        result
+        }
     }
 
     fn fixed_addr_reserve(&'static self, phys_addr: u64, kind: PageType) -> Result<(), ErrorCode> {
@@ -672,9 +667,7 @@ impl PhysicalMemory {
         let start = self.small_pages.allocate_contiguous_frames(num_frames)?;
 
         let mut frame_start = start;
-        let mut result = vec![];
-        result.reserve(num_frames as usize);
-
+        let mut result = Vec::with_capacity(num_frames as usize);
         let mut failed = false;
 
         for _idx in 0..num_frames {
@@ -711,7 +704,7 @@ impl PhysicalMemory {
 
     fn init(available: &[MemorySegment], in_use: &[MemorySegment]) {
         assert_eq!(0, unsafe {
-            core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM) as *const usize)
+            core::ptr::read_volatile(core::ptr::addr_of!(PHYS_MEM))
         });
 
         let mut total_size: u64 = 0;
@@ -742,7 +735,7 @@ impl PhysicalMemory {
         let ptr = self_ as *mut PhysicalMemory;
         let ptr = ptr as usize;
         unsafe {
-            core::ptr::write_volatile(core::ptr::addr_of_mut!(PHYS_MEM) as *mut usize, ptr);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!(PHYS_MEM), ptr);
         }
 
         PhysicalMemory::assign_pages_to_area(available, &mut self_.small_pages);
@@ -760,7 +753,7 @@ impl PhysicalMemory {
 
         let mut loop_closure = |count: bool| {
             for segment in available {
-                let mut segment = segment.clone();
+                let mut segment = *segment;
                 // The inner loop splits the segment in chunks of 64 pages.
                 loop {
                     if segment.size < S::SIZE {

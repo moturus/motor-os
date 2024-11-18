@@ -50,6 +50,7 @@ pub fn l3_direct_phys_table_phys_addr() -> u64 {
     (table_l3 as *const _ as usize as u64) - PAGING_DIRECT_MAP_OFFSET
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct PTE {
@@ -57,15 +58,15 @@ struct PTE {
 }
 
 impl PTE {
-    const PRESENT: u64 = 0b_00_000_001; // bit 0.
-    const WRITABLE: u64 = 0b_00_000_010; // bit 1.
-    const USER: u64 = 0b_00_000_100; // bit 2.
-    const ACCESSED: u64 = 0b_00_100_000; // bit 5.
-    const HUGE: u64 = 0b_10_000_000; // bit 7.
-    const MMIO_RW: u64 = 0b_00_111_011; // bit 0: present; bit 1: writable;
-                                        // bit 3: write through; bit 4: no cache; bit 5: accessed.
+    const PRESENT: u64 = 0b_0000_0001; // bit 0.
+    const WRITABLE: u64 = 0b_0000_0010; // bit 1.
+    const USER: u64 = 0b_0000_0100; // bit 2.
+    const ACCESSED: u64 = 0b_0010_0000; // bit 5.
+    const HUGE: u64 = 0b_1000_0000; // bit 7.
+    const MMIO_RW: u64 = 0b_0011_1011; // bit 0: present; bit 1: writable;
+                                       // bit 3: write through; bit 4: no cache; bit 5: accessed.
 
-    const _PRESENT_WRITABLE_HUGE: u64 = 0b_10_000_111; // bit 0: present; bit 1: writable; bit 7: huge page.
+    const _PRESENT_WRITABLE_HUGE: u64 = 0b_1000_0111; // bit 0: present; bit 1: writable; bit 7: huge page.
 
     #[inline]
     const fn empty() -> Self {
@@ -89,7 +90,7 @@ impl PTE {
     }
 
     #[inline]
-    fn to_addr(&self) -> u64 {
+    fn get_addr(&self) -> u64 {
         self.entry & 0x_000f_ffff_ffff_f000
     }
 }
@@ -202,7 +203,7 @@ impl PageTableImpl {
         }
         if pte_l3.is_huge_page() {
             if pte_l3.is_present() {
-                return Some(pte_l3.to_addr() + (virt_addr & (PAGE_SIZE_LARGE - 1)));
+                return Some(pte_l3.get_addr() + (virt_addr & (PAGE_SIZE_LARGE - 1)));
             } else {
                 return None;
             }
@@ -216,7 +217,7 @@ impl PageTableImpl {
         }
         if pte_l2.is_huge_page() {
             if pte_l2.is_present() {
-                return Some(pte_l2.to_addr() + (virt_addr & (PAGE_SIZE_MID - 1)));
+                return Some(pte_l2.get_addr() + (virt_addr & (PAGE_SIZE_MID - 1)));
             } else {
                 return None;
             }
@@ -226,9 +227,9 @@ impl PageTableImpl {
         let idx_l1 = PageTableImpl::idx_l1(virt_addr);
         let pte_l1 = table_l1.get(idx_l1);
         if pte_l1.is_present() {
-            return Some(pte_l1.to_addr() + (virt_addr & (PAGE_SIZE_SMALL - 1)));
+            Some(pte_l1.get_addr() + (virt_addr & (PAGE_SIZE_SMALL - 1)))
         } else {
-            return None;
+            None
         }
     }
 
@@ -411,7 +412,7 @@ impl PageTableImpl {
         let table_l1 = HwPageTable::from_pte(pte_l2);
         let idx_l1 = PageTableImpl::idx_l1(virt_addr);
         let pte_l1 = table_l1.get(idx_l1);
-        return pte_l1.is_present();
+        pte_l1.is_present()
     }
 
     fn flush_virt_addr(&self, virt_addr: u64) {

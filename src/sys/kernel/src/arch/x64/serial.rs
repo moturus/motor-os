@@ -56,7 +56,9 @@ pub struct SerialPort {
 impl SerialPort {
     /// Creates a new serial port interface on the given I/O port.
     ///
-    /// This function is unsafe because the caller must ensure that the given base address
+    /// # Safety
+    ///
+    /// The caller must ensure that the given base address
     /// really points to a serial port device.
     pub const unsafe fn new(base: u16) -> Self {
         Self {
@@ -65,7 +67,6 @@ impl SerialPort {
             fifo_ctrl: PortWriteOnly::new(base + 2),
             line_ctrl: PortWriteOnly::new(base + 3),
             modem_ctrl: PortWriteOnly::new(base + 4),
-            // line_sts: PortReadOnly::new(base + 5),
         }
     }
 

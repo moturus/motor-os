@@ -18,7 +18,7 @@ impl InitrdHeader {
     const MAGIC: u32 = 0xf402_100f; // Whatever.
 
     fn from_addr(addr: usize) -> &'static Self {
-        unsafe { (addr as usize as *const InitrdHeader).as_ref().unwrap() }
+        unsafe { (addr as *const InitrdHeader).as_ref().unwrap() }
     }
 }
 
@@ -195,7 +195,7 @@ impl KernelBootupInfo {
 
     pub fn kernel_bytes_phys(&self) -> crate::mm::MemorySegment {
         crate::mm::MemorySegment {
-            start: crate::mm::KERNEL_PHYS_START as u64,
+            start: crate::mm::KERNEL_PHYS_START,
             size: self.max_ram_offset,
         }
     }

@@ -332,10 +332,9 @@ impl UserAddressSpace {
         // When dropping, we count the full segment, with guard pages, so when adding,
         // we need to do the same.
         self.stats_kernel_add(num_pages)?;
-        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages).or_else(
-            |err| {
+        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages).inspect_err(
+            |_| {
                 self.stats_kernel_sub(num_pages);
-                Err(err)
             },
         )
     }
@@ -365,7 +364,7 @@ impl UserAddressSpace {
         // }
 
         if let Some(kernel_stack) = kernel_stack {
-            let kernel_segment = kernel_stack.clone();
+            let kernel_segment = *kernel_stack;
             if self
                 .kernel_stacks
                 .push(
@@ -374,7 +373,7 @@ impl UserAddressSpace {
                 )
                 .is_err()
             {
-                self.do_drop_kernel_stack(kernel_stack.clone());
+                self.do_drop_kernel_stack(*kernel_stack);
             }
         }
     }
@@ -384,10 +383,9 @@ impl UserAddressSpace {
 
         self.inner
             .vmem_allocate_pages(VmemKind::User, num_pages, None)
-            .or_else(|err| {
+            .inspect_err(|_| {
                 log::error!("failed to allocate {num_pages} pages");
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                Err(err)
             })
     }
 
@@ -426,9 +424,8 @@ impl UserAddressSpace {
                         | MappingOptions::LAZY,
                 ),
             )
-            .or_else(|err| {
+            .inspect_err(|_| {
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                Err(err)
             })
     }
 
@@ -443,9 +440,8 @@ impl UserAddressSpace {
 
         self.inner
             .vmem_allocate_pages(VmemKind::Unmapped, num_pages, None)
-            .or_else(|err| {
+            .inspect_err(|_| {
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                Err(err)
             })
     }
 
@@ -456,9 +452,8 @@ impl UserAddressSpace {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
         self.inner
             .vmem_allocate_contiguous_pages(VmemKind::User, num_pages)
-            .or_else(|err| {
+            .inspect_err(|_| {
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                Err(err)
             })
     }
 
@@ -467,7 +462,6 @@ impl UserAddressSpace {
             |_| {
                 self.inner.custom_memory.free(addr).map(|sz| {
                     self.stats_user_sub(sz);
-                    ()
                 })
             },
             |sz| {
@@ -493,9 +487,8 @@ impl UserAddressSpace {
                     self.inner
                         .mmio_map(phys_addr, segment.start)
                         .map(|_| segment.start)
-                        .or_else(|err| {
+                        .inspect_err(|_| {
                             self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                            Err(err)
                         })
                 },
             )

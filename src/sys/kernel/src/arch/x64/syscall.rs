@@ -162,6 +162,7 @@ pub struct ThreadControlBlock {
 }
 
 impl ThreadControlBlock {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             user_rsp: 0,
@@ -221,11 +222,8 @@ impl ThreadControlBlock {
     }
 
     pub fn pf_addr_error_code(&self) -> Option<(u64, u64)> {
-        if let Some(pf_addr) = self.pf_addr {
-            Some((pf_addr, self.irq_stack.unwrap().error_code))
-        } else {
-            None
-        }
+        self.pf_addr
+            .map(|pf_addr| (pf_addr, self.irq_stack.unwrap().error_code))
     }
 
     unsafe fn from_addr(addr: u64) -> &'static mut Self {
@@ -564,7 +562,7 @@ extern "C" fn syscall_handler_rust(
         )
     };
 
-    return res; // rax
+    res // rax
 }
 
 #[naked]

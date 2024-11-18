@@ -100,12 +100,13 @@ impl Drop for SegmentCache {
 }
 
 impl SegmentCache {
-    pub(super) const fn new() -> Self {
-        const VAL0: SpinLock<*mut CacheLine> = SpinLock::new(core::ptr::null_mut());
-        const VAL1: AtomicU64 = AtomicU64::new(0);
+    #[allow(clippy::declare_interior_mutable_const)]
+    pub(super) fn new() -> Self {
+        const V0: SpinLock<*mut CacheLine> = SpinLock::new(core::ptr::null_mut());
+        const V1: AtomicU64 = AtomicU64::new(0);
         Self {
-            caches: [VAL0; CACHE_LINES],
-            counts: [VAL1; CACHE_LINES],
+            caches: [V0; CACHE_LINES],
+            counts: [V1; CACHE_LINES],
         }
     }
 

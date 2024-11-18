@@ -1,4 +1,4 @@
-pub(self) mod gdt;
+mod gdt;
 
 pub mod irq;
 pub mod paging;
@@ -85,16 +85,17 @@ pub fn kernel_exit() -> ! {
 
         // Initially it worked with port 0x3c0.
         let mut port = Port::new(0x3c0);
-        port.write(0x34 as u8);
+        port.write(0x34_u8);
         // Later port number became 0x600, for some reason.
         let mut port = Port::new(0x600);
-        port.write(0x34 as u8);
+        port.write(0x34_u8);
 
         // Then, try Qemu exit.
         let mut port = Port::new(0xf4);
-        port.write(0x10 as u32);
+        port.write(0x10_u32);
     }
 
+    #[allow(clippy::empty_loop)]
     loop {} // The above did not work, so just loop
 }
 
