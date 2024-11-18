@@ -47,7 +47,7 @@ pub(super) unsafe fn raw_alloc_for_slab<T: Sized>() -> *mut T {
         )
         .expect("Invalid layout");
 
-        core::mem::transmute(kheap::RAW_ALLOCATOR.alloc(layout))
+        kheap::RAW_ALLOCATOR.alloc(layout) as *mut T
     } else {
         // Runtime: "manually" map pages for slabs (they will never get unmapped).
         let num_pages =
@@ -69,7 +69,7 @@ pub(super) unsafe fn raw_alloc_for_slab<T: Sized>() -> *mut T {
             page_vaddr += PAGE_SIZE_SMALL;
         }
 
-        core::mem::transmute(vaddr as usize as *mut u8)
+        vaddr as usize as *mut T
     };
     result
 }
@@ -180,14 +180,6 @@ impl MemorySegment {
         (self.start <= segment.start) && (self.end() >= segment.end())
     }
 
-    pub unsafe fn as_slice(&self) -> &[u8] {
-        core::slice::from_raw_parts(self.start as usize as *const u8, self.size as usize)
-    }
-
-    pub unsafe fn as_slice_mut(&self) -> &mut [u8] {
-        core::slice::from_raw_parts_mut(self.start as usize as *mut u8, self.size as usize)
-    }
-
     pub fn is_empty(&self) -> bool {
         self.size == 0
     }
@@ -283,6 +275,7 @@ impl PageType {
 }
 
 bitflags! {
+    #[derive(Default)]
     pub struct MappingOptions: u8 {
         const READABLE        = 1;
         const WRITABLE        = 2;
@@ -292,14 +285,6 @@ bitflags! {
         const LAZY            = 32;
         const GUARD           = 64;
         const PRIVATE         = 128;  // Used by vmem_pages.
-    }
-}
-
-impl Default for MappingOptions {
-    fn default() -> Self {
-        Self {
-            bits: Default::default(),
-        }
     }
 }
 
@@ -356,8 +341,8 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
 
     // Step 2. Init physical memory.
     let exclusion = MemorySegment {
-        start: KERNEL_PHYS_START as u64,
-        size: bootup_heap_phys.end() - (KERNEL_PHYS_START as u64),
+        start: KERNEL_PHYS_START,
+        size: bootup_heap_phys.end() - KERNEL_PHYS_START,
     };
     let pvh_mem_map = boot_info.pvh().mem_map();
     let mut available_memory: Vec<MemorySegment> = Vec::with_capacity(pvh_mem_map.len() + 2);
@@ -380,14 +365,14 @@ pub fn init_mm_bsp_stage1(boot_info: &crate::init::KernelBootupInfo) -> u64 {
 
     in_use.push(MemorySegment {
         start: 0,
-        size: KERNEL_PHYS_START as u64,
+        size: KERNEL_PHYS_START,
     });
 
     let initrd_seg = boot_info.initrd_bytes_phys();
     if initrd_seg.start > bootup_heap_phys.end() {
         in_use.push(initrd_seg);
     } else {
-        assert!(initrd_seg.end() < KERNEL_PHYS_START as u64);
+        assert!(initrd_seg.end() < KERNEL_PHYS_START);
     }
 
     phys::init(&available_memory[0..], &in_use[0..]);

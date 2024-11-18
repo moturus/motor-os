@@ -91,14 +91,17 @@ pub fn is_kernel_addr(vmem_addr: u64) -> bool {
 
 pub fn is_user(vmem_addr: u64) -> bool {
     vmem_addr <= VMEM_USER_END
-        || (vmem_addr >= moto_sys::CUSTOM_USERSPACE_REGION_START
-            && vmem_addr < moto_sys::CUSTOM_USERSPACE_REGION_END)
+        || (moto_sys::CUSTOM_USERSPACE_REGION_START..moto_sys::CUSTOM_USERSPACE_REGION_END)
+            .contains(&vmem_addr)
 }
 
 pub fn init() {
     KERNEL_ADDRESS_SPACE.set(KernelAddressSpace::new());
 }
 
+/// # Safety
+///
+/// Assumes addresses are properly initialized.
 pub unsafe fn map_page(phys_addr: u64, virt_addr: u64, kind: PageType, options: MappingOptions) {
     KERNEL_ADDRESS_SPACE
         .base
@@ -106,7 +109,7 @@ pub unsafe fn map_page(phys_addr: u64, virt_addr: u64, kind: PageType, options: 
         .map_page(phys_addr, virt_addr, kind, options);
 }
 
-pub unsafe fn get_kernel_static_page_mut() -> &'static mut moto_sys::KernelStaticPage {
+pub fn get_kernel_static_page_mut() -> &'static mut moto_sys::KernelStaticPage {
     KERNEL_ADDRESS_SPACE.get_static_shared_page_mut()
 }
 
@@ -344,7 +347,7 @@ impl VmemRegion {
 
         #[cfg(debug_assertions)]
         {
-            assert!(frames.len() > 0);
+            assert!(!frames.is_empty());
 
             let mut prev_kind = None;
             let mut prev_start = None;
@@ -519,8 +522,8 @@ pub struct KernelAddressSpace {
 impl KernelAddressSpace {
     // Unsafe to indicate the caller(s) must deal with memory barriers properly.
     // Otherwise safe, if called after the bootup init.
-    unsafe fn get_static_shared_page_mut(&self) -> &'static mut moto_sys::KernelStaticPage {
-        self.static_shared_page.get_mut()
+    fn get_static_shared_page_mut(&self) -> &'static mut moto_sys::KernelStaticPage {
+        unsafe { self.static_shared_page.get_mut() }
     }
 
     fn new() -> &'static mut Self {
@@ -550,7 +553,7 @@ impl KernelAddressSpace {
             static_shared_page: UnsafeRef::const_default(),
             next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
 
-            _pin: PhantomPinned::default(),
+            _pin: PhantomPinned,
         }));
 
         let space = UnsafeRef::from(&result.base);

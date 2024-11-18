@@ -233,9 +233,7 @@ impl Process {
     }
 
     pub fn from_pid(pid: u64) -> Option<Arc<Self>> {
-        crate::xray::stats::stats_from_pid(pid)
-            .map(|stats| stats.owner.upgrade())
-            .flatten()
+        crate::xray::stats::stats_from_pid(pid).and_then(|stats| stats.owner.upgrade())
     }
 
     pub fn new_child(
@@ -313,11 +311,7 @@ impl Process {
 
     pub(super) fn get_object(&self, handle: &SysHandle) -> Option<WaitObject> {
         let objects = self.wait_objects.lock(line!());
-        if let Some(obj) = objects.get(handle) {
-            Some(obj.clone())
-        } else {
-            None
-        }
+        objects.get(handle).cloned()
     }
 
     // TODO: put_object should not remove live threads, as they can self-ref.
@@ -425,26 +419,20 @@ impl Process {
         self.status.lock(line!()); // Must lock status because self.self_object is mutated on exit.
         compiler_fence(Ordering::AcqRel);
         core::sync::atomic::fence(Ordering::AcqRel);
-        if let Some(obj) = self.self_object.as_ref() {
-            Some(obj.clone())
-        } else {
-            None
-        }
+        self.self_object.as_ref().map(|o| o.clone())
     }
 
     pub(super) fn self_pinned(&self) -> Option<Arc<Process>> {
         self.status.lock(line!()); // Must lock status because self.self_object is mutated on exit.
         compiler_fence(Ordering::AcqRel);
         core::sync::atomic::fence(Ordering::AcqRel);
-        if let Some(obj) = self.self_object.as_ref() {
-            super::sysobject::object_from_sysobject::<Process>(&obj)
-        } else {
-            None
-        }
+        self.self_object
+            .as_ref()
+            .and_then(super::sysobject::object_from_sysobject::<Process>)
     }
 
     pub fn status(&self) -> ProcessStatus {
-        self.status.lock(line!()).clone()
+        *self.status.lock(line!())
     }
     pub fn address_space(&self) -> &Arc<UserAddressSpace> {
         &self.address_space
@@ -570,10 +558,10 @@ impl Process {
                     self.debug_name()
                 );
                 *status = ProcessStatus::Running;
-                return true;
+                true
             }
-            ProcessStatus::Exiting(_) => return false,
-            ProcessStatus::Running => return true,
+            ProcessStatus::Exiting(_) => false,
+            ProcessStatus::Running => true,
             _ => panic!("unexpected process status: {:?}", *status),
         }
     }
@@ -943,7 +931,10 @@ impl Thread {
         self.user_tcb_user_addr
     }
 
-    unsafe fn user_tcb_mut(&self) -> &mut UserThreadControlBlock {
+    /// # Safety
+    ///
+    /// Assumes that self is not running in the userspace.
+    pub unsafe fn user_tcb_mut(&self) -> &mut UserThreadControlBlock {
         debug_assert_ne!(0, self.user_tcb_kernel_addr);
         (self.user_tcb_kernel_addr as usize as *mut UserThreadControlBlock)
             .as_mut()
@@ -968,12 +959,6 @@ impl Thread {
             );
             Err(())
         }
-    }
-
-    pub unsafe fn user_tcb_set_current_cpu(&self) {
-        self.user_tcb_mut()
-            .current_cpu
-            .store(crate::arch::current_cpu() as u32, Ordering::Relaxed);
     }
 
     pub fn get_weak(&self) -> Weak<Self> {

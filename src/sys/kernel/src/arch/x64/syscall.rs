@@ -467,10 +467,12 @@ impl ThreadControlBlock {
     }
 
     fn set_fs(&self) {
-        let thread = self.owner();
-        unsafe { thread.user_tcb_set_current_cpu() };
-        let fsbase = thread.user_tcb_user_addr();
         unsafe {
+            self.owner()
+                .user_tcb_mut()
+                .current_cpu
+                .store(crate::arch::current_cpu() as u32, Ordering::Relaxed);
+            let fsbase = self.owner().user_tcb_user_addr();
             asm!("wrfsbase {}", in(reg) fsbase, options(nostack, preserves_flags));
         }
     }

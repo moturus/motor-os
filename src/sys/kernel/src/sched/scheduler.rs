@@ -407,7 +407,9 @@ impl Scheduler {
             self.idle_start();
             if nosleep {
                 self.idle.store(true, Ordering::Release);
-                while !self.wake.load(Ordering::Relaxed) {}
+                while !self.wake.load(Ordering::Relaxed) {
+                    core::hint::spin_loop();
+                }
                 self.idle.store(false, Ordering::Release);
             } else {
                 interrupts::disable();
@@ -472,7 +474,7 @@ pub fn start() -> ! {
         {
             // Safe because we have proper memory fences around and are calling this after
             // the bootup has completed.
-            let shared_page = unsafe { crate::mm::virt::get_kernel_static_page_mut() };
+            let shared_page = crate::mm::virt::get_kernel_static_page_mut();
             shared_page.version = 0;
             shared_page.num_cpus = crate::arch::num_cpus() as u32;
             update_system_time();
@@ -494,15 +496,13 @@ pub fn start() -> ! {
 }
 
 fn update_system_time() {
-    let shared_page = unsafe { crate::mm::virt::get_kernel_static_page_mut() };
+    let shared_page = crate::mm::virt::get_kernel_static_page_mut();
     crate::arch::time::populate_kernel_static_page(shared_page);
 }
 
 pub fn post(job: Job) {
     if job.cpu == uCpus::MAX {
-        {
-            GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job)
-        };
+        GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job);
         let mut wake = |_: uCpus, scheduler: &Scheduler| -> bool {
             if scheduler.idle.load(Ordering::Acquire) {
                 scheduler.wake();
@@ -615,6 +615,7 @@ pub fn get_usage(buf: &mut [f32]) {
     let num_cpus = crate::arch::num_cpus() as usize;
     assert_eq!(buf.len(), num_cpus);
 
+    #[allow(clippy::needless_range_loop)]
     for cpu in 0..num_cpus {
         let scheduler = PERCPU_SCHEDULERS.get_for_cpu(cpu as uCpus);
         buf[cpu] = scheduler.load_pct();

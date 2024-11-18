@@ -185,8 +185,7 @@ impl PageAllocatorInner {
         self.slab_count += 1;
 
         // Initialize the rest.
-        for idx in 1..STRUCT_PAGES_IN_SMALL_PAGE {
-            let page = &mut page_array[idx];
+        for page in &mut page_array[1..] {
             debug_assert!(page.is_empty());
 
             self.free_list
@@ -276,12 +275,12 @@ impl VmemSegment {
             let phys_addr = frame.start() + offset;
             let refs = page.frame.refs();
             if refs == 1 {
-                return VaddrMapStatus::Private(phys_addr);
+                VaddrMapStatus::Private(phys_addr)
             } else {
-                return VaddrMapStatus::Shared(phys_addr);
+                VaddrMapStatus::Shared(phys_addr)
             }
         } else {
-            return VaddrMapStatus::Unmapped;
+            VaddrMapStatus::Unmapped
         }
     }
 
