@@ -20,6 +20,7 @@ script = '''
 rm -rf build
 rm -rf vm_images
 rm -rf src/sys/target
+rm -rf src/boot/*/target
 cd "${RDIR}/src/imager"
 cargo clean
 rm -rf target
