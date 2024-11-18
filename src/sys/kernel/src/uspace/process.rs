@@ -934,6 +934,7 @@ impl Thread {
     /// # Safety
     ///
     /// Assumes that self is not running in the userspace.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn user_tcb_mut(&self) -> &mut UserThreadControlBlock {
         debug_assert_ne!(0, self.user_tcb_kernel_addr);
         (self.user_tcb_kernel_addr as usize as *mut UserThreadControlBlock)
@@ -969,11 +970,7 @@ impl Thread {
         self.status.lock(line!()); // Must lock status because self.self_object is mutated on exit.
         compiler_fence(Ordering::AcqRel);
         core::sync::atomic::fence(Ordering::AcqRel);
-        if let Some(obj) = self.self_object.as_ref() {
-            Some(obj.clone())
-        } else {
-            None
-        }
+        self.self_object.as_ref().cloned()
     }
 
     pub fn cancel_timeout(&self) {
@@ -1285,7 +1282,7 @@ impl Thread {
                         process_mut.pid().as_u64(),
                         process_mut.debug_name()
                     );
-                    *process_status = ProcessStatus::Error(err.clone());
+                    *process_status = ProcessStatus::Error(err);
                     error = Some(err);
                     break 'proc_lock;
                 }
@@ -1582,9 +1579,10 @@ impl Thread {
     }
 
     fn get_thread_data(&self) -> moto_sys::stats::ThreadDataV1 {
-        let mut thread_data = moto_sys::stats::ThreadDataV1::default();
-
-        thread_data.tid = self.tid.as_u64();
+        let mut thread_data = moto_sys::stats::ThreadDataV1 {
+            tid: self.tid.as_u64(),
+            ..Default::default()
+        };
         {
             let status = self.status.lock(line!());
             match *status {
@@ -1623,7 +1621,7 @@ impl Thread {
         let name_bytes = name.as_bytes();
 
         thread_data.name_len = name_bytes.len() as u8;
-        if name_bytes.len() > 0 {
+        if !name_bytes.is_empty() {
             thread_data.name_bytes[0..name_bytes.len()].copy_from_slice(name_bytes);
         }
 

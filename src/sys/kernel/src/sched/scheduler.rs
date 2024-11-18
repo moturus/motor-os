@@ -456,9 +456,9 @@ pub fn start() -> ! {
             VecDeque::with_capacity(INITIAL_QUEUE_SIZE),
         ))));
 
-        PERCPU_TIMERS.set(Box::leak(Box::new(StaticPerCpu::new())));
+        PERCPU_TIMERS.set(Box::leak(Box::new(StaticPerCpu::init())));
 
-        PERCPU_SCHEDULERS.set(Box::leak(Box::new(StaticPerCpu::new())));
+        PERCPU_SCHEDULERS.set(Box::leak(Box::new(StaticPerCpu::init())));
     } else {
         // Wait until BSP initializes SCHEDULERS.
         PERCPU_SCHEDULERS.spin_until_set();

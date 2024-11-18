@@ -7,13 +7,18 @@ pub struct StaticPerCpu<T> {
 }
 
 impl<T> StaticPerCpu<T> {
-    pub fn new() -> Self {
+    pub fn init() -> Self {
         Self {
             data: {
                 let arr = [0_usize; MAX_CPUS as usize];
-                unsafe { core::mem::transmute::<_, [AtomicUsize; MAX_CPUS as usize]>(arr) }
+                unsafe {
+                    core::mem::transmute::<
+                        [usize; MAX_CPUS as usize],
+                        [AtomicUsize; MAX_CPUS as usize],
+                    >(arr)
+                }
             },
-            _unused: PhantomData::default(),
+            _unused: PhantomData,
         }
     }
 

@@ -74,7 +74,7 @@ pub fn gdt_init() {
         GDT.set(Box::leak(Box::new(StaticPerCpu::<(
             GlobalDescriptorTable,
             Selectors,
-        )>::new())));
+        )>::init())));
     }
 
     let (gdt, selectors) = GDT.set_per_cpu(Box::leak(Box::new(new_gdt())));

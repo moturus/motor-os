@@ -276,7 +276,7 @@ fn sys_handle_put(
             .map_err(|_| moto_rt::E_INVALID_ARGUMENT),
         None => {
             log::debug!("sys_handle_put: bad process handle");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            Err(moto_rt::E_INVALID_ARGUMENT)
         }
     }
 }
@@ -308,12 +308,12 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
 
         if return_pid {
             if let Some(proc) = super::shared::peer_owner(thread.owner().pid(), &obj.sys_object) {
-                return ResultBuilder::ok_1(proc.pid().as_u64());
+                ResultBuilder::ok_1(proc.pid().as_u64())
             } else {
-                return ResultBuilder::result(moto_rt::E_NOT_FOUND);
+                ResultBuilder::result(moto_rt::E_NOT_FOUND)
             }
         } else {
-            return ResultBuilder::ok();
+            ResultBuilder::ok()
         }
     } else {
         log::debug!(
@@ -321,7 +321,7 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             process.pid().as_u64(),
             handle.as_u64()
         );
-        return ResultBuilder::bad_handle(handle);
+        ResultBuilder::bad_handle(handle)
     }
 }
 

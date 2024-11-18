@@ -6,7 +6,7 @@ struct Loader<'a> {
     address_space: &'a crate::mm::user::UserAddressSpace,
 }
 
-impl<'a> elfloader::ElfLoader for Loader<'a> {
+impl elfloader::ElfLoader for Loader<'_> {
     fn allocate(
         &mut self,
         load_headers: elfloader::LoadableHeaders,

@@ -184,6 +184,7 @@ impl SysObject {
         self_.wake_event_lock.store(false, Ordering::Release);
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn wake_thread(&self, wakee_thread: SysHandle, this_cpu: bool) -> Result<(), ()> {
         if let Some(process) = self.process_owner().upgrade() {
             if let Some(thread) = super::sysobject::object_from_handle::<super::process::Thread>(
@@ -193,9 +194,8 @@ impl SysObject {
                 thread.post_wake(this_cpu);
                 return Ok(());
             }
-            return Err(());
         }
-        return Err(());
+        Err(())
     }
 
     // NOT called from IRQ.

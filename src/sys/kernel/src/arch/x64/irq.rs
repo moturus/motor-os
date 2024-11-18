@@ -175,10 +175,10 @@ pub fn init() {
     log::trace!("amd64::irq::init() for cpu {}", cpu);
     if cpu == super::bsp() {
         IDT.set(Box::leak(Box::new(
-            StaticPerCpu::<InterruptDescriptorTable>::new(),
+            StaticPerCpu::<InterruptDescriptorTable>::init(),
         )));
         X2APIC.set(Box::leak(Box::new(
-            StaticPerCpu::<x86::apic::x2apic::X2APIC>::new(),
+            StaticPerCpu::<x86::apic::x2apic::X2APIC>::init(),
         )));
 
         // Check that APIC base is at the default address. VirtIO assumes so,

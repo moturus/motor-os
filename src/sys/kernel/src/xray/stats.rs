@@ -278,7 +278,7 @@ impl KProcessStats {
         // Do it here because this is the only place where child processes
         // are tracked.
         let children = self.children.lock(line!());
-        for (pid, _) in &*children {
+        for pid in children.keys() {
             crate::uspace::process::post_kill_by_pid(pid.as_u64());
         }
     }
@@ -288,7 +288,7 @@ impl KProcessStats {
     }
 
     pub fn debug_name(&self) -> &str {
-        &self.debug_name.as_str()
+        self.debug_name.as_str()
     }
 
     pub fn parent(&self) -> Option<Arc<KProcessStats>> {
@@ -576,6 +576,7 @@ pub fn fill_percpu_stats_entry(
             num_cpus,
         );
 
+        #[allow(clippy::needless_range_loop)]
         for cpu in 0..num_cpus {
             let entry_here = stats.get_percpu_stats_entry(cpu as uCpus);
             let entry_there = &mut percpu_entries[cpu];
@@ -595,7 +596,7 @@ pub fn fill_percpu_stats_page(page_addr: usize) -> usize {
         let lock = SYSTEM_STATS.children.lock(line!());
         processes.reserve_exact(lock.len());
 
-        for (_, stats) in &*lock {
+        for stats in lock.values() {
             processes.push(stats.clone());
         }
 

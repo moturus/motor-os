@@ -30,7 +30,10 @@ impl core::fmt::Debug for DebugSession {
 }
 
 impl DebugSession {
-    pub fn new(debugger: Arc<Process>, debuggee: Arc<Process>) -> Result<SysHandle, ErrorCode> {
+    pub fn new_session(
+        debugger: Arc<Process>,
+        debuggee: Arc<Process>,
+    ) -> Result<SysHandle, ErrorCode> {
         let session = {
             let mut ss = debuggee.debug_session.lock(line!());
             if ss.is_some() {
@@ -94,7 +97,7 @@ fn sys_dbg_attach(thread: &crate::uspace::process::Thread, args: &SyscallArgs) -
         return ResultBuilder::result(moto_rt::E_NOT_FOUND);
     };
 
-    match DebugSession::new(thread.owner(), debuggee) {
+    match DebugSession::new_session(thread.owner(), debuggee) {
         Ok(handle) => ResultBuilder::ok_1(handle.into()),
         Err(err) => ResultBuilder::result(err),
     }
@@ -105,7 +108,7 @@ fn get_session(
     debug_handle: SysHandle,
 ) -> Result<Arc<DebugSession>, ErrorCode> {
     let session = if let Some(obj) =
-        super::sysobject::object_from_handle::<DebugSession>(&debugger, debug_handle)
+        super::sysobject::object_from_handle::<DebugSession>(debugger, debug_handle)
     {
         obj
     } else {
@@ -171,6 +174,7 @@ fn sys_dbg_list_threads(
     let sz = tids.len().min(buf_len as usize);
     let copied_tids = session.debuggee.list_tids(&start_tid, &mut tids[0..sz]);
 
+    #[allow(clippy::needless_range_loop)]
     for idx in 0..copied_tids {
         let tid = tids[idx];
         unsafe {

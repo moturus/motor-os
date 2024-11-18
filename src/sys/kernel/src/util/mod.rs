@@ -47,62 +47,10 @@ pub fn prng(add_entropy: bool) -> u32 {
         *val += core::num::Wrapping(crate::arch::time::Instant::now().as_u64());
     }
 
-    *val = *val % MOD;
+    *val %= MOD;
 
-    return (*val).0 as u32;
+    val.0 as u32
 }
-
-pub unsafe fn bzero(start: usize, len: usize) {
-    // TODO: this can be optimized; see https://www.felixcloutier.com/x86/maskmovdqu
-    let end = start + len;
-    let mut pos = start;
-
-    // zero any odd bytes at the beginning.
-    while ((pos & 7) != 0) && (pos < end) {
-        let ptr = pos as *mut u8;
-        *ptr = 0;
-        pos += 1;
-    }
-
-    // zero in 8-byte chunks.
-    while pos + 8 < end {
-        let ptr = pos as *mut u64;
-        *ptr = 0;
-        pos += 8;
-    }
-
-    // zero any odd bytes at the end.
-    while pos < end {
-        let ptr = pos as *mut u8;
-        *ptr = 0;
-        pos += 1;
-    }
-}
-
-#[macro_export]
-macro_rules! is_power_of_two {
-    ($num: expr) => {
-        ($num) & (($num) - 1) == 0
-    };
-}
-pub use is_power_of_two;
-
-#[macro_export]
-macro_rules! offset_of {
-    ($struct:ty, $($field:tt)+) => ({
-        let val = ::core::mem::MaybeUninit::<$struct>::uninit();
-        let val: $struct = unsafe { val.assume_init() };
-
-        let base = &val as *const _ as usize;
-        #[allow(unaligned_references)]
-        let member =  &val.$($field)* as *const _ as usize;
-
-        ::core::mem::forget(val);
-
-        member - base
-    });
-}
-pub use offset_of;
 
 pub fn decode_arg<F: core::str::FromStr>(args: &Vec<&str>, param: &str) -> Option<F> {
     for arg in args {

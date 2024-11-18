@@ -143,7 +143,7 @@ pub fn start() {
 
     TRACER.set(Box::leak(Box::new(Tracer {
         tracing: AtomicBool::new(true),
-        buffers: StaticPerCpu::new(),
+        buffers: StaticPerCpu::init(),
     })))
 }
 

@@ -57,8 +57,7 @@ impl<T> StaticRef<T> {
         let ptr = self.ptr.load(Ordering::Acquire);
         assert_ne!(ptr, 0);
         let ptr = ptr as *const T;
-        let ptr = unsafe { &*ptr };
-        ptr
+        unsafe { &*ptr }
     }
 
     pub fn spin_until_set(&self) {

@@ -80,6 +80,7 @@ impl Shared {
 
 // It would have been better to use a HashMap, but it is unavailable in [no-std].
 // TODO: use a HashMap instead of BTreeMap.
+#[allow(clippy::type_complexity)]
 static LISTENERS: StaticRef<SpinLock<BTreeMap<Arc<String>, LinkedList<Arc<Shared>>>>> =
     StaticRef::default_const();
 
@@ -240,14 +241,12 @@ pub(super) fn peer_owner(
         let sharer = shared
             .sharer
             .upgrade()
-            .map(|sharer| sharer.process_owner().upgrade())
-            .flatten();
+            .and_then(|sharer| sharer.process_owner().upgrade());
         let sharee = shared
             .sharee
             .lock(line!())
             .upgrade()
-            .map(|sharee| sharee.process_owner().upgrade())
-            .flatten();
+            .and_then(|sharee| sharee.process_owner().upgrade());
 
         if let Some(sharer) = &sharer {
             if sharer.pid() == this {

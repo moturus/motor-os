@@ -237,7 +237,7 @@ fn sys_map(
     }
 
     log::debug!("sys_mem_impl: bad map flags: 0x{:x}", flags);
-    return ResultBuilder::invalid_argument();
+    ResultBuilder::invalid_argument()
 }
 
 fn sys_unmap(
@@ -277,10 +277,11 @@ fn sys_mem_global_stats(
     let phys_stats = crate::mm::phys::PhysStats::get();
     let heap_stats = crate::mm::kheap::heap_stats();
 
-    let mut stats = moto_sys::stats::MemoryStats::default();
-    stats.available = phys_stats.total_size;
-    stats.used_pages = phys_stats.small_pages_used;
-    stats.heap_total = heap_stats.total_in_heap as u64;
+    let stats = moto_sys::stats::MemoryStats {
+        available: phys_stats.total_size,
+        used_pages: phys_stats.small_pages_used,
+        heap_total: heap_stats.total_in_heap as u64,
+    };
 
     unsafe {
         let src: &[u8] = core::slice::from_raw_parts(
@@ -387,7 +388,7 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             if args.args[5] != 0 {
                 return ResultBuilder::invalid_argument();
             }
-            return sys_map(
+            sys_map(
                 thread,
                 &address_space,
                 args.flags,
@@ -395,25 +396,25 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
                 args.args[2],
                 args.args[3],
                 args.args[4],
-            );
+            )
         }
         SysMem::OP_UNMAP => {
             if args.args[3] != 0 || args.args[4] != 0 || args.args[5] != 0 {
                 return ResultBuilder::invalid_argument();
             }
-            return sys_unmap(
+            sys_unmap(
                 thread,
                 &address_space,
                 args.flags,
                 args.args[1],
                 args.args[2],
-            );
+            )
         }
         SysMem::OP_QUERY => {
             if args.args[5] != 0 {
                 return ResultBuilder::invalid_argument();
             }
-            return sys_mem_query(
+            sys_mem_query(
                 thread,
                 &address_space,
                 args.flags,
@@ -421,7 +422,7 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
                 args.args[2],
                 args.args[3],
                 args.args[4],
-            );
+            )
         }
         _ => {
             log::debug!("sys_mem: bad op {}", args.operation);

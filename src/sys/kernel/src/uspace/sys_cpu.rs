@@ -90,7 +90,7 @@ fn process_wait_handles(
                 );
                 return ResultBuilder::bad_handle(*handle);
             }
-            objects.push((handle.clone(), obj.clone()));
+            objects.push((*handle, obj.clone()));
         } else {
             log::debug!(
                 "sys_wait: object not found in pid {} for handle {}.",
@@ -102,10 +102,10 @@ fn process_wait_handles(
     }
 
     for (handle, obj) in &objects {
-        obj.sys_object.add_waiting_thread(curr, handle.clone());
+        obj.sys_object.add_waiting_thread(curr, *handle);
         if obj.wake_count < obj.sys_object.wake_count() || obj.sys_object.done() {
             // obj has unconsumed wakes, so queue it as a waker to the current thread.
-            curr.add_waker(handle.clone())
+            curr.add_waker(*handle)
         }
     }
 
@@ -237,12 +237,11 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     }
 
     if wake_target != SysHandle::NONE {
-        match do_wake(curr, wake_target, SysHandle::NONE, wake_this_cpu) {
-            Err(err) => match err {
+        if let Err(err) = do_wake(curr, wake_target, SysHandle::NONE, wake_this_cpu) {
+            match err {
                 moto_rt::E_BAD_HANDLE => return ResultBuilder::bad_handle(wake_target),
                 _ => return ResultBuilder::result(err),
-            },
-            _ => {}
+            }
         }
     }
 
@@ -393,12 +392,10 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
 
     // Need to wait.
     let target_obj = killer.owner().get_object(&target).unwrap();
-    target_obj
-        .sys_object
-        .add_waiting_thread(killer, target.clone());
+    target_obj.sys_object.add_waiting_thread(killer, target);
     if target_obj.wake_count < target_obj.sys_object.wake_count() {
         // obj has unconsumed wakes, so queue it as a waker to the current thread.
-        killer.add_waker(target.clone())
+        killer.add_waker(target)
     }
 
     killer.add_wait_objects(alloc::vec![target_obj]);
@@ -465,10 +462,7 @@ fn sys_cpu_usage_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> 
         return ResultBuilder::invalid_argument();
     }
 
-    let mut usage: Vec<f32> = Vec::with_capacity(crate::arch::num_cpus() as usize);
-    for _ in 0..crate::arch::num_cpus() {
-        usage.push(0.0);
-    }
+    let mut usage: Vec<f32> = alloc::vec![0.0; crate::arch::num_cpus() as usize];
     crate::sched::get_usage(usage.as_mut());
 
     unsafe {
@@ -555,7 +549,7 @@ pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs
         SysCpu::OP_EXIT => curr.exit(args.args[0]),
         _ => {
             log::debug!("sys_cpu: bad op: {}", args.operation);
-            return ResultBuilder::invalid_argument();
+            ResultBuilder::invalid_argument()
         }
     }
 }

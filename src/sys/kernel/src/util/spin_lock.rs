@@ -69,6 +69,7 @@ impl<T: ?Sized> SpinLock<T> {
                             self.lock_word.load(Ordering::Acquire)
                         );
                         super::print_stack_trace_and_die(cpu);
+                        #[allow(clippy::empty_loop)]
                         loop {}
                     }
                     #[cfg(not(debug_assertions))]
@@ -95,26 +96,26 @@ impl<T: ?Sized> SpinLock<T> {
     }
 }
 
-impl<T: ?Sized + Default> Default for SpinLock<T> {
+impl<T: Default> Default for SpinLock<T> {
     fn default() -> SpinLock<T> {
         SpinLock::new(Default::default())
     }
 }
 
-impl<'a, T: ?Sized> Deref for LockGuard<'a, T> {
+impl<T: ?Sized> Deref for LockGuard<'_, T> {
     type Target = T;
-    fn deref<'b>(&'b self) -> &'b T {
+    fn deref(&self) -> &T {
         &*self.data
     }
 }
 
-impl<'a, T: ?Sized> DerefMut for LockGuard<'a, T> {
-    fn deref_mut<'b>(&'b mut self) -> &'b mut T {
+impl<T: ?Sized> DerefMut for LockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
         &mut *self.data
     }
 }
 
-impl<'a, T: ?Sized> Drop for LockGuard<'a, T> {
+impl<T: ?Sized> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
         self.lock_word.store(0, Ordering::SeqCst);
     }
