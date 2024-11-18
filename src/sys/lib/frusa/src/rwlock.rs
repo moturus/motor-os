@@ -11,10 +11,7 @@ pub const fn rwlock_new() -> AtomicU32 {
 
 pub fn try_read_lock(lock: &AtomicU32) -> bool {
     let val = lock.fetch_add(READER, Ordering::Relaxed);
-    if val > MAX_LOCK_VALUE {
-        lock.fetch_sub(READER, Ordering::Relaxed);
-        false
-    } else if val & WRITER != 0 {
+    if val > MAX_LOCK_VALUE || val & WRITER != 0 {
         lock.fetch_sub(READER, Ordering::Relaxed);
         false
     } else {

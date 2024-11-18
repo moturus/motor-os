@@ -41,7 +41,7 @@ pub extern "C" fn spawn(
             assert!(u64::from(sys_handle) > (moto_rt::E_MAX as u64));
             sys_handle.as_u64()
         }
-        Err(err) => u16::from(err) as u64,
+        Err(err) => err as u64,
     }
 }
 

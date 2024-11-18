@@ -152,7 +152,7 @@ impl Block {
             return core::ptr::null_mut();
         }
 
-        return unsafe { self.data.add((ones as usize) << self.entry_sz_log2) };
+        unsafe { self.data.add((ones as usize) << self.entry_sz_log2) }
     }
 
     fn dealloc(&self, ptr: *mut u8) -> Result<(), ()> {
@@ -383,8 +383,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             let mut curr_used_bit = 2_u64;
 
             let mut entry_sz_log2 = Self::MIN_SIZE.ilog2();
-            for idx in 0..SLABS {
-                let slab = &mut slabs[idx];
+            for slab in slabs {
                 slab.entry_sz_log2 = entry_sz_log2;
                 slab.bytes_total.store(0, Ordering::Relaxed);
                 slab.bytes_in_use.store(0, Ordering::Relaxed);

@@ -362,7 +362,7 @@ impl NetChannel {
     }
 
     // Poll messages, if any. Returns true if the IO thread may sleep.
-    fn io_thread_poll_messages(self: &Self) -> bool {
+    fn io_thread_poll_messages(&self) -> bool {
         let mut received_messages = 0;
 
         while let Ok(msg) = self.conn.recv() {
@@ -424,7 +424,7 @@ impl NetChannel {
 
     // Attempts to send some messages. Returns true if the io thread may sleep.
     fn io_thread_send_messages(
-        self: &Self,
+        &self,
         msg: Option<io_channel::Msg>,
     ) -> (bool, Option<io_channel::Msg>) {
         let mut sent_messages = 0;
@@ -478,7 +478,7 @@ impl NetChannel {
         };
 
         self_.io_thread_wake_handle.store(
-            moto_sys::UserThreadControlBlock::get().self_handle.into(),
+            moto_sys::UserThreadControlBlock::get().self_handle,
             Ordering::Release,
         );
 
@@ -628,7 +628,7 @@ impl NetChannel {
     }
 
     // Note: this is called from the IO thread, so must not sleep/block.
-    fn on_orphan_message(self: &Self, msg: io_channel::Msg) {
+    fn on_orphan_message(&self, msg: io_channel::Msg) {
         match msg.command {
             api_net::CMD_TCP_STREAM_RX => {
                 // RX raced with the client dropping the sream. Need to get page to free it.
@@ -942,7 +942,7 @@ impl TcpStream {
             sz_read
         };
 
-        return Ok(sz_read);
+        Ok(sz_read)
     }
 
     fn poll_rx(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -1065,11 +1065,7 @@ impl TcpStream {
     }
 
     pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        if buf.len() == 0 {
-            return Ok(0);
-        }
-
-        if !self.tcp_state().can_write() {
+        if buf.is_empty() || !self.tcp_state().can_write() {
             return Ok(0);
         }
 
@@ -1125,7 +1121,7 @@ impl TcpStream {
                             "{}:{} alloc page stuck for socket 0x{:x}",
                             file!(),
                             line!(),
-                            u64::from(self.handle)
+                            self.handle
                         );
                     }
 
@@ -1343,7 +1339,7 @@ impl TcpListener {
 
         let inner = Arc::new(TcpStream {
             local_addr: self.socket_addr,
-            remote_addr: remote_addr.clone(),
+            remote_addr,
             handle: resp.handle,
             channel: channel.clone(),
             recv_queue: Mutex::new(VecDeque::new()),

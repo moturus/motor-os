@@ -65,7 +65,7 @@ pub extern "C" fn ticks_to_nanos(ticks: u64, out_hi_ptr: *mut u64, out_lo_ptr: *
         nanos >>= -tsc_shift;
     }
 
-    let result: u128 = nanos * (page.tsc_mul as u128) >> 32;
+    let result: u128 = (nanos * (page.tsc_mul as u128)) >> 32;
     unsafe {
         *out_hi_ptr = (result >> 64) as u64;
         *out_lo_ptr = ((result << 64) >> 64) as u64;
@@ -87,12 +87,10 @@ pub extern "C" fn nanos_to_ticks(nanos: u64) -> u64 {
     };
 
     if tsc_shift >= 0 {
-        res >>= tsc_shift;
+        res >> tsc_shift
     } else {
-        res <<= -tsc_shift;
+        res << -tsc_shift
     }
-
-    return res;
 }
 
 fn rdtsc() -> u64 {

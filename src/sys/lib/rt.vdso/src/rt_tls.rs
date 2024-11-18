@@ -17,6 +17,7 @@ pub unsafe extern "C" fn create(dtor: u64) -> Key {
     if dtor == 0 {
         KEYS.lock().insert(key, None);
     } else {
+        #[allow(clippy::missing_transmute_annotations)]
         KEYS.lock().insert(key, Some(core::mem::transmute(dtor)));
     }
     key
@@ -54,7 +55,7 @@ pub unsafe extern "C" fn get(key: Key) -> *mut u8 {
             return *value as *mut u8;
         }
     }
-    return core::ptr::null_mut();
+    core::ptr::null_mut()
 }
 
 /// Runtim impl of ```fn destroy(key: Key)```
@@ -74,11 +75,9 @@ pub unsafe extern "C" fn tmp_on_thread_exiting() {
         let map = &mut *ptr;
         for (key, pval) in map.iter_mut() {
             let keys = KEYS.lock();
-            if let Some(dtor_option) = keys.get(key) {
-                if let Some(dtor) = dtor_option {
-                    dtor((*pval) as *mut u8);
-                    *pval = 0;
-                }
+            if let Some(Some(dtor)) = keys.get(key) {
+                dtor((*pval) as *mut u8);
+                *pval = 0;
             }
         }
 

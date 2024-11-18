@@ -28,7 +28,7 @@ impl WaitQueueEntry {
             wake_handle: 0,
             prev: AtomicUsize::new(0),
             next: AtomicUsize::new(0),
-            _pin: PhantomPinned::default(),
+            _pin: PhantomPinned,
         }
     }
 
@@ -86,7 +86,7 @@ impl WaitQueue {
         unsafe {
             let self_ref: &mut WaitQueue = Arc::get_mut(&mut self_).unwrap_unchecked();
             let mut head_lock = self_ref.entries.lock();
-            let head: &mut WaitQueueEntry = &mut *head_lock;
+            let head: &mut WaitQueueEntry = &mut head_lock;
             self_ref.p_head = head as *const _ as usize;
             head.prev.store(self_ref.p_head, Ordering::Relaxed);
             head.next.store(self_ref.p_head, Ordering::Relaxed);
@@ -107,7 +107,7 @@ impl WaitQueue {
 
             // Safe because under the mutex lock.
             unsafe {
-                entry.insert_before(&mut *head_lock);
+                entry.insert_before(&mut head_lock);
             }
         }
 
@@ -203,8 +203,8 @@ fn futex_wait_impl(
             if 1 == queue.num_waiters.fetch_sub(1, Ordering::Relaxed) {
                 if let Some(q) = lock.get(&key) {
                     // It is really hard to get a pointer out of Pin<Arc<_>>.
-                    let ref1: &WaitQueue = &*q;
-                    let ref2: &WaitQueue = &*queue;
+                    let ref1: &WaitQueue = q;
+                    let ref2: &WaitQueue = &queue;
                     let ptr1 = ref1 as *const WaitQueue;
                     let ptr2 = ref2 as *const WaitQueue;
                     if ptr1 == ptr2 {

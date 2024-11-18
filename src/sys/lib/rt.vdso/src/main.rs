@@ -327,7 +327,10 @@ pub extern "C" fn _rt_entry(version: u64) {
     stdio::init();
 }
 
-pub extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
+/// # Safety
+///
+/// Assumes ptr is properly allocated.
+pub unsafe extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
     let mut curr_pos = 0_usize;
     let mut remainder = size;
     unsafe {

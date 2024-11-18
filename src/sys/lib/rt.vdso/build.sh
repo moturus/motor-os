@@ -9,6 +9,9 @@ RUSTFLAGS="-C force-frame-pointers=yes " \
 cargo build --target rt.json -Zbuild-std=core,alloc \
   -Zbuild-std-features=compiler-builtins-mem --no-default-features $@
 
+cargo clippy --target rt.json -Zbuild-std=core,alloc \
+  -Zbuild-std-features=compiler-builtins-mem --no-default-features $@
+
 if [[ "$1" == "--release" ]] ; then
   strip -o "${SCRIPT_DIR}/rt.vdso" "${TARGET_DIR}/rt/release/rt"
 else

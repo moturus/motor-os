@@ -152,7 +152,7 @@ where
     type Target = T;
 
     fn deref(&self) -> &T {
-        &*self.value
+        &self.value
     }
 }
 
@@ -162,7 +162,7 @@ where
     S: Strategy,
 {
     fn deref_mut(&mut self) -> &mut T {
-        &mut *self.value
+        &mut self.value
     }
 }
 

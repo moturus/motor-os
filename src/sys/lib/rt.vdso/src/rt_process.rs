@@ -258,7 +258,7 @@ impl Loader {
 
 impl Drop for Loader {
     fn drop(&mut self) {
-        for (_, (addr, _)) in &self.mapped_regions {
+        for (addr, _) in self.mapped_regions.values() {
             moto_sys::SysMem::unmap(moto_sys::SysHandle::SELF, 0, u64::MAX, *addr).unwrap();
         }
     }
@@ -423,14 +423,14 @@ unsafe fn create_remote_args(
     };
 
     for arg in args1 {
-        if arg.len() == 0 && skip_empty {
+        if arg.is_empty() && skip_empty {
             continue;
         }
         calc_lengths(arg);
     }
 
     for arg in args2 {
-        if arg.len() == 0 && skip_empty {
+        if arg.is_empty() && skip_empty {
             continue;
         }
         calc_lengths(arg);
@@ -466,14 +466,14 @@ unsafe fn create_remote_args(
     };
 
     for arg in args1 {
-        if arg.len() == 0 && skip_empty {
+        if arg.is_empty() && skip_empty {
             continue;
         }
         write_arg(arg);
     }
 
     for arg in args2 {
-        if arg.len() == 0 && skip_empty {
+        if arg.is_empty() && skip_empty {
             continue;
         }
         write_arg(arg);
@@ -655,9 +655,8 @@ unsafe fn spawn_impl(
 
     // Check if this is an elf file or a script.
     let file_sz = moto_rt::fs::get_file_attr(fd)
-        .map_err(|e| {
+        .inspect_err(|_| {
             moto_rt::fs::close(fd).unwrap();
-            e
         })?
         .size;
     if file_sz < 4 {
@@ -666,9 +665,8 @@ unsafe fn spawn_impl(
     }
     let mut buf: [u8; 4] = [0; 4];
 
-    let sz = moto_rt::fs::read(fd, &mut buf).map_err(|e| {
+    let sz = moto_rt::fs::read(fd, &mut buf).inspect_err(|_| {
         moto_rt::fs::close(fd).unwrap();
-        e
     })?;
     if sz != 4 {
         moto_rt::fs::close(fd).unwrap();
@@ -676,9 +674,8 @@ unsafe fn spawn_impl(
     }
 
     if is_elf(&buf) {
-        moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).map_err(|e| {
+        moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).inspect_err(|_| {
             moto_rt::fs::close(fd).unwrap();
-            e
         })?;
         let res = run_elf(exe, fd, None, args_rt, result_rt);
         moto_rt::fs::close(fd).unwrap();
@@ -686,9 +683,8 @@ unsafe fn spawn_impl(
     }
 
     if is_script(&buf) {
-        moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).map_err(|e| {
+        moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET).inspect_err(|_| {
             moto_rt::fs::close(fd).unwrap();
-            e
         })?;
         let res = run_script(exe, fd, args_rt, result_rt);
         moto_rt::fs::close(fd).unwrap();
@@ -696,7 +692,7 @@ unsafe fn spawn_impl(
     }
 
     moto_rt::fs::close(fd).unwrap();
-    return Err(moto_rt::E_INVALID_ARGUMENT);
+    Err(moto_rt::E_INVALID_ARGUMENT)
 }
 
 pub unsafe extern "C" fn spawn(
@@ -767,9 +763,7 @@ impl ProcessData {
     pub unsafe fn args(&self) -> Vec<&[u8]> {
         if self.args == 0 {
             // Only sys-io has no args; every other process has them.
-            let mut result = Vec::new();
-            result.push("sys-io".as_bytes());
-            return result;
+            return alloc::vec![b"sys-io"];
         }
 
         Self::deserialize_vec(self.args)
@@ -857,7 +851,7 @@ impl EnvRt {
 
         let env = ENV.lock();
         let map = unsafe { env.pointer.as_ref().unwrap_unchecked() };
-        map.get(key).map(|s| s.clone())
+        map.get(key).cloned()
     }
 
     fn set(key: &str, val: &str) {
@@ -967,7 +961,7 @@ fn encode_args(args: Vec<String>) -> Result<u64, ErrorCode> {
     };
 
     for arg in &args {
-        if arg.len() == 0 {
+        if arg.is_empty() {
             continue;
         }
         calc_lengths(arg.as_str());
@@ -997,7 +991,7 @@ fn encode_args(args: Vec<String>) -> Result<u64, ErrorCode> {
         };
 
         for arg in args {
-            if arg.len() == 0 {
+            if arg.is_empty() {
                 continue;
             }
             write_arg(arg.as_str());

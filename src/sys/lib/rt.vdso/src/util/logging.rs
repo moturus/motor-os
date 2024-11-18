@@ -55,7 +55,7 @@ fn get_backtrace() -> [u64; BT_DEPTH] {
     rbp = unsafe { *(rbp as *mut u64) };
     let mut prev = 0_u64;
 
-    for idx in 0..BT_DEPTH {
+    for entry in &mut backtrace {
         if prev == rbp {
             break;
         }
@@ -67,7 +67,7 @@ fn get_backtrace() -> [u64; BT_DEPTH] {
         }
         prev = rbp;
         unsafe {
-            backtrace[idx] = *((rbp + 8) as *mut u64);
+            *entry = *((rbp + 8) as *mut u64);
             rbp = *(rbp as *mut u64);
         }
     }

@@ -13,10 +13,7 @@ pub enum StdioKind {
 
 impl StdioKind {
     pub fn is_reader(&self) -> bool {
-        match self {
-            StdioKind::Stdin => true,
-            _ => false,
-        }
+        matches!(self, StdioKind::Stdin)
     }
 
     pub fn get(&self) -> &'static Stdio {
@@ -56,24 +53,22 @@ impl StdioImpl {
             };
             if pipe_data.pipe_addr == 0 {
                 Pipe::Null
+            } else if kind.is_reader() {
+                Pipe::Reader(moto_ipc::sync_pipe::Reader::new(
+                    moto_ipc::sync_pipe::RawPipeData {
+                        buf_addr: pipe_data.pipe_addr as usize,
+                        buf_size: pipe_data.pipe_size as usize,
+                        ipc_handle: pipe_data.handle,
+                    },
+                ))
             } else {
-                if kind.is_reader() {
-                    Pipe::Reader(moto_ipc::sync_pipe::Reader::new(
-                        moto_ipc::sync_pipe::RawPipeData {
-                            buf_addr: pipe_data.pipe_addr as usize,
-                            buf_size: pipe_data.pipe_size as usize,
-                            ipc_handle: pipe_data.handle,
-                        },
-                    ))
-                } else {
-                    Pipe::Writer(moto_ipc::sync_pipe::Writer::new(
-                        moto_ipc::sync_pipe::RawPipeData {
-                            buf_addr: pipe_data.pipe_addr as usize,
-                            buf_size: pipe_data.pipe_size as usize,
-                            ipc_handle: pipe_data.handle,
-                        },
-                    ))
-                }
+                Pipe::Writer(moto_ipc::sync_pipe::Writer::new(
+                    moto_ipc::sync_pipe::RawPipeData {
+                        buf_addr: pipe_data.pipe_addr as usize,
+                        buf_size: pipe_data.pipe_size as usize,
+                        ipc_handle: pipe_data.handle,
+                    },
+                ))
             }
         };
         Self {
@@ -237,21 +232,12 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
         } else {
             let mut dest = unsafe { moto_ipc::sync_pipe::Reader::new(to) };
             let mut buf = [0_u8; 80];
-            loop {
-                match dest.read(&mut buf) {
-                    Ok(sz) => {
-                        if sz > 0 {
-                            if from.get().inner.lock().pipe.write(&buf[0..sz]).is_err() {
-                                break;
-                            }
-                            moto_sys::SysCpu::sched_yield();
-                        } else {
-                            break;
-                        }
-                    }
-                    Err(_) => {
+            while let Ok(sz) = dest.read(&mut buf) {
+                if sz > 0 {
+                    if from.get().inner.lock().pipe.write(&buf[0..sz]).is_err() {
                         break;
                     }
+                    moto_sys::SysCpu::sched_yield();
                 }
             }
         }
@@ -273,15 +259,11 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
         relay_thread_fn as usize as u64,
         thread_arg,
     )
-    .map_err(|err| {
-        unsafe {
-            drop(Box::from_raw(thread_arg as *mut RelayArg));
-            local_copy.release(SysHandle::SELF);
-        }
-
-        err
+    .inspect_err(|_| unsafe {
+        drop(Box::from_raw(thread_arg as *mut RelayArg));
+        local_copy.release(SysHandle::SELF);
     })
-    .map(|handle| SysHandle::from(handle))
+    .map(SysHandle::from)
 }
 
 pub fn init() {
@@ -349,11 +331,8 @@ fn create_stdio_pipes(
                 moto_ipc::sync_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
 
             let pdata = &local_data as *const _ as usize as *const u8;
-            let thread = set_relay(kind, pdata).map_err(|err| {
-                unsafe {
-                    remote_data.unsafe_copy().release(remote_process);
-                }
-                err
+            let thread = set_relay(kind, pdata).inspect_err(|_| unsafe {
+                remote_data.unsafe_copy().release(remote_process);
             })?;
 
             // These relay threads are "detached" below (we release the handles).

@@ -155,7 +155,7 @@ impl RemoteLoader {
 
 impl Drop for RemoteLoader {
     fn drop(&mut self) {
-        for (_, (addr, _)) in &self.mapped_regions {
+        for (addr, _) in self.mapped_regions.values() {
             SysMem::unmap(SysHandle::SELF, 0, u64::MAX, *addr).unwrap();
         }
     }

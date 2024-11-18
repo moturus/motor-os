@@ -30,8 +30,7 @@ pub extern "C" fn duplicate(rt_fd: RtFd) -> RtFd {
 
     match fd.as_ref() {
         Fd::TcpListener(listener) => todo!(),
-        Fd::TcpStream(stream) =>
-            DESCRIPTORS.push(Arc::new(Fd::TcpStream(stream.clone()))),
+        Fd::TcpStream(stream) => DESCRIPTORS.push(Arc::new(Fd::TcpStream(stream.clone()))),
         _ => -(E_BAD_HANDLE as RtFd),
     }
 }
@@ -60,8 +59,10 @@ pub extern "C" fn close(rt_fd: i32) -> ErrorCode {
             Err(err) => err,
         },
         Fd::TcpListener(_) | Fd::TcpStream(_) =>
-            // drop will work
-            E_OK,
+        // drop will work
+        {
+            E_OK
+        }
         _ => panic!("fd {rt_fd} not a file"), // Can't just return an error, as we've popped the fd.
     }
 }
@@ -81,7 +82,7 @@ pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
             }
             Err(err) => err,
         },
-        _ => return E_BAD_HANDLE,
+        _ => E_BAD_HANDLE,
     }
 }
 
@@ -106,7 +107,7 @@ pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
     match fd.as_ref() {
-        Fd::File(file) => match FsClient::read(&file, buf) {
+        Fd::File(file) => match FsClient::read(file, buf) {
             Ok(sz) => sz as i64,
             Err(err) => -(err as i64),
         },
@@ -136,7 +137,7 @@ pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
 
     let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
     match fd.as_ref() {
-        Fd::File(file) => match FsClient::write(&file, buf) {
+        Fd::File(file) => match FsClient::write(file, buf) {
             Ok(sz) => sz as i64,
             Err(err) => -(err as i64),
         },
@@ -169,11 +170,11 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
     };
 
     match fd.as_ref() {
-        Fd::File(file) => match FsClient::seek(&file, offset, whence) {
+        Fd::File(file) => match FsClient::seek(file, offset, whence) {
             Ok(sz) => sz as i64,
             Err(err) => -(err as i64),
         },
-        _ => return -(E_BAD_HANDLE as i64),
+        _ => -(E_BAD_HANDLE as i64),
     }
 }
 
@@ -323,7 +324,7 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
         return E_BAD_HANDLE;
     };
 
-    let de = match FsClient::readdir_next(&rdr) {
+    let de = match FsClient::readdir_next(rdr) {
         Ok(de) => de,
         Err(err) => return err,
     };
@@ -391,7 +392,7 @@ impl CanonicalPath {
     }
 
     fn normalize(abs_path: &str) -> Result<Self, ErrorCode> {
-        if (abs_path.len() == 0) || (abs_path.len() >= MAX_PATH_LEN) {
+        if abs_path.is_empty() || (abs_path.len() >= MAX_PATH_LEN) {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
         if &abs_path[0..1] != "/" {
@@ -418,7 +419,7 @@ impl CanonicalPath {
             }
 
             if entry == ".." {
-                if components.len() == 0 {
+                if components.is_empty() {
                     return Err(moto_rt::E_INVALID_FILENAME);
                 }
                 components.pop();
@@ -427,7 +428,7 @@ impl CanonicalPath {
             }
         }
 
-        if components.len() == 0 {
+        if components.is_empty() {
             return Ok(CanonicalPath {
                 abs_path: "/".to_owned(),
                 fname_offset: 1,
@@ -449,7 +450,7 @@ impl CanonicalPath {
     }
 
     fn parse(path: &str) -> Result<Self, ErrorCode> {
-        if (path.len() == 0) || (path.len() >= MAX_PATH_LEN) || (path.len() != path.trim().len()) {
+        if path.is_empty() || (path.len() >= MAX_PATH_LEN) || (path.len() != path.trim().len()) {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
 
@@ -496,13 +497,13 @@ static FS_CLIENT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUs
 static FS_CLIENT_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 impl FsClient {
-    fn new(url: String) -> Result<(), ErrorCode> {
+    fn create(url: String) -> Result<(), ErrorCode> {
         use alloc::boxed::Box;
 
         let mut conn = moto_ipc::sync::ClientConnection::new(moto_ipc::sync::ChannelSize::Small)?;
         if let Err(err) = conn.connect(url.as_str()) {
             moto_sys::SysRay::log("Failed to connect to FS driver.").ok();
-            return Err(err.into());
+            return Err(err);
         }
 
         let fs_client = Box::leak(Box::new(FsClient {
@@ -527,7 +528,7 @@ impl FsClient {
             let mut initialized = FS_CLIENT_INITIALIZED.lock();
             if !*initialized {
                 let driver_url = get_fileserver_url()?;
-                FsClient::new(driver_url)?;
+                FsClient::create(driver_url)?;
                 *initialized = true;
             }
             addr = FS_CLIENT.load(Ordering::SeqCst);
@@ -757,7 +758,7 @@ impl FsClient {
     }
 
     fn write(file: &File, buf: &[u8]) -> Result<usize, ErrorCode> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             moto_sys::SysRay::log("FS: write request with empty buf").ok();
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -814,7 +815,7 @@ impl FsClient {
             return Err(resp.header.result);
         }
 
-        ReadDir::from(c_path.abs_path, &resp)
+        ReadDir::from(c_path.abs_path, resp)
     }
 
     fn readdir_next(readdir: &ReadDir) -> Result<DirEntry, ErrorCode> {
