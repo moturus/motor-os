@@ -50,12 +50,13 @@ dependencies = [
   "sys_log_debug",
   "sys_tty_debug",
   "sysbox_debug",
-  "systest_debug",
   "rush_debug",
   "httpd_debug",
   "kibim_debug",
   "mdbg_debug",
   "rnetbench_debug",
+  "systest_debug",
+#  "mio_test_debug",
   "make_img_debug",
 ]
 
@@ -72,12 +73,13 @@ dependencies = [
   "sys_log_release",
   "sys_tty_release",
   "sysbox_release",
-  "systest_release",
   "rush_release",
   "httpd_release",
   "kibim_release",
   "mdbg_release",
   "rnetbench_release",
+  "systest_release",
+#  "mio_test_release",
   "make_img_release",
 ]
 
@@ -93,12 +95,13 @@ dependencies = [
   "sys_log_debug",
   "sys_tty_debug",
   "sysbox_debug",
-  "systest_debug",
   "rush_debug",
   "httpd_debug",
   "kibim_debug",
   "mdbg_debug",
   "rnetbench_debug",
+  "systest_debug",
+#  "mio_test_debug",
   "make_img_debug",
 ]
 
@@ -114,12 +117,13 @@ dependencies = [
   "sys_log_release",
   "sys_tty_release",
   "sysbox_release",
-  "systest_release",
   "rush_release",
   "httpd_release",
   "kibim_release",
   "mdbg_release",
   "rnetbench_release",
+  "systest_release",
+#  "mio_test_release",
   "make_img_release",
 ]
 
@@ -292,6 +296,22 @@ script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/systest" "${MOTO_BIN}/systest"
+'''
+
+[tasks.mio_test_debug]
+cwd = "./src/sys/tests/mio-test"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/mio-test" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/mio-test"
+'''
+
+[tasks.mio_test_release_release]
+cwd = "./src/sys/tests/mio_test_release"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/mio-test" "${MOTO_BIN}/mio-test"
 '''
 
 [tasks.rush_debug]

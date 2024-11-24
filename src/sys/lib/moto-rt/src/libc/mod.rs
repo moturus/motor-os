@@ -5,6 +5,16 @@ mod fmod;
 mod log;
 mod log2;
 
+pub const STDIN_FILENO: crate::RtFd = crate::FD_STDIN;
+pub const STDOUT_FILENO: crate::RtFd = crate::FD_STDOUT;
+pub const STDERR_FILENO: crate::RtFd = crate::FD_STDERR;
+
+// We need unsafe because stdlib wraps the call in unsafe block.
+#[allow(unused_unsafe)]
+pub unsafe fn close(fd: crate::RtFd) -> Result<(), crate::ErrorCode> {
+    crate::fs::close(fd)
+}
+
 // mem* functions below have been copied from rust compiler_builtins/mem.rs.
 // #[linkage = "extern_weak"]
 #[no_mangle]

@@ -61,7 +61,7 @@ const RT_VERSION: u64 = 1;
 // Rust's dependency on libc runs deep, without these many binaries
 // fail to link.
 #[cfg(feature = "rustc-dep-of-std")]
-mod libc;
+pub mod libc;
 
 #[cfg(not(feature = "base"))]
 pub mod alloc;

@@ -31,6 +31,7 @@ static BIN_FULL: [&str; 10] = [
     "sys/sys-tty",
     "sys/sysbox",
     "sys/systest",
+//    "sys/mio-test",
 ];
 
 // For the "web" image.
