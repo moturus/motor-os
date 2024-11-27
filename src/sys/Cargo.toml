@@ -26,7 +26,6 @@ members = [
   "tools/sysbox",
 
   # tests
-  "tests/mio-test",
   "tests/systest",
 ]
 resolver = "2"
