@@ -1,5 +1,8 @@
+use crate::posix;
+use crate::posix::PosixFile;
 use crate::{rt_process::ProcessData, rt_process::StdioData, spin::Mutex};
 use alloc::{boxed::Box, vec::Vec};
+use core::any::Any;
 use moto_ipc::sync_pipe::Pipe;
 use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
 use moto_sys::SysHandle;
@@ -22,16 +25,17 @@ impl StdioKind {
             Self::Stdout => moto_rt::FD_STDOUT,
             Self::Stderr => moto_rt::FD_STDERR,
         };
-        let fd = crate::util::fd::DESCRIPTORS.get(fd).unwrap();
 
-        match fd.as_ref() {
-            crate::util::fd::Fd::Stdio(stdio) => unsafe {
-                (stdio as *const _ as usize as *const Stdio)
-                    .as_ref()
-                    .unwrap()
-            },
-
-            _ => panic!(),
+        let Some(posix_file) = posix::get_file(fd) else {
+            panic!();
+        };
+        let Some(stdio) = (posix_file.as_ref() as &dyn Any).downcast_ref::<Stdio>() else {
+            panic!();
+        };
+        unsafe {
+            (stdio as *const _ as usize as *const Stdio)
+                .as_ref()
+                .unwrap()
         }
     }
 }
@@ -135,15 +139,18 @@ pub struct Stdio {
     inner: Mutex<StdioImpl>,
 }
 
-impl Stdio {
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+impl PosixFile for Stdio {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         self.inner.lock().read(buf)
     }
-    pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         self.inner.lock().write(buf)
     }
-    pub fn flush(&self) -> Result<(), ErrorCode> {
+    fn flush(&self) -> Result<(), ErrorCode> {
         self.inner.lock().flush()
+    }
+    fn close(&self) -> Result<(), ErrorCode> {
+        todo!()
     }
 }
 
@@ -267,22 +274,22 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
 }
 
 pub fn init() {
-    use crate::util::fd::{Fd, DESCRIPTORS};
     use alloc::sync::Arc;
+    use posix::PosixFile;
 
-    let stdin_fd = DESCRIPTORS.push(Arc::new(Fd::Stdio(Stdio {
+    let stdin_fd = posix::push_file(Arc::new(Stdio {
         inner: Mutex::new(StdioImpl::new(StdioKind::Stdin)),
-    })));
+    }));
     assert_eq!(moto_rt::FD_STDIN, stdin_fd);
 
-    let stdout_fd = DESCRIPTORS.push(Arc::new(Fd::Stdio(Stdio {
+    let stdout_fd = posix::push_file(Arc::new(Stdio {
         inner: Mutex::new(StdioImpl::new(StdioKind::Stdout)),
-    })));
+    }));
     assert_eq!(moto_rt::FD_STDOUT, stdout_fd);
 
-    let stderr_fd = DESCRIPTORS.push(Arc::new(Fd::Stdio(Stdio {
+    let stderr_fd = posix::push_file(Arc::new(Stdio {
         inner: Mutex::new(StdioImpl::new(StdioKind::Stderr)),
-    })));
+    }));
     assert_eq!(moto_rt::FD_STDERR, stderr_fd);
 }
 
@@ -314,7 +321,7 @@ fn create_stdio_pipes(
     stdio: RtFd,
     kind: RtFd,
 ) -> Result<(RtFd, StdioData), ErrorCode> {
-    use crate::util::fd::{Fd, DESCRIPTORS};
+    use crate::posix::PosixFile;
     use alloc::sync::Arc;
 
     fn null_data() -> StdioData {
@@ -358,7 +365,9 @@ fn create_stdio_pipes(
                 let pipe = unsafe {
                     moto_ipc::sync_pipe::Pipe::Writer(moto_ipc::sync_pipe::Writer::new(local_data))
                 };
-                let pipe_fd = DESCRIPTORS.push(Arc::new(Fd::Pipe(Mutex::new(pipe))));
+                let pipe_fd = posix::push_file(Arc::new(StdioPipe {
+                    inner: Mutex::new(pipe),
+                }));
                 Ok((
                     pipe_fd,
                     StdioData {
@@ -371,7 +380,9 @@ fn create_stdio_pipes(
                 let pipe = unsafe {
                     moto_ipc::sync_pipe::Pipe::Reader(moto_ipc::sync_pipe::Reader::new(local_data))
                 };
-                let pipe_fd = DESCRIPTORS.push(Arc::new(Fd::Pipe(Mutex::new(pipe))));
+                let pipe_fd = posix::push_file(Arc::new(StdioPipe {
+                    inner: Mutex::new(pipe),
+                }));
                 Ok((
                     pipe_fd,
                     StdioData {
@@ -383,5 +394,27 @@ fn create_stdio_pipes(
             }
         }
         fd => panic!("fd: {fd}"),
+    }
+}
+
+struct StdioPipe {
+    inner: Mutex<moto_ipc::sync_pipe::Pipe>,
+}
+
+impl PosixFile for StdioPipe {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        self.inner.lock().read(buf)
+    }
+
+    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        self.inner.lock().write(buf)
+    }
+
+    fn flush(&self) -> Result<(), ErrorCode> {
+        Ok(())
+    }
+
+    fn close(&self) -> Result<(), ErrorCode> {
+        Ok(())
     }
 }

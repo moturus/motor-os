@@ -2,8 +2,10 @@
 #![no_main]
 #![allow(unused)]
 #![feature(str_from_raw_parts)]
+#![feature(trait_upcasting)]
 
 mod load;
+mod posix;
 mod rt_alloc;
 mod rt_fs;
 mod rt_futex;
@@ -16,7 +18,6 @@ mod stdio;
 
 #[macro_use]
 mod util {
-    pub mod fd;
     #[macro_use]
     pub mod logging;
     pub mod scopeguard;
@@ -197,9 +198,10 @@ pub extern "C" fn _rt_entry(version: u64) {
     vtable
         .fs_open
         .store(rt_fs::open as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .fs_close
-        .store(rt_fs::close as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_close.store(
+        posix::posix_close as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_get_file_attr.store(
         rt_fs::get_file_attr as *const () as usize as u64,
         Ordering::Relaxed,
@@ -215,15 +217,18 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_fs::truncate as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_read
-        .store(rt_fs::read as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .fs_write
-        .store(rt_fs::write as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .fs_flush
-        .store(rt_fs::flush as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_read.store(
+        posix::posix_read as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_write.store(
+        posix::posix_write as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_flush.store(
+        posix::posix_flush as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable
         .fs_seek
         .store(rt_fs::seek as *const () as usize as u64, Ordering::Relaxed);
@@ -283,7 +288,7 @@ pub extern "C" fn _rt_entry(version: u64) {
         .fs_chdir
         .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_duplicate.store(
-        rt_fs::duplicate as *const () as usize as u64,
+        posix::posix_duplicate as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

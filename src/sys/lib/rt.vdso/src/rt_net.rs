@@ -1,5 +1,6 @@
-use crate::util::fd::Fd;
-use crate::util::fd::DESCRIPTORS;
+use crate::posix;
+use crate::posix::PosixFile;
+use core::any::Any;
 use moto_rt::error::*;
 use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
@@ -50,17 +51,14 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
-    DESCRIPTORS.push(alloc::sync::Arc::new(Fd::TcpListener(listener)))
+    posix::push_file(listener)
 }
 
-pub extern "C" fn accept(listener: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
-    let fd = if let Some(fd) = DESCRIPTORS.get(listener) {
-        fd
-    } else {
+pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
         return -(E_BAD_HANDLE as RtFd);
     };
-
-    let Fd::TcpListener(listener) = fd.as_ref() else {
+    let Some(listener) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpListener>() else {
         return -(E_BAD_HANDLE as RtFd);
     };
 
@@ -68,7 +66,7 @@ pub extern "C" fn accept(listener: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
-    let stream = DESCRIPTORS.push(alloc::sync::Arc::new(Fd::TcpStream(stream)));
+    let stream = posix::push_file(stream);
     unsafe {
         *peer_addr = addr.into();
     }
@@ -86,17 +84,14 @@ pub extern "C" fn tcp_connect(addr: *const netc::sockaddr, timeout_ns: u64) -> R
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
-    DESCRIPTORS.push(alloc::sync::Arc::new(Fd::TcpStream(stream)))
+    posix::push_file(stream)
 }
 
 pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-
-    let Fd::TcpStream(tcp_stream) = fd.as_ref() else {
+    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
         return E_BAD_HANDLE;
     };
 
@@ -135,13 +130,10 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
 }
 
 pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-
-    let Fd::TcpStream(tcp_stream) = fd.as_ref() else {
+    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
         return E_BAD_HANDLE;
     };
 
@@ -183,13 +175,10 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
 }
 
 pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-
-    let Fd::TcpStream(tcp_stream) = fd.as_ref() else {
+    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
         return E_BAD_HANDLE;
     };
 
@@ -745,6 +734,23 @@ impl Drop for TcpStream {
     }
 }
 
+impl PosixFile for TcpStream {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        self.read(buf)
+    }
+
+    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        self.write(buf)
+    }
+
+    fn flush(&self) -> Result<(), ErrorCode> {
+        Ok(())
+    }
+    fn close(&self) -> Result<(), ErrorCode> {
+        Ok(())
+    }
+}
+
 impl TcpStream {
     fn ack_rx(&self) {
         let mut req = io_channel::Msg::new();
@@ -1279,6 +1285,12 @@ impl Drop for TcpListener {
         msg.handle = self.handle;
         self.channel.send_msg(msg);
         self.channel.tcp_listener_dropped(self.handle)
+    }
+}
+
+impl PosixFile for TcpListener {
+    fn close(&self) -> Result<(), ErrorCode> {
+        Ok(())
     }
 }
 

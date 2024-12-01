@@ -115,6 +115,6 @@ pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
     if rt_fd < 0 {
         let _ = moto_sys::SysRay::log(msg);
     } else {
-        let _ = crate::rt_fs::write(rt_fd, msg.as_ptr(), msg.len());
+        let _ = crate::posix::posix_write(rt_fd, msg.as_ptr(), msg.len());
     }
 }

@@ -1,8 +1,9 @@
+use core::any::Any;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
-use crate::util::fd::Fd;
-use crate::util::fd::DESCRIPTORS;
+use crate::posix;
+use crate::posix::PosixFile;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -21,20 +22,6 @@ pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
     }
 }
 
-pub extern "C" fn duplicate(rt_fd: RtFd) -> RtFd {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
-        return -(E_BAD_HANDLE as RtFd);
-    };
-
-    match fd.as_ref() {
-        Fd::TcpListener(listener) => todo!(),
-        Fd::TcpStream(stream) => DESCRIPTORS.push(Arc::new(Fd::TcpStream(stream.clone()))),
-        _ => -(E_BAD_HANDLE as RtFd),
-    }
-}
-
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
@@ -43,46 +30,27 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
         Err(err) => return -(err as i32),
     };
 
-    DESCRIPTORS.push(alloc::sync::Arc::new(Fd::File(file)))
-}
-
-pub extern "C" fn close(rt_fd: i32) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.pop(rt_fd) {
-        fd
-    } else {
-        return E_BAD_HANDLE;
-    };
-
-    match fd.as_ref() {
-        Fd::File(file) => match FsClient::close_fd(file.fd, CloseFdRequest::F_FILE) {
-            Ok(()) => E_OK,
-            Err(err) => err,
-        },
-        Fd::TcpListener(_) | Fd::TcpStream(_) =>
-        // drop will work
-        {
-            E_OK
-        }
-        _ => panic!("fd {rt_fd} not a file"), // Can't just return an error, as we've popped the fd.
-    }
+    posix::push_file(alloc::sync::Arc::new(file))
 }
 
 pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
+    // TODO: the following four lines is boilerplace repeated several times to get
+    // a specific type out of fd; maybe there is a way to do that using a generic
+    // function or a macro? The challenge is that the final variable (a reference)
+    // borrows the first variable (an Arc), and borrow checker complains...
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return E_BAD_HANDLE;
+    };
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
         return E_BAD_HANDLE;
     };
 
-    match fd.as_ref() {
-        Fd::File(file) => match FsClient::stat(&file.abs_path) {
-            Ok(a) => {
-                unsafe { *attr = a };
-                E_OK
-            }
-            Err(err) => err,
-        },
-        _ => E_BAD_HANDLE,
+    match FsClient::stat(&file.abs_path) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            E_OK
+        }
+        Err(err) => err,
     }
 }
 
@@ -98,83 +66,17 @@ pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
     todo!()
 }
 
-pub extern "C" fn read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
-        return -(E_BAD_HANDLE as i64);
-    };
-
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-    match fd.as_ref() {
-        Fd::File(file) => match FsClient::read(file, buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::Stdio(stdio) => match stdio.read(buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::Pipe(pipe) => match pipe.lock().read(buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::ReadDir(read_dir) => -(E_BAD_HANDLE as i64),
-        Fd::TcpStream(stream) => match stream.read(buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::TcpListener(_) => -(E_BAD_HANDLE as i64),
-    }
-}
-
-pub extern "C" fn write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
-        return -(E_BAD_HANDLE as i64);
-    };
-
-    let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-    match fd.as_ref() {
-        Fd::File(file) => match FsClient::write(file, buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::Stdio(stdio) => match stdio.write(buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::Pipe(pipe) => match pipe.lock().write(buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::ReadDir(read_dir) => -(E_BAD_HANDLE as i64),
-        Fd::TcpStream(stream) => match stream.write(buf) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        Fd::TcpListener(_) => -(E_BAD_HANDLE as i64),
-    }
-}
-
-pub extern "C" fn flush(_rt_fd: i32) -> ErrorCode {
-    E_OK
-}
-
 pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return -(E_BAD_HANDLE as i64);
+    };
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
         return -(E_BAD_HANDLE as i64);
     };
 
-    match fd.as_ref() {
-        Fd::File(file) => match FsClient::seek(file, offset, whence) {
-            Ok(sz) => sz as i64,
-            Err(err) => -(err as i64),
-        },
-        _ => -(E_BAD_HANDLE as i64),
+    match FsClient::seek(file, offset, whence) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
     }
 }
 
@@ -289,42 +191,32 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
         Err(err) => return -(err as i32),
     };
 
-    DESCRIPTORS.push(alloc::sync::Arc::new(Fd::ReadDir(rdr)))
+    posix::push_file(alloc::sync::Arc::new(rdr))
 }
 
 pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.pop(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return E_BAD_HANDLE;
+    };
+    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
         return E_BAD_HANDLE;
     };
 
-    let rdr = if let Fd::ReadDir(rdr) = fd.as_ref() {
-        rdr
-    } else {
-        return E_BAD_HANDLE;
-    };
-
-    match FsClient::close_fd(rdr.fd, CloseFdRequest::F_READDIR) {
+    match FsClient::close_fd(dir.fd, CloseFdRequest::F_READDIR) {
         Ok(()) => E_OK,
         Err(err) => err,
     }
 }
 
 pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
-    let fd = if let Some(fd) = DESCRIPTORS.get(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return E_BAD_HANDLE;
+    };
+    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
         return E_BAD_HANDLE;
     };
 
-    let rdr = if let Fd::ReadDir(rdr) = fd.as_ref() {
-        rdr
-    } else {
-        return E_BAD_HANDLE;
-    };
-
-    let de = match FsClient::readdir_next(rdr) {
+    let de = match FsClient::readdir_next(dir) {
         Ok(de) => de,
         Err(err) => return err,
     };
@@ -364,6 +256,8 @@ pub struct ReadDir {
     fd: u64,
 }
 
+impl PosixFile for ReadDir {}
+
 impl ReadDir {
     fn from(path: String, resp: &ReadDirResponse) -> Result<ReadDir, ErrorCode> {
         Ok(ReadDir { path, fd: resp.fd })
@@ -377,6 +271,24 @@ pub struct File {
     abs_path: String,
     fd: u64,
     pos: AtomicU64, // Atomic because read operations take &File, but change pos.
+}
+
+impl PosixFile for File {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        FsClient::read(self, buf)
+    }
+
+    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        FsClient::write(self, buf)
+    }
+
+    fn flush(&self) -> Result<(), ErrorCode> {
+        Ok(())
+    }
+
+    fn close(&self) -> Result<(), ErrorCode> {
+        FsClient::close_fd(self.fd, CloseFdRequest::F_FILE)
+    }
 }
 
 // Given a path str from the user, figure out the absolute path, filename, etc.
