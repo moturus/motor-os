@@ -10,10 +10,12 @@ mod rt_alloc;
 mod rt_fs;
 mod rt_futex;
 mod rt_net;
+mod rt_poll;
 mod rt_process;
 mod rt_thread;
 mod rt_time;
 mod rt_tls;
+mod runtime;
 mod stdio;
 
 #[macro_use]
@@ -300,6 +302,10 @@ pub extern "C" fn _rt_entry(version: u64) {
     vtable
         .net_bind
         .store(rt_net::bind as *const () as usize as u64, Ordering::Relaxed);
+    vtable.net_listen.store(
+        rt_net::listen as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.net_accept.store(
         rt_net::accept as *const () as usize as u64,
         Ordering::Relaxed,
@@ -322,6 +328,24 @@ pub extern "C" fn _rt_entry(version: u64) {
     );
     vtable.net_getsockopt.store(
         rt_net::getsockopt as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    // Poll.
+    vtable
+        .poll_new
+        .store(rt_poll::new as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .poll_add
+        .store(rt_poll::add as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .poll_set
+        .store(rt_poll::set as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .poll_del
+        .store(rt_poll::del as *const () as usize as u64, Ordering::Relaxed);
+    vtable.poll_wait.store(
+        rt_poll::wait as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

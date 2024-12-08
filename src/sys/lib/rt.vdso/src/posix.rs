@@ -12,9 +12,12 @@ use crate::stdio::Stdio;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use moto_rt::poll::Interests;
+use moto_rt::poll::Token;
 use moto_rt::ErrorCode;
 use moto_rt::RtFd;
 use moto_rt::E_BAD_HANDLE;
+use moto_rt::E_INVALID_ARGUMENT;
 use moto_rt::E_OK;
 
 pub trait PosixFile: Any + Send + Sync {
@@ -29,6 +32,18 @@ pub trait PosixFile: Any + Send + Sync {
     }
     fn close(&self) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
+    }
+    fn poll_add(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        todo!()
+        // Err(E_INVALID_ARGUMENT)
+    }
+    fn poll_set(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        todo!()
+        // Err(E_INVALID_ARGUMENT)
+    }
+    fn poll_del(&self, poll_fd: RtFd) -> Result<(), ErrorCode> {
+        todo!()
+        // Err(E_INVALID_ARGUMENT)
     }
 }
 

@@ -233,6 +233,17 @@ impl RawChannel {
         }
     }
 
+    fn may_alloc_page(&self, subchannel: SubChannel) -> bool {
+        let (bitmap_ref, subchannel_mask) = match subchannel {
+            SubChannel::Client(mask) => (&self.client_pages_in_use, mask),
+            SubChannel::Server(mask) => (&self.server_pages_in_use, mask),
+        };
+
+        let bitmap = bitmap_ref.load(Ordering::Relaxed);
+        let ones = (bitmap | !subchannel_mask).trailing_ones();
+        ones != 64
+    }
+
     fn alloc_page(&self, subchannel: SubChannel) -> Result<RawIoPage, ErrorCode> {
         let (bitmap_ref, subchannel_mask) = match subchannel {
             SubChannel::Client(mask) => (&self.client_pages_in_use, mask),
@@ -535,6 +546,11 @@ impl ClientConnection {
         }
     }
 
+    pub fn may_alloc_page(&self, subchannel_mask: u64) -> bool {
+        self.raw_channel()
+            .may_alloc_page(SubChannel::Client(subchannel_mask))
+    }
+
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
             Err(moto_rt::E_INVALID_ARGUMENT)
@@ -742,6 +758,11 @@ impl ServerConnection {
         } else {
             Err(moto_rt::E_NOT_READY)
         }
+    }
+
+    pub fn may_alloc_page(&self, subchannel_mask: u64) -> bool {
+        self.raw_channel()
+            .may_alloc_page(SubChannel::Server(subchannel_mask))
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {

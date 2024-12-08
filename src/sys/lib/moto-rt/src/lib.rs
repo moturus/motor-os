@@ -79,6 +79,8 @@ pub mod net;
 pub mod netc;
 
 #[cfg(not(feature = "base"))]
+pub mod poll;
+#[cfg(not(feature = "base"))]
 pub mod process;
 #[cfg(not(feature = "base"))]
 pub mod thread;
@@ -199,6 +201,7 @@ pub struct RtVdsoVtableV1 {
     // Networking.
     pub dns_lookup: AtomicU64,
     pub net_bind: AtomicU64,
+    pub net_listen: AtomicU64,
     pub net_accept: AtomicU64,
     pub net_tcp_connect: AtomicU64,
     pub net_udp_connect: AtomicU64,
@@ -210,6 +213,13 @@ pub struct RtVdsoVtableV1 {
     pub net_udp_recv_from: AtomicU64,
     pub net_udp_peek_from: AtomicU64,
     pub net_udp_send_to: AtomicU64,
+
+    // Polling.
+    pub poll_new: AtomicU64,
+    pub poll_add: AtomicU64,
+    pub poll_set: AtomicU64,
+    pub poll_del: AtomicU64,
+    pub poll_wait: AtomicU64,
 }
 
 #[cfg(not(feature = "base"))]

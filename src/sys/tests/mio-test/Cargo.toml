@@ -1,0 +1,7 @@
+[package]
+name = "mio-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mio = { git = "https://github.com/moturus/mio.git", branch = "motor-os_20241121", features = ["net", "os-poll"]}

@@ -21,6 +21,7 @@ pub const SO_SNDTIMEO: u64 = 2;
 pub const SO_SHUTDOWN: u64 = 3;
 pub const SO_NODELAY: u64 = 4;
 pub const SO_TTL: u64 = 5;
+pub const SO_NONBLOCKING: u64 = 6;
 
 fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
     let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
@@ -52,6 +53,16 @@ pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
     to_result!(vdso_bind(proto, addr))
 }
 
+pub fn listen(rt_fd: RtFd, max_backlog: u32) -> Result<(), ErrorCode> {
+    let vdso_listen: extern "C" fn(RtFd, u32) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtableV1::get().net_listen.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_listen(rt_fd, max_backlog))
+}
+
 pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
     let vdso_accept: extern "C" fn(RtFd, *mut netc::sockaddr) -> RtFd = unsafe {
         core::mem::transmute(
@@ -68,6 +79,9 @@ pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
     Ok((res, addr))
 }
 
+/// Create a TCP stream by connecting to a remote addr.
+///
+/// If timeout.is_zero(), the connect is nonblocking.
 pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, ErrorCode> {
     let vdso_tcp_connect: extern "C" fn(*const netc::sockaddr, u64) -> RtFd = unsafe {
         core::mem::transmute(
@@ -100,9 +114,7 @@ pub fn socket_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
 pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
     let vdso_peer_addr: extern "C" fn(RtFd, *mut netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .net_peer_addr
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtableV1::get().net_peer_addr.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -135,11 +147,12 @@ pub fn only_v6(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
 
 pub fn take_error(_rt_fd: RtFd) -> Result<ErrorCode, ErrorCode> {
     // getsockopt
-    Err(crate::E_NOT_IMPLEMENTED)
+    todo!()
 }
 
-pub fn set_nonblocking(_rt_fd: RtFd, _nonblocking: bool) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_nonblocking(rt_fd: RtFd, nonblocking: bool) -> Result<(), ErrorCode> {
+    let nonblocking: u8 = if nonblocking { 1 } else { 0 };
+    setsockopt(rt_fd, SO_NONBLOCKING, &nonblocking as *const _ as usize, 1)
 }
 
 pub fn peek(_rt_fd: RtFd, _buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -153,6 +166,7 @@ pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), Er
     };
 
     if timeout == 0 {
+        // See TcpStream::set_read_timeout() doc in Rust stdlib.
         return Err(crate::E_INVALID_ARGUMENT);
     }
 
@@ -186,6 +200,11 @@ pub fn set_write_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), E
         Some(dur) => dur.as_nanos().try_into().unwrap_or(u64::MAX),
         None => u64::MAX,
     };
+
+    if timeout == 0 {
+        // See TcpStream::set_write_timeout() doc in Rust stdlib.
+        return Err(crate::E_INVALID_ARGUMENT);
+    }
 
     setsockopt(
         rt_fd,
@@ -229,7 +248,7 @@ pub fn linger(_rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
 }
 
 pub fn set_nodelay(rt_fd: RtFd, nodelay: bool) -> Result<(), ErrorCode> {
-    let nodelay = if nodelay { 1 } else { 0 };
+    let nodelay: u8 = if nodelay { 1 } else { 0 };
     setsockopt(rt_fd, SO_NODELAY, &nodelay as *const _ as usize, 1)
 }
 
