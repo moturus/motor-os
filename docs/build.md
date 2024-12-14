@@ -36,7 +36,8 @@ $ rustup component add rust-src --toolchain nightly-2024-10-18-x86_64-unknown-li
 $ cargo install --force cargo-make
 ```
 
-(Note: we pin to a specific nightly version for better reproducibility.)
+(Note: we pin to a specific nightly version for better reproducibility.
+See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
 
 ## Clone the Motor OS repo:
 
