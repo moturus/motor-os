@@ -6,7 +6,7 @@ pub fn to_ioerror(err: FsError) -> std::io::Error {
 
     match err {
         FsError::AlreadyExists => Error::from(ErrorKind::AlreadyExists),
-        FsError::FsFull => Error::from(ErrorKind::FilesystemQuotaExceeded),
+        FsError::FsFull => Error::from(ErrorKind::QuotaExceeded),
         FsError::InvalidArgument => Error::from(ErrorKind::InvalidInput),
         FsError::IoError => Error::from(ErrorKind::BrokenPipe),
         FsError::NotFound => Error::from(ErrorKind::NotFound),

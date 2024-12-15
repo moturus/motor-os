@@ -501,12 +501,7 @@ impl Editor {
                 // this case, so we need to check the last byte directly.
                 let mut file = File::open(path)?;
                 file.seek(io::SeekFrom::End(0))?;
-                if file
-                    .bytes()
-                    .next()
-                    .transpose()?
-                    .map_or(true, |b| b == b'\n')
-                {
+                if file.bytes().next().transpose()?.is_none_or(|b| b == b'\n') {
                     self.rows.push(Row::new(Vec::new()));
                 }
                 self.update_all_rows();

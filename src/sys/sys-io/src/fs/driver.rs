@@ -344,7 +344,7 @@ impl Driver {
         dir_entry.version = 0;
         dir_entry._reserved = 0;
         dir_entry.attr = attr;
-        dir_entry.fname_size = item.filename().as_bytes().len() as u16;
+        dir_entry.fname_size = item.filename().len() as u16;
         assert!((dir_entry.fname_size as usize) <= moto_rt::fs::MAX_FILENAME_LEN);
         raw_channel.put_bytes(item.filename().as_bytes(), dir_entry.fname.as_mut_ptr())?;
 

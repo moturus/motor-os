@@ -329,7 +329,7 @@ impl KProcessStats {
             }
         };
 
-        let debug_name = if self.debug_name.as_bytes().len() > 32 {
+        let debug_name = if self.debug_name.len() > 32 {
             &self.debug_name.as_bytes()[0..32]
         } else {
             self.debug_name.as_bytes()

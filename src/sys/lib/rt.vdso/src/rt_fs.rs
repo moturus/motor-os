@@ -468,7 +468,7 @@ impl FsClient {
                 req.header.flags = 0;
                 req.parent_fd = 0;
 
-                req.fname_size = c_path.abs_path.as_bytes().len() as u16;
+                req.fname_size = c_path.abs_path.len() as u16;
                 raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
             }
 
@@ -527,7 +527,7 @@ impl FsClient {
             req.header.flags = flags;
             req.parent_fd = 0;
 
-            req.fname_size = c_path.abs_path.as_bytes().len() as u16;
+            req.fname_size = c_path.abs_path.len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
@@ -553,7 +553,7 @@ impl FsClient {
             req.header.flags = opts;
             req.parent_fd = 0;
 
-            req.fname_size = c_path.abs_path.as_bytes().len() as u16;
+            req.fname_size = c_path.abs_path.len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
@@ -716,7 +716,7 @@ impl FsClient {
             req.header.flags = 0;
             req.parent_fd = 0;
 
-            req.fname_size = c_path.abs_path.as_bytes().len() as u16;
+            req.fname_size = c_path.abs_path.len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
@@ -784,7 +784,7 @@ impl FsClient {
             req.header.flags = 0;
             req.parent_fd = 0;
 
-            req.fname_size = c_path.abs_path.as_bytes().len() as u16;
+            req.fname_size = c_path.abs_path.len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 
@@ -810,7 +810,7 @@ impl FsClient {
             req.header.flags = 0;
             req.parent_fd = 0;
 
-            req.fname_size = c_path.abs_path.as_bytes().len() as u16;
+            req.fname_size = c_path.abs_path.len() as u16;
             raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
         }
 

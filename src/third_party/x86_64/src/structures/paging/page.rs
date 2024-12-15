@@ -4,8 +4,6 @@ use crate::structures::paging::page_table::PageTableLevel;
 use crate::structures::paging::PageTableIndex;
 use crate::VirtAddr;
 use core::fmt;
-#[cfg(feature = "step_trait")]
-use core::iter::Step;
 use core::marker::PhantomData;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
@@ -264,32 +262,6 @@ impl<S: PageSize> Sub<Self> for Page<S> {
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         (self.start_address - rhs.start_address) / S::SIZE
-    }
-}
-
-#[cfg(feature = "step_trait")]
-impl<S: PageSize> Step for Page<S> {
-    fn steps_between(start: &Self, end: &Self) -> Option<usize> {
-        Step::steps_between(&start.start_address, &end.start_address)
-            .map(|steps| steps / S::SIZE as usize)
-    }
-
-    fn forward_checked(start: Self, count: usize) -> Option<Self> {
-        let count = count.checked_mul(S::SIZE as usize)?;
-        let start_address = Step::forward_checked(start.start_address, count)?;
-        Some(Self {
-            start_address,
-            size: PhantomData,
-        })
-    }
-
-    fn backward_checked(start: Self, count: usize) -> Option<Self> {
-        let count = count.checked_mul(S::SIZE as usize)?;
-        let start_address = Step::backward_checked(start.start_address, count)?;
-        Some(Self {
-            start_address,
-            size: PhantomData,
-        })
     }
 }
 

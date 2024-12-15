@@ -47,7 +47,13 @@ pub struct Row {
 
 impl Row {
     /// Create a new row, containing characters `chars`.
-    pub fn new(chars: Vec<u8>) -> Self { Self { chars, cx2rx: vec![0], ..Self::default() } }
+    pub fn new(chars: Vec<u8>) -> Self {
+        Self {
+            chars,
+            cx2rx: vec![0],
+            ..Self::default()
+        }
+    }
 
     // TODO: Combine update and update_syntax
     /// Update the row: convert tabs into spaces and compute highlight symbols
@@ -57,8 +63,18 @@ impl Row {
         let (mut cx, mut rx) = (0, 0);
         for c in String::from_utf8_lossy(&self.chars).chars() {
             // The number of rendered characters
-            let n_rend_chars = if c == '\t' { tab - (rx % tab) } else { c.width().unwrap_or(1) };
-            self.render.push_str(&(if c == '\t' { " ".repeat(n_rend_chars) } else { c.into() }));
+            let n_rend_chars = if c == '\t' {
+                tab - (rx % tab)
+            } else {
+                c.width().unwrap_or(1)
+            };
+            self.render.push_str(
+                &(if c == '\t' {
+                    " ".repeat(n_rend_chars)
+                } else {
+                    c.into()
+                }),
+            );
             self.cx2rx.extend(std::iter::repeat(rx).take(c.len_utf8()));
             self.rx2cx.extend(std::iter::repeat(cx).take(n_rend_chars));
             (rx, cx) = (rx + n_rend_chars, cx + c.len_utf8());
@@ -72,7 +88,12 @@ impl Row {
     /// character.
     pub fn get_char_size(&self, rx: usize) -> usize {
         let cx0 = self.rx2cx[rx];
-        self.rx2cx.iter().skip(rx + 1).map(|cx| cx - cx0).find(|d| *d > 0).unwrap_or(1)
+        self.rx2cx
+            .iter()
+            .skip(rx + 1)
+            .map(|cx| cx - cx0)
+            .find(|d| *d > 0)
+            .unwrap_or(1)
     }
 
     /// Update the syntax highlighting types of the row.
@@ -81,13 +102,18 @@ impl Row {
         let line = self.render.as_bytes();
 
         // Delimiters for multi-line comments and multi-line strings, as Option<&String, &String>
-        let ml_comment_delims = syntax.ml_comment_delims.as_ref().map(|(start, end)| (start, end));
+        let ml_comment_delims = syntax
+            .ml_comment_delims
+            .as_ref()
+            .map(|(start, end)| (start, end));
         let ml_string_delims = syntax.ml_string_delim.as_ref().map(|x| (x, x));
 
         'syntax_loop: while self.hl.len() < line.len() {
             let i = self.hl.len();
-            let find_str =
-                |s: &str| line.get(i..(i + s.len())).map_or(false, |r| r.eq(s.as_bytes()));
+            let find_str = |s: &str| {
+                line.get(i..(i + s.len()))
+                    .is_some_and(|r| r.eq(s.as_bytes()))
+            };
 
             if hl_state == HlState::Normal && syntax.sl_comment_start.iter().any(|s| find_str(s)) {
                 self.hl.extend(repeat(HlType::Comment).take(line.len() - i));
@@ -97,7 +123,11 @@ impl Row {
             // Multi-line strings and multi-line comments have the same behavior; the only
             // differences are: the start/end delimiters, the `HLState`, the `HLType`.
             for (delims, mstate, mtype) in &[
-                (ml_comment_delims, HlState::MultiLineComment, HlType::MlComment),
+                (
+                    ml_comment_delims,
+                    HlState::MultiLineComment,
+                    HlType::MlComment,
+                ),
                 (ml_string_delims, HlState::MultiLineString, HlType::MlString),
             ] {
                 if let Some((start, end)) = delims {
@@ -150,10 +180,11 @@ impl Row {
                 // This filters makes sure that names such as "in_comment" are not partially
                 // highlighted (even though "in" is a keyword in rust)
                 // The argument is the keyword that is matched at `i`.
-                let s_filter = |kw: &str| line.get(i + kw.len()).map_or(true, |c| is_sep(*c));
+                let s_filter = |kw: &str| line.get(i + kw.len()).is_none_or(|c| is_sep(*c));
                 for (keyword_highlight_type, kws) in &syntax.keywords {
                     for keyword in kws.iter().filter(|kw| find_str(kw) && s_filter(kw)) {
-                        self.hl.extend(repeat(*keyword_highlight_type).take(keyword.len()));
+                        self.hl
+                            .extend(repeat(*keyword_highlight_type).take(keyword.len()));
                     }
                 }
             }
@@ -162,8 +193,11 @@ impl Row {
         }
 
         // String state doesn't propagate to the next row
-        self.hl_state =
-            if matches!(hl_state, HlState::String(_)) { HlState::Normal } else { hl_state };
+        self.hl_state = if matches!(hl_state, HlState::String(_)) {
+            HlState::Normal
+        } else {
+            hl_state
+        };
         self.hl_state
     }
 
@@ -173,10 +207,19 @@ impl Row {
     pub fn draw(&self, offset: usize, max_len: usize, buffer: &mut String) -> Result<(), Error> {
         let mut current_hl_type = HlType::Normal;
         let chars = self.render.chars().skip(offset).take(max_len);
-        let mut rx = self.render.chars().take(offset).map(|c| c.width().unwrap_or(1)).sum();
+        let mut rx = self
+            .render
+            .chars()
+            .take(offset)
+            .map(|c| c.width().unwrap_or(1))
+            .sum();
         for (c, mut hl_type) in chars.zip(self.hl.iter().skip(offset)) {
             if c.is_ascii_control() {
-                let rendered_char = if (c as u8) <= 26 { (b'@' + c as u8) as char } else { '?' };
+                let rendered_char = if (c as u8) <= 26 {
+                    (b'@' + c as u8) as char
+                } else {
+                    '?'
+                };
                 write!(buffer, "{REVERSE_VIDEO}{rendered_char}{RESET_FMT}")?;
                 // Restore previous color
                 if current_hl_type != HlType::Normal {

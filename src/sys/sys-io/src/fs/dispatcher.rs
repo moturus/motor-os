@@ -66,12 +66,12 @@ impl Dispatcher {
         let resp = conn.resp::<GetServerUrlResponse>();
         resp.header.result = 0;
         resp.header.ver = 0;
-        resp.url_size = super::DRIVER_URL.as_bytes().len() as u16;
+        resp.url_size = super::DRIVER_URL.len() as u16;
         unsafe {
             core::intrinsics::copy_nonoverlapping(
                 super::DRIVER_URL.as_bytes().as_ptr(),
                 resp.url.as_mut_ptr(),
-                super::DRIVER_URL.as_bytes().len(),
+                super::DRIVER_URL.len(),
             );
         }
 

@@ -1,18 +1,11 @@
 //! Physical and virtual addresses manipulation
 
-#[cfg(feature = "step_trait")]
-use core::convert::TryFrom;
 use core::fmt;
-#[cfg(feature = "step_trait")]
-use core::iter::Step;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
 use crate::structures::paging::page_table::PageTableLevel;
 use crate::structures::paging::{PageOffset, PageTableIndex};
 use bit_field::BitField;
-
-#[cfg(feature = "step_trait")]
-const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000_0000;
 
 /// A canonical 64-bit virtual memory address.
 ///
@@ -338,66 +331,6 @@ impl Sub<VirtAddr> for VirtAddr {
     }
 }
 
-#[cfg(feature = "step_trait")]
-impl Step for VirtAddr {
-    fn steps_between(start: &Self, end: &Self) -> Option<usize> {
-        let mut steps = end.0.checked_sub(start.0)?;
-
-        // Check if we jumped the gap.
-        if end.0.get_bit(47) && !start.0.get_bit(47) {
-            steps = steps.checked_sub(0xffff_0000_0000_0000).unwrap();
-        }
-
-        usize::try_from(steps).ok()
-    }
-
-    fn forward_checked(start: Self, count: usize) -> Option<Self> {
-        let offset = u64::try_from(count).ok()?;
-        if offset > ADDRESS_SPACE_SIZE {
-            return None;
-        }
-
-        let mut addr = start.0.checked_add(offset)?;
-
-        match addr.get_bits(47..) {
-            0x1 => {
-                // Jump the gap by sign extending the 47th bit.
-                addr.set_bits(47.., 0x1ffff);
-            }
-            0x2 => {
-                // Address overflow
-                return None;
-            }
-            _ => {}
-        }
-
-        Some(Self::new(addr))
-    }
-
-    fn backward_checked(start: Self, count: usize) -> Option<Self> {
-        let offset = u64::try_from(count).ok()?;
-        if offset > ADDRESS_SPACE_SIZE {
-            return None;
-        }
-
-        let mut addr = start.0.checked_sub(offset)?;
-
-        match addr.get_bits(47..) {
-            0x1fffe => {
-                // Jump the gap by sign extending the 47th bit.
-                addr.set_bits(47.., 0);
-            }
-            0x1fffd => {
-                // Address underflow
-                return None;
-            }
-            _ => {}
-        }
-
-        Some(Self::new(addr))
-    }
-}
-
 /// A passed `u64` was not a valid physical address.
 ///
 /// This means that bits 52 to 64 were not all null.
@@ -659,120 +592,6 @@ mod tests {
         assert_eq!(VirtAddr::new_truncate(1 << 47), VirtAddr(0xfffff << 47));
         assert_eq!(VirtAddr::new_truncate(123), VirtAddr(123));
         assert_eq!(VirtAddr::new_truncate(123 << 47), VirtAddr(0xfffff << 47));
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_step_forward() {
-        assert_eq!(Step::forward(VirtAddr(0), 0), VirtAddr(0));
-        assert_eq!(Step::forward(VirtAddr(0), 1), VirtAddr(1));
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 1),
-            VirtAddr(0xffff_8000_0000_0000)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr(0xffff_8000_0000_0000), 1),
-            VirtAddr(0xffff_8000_0000_0001)
-        );
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0xffff_ffff_ffff_ffff), 1),
-            None
-        );
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 0x1234_5678_9abd),
-            VirtAddr(0xffff_9234_5678_9abc)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ffff), 0x8000_0000_0000),
-            VirtAddr(0xffff_ffff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::forward(VirtAddr(0x7fff_ffff_ff00), 0x8000_0000_00ff),
-            VirtAddr(0xffff_ffff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0x7fff_ffff_ff00), 0x8000_0000_0100),
-            None
-        );
-        assert_eq!(
-            Step::forward_checked(VirtAddr(0x7fff_ffff_ffff), 0x8000_0000_0001),
-            None
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_step_backward() {
-        assert_eq!(Step::backward(VirtAddr(0), 0), VirtAddr(0));
-        assert_eq!(Step::backward_checked(VirtAddr(0), 1), None);
-        assert_eq!(Step::backward(VirtAddr(1), 1), VirtAddr(0));
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 1),
-            VirtAddr(0x7fff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0001), 1),
-            VirtAddr(0xffff_8000_0000_0000)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_9234_5678_9abc), 0x1234_5678_9abd),
-            VirtAddr(0x7fff_ffff_ffff)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 0x8000_0000_0000),
-            VirtAddr(0)
-        );
-        assert_eq!(
-            Step::backward(VirtAddr(0xffff_8000_0000_0000), 0x7fff_ffff_ff01),
-            VirtAddr(0xff)
-        );
-        assert_eq!(
-            Step::backward_checked(VirtAddr(0xffff_8000_0000_0000), 0x8000_0000_0001),
-            None
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "step_trait")]
-    fn virtaddr_steps_between() {
-        assert_eq!(Step::steps_between(&VirtAddr(0), &VirtAddr(0)), Some(0));
-        assert_eq!(Step::steps_between(&VirtAddr(0), &VirtAddr(1)), Some(1));
-        assert_eq!(Step::steps_between(&VirtAddr(1), &VirtAddr(0)), None);
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0x7fff_ffff_ffff),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
-            Some(1)
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0x7fff_ffff_ffff)
-            ),
-            None
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
-            Some(0)
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0000),
-                &VirtAddr(0xffff_8000_0000_0001)
-            ),
-            Some(1)
-        );
-        assert_eq!(
-            Step::steps_between(
-                &VirtAddr(0xffff_8000_0000_0001),
-                &VirtAddr(0xffff_8000_0000_0000)
-            ),
-            None
-        );
     }
 
     #[test]

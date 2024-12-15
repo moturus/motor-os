@@ -31,8 +31,8 @@ $ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```
-$ rustup default nightly-2024-10-18
-$ rustup component add rust-src --toolchain nightly-2024-10-18-x86_64-unknown-linux-gnu
+$ rustup default nightly-2024-12-15
+$ rustup component add rust-src --toolchain nightly-2024-12-15-x86_64-unknown-linux-gnu
 $ cargo install --force cargo-make
 ```
 
@@ -56,14 +56,14 @@ Check out Rust sources with Motūrus target added:
 
 ```
 $ cd $MOTORH
-$ git clone -b motor-os_2024-10-18 https://github.com/moturus/rust.git
+$ git clone -b motor-os_2024-12-15 https://github.com/moturus/rust.git
 ```
 
 Build Rust Motūrus target/toolchain:
 
 ```
 $ cd $MOTORH/rust
-$ ./x.py build --stage 2 clippy library
+$ ./build_moturus.sh
 ```
 
 Register the new toolchain:

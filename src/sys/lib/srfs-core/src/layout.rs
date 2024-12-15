@@ -580,7 +580,7 @@ impl Superblock {
 }
 
 pub(crate) fn validate_filename(name: &str) -> Result<(), FsError> {
-    if name.as_bytes().len() > 255 || name.contains('/') || name == "." || name == ".." {
+    if name.len() > 255 || name.contains('/') || name == "." || name == ".." {
         return Err(FsError::InvalidArgument);
     }
 

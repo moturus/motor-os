@@ -179,8 +179,8 @@ impl RenameRequest {
         self.header.flags = 0;
         self.parent_fd = 0;
 
-        self.old_fname_size = old.as_bytes().len() as u16;
-        self.new_fname_size = new.as_bytes().len() as u16;
+        self.old_fname_size = old.len() as u16;
+        self.new_fname_size = new.len() as u16;
         unsafe {
             raw_channel.put_bytes(old.as_bytes(), self.old.as_mut_ptr())?;
             raw_channel.put_bytes(new.as_bytes(), self.new.as_mut_ptr())?;
