@@ -1,4 +1,4 @@
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// An atomic for use as a futex that is at least 8-bits but may be larger.
@@ -14,7 +14,7 @@ pub type Primitive = u32;
 pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::Duration>) -> bool {
     let vdso_futex_wait: extern "C" fn(*const AtomicU32, u32, u64) -> u32 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().futex_wait.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().futex_wait.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -39,7 +39,7 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<core::time::
 pub fn futex_wake(futex: &AtomicU32) -> bool {
     let vdso_futex_wake: extern "C" fn(*const AtomicU32) -> u32 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().futex_wake.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().futex_wake.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -53,7 +53,7 @@ pub fn futex_wake(futex: &AtomicU32) -> bool {
 pub fn futex_wake_all(futex: &AtomicU32) {
     let vdso_futex_wake_all: extern "C" fn(*const AtomicU32) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().futex_wake_all.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().futex_wake_all.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 

@@ -22,7 +22,7 @@ fn init_remote_vdso(address_space: SysHandle, entry_point: u64) -> Result<(), Er
     // Map/copy VDSO bytes.
     // TODO: instead of copying VDSO bytes, map the pages.
     let flags = SysMem::F_SHARE_SELF | SysMem::F_READABLE;
-    let vdso_bytes_sz = moto_rt::RtVdsoVtableV1::get()
+    let vdso_bytes_sz = moto_rt::RtVdsoVtable::get()
         .vdso_bytes_sz
         .load(Ordering::Relaxed);
     let num_pages = (vdso_bytes_sz + sys_mem::PAGE_SIZE_SMALL - 1) >> sys_mem::PAGE_SIZE_SMALL_LOG2;
@@ -59,7 +59,7 @@ fn init_remote_vdso(address_space: SysHandle, entry_point: u64) -> Result<(), Er
     assert_eq!(remote, moto_rt::RT_VDSO_VTABLE_VADDR);
 
     let remote_vdso_vtable = unsafe {
-        (local as usize as *const moto_rt::RtVdsoVtableV1)
+        (local as usize as *const moto_rt::RtVdsoVtable)
             .as_ref()
             .unwrap()
     };
@@ -79,7 +79,7 @@ fn load_binary(address_space: SysHandle) -> Result<u64, ErrorCode> {
     let vdso_bytes = unsafe {
         core::slice::from_raw_parts(
             moto_rt::RT_VDSO_BYTES_ADDR as usize as *const u8,
-            moto_rt::RtVdsoVtableV1::get()
+            moto_rt::RtVdsoVtable::get()
                 .vdso_bytes_sz
                 .load(Ordering::Relaxed) as usize,
         )

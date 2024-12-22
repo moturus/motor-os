@@ -12,7 +12,7 @@ use crate::error::*;
 use crate::ok_or_error;
 use crate::to_result;
 use crate::RtFd;
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 use core::sync::atomic::Ordering;
 
 #[cfg(not(feature = "rustc-dep-of-std"))]
@@ -105,7 +105,7 @@ impl DirEntry {
 pub fn is_terminal(rt_fd: RtFd) -> bool {
     let vdso_is_terminal: extern "C" fn(i32) -> i32 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_is_terminal.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_is_terminal.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -119,7 +119,7 @@ pub fn is_terminal(rt_fd: RtFd) -> bool {
 pub fn duplicate(rt_fd: RtFd) -> Result<RtFd, ErrorCode> {
     let vdso_duplicate: extern "C" fn(RtFd) -> RtFd = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_duplicate.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_duplicate.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -130,7 +130,7 @@ pub fn duplicate(rt_fd: RtFd) -> Result<RtFd, ErrorCode> {
 pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
     let vdso_open: extern "C" fn(*const u8, usize, u32) -> i32 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_open.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_open.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -141,7 +141,7 @@ pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
 pub fn close(rt_fd: RtFd) -> Result<(), ErrorCode> {
     let vdso_close: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_close.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_close.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -151,9 +151,7 @@ pub fn close(rt_fd: RtFd) -> Result<(), ErrorCode> {
 pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr, ErrorCode> {
     let vdso_get_file_attr: extern "C" fn(i32, *mut FileAttr) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .fs_get_file_attr
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_get_file_attr.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -167,7 +165,7 @@ pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr, ErrorCode> {
 pub fn fsync(rt_fd: RtFd) -> Result<(), ErrorCode> {
     let vdso_fsync: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_fsync.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_fsync.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -177,7 +175,7 @@ pub fn fsync(rt_fd: RtFd) -> Result<(), ErrorCode> {
 pub fn datasync(rt_fd: RtFd) -> Result<(), ErrorCode> {
     let vdso_datasync: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_datasync.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_datasync.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -187,7 +185,7 @@ pub fn datasync(rt_fd: RtFd) -> Result<(), ErrorCode> {
 pub fn truncate(rt_fd: RtFd, size: u64) -> Result<(), ErrorCode> {
     let vdso_truncate: extern "C" fn(i32, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_truncate.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_truncate.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -197,7 +195,7 @@ pub fn truncate(rt_fd: RtFd, size: u64) -> Result<(), ErrorCode> {
 pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
     let vdso_read: extern "C" fn(i32, *mut u8, usize) -> i64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_read.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_read.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -207,7 +205,7 @@ pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
 pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
     let vdso_write: extern "C" fn(i32, *const u8, usize) -> i64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_write.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_write.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -217,7 +215,7 @@ pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
 pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {
     let vdso_flush: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_flush.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_flush.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -227,7 +225,7 @@ pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {
 pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
     let vdso_seek: extern "C" fn(i32, i64, u8) -> i64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_seek.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_seek.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -237,7 +235,7 @@ pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
 pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
     let vdso_mkdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_mkdir.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_mkdir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -248,7 +246,7 @@ pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
 pub fn unlink(path: &str) -> Result<(), ErrorCode> {
     let vdso_unlink: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_unlink.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_unlink.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -259,7 +257,7 @@ pub fn unlink(path: &str) -> Result<(), ErrorCode> {
 pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
     let vdso_rename: extern "C" fn(*const u8, usize, *const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_rename.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_rename.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -276,7 +274,7 @@ pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
 pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
     let vdso_rmdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_rmdir.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_rmdir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -287,7 +285,7 @@ pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
 pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
     let vdso_rmdir_all: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_rmdir_all.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_rmdir_all.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -298,7 +296,7 @@ pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
 pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
     let vdso_set_perm: extern "C" fn(*const u8, usize, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_set_perm.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_set_perm.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -309,9 +307,7 @@ pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
 pub fn set_file_perm(rt_fd: RtFd, perm: u64) -> Result<(), ErrorCode> {
     let vdso_set_file_perm: extern "C" fn(RtFd, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .fs_set_file_perm
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_set_file_perm.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -321,7 +317,7 @@ pub fn set_file_perm(rt_fd: RtFd, perm: u64) -> Result<(), ErrorCode> {
 pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
     let vdso_stat: extern "C" fn(*const u8, usize, *mut FileAttr) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_stat.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_stat.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -337,9 +333,7 @@ pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
 pub fn canonicalize(path: &str) -> Result<alloc::string::String, ErrorCode> {
     let vdso_canonicalize: extern "C" fn(*const u8, usize, *mut u8, *mut usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .fs_canonicalize
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_canonicalize.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -357,7 +351,7 @@ pub fn canonicalize(path: &str) -> Result<alloc::string::String, ErrorCode> {
 pub fn copy(from: &str, to: &str) -> Result<u64, ErrorCode> {
     let vdso_copy: extern "C" fn(*const u8, usize, *const u8, usize) -> i64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_copy.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_copy.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -369,7 +363,7 @@ pub fn copy(from: &str, to: &str) -> Result<u64, ErrorCode> {
 pub fn opendir(path: &str) -> Result<RtFd, ErrorCode> {
     let vdso_opendir: extern "C" fn(*const u8, usize) -> i32 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_opendir.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_opendir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -380,7 +374,7 @@ pub fn opendir(path: &str) -> Result<RtFd, ErrorCode> {
 pub fn closedir(rt_fd: RtFd) -> Result<(), ErrorCode> {
     let vdso_closedir: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_closedir.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_closedir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -390,7 +384,7 @@ pub fn closedir(rt_fd: RtFd) -> Result<(), ErrorCode> {
 pub fn readdir(rt_fd: RtFd) -> Result<Option<DirEntry>, ErrorCode> {
     let vdso_readdir: extern "C" fn(i32, *mut DirEntry) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_readdir.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_readdir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -405,7 +399,7 @@ pub fn readdir(rt_fd: RtFd) -> Result<Option<DirEntry>, ErrorCode> {
 pub fn getcwd() -> Result<alloc::string::String, ErrorCode> {
     let vdso_getcwd: extern "C" fn(*mut u8, *mut usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_getcwd.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_getcwd.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -422,7 +416,7 @@ pub fn getcwd() -> Result<alloc::string::String, ErrorCode> {
 pub fn chdir(path: &str) -> Result<(), ErrorCode> {
     let vdso_chdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().fs_chdir.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().fs_chdir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 

@@ -1,13 +1,11 @@
 use core::{alloc::Layout, sync::atomic::Ordering};
 
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 
 #[inline(always)]
 pub fn alloc(layout: Layout) -> *mut u8 {
     let vdso_alloc: extern "C" fn(u64, u64) -> u64 = unsafe {
-        core::mem::transmute(
-            RtVdsoVtableV1::get().alloc.load(Ordering::Relaxed) as usize as *const ()
-        )
+        core::mem::transmute(RtVdsoVtable::get().alloc.load(Ordering::Relaxed) as usize as *const ())
     };
 
     vdso_alloc(layout.size() as u64, layout.align() as u64) as usize as *mut u8
@@ -17,7 +15,7 @@ pub fn alloc(layout: Layout) -> *mut u8 {
 pub fn alloc_zeroed(layout: Layout) -> *mut u8 {
     let vdso_alloc_zeroed: extern "C" fn(u64, u64) -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().alloc_zeroed.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().alloc_zeroed.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -31,7 +29,7 @@ pub fn alloc_zeroed(layout: Layout) -> *mut u8 {
 pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
     let vdso_dealloc: extern "C" fn(u64, u64, u64) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().dealloc.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().dealloc.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -49,7 +47,7 @@ pub unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
     let vdso_realloc: extern "C" fn(u64, u64, u64, u64) -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().realloc.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().realloc.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -66,7 +64,7 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
 pub(crate) fn raw_dealloc(addr: u64) {
     let vdso_dealloc: extern "C" fn(u64, u64, u64) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().dealloc.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().dealloc.load(Ordering::Relaxed) as usize as *const ()
         )
     };
 
@@ -77,7 +75,7 @@ pub(crate) fn raw_dealloc(addr: u64) {
 pub fn release_handle(handle: u64) -> Result<(), crate::ErrorCode> {
     let vdso_release_handle: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().release_handle.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().release_handle.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 

@@ -32,14 +32,18 @@ pub use util::spin;
 extern crate alloc;
 
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
-use moto_rt::RtVdsoVtableV1;
+use moto_rt::RtVdsoVtable;
 
 // The entry point.
 #[no_mangle]
 pub extern "C" fn _rt_entry(version: u64) {
-    assert_eq!(version, 1);
+    if version != 2 {
+        // Doing assert or panic will #PF, so we use lower-level API.
+        moto_log!("VDSO: unsupported version: {version}.");
+        moto_sys::sys_cpu::SysCpu::exit(1)
+    }
 
-    let vtable = RtVdsoVtableV1::get();
+    let vtable = RtVdsoVtable::get();
     let self_addr = _rt_entry as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
@@ -57,6 +61,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         fill_random_bytes as *const () as usize as u64,
         Ordering::Relaxed,
     );
+
+    vtable
+        .num_cpus
+        .store(num_cpus as *const () as usize as u64, Ordering::Relaxed);
 
     // Memory management.
     vtable.alloc.store(
@@ -379,6 +387,10 @@ pub unsafe extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
             curr_pos += to_copy;
         }
     }
+}
+
+pub extern "C" fn num_cpus() -> usize {
+    moto_sys::num_cpus() as usize
 }
 
 pub extern "C" fn vdso_unimplemented() {

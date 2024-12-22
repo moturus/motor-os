@@ -1,6 +1,6 @@
 use core::{sync::atomic::Ordering, time::Duration};
 
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
@@ -37,9 +37,7 @@ impl Instant {
     pub fn now() -> Self {
         let vdso_time_instant_now: extern "C" fn() -> u64 = unsafe {
             core::mem::transmute(
-                RtVdsoVtableV1::get()
-                    .time_instant_now
-                    .load(Ordering::Relaxed) as usize as *const (),
+                RtVdsoVtable::get().time_instant_now.load(Ordering::Relaxed) as usize as *const ()
             )
         };
 
@@ -189,7 +187,7 @@ impl SystemTime {
 fn ticks_to_nanos(ticks: u64) -> u128 {
     let vdso_ticks_to_nanos: extern "C" fn(u64, *mut u64, *mut u64) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
+            RtVdsoVtable::get()
                 .time_ticks_to_nanos
                 .load(Ordering::Relaxed) as usize as *const (),
         )
@@ -207,7 +205,7 @@ fn ticks_to_nanos(ticks: u64) -> u128 {
 fn abs_ticks_to_nanos(ticks: u64) -> u128 {
     let vdso_abs_ticks_to_nanos: extern "C" fn(u64, *mut u64, *mut u64) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
+            RtVdsoVtable::get()
                 .time_abs_ticks_to_nanos
                 .load(Ordering::Relaxed) as usize as *const (),
         )
@@ -224,7 +222,7 @@ fn abs_ticks_to_nanos(ticks: u64) -> u128 {
 fn nanos_to_ticks(nanos: u64) -> u64 {
     let vdso_nanos_to_ticks: extern "C" fn(u64) -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
+            RtVdsoVtable::get()
                 .time_nanos_to_ticks
                 .load(Ordering::Relaxed) as usize as *const (),
         )
@@ -234,7 +232,7 @@ fn nanos_to_ticks(nanos: u64) -> u64 {
 }
 
 fn ticks_in_sec() -> u64 {
-    RtVdsoVtableV1::get()
+    RtVdsoVtable::get()
         .time_ticks_in_sec
         .load(Ordering::Relaxed)
 }

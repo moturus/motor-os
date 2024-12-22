@@ -2,7 +2,7 @@ use core::sync::atomic::Ordering;
 
 use super::error::ErrorCode;
 
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 
 pub type ThreadHandle = u64;
 
@@ -13,7 +13,7 @@ pub fn spawn(
 ) -> Result<ThreadHandle, ErrorCode> {
     let vdso_spawn: extern "C" fn(extern "C" fn(thread_arg: u64), usize, u64) -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().thread_spawn.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().thread_spawn.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -28,7 +28,7 @@ pub fn spawn(
 pub fn yield_now() {
     let vdso_yield: extern "C" fn() = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().thread_yield.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().thread_yield.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -38,7 +38,7 @@ pub fn yield_now() {
 pub fn sleep_until(deadline: crate::time::Instant) {
     let vdso_sleep: extern "C" fn(u64) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().thread_sleep.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().thread_sleep.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -48,9 +48,7 @@ pub fn sleep_until(deadline: crate::time::Instant) {
 pub fn set_name(name: &str) -> ErrorCode {
     let vdso_set_name: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .thread_set_name
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().thread_set_name.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -60,7 +58,7 @@ pub fn set_name(name: &str) -> ErrorCode {
 pub fn join(handle: ThreadHandle) -> ErrorCode {
     let vdso_join: extern "C" fn(u64) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().thread_join.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().thread_join.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 

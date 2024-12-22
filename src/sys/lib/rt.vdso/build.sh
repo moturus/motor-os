@@ -34,7 +34,9 @@ fi
 NEW_HASH=$(sha256sum "${TEMP_FNAME}" | awk '{print $1}')
 
 if [ "${NEW_HASH}" != "${PREV_HASH}" ]; then
-    rm "${TARGET_FNAME}"
+    if [ -f "${TARGET_FNAME}" ]; then
+        rm "${TARGET_FNAME}"
+    fi
     mv "${TEMP_FNAME}" "${TARGET_FNAME}"
     echo "did build"
 else

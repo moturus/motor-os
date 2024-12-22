@@ -68,7 +68,7 @@ pub fn load() {
     assert_eq!(addr, moto_rt::RT_VDSO_VTABLE_VADDR);
 
     let vdso_vtable = unsafe {
-        (moto_rt::RT_VDSO_VTABLE_VADDR as usize as *const moto_rt::RtVdsoVtableV1)
+        (moto_rt::RT_VDSO_VTABLE_VADDR as usize as *const moto_rt::RtVdsoVtable)
             .as_ref()
             .unwrap()
     };

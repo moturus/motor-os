@@ -55,9 +55,6 @@ pub const RT_VDSO_BYTES_ADDR: u64 = RT_VDSO_START - (1_u64 << 32); // 4GB for RT
 #[doc(hidden)]
 pub const RT_VDSO_VTABLE_VADDR: u64 = RT_VDSO_START - MOTO_SYS_PAGE_SIZE_SMALL;
 
-#[cfg(not(feature = "base"))]
-const RT_VERSION: u64 = 1;
-
 // Rust's dependency on libc runs deep, without these many binaries
 // fail to link.
 #[cfg(feature = "rustc-dep-of-std")]
@@ -109,9 +106,18 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
+const RT_VERSION: u64 = 2;
+
+/// The main VDSO vtable. Versioning happens via passing RT_VERSION
+/// constant to vdso_entry. In theory, the VDSO object can support
+/// multiple versions, so that older binaries may run on newer versions
+/// of Motor OS. In practice this flexibility is postponed until
+/// later, probably until Motor OS becomes an officially supported
+/// Rust target.
+#[cfg(not(feature = "base"))]
 #[doc(hidden)]
 #[repr(C)]
-pub struct RtVdsoVtableV1 {
+pub struct RtVdsoVtable {
     // This function is called to initialize this VTable
     // (i.e. all fields other than vdso_entry and vdso_bytes_sz).
     // Initialized by the loader/parent.
@@ -125,6 +131,7 @@ pub struct RtVdsoVtableV1 {
     pub log_to_kernel: AtomicU64,
     pub log_backtrace: AtomicU64,
     pub fill_random_bytes: AtomicU64,
+    pub num_cpus: AtomicU64,
 
     // Memory management.
     pub alloc: AtomicU64,
@@ -223,15 +230,15 @@ pub struct RtVdsoVtableV1 {
 }
 
 #[cfg(not(feature = "base"))]
-const _SIZE_CHECK: () = assert!(size_of::<RtVdsoVtableV1>() <= 4096);
+const _SIZE_CHECK: () = assert!(size_of::<RtVdsoVtable>() <= 4096);
 
 #[cfg(not(feature = "base"))]
 #[doc(hidden)]
-impl RtVdsoVtableV1 {
+impl RtVdsoVtable {
     pub fn get() -> &'static Self {
         // Safety: sys-io is supposed to have taken care of this.
         unsafe {
-            (RT_VDSO_VTABLE_VADDR as usize as *const RtVdsoVtableV1)
+            (RT_VDSO_VTABLE_VADDR as usize as *const RtVdsoVtable)
                 .as_ref()
                 .unwrap_unchecked()
         }
@@ -241,10 +248,10 @@ impl RtVdsoVtableV1 {
 #[cfg(not(feature = "base"))]
 #[doc(hidden)]
 pub fn init() {
-    assert_ne!(0, RtVdsoVtableV1::get().vdso_entry.load(Ordering::Acquire));
+    assert_ne!(0, RtVdsoVtable::get().vdso_entry.load(Ordering::Acquire));
     let vdso_entry: extern "C" fn(u64) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().vdso_entry.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().vdso_entry.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -274,7 +281,7 @@ pub fn start() {
 pub fn fill_random_bytes(bytes: &mut [u8]) {
     let vdso_fill_random_bytes: extern "C" fn(*mut u8, usize) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
+            RtVdsoVtable::get()
                 .fill_random_bytes
                 .load(Ordering::Relaxed) as usize as *const (),
         )
@@ -286,7 +293,17 @@ pub fn fill_random_bytes(bytes: &mut [u8]) {
 /// The number of CPUs available.
 #[cfg(not(feature = "base"))]
 pub fn num_cpus() -> usize {
-    todo!()
+    // Although num_cpus in part KernelStaticPage in sys-io crate
+    // and theoretically available without calling into the VDSO,
+    // we want to keep moto-rt lean and mean and not depend on
+    // extra crates, so we plump num_cpus() through vdso.
+    let vdso_num_cpus: extern "C" fn() -> usize = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().num_cpus.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_num_cpus()
 }
 
 #[cfg(not(test))]

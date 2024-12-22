@@ -28,7 +28,7 @@ pub const E_MAX: u16 = u16::MAX;
 pub fn log_to_kernel(msg: &str) {
     let vdso_log_to_kernel: extern "C" fn(*const u8, usize) = unsafe {
         core::mem::transmute(
-            super::RtVdsoVtableV1::get()
+            super::RtVdsoVtable::get()
                 .log_to_kernel
                 .load(core::sync::atomic::Ordering::Relaxed) as usize as *const (),
         )
@@ -54,7 +54,7 @@ macro_rules! moto_log {
 pub fn log_backtrace(rt_fd: crate::RtFd) {
     let vdso_log_backtrace: extern "C" fn(crate::RtFd) = unsafe {
         core::mem::transmute(
-            super::RtVdsoVtableV1::get()
+            super::RtVdsoVtable::get()
                 .log_backtrace
                 .load(core::sync::atomic::Ordering::Relaxed) as usize as *const (),
         )

@@ -7,7 +7,7 @@ use alloc;
 extern crate alloc;
 
 use crate::RtFd;
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -25,7 +25,7 @@ pub const STDIO_MAKE_PIPE: RtFd = -((crate::error::E_MAX as RtFd) + 3);
 pub fn args() -> alloc::vec::Vec<String> {
     let vdso_args: extern "C" fn() -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_args.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_args.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -49,7 +49,7 @@ pub fn args() -> alloc::vec::Vec<String> {
 pub fn env() -> alloc::vec::Vec<(String, String)> {
     let vdso_get_full_env: extern "C" fn() -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
+            RtVdsoVtable::get()
                 .proc_get_full_env
                 .load(Ordering::Relaxed) as usize as *const (),
         )
@@ -83,7 +83,7 @@ pub fn env() -> alloc::vec::Vec<(String, String)> {
 pub fn getenv(key: &str) -> Option<String> {
     let vdso_get: extern "C" fn(*const u8, usize) -> u64 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_getenv.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_getenv.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -114,7 +114,7 @@ pub fn getenv(key: &str) -> Option<String> {
 pub fn setenv(key: &str, val: &str) {
     let vdso_set: extern "C" fn(*const u8, usize, usize, usize) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_setenv.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_setenv.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -129,7 +129,7 @@ pub fn setenv(key: &str, val: &str) {
 pub fn unsetenv(key: &str) {
     let vdso_set: extern "C" fn(*const u8, usize, usize, usize) = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_setenv.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_setenv.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -200,7 +200,7 @@ pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCod
     use alloc::borrow::ToOwned;
     let vdso_spawn: extern "C" fn(*const SpawnArgsRt, *mut SpawnResult) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_spawn.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_spawn.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -268,7 +268,7 @@ pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCod
 pub fn kill(handle: u64) -> crate::ErrorCode {
     let vdso_kill: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_kill.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_kill.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -278,7 +278,7 @@ pub fn kill(handle: u64) -> crate::ErrorCode {
 pub fn wait(handle: u64) -> Result<i32, crate::ErrorCode> {
     let vdso_wait: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_wait.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_wait.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -305,7 +305,7 @@ fn convert_exit_status(exit_status: u64) -> i32 {
 pub fn try_wait(handle: u64) -> Result<i32, crate::ErrorCode> {
     let vdso_status: extern "C" fn(u64, *mut u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_status.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_status.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -321,7 +321,7 @@ pub fn try_wait(handle: u64) -> Result<i32, crate::ErrorCode> {
 pub fn exit(code: i32) -> ! {
     let vdso_exit: extern "C" fn(i32) -> ! = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().proc_exit.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().proc_exit.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 

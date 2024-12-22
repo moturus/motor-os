@@ -2,7 +2,7 @@ use crate::ok_or_error;
 use crate::to_result;
 use crate::ErrorCode;
 use crate::RtFd;
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 use core::sync::atomic::Ordering;
 
 #[cfg(not(feature = "rustc-dep-of-std"))]
@@ -27,7 +27,7 @@ pub struct Event {
 pub fn new() -> Result<RtFd, ErrorCode> {
     let vdso_poll_new: extern "C" fn() -> RtFd = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().poll_new.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().poll_new.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -42,7 +42,7 @@ pub fn add(
 ) -> Result<(), ErrorCode> {
     let vdso_poll_add: extern "C" fn(RtFd, RtFd, u64, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().poll_add.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().poll_add.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -57,7 +57,7 @@ pub fn set(
 ) -> Result<(), ErrorCode> {
     let vdso_poll_set: extern "C" fn(RtFd, RtFd, u64, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().poll_set.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().poll_set.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -67,7 +67,7 @@ pub fn set(
 pub fn del(poll_fd: RtFd, source_fd: RtFd) -> Result<(), ErrorCode> {
     let vdso_poll_del: extern "C" fn(RtFd, RtFd) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().poll_del.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().poll_del.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -82,7 +82,7 @@ pub fn wait(
 ) -> Result<usize, ErrorCode> {
     let vdso_poll_wait: extern "C" fn(RtFd, u64, *mut Event, usize) -> i32 = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().poll_wait.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().poll_wait.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 

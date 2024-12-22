@@ -3,7 +3,7 @@ use crate::ok_or_error;
 use crate::to_result;
 use crate::ErrorCode;
 use crate::RtFd;
-use crate::RtVdsoVtableV1;
+use crate::RtVdsoVtable;
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 
@@ -26,7 +26,7 @@ pub const SO_NONBLOCKING: u64 = 6;
 fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
     let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().net_setsockopt.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_setsockopt.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -36,7 +36,7 @@ fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), Error
 fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
     let vdso_getsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().net_getsockopt.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_getsockopt.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -46,7 +46,7 @@ fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), Error
 pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
     let vdso_bind: extern "C" fn(u8, *const netc::sockaddr) -> RtFd = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().net_bind.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_bind.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -56,7 +56,7 @@ pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
 pub fn listen(rt_fd: RtFd, max_backlog: u32) -> Result<(), ErrorCode> {
     let vdso_listen: extern "C" fn(RtFd, u32) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().net_listen.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_listen.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -66,7 +66,7 @@ pub fn listen(rt_fd: RtFd, max_backlog: u32) -> Result<(), ErrorCode> {
 pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
     let vdso_accept: extern "C" fn(RtFd, *mut netc::sockaddr) -> RtFd = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().net_accept.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_accept.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -85,9 +85,7 @@ pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
 pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, ErrorCode> {
     let vdso_tcp_connect: extern "C" fn(*const netc::sockaddr, u64) -> RtFd = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .net_tcp_connect
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_tcp_connect.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -98,9 +96,7 @@ pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, Err
 pub fn udp_connect(addr: &netc::sockaddr) -> Result<(), ErrorCode> {
     let vdso_udp_connect: extern "C" fn(*const netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get()
-                .net_udp_connect
-                .load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_udp_connect.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -114,7 +110,7 @@ pub fn socket_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
 pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
     let vdso_peer_addr: extern "C" fn(RtFd, *mut netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().net_peer_addr.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().net_peer_addr.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
@@ -350,7 +346,7 @@ pub fn lookup_host(
         /* result_len */ *mut usize,
     ) -> ErrorCode = unsafe {
         core::mem::transmute(
-            RtVdsoVtableV1::get().dns_lookup.load(Ordering::Relaxed) as usize as *const (),
+            RtVdsoVtable::get().dns_lookup.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
