@@ -77,22 +77,22 @@ impl Iterator for DirectoryIterSrFs {
 impl super::DirectoryIter for DirectoryIterSrFs {}
 
 impl super::filesystem::FileSystem for FileSystemSrFS {
-    fn open_file(&'static mut self, path: &str) -> Result<Box<dyn super::File>, ErrorCode> {
+    fn open_file(&mut self, path: &str) -> Result<Box<dyn super::File>, ErrorCode> {
         let inner = self.inner.open_file(path).map_err(to_error_code)?;
         Ok(Box::new(File { inner }))
     }
 
-    fn create_file(&'static mut self, path: &str) -> Result<(), ErrorCode> {
+    fn create_file(&mut self, path: &str) -> Result<(), ErrorCode> {
         let _ = self.inner.create_file(path).map_err(to_error_code)?;
         Ok(())
     }
 
-    fn iter(&'static mut self, path: &str) -> Result<Box<dyn super::DirectoryIter>, ErrorCode> {
+    fn iter(&mut self, path: &str) -> Result<Box<dyn super::DirectoryIter>, ErrorCode> {
         let inner = self.inner.read_dir(path).map_err(to_error_code)?;
         Ok(Box::new(DirectoryIterSrFs { inner }))
     }
 
-    fn stat(&'static mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
+    fn stat(&mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
         use moto_rt::fs::FileAttr;
         let attr = self.inner.stat(path).map_err(to_error_code)?;
 
@@ -111,23 +111,42 @@ impl super::filesystem::FileSystem for FileSystemSrFS {
         })
     }
 
-    fn mkdir(&'static mut self, path: &str) -> Result<(), ErrorCode> {
+    fn mkdir(&mut self, path: &str) -> Result<(), ErrorCode> {
         self.inner.create_dir(path).map_err(to_error_code)
     }
 
-    fn unlink(&'static mut self, path: &str) -> Result<(), ErrorCode> {
+    fn unlink(&mut self, path: &str) -> Result<(), ErrorCode> {
         self.inner.unlink(path).map_err(to_error_code)
     }
 
-    fn delete_dir(&'static mut self, path: &str) -> Result<(), ErrorCode> {
+    fn delete_dir(&mut self, path: &str) -> Result<(), ErrorCode> {
         self.unlink(path)
     }
 
-    fn delete_dir_all(&'static mut self, _path: &str) -> Result<(), ErrorCode> {
-        todo!()
+    fn delete_dir_all(&mut self, path: &str) -> Result<(), ErrorCode> {
+        let mut files = vec![];
+        let mut dirs = vec![];
+
+        for entry in self.iter(path)? {
+            if entry.is_directory() {
+                dirs.push(entry.path().to_owned());
+            } else {
+                files.push(entry.path().to_owned());
+            }
+        }
+
+        for file in files {
+            self.unlink(&file)?;
+        }
+
+        for dir in dirs {
+            self.delete_dir_all(&dir)?;
+        }
+
+        self.unlink(path)
     }
 
-    fn rename(&'static mut self, old: &str, new: &str) -> Result<(), ErrorCode> {
+    fn rename(&mut self, old: &str, new: &str) -> Result<(), ErrorCode> {
         self.inner.rename(old, new).map_err(to_error_code)
     }
 }
@@ -194,7 +213,7 @@ fn to_error_code(error: std::io::Error) -> ErrorCode {
         std::io::ErrorKind::NotFound => moto_rt::E_NOT_FOUND,
         std::io::ErrorKind::PermissionDenied => moto_rt::E_NOT_ALLOWED,
         std::io::ErrorKind::AlreadyExists => moto_rt::E_ALREADY_IN_USE,
-        std::io::ErrorKind::WouldBlock => todo!(),
+        std::io::ErrorKind::WouldBlock => moto_rt::E_NOT_READY,
         std::io::ErrorKind::InvalidInput => todo!(),
         std::io::ErrorKind::InvalidData => moto_rt::E_UNKNOWN,
         std::io::ErrorKind::TimedOut => todo!(),
@@ -204,6 +223,7 @@ fn to_error_code(error: std::io::Error) -> ErrorCode {
         std::io::ErrorKind::UnexpectedEof => todo!(),
         std::io::ErrorKind::OutOfMemory => moto_rt::E_OUT_OF_MEMORY,
         std::io::ErrorKind::FileTooLarge => moto_rt::E_FILE_TOO_LARGE,
+        std::io::ErrorKind::IsADirectory => moto_rt::E_INVALID_FILENAME,
         // std::io::ErrorKind::Other => todo!(),
         _ => moto_rt::E_UNKNOWN,
     }

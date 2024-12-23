@@ -83,12 +83,17 @@ impl Iterator for ReadDir {
         self.cur_pos += 1;
 
         match entry {
-            Ok(entry) => Some(Ok(DirEntry {
-                name: entry.name.clone(),
-                path: self.path.clone(),
-                id: entry.id,
-                fs: self.fs.clone(),
-            })),
+            Ok(entry) => {
+                let mut path = self.path.clone();
+                path.push('/');
+                path.push_str(&entry.name);
+                Some(Ok(DirEntry {
+                    name: entry.name.clone(),
+                    path,
+                    id: entry.id,
+                    fs: self.fs.clone(),
+                }))
+            }
             Err(err) => Some(Err(err)),
         }
     }

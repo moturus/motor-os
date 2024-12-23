@@ -81,8 +81,6 @@ impl FileSystemInner {
             ("", path)
         };
 
-        log::debug!("split: {} -> {} {}", path, dir, filename);
-
         let dir = if dir.starts_with('/') {
             dir.strip_prefix('/').unwrap()
         } else {
@@ -246,7 +244,8 @@ impl FileSystem {
     pub fn open_file(&mut self, path: &str) -> Result<crate::File> {
         let file_id = self.inner.borrow_mut().get_entry(path)?;
         if file_id.kind() != EntryKind::File {
-            return Err(ErrorKind::NotFound.into());
+            assert_eq!(file_id.kind(), EntryKind::Directory);
+            return Err(ErrorKind::IsADirectory.into());
         }
 
         Ok(crate::File::from(file_id, self.inner.clone()))

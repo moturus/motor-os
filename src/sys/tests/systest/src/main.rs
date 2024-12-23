@@ -1,4 +1,5 @@
 // mod channel_test;
+mod fs;
 mod mpmc;
 mod spawn_wait_kill;
 mod subcommand;
@@ -554,6 +555,8 @@ fn main() {
     unsafe { core::arch::asm!("int 3") }
 
     std::thread::spawn(input_listener);
+
+    fs::run_tests();
 
     tcp::test_tcp_loopback();
     std::env::set_var("foo", "bar");

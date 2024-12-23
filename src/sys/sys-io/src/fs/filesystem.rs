@@ -21,15 +21,15 @@ pub trait DirectoryEntry {
 pub trait DirectoryIter: Iterator<Item = Box<dyn DirectoryEntry>> {}
 
 pub trait FileSystem {
-    fn open_file(&'static mut self, path: &str) -> Result<Box<dyn File>, ErrorCode>;
-    fn create_file(&'static mut self, path: &str) -> Result<(), ErrorCode>;
-    fn iter(&'static mut self, path: &str) -> Result<Box<dyn DirectoryIter>, ErrorCode>;
-    fn stat(&'static mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode>;
-    fn mkdir(&'static mut self, path: &str) -> Result<(), ErrorCode>;
-    fn unlink(&'static mut self, path: &str) -> Result<(), ErrorCode>;
-    fn rename(&'static mut self, old: &str, new: &str) -> Result<(), ErrorCode>;
-    fn delete_dir(&'static mut self, path: &str) -> Result<(), ErrorCode>;
-    fn delete_dir_all(&'static mut self, path: &str) -> Result<(), ErrorCode>;
+    fn open_file(&mut self, path: &str) -> Result<Box<dyn File>, ErrorCode>;
+    fn create_file(&mut self, path: &str) -> Result<(), ErrorCode>;
+    fn iter(&mut self, path: &str) -> Result<Box<dyn DirectoryIter>, ErrorCode>;
+    fn stat(&mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode>;
+    fn mkdir(&mut self, path: &str) -> Result<(), ErrorCode>;
+    fn unlink(&mut self, path: &str) -> Result<(), ErrorCode>;
+    fn rename(&mut self, old: &str, new: &str) -> Result<(), ErrorCode>;
+    fn delete_dir(&mut self, path: &str) -> Result<(), ErrorCode>;
+    fn delete_dir_all(&mut self, path: &str) -> Result<(), ErrorCode>;
 }
 
 // We can't have a pointer to dyn FileSystem, but we can have a pointer

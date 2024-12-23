@@ -130,10 +130,7 @@ impl Iterator for DirectoryIterFlatFs {
 impl super::DirectoryIter for DirectoryIterFlatFs {}
 
 impl super::filesystem::FileSystem for FileSystemFlatFS {
-    fn open_file(
-        &'static mut self,
-        path: &str,
-    ) -> Result<Box<dyn super::File>, moto_sys::ErrorCode> {
+    fn open_file(&mut self, path: &str) -> Result<Box<dyn super::File>, moto_sys::ErrorCode> {
         let paths: Vec<&str> = path
             .split('/')
             .map(|name| name.trim())
@@ -157,18 +154,27 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         Ok(Box::new(FileFlatFs { bytes: file }))
     }
 
-    fn create_file(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
+    fn create_file(&mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
         Err(moto_rt::E_NOT_ALLOWED)
     }
 
-    fn iter(
-        &'static mut self,
-        path: &str,
-    ) -> Result<Box<dyn super::DirectoryIter>, moto_sys::ErrorCode> {
+    fn iter(&mut self, path: &str) -> Result<Box<dyn super::DirectoryIter>, moto_sys::ErrorCode> {
+        // Safety: we know that self is a static ref, as filesystems
+        // are never dropped (at least for now).
+        // But taking `&'static mut self`` as an arg is not convenient,
+        // as Rust doesn't allow calling such methods more than one
+        // as of 2024-12-21 (not sure why; maybe a bug?). So we do
+        // nasty things here to trick borrow checker.
+        let self_: &'static Self = unsafe {
+            (self as *mut _ as usize as *mut Self)
+                .as_mut()
+                .unwrap_unchecked()
+        };
+
         if !path.starts_with('/') {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
-        let mut dir = &self.root_dir;
+        let mut dir = &self_.root_dir;
 
         for name in path.split('/') {
             if name.is_empty() {
@@ -190,7 +196,7 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         }))
     }
 
-    fn stat(&'static mut self, path: &str) -> Result<moto_rt::fs::FileAttr, moto_sys::ErrorCode> {
+    fn stat(&mut self, path: &str) -> Result<moto_rt::fs::FileAttr, moto_sys::ErrorCode> {
         if !path.starts_with('/') {
             return Err(moto_rt::E_INVALID_FILENAME);
         }
@@ -243,23 +249,23 @@ impl super::filesystem::FileSystem for FileSystemFlatFS {
         }
     }
 
-    fn mkdir(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
+    fn mkdir(&mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
         Err(moto_rt::E_NOT_ALLOWED)
     }
 
-    fn unlink(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
+    fn unlink(&mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
         Err(moto_rt::E_NOT_ALLOWED)
     }
 
-    fn delete_dir(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
+    fn delete_dir(&mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
         Err(moto_rt::E_NOT_ALLOWED)
     }
 
-    fn delete_dir_all(&'static mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
+    fn delete_dir_all(&mut self, _path: &str) -> Result<(), moto_sys::ErrorCode> {
         Err(moto_rt::E_NOT_ALLOWED)
     }
 
-    fn rename(&'static mut self, _old: &str, _new: &str) -> Result<(), ErrorCode> {
+    fn rename(&mut self, _old: &str, _new: &str) -> Result<(), ErrorCode> {
         Err(moto_rt::E_NOT_ALLOWED)
     }
 }
@@ -278,7 +284,7 @@ pub(super) fn init(
         moto_sys::SysCpu::exit(1);
     }
 
-    let buf: &'static mut [u8] = unsafe {
+    let buf: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(
             maybe_addr.unwrap() as usize as *mut u8,
             (num_pages << moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2) as usize,

@@ -136,7 +136,7 @@ impl Driver {
                         if cmd != CMD_STAT && cmd != 0 && cmd != CMD_READDIR_NEXT {
                             // CMD_STAT is often used to probe, so don't spam the log.
                             // CMD_READDIR_NEXT returns E_NOT_FOUND when the loop ends.
-                            crate::moto_log!("fs::driver: command {} failed with {:?}", cmd, err);
+                            crate::moto_log!("command {} failed with {:?}", cmd, err);
                         }
 
                         // #[cfg(debug_assertions)]
@@ -144,7 +144,7 @@ impl Driver {
                             // This is wrong. But most likeky fixed.
                             static ONCE: std::sync::Once = std::sync::Once::new();
                             ONCE.call_once(|| {
-                                crate::moto_log!("{}:{} fs::driver: ZERO", file!(), line!());
+                                crate::moto_log!("{}:{} ZERO", file!(), line!());
                             });
                         }
                         let raw_channel = conn.raw_channel();
