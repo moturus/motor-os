@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{atomic::*, Arc};
 use std::time::Duration;
 
@@ -181,7 +181,7 @@ fn test_read_timeout() {
     // server.join();
 }
 
-pub fn test_tcp_loopback() {
+fn test_tcp_loopback() {
     assert!(std::net::TcpStream::connect("localhost:3333").is_err());
     let start = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
@@ -224,8 +224,56 @@ pub fn test_tcp_loopback() {
 
     // Wrap the output in sleeps to avoid debug console output mangling.
     std::thread::sleep(std::time::Duration::from_millis(10));
-    println!("test_tcp() PASS");
+    println!("test_tcp_loopback() PASS");
     std::thread::sleep(std::time::Duration::from_millis(10));
+}
+
+pub fn test_zero_port_listen() {
+    static HELLO: &[u8] = b"hello";
+    static BYE: &[u8] = b"see you later";
+
+    let port = Arc::new(AtomicU16::new(0));
+    let response_received = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        // server/listener
+        scope.spawn(|| {
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let listener = std::net::TcpListener::bind(addr).unwrap();
+            port.store(listener.local_addr().unwrap().port(), Ordering::Release);
+
+            let (mut conn, _) = listener.accept().unwrap();
+
+            let mut buf = [0_u8; HELLO.len()];
+            conn.read_exact(&mut buf).unwrap();
+            assert_eq!(buf, HELLO);
+            conn.write_all(BYE).unwrap();
+            // If the server is dropped now, the write above may not be delivered.
+            while !response_received.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        });
+
+        // Client: wait for the listener to start.
+        while port.load(Ordering::Relaxed) == 0 {
+            core::hint::spin_loop();
+        }
+
+        let addr: SocketAddr = format!("127.0.0.1:{}", port.load(Ordering::Relaxed))
+            .parse()
+            .unwrap();
+        let mut conn = std::net::TcpStream::connect(addr).unwrap();
+        conn.write_all(HELLO).unwrap();
+        let mut buf = [0_u8; BYE.len()];
+        conn.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, BYE);
+        response_received.store(true, Ordering::Relaxed);
+    });
+}
+
+pub fn run_tests() {
+    test_zero_port_listen();
+    test_tcp_loopback();
 }
 
 // pub fn test_wget() {

@@ -105,7 +105,7 @@ impl NetSys {
             return sqe;
         }
 
-        let socket_addr = match api_net::get_socket_addr(&sqe.payload) {
+        let mut socket_addr = match api_net::get_socket_addr(&sqe.payload) {
             Ok(addr) => addr,
             Err(err) => {
                 sqe.status = err;
@@ -128,6 +128,11 @@ impl NetSys {
         // Verify that the IP is valid (if present) before the listener is created.
         let ip_addr = socket_addr.ip();
         let device_idx: Option<usize> = if ip_addr.is_unspecified() {
+            if socket_addr.port() == 0 {
+                // We don't allow listening on an unspecified port if the IP is also unspecified.
+                sqe.status = moto_rt::E_INVALID_ARGUMENT;
+                return sqe;
+            }
             None
         } else {
             match self.ip_addresses.get(&ip_addr) {
@@ -149,6 +154,23 @@ impl NetSys {
             return sqe;
         }
 
+        // Allocate/assign port, if needed.
+        let mut allocated_port = None;
+        if socket_addr.port() == 0 {
+            let local_port = match self.devices[device_idx.unwrap()].get_ephemeral_port(&ip_addr) {
+                Some(port) => port,
+                None => {
+                    log::info!("get_ephemeral_port({:?}) failed", ip_addr);
+                    sqe.status = moto_rt::E_OUT_OF_MEMORY;
+                    return sqe;
+                }
+            };
+            socket_addr.set_port(local_port);
+            api_net::put_socket_addr(&mut sqe.payload, &socket_addr);
+            allocated_port = Some(local_port);
+        }
+
+        // Create TcpListener object.
         let listener_id: TcpListenerId = self.next_id().into();
         let listener = TcpListener::new(conn.clone(), socket_addr);
         self.tcp_listeners.insert(listener_id, listener);
@@ -172,6 +194,7 @@ impl NetSys {
             conn.wait_handle().as_u64()
         );
 
+        // Start listening.
         match device_idx {
             None => {
                 for idx in 0..self.devices.len() {
@@ -190,22 +213,30 @@ impl NetSys {
                                 .unwrap()
                                 .remove(&listener_id));
                             self.drop_tcp_listener(listener_id);
+                            // TODO: maybe continue instead?
                             sqe.status = err;
                             return sqe;
                         }
                     }
                 }
             }
-            Some(idx) => {
-                if let Err(err) =
-                    self.start_listening_on_device(listener_id, idx, socket_addr, num_listeners)
-                {
+            Some(device_idx) => {
+                if let Err(err) = self.start_listening_on_device(
+                    listener_id,
+                    device_idx,
+                    socket_addr,
+                    num_listeners,
+                ) {
                     assert!(self
                         .conn_tcp_listeners
                         .get_mut(&conn.wait_handle())
                         .unwrap()
                         .remove(&listener_id));
                     self.drop_tcp_listener(listener_id);
+
+                    if let Some(port) = allocated_port {
+                        self.devices[device_idx].free_ephemeral_port(port);
+                    }
                     sqe.status = err;
                     return sqe;
                 }
@@ -608,15 +639,14 @@ impl NetSys {
             return Some(sqe);
         };
 
-        let local_port =
-            match self.devices[device_idx].get_ephemeral_port(&local_ip_addr, &remote_addr) {
-                Some(port) => port,
-                None => {
-                    log::info!("get_ephemeral_port({:?}) failed", local_ip_addr);
-                    sqe.status = moto_rt::E_OUT_OF_MEMORY;
-                    return Some(sqe);
-                }
-            };
+        let local_port = match self.devices[device_idx].get_ephemeral_port(&local_ip_addr) {
+            Some(port) => port,
+            None => {
+                log::info!("get_ephemeral_port({:?}) failed", local_ip_addr);
+                sqe.status = moto_rt::E_OUT_OF_MEMORY;
+                return Some(sqe);
+            }
+        };
 
         let mut moto_socket = match self.new_socket_for_device(device_idx, conn.clone()) {
             Ok(s) => s,

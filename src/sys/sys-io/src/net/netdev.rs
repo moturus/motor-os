@@ -322,11 +322,7 @@ impl NetDev {
         &self.config
     }
 
-    pub fn get_ephemeral_port(
-        &mut self,
-        _local_ip_addr: &IpAddr,
-        _remote_addr: &SocketAddr,
-    ) -> Option<u16> {
+    pub fn get_ephemeral_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
         // TODO: do better than a linear search.
         for port in Self::EPHEMERAL_PORT_MIN..=Self::EPHEMERAL_PORT_MAX {
             if !self.ports_in_use.contains(&port) {

@@ -1653,7 +1653,13 @@ impl ResponseHandler for TcpListener {
 
 impl TcpListener {
     fn bind(socket_addr: &SocketAddr) -> Result<Arc<TcpListener>, ErrorCode> {
-        let req = api_net::bind_tcp_listener_request(socket_addr, None);
+        let mut socket_addr = *socket_addr;
+        if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
+            crate::moto_log!("we don't currently allow binding to/listening on 0.0.0.0:0");
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let req = api_net::bind_tcp_listener_request(&socket_addr, None);
         let channel = NET.lock().reserve_channel();
         let resp = channel.send_receive(req);
         if resp.status() != moto_rt::E_OK {
@@ -1661,8 +1667,15 @@ impl TcpListener {
             return Err(resp.status());
         }
 
+        if socket_addr.port() == 0 {
+            let actual_addr = api_net::get_socket_addr(&resp.payload).unwrap();
+            assert_eq!(socket_addr.ip(), actual_addr.ip());
+            assert_ne!(0, actual_addr.port());
+            socket_addr.set_port(actual_addr.port());
+        }
+
         let inner = Arc::new_cyclic(|me| TcpListener {
-            socket_addr: *socket_addr,
+            socket_addr,
             channel: channel.clone(),
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),

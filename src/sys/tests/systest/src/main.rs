@@ -556,9 +556,7 @@ fn main() {
 
     std::thread::spawn(input_listener);
 
-    fs::run_tests();
-
-    tcp::test_tcp_loopback();
+    tcp::run_tests();
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
@@ -589,6 +587,7 @@ fn main() {
     test_thread();
     test_ipc();
     test_pipes();
+    fs::run_tests();
 
     println!("PASS");
 
