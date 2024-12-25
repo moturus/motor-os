@@ -166,6 +166,22 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     }
 }
 
+pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return E_BAD_HANDLE;
+    };
+    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+        *addr = (*tcp_stream.socket_addr()).into();
+        return E_OK;
+    };
+    if let Some(tcp_listener) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpListener>() {
+        *addr = (*tcp_listener.socket_addr()).into();
+        return E_OK;
+    };
+
+    E_BAD_HANDLE
+}
+
 pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
@@ -177,7 +193,6 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
     *addr = (*tcp_stream.peer_addr()).into();
     E_OK
 }
-
 // -------------------------------- implementation details ------------------------------ //
 
 // Note: we have an IO thread per net channel instead of a single IO thread:
@@ -1440,8 +1455,8 @@ impl TcpStream {
         &self.remote_addr
     }
 
-    fn socket_addr(&self) -> Result<SocketAddr, ErrorCode> {
-        Ok(self.local_addr)
+    fn socket_addr(&self) -> &SocketAddr {
+        &self.local_addr
     }
 
     fn shutdown(&self, read: bool, write: bool) -> ErrorCode {
@@ -1693,8 +1708,8 @@ impl TcpListener {
             .inspect_err(|_| panic!("TODO: what can we do here?"))
     }
 
-    fn socket_addr(&self) -> Result<SocketAddr, ErrorCode> {
-        Ok(self.socket_addr)
+    fn socket_addr(&self) -> &SocketAddr {
+        &self.socket_addr
     }
 
     fn get_pending_accept(&self) -> Result<PendingAccept, ErrorCode> {
