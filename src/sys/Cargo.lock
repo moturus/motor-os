@@ -472,7 +472,7 @@ dependencies = [
  "frusa",
  "intrusive-collections",
  "log",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "x86",
  "x86_64",
@@ -518,7 +518,7 @@ name = "mdbg"
 version = "0.1.0"
 dependencies = [
  "clap",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
 ]
 
@@ -552,7 +552,7 @@ name = "moto-ipc"
 version = "0.2.5"
 dependencies = [
  "compiler_builtins",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -564,7 +564,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "spin 0.5.2",
 ]
@@ -574,7 +574,7 @@ name = "moto-mpmc"
 version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
 ]
 
@@ -586,7 +586,7 @@ checksum = "64a5ea411b361b70e6f124111875f03b13faa1b6f1b2e0af93e68c51ca4120c7"
 
 [[package]]
 name = "moto-rt"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",
@@ -598,7 +598,7 @@ name = "moto-sys"
 version = "0.2.4"
 dependencies = [
  "compiler_builtins",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -608,7 +608,7 @@ name = "moto-sys-io"
 version = "0.2.4"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "smoltcp",
 ]
@@ -759,7 +759,7 @@ dependencies = [
  "elfloader",
  "frusa",
  "moto-ipc",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "moto-sys-io",
 ]
@@ -928,7 +928,7 @@ dependencies = [
  "ipnetwork",
  "log",
  "moto-ipc",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "moto-sys-io",
  "moto-virtio",
@@ -945,7 +945,7 @@ version = "0.1.0"
 dependencies = [
  "moto-ipc",
  "moto-log",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
 ]
 
@@ -956,7 +956,7 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "x86_64",
 ]
@@ -966,7 +966,7 @@ name = "sysbox"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
  "moto-sys-io",
  "time",
@@ -980,7 +980,7 @@ dependencies = [
  "futures",
  "moto-ipc",
  "moto-mpmc",
- "moto-rt 0.2.0",
+ "moto-rt 0.2.1",
  "moto-sys",
 ]
 

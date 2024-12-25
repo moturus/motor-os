@@ -103,8 +103,20 @@ pub fn udp_connect(addr: &netc::sockaddr) -> Result<(), ErrorCode> {
     ok_or_error(vdso_udp_connect(addr))
 }
 
-pub fn socket_addr(_rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
-    todo!()
+pub fn socket_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
+    let vdso_socket_addr: extern "C" fn(RtFd, *mut netc::sockaddr) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().net_socket_addr.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
+    let res = vdso_socket_addr(rt_fd, &mut addr);
+    if res != crate::E_OK {
+        return Err(res as ErrorCode);
+    }
+
+    Ok(addr)
 }
 
 pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {

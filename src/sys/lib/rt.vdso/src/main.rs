@@ -326,6 +326,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         vdso_unimplemented as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.net_socket_addr.store(
+        rt_net::socket_addr as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.net_peer_addr.store(
         rt_net::peer_addr as *const () as usize as u64,
         Ordering::Relaxed,
