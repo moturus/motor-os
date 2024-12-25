@@ -63,7 +63,7 @@ Build Rust Motūrus target/toolchain:
 
 ```
 $ cd $MOTORH/rust
-$ ./build_moturus.sh
+$ ./build_moturus_target.sh
 ```
 
 Register the new toolchain:
