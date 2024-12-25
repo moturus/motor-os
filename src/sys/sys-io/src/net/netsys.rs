@@ -184,6 +184,11 @@ impl NetSys {
                             local_addr,
                             num_listeners,
                         ) {
+                            assert!(self
+                                .conn_tcp_listeners
+                                .get_mut(&conn.wait_handle())
+                                .unwrap()
+                                .remove(&listener_id));
                             self.drop_tcp_listener(listener_id);
                             sqe.status = err;
                             return sqe;
@@ -195,6 +200,11 @@ impl NetSys {
                 if let Err(err) =
                     self.start_listening_on_device(listener_id, idx, socket_addr, num_listeners)
                 {
+                    assert!(self
+                        .conn_tcp_listeners
+                        .get_mut(&conn.wait_handle())
+                        .unwrap()
+                        .remove(&listener_id));
                     self.drop_tcp_listener(listener_id);
                     sqe.status = err;
                     return sqe;
@@ -250,7 +260,16 @@ impl NetSys {
                 .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
             smol_socket
                 .listen((socket_addr.ip(), socket_addr.port()))
-                .unwrap();
+                .map_err(|err| {
+                    log::info!(
+                        "{}:{} listen failed for address {:?}: {:?}",
+                        file!(),
+                        line!(),
+                        socket_addr,
+                        err
+                    );
+                    moto_rt::E_INVALID_ARGUMENT
+                })?;
             log::debug!(
                 "{}:{} started listener {:?} on device #{}",
                 file!(),
