@@ -271,9 +271,56 @@ pub fn test_zero_port_listen() {
     });
 }
 
+fn test_peek() {
+    const N: usize = 1024 * 1024 * 3 + 1001;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:333").unwrap();
+    let server_thread = std::thread::spawn(move || {
+        let (mut server, _) = listener.accept().unwrap();
+
+        let mut buf = [0_u8; 1024];
+        for pos in 0..buf.len() {
+            buf[pos] = (pos & 255) as u8;
+        }
+
+        let mut total_written = 0;
+        while total_written < N {
+            total_written += server.write(&buf).unwrap();
+        }
+    });
+
+    let mut client = std::net::TcpStream::connect("127.0.0.1:333").unwrap();
+    let mut buf = [0_u8; 1024];
+    let mut total_received = 0;
+    let mut peek = false;
+    while total_received < N {
+        if peek {
+            let sz = client.peek(&mut buf).unwrap();
+            assert!(sz > 0);
+            for pos in 0..sz {
+                assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
+            }
+        }
+        let sz = client.read(&mut buf).unwrap();
+        assert!(sz > 0);
+        for pos in 0..sz {
+            assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
+        }
+        total_received += sz;
+    }
+
+    server_thread.join().unwrap();
+
+    // Wrap the output in sleeps to avoid debug console output mangling.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    println!("test_peek() PASS");
+    std::thread::sleep(std::time::Duration::from_millis(10));
+}
+
 pub fn run_tests() {
     test_zero_port_listen();
     test_tcp_loopback();
+    test_peek();
 }
 
 // pub fn test_wget() {

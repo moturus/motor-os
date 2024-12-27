@@ -166,6 +166,21 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     }
 }
 
+pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return -(E_BAD_HANDLE as i64);
+    };
+    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
+        return -(E_INVALID_ARGUMENT as i64);
+    };
+
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+    match tcp_stream.peek(buf) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
 pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
@@ -827,7 +842,7 @@ impl Drop for TcpStream {
 
 impl PosixFile for TcpStream {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read(buf)
+        self.read_or_peak(buf, false)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
@@ -1123,11 +1138,16 @@ impl TcpStream {
         self.tx_timeout_ns.load(Ordering::Relaxed)
     }
 
-    fn peek(&self, _buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        todo!()
+    fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        self.read_or_peak(buf, true)
     }
 
-    fn process_rx_message(&self, buf: &mut [u8], msg: io_channel::Msg) -> Result<usize, ErrorCode> {
+    fn process_rx_message(
+        &self,
+        buf: &mut [u8],
+        msg: io_channel::Msg,
+        peek: bool,
+    ) -> Result<usize, ErrorCode> {
         fence(Ordering::SeqCst);
         assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
         let sz_read = msg.payload.args_64()[1] as usize;
@@ -1178,7 +1198,8 @@ impl TcpStream {
             msg.handle,
             self.stats_rx_bytes.load(Ordering::Relaxed)
         );
-        let sz_read = if sz_read > buf.len() {
+
+        let copied_to_buf = if sz_read > buf.len() {
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     io_page.bytes().as_ptr(),
@@ -1186,15 +1207,6 @@ impl TcpStream {
                     buf.len(),
                 );
             }
-
-            let mut buf_lock = self.rx_buf.lock();
-            let rx_buf = &mut *buf_lock;
-            assert!(rx_buf.is_none());
-            *rx_buf = Some(RxBuf {
-                page: io_page,
-                len: sz_read,
-                consumed: buf.len(),
-            });
             buf.len()
         } else {
             unsafe {
@@ -1203,10 +1215,30 @@ impl TcpStream {
             sz_read
         };
 
-        Ok(sz_read)
+        if peek {
+            let mut buf_lock = self.rx_buf.lock();
+            let rx_buf = &mut *buf_lock;
+            assert!(rx_buf.is_none());
+            *rx_buf = Some(RxBuf {
+                page: io_page,
+                len: sz_read,
+                consumed: 0,
+            });
+        } else if sz_read > copied_to_buf {
+            let mut buf_lock = self.rx_buf.lock();
+            let rx_buf = &mut *buf_lock;
+            assert!(rx_buf.is_none());
+            *rx_buf = Some(RxBuf {
+                page: io_page,
+                len: sz_read,
+                consumed: copied_to_buf,
+            });
+        }
+
+        Ok(copied_to_buf)
     }
 
-    fn poll_rx(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn poll_rx(&self, buf: &mut [u8], peek: bool) -> Result<usize, ErrorCode> {
         {
             let mut buf_lock = self.rx_buf.lock();
             if let Some(rx_buf) = &mut *buf_lock {
@@ -1219,9 +1251,11 @@ impl TcpStream {
                     );
                 }
 
-                rx_buf.consume(sz_read);
-                if rx_buf.is_consumed() {
-                    *buf_lock = None;
+                if !peek {
+                    rx_buf.consume(sz_read);
+                    if rx_buf.is_consumed() {
+                        *buf_lock = None;
+                    }
                 }
 
                 return Ok(sz_read);
@@ -1230,7 +1264,7 @@ impl TcpStream {
 
         {
             if let Some(msg) = self.recv_queue.lock().pop_front() {
-                return self.process_rx_message(buf, msg);
+                return self.process_rx_message(buf, msg, peek);
             }
         }
 
@@ -1241,8 +1275,8 @@ impl TcpStream {
         Err(moto_rt::E_NOT_READY)
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        match self.poll_rx(buf) {
+    fn read_or_peak(&self, buf: &mut [u8], peek: bool) -> Result<usize, ErrorCode> {
+        match self.poll_rx(buf, peek) {
             Ok(sz) => return Ok(sz),
             Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
         }
@@ -1265,7 +1299,7 @@ impl TcpStream {
                 }
             }
 
-            match self.poll_rx(buf) {
+            match self.poll_rx(buf, peek) {
                 Ok(sz) => return Ok(sz),
                 Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
             }
@@ -1276,7 +1310,7 @@ impl TcpStream {
             }
 
             // Re-check for incoming messages.
-            match self.poll_rx(buf) {
+            match self.poll_rx(buf, peek) {
                 Ok(sz) => {
                     *self.rx_waiter.lock() = None;
                     return Ok(sz);

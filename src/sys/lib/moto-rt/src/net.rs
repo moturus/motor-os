@@ -163,8 +163,14 @@ pub fn set_nonblocking(rt_fd: RtFd, nonblocking: bool) -> Result<(), ErrorCode> 
     setsockopt(rt_fd, SO_NONBLOCKING, &nonblocking as *const _ as usize, 1)
 }
 
-pub fn peek(_rt_fd: RtFd, _buf: &mut [u8]) -> Result<usize, ErrorCode> {
-    todo!()
+pub fn peek(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    let vdso_peek: extern "C" fn(i32, *mut u8, usize) -> i64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().net_peek.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    to_result!(vdso_peek(rt_fd, buf.as_mut_ptr(), buf.len()))
 }
 
 pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {

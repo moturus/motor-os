@@ -342,6 +342,9 @@ pub extern "C" fn _rt_entry(version: u64) {
         rt_net::getsockopt as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable
+        .net_peek
+        .store(rt_net::peek as *const () as usize as u64, Ordering::Relaxed);
 
     // Poll.
     vtable
