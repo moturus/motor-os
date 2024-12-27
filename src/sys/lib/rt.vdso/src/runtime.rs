@@ -47,8 +47,7 @@ pub struct WaitObject {
 
 impl Drop for WaitObject {
     fn drop(&mut self) {
-        // todo!("notify registries")
-        crate::moto_log!("WaitObject::drop(): notify registries");
+        self.on_event(moto_rt::poll::POLL_READ_CLOSED | moto_rt::poll::POLL_WRITE_CLOSED);
     }
 }
 
@@ -233,12 +232,14 @@ impl Registry {
             entry.token = token;
             entry.events = bits;
             idx += 1;
+            // crate::moto_log!("returning token: {token} event: {bits}");
         }
 
-        (idx + 1) as i32
+        idx as i32
     }
 
-    pub fn on_event(&self, token: Token, event_bits: EventBits) {
+    fn on_event(&self, token: Token, event_bits: EventBits) {
+        // crate::moto_log!("on_event: token: {token} events: {event_bits}");
         self.events
             .lock()
             .entry(token)

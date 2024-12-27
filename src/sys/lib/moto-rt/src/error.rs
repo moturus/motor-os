@@ -21,6 +21,7 @@ pub const E_NOT_A_DIRECTORY: u16 = 17;
 pub const E_BAD_HANDLE: u16 = 18;
 pub const E_FILE_TOO_LARGE: u16 = 19;
 pub const E_BUFFER_FULL: u16 = 20;
+pub const E_NOT_CONNECTED: u16 = 21;
 
 pub const E_MAX: u16 = u16::MAX;
 

@@ -171,8 +171,11 @@ pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> 
         return E_BAD_HANDLE;
     };
     if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-        *addr = (*tcp_stream.socket_addr()).into();
-        return E_OK;
+        if let Some(socket_addr) = tcp_stream.socket_addr() {
+            *addr = (socket_addr).into();
+            return E_OK;
+        }
+        return E_INVALID_ARGUMENT;
     };
     if let Some(tcp_listener) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpListener>() {
         *addr = (*tcp_listener.socket_addr()).into();
@@ -190,8 +193,13 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
         return E_BAD_HANDLE;
     };
 
-    *addr = (*tcp_stream.peer_addr()).into();
-    E_OK
+    match tcp_stream.peer_addr() {
+        Ok(peer_addr) => {
+            *addr = peer_addr.into();
+            E_OK
+        }
+        Err(err) => err,
+    }
 }
 // -------------------------------- implementation details ------------------------------ //
 
@@ -227,6 +235,7 @@ use moto_ipc::io_channel;
 use moto_rt::time::Instant;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
+use moto_sys_io::api_net::TcpState;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
 static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
@@ -566,11 +575,11 @@ impl NetChannel {
         assert!(self.subchannels_in_use[idx].swap(false, Ordering::AcqRel));
     }
 
-    fn tcp_stream_created(&self, stream: &Arc<TcpStream>) {
+    fn tcp_stream_created(&self, stream: &TcpStream) {
         assert!(self
             .tcp_streams
             .lock()
-            .insert(stream.handle, Arc::downgrade(stream))
+            .insert(stream.handle(), stream.me.clone())
             .is_none());
     }
 
@@ -747,9 +756,9 @@ impl RxBuf {
 
 pub struct TcpStream {
     channel: Arc<NetChannel>,
-    local_addr: SocketAddr,
+    local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
-    handle: u64,
+    handle: AtomicU64,
     wait_object: WaitObject,
     nonblocking: AtomicBool,
     me: Weak<TcpStream>,
@@ -781,9 +790,14 @@ pub struct TcpStream {
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
+        let handle = self.handle.load(Ordering::Relaxed);
+        if handle == 0 {
+            return;
+        }
+
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_CLOSE;
-        req.handle = self.handle;
+        req.handle = self.handle();
 
         if moto_sys::UserThreadControlBlock::get().self_handle
             == self.channel.io_thread_wake_handle.load(Ordering::Relaxed)
@@ -807,7 +821,7 @@ impl Drop for TcpStream {
         }
 
         self.channel
-            .tcp_stream_dropped(self.handle, self.subchannel_idx);
+            .tcp_stream_dropped(self.handle(), self.subchannel_idx);
     }
 }
 
@@ -845,7 +859,22 @@ impl PosixFile for TcpStream {
     }
 }
 
+impl ResponseHandler for TcpStream {
+    fn on_response(&self, resp: io_channel::Msg) {
+        assert_eq!(resp.command, api_net::CMD_TCP_STREAM_CONNECT);
+        self.on_connected(resp);
+        self.wait_object
+            .on_event(moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE);
+    }
+}
+
 impl TcpStream {
+    fn handle(&self) -> u64 {
+        let handle = self.handle.load(Ordering::Relaxed);
+        assert_ne!(0, handle);
+        handle
+    }
+
     fn raise_events(&self, interests: Interests, token: Token) {
         let mut events = 0;
 
@@ -865,7 +894,7 @@ impl TcpStream {
     fn ack_rx(&self) {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_RX_ACK;
-        req.handle = self.handle;
+        req.handle = self.handle();
         req.payload.args_64_mut()[0] = self.next_rx_seq.load(Ordering::Relaxed) - 1;
         self.channel.send_msg(req);
     }
@@ -904,10 +933,10 @@ impl TcpStream {
         let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
 
         let mut nonblocking = false;
-        let req = if let Some(timo) = timeout {
+        let mut req = if let Some(timo) = timeout {
             let abs_timeout = if timo.is_zero() {
                 nonblocking = true;
-                Instant::from_u64(1) // Nonblocking
+                Instant::from_u64(0)
             } else {
                 Instant::now() + timo
             };
@@ -916,8 +945,42 @@ impl TcpStream {
             api_net::tcp_stream_connect_request(socket_addr, subchannel_mask)
         };
 
+        let new_stream = Arc::new_cyclic(|me| TcpStream {
+            local_addr: Mutex::new(None),
+            remote_addr: *socket_addr,
+            handle: AtomicU64::new(SysHandle::NONE.into()),
+            wait_object: WaitObject::new(
+                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
+            ),
+            me: me.clone(),
+            nonblocking: AtomicBool::new(nonblocking),
+            channel: channel.clone(),
+            recv_queue: Mutex::new(VecDeque::new()),
+            next_rx_seq: AtomicU64::new(1),
+            rx_buf: Mutex::new(None),
+            tx_msg: Mutex::new(None),
+            rx_waiter: Mutex::new(None),
+            tcp_state: AtomicU32::new(api_net::TcpState::Connecting.into()),
+            rx_done: AtomicBool::new(false),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_idx,
+            subchannel_mask,
+            stats_rx_bytes: AtomicU64::new(0),
+            stats_tx_bytes: AtomicU64::new(0),
+        });
+
         if nonblocking {
-            todo!()
+            let req_id = channel.new_req_id();
+            req.id = req_id;
+            channel
+                .post_msg_with_response_waiter(req, new_stream.me.clone())
+                .inspect_err(|_| {
+                    // assert!(self.accept_requests.lock().remove(&req.id).is_some());
+                    channel.release_subchannel(subchannel_idx);
+                    NET.lock().release_channel(&channel);
+                })?;
+            return Ok(new_stream);
         }
 
         let resp = channel.send_receive(req);
@@ -932,48 +995,35 @@ impl TcpStream {
 
             channel.release_subchannel(subchannel_idx);
             NET.lock().release_channel(&channel);
+
             return Err(resp.status());
         }
+        new_stream.on_connected(resp);
 
-        let inner = Arc::new_cyclic(|me| TcpStream {
-            local_addr: api_net::get_socket_addr(&resp.payload).unwrap(),
-            remote_addr: *socket_addr,
-            handle: resp.handle,
-            wait_object: WaitObject::new(
-                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ),
-            me: me.clone(),
-            nonblocking: AtomicBool::new(nonblocking),
-            channel: channel.clone(),
-            recv_queue: Mutex::new(VecDeque::new()),
-            next_rx_seq: AtomicU64::new(1),
-            rx_buf: Mutex::new(None),
-            tx_msg: Mutex::new(None),
-            rx_waiter: Mutex::new(None),
-            tcp_state: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
-            rx_done: AtomicBool::new(false),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
-            subchannel_idx,
-            subchannel_mask,
-            stats_rx_bytes: AtomicU64::new(0),
-            stats_tx_bytes: AtomicU64::new(0),
-        });
+        Ok(new_stream)
+    }
 
-        channel.tcp_stream_created(&inner);
-        inner.ack_rx();
+    fn on_connected(&self, resp: io_channel::Msg) {
+        assert_ne!(0, resp.handle);
+
+        self.handle.store(resp.handle, Ordering::Relaxed);
+        *self.local_addr.lock() = Some(api_net::get_socket_addr(&resp.payload).unwrap());
+        let prev = self
+            .tcp_state
+            .swap(TcpState::ReadWrite.into(), Ordering::Release);
+        assert_eq!(prev, TcpState::Connecting.into());
+        self.channel.tcp_stream_created(self);
+        self.ack_rx();
 
         #[cfg(debug_assertions)]
         moto_log!(
             "{}:{} new outgoing TcpStream {:?} -> {:?} 0x{:x}",
             file!(),
             line!(),
-            inner.local_addr,
-            inner.remote_addr,
-            inner.handle
+            self.local_addr.lock().unwrap(),
+            self.remote_addr,
+            self.handle()
         );
-
-        Ok(inner)
     }
 
     unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
@@ -1362,7 +1412,7 @@ impl TcpStream {
                             "{}:{} alloc page stuck for socket 0x{:x}",
                             file!(),
                             line!(),
-                            self.handle
+                            self.handle()
                         );
                     }
 
@@ -1384,7 +1434,7 @@ impl TcpStream {
         }
 
         let msg =
-            api_net::tcp_stream_tx_msg(self.handle, io_page, write_sz, Instant::now().as_u64());
+            api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
         self.channel.send_msg(msg);
         self.stats_tx_bytes
             .fetch_add(write_sz as u64, Ordering::Relaxed);
@@ -1393,7 +1443,7 @@ impl TcpStream {
             "{}:{} stream 0x{:x} TX bytes {}",
             file!(),
             line!(),
-            self.handle,
+            self.handle(),
             self.stats_tx_bytes.load(Ordering::Relaxed)
         );
         Ok(write_sz)
@@ -1424,7 +1474,7 @@ impl TcpStream {
         }
 
         let msg =
-            api_net::tcp_stream_tx_msg(self.handle, io_page, write_sz, Instant::now().as_u64());
+            api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
         if let Err(msg) = self.try_tx(msg, write_sz) {
             *tx_lock = Some((msg, write_sz));
             self.channel.write_waiters.lock().push_back(self.me.clone());
@@ -1444,19 +1494,32 @@ impl TcpStream {
             "{}:{} stream 0x{:x} TX bytes {}",
             file!(),
             line!(),
-            self.handle,
+            self.handle(),
             self.stats_tx_bytes.load(Ordering::Relaxed)
         );
 
         Ok(())
     }
 
-    fn peer_addr(&self) -> &SocketAddr {
-        &self.remote_addr
+    fn peer_addr(&self) -> Result<SocketAddr, ErrorCode> {
+        // https://docs.rs/mio/0.8.8/mio/net/struct.TcpStream.html#method.connect
+        // suggests that peer_addr() should return non-error only if connected.
+        match self.tcp_state() {
+            api_net::TcpState::Closed => Err(moto_rt::E_NOT_CONNECTED),
+            api_net::TcpState::Listening => Err(moto_rt::E_INVALID_ARGUMENT),
+            api_net::TcpState::PendingAccept => Err(moto_rt::E_INVALID_ARGUMENT),
+            api_net::TcpState::Connecting => Err(moto_rt::E_NOT_CONNECTED),
+            api_net::TcpState::ReadWrite => Ok(self.remote_addr),
+            api_net::TcpState::ReadOnly => Ok(self.remote_addr),
+            api_net::TcpState::WriteOnly => Ok(self.remote_addr),
+            api_net::TcpState::_Max => {
+                panic!("bad state {}", self.tcp_state.load(Ordering::Relaxed))
+            }
+        }
     }
 
-    fn socket_addr(&self) -> &SocketAddr {
-        &self.local_addr
+    fn socket_addr(&self) -> Option<SocketAddr> {
+        *self.local_addr.lock()
     }
 
     fn shutdown(&self, read: bool, write: bool) -> ErrorCode {
@@ -1471,7 +1534,7 @@ impl TcpStream {
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
-        req.handle = self.handle;
+        req.handle = self.handle();
         req.payload.args_64_mut()[0] = option;
         let resp = self.channel.send_receive(req);
 
@@ -1505,7 +1568,7 @@ impl TcpStream {
     fn set_nodelay(&self, nodelay: u8) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
-        req.handle = self.handle;
+        req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         req.payload.args_64_mut()[1] = nodelay as u64;
         self.channel.send_receive(req).status()
@@ -1514,7 +1577,7 @@ impl TcpStream {
     fn nodelay(&self) -> Result<u8, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_GET_OPTION;
-        req.handle = self.handle;
+        req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         let resp = self.channel.send_receive(req);
 
@@ -1529,7 +1592,7 @@ impl TcpStream {
     fn set_ttl(&self, ttl: u32) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
-        req.handle = self.handle;
+        req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_32_mut()[2] = ttl;
         self.channel.send_receive(req).status()
@@ -1538,7 +1601,7 @@ impl TcpStream {
     fn ttl(&self) -> Result<u32, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::CMD_TCP_STREAM_GET_OPTION;
-        req.handle = self.handle;
+        req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel.send_receive(req);
 
@@ -1609,7 +1672,10 @@ impl PosixFile for TcpListener {
     fn poll_add(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         self.wait_object.add_interests(poll_fd, token, interests)?;
 
-        crate::moto_log!("TODO: TcpListener: add pending accepts");
+        let have_async_accepts = !self.async_accepts.lock().is_empty();
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
+            self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+        }
 
         Ok(())
     }
@@ -1760,9 +1826,9 @@ impl TcpListener {
         let remote_addr = api_net::get_socket_addr(&pending_accept.resp.payload).unwrap();
 
         let inner = Arc::new_cyclic(|me| TcpStream {
-            local_addr: self.socket_addr,
+            local_addr: Mutex::new(Some(self.socket_addr)),
             remote_addr,
-            handle: pending_accept.resp.handle,
+            handle: AtomicU64::new(pending_accept.resp.handle),
             wait_object: WaitObject::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
@@ -1792,7 +1858,7 @@ impl TcpListener {
             "{}:{} new incoming TcpStream {:?} <- {:?} mask: 0x{:x}",
             file!(),
             line!(),
-            inner.local_addr,
+            inner.local_addr.lock().unwrap(),
             inner.remote_addr,
             inner.subchannel_mask
         );
@@ -1893,9 +1959,10 @@ impl TcpListener {
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
-        self.nonblocking.store(nonblocking, Ordering::Relaxed);
-        if nonblocking {
-            crate::moto_log!("Kick existing blocking accept()s.");
+        let was_blocking = !self.nonblocking.swap(nonblocking, Ordering::Relaxed);
+        if nonblocking && was_blocking {
+            // TODO: at the moment, previously-issues blocking accepts
+            // will remain blocking. Maybe they should be kicked with E_NOT_READY?
         }
         E_OK
     }
