@@ -859,13 +859,13 @@ impl PosixFile for TcpStream {
 
     fn poll_add(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         self.wait_object.add_interests(poll_fd, token, interests)?;
-        self.raise_events(interests, token);
+        self.maybe_raise_events(interests, token);
         Ok(())
     }
 
     fn poll_set(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         self.wait_object.set_interests(poll_fd, token, interests)?;
-        self.raise_events(interests, token);
+        self.maybe_raise_events(interests, token);
         Ok(())
     }
 
@@ -890,14 +890,23 @@ impl TcpStream {
         handle
     }
 
-    fn raise_events(&self, interests: Interests, token: Token) {
+    fn maybe_raise_events(&self, interests: Interests, token: Token) {
         let mut events = 0;
 
-        if (interests & moto_rt::poll::POLL_WRITABLE != 0) && self.have_write_buffer_space() {
+        // maybe_raise_events is called from poll_add/poll_set,
+        // so we raise events that are expected and don't raise events
+        // that are not expected (based on mio tests, so somewhat ad-hoc).
+        let state = self.tcp_state();
+
+        if (interests & moto_rt::poll::POLL_WRITABLE != 0)
+            && self.have_write_buffer_space()
+            && (state.can_write() || state == TcpState::Closed)
+        {
             events |= moto_rt::poll::POLL_WRITABLE;
         }
         if ((interests & moto_rt::poll::POLL_READABLE) != 0)
             && (self.rx_buf.lock().is_some() || !self.recv_queue.lock().is_empty())
+            && (state.can_read() || state == TcpState::Closed)
         {
             events |= moto_rt::poll::POLL_READABLE;
         }
@@ -1493,10 +1502,12 @@ impl TcpStream {
         // Serialize writes, as we have only one self.tx_msg to store into.
         let mut tx_lock = self.tx_msg.lock();
         if tx_lock.is_some() {
+            self.channel.write_waiters.lock().push_back(self.me.clone());
             return Err(moto_rt::E_NOT_READY);
         }
 
         let Ok(io_page) = self.channel.conn.alloc_page(self.subchannel_mask) else {
+            self.channel.write_waiters.lock().push_back(self.me.clone());
             return Err(moto_rt::E_NOT_READY);
         };
         unsafe {

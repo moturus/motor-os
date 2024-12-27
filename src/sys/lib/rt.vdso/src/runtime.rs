@@ -215,7 +215,9 @@ impl Registry {
                 if deadline <= moto_rt::time::Instant::now() {
                     self.wait_handle
                         .store(SysHandle::NONE.as_u64(), Ordering::Release);
-                    return -(E_TIMED_OUT as i32);
+                    // MIO docs for poll() say that upon timeout poll() returns OK(()),
+                    // and MIO tests (specifically tcp::listen_then_close() rely on this).
+                    return 0; // -(E_TIMED_OUT as i32);
                 }
             }
         }
