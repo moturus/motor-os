@@ -1438,14 +1438,14 @@ impl TcpStream {
         self.channel.send_msg(msg);
         self.stats_tx_bytes
             .fetch_add(write_sz as u64, Ordering::Relaxed);
-        #[cfg(debug_assertions)]
-        moto_log!(
-            "{}:{} stream 0x{:x} TX bytes {}",
-            file!(),
-            line!(),
-            self.handle(),
-            self.stats_tx_bytes.load(Ordering::Relaxed)
-        );
+        // #[cfg(debug_assertions)]
+        // moto_log!(
+        //     "{}:{} stream 0x{:x} TX bytes {}",
+        //     file!(),
+        //     line!(),
+        //     self.handle(),
+        //     self.stats_tx_bytes.load(Ordering::Relaxed)
+        // );
         Ok(write_sz)
     }
 

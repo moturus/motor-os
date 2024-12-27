@@ -11,8 +11,8 @@ use moto_ipc::io_channel;
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_net::{self, TcpState};
 
-use super::socket::MotoSocket;
 use super::socket::SocketId;
+use super::socket::{MotoSocket, TxDoneAction};
 use super::tcp_listener::TcpListener;
 use super::tcp_listener::TcpListenerId;
 use super::RxBuf;
@@ -349,6 +349,7 @@ impl NetSys {
             connect_req: None,
             ephemeral_port: None,
             tx_queue: VecDeque::new(),
+            tx_done_action: None,
             rx_seq: 0,
             rx_ack: u64::MAX,
             state: TcpState::Closed,
@@ -386,6 +387,7 @@ impl NetSys {
     }
 
     fn drop_tcp_socket(&mut self, socket_id: SocketId) {
+        // Note: cancel_tcp_tx may call drop_tcp_socket recursively (once).
         self.cancel_tcp_tx(socket_id);
 
         // First, abort the connection without removing the socket from
@@ -397,11 +399,7 @@ impl NetSys {
         let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
             s
         } else {
-            log::error!(
-                "drop_tcp_socket(): socket {} not found.",
-                u64::from(socket_id)
-            );
-            moto_rt::error::log_backtrace(-1);
+            // cancel_tcp_tx() dropped the socket already.
             return;
         };
         let smol_socket = self.devices[moto_socket.device_idx]
@@ -469,7 +467,7 @@ impl NetSys {
         self.put_unused_tcp_socket(smol_socket);
         #[cfg(debug_assertions)]
         log::debug!(
-            "{}:{} dropped tcp socket 0x{:x}; {} active sockets.",
+            "{}:{} dropped tcp socket {}; {} active sockets.",
             file!(),
             line!(),
             u64::from(socket_id),
@@ -907,8 +905,7 @@ impl NetSys {
                 if shut_rd && shut_wr {
                     moto_socket.state = TcpState::Closed;
                     sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    smol_socket.close();
-                    self.cancel_tcp_tx(socket_id);
+                    self.finalize_tcp_tx(socket_id, TxDoneAction::Close);
                 } else if shut_rd {
                     moto_socket.state = TcpState::WriteOnly;
                     sqe.payload.args_32_mut()[5] = moto_socket.state.into();
@@ -916,24 +913,22 @@ impl NetSys {
                     assert!(shut_wr);
                     moto_socket.state = TcpState::ReadOnly;
                     sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    smol_socket.close();
-                    self.cancel_tcp_tx(socket_id);
+                    self.finalize_tcp_tx(socket_id, TxDoneAction::Close);
                 }
             }
             TcpState::ReadOnly => {
-                if shut_wr {
-                    assert!(moto_socket.tx_queue.is_empty());
+                if shut_rd {
                     moto_socket.state = TcpState::Closed;
                     sqe.payload.args_32_mut()[5] = moto_socket.state.into();
                     smol_socket.close();
                 }
             }
             TcpState::WriteOnly => {
-                if shut_rd {
+                if shut_wr {
+                    assert!(moto_socket.tx_queue.is_empty());
                     moto_socket.state = TcpState::Closed;
                     sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    smol_socket.close();
-                    self.cancel_tcp_tx(socket_id);
+                    self.finalize_tcp_tx(socket_id, TxDoneAction::Close);
                 }
             }
             TcpState::Closed => {}
@@ -1015,11 +1010,7 @@ impl NetSys {
             line!(),
             u64::from(socket_id)
         );
-        // While there can still be outgoing writes that need completion,
-        // we drop everything here: let the user-side worry about
-        // not dropping connections before writes are complete.
-        // TODO: implement SO_LINGER (Rust: TcpStream::set_linger()).
-        self.drop_tcp_socket(socket_id);
+        self.finalize_tcp_tx(socket_id, TxDoneAction::Drop);
         sqe.status = moto_rt::E_OK;
         Some(sqe)
     }
@@ -1625,9 +1616,34 @@ impl NetSys {
                 Err(_err) => todo!(),
             }
         }
+
+        if moto_socket.tx_queue.is_empty() && (smol_socket.send_queue() == 0) {
+            if let Some(tx_done_action) = moto_socket.tx_done_action {
+                match tx_done_action {
+                    TxDoneAction::Close => smol_socket.close(),
+                    TxDoneAction::Drop => self.drop_tcp_socket(socket_id),
+                }
+            }
+        }
     }
 
     fn cancel_tcp_tx(&mut self, socket_id: SocketId) {
+        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
+            s
+        } else {
+            // cancel_tcp_tx() may be called recursively from drop_tcp_socket().
+            return;
+        };
+        moto_socket.tx_queue.clear();
+        if let Some(tx_done_action) = moto_socket.tx_done_action {
+            if tx_done_action == TxDoneAction::Drop {
+                moto_socket.tx_done_action = None; // Avoid deep recursion.
+                self.drop_tcp_socket(socket_id);
+            }
+        }
+    }
+
+    fn finalize_tcp_tx(&mut self, socket_id: SocketId, tx_done_action: TxDoneAction) {
         let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
             s
         } else {
@@ -1635,11 +1651,15 @@ impl NetSys {
             // but it still happens when the client does something naughty: when our httpd
             // based on tiny-http runs without Cloudflare proxy, and we ^C httpd, this
             // line triggers sometimes.
-            log::error!("Missing socket {} in cancel_tcp_tx.", u64::from(socket_id));
+            log::error!(
+                "Missing socket {} in finalize_tcp_tx.",
+                u64::from(socket_id)
+            );
             return;
         };
-        // TODO: Linux keeps sending buffered packets after socket close. Should we do the same?
-        moto_socket.tx_queue.clear();
+
+        moto_socket.tx_done_action = Some(tx_done_action);
+        self.do_tcp_tx(socket_id);
     }
 }
 

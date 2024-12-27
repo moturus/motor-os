@@ -16,8 +16,8 @@ extern crate alloc;
 macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
-            let msg = alloc::format!($($arg)*);
-            moto_sys::SysRay::log(alloc::format!("{}:{} {}", file!(), line!(), msg.as_str()).as_str()).ok();
+            // Note: don't do file!()/line!() here because it is done in logger.rs.
+            moto_sys::SysRay::log(alloc::format!($($arg)*).as_str()).ok();
         }
     };
 }

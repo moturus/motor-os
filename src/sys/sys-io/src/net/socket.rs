@@ -18,6 +18,13 @@ impl From<SocketId> for u64 {
     }
 }
 
+// What to do with the socket once its TX queue is drained.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum TxDoneAction {
+    Close,
+    Drop,
+}
+
 pub(super) struct MotoSocket {
     pub id: SocketId, // Unique across all devices.
     pub handle: smoltcp::iface::SocketHandle,
@@ -36,6 +43,8 @@ pub(super) struct MotoSocket {
     pub ephemeral_port: Option<u16>,
 
     pub tx_queue: VecDeque<super::TxBuf>,
+
+    pub tx_done_action: Option<TxDoneAction>,
 
     pub rx_seq: u64,
     pub rx_ack: u64,
