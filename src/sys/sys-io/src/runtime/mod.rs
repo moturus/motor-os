@@ -33,6 +33,9 @@ pub trait IoSubsystem {
     fn wait_timeout(&mut self) -> Option<core::time::Duration>;
 
     fn get_stats(&mut self, msg: &internal_queue::Msg);
+
+    #[allow(unused)]
+    fn dump_state(&mut self);
 }
 
 pub static STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);

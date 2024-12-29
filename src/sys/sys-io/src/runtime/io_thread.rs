@@ -195,8 +195,9 @@ impl IoRuntime {
                         }
                         Err(_) => {
                             log::info!(
-                                "Dropping conn 0x{:x} due to error in process_sqe.",
-                                endpoint_handle.as_u64()
+                                "Dropping conn 0x{:x} due to error in process_sqe; cmd: {}.",
+                                endpoint_handle.as_u64(),
+                                msg.command
                             );
                             self.drop_connection(endpoint_handle);
                             return;
@@ -461,6 +462,8 @@ impl IoRuntime {
 
                             assert!(self.pending_completions.is_empty());
                             self.process_wakeups(self.all_handles.clone(), true);
+                            #[cfg(debug_assertions)]
+                            self.net.dump_state();
                         } else {
                             debug_timed_out = false;
                             self.process_wakeups(handles, false);

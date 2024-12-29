@@ -1480,17 +1480,17 @@ impl NetSys {
         if moto_socket.rx_ack == u64::MAX
             || (moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT))
         {
-            #[cfg(debug_assertions)]
-            if moto_socket.rx_ack != u64::MAX {
-                log::debug!(
-                    "{}:{} TCP RX: stuck seq: {} ack: {} state: {:?}",
-                    file!(),
-                    line!(),
-                    moto_socket.rx_seq,
-                    moto_socket.rx_ack,
-                    moto_socket.state
-                );
-            }
+            // #[cfg(debug_assertions)]
+            // if moto_socket.rx_ack != u64::MAX {
+            //     log::debug!(
+            //         "{}:{} TCP RX: stuck seq: {} ack: {} state: {:?}",
+            //         file!(),
+            //         line!(),
+            //         moto_socket.rx_seq,
+            //         moto_socket.rx_ack,
+            //         moto_socket.state
+            //     );
+            // }
             return;
         }
 
@@ -1847,5 +1847,11 @@ impl IoSubsystem for NetSys {
         }
 
         payload.results.swap(results);
+    }
+
+    fn dump_state(&mut self) {
+        for socket in self.tcp_sockets.values() {
+            socket.domp_state();
+        }
     }
 }
