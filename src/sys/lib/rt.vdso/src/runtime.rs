@@ -47,7 +47,9 @@ pub struct WaitObject {
 
 impl Drop for WaitObject {
     fn drop(&mut self) {
-        self.on_event(moto_rt::poll::POLL_READ_CLOSED | moto_rt::poll::POLL_WRITE_CLOSED);
+        // MIO test tcp::test_listen_then_close() panics if an event
+        // is received for dropped TCP Listener.
+        // self.on_event(moto_rt::poll::POLL_READ_CLOSED | moto_rt::poll::POLL_WRITE_CLOSED);
     }
 }
 
@@ -126,6 +128,11 @@ impl WaitObject {
         let mut registries = self.registries.lock();
         for entry in &*registries {
             let (registry_id, (registry, token, interests)) = entry;
+            // Update interests: *_CLOSED events are always of interest.
+            let interests = interests
+                | moto_rt::poll::POLL_READ_CLOSED
+                | moto_rt::poll::POLL_WRITE_CLOSED
+                | moto_rt::poll::POLL_ERROR;
             if interests & events != 0 {
                 if let Some(registry) = registry.upgrade() {
                     let registry = (registry.as_ref() as &dyn Any)
@@ -242,6 +249,8 @@ impl Registry {
 
     fn on_event(&self, token: Token, event_bits: EventBits) {
         // crate::moto_log!("on_event: token: {token} events: {event_bits}");
+        // crate::util::logging::log_backtrace(-1);
+
         self.events
             .lock()
             .entry(token)

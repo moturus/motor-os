@@ -22,6 +22,7 @@ pub const SO_SHUTDOWN: u64 = 3;
 pub const SO_NODELAY: u64 = 4;
 pub const SO_TTL: u64 = 5;
 pub const SO_NONBLOCKING: u64 = 6;
+pub const SO_ERROR: u64 = 7;
 
 fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
     let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
@@ -153,9 +154,10 @@ pub fn only_v6(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
     todo!()
 }
 
-pub fn take_error(_rt_fd: RtFd) -> Result<ErrorCode, ErrorCode> {
-    // getsockopt
-    todo!()
+pub fn take_error(rt_fd: RtFd) -> Result<ErrorCode, ErrorCode> {
+    let mut error = 0_u16;
+    getsockopt(rt_fd, SO_ERROR, &mut error as *mut _ as usize, 2)?;
+    Ok(error as ErrorCode)
 }
 
 pub fn set_nonblocking(rt_fd: RtFd, nonblocking: bool) -> Result<(), ErrorCode> {
