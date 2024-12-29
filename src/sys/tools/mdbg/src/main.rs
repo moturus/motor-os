@@ -160,18 +160,36 @@ fn print_stack_trace(proc_name: &str, dbg_handle: moto_sys::SysHandle, tid: u64)
         thread_data.syscall_op
     )
     .ok();
-    write!(&mut writer, "\naddr2line -e {proc_name} \\").ok();
-    write!(&mut writer, " \n  0x{:x}", thread_data.ip).ok();
+    write!(&mut writer, "\naddr2line -e {proc_name}").ok();
+    let mut in_vdso = false;
+
+    let mut write_addr = |addr| {
+        if addr >= moto_rt::RT_VDSO_START {
+            if !in_vdso {
+                in_vdso = true;
+                write!(&mut writer, " \\\n  -- rt.vdso").ok();
+            }
+            write!(
+                &mut writer,
+                " \\\n    0x{:x}",
+                addr - moto_rt::RT_VDSO_START
+            )
+            .ok();
+        } else {
+            if in_vdso {
+                in_vdso = false;
+                write!(&mut writer, " \\\n  ^^^").ok();
+            }
+            write!(&mut writer, " \\\n  0x{:x}", addr).ok();
+        }
+    };
+
+    write_addr(thread_data.ip);
     for addr in backtrace {
         if addr == 0 {
             break;
         }
-
-        if addr > (1_u64 << 40) {
-            break;
-        }
-
-        write!(&mut writer, " \\\n  0x{:x}", addr).ok();
+        write_addr(addr);
     }
 
     let _ = write!(&mut writer, "\n\n");
