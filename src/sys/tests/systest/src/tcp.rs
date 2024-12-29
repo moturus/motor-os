@@ -279,6 +279,7 @@ fn test_peek() {
         let (mut server, _) = listener.accept().unwrap();
 
         let mut buf = [0_u8; 1024];
+        #[allow(clippy::needless_range_loop)]
         for pos in 0..buf.len() {
             buf[pos] = (pos & 255) as u8;
         }
@@ -297,12 +298,14 @@ fn test_peek() {
         if peek {
             let sz = client.peek(&mut buf).unwrap();
             assert!(sz > 0);
+            #[allow(clippy::needless_range_loop)]
             for pos in 0..sz {
                 assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
             }
         }
         let sz = client.read(&mut buf).unwrap();
         assert!(sz > 0);
+        #[allow(clippy::needless_range_loop)]
         for pos in 0..sz {
             assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
         }
