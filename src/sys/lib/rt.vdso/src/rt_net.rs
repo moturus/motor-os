@@ -919,11 +919,18 @@ impl TcpStream {
         match msg.command {
             api_net::CMD_TCP_STREAM_RX => {
                 self.recv_queue.lock().push_back(msg);
-                self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+                let sz_read = msg.payload.args_64()[1] as usize;
+                if sz_read > 0 {
+                    self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+                } else {
+                    self.wait_object
+                        .on_event(moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_READ_CLOSED);
+                }
             }
             api_net::EVT_TCP_STREAM_STATE_CHANGED => {
                 self.tcp_state
                     .store(msg.payload.args_32()[0], Ordering::Relaxed);
+                // TODO: raise an event?
             }
             _ => panic!(
                 "{}:{}: Unrecognized msg {} for stream 0x{:x}",
@@ -1406,12 +1413,15 @@ impl TcpStream {
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        if self.nonblocking.load(Ordering::Relaxed) {
-            return self.write_nonblocking(buf);
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if !self.tcp_state().can_write() {
+            return Err(moto_rt::E_NOT_CONNECTED);
         }
 
-        if buf.is_empty() || !self.tcp_state().can_write() {
-            return Ok(0);
+        if self.nonblocking.load(Ordering::Relaxed) {
+            return self.write_nonblocking(buf);
         }
 
         let timestamp = Instant::now();
@@ -1504,9 +1514,9 @@ impl TcpStream {
     }
 
     fn write_nonblocking(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        if buf.is_empty() || !self.tcp_state().can_write() {
-            return Ok(0);
-        }
+        // These are checked at the callsite.
+        debug_assert!(!buf.is_empty());
+        debug_assert!(self.tcp_state().can_write());
 
         // Serialize writes (= keep tx_lock), as we have only one self.tx_msg to store into.
         let mut tx_lock = self.tx_msg.lock();
@@ -1602,6 +1612,7 @@ impl TcpStream {
                 .store(resp.payload.args_32()[5], Ordering::Relaxed);
             moto_rt::E_OK
         } else {
+            crate::moto_log!("shutdown error: {}", resp.status());
             resp.status()
         }
     }
