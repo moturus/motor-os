@@ -412,6 +412,7 @@ impl NetChannel {
                     SysHandle::NONE
                 }
             } else {
+                // These are synchronous req/resp messages.
                 let mut resp_waiters = self.legacy_resp_waiters.lock();
                 if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
                     *resp = Some(msg);
@@ -804,13 +805,26 @@ impl Drop for TcpStream {
 
         // Clear RX queue: basically, free up server-allocated pages.
         {
-            let mut queue = self.recv_queue.lock();
-            while let Some(msg) = queue.pop_front() {
+            let mut rxq = self.recv_queue.lock();
+            while let Some(msg) = rxq.pop_front() {
+                if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+                    continue;
+                }
                 assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
                 let sz_read = msg.payload.args_64()[1];
                 if sz_read > 0 {
                     let _ = self.channel.conn.get_page(msg.payload.shared_pages()[0]);
                 }
+            }
+        }
+
+        // Clear TX queue (of length 0 or 1).
+        let tx_msg = self.tx_msg.lock().take();
+        if let Some((msg, _)) = tx_msg {
+            assert_eq!(msg.command, api_net::CMD_TCP_STREAM_TX);
+            let sz_read = msg.payload.args_64()[1];
+            if sz_read > 0 {
+                let _ = self.channel.conn.get_page(msg.payload.shared_pages()[0]);
             }
         }
 
@@ -895,6 +909,9 @@ impl TcpStream {
             && state.can_read()
         {
             events |= moto_rt::poll::POLL_READABLE;
+            if self.rx_done.load(Ordering::Acquire) {
+                events |= moto_rt::poll::POLL_READ_CLOSED;
+            }
         }
 
         if events != 0 {
@@ -916,21 +933,48 @@ impl TcpStream {
 
     // Note: this is called from the IO thread, so must not sleep.
     fn process_incoming_msg(&self, msg: io_channel::Msg) {
+        // The main challenge/nuance here is that sometimes we need to raise
+        // poll events here, and sometimes we have to delay them. For example,
+        // while there are messages in RXQ, we should not raise POLL_READ_CLOSED.
+        let mut recv_q = self.recv_queue.lock();
+        if !recv_q.is_empty() {
+            // No need to raise POLL_READABLE, as this is not a state change
+            // (receive queue non-empty).
+            if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+                let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+                // Currently this is the only incoming state change possible.
+                assert_eq!(new_state, TcpState::Closed);
+                let new_state = TcpState::ReadOnly;
+
+                // Deal only with TX closure: RX closing will happen later.
+                self.mark_tx_done();
+            }
+            recv_q.push_back(msg);
+            return;
+        }
+
+        // RXQ is empty.
         match msg.command {
             api_net::CMD_TCP_STREAM_RX => {
-                self.recv_queue.lock().push_back(msg);
                 let sz_read = msg.payload.args_64()[1] as usize;
                 if sz_read > 0 {
+                    recv_q.push_back(msg);
+                    drop(recv_q);
+                    // The RXQ was empty, this is a new (edge) event.
                     self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
                 } else {
-                    self.wait_object
-                        .on_event(moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_READ_CLOSED);
+                    // RX done. Need to raise the event here.
+                    drop(recv_q);
+                    self.mark_rx_done();
                 }
             }
             api_net::EVT_TCP_STREAM_STATE_CHANGED => {
-                self.tcp_state
-                    .store(msg.payload.args_32()[0], Ordering::Relaxed);
-                // TODO: raise an event?
+                let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+                // Currently this is the only incoming state change possible.
+                assert_eq!(new_state, TcpState::Closed);
+
+                self.mark_rx_done();
+                self.mark_tx_done();
             }
             _ => panic!(
                 "{}:{}: Unrecognized msg {} for stream 0x{:x}",
@@ -1044,8 +1088,7 @@ impl TcpStream {
         assert_eq!(prev, TcpState::Connecting.into());
         self.channel.tcp_stream_created(self);
 
-        self.wait_object
-            .on_event(moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE);
+        self.wait_object.on_event(moto_rt::poll::POLL_WRITABLE);
 
         self.ack_rx();
 
@@ -1169,6 +1212,64 @@ impl TcpStream {
         self.read_or_peak(buf, true)
     }
 
+    fn mark_rx_done(&self) {
+        let prev = self.rx_done.swap(true, Ordering::AcqRel);
+        if prev {
+            return;
+        }
+        let mut prev_state = self.tcp_state();
+        loop {
+            let new_state = match prev_state {
+                TcpState::ReadWrite => TcpState::WriteOnly,
+                TcpState::ReadOnly => TcpState::Closed,
+                TcpState::Closed => return,
+                _ => panic!("Unexpected TCP state: {:?}", prev_state),
+            };
+            match self.tcp_state.compare_exchange_weak(
+                prev_state.into(),
+                new_state.into(),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(prev) => {
+                    prev_state = prev.try_into().unwrap();
+                    core::hint::spin_loop();
+                }
+            }
+        }
+
+        self.wait_object
+            .on_event(moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_READ_CLOSED);
+    }
+
+    fn mark_tx_done(&self) {
+        let mut prev_state = self.tcp_state();
+        loop {
+            let new_state = match prev_state {
+                TcpState::ReadWrite => TcpState::ReadOnly,
+                TcpState::WriteOnly => TcpState::Closed,
+                TcpState::Closed => return,
+                _ => panic!("Unexpected TCP state: {:?}", prev_state),
+            };
+            match self.tcp_state.compare_exchange_weak(
+                prev_state.into(),
+                new_state.into(),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(prev) => {
+                    prev_state = prev.try_into().unwrap();
+                    core::hint::spin_loop();
+                }
+            }
+        }
+
+        self.wait_object
+            .on_event(moto_rt::poll::POLL_WRITABLE | moto_rt::poll::POLL_WRITE_CLOSED);
+    }
+
     fn process_rx_message(
         &self,
         buf: &mut [u8],
@@ -1176,6 +1277,18 @@ impl TcpStream {
         peek: bool,
     ) -> Result<usize, ErrorCode> {
         fence(Ordering::SeqCst);
+
+        if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+            // Note: this message was preprocessed in process_incoming_msg,
+            // and the state was set to read-only.
+            let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+            // Currently this is the only incoming state change possible.
+            assert_eq!(new_state, TcpState::Closed);
+            debug_assert!(!self.tcp_state().can_write());
+            self.mark_rx_done();
+            return Ok(0);
+        }
+
         assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
         let sz_read = msg.payload.args_64()[1] as usize;
         assert!(sz_read <= moto_ipc::io_channel::PAGE_SIZE);
@@ -1188,15 +1301,7 @@ impl TcpStream {
 
         if sz_read == 0 {
             assert_eq!(msg.payload.shared_pages()[0], u16::MAX);
-            self.rx_done.store(true, Ordering::Release);
-            #[cfg(debug_assertions)]
-            moto_log!(
-                "{}:{} RX closed for stream 0x{:x} rx_seq {}",
-                file!(),
-                line!(),
-                msg.handle,
-                rx_seq
-            );
+            self.mark_rx_done();
             return Ok(0);
         }
 
@@ -1571,6 +1676,7 @@ impl TcpStream {
     }
 
     fn peer_addr(&self) -> Result<SocketAddr, ErrorCode> {
+        core::sync::atomic::fence(Ordering::Acquire);
         // https://docs.rs/mio/0.8.8/mio/net/struct.TcpStream.html#method.connect
         // suggests that peer_addr() should return non-error only if connected.
         match self.tcp_state() {
@@ -1596,9 +1702,21 @@ impl TcpStream {
         let mut option = 0_u64;
         if read {
             option |= api_net::TCP_OPTION_SHUT_RD;
+
+            // Clear RXQ.
+            let mut rxq = self.recv_queue.lock();
+            while let Some(msg) = rxq.pop_front() {
+                assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
+                let sz_read = msg.payload.args_64()[1];
+                if sz_read > 0 {
+                    let _ = self.channel.conn.get_page(msg.payload.shared_pages()[0]);
+                }
+            }
+            self.mark_rx_done();
         }
         if write {
             option |= api_net::TCP_OPTION_SHUT_WR;
+            self.mark_tx_done();
         }
 
         let mut req = io_channel::Msg::new();
@@ -1607,14 +1725,7 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = option;
         let resp = self.channel.send_receive(req);
 
-        if resp.status() == moto_rt::E_OK {
-            self.tcp_state
-                .store(resp.payload.args_32()[5], Ordering::Relaxed);
-            moto_rt::E_OK
-        } else {
-            crate::moto_log!("shutdown error: {}", resp.status());
-            resp.status()
-        }
+        resp.status()
     }
 
     fn set_linger(&self, dur: Option<Duration>) -> Result<(), ErrorCode> {
