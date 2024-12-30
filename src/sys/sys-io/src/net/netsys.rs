@@ -876,14 +876,23 @@ impl NetSys {
             return sqe;
         }
 
-        let shut_rd = (options & api_net::TCP_OPTION_SHUT_RD != 0) && moto_socket.state.can_read();
-        options ^= api_net::TCP_OPTION_SHUT_RD;
+        let shut_rd = if options & api_net::TCP_OPTION_SHUT_RD != 0 {
+            options ^= api_net::TCP_OPTION_SHUT_RD;
+            moto_socket.state.can_read()
+        } else {
+            false
+        };
 
-        let shut_wr = (options & api_net::TCP_OPTION_SHUT_WR != 0) && moto_socket.state.can_write();
-        options ^= api_net::TCP_OPTION_SHUT_WR;
+        let shut_wr = if options & api_net::TCP_OPTION_SHUT_WR != 0 {
+            options ^= api_net::TCP_OPTION_SHUT_WR;
+            moto_socket.state.can_write()
+        } else {
+            false
+        };
 
         if options != 0 {
             sqe.status = moto_rt::E_INVALID_ARGUMENT;
+            log::warn!("unrecognized TCP option 0x{:x}", options);
             return sqe;
         }
 
@@ -1620,7 +1629,10 @@ impl NetSys {
         if moto_socket.tx_queue.is_empty() && (smol_socket.send_queue() == 0) {
             if let Some(tx_done_action) = moto_socket.tx_done_action {
                 match tx_done_action {
-                    TxDoneAction::Close => smol_socket.close(),
+                    TxDoneAction::Close => {
+                        moto_socket.state = TcpState::Closed;
+                        smol_socket.close();
+                    }
                     TxDoneAction::Drop => self.drop_tcp_socket(socket_id),
                 }
             }
