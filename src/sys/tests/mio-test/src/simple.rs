@@ -10,6 +10,7 @@ use mio::{Events, Interest, Poll, Registry, Token};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 // Setup some tokens to allow us to identify which event is for which socket.
 const SERVER: Token = Token(0);
@@ -230,5 +231,7 @@ pub fn test() {
         server.join().unwrap();
     });
 
+    std::thread::sleep(Duration::from_millis(100));
     println!("simple PASS");
+    std::thread::sleep(Duration::from_millis(100));
 }

@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+log = "0.4.8"
 mio = { git = "https://github.com/moturus/mio.git", branch = "motor-os_20241121", features = ["net", "os-poll"]}
