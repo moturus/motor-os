@@ -1866,8 +1866,7 @@ impl PosixFile for TcpListener {
         // Err(E_INVALID_ARGUMENT)
     }
     fn poll_del(&self, poll_fd: RtFd) -> Result<(), ErrorCode> {
-        todo!()
-        // Err(E_INVALID_ARGUMENT)
+        self.wait_object.del_interests(poll_fd)
     }
 }
 
