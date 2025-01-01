@@ -54,6 +54,14 @@ impl From<in6_addr> for core::net::Ipv6Addr {
     }
 }
 
+impl From<core::net::Ipv6Addr> for in6_addr {
+    fn from(addr: core::net::Ipv6Addr) -> in6_addr {
+        in6_addr {
+            s6_addr: addr.octets(),
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct sockaddr_in6 {
@@ -66,8 +74,14 @@ pub struct sockaddr_in6 {
 }
 
 impl From<core::net::SocketAddrV6> for sockaddr_in6 {
-    fn from(_addr: core::net::SocketAddrV6) -> sockaddr_in6 {
-        todo!()
+    fn from(addr: core::net::SocketAddrV6) -> sockaddr_in6 {
+        sockaddr_in6 {
+            sin6_family: AF_INET6 as sa_family_t,
+            sin6_port: addr.port().to_be(),
+            sin6_addr: (*addr.ip()).into(),
+            sin6_flowinfo: addr.flowinfo(),
+            sin6_scope_id: addr.scope_id(),
+        }
     }
 }
 

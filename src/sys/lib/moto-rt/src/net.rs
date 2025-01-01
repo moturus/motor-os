@@ -81,17 +81,19 @@ pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
 }
 
 /// Create a TCP stream by connecting to a remote addr.
-///
-/// If timeout.is_zero(), the connect is nonblocking.
-pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration) -> Result<RtFd, ErrorCode> {
-    let vdso_tcp_connect: extern "C" fn(*const netc::sockaddr, u64) -> RtFd = unsafe {
+pub fn tcp_connect(
+    addr: &netc::sockaddr,
+    timeout: Duration,
+    nonblocking: bool,
+) -> Result<RtFd, ErrorCode> {
+    let vdso_tcp_connect: extern "C" fn(*const netc::sockaddr, u64, bool) -> RtFd = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_tcp_connect.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
     let timeout = timeout.as_nanos().try_into().unwrap_or(u64::MAX);
-    to_result!(vdso_tcp_connect(addr, timeout))
+    to_result!(vdso_tcp_connect(addr, timeout, nonblocking))
 }
 
 pub fn udp_connect(addr: &netc::sockaddr) -> Result<(), ErrorCode> {
