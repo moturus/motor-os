@@ -5,6 +5,7 @@ use std::time::Duration;
 mod close_on_drop;
 mod simple;
 mod tcp;
+mod tcp_listener;
 
 #[macro_use]
 mod util;
@@ -30,6 +31,7 @@ fn main() {
         .spawn(input_listener)
         .unwrap();
 
+    tcp_listener::run_all_tests();
     tcp::run_all_tests();
     simple::test();
     close_on_drop::test_close_on_drop();

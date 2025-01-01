@@ -91,14 +91,18 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
     stream
 }
 
-pub extern "C" fn tcp_connect(addr: *const netc::sockaddr, timeout_ns: u64) -> RtFd {
+pub extern "C" fn tcp_connect(
+    addr: *const netc::sockaddr,
+    timeout_ns: u64,
+    nonblocking: bool,
+) -> RtFd {
     let addr = unsafe { (*addr).into() };
     let timeout = if timeout_ns == u64::MAX {
         None
     } else {
         Some(Duration::from_nanos(timeout_ns))
     };
-    let stream = match TcpStream::connect(&addr, timeout) {
+    let stream = match TcpStream::connect(&addr, timeout, nonblocking) {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
@@ -125,11 +129,16 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
-        return E_BAD_HANDLE;
-    };
 
-    tcp_stream.getsockopt(option, ptr, len)
+    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+        tcp_stream.getsockopt(option, ptr, len)
+    } else if let Some(tcp_listener) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpListener>()
+    {
+        tcp_listener.getsockopt(option, ptr, len)
+    } else {
+        E_BAD_HANDLE
+    }
 }
 
 pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
@@ -261,7 +270,7 @@ impl NetRuntime {
 
 struct NetChannel {
     conn: io_channel::ClientConnection,
-    reservations: AtomicUsize,
+    reservations: AtomicU8,
 
     subchannels_in_use: Vec<AtomicBool>,
 
@@ -509,7 +518,7 @@ impl NetChannel {
     }
 
     fn new() -> Arc<Self> {
-        let mut subchannels_in_use = Vec::with_capacity(IO_SUBCHANNELS);
+        let mut subchannels_in_use = Vec::with_capacity(IO_SUBCHANNELS as usize);
         for _ in 0..IO_SUBCHANNELS {
             subchannels_in_use.push(AtomicBool::new(false));
         }
@@ -519,7 +528,7 @@ impl NetChannel {
             subchannels_in_use,
             tcp_streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),
-            reservations: AtomicUsize::new(0),
+            reservations: AtomicU8::new(0),
             next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             send_waiters: Mutex::new(VecDeque::new()),
@@ -553,9 +562,9 @@ impl NetChannel {
     }
 
     /// Returns the index of the subchannel in [0..IO_SUBCHANNELS).
-    fn reserve_subchannel(&self) -> usize {
+    fn reserve_subchannel(&self) -> u8 {
         for idx in 0..IO_SUBCHANNELS {
-            if self.subchannels_in_use[idx].swap(true, Ordering::AcqRel) {
+            if self.subchannels_in_use[idx as usize].swap(true, Ordering::AcqRel) {
                 continue; // Was already reserved.
             }
             return idx;
@@ -563,9 +572,9 @@ impl NetChannel {
         panic!("Failed to reserve IO subchannel.")
     }
 
-    fn release_subchannel(&self, idx: usize) {
+    fn release_subchannel(&self, idx: u8) {
         assert!(idx < IO_SUBCHANNELS);
-        assert!(self.subchannels_in_use[idx].swap(false, Ordering::AcqRel));
+        assert!(self.subchannels_in_use[idx as usize].swap(false, Ordering::AcqRel));
     }
 
     fn tcp_stream_created(&self, stream: &TcpStream) {
@@ -576,7 +585,7 @@ impl NetChannel {
             .is_none());
     }
 
-    fn tcp_stream_dropped(&self, handle: u64, subchannel_idx: usize) {
+    fn tcp_stream_dropped(&self, handle: u64, subchannel_idx: u8) {
         let stream = self.tcp_streams.lock().remove(&handle).unwrap();
         assert_eq!(0, stream.strong_count());
 
@@ -774,8 +783,8 @@ pub struct TcpStream {
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
 
-    subchannel_idx: usize, // Never changes.
-    subchannel_mask: u64,  // Never changes.
+    subchannel_idx: u8,   // Never changes.
+    subchannel_mask: u64, // Never changes.
 
     stats_rx_bytes: CachePadded<AtomicU64>,
     stats_tx_bytes: CachePadded<AtomicU64>,
@@ -989,22 +998,20 @@ impl TcpStream {
     fn connect(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
+        nonblocking: bool,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         let channel = NET.lock().reserve_channel();
         let subchannel_idx = channel.reserve_subchannel();
         let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
 
-        let mut nonblocking = false;
         let mut req = if let Some(timo) = timeout {
-            let abs_timeout = if timo.is_zero() {
-                nonblocking = true;
-                Instant::from_u64(0)
-            } else {
-                Instant::now() + timo
-            };
-            api_net::tcp_stream_connect_timeout_request(socket_addr, subchannel_mask, abs_timeout)
+            api_net::tcp_stream_connect_timeout_request(
+                socket_addr,
+                subchannel_idx,
+                Instant::now() + timo,
+            )
         } else {
-            api_net::tcp_stream_connect_request(socket_addr, subchannel_mask)
+            api_net::tcp_stream_connect_request(socket_addr, subchannel_idx)
         };
 
         let new_stream = Arc::new_cyclic(|me| TcpStream {
@@ -1081,7 +1088,7 @@ impl TcpStream {
 
         assert_ne!(0, resp.handle);
         self.handle.store(resp.handle, Ordering::Relaxed);
-        *self.local_addr.lock() = Some(api_net::get_socket_addr(&resp.payload).unwrap());
+        *self.local_addr.lock() = Some(api_net::get_socket_addr(&resp.payload));
         let prev = self
             .tcp_state
             .swap(TcpState::ReadWrite.into(), Ordering::Release);
@@ -1094,12 +1101,13 @@ impl TcpStream {
 
         #[cfg(debug_assertions)]
         moto_log!(
-            "{}:{} new outgoing TcpStream {:?} -> {:?} 0x{:x}",
+            "{}:{} new outgoing TcpStream {:?} -> {:?} 0x{:x}, mask: 0x{:x}",
             file!(),
             line!(),
             self.local_addr.lock().unwrap(),
             self.remote_addr,
-            self.handle()
+            self.handle(),
+            self.subchannel_mask
         );
 
         Ok(())
@@ -1583,6 +1591,7 @@ impl TcpStream {
                             line!(),
                             self.handle()
                         );
+                        self.channel.conn.dump_state();
                     }
 
                     let _ = moto_sys::SysCpu::wait(
@@ -1805,7 +1814,7 @@ impl TcpStream {
 
 struct AcceptRequest {
     channel: Arc<NetChannel>,
-    subchannel_idx: usize,
+    subchannel_idx: u8,
     req: moto_ipc::io_channel::Msg,
 }
 
@@ -1862,9 +1871,16 @@ impl PosixFile for TcpListener {
     }
 
     fn poll_set(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        todo!()
-        // Err(E_INVALID_ARGUMENT)
+        self.wait_object.set_interests(poll_fd, token, interests)?;
+
+        let have_async_accepts = !self.async_accepts.lock().is_empty();
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
+            self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+        }
+
+        Ok(())
     }
+
     fn poll_del(&self, poll_fd: RtFd) -> Result<(), ErrorCode> {
         self.wait_object.del_interests(poll_fd)
     }
@@ -1914,7 +1930,7 @@ impl TcpListener {
         }
 
         if socket_addr.port() == 0 {
-            let actual_addr = api_net::get_socket_addr(&resp.payload).unwrap();
+            let actual_addr = api_net::get_socket_addr(&resp.payload);
             assert_eq!(socket_addr.ip(), actual_addr.ip());
             assert_ne!(0, actual_addr.port());
             socket_addr.set_port(actual_addr.port());
@@ -2003,7 +2019,7 @@ impl TcpListener {
             return Err(pending_accept.resp.status());
         }
 
-        let remote_addr = api_net::get_socket_addr(&pending_accept.resp.payload).unwrap();
+        let remote_addr = api_net::get_socket_addr(&pending_accept.resp.payload);
 
         let inner = Arc::new_cyclic(|me| TcpStream {
             local_addr: Mutex::new(Some(self.socket_addr)),
@@ -2114,6 +2130,12 @@ impl TcpListener {
                     Err(err) => err,
                 }
             }
+            moto_rt::net::SO_ERROR => {
+                assert_eq!(len, 2);
+                let err = self.take_error();
+                *(ptr as *mut u16) = err;
+                moto_rt::E_OK
+            }
             _ => panic!("unrecognized option {option}"),
         }
     }
@@ -2134,9 +2156,8 @@ impl TcpListener {
         Err(moto_rt::E_NOT_IMPLEMENTED) // This is deprected since Rust 1.16
     }
 
-    fn take_error(&self) -> Result<Option<ErrorCode>, ErrorCode> {
-        // We don't have this unixism.
-        Ok(None)
+    fn take_error(&self) -> ErrorCode {
+        moto_rt::E_OK
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {

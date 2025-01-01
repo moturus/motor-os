@@ -9,12 +9,8 @@ pub fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
 
 pub fn ip_network_to_cidr(ip_network: &IpNetwork) -> IpCidr {
     match ip_network {
-        IpNetwork::V4(network) => {
-            IpCidr::Ipv4(Ipv4Cidr::new(network.ip().into(), network.prefix()))
-        }
-        IpNetwork::V6(network) => {
-            IpCidr::Ipv6(Ipv6Cidr::new(network.ip().into(), network.prefix()))
-        }
+        IpNetwork::V4(network) => IpCidr::Ipv4(Ipv4Cidr::new(network.ip(), network.prefix())),
+        IpNetwork::V6(network) => IpCidr::Ipv6(Ipv6Cidr::new(network.ip(), network.prefix())),
     }
 }
 

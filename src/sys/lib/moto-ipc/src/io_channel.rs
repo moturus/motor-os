@@ -51,6 +51,10 @@ pub union Payload {
 const _PAYLOAD_SIZE: () = assert!(core::mem::size_of::<Payload>() == 24);
 
 impl Payload {
+    pub fn new_zeroed() -> Self {
+        Self { args_64: [0; 3] }
+    }
+
     pub fn shared_pages_mut(&mut self) -> &mut [u16; 12] {
         unsafe { &mut self.shared_pages }
     }

@@ -105,13 +105,7 @@ impl NetSys {
             return sqe;
         }
 
-        let mut socket_addr = match api_net::get_socket_addr(&sqe.payload) {
-            Ok(addr) => addr,
-            Err(err) => {
-                sqe.status = err;
-                return sqe;
-            }
-        };
+        let mut socket_addr = api_net::get_socket_addr(&sqe.payload);
 
         // Verify that we are not listening on that address yet.
         for listener in self.tcp_listeners.values() {
@@ -138,6 +132,8 @@ impl NetSys {
             match self.ip_addresses.get(&ip_addr) {
                 Some(idx) => Some(*idx),
                 None => {
+                    #[cfg(debug_assertions)]
+                    log::info!("IP addr {:?} not found", ip_addr);
                     sqe.status = moto_rt::E_INVALID_ARGUMENT;
                     return sqe;
                 }
@@ -600,21 +596,7 @@ impl NetSys {
         conn: &Rc<io_channel::ServerConnection>,
         mut sqe: io_channel::Msg,
     ) -> Option<io_channel::Msg> {
-        let remote_addr = match api_net::get_socket_addr(&sqe.payload) {
-            Ok(addr) => addr,
-            Err(err) => {
-                sqe.status = err;
-                return Some(sqe);
-            }
-        };
-
-        let timeout = api_net::tcp_stream_connect_timeout(&sqe);
-        if let Some(timo) = timeout {
-            if timo <= moto_rt::time::Instant::now() {
-                sqe.status = moto_rt::E_TIMED_OUT;
-                return Some(sqe);
-            }
-        };
+        let remote_addr = api_net::get_socket_addr(&sqe.payload);
 
         #[cfg(debug_assertions)]
         log::debug!(
@@ -653,7 +635,7 @@ impl NetSys {
                 return Some(sqe);
             }
         };
-        moto_socket.subchannel_mask = sqe.payload.args_64()[0];
+        moto_socket.subchannel_mask = api_net::io_subchannel_mask(sqe.payload.args_8()[23]);
 
         let conn_handle = conn.wait_handle();
         if let Some(conn_sockets) = self.conn_tcp_sockets.get_mut(&conn_handle) {
@@ -679,6 +661,7 @@ impl NetSys {
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
 
+        let timeout = api_net::tcp_stream_connect_timeout(&sqe);
         if let Some(timeout) = timeout {
             let now = moto_rt::time::Instant::now();
             if timeout <= now {
@@ -1243,7 +1226,8 @@ impl NetSys {
         }
 
         #[cfg(debug_assertions)]
-        let mut dbg_moto_state = moto_socket.state;
+        #[allow(unused_assignments)]
+        let mut _dbg_moto_state = moto_socket.state;
 
         /*
           RFC 793: https://datatracker.ietf.org/doc/html/rfc793
@@ -1365,8 +1349,9 @@ impl NetSys {
                 TcpState::ReadWrite | TcpState::ReadOnly | TcpState::WriteOnly => {
                     moto_socket.state = TcpState::Closed;
                     #[cfg(debug_assertions)]
+                    #[allow(unused_assignments)]
                     {
-                        dbg_moto_state = moto_socket.state;
+                        _dbg_moto_state = moto_socket.state;
                     }
                     self.on_socket_state_changed(socket_id);
                 }
@@ -1392,8 +1377,9 @@ impl NetSys {
                     smol_socket.close();
                     moto_socket.state = TcpState::Closed;
                     #[cfg(debug_assertions)]
+                    #[allow(unused_assignments)]
                     {
-                        dbg_moto_state = moto_socket.state;
+                        _dbg_moto_state = moto_socket.state;
                     }
                     self.on_socket_state_changed(socket_id);
                 }
@@ -1421,16 +1407,16 @@ impl NetSys {
             }
         }
 
-        #[cfg(debug_assertions)]
-        if state != smoltcp::socket::tcp::State::Established {
-            log::debug!(
-                "socket state: {:?} for socket 0x{:x} can_recv: {:?} moto state: {:?}",
-                state,
-                u64::from(socket_id),
-                can_recv,
-                dbg_moto_state
-            );
-        }
+        // #[cfg(debug_assertions)]
+        // if state != smoltcp::socket::tcp::State::Established {
+        //     log::debug!(
+        //         "socket state: {:?} for socket 0x{:x} can_recv: {:?} moto state: {:?}",
+        //         state,
+        //         u64::from(socket_id),
+        //         can_recv,
+        //         dbg_moto_state
+        //     );
+        // }
 
         if can_recv {
             self.do_tcp_rx(socket_id);
@@ -1510,13 +1496,15 @@ impl NetSys {
                 Err(err) => {
                     assert_eq!(err, moto_rt::E_NOT_READY);
                     self.pending_tcp_rx.push_back(socket_id);
-                    #[cfg(debug_assertions)]
-                    log::debug!(
-                        "{}:{} do_tcp_rx: alloc error for socket 0x{:x}",
-                        file!(),
-                        line!(),
-                        u64::from(socket_id)
-                    );
+                    // #[cfg(debug_assertions)]
+                    // log::debug!(
+                    //     "{}:{} do_tcp_rx: alloc error for socket 0x{:x} mask 0x{:x}",
+                    //     file!(),
+                    //     line!(),
+                    //     u64::from(socket_id),
+                    //     moto_socket.subchannel_mask
+                    // );
+                    // moto_socket.conn.dump_state();
                     return;
                 }
             };

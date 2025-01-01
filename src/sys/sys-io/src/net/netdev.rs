@@ -24,7 +24,7 @@ impl VirtioRxToken {
 impl RxToken for VirtioRxToken {
     fn consume<R, F>(self, f: F) -> R
     where
-        F: FnOnce(&mut [u8]) -> R,
+        F: FnOnce(&[u8]) -> R,
     {
         if let Some(rx_packet) = self.dev().rx_packet.as_ref() {
             let buf = rx_packet.bytes_mut();
@@ -369,9 +369,14 @@ impl NetDev {
             ..
         } = self;
 
-        match device {
+        let poll_result = match device {
             SmoltcpDevice::VirtIo(dev) => iface.poll(smoltcp::time::Instant::now(), dev, sockets),
             SmoltcpDevice::Loopback(dev) => iface.poll(smoltcp::time::Instant::now(), dev, sockets),
+        };
+
+        match poll_result {
+            smoltcp::iface::PollResult::None => false,
+            smoltcp::iface::PollResult::SocketStateChanged => true,
         }
     }
 }
@@ -384,6 +389,9 @@ pub(super) fn init(config: &super::config::NetConfig) -> Vec<NetDev> {
         loopback_cfg
             .cidrs
             .push(ipnetwork::IpNetwork::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8).unwrap());
+        loopback_cfg
+            .cidrs
+            .push(ipnetwork::IpNetwork::V6("::1/128".parse().unwrap()));
         let loopback_dev = Loopback::new(smoltcp::phy::Medium::Ethernet);
         let dev = NetDev::new(
             "loopback",

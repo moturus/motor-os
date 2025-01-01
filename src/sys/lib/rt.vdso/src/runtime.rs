@@ -36,8 +36,6 @@ pub trait ResponseHandler {
 /// Wait objects are owned by their parent objects (e.g. sockets);
 /// but a wait object can be added to multiple "Registries" with different tokens.
 pub struct WaitObject {
-    supported_interests: Interests,
-
     // Registry FD -> (Registry, Token).
     // TODO: is there a way to go from Arc<dyn PosixFile> to Arc<Registry>?
     // If so, then we can have Weak<Registry> below.
@@ -56,7 +54,6 @@ impl Drop for WaitObject {
 impl WaitObject {
     pub fn new(supported_interests: Interests) -> Self {
         Self {
-            supported_interests,
             registries: Mutex::new(BTreeMap::new()),
         }
     }

@@ -1,11 +1,9 @@
 // Spec for client-server Networking IPC.
 
 use core::net::IpAddr;
-use core::net::Ipv4Addr;
 use core::net::Ipv6Addr;
 use core::net::SocketAddr;
 use moto_ipc::io_channel;
-use moto_sys::ErrorCode;
 
 pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX;
 
@@ -46,14 +44,14 @@ pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
 ///
 /// Eight subchannels (8 pages in-flight) are not much worse re: throughput vs four
 /// (16 pages in-flight), based on benchmarks.
-pub const IO_SUBCHANNELS: usize = 8;
+pub const IO_SUBCHANNELS: u8 = 8;
 
-pub const fn io_subchannel_mask(io_channel_idx: usize) -> u64 {
+pub const fn io_subchannel_mask(io_channel_idx: u8) -> u64 {
     debug_assert!(io_channel_idx < IO_SUBCHANNELS);
 
     const IO_SUBCHANNEL_WIDTH: u8 = 8;
     const IO_SUBCHANNEL_MASK: u64 = 0xFF;
-    const _A1: () = assert!((IO_SUBCHANNEL_WIDTH as usize) * IO_SUBCHANNELS == 64);
+    const _A1: () = assert!((IO_SUBCHANNEL_WIDTH as usize) * (IO_SUBCHANNELS as usize) == 64);
     const _A2: () = assert!(IO_SUBCHANNEL_MASK == ((1 << IO_SUBCHANNEL_WIDTH) - 1));
 
     IO_SUBCHANNEL_MASK << ((io_channel_idx as u64) * (IO_SUBCHANNEL_WIDTH as u64))
@@ -139,38 +137,40 @@ pub fn accept_tcp_listener_request(handle: u64, subchannel_mask: u64) -> io_chan
     msg
 }
 
-pub fn tcp_stream_connect_request(addr: &SocketAddr, subchannel_mask: u64) -> io_channel::Msg {
+pub fn tcp_stream_connect_request(addr: &SocketAddr, subchannel_idx: u8) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_STREAM_CONNECT;
-    msg.payload.args_64_mut()[0] = subchannel_mask;
-    msg.payload.args_32_mut()[5] = 0; // timeout
+    msg.payload.args_8_mut()[23] = subchannel_idx;
     put_socket_addr(&mut msg.payload, addr);
+    msg.flags = u32::MAX; // Timeout.
 
     msg
 }
 
 pub fn tcp_stream_connect_timeout_request(
     addr: &SocketAddr,
-    subchannel_mask: u64,
+    subchannel_idx: u8,
     timeout: moto_rt::time::Instant,
 ) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = CMD_TCP_STREAM_CONNECT;
+    msg.payload.args_8_mut()[23] = subchannel_idx;
+    put_socket_addr(&mut msg.payload, addr);
 
     // We have only 32 bits for timeout. ~10ms granularity is fine.
-    let timeout = timeout.as_u64() >> 27;
-    assert!(timeout < (u32::MAX) as u64);
-    msg.payload.args_64_mut()[0] = subchannel_mask;
-    msg.payload.args_32_mut()[5] = timeout as u32;
-    put_socket_addr(&mut msg.payload, addr);
+    let timeout_64: u64 = timeout.as_u64() >> 27;
+    msg.flags = if timeout_64 > (u32::MAX as u64) {
+        u32::MAX
+    } else {
+        timeout_64 as u32
+    };
 
     msg
 }
 
 pub fn tcp_stream_connect_timeout(msg: &io_channel::Msg) -> Option<moto_rt::time::Instant> {
-    let mut timeout = msg.payload.args_32()[5];
-    timeout &= u32::MAX - 1;
-    if timeout == 0 {
+    let timeout = msg.flags;
+    if timeout == u32::MAX {
         return None;
     }
     let timeout = (timeout as u64) << 27;
@@ -209,34 +209,33 @@ pub fn tcp_stream_rx_msg(
     msg
 }
 
-pub fn get_socket_addr(payload: &io_channel::Payload) -> Result<SocketAddr, ErrorCode> {
-    match payload.args_32()[5] & 1 {
-        0 => {
-            let ip = Ipv4Addr::from(payload.args_32()[0]);
-            let port = payload.args_16()[2];
-            Ok(SocketAddr::new(IpAddr::V4(ip), port))
-        }
-        1 => {
-            let octets: [u8; 16] = payload.args_8()[0..16].try_into().unwrap();
-            let ip = Ipv6Addr::from(octets);
-            let port = payload.args_16()[9];
-            Ok(SocketAddr::new(IpAddr::V6(ip), port))
-        }
-        _ => unreachable!(),
+pub fn get_socket_addr(payload: &io_channel::Payload) -> SocketAddr {
+    let octets: [u8; 16] = payload.args_8()[0..16].try_into().unwrap();
+    let ipv6 = Ipv6Addr::from(octets);
+    let port = payload.args_16()[8];
+    if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+        SocketAddr::new(IpAddr::V4(ipv4), port)
+    } else {
+        SocketAddr::new(IpAddr::V6(ipv6), port)
     }
 }
 
+// Uses the first 18 bytes (= 9 u16).
 pub fn put_socket_addr(payload: &mut io_channel::Payload, addr: &SocketAddr) {
-    match addr.ip() {
-        IpAddr::V4(addr_v4) => {
-            payload.args_32_mut()[0] = addr_v4.into();
-            payload.args_16_mut()[2] = addr.port();
-            payload.args_32_mut()[5] &= u32::MAX - 1;
-        }
-        IpAddr::V6(addr_v6) => {
-            payload.args_8_mut()[0..16].clone_from_slice(&addr_v6.octets());
-            payload.args_16_mut()[9] = addr.port();
-            payload.args_32_mut()[5] |= 1;
-        }
-    }
+    let ipv6 = match addr.ip() {
+        IpAddr::V4(ipv4_addr) => ipv4_addr.to_ipv6_mapped(),
+        IpAddr::V6(ipv6_addr) => ipv6_addr,
+    };
+    payload.args_8_mut()[0..16].clone_from_slice(&ipv6.octets());
+    payload.args_16_mut()[8] = addr.port();
+}
+
+#[test]
+fn test_get_put_socket_addr() {
+    let mut payload = io_channel::Payload::new_zeroed();
+
+    let addr_in = "[ff:ff:ff::ff:ff:ff]:1234".parse().unwrap();
+    put_socket_addr(&mut payload, &addr_in);
+    let addr_out = get_socket_addr(&payload);
+    assert_eq!(addr_in, addr_out);
 }
