@@ -86,8 +86,7 @@ where
     thread_handle.join().expect("unable to join thread");
 }
 
-#[test]
-fn set_get_ttl() {
+fn test_set_get_ttl() {
     init();
 
     let listener = TcpListener::bind(any_local_address()).unwrap();
@@ -284,6 +283,7 @@ pub fn run_all_tests() {
     test_tcp_listener();
     test_tcp_listener_ipv6();
     test_tcp_listener_std();
+    test_set_get_ttl();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("tcp_listener PASS");

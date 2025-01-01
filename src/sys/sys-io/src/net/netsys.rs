@@ -254,12 +254,11 @@ impl NetSys {
         assert!(!socket_addr.ip().is_unspecified());
 
         for _ in 0..num_listeners {
-            let conn = self
-                .tcp_listeners
-                .get_mut(&listener_id)
-                .unwrap()
-                .conn()
-                .clone();
+            let (conn, ttl) = {
+                let listener = self.tcp_listeners.get_mut(&listener_id).unwrap();
+
+                (listener.conn().clone(), listener.ttl())
+            };
             let conn_handle = conn.wait_handle();
             let mut moto_socket = self.new_socket_for_device(device_idx, conn)?;
             let socket_id = moto_socket.id;
@@ -285,6 +284,7 @@ impl NetSys {
             let smol_socket = self.devices[device_idx]
                 .sockets
                 .get_mut::<smoltcp::socket::tcp::Socket>(smol_handle);
+            smol_socket.set_hop_limit(Some(ttl));
             smol_socket
                 .listen((socket_addr.ip(), socket_addr.port()))
                 .map_err(|err| {
@@ -543,6 +543,90 @@ impl NetSys {
 
         listener.add_pending_accept(req, conn);
         Ok(None)
+    }
+
+    fn tcp_listener_get_option(
+        &mut self,
+        _conn: &Rc<io_channel::ServerConnection>,
+        mut msg: io_channel::Msg,
+    ) -> io_channel::Msg {
+        let listener_id = msg.handle.into();
+        let listener = match self.tcp_listeners.get(&listener_id) {
+            Some(l) => l,
+            None => {
+                msg.status = moto_rt::E_BAD_HANDLE;
+                return msg;
+            }
+        };
+
+        let options = msg.payload.args_64()[0];
+        if options == 0 {
+            msg.status = moto_rt::E_INVALID_ARGUMENT;
+            return msg;
+        }
+
+        match options {
+            api_net::TCP_OPTION_TTL => {
+                msg.payload.args_8_mut()[23] = listener.ttl();
+                msg.status = moto_rt::E_OK;
+            }
+            _ => {
+                log::debug!("Invalid option 0x{}", options);
+                msg.status = moto_rt::E_INVALID_ARGUMENT;
+            }
+        }
+
+        msg
+    }
+
+    fn tcp_listener_set_option(
+        &mut self,
+        _conn: &Rc<io_channel::ServerConnection>,
+        mut msg: io_channel::Msg,
+    ) -> io_channel::Msg {
+        let listener_id = msg.handle.into();
+        let listener = match self.tcp_listeners.get_mut(&listener_id) {
+            Some(l) => l,
+            None => {
+                msg.status = moto_rt::E_BAD_HANDLE;
+                return msg;
+            }
+        };
+
+        let options = msg.payload.args_64()[0];
+        if options == 0 {
+            msg.status = moto_rt::E_INVALID_ARGUMENT;
+            return msg;
+        }
+
+        match options {
+            api_net::TCP_OPTION_TTL => {
+                let ttl = msg.payload.args_8()[23];
+                let sockets = match listener.set_ttl(ttl) {
+                    Ok(sockets) => sockets,
+                    Err(err) => {
+                        msg.status = err;
+                        return msg;
+                    }
+                };
+
+                for socket_id in sockets {
+                    let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
+                    let smol_socket = self.devices[moto_socket.device_idx]
+                        .sockets
+                        .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+                    smol_socket.set_hop_limit(Some(ttl));
+                }
+
+                msg.status = moto_rt::E_OK;
+            }
+            _ => {
+                log::debug!("Invalid option 0x{}", options);
+                msg.status = moto_rt::E_INVALID_ARGUMENT;
+            }
+        }
+
+        msg
     }
 
     fn tcp_listener_drop(
@@ -1692,6 +1776,12 @@ impl IoSubsystem for NetSys {
             api_net::CMD_TCP_LISTENER_BIND => Ok(Some(self.tcp_listener_bind(conn, msg))),
             api_net::CMD_TCP_LISTENER_ACCEPT => self.tcp_listener_accept(conn, msg),
             api_net::CMD_TCP_LISTENER_DROP => self.tcp_listener_drop(conn, msg).map(|_| None),
+            api_net::CMD_TCP_LISTENER_SET_OPTION => {
+                Ok(Some(self.tcp_listener_set_option(conn, msg)))
+            }
+            api_net::CMD_TCP_LISTENER_GET_OPTION => {
+                Ok(Some(self.tcp_listener_get_option(conn, msg)))
+            }
             api_net::CMD_TCP_STREAM_CONNECT => Ok(self.tcp_stream_connect(conn, msg)),
             api_net::CMD_TCP_STREAM_TX => {
                 self.tcp_stream_write(conn, msg);

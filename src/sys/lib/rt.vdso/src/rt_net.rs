@@ -2140,14 +2140,31 @@ impl TcpListener {
         }
     }
 
-    fn set_ttl(&self, _ttl: u32) -> ErrorCode {
-        todo!()
+    fn set_ttl(&self, ttl: u32) -> ErrorCode {
+        if ttl > (u8::MAX as u32) {
+            return moto_rt::E_INVALID_ARGUMENT;
+        }
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::CMD_TCP_LISTENER_SET_OPTION;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        req.payload.args_8_mut()[23] = ttl as u8;
+        self.channel.send_receive(req).status()
     }
 
     fn ttl(&self) -> Result<u32, ErrorCode> {
-        todo!()
-    }
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::CMD_TCP_LISTENER_GET_OPTION;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        let resp = self.channel.send_receive(req);
 
+        if resp.status() == moto_rt::E_OK {
+            Ok(resp.payload.args_8()[23] as u32)
+        } else {
+            Err(resp.status())
+        }
+    }
     fn set_only_v6(&self, _: bool) -> Result<(), ErrorCode> {
         Err(moto_rt::E_NOT_IMPLEMENTED) // This is deprected since Rust 1.16
     }

@@ -38,6 +38,9 @@ pub struct TcpListener {
 
     // Pure listening sockets. We need to track them to drop when the listener is dropped.
     listening_sockets: HashSet<SocketId>,
+
+    // Will be applied to all new sockets.
+    ttl: u8,
 }
 
 impl Drop for TcpListener {
@@ -58,6 +61,7 @@ impl TcpListener {
             pending_accepts: VecDeque::new(),
             pending_sockets: VecDeque::new(),
             listening_sockets: HashSet::new(),
+            ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
         }
     }
 
@@ -67,6 +71,29 @@ impl TcpListener {
 
     pub fn conn_handle(&self) -> SysHandle {
         self.conn.wait_handle()
+    }
+
+    pub fn ttl(&self) -> u8 {
+        self.ttl
+    }
+
+    pub fn set_ttl(&mut self, ttl: u8) -> Result<Vec<SocketId>, moto_rt::ErrorCode> {
+        if ttl == self.ttl {
+            return Ok(Vec::new());
+        }
+
+        if ttl == 0 {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        self.ttl = ttl;
+
+        let mut sockets = Vec::with_capacity(self.listening_sockets.len());
+        for socket_id in &self.listening_sockets {
+            sockets.push(*socket_id);
+        }
+
+        Ok(sockets)
     }
 
     pub fn socket_addr(&self) -> &SocketAddr {
