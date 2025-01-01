@@ -281,8 +281,8 @@ fn start_connections(
 
 pub fn run_all_tests() {
     test_is_send_and_sync();
-    // test_tcp_listener();
-    // test_tcp_listener_ipv6();
+    test_tcp_listener();
+    test_tcp_listener_ipv6();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("tcp_listener PASS");

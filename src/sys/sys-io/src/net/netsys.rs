@@ -314,6 +314,8 @@ impl NetSys {
         device_idx: usize,
         conn: Rc<io_channel::ServerConnection>,
     ) -> Result<MotoSocket, ErrorCode> {
+        let pid = moto_sys::SysObj::get_pid(conn.wait_handle())?;
+
         let mut smol_socket = self.get_unused_tcp_socket()?;
         let socket_id = self.next_id().into();
 
@@ -332,8 +334,6 @@ impl NetSys {
             u64::from(socket_id),
             self.tcp_sockets.len()
         );
-
-        let pid = moto_sys::SysObj::get_pid(conn.wait_handle()).unwrap();
 
         Ok(MotoSocket {
             id: socket_id,
