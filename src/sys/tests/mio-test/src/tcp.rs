@@ -197,6 +197,7 @@ fn test_read() {
         for event in &events {
             assert_eq!(event.token(), Token(1));
             let mut buf = [0; 1024];
+            #[allow(clippy::while_let_loop)]
             loop {
                 if let Ok(amt) = data.socket.read(&mut buf) {
                     data.amt += amt;
@@ -262,6 +263,7 @@ fn test_peek() {
                 Err(err) => panic!("unexpected error: {}", err),
             }
 
+            #[allow(clippy::while_let_loop)]
             loop {
                 if let Ok(amt) = data.socket.read(&mut buf) {
                     data.amt += amt;
@@ -322,6 +324,7 @@ fn test_write() {
         for event in &events {
             assert_eq!(event.token(), Token(1));
             let buf = [0; 1024];
+            #[allow(clippy::while_let_loop)]
             loop {
                 if let Ok(amt) = data.socket.write(&buf) {
                     data.amt += amt;

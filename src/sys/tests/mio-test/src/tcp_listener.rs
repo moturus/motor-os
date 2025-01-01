@@ -96,10 +96,10 @@ fn test_set_get_ttl() {
     listener.set_ttl(TTL).unwrap();
     assert_eq!(listener.ttl().unwrap(), TTL);
     assert!(listener.take_error().unwrap().is_none());
+    println!("test_set_get_ttl PASS");
 }
 
-#[test]
-fn get_ttl_without_previous_set() {
+fn test_get_ttl_without_previous_set() {
     init();
 
     let listener = TcpListener::bind(any_local_address()).unwrap();
@@ -107,11 +107,10 @@ fn get_ttl_without_previous_set() {
     // expect a get TTL to work w/o any previous set_ttl
     listener.ttl().expect("unable to get TTL for TCP listener");
     assert!(listener.take_error().unwrap().is_none());
+    println!("test_get_ttl_without_previous_set PASS");
 }
 
-#[cfg(unix)]
-#[test]
-fn raw_fd() {
+fn test_raw_fd() {
     init();
 
     let listener = TcpListener::bind(any_local_address()).unwrap();
@@ -124,10 +123,10 @@ fn raw_fd() {
     let listener = unsafe { TcpListener::from_raw_fd(raw_fd2) };
     assert_eq!(listener.as_raw_fd(), raw_fd1);
     assert_eq!(listener.local_addr().unwrap(), address);
+    println!("test_raw_fd PASS");
 }
 
-#[test]
-fn registering() {
+fn test_registering() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut stream = TcpListener::bind(any_local_address()).unwrap();
@@ -139,10 +138,10 @@ fn registering() {
     expect_no_events(&mut poll, &mut events);
 
     // NOTE: more tests are done in the smoke tests above.
+    println!("test_registering PASS");
 }
 
-#[test]
-fn reregister() {
+fn test_reregister() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut listener = TcpListener::bind(any_local_address()).unwrap();
@@ -175,10 +174,10 @@ fn reregister() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
+    println!("test_reregister PASS");
 }
 
-#[test]
-fn no_events_after_deregister() {
+fn test_no_events_after_deregister() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut listener = TcpListener::bind(any_local_address()).unwrap();
@@ -207,11 +206,11 @@ fn no_events_after_deregister() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
+    println!("test_no_events_after_deregister PASS");
 }
 
 /// This tests reregister on successful accept works
-#[test]
-fn tcp_listener_two_streams() {
+fn test_tcp_listener_two_streams() {
     let (mut poll1, mut events) = init_with_poll();
 
     let mut listener = TcpListener::bind(any_local_address()).unwrap();
@@ -260,6 +259,7 @@ fn tcp_listener_two_streams() {
     barrier.wait();
     thread_handle1.join().expect("unable to join thread");
     thread_handle2.join().expect("unable to join thread");
+    println!("test_tcp_listener_two_streams PASS");
 }
 
 /// Start `n_connections` connections to `address`. If a `barrier` is provided
@@ -284,6 +284,12 @@ pub fn run_all_tests() {
     test_tcp_listener_ipv6();
     test_tcp_listener_std();
     test_set_get_ttl();
+    test_get_ttl_without_previous_set();
+    test_raw_fd();
+    test_registering();
+    test_reregister();
+    test_no_events_after_deregister();
+    test_tcp_listener_two_streams();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("tcp_listener PASS");
