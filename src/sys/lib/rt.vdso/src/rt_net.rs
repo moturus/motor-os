@@ -2161,11 +2161,16 @@ impl TcpListener {
     }
 
     fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
-        let was_blocking = !self.nonblocking.swap(nonblocking, Ordering::Relaxed);
+        let was_blocking = !self.nonblocking.swap(nonblocking, Ordering::Release);
         if nonblocking && was_blocking {
+            match self.listen(1024) {
+                Ok(()) => E_OK,
+                Err(err) => err,
+            }
             // TODO: at the moment, previously-issues blocking accepts
             // will remain blocking. Maybe they should be kicked with E_NOT_READY?
+        } else {
+            E_OK
         }
-        E_OK
     }
 }

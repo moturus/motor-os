@@ -23,16 +23,15 @@ fn test_is_send_and_sync() {
 
 fn test_tcp_listener() {
     smoke_test_tcp_listener(any_local_address(), TcpListener::bind);
-    println!("test_cp_listener PASS");
+    println!("test_tcp_listener PASS");
 }
 
 fn test_tcp_listener_ipv6() {
     smoke_test_tcp_listener(any_local_ipv6_address(), TcpListener::bind);
-    println!("test_cp_listener_ipv6 PASS");
+    println!("test_tcp_listener_ipv6 PASS");
 }
 
-#[test]
-fn tcp_listener_std() {
+fn test_tcp_listener_std() {
     smoke_test_tcp_listener(any_local_address(), |addr| {
         let listener = net::TcpListener::bind(addr).unwrap();
         // `std::net::TcpListener`s are blocking by default, so make sure it is in
@@ -40,6 +39,7 @@ fn tcp_listener_std() {
         listener.set_nonblocking(true).unwrap();
         Ok(TcpListener::from_std(listener))
     });
+    println!("test_tcp_listener_std PASS");
 }
 
 fn smoke_test_tcp_listener<F>(addr: SocketAddr, make_listener: F)
@@ -283,6 +283,7 @@ pub fn run_all_tests() {
     test_is_send_and_sync();
     test_tcp_listener();
     test_tcp_listener_ipv6();
+    test_tcp_listener_std();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("tcp_listener PASS");
