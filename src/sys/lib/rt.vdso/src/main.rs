@@ -37,7 +37,7 @@ use moto_rt::RtVdsoVtable;
 // The entry point.
 #[no_mangle]
 pub extern "C" fn _rt_entry(version: u64) {
-    if version != 5 {
+    if version != 6 {
         // Doing assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
@@ -231,8 +231,16 @@ pub extern "C" fn _rt_entry(version: u64) {
         posix::posix_read as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.fs_read_vectored.store(
+        posix::posix_read_vectored as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_write.store(
         posix::posix_write as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_write_vectored.store(
+        posix::posix_write_vectored as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_flush.store(

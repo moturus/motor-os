@@ -202,6 +202,27 @@ pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
     to_result!(vdso_read(rt_fd, buf.as_mut_ptr(), buf.len()))
 }
 
+pub fn read_vectored(rt_fd: RtFd, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
+    use alloc::vec::Vec;
+
+    let vdso_read_vectored: extern "C" fn(i32, *const usize, usize) -> i64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().fs_read_vectored.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    // Pack: a vector of [addr, len].
+    let mut packed = Vec::with_capacity(bufs.len() * 2);
+    for buf in &*bufs {
+        let addr = buf.as_ptr() as usize;
+        let len = buf.len();
+        packed.push(addr);
+        packed.push(len);
+    }
+
+    to_result!(vdso_read_vectored(rt_fd, packed.as_ptr(), bufs.len()))
+}
+
 pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
     let vdso_write: extern "C" fn(i32, *const u8, usize) -> i64 = unsafe {
         core::mem::transmute(
@@ -210,6 +231,30 @@ pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
     };
 
     to_result!(vdso_write(rt_fd, buf.as_ptr(), buf.len()))
+}
+
+pub fn write_vectored(rt_fd: RtFd, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+    use alloc::vec::Vec;
+
+    let vdso_write_vectored: extern "C" fn(i32, *const usize, usize) -> i64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .fs_write_vectored
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    // Pack: a vector of [addr, len].
+    let mut packed = Vec::with_capacity(bufs.len() * 2);
+    #[allow(clippy::borrow_deref_ref)]
+    for buf in &*bufs {
+        let addr = buf.as_ptr() as usize;
+        let len = buf.len();
+        packed.push(addr);
+        packed.push(len);
+    }
+
+    to_result!(vdso_write_vectored(rt_fd, packed.as_ptr(), bufs.len()))
 }
 
 pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {

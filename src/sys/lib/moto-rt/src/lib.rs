@@ -106,7 +106,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-const RT_VERSION: u64 = 5;
+const RT_VERSION: u64 = 6;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -185,7 +185,9 @@ pub struct RtVdsoVtable {
     pub fs_datasync: AtomicU64,
     pub fs_truncate: AtomicU64,
     pub fs_read: AtomicU64,
+    pub fs_read_vectored: AtomicU64,
     pub fs_write: AtomicU64,
+    pub fs_write_vectored: AtomicU64,
     pub fs_flush: AtomicU64,
     pub fs_seek: AtomicU64,
     pub fs_mkdir: AtomicU64,

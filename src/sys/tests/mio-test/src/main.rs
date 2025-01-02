@@ -6,6 +6,7 @@ mod close_on_drop;
 mod simple;
 mod tcp;
 mod tcp_listener;
+mod tcp_stream;
 
 #[macro_use]
 mod util;
@@ -31,6 +32,7 @@ fn main() {
         .spawn(input_listener)
         .unwrap();
 
+    tcp_stream::run_all_tests();
     tcp_listener::run_all_tests();
     tcp::run_all_tests();
     simple::test();

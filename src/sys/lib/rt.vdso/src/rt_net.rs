@@ -844,11 +844,19 @@ impl Drop for TcpStream {
 
 impl PosixFile for TcpStream {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read_or_peak(buf, false)
+        self.read_or_peek(&mut [buf], false)
+    }
+
+    unsafe fn read_vectored(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
+        self.read_or_peek(bufs, false)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.write(buf)
+        self.write(&[buf])
+    }
+
+    unsafe fn write_vectored(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+        self.write(bufs)
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {
@@ -1217,7 +1225,7 @@ impl TcpStream {
     }
 
     fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read_or_peak(buf, true)
+        self.read_or_peek(&mut [buf], true)
     }
 
     fn mark_rx_done(&self) {
@@ -1280,7 +1288,7 @@ impl TcpStream {
 
     fn process_rx_message(
         &self,
-        buf: &mut [u8],
+        bufs: &mut [&mut [u8]],
         msg: io_channel::Msg,
         peek: bool,
     ) -> Result<usize, ErrorCode> {
@@ -1339,72 +1347,63 @@ impl TcpStream {
         //     self.stats_rx_bytes.load(Ordering::Relaxed)
         // );
 
-        let copied_to_buf = if sz_read > buf.len() {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    io_page.bytes().as_ptr(),
-                    buf.as_mut_ptr(),
-                    buf.len(),
-                );
-            }
-            buf.len()
-        } else {
-            unsafe {
-                core::ptr::copy_nonoverlapping(io_page.bytes().as_ptr(), buf.as_mut_ptr(), sz_read);
-            }
-            sz_read
-        };
+        let mut buf_lock = self.rx_buf.lock();
+        let rx_buf = &mut *buf_lock;
+        assert!(rx_buf.is_none());
+        *rx_buf = Some(RxBuf {
+            page: io_page,
+            len: sz_read,
+            consumed: 0,
+        });
 
-        if peek {
-            let mut buf_lock = self.rx_buf.lock();
-            let rx_buf = &mut *buf_lock;
-            assert!(rx_buf.is_none());
-            *rx_buf = Some(RxBuf {
-                page: io_page,
-                len: sz_read,
-                consumed: 0,
-            });
-        } else if sz_read > copied_to_buf {
-            let mut buf_lock = self.rx_buf.lock();
-            let rx_buf = &mut *buf_lock;
-            assert!(rx_buf.is_none());
-            *rx_buf = Some(RxBuf {
-                page: io_page,
-                len: sz_read,
-                consumed: copied_to_buf,
-            });
+        let Some(rx_buf) = rx_buf.as_mut() else {
+            unreachable!()
+        };
+        let copied_bytes = unsafe { Self::rx_copy(rx_buf.bytes(), bufs) };
+        if !peek {
+            rx_buf.consume(copied_bytes);
+            if rx_buf.is_consumed() {
+                *buf_lock = None;
+            }
         }
 
-        Ok(copied_to_buf)
+        Ok(copied_bytes)
     }
 
-    fn poll_rx(&self, buf: &mut [u8], peek: bool) -> Result<usize, ErrorCode> {
+    unsafe fn rx_copy(mut src: &[u8], dst: &mut [&mut [u8]]) -> usize {
+        let mut copied_bytes = 0;
+        for buf in dst {
+            let to_copy = buf.len().min(src.len());
+            core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), to_copy);
+
+            copied_bytes += to_copy;
+            src = &src[to_copy..];
+            if src.is_empty() {
+                break;
+            }
+        }
+
+        copied_bytes
+    }
+
+    fn poll_rx(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
         {
             let mut buf_lock = self.rx_buf.lock();
             if let Some(rx_buf) = &mut *buf_lock {
-                let sz_read = buf.len().min(rx_buf.available());
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        rx_buf.bytes().as_ptr(),
-                        buf.as_mut_ptr(),
-                        sz_read,
-                    );
-                }
-
+                let copied_bytes = unsafe { Self::rx_copy(rx_buf.bytes(), bufs) };
                 if !peek {
-                    rx_buf.consume(sz_read);
+                    rx_buf.consume(copied_bytes);
                     if rx_buf.is_consumed() {
                         *buf_lock = None;
                     }
                 }
-
-                return Ok(sz_read);
+                return Ok(copied_bytes);
             }
         }
 
         {
             if let Some(msg) = self.recv_queue.lock().pop_front() {
-                return self.process_rx_message(buf, msg, peek);
+                return self.process_rx_message(bufs, msg, peek);
             }
         }
 
@@ -1415,8 +1414,8 @@ impl TcpStream {
         Err(moto_rt::E_NOT_READY)
     }
 
-    fn read_or_peak(&self, buf: &mut [u8], peek: bool) -> Result<usize, ErrorCode> {
-        match self.poll_rx(buf, peek) {
+    fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
+        match self.poll_rx(bufs, peek) {
             Ok(sz) => return Ok(sz),
             Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
         }
@@ -1439,7 +1438,7 @@ impl TcpStream {
                 }
             }
 
-            match self.poll_rx(buf, peek) {
+            match self.poll_rx(bufs, peek) {
                 Ok(sz) => return Ok(sz),
                 Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
             }
@@ -1450,7 +1449,7 @@ impl TcpStream {
             }
 
             // Re-check for incoming messages.
-            match self.poll_rx(buf, peek) {
+            match self.poll_rx(bufs, peek) {
                 Ok(sz) => {
                     *self.rx_waiter.lock() = None;
                     return Ok(sz);
@@ -1525,8 +1524,8 @@ impl TcpStream {
         self.channel.conn.may_alloc_page(self.subchannel_mask)
     }
 
-    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        if buf.is_empty() {
+    fn write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+        if bufs.is_empty() {
             return Ok(0);
         }
         if !self.tcp_state().can_write() {
@@ -1534,11 +1533,10 @@ impl TcpStream {
         }
 
         if self.nonblocking.load(Ordering::Relaxed) {
-            return self.write_nonblocking(buf);
+            return self.write_nonblocking(bufs);
         }
 
         let timestamp = Instant::now();
-        let write_sz = buf.len().min(io_channel::PAGE_SIZE);
         let timo_ns = self.tx_timeout_ns.load(Ordering::Relaxed);
         let abs_timeout = if timo_ns == u64::MAX {
             None
@@ -1603,13 +1601,7 @@ impl TcpStream {
                 }
             }
         };
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf.as_ptr(),
-                io_page.bytes_mut().as_mut_ptr(),
-                write_sz,
-            );
-        }
+        let write_sz = unsafe { Self::tx_copy(bufs, io_page.bytes_mut()) };
 
         let msg =
             api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
@@ -1627,9 +1619,24 @@ impl TcpStream {
         Ok(write_sz)
     }
 
-    fn write_nonblocking(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+    unsafe fn tx_copy(src: &[&[u8]], mut dst: &mut [u8]) -> usize {
+        let mut written = 0;
+        for buf in src {
+            let to_write = buf.len().min(dst.len());
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), dst.as_mut_ptr(), to_write);
+            written += to_write;
+            dst = &mut dst[to_write..];
+
+            if dst.is_empty() {
+                break;
+            }
+        }
+
+        written
+    }
+
+    fn write_nonblocking(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         // These are checked at the callsite.
-        debug_assert!(!buf.is_empty());
         debug_assert!(self.tcp_state().can_write());
 
         // Serialize writes (= keep tx_lock), as we have only one self.tx_msg to store into.
@@ -1642,19 +1649,12 @@ impl TcpStream {
             }
         }
 
-        let write_sz = buf.len().min(io_channel::PAGE_SIZE);
-
         let Ok(io_page) = self.channel.conn.alloc_page(self.subchannel_mask) else {
             self.channel.write_waiters.lock().push_back(self.me.clone());
             return Err(moto_rt::E_NOT_READY);
         };
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buf.as_ptr(),
-                io_page.bytes_mut().as_mut_ptr(),
-                write_sz,
-            );
-        }
+
+        let write_sz = unsafe { Self::tx_copy(bufs, io_page.bytes_mut()) };
 
         let msg =
             api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());

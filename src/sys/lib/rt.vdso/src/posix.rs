@@ -24,7 +24,13 @@ pub trait PosixFile: Any + Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
+    unsafe fn read_vectored(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
+        Err(E_BAD_HANDLE)
+    }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        Err(E_BAD_HANDLE)
+    }
+    unsafe fn write_vectored(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
     fn flush(&self) -> Result<(), ErrorCode> {
@@ -61,6 +67,32 @@ pub extern "C" fn posix_read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
     }
 }
 
+pub unsafe extern "C" fn posix_read_vectored(rt_fd: i32, packed: *const usize, num: usize) -> i64 {
+    let posix_file = if let Some(fd) = get_file(rt_fd) {
+        fd
+    } else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    if num & 1 != 0 {
+        return -(E_BAD_HANDLE as i64);
+    }
+
+    let packed = core::slice::from_raw_parts(packed, num * 2);
+    let mut bufs = Vec::with_capacity(num);
+    for idx in 0..num {
+        let addr = packed[2 * idx];
+        let len = packed[2 * idx + 1];
+        let buf = core::slice::from_raw_parts_mut(addr as *mut u8, len);
+        bufs.push(buf);
+    }
+
+    match posix_file.read_vectored(bufs.as_mut_slice()) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
 pub extern "C" fn posix_write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
     let posix_file = if let Some(fd) = get_file(rt_fd) {
         fd
@@ -70,6 +102,28 @@ pub extern "C" fn posix_write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 
 
     let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
     match posix_file.write(buf) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
+pub unsafe extern "C" fn posix_write_vectored(rt_fd: i32, packed: *const usize, num: usize) -> i64 {
+    let posix_file = if let Some(fd) = get_file(rt_fd) {
+        fd
+    } else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    let packed = core::slice::from_raw_parts(packed, num * 2);
+    let mut bufs = Vec::with_capacity(num);
+    for idx in 0..num {
+        let addr = packed[2 * idx];
+        let len = packed[2 * idx + 1];
+        let buf = core::slice::from_raw_parts(addr as *const u8, len);
+        bufs.push(buf);
+    }
+
+    match posix_file.write_vectored(bufs.as_slice()) {
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
     }
