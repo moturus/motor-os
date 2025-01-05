@@ -993,6 +993,6 @@ pub fn run_all_tests() {
     test_tcp_no_events_after_deregister();
 
     std::thread::sleep(Duration::from_millis(100));
-    println!("tcp PASS");
+    println!("tcp ALL PASS");
     std::thread::sleep(Duration::from_millis(100));
 }

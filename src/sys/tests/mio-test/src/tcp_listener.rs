@@ -23,12 +23,12 @@ fn test_is_send_and_sync() {
 
 fn test_tcp_listener() {
     smoke_test_tcp_listener(any_local_address(), TcpListener::bind);
-    println!("test_tcp_listener PASS");
+    println!("tcp_listener::test_tcp_listener PASS");
 }
 
 fn test_tcp_listener_ipv6() {
     smoke_test_tcp_listener(any_local_ipv6_address(), TcpListener::bind);
-    println!("test_tcp_listener_ipv6 PASS");
+    println!("tcp_listener::test_tcp_listener_ipv6 PASS");
 }
 
 fn test_tcp_listener_std() {
@@ -39,7 +39,7 @@ fn test_tcp_listener_std() {
         listener.set_nonblocking(true).unwrap();
         Ok(TcpListener::from_std(listener))
     });
-    println!("test_tcp_listener_std PASS");
+    println!("tcp_listener::test_tcp_listener_std PASS");
 }
 
 fn smoke_test_tcp_listener<F>(addr: SocketAddr, make_listener: F)
@@ -96,7 +96,7 @@ fn test_set_get_ttl() {
     listener.set_ttl(TTL).unwrap();
     assert_eq!(listener.ttl().unwrap(), TTL);
     assert!(listener.take_error().unwrap().is_none());
-    println!("test_set_get_ttl PASS");
+    println!("tcp_listener::test_set_get_ttl PASS");
 }
 
 fn test_get_ttl_without_previous_set() {
@@ -107,7 +107,7 @@ fn test_get_ttl_without_previous_set() {
     // expect a get TTL to work w/o any previous set_ttl
     listener.ttl().expect("unable to get TTL for TCP listener");
     assert!(listener.take_error().unwrap().is_none());
-    println!("test_get_ttl_without_previous_set PASS");
+    println!("tcp_listener::test_get_ttl_without_previous_set PASS");
 }
 
 fn test_raw_fd() {
@@ -123,7 +123,7 @@ fn test_raw_fd() {
     let listener = unsafe { TcpListener::from_raw_fd(raw_fd2) };
     assert_eq!(listener.as_raw_fd(), raw_fd1);
     assert_eq!(listener.local_addr().unwrap(), address);
-    println!("test_raw_fd PASS");
+    println!("tcp_listener::test_raw_fd PASS");
 }
 
 fn test_registering() {
@@ -138,7 +138,7 @@ fn test_registering() {
     expect_no_events(&mut poll, &mut events);
 
     // NOTE: more tests are done in the smoke tests above.
-    println!("test_registering PASS");
+    println!("tcp_listener::test_registering PASS");
 }
 
 fn test_reregister() {
@@ -174,7 +174,7 @@ fn test_reregister() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
-    println!("test_reregister PASS");
+    println!("tcp_listener::test_reregister PASS");
 }
 
 fn test_no_events_after_deregister() {
@@ -206,7 +206,7 @@ fn test_no_events_after_deregister() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
-    println!("test_no_events_after_deregister PASS");
+    println!("tcp_listener::test_no_events_after_deregister PASS");
 }
 
 /// This tests reregister on successful accept works
@@ -259,7 +259,7 @@ fn test_tcp_listener_two_streams() {
     barrier.wait();
     thread_handle1.join().expect("unable to join thread");
     thread_handle2.join().expect("unable to join thread");
-    println!("test_tcp_listener_two_streams PASS");
+    println!("tcp_listener::test_tcp_listener_two_streams PASS");
 }
 
 /// Start `n_connections` connections to `address`. If a `barrier` is provided
@@ -292,6 +292,6 @@ pub fn run_all_tests() {
     test_tcp_listener_two_streams();
 
     std::thread::sleep(Duration::from_millis(100));
-    println!("tcp_listener PASS");
+    println!("tcp_listener ALL PASS");
     std::thread::sleep(Duration::from_millis(100));
 }

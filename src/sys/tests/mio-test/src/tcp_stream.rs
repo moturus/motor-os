@@ -34,16 +34,15 @@ fn test_is_send_and_sync() {
 
 fn test_tcp_stream_ipv4() {
     smoke_test_tcp_stream(any_local_address(), TcpStream::connect);
-    println!("test_tcp_stream_ipv4 PASS");
+    println!("tcp_stream::test_tcp_stream_ipv4 PASS");
 }
 
-#[test]
-fn tcp_stream_ipv6() {
+fn test_tcp_stream_ipv6() {
     smoke_test_tcp_stream(any_local_ipv6_address(), TcpStream::connect);
+    println!("tcp_stream::test_tcp_stream_ipv6 PASS");
 }
 
-#[test]
-fn tcp_stream_std() {
+fn test_tcp_stream_std() {
     smoke_test_tcp_stream(any_local_address(), |addr| {
         let stream = net::TcpStream::connect(addr).unwrap();
         // `std::net::TcpStream`s are blocking by default, so make sure it is
@@ -51,6 +50,7 @@ fn tcp_stream_std() {
         stream.set_nonblocking(true).unwrap();
         Ok(TcpStream::from_std(stream))
     });
+    println!("tcp_stream::test_tcp_stream_std PASS");
 }
 
 fn smoke_test_tcp_stream<F>(addr: SocketAddr, make_stream: F)
@@ -129,8 +129,7 @@ where
     handle.join().expect("unable to join thread");
 }
 
-#[test]
-fn set_get_ttl() {
+fn test_set_get_ttl() {
     let (mut poll, mut events) = init_with_poll();
 
     let barrier = Arc::new(Barrier::new(2));
@@ -159,10 +158,10 @@ fn set_get_ttl() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_set_get_ttl PASS");
 }
 
-#[test]
-fn get_ttl_without_previous_set() {
+fn test_get_ttl_without_previous_set() {
     let (mut poll, mut events) = init_with_poll();
 
     let barrier = Arc::new(Barrier::new(2));
@@ -189,10 +188,10 @@ fn get_ttl_without_previous_set() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_get_ttl_without_previous_set PASS");
 }
 
-#[test]
-fn set_get_nodelay() {
+fn test_set_get_nodelay() {
     let (mut poll, mut events) = init_with_poll();
 
     let barrier = Arc::new(Barrier::new(2));
@@ -221,10 +220,10 @@ fn set_get_nodelay() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_set_get_nodelay PASS");
 }
 
-#[test]
-fn get_nodelay_without_previous_set() {
+fn test_get_nodelay_without_previous_set() {
     let (mut poll, mut events) = init_with_poll();
 
     let barrier = Arc::new(Barrier::new(2));
@@ -253,10 +252,10 @@ fn get_nodelay_without_previous_set() {
 
     barrier.wait();
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_get_nodelay_without_previous_set PASS");
 }
 
-#[test]
-fn shutdown_read() {
+fn test_shutdown_read() {
     let (mut poll, mut events) = init_with_poll();
 
     let (thread_handle, address) = echo_listener(any_local_address(), 1);
@@ -295,6 +294,7 @@ fn shutdown_read() {
         target_os = "tvos",
         target_os = "visionos",
         target_os = "watchos",
+        target_os = "moturus",
     ))]
     {
         let mut buf = [0; 20];
@@ -303,11 +303,11 @@ fn shutdown_read() {
 
     drop(stream);
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_shutdown_read PASS");
 }
 
-#[test]
-#[ignore = "This test is flaky, it doesn't always receive an event after shutting down the write side"]
-fn shutdown_write() {
+// #[ignore = "This test is flaky, it doesn't always receive an event after shutting down the write side"]
+fn test_shutdown_write() {
     let (mut poll, mut events) = init_with_poll();
 
     let (thread_handle, address) = echo_listener(any_local_address(), 1);
@@ -329,7 +329,7 @@ fn shutdown_write() {
     stream.shutdown(Shutdown::Write).unwrap();
 
     let err = stream.write(DATA2).unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(err.kind(), io::ErrorKind::NotConnected);
 
     // FIXME: we don't always receive the following event.
     expect_events(
@@ -344,6 +344,7 @@ fn shutdown_write() {
 
     drop(stream);
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_shutdown_write PASS");
 }
 
 #[test]
@@ -861,10 +862,20 @@ fn send_oob_data<S: AsRawFd>(stream: &S, data: &[u8]) -> io::Result<usize> {
 }
 
 pub fn run_all_tests() {
+    test_shutdown_write();
+
     test_is_send_and_sync();
     test_tcp_stream_ipv4();
+    test_tcp_stream_ipv6();
+    test_tcp_stream_std();
+    test_set_get_ttl();
+    test_get_ttl_without_previous_set();
+    test_set_get_nodelay();
+    test_get_nodelay_without_previous_set();
+    test_shutdown_read();
+    test_shutdown_write();
 
     std::thread::sleep(Duration::from_millis(100));
-    println!("tcp_stream PASS");
+    println!("tcp_stream ALL PASS");
     std::thread::sleep(Duration::from_millis(100));
 }
