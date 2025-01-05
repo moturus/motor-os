@@ -111,7 +111,7 @@ impl PerCpuStatsEntry {
     fn usage_kernel(&self, now: u64) -> u64 {
         let started_k = self.started_k.load(Ordering::Relaxed);
         let cpu_kernel = self.cpu_kernel.load(Ordering::Relaxed);
-        if started_k > 0 {
+        if started_k > 0 && now > started_k {
             cpu_kernel + now - started_k
         } else {
             cpu_kernel
@@ -121,7 +121,7 @@ impl PerCpuStatsEntry {
     fn usage_uspace(&self, now: u64) -> u64 {
         let started_u = self.started_u.load(Ordering::Relaxed);
         let cpu_uspace = self.cpu_uspace.load(Ordering::Relaxed);
-        if started_u > 0 {
+        if started_u > 0 && now > started_u {
             cpu_uspace + now - started_u
         } else {
             cpu_uspace
