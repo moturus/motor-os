@@ -275,44 +275,53 @@ fn test_peek() {
     const N: usize = 1024 * 1024 * 3 + 1001;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:333").unwrap();
-    let server_thread = std::thread::spawn(move || {
-        let (mut server, _) = listener.accept().unwrap();
+    let done_reading = AtomicBool::new(false);
 
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let (mut server, _) = listener.accept().unwrap();
+
+            let mut buf = [0_u8; 1024];
+            #[allow(clippy::needless_range_loop)]
+            for pos in 0..buf.len() {
+                buf[pos] = (pos & 255) as u8;
+            }
+
+            let mut total_written = 0;
+            while total_written < N {
+                total_written += server.write(&buf).unwrap();
+            }
+
+            // If we drop `server` here, some written bytes in flight may get lost.
+            while !done_reading.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        });
+
+        let mut client = std::net::TcpStream::connect("127.0.0.1:333").unwrap();
         let mut buf = [0_u8; 1024];
-        #[allow(clippy::needless_range_loop)]
-        for pos in 0..buf.len() {
-            buf[pos] = (pos & 255) as u8;
-        }
-
-        let mut total_written = 0;
-        while total_written < N {
-            total_written += server.write(&buf).unwrap();
-        }
-    });
-
-    let mut client = std::net::TcpStream::connect("127.0.0.1:333").unwrap();
-    let mut buf = [0_u8; 1024];
-    let mut total_received = 0;
-    let mut peek = false;
-    while total_received < N {
-        if peek {
-            let sz = client.peek(&mut buf).unwrap();
+        let mut total_received = 0;
+        let mut peek = false;
+        while total_received < N {
+            if peek {
+                let sz = client.peek(&mut buf).unwrap();
+                assert!(sz > 0);
+                #[allow(clippy::needless_range_loop)]
+                for pos in 0..sz {
+                    assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
+                }
+            }
+            let sz = client.read(&mut buf).unwrap();
             assert!(sz > 0);
             #[allow(clippy::needless_range_loop)]
             for pos in 0..sz {
                 assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
             }
+            total_received += sz;
         }
-        let sz = client.read(&mut buf).unwrap();
-        assert!(sz > 0);
-        #[allow(clippy::needless_range_loop)]
-        for pos in 0..sz {
-            assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
-        }
-        total_received += sz;
-    }
 
-    server_thread.join().unwrap();
+        done_reading.store(true, Ordering::Relaxed);
+    });
 
     // Wrap the output in sleeps to avoid debug console output mangling.
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -323,37 +332,47 @@ fn test_peek() {
 fn test_ipv6() {
     const N: usize = 1024 * 1024 * 3 + 1001;
 
+    let done_reading = AtomicBool::new(false);
     let listener = std::net::TcpListener::bind("[::1]:333").unwrap();
-    let server_thread = std::thread::spawn(move || {
-        let (mut server, _) = listener.accept().unwrap();
 
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let (mut server, _) = listener.accept().unwrap();
+
+            let mut buf = [0_u8; 1024];
+            #[allow(clippy::needless_range_loop)]
+            for pos in 0..buf.len() {
+                buf[pos] = (pos & 255) as u8;
+            }
+
+            let mut total_written = 0;
+            while total_written < N {
+                server.write_all(&buf).unwrap();
+                total_written += buf.len();
+            }
+
+            // If we drop `server` now, some of the queued TX bytes
+            // may get dropped.
+            while !done_reading.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        });
+
+        let mut client = std::net::TcpStream::connect("[::1]:333").unwrap();
         let mut buf = [0_u8; 1024];
-        #[allow(clippy::needless_range_loop)]
-        for pos in 0..buf.len() {
-            buf[pos] = (pos & 255) as u8;
+        let mut total_received = 0;
+        while total_received < N {
+            let sz = client.read(&mut buf).unwrap();
+            assert!(sz > 0);
+            #[allow(clippy::needless_range_loop)]
+            for pos in 0..sz {
+                assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
+            }
+            total_received += sz;
         }
 
-        let mut total_written = 0;
-        while total_written < N {
-            server.write_all(&buf).unwrap();
-            total_written += buf.len();
-        }
+        done_reading.store(true, Ordering::Relaxed);
     });
-
-    let mut client = std::net::TcpStream::connect("[::1]:333").unwrap();
-    let mut buf = [0_u8; 1024];
-    let mut total_received = 0;
-    while total_received < N {
-        let sz = client.read(&mut buf).unwrap();
-        assert!(sz > 0);
-        #[allow(clippy::needless_range_loop)]
-        for pos in 0..sz {
-            assert_eq!(buf[pos], ((total_received + pos) & 255) as u8);
-        }
-        total_received += sz;
-    }
-
-    server_thread.join().unwrap();
 
     // Wrap the output in sleeps to avoid debug console output mangling.
     std::thread::sleep(std::time::Duration::from_millis(10));

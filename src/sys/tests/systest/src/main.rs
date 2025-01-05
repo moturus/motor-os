@@ -557,6 +557,7 @@ fn main() {
     std::thread::spawn(input_listener);
 
     tcp::run_tests();
+
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
