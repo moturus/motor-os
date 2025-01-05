@@ -766,10 +766,11 @@ pub struct TcpStream {
     me: Weak<TcpStream>,
 
     // This is, most of the time, a single-producer, single-consumer queue.
+    // MUST be locked before rx_buf is locked.
     recv_queue: Mutex<VecDeque<io_channel::Msg>>,
     next_rx_seq: CachePadded<AtomicU64>,
 
-    // A partially consumed incoming RX.
+    // A partially consumed incoming RX. MUST NOT be locked when recv_queue lock is acquired.
     rx_buf: Mutex<Option<RxBuf>>,
 
     // A pending tx message.
@@ -954,17 +955,19 @@ impl TcpStream {
         // poll events here, and sometimes we have to delay them. For example,
         // while there are messages in RXQ, we should not raise POLL_READ_CLOSED.
         let mut recv_q = self.recv_queue.lock();
-        if !recv_q.is_empty() {
+        let have_rx_bytes = self.rx_buf.lock().is_some() || !recv_q.is_empty();
+        if have_rx_bytes {
             // No need to raise POLL_READABLE, as this is not a state change
             // (receive queue non-empty).
             if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
                 let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
-                // Currently this is the only incoming state change possible.
-                assert_eq!(new_state, TcpState::Closed);
-                let new_state = TcpState::ReadOnly;
-
-                // Deal only with TX closure: RX closing will happen later.
-                self.mark_tx_done();
+                match new_state {
+                    TcpState::Closed => {
+                        // Deal only with TX closure: RX closing will happen later.
+                        self.mark_tx_done();
+                    }
+                    _ => panic!("Unexpected TcpState {:?}", new_state),
+                }
             }
             recv_q.push_back(msg);
             return;
@@ -987,11 +990,13 @@ impl TcpStream {
             }
             api_net::EVT_TCP_STREAM_STATE_CHANGED => {
                 let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
-                // Currently this is the only incoming state change possible.
-                assert_eq!(new_state, TcpState::Closed);
-
-                self.mark_rx_done();
-                self.mark_tx_done();
+                match new_state {
+                    TcpState::Closed => {
+                        self.mark_rx_done();
+                        self.mark_tx_done();
+                    }
+                    _ => panic!("Unexpected TcpState {:?}", new_state),
+                }
             }
             _ => panic!(
                 "{}:{}: Unrecognized msg {} for stream 0x{:x}",
@@ -1265,7 +1270,7 @@ impl TcpStream {
             let new_state = match prev_state {
                 TcpState::ReadWrite => TcpState::ReadOnly,
                 TcpState::WriteOnly => TcpState::Closed,
-                TcpState::Closed => return,
+                TcpState::ReadOnly | TcpState::Closed => return,
                 _ => panic!("Unexpected TCP state: {:?}", prev_state),
             };
             match self.tcp_state.compare_exchange_weak(
@@ -1298,11 +1303,13 @@ impl TcpStream {
             // Note: this message was preprocessed in process_incoming_msg,
             // and the state was set to read-only.
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
-            // Currently this is the only incoming state change possible.
-            assert_eq!(new_state, TcpState::Closed);
-            debug_assert!(!self.tcp_state().can_write());
-            self.mark_rx_done();
-            return Ok(0);
+            match new_state {
+                TcpState::Closed => {
+                    self.mark_rx_done();
+                    return Ok(0);
+                }
+                _ => panic!("Unexpected TcpState {:?}", new_state),
+            }
         }
 
         assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
@@ -1807,8 +1814,9 @@ impl TcpStream {
         err as ErrorCode
     }
 
-    fn set_nonblocking(&self, _nonblocking: bool) -> ErrorCode {
-        todo!()
+    fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
+        self.nonblocking.store(nonblocking, Ordering::Release);
+        moto_rt::E_OK
     }
 }
 
@@ -2021,7 +2029,7 @@ impl TcpListener {
 
         let remote_addr = api_net::get_socket_addr(&pending_accept.resp.payload);
 
-        let inner = Arc::new_cyclic(|me| TcpStream {
+        let new_stream = Arc::new_cyclic(|me| TcpStream {
             local_addr: Mutex::new(Some(self.socket_addr)),
             remote_addr,
             handle: AtomicU64::new(pending_accept.resp.handle),
@@ -2047,20 +2055,21 @@ impl TcpListener {
             error: AtomicU16::new(E_OK),
         });
 
-        pending_accept.req.channel.tcp_stream_created(&inner);
-        inner.ack_rx();
+        pending_accept.req.channel.tcp_stream_created(&new_stream);
+        new_stream.ack_rx();
 
         #[cfg(debug_assertions)]
         moto_log!(
-            "{}:{} new incoming TcpStream {:?} <- {:?} mask: 0x{:x}",
+            "{}:{} new incoming TcpStream {:?} <- {:?} 0x{:x} mask: 0x{:x}",
             file!(),
             line!(),
-            inner.local_addr.lock().unwrap(),
-            inner.remote_addr,
-            inner.subchannel_mask
+            new_stream.local_addr.lock().unwrap(),
+            new_stream.remote_addr,
+            new_stream.handle(),
+            new_stream.subchannel_mask
         );
 
-        Ok((inner, remote_addr))
+        Ok((new_stream, remote_addr))
     }
 
     fn post_accept(&self, blocking: bool) -> Result<u64, ErrorCode> {

@@ -21,6 +21,7 @@ impl From<SocketId> for u64 {
 // What to do with the socket once its TX queue is drained.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum TxDoneAction {
+    CloseWr,
     Close,
     Drop,
 }
