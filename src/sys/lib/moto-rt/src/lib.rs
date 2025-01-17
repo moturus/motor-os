@@ -106,7 +106,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-const RT_VERSION: u64 = 6;
+const RT_VERSION: u64 = 7;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -132,6 +132,7 @@ pub struct RtVdsoVtable {
     pub log_backtrace: AtomicU64,
     pub fill_random_bytes: AtomicU64,
     pub num_cpus: AtomicU64,
+    pub internal_helper: AtomicU64,
 
     // Memory management.
     pub alloc: AtomicU64,
@@ -306,6 +307,23 @@ pub fn num_cpus() -> usize {
     };
 
     vdso_num_cpus()
+}
+
+#[cfg(not(feature = "base"))]
+#[doc(hidden)]
+pub fn internal_helper(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
+    // This is an internal helper used during development and testing of the VDSO.
+    // Useful as it allows an extra 'poke' into the VDSO without changing moto-rt/stdlib.
+    //
+    // May panic in a release version, so should not be used for anything other than
+    // during VDSO development.
+    let vdso_internal_helper: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().internal_helper.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    vdso_internal_helper(a0, a1, a2, a3, a4, a5)
 }
 
 #[cfg(not(test))]
