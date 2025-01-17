@@ -291,7 +291,7 @@ pub fn run_all_tests() {
     test_no_events_after_deregister();
     test_tcp_listener_two_streams();
 
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(1000));
     println!("tcp_listener ALL PASS");
     std::thread::sleep(Duration::from_millis(100));
 }

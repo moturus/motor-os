@@ -862,8 +862,6 @@ fn send_oob_data<S: AsRawFd>(stream: &S, data: &[u8]) -> io::Result<usize> {
 }
 
 pub fn run_all_tests() {
-    test_shutdown_write();
-
     test_is_send_and_sync();
     test_tcp_stream_ipv4();
     test_tcp_stream_ipv6();

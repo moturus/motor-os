@@ -38,7 +38,8 @@ fn main() {
     simple::test();
     close_on_drop::test_close_on_drop();
 
-    std::thread::sleep(Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(100));
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0); // Check the internal net state has been cleared.
     println!("\nmio-test: ALL PASS\n");
     std::thread::sleep(Duration::from_millis(10));
 }
