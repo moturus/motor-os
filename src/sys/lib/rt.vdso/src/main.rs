@@ -37,7 +37,7 @@ use moto_rt::RtVdsoVtable;
 // The entry point.
 #[no_mangle]
 pub extern "C" fn _rt_entry(version: u64) {
-    if version != 6 {
+    if version != 7 {
         // Doing assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
@@ -59,6 +59,10 @@ pub extern "C" fn _rt_entry(version: u64) {
 
     vtable.fill_random_bytes.store(
         fill_random_bytes as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.internal_helper.store(
+        vdso_internal_helper as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
@@ -406,6 +410,20 @@ pub unsafe extern "C" fn fill_random_bytes(ptr: *mut u8, size: usize) {
 
 pub extern "C" fn num_cpus() -> usize {
     moto_sys::num_cpus() as usize
+}
+
+pub extern "C" fn vdso_internal_helper(
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+) -> u64 {
+    match a0 {
+        0 => crate::rt_net::vdso_internal_helper(a1, a2, a3, a4, a5),
+        _ => panic!("Unrecognized option {a0}"),
+    }
 }
 
 pub extern "C" fn vdso_unimplemented() {

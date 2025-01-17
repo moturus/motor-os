@@ -16,10 +16,10 @@ fi
 
 RUSTFLAGS="-C force-frame-pointers=yes " \
 cargo build --target rt.json -Zbuild-std=core,alloc \
-  -Zbuild-std-features=compiler-builtins-mem --no-default-features $@
+  -Zbuild-std-features=compiler-builtins-mem --no-default-features --features "netdev" $@
 
 cargo clippy --target rt.json -Zbuild-std=core,alloc \
-  -Zbuild-std-features=compiler-builtins-mem --no-default-features $@
+  -Zbuild-std-features=compiler-builtins-mem --no-default-features --features "netdev" $@
 
 # Don't update the output file if nothings has changed,
 # otherwise sys-io is always relinked, which takes time.

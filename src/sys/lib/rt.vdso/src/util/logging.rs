@@ -20,19 +20,15 @@ pub extern "C" fn log_to_kernel(ptr: *const u8, size: usize) {
 #[panic_handler]
 fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
     moto_rt::error::log_panic(info);
+
+    // Sleep a bit to let the panic output propagate.
+    #[cfg(debug_assertions)]
+    crate::rt_thread::sleep(
+        (moto_rt::time::Instant::now() + core::time::Duration::from_millis(100)).as_u64(),
+    );
+
     moto_sys::SysCpu::exit(u64::MAX)
 }
-
-/*
-// This panic handler is active only for code running here in VDSO.
-#[cfg(not(test))]
-pub fn moturus_log_panic(info: &PanicInfo<'_>) {
-    moto_sys::SysRay::log("PANIC VDSO").ok(); // Log w/o allocations.
-    let msg = alloc::format!("PANIC VDSO: {}", info);
-    moto_sys::SysRay::log(msg.as_str()).ok();
-    log_backtrace(-1);
-}
-*/
 
 const BT_DEPTH: usize = 64;
 

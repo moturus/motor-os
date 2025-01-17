@@ -216,7 +216,27 @@ pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == 
 impl RawChannel {
     fn is_empty(&self) -> bool {
         self.client_queue_head.load(Ordering::Acquire)
-            == self.server_queue_tail.load(Ordering::Acquire)
+            == self.client_queue_tail.load(Ordering::Acquire)
+            && self.server_queue_head.load(Ordering::Acquire)
+                == self.server_queue_tail.load(Ordering::Acquire)
+            && self.client_pages_in_use.load(Ordering::Relaxed) == 0
+            && self.server_pages_in_use.load(Ordering::Relaxed) == 0
+    }
+
+    fn assert_empty(&self) {
+        if !self.is_empty() {
+            self.dump_state();
+        }
+        assert_eq!(
+            self.client_queue_head.load(Ordering::Acquire),
+            self.client_queue_tail.load(Ordering::Acquire)
+        );
+        assert_eq!(
+            self.server_queue_head.load(Ordering::Acquire),
+            self.server_queue_tail.load(Ordering::Acquire)
+        );
+        assert_eq!(0, self.client_pages_in_use.load(Ordering::Relaxed));
+        assert_eq!(0, self.server_pages_in_use.load(Ordering::Relaxed));
     }
 
     fn page_bytes(&self, raw_page: RawIoPage) -> Result<&mut [u8], ErrorCode> {
@@ -572,6 +592,10 @@ impl ClientConnection {
 
     pub fn is_empty(&self) -> bool {
         self.raw_channel().is_empty()
+    }
+
+    pub fn assert_empty(&self) {
+        self.raw_channel().assert_empty()
     }
 
     pub fn dump_state(&self) {

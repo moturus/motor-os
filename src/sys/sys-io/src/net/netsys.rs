@@ -480,8 +480,10 @@ impl NetSys {
         let listener = match self.tcp_listeners.get_mut(&listener_id) {
             Some(l) => l,
             None => {
-                log::debug!("can't find listener 0x{:x}", req.handle);
-                return Err(());
+                log::warn!("can't find listener 0x{:x}", req.handle);
+                // return Err(());
+                // TODO: how is this possible?
+                return Ok(None);
             }
         };
 
@@ -490,7 +492,7 @@ impl NetSys {
             let pid1 = moto_sys::SysObj::get_pid(listener.conn_handle()).unwrap();
             let pid2 = moto_sys::SysObj::get_pid(conn.wait_handle()).unwrap();
             if pid1 != pid2 {
-                log::debug!(
+                log::warn!(
                     "wrong process 0x{:x} vs 0x{:x} for ID 0x{:x}",
                     pid1,
                     pid2,
@@ -1424,7 +1426,8 @@ impl NetSys {
                 }
             }
 
-            smoltcp::socket::tcp::State::Closed => match moto_socket.state {
+            // Local TX closed.
+            smoltcp::socket::tcp::State::FinWait1 => match moto_socket.state {
                 TcpState::Connecting => {
                     self.on_connect_failed(socket_id);
                     return;
@@ -1433,12 +1436,17 @@ impl NetSys {
                     self.drop_tcp_socket(socket_id);
                     return;
                 }
-                TcpState::ReadWrite | TcpState::ReadOnly | TcpState::WriteOnly => {
+                TcpState::WriteOnly => {
                     moto_socket.state = TcpState::Closed;
                     moto_state = moto_socket.state;
+                    log::warn!("remote closed");
                     self.notify_socket_state_changed(socket_id);
                 }
-                TcpState::Closed => {}
+                TcpState::ReadWrite => {
+                    moto_socket.state = TcpState::ReadOnly;
+                    self.finalize_tcp_tx(socket_id, TxDoneAction::CloseWr);
+                }
+                TcpState::ReadOnly | TcpState::Closed => {}
                 TcpState::_Max => panic!(),
             },
 
@@ -1461,17 +1469,24 @@ impl NetSys {
                 TcpState::_Max => panic!(),
             },
 
-            smoltcp::socket::tcp::State::FinWait1 => {
-                match moto_state {
-                    TcpState::Listening
-                    | TcpState::PendingAccept
-                    | TcpState::Connecting
-                    | TcpState::ReadWrite
-                    | TcpState::WriteOnly => panic!(), // Impossible.
-                    TcpState::ReadOnly | TcpState::Closed => {}
-                    TcpState::_Max => panic!(),
+            smoltcp::socket::tcp::State::Closed => match moto_socket.state {
+                TcpState::Connecting => {
+                    self.on_connect_failed(socket_id);
+                    return;
                 }
-            }
+                TcpState::Listening | TcpState::PendingAccept => {
+                    self.drop_tcp_socket(socket_id);
+                    return;
+                }
+                TcpState::ReadOnly | TcpState::ReadWrite | TcpState::WriteOnly => {
+                    moto_socket.state = TcpState::Closed;
+                    moto_state = moto_socket.state;
+                    // log::warn!("remote closed");
+                    self.notify_socket_state_changed(socket_id);
+                }
+                TcpState::Closed => {}
+                TcpState::_Max => panic!(),
+            },
             smoltcp::socket::tcp::State::FinWait2
             | smoltcp::socket::tcp::State::Closing
             | smoltcp::socket::tcp::State::LastAck
@@ -1505,14 +1520,14 @@ impl NetSys {
                         .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
                     smol_socket.close();
                     moto_socket.state = TcpState::Closed;
-                    log::info!("RX closed: {:?} {:?}", smol_state, moto_state);
+                    log::warn!("RX closed: {:?} {:?}", smol_state, moto_state);
                     self.notify_socket_state_changed(socket_id);
                 }
                 TcpState::ReadWrite => {
                     let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
                     // MIO tests that local writes succeed, and that remote reads succeed.
                     moto_socket.state = TcpState::WriteOnly;
-                    log::info!("RX closed: {:?} {:?}", smol_state, moto_state);
+                    log::warn!("RX closed: {:?} {:?}", smol_state, moto_state);
                     self.notify_rx_done(socket_id);
                 }
 
@@ -1626,7 +1641,7 @@ impl NetSys {
             smol_socket.recv(&mut receive_closure).unwrap();
 
             // #[cfg(debug_assertions)]
-            // log::debug!(
+            // log::warn!(
             //     "{}:{} TcpRx event: seq {} {} bytes",
             //     file!(),
             //     line!(),
@@ -1660,6 +1675,7 @@ impl NetSys {
             && (moto_socket.state == TcpState::WriteOnly || moto_socket.state == TcpState::Closed)
             && !moto_socket.rx_closed_notified
         {
+            // log::warn!("RX done");
             self.notify_rx_done(socket_id);
         }
     }
