@@ -645,15 +645,6 @@ fn test_tcp_reset_close_event() {
     println!("tcp_stream::test_tcp_reset_close_event PASS");
 }
 
-#[test]
-#[cfg_attr(
-    windows,
-    ignore = "fails on Windows; client close events are not found"
-)]
-#[cfg_attr(
-    any(target_os = "hurd", target_os = "illumos", target_os = "solaris"),
-    ignore = "fails; client write_closed events are not found"
-)]
 fn tcp_shutdown_client_both_close_event() {
     let (mut poll, mut events) = init_with_poll();
     let barrier = Arc::new(Barrier::new(2));
@@ -680,6 +671,7 @@ fn tcp_shutdown_client_both_close_event() {
 
     barrier.wait();
     handle.join().expect("failed to join thread");
+    println!("tcp_stream::tcp_shutdown_client_both_close_event PASS");
 }
 
 /// Start a listener that accepts `n_connections` connections on the returned
@@ -747,8 +739,7 @@ fn start_listener(
     (thread_handle, receiver.recv().unwrap())
 }
 
-#[test]
-fn hup_event_on_disconnect() {
+fn test_hup_event_on_disconnect() {
     use mio::net::TcpListener;
 
     let (mut poll, mut events) = init_with_poll();
@@ -788,66 +779,10 @@ fn hup_event_on_disconnect() {
         &mut events,
         vec![ExpectEvent::new(Token(1), Interest::READABLE)],
     );
-}
-
-#[test]
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn priority_event_on_oob_data() {
-    let (mut poll, mut events) = init_with_poll();
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-
-    let listener = std::net::TcpListener::bind(addr).unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let mut client = TcpStream::connect(addr).unwrap();
-    poll.registry()
-        .register(
-            &mut client,
-            Token(0),
-            Interest::READABLE | Interest::PRIORITY,
-        )
-        .unwrap();
-
-    let (stream, _) = listener.accept().unwrap();
-
-    // Sending out of bound data should trigger priority event.
-    send_oob_data(&stream, DATA1).unwrap();
-    expect_events(
-        &mut poll,
-        &mut events,
-        vec![ExpectEvent::new(
-            Token(0),
-            Readiness::READABLE | Readiness::PRIORITY,
-        )],
-    );
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn send_oob_data<S: AsRawFd>(stream: &S, data: &[u8]) -> io::Result<usize> {
-    unsafe {
-        let res = libc::send(
-            stream.as_raw_fd(),
-            data.as_ptr().cast(),
-            data.len(),
-            libc::MSG_OOB,
-        );
-        if res == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(res as usize)
-        }
-    }
+    println!("tcp_stream::test_hup_event_on_disconnect PASS");
 }
 
 pub fn run_all_tests() {
-    test_registering();
-    test_reregistering();
-    test_no_events_after_deregister();
-    test_tcp_shutdown_client_read_close_event();
-    test_tcp_shutdown_client_write_close_event();
-    test_tcp_shutdown_server_write_close_event();
-    test_tcp_reset_close_event();
-
     test_is_send_and_sync();
     test_tcp_stream_ipv4();
     test_tcp_stream_ipv6();
@@ -867,6 +802,8 @@ pub fn run_all_tests() {
     test_tcp_shutdown_client_write_close_event();
     test_tcp_shutdown_server_write_close_event();
     test_tcp_reset_close_event();
+    tcp_shutdown_client_both_close_event();
+    test_hup_event_on_disconnect();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("tcp_stream ALL PASS");
