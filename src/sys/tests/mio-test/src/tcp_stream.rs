@@ -427,8 +427,7 @@ fn test_raw_fd() {
     println!("tcp_stream::test_raw_fd PASS");
 }
 
-#[test]
-fn registering() {
+fn test_registering() {
     let (mut poll, mut events) = init_with_poll();
 
     let (thread_handle, address) = echo_listener(any_local_address(), 1);
@@ -445,10 +444,10 @@ fn registering() {
 
     drop(stream);
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_registering PASS");
 }
 
-#[test]
-fn reregistering() {
+fn test_reregistering() {
     let (mut poll, mut events) = init_with_poll();
 
     let (thread_handle, address) = echo_listener(any_local_address(), 1);
@@ -473,10 +472,10 @@ fn reregistering() {
 
     drop(stream);
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_reregistering PASS");
 }
 
-#[test]
-fn no_events_after_deregister() {
+fn test_no_events_after_deregister() {
     let (mut poll, mut events) = init_with_poll();
 
     let (thread_handle, address) = echo_listener(any_local_address(), 1);
@@ -508,17 +507,10 @@ fn no_events_after_deregister() {
 
     drop(stream);
     thread_handle.join().expect("unable to join thread");
+    println!("tcp_stream::test_no_events_after_deregister PASS");
 }
 
-#[test]
-#[cfg_attr(
-    windows,
-    ignore = "fails on Windows; client read closed events are not triggered"
-)]
-#[cfg_attr(target_os = "hurd", ignore = "POLLRDHUP isn't supported on GNU/Hurd")]
-#[cfg_attr(target_os = "solaris", ignore = "POLLRDHUP isn't supported on Solaris")]
-#[cfg_attr(target_os = "nto", ignore = "POLLRDHUP isn't supported on NTO")]
-fn tcp_shutdown_client_read_close_event() {
+fn test_tcp_shutdown_client_read_close_event() {
     let (mut poll, mut events) = init_with_poll();
     let barrier = Arc::new(Barrier::new(2));
 
@@ -546,22 +538,10 @@ fn tcp_shutdown_client_read_close_event() {
 
     barrier.wait();
     handle.join().expect("failed to join thread");
+    println!("tcp_stream::test_tcp_shutdown_client_read_close_event PASS");
 }
 
-#[test]
-#[cfg_attr(windows, ignore = "fails; client write_closed events are not found")]
-#[cfg_attr(
-    any(
-        target_os = "android",
-        target_os = "hurd",
-        target_os = "illumos",
-        target_os = "solaris",
-        target_os = "linux",
-        target_os = "nto"
-    ),
-    ignore = "fails; client write_closed events are not found"
-)]
-fn tcp_shutdown_client_write_close_event() {
+fn test_tcp_shutdown_client_write_close_event() {
     let (mut poll, mut events) = init_with_poll();
     let barrier = Arc::new(Barrier::new(2));
 
@@ -589,13 +569,10 @@ fn tcp_shutdown_client_write_close_event() {
 
     barrier.wait();
     handle.join().expect("failed to join thread");
+    println!("tcp_stream::test_tcp_shutdown_client_write_close_event PASS");
 }
 
-#[test]
-#[cfg_attr(target_os = "hurd", ignore = "POLLRDHUP isn't supported on GNU/Hurd")]
-#[cfg_attr(target_os = "solaris", ignore = "POLLRDHUP isn't supported on Solaris")]
-#[cfg_attr(target_os = "nto", ignore = "POLLRDHUP isn't supported on NTO")]
-fn tcp_shutdown_server_write_close_event() {
+fn test_tcp_shutdown_server_write_close_event() {
     let (mut poll, mut events) = init_with_poll();
     let barrier = Arc::new(Barrier::new(2));
 
@@ -622,13 +599,10 @@ fn tcp_shutdown_server_write_close_event() {
 
     barrier.wait();
     handle.join().expect("failed to join thread");
+    println!("tcp_stream::test_tcp_shutdown_server_write_close_event PASS");
 }
 
-#[test]
-#[cfg_attr(target_os = "hurd", ignore = "POLLRDHUP isn't supported on GNU/Hurd")]
-#[cfg_attr(target_os = "solaris", ignore = "POLLRDHUP isn't supported on Solaris")]
-#[cfg_attr(target_os = "nto", ignore = "POLLRDHUP isn't supported on NTO")]
-fn tcp_reset_close_event() {
+fn test_tcp_reset_close_event() {
     let (mut poll, mut events) = init_with_poll();
 
     let listener = net::TcpListener::bind(any_local_address()).unwrap();
@@ -668,6 +642,7 @@ fn tcp_reset_close_event() {
             break;
         }
     }
+    println!("tcp_stream::test_tcp_reset_close_event PASS");
 }
 
 #[test]
@@ -865,6 +840,14 @@ fn send_oob_data<S: AsRawFd>(stream: &S, data: &[u8]) -> io::Result<usize> {
 }
 
 pub fn run_all_tests() {
+    test_registering();
+    test_reregistering();
+    test_no_events_after_deregister();
+    test_tcp_shutdown_client_read_close_event();
+    test_tcp_shutdown_client_write_close_event();
+    test_tcp_shutdown_server_write_close_event();
+    test_tcp_reset_close_event();
+
     test_is_send_and_sync();
     test_tcp_stream_ipv4();
     test_tcp_stream_ipv6();
@@ -877,6 +860,13 @@ pub fn run_all_tests() {
     test_shutdown_write();
     test_shutdown_both();
     test_raw_fd();
+    test_registering();
+    test_reregistering();
+    test_no_events_after_deregister();
+    test_tcp_shutdown_client_read_close_event();
+    test_tcp_shutdown_client_write_close_event();
+    test_tcp_shutdown_server_write_close_event();
+    test_tcp_reset_close_event();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("tcp_stream ALL PASS");
