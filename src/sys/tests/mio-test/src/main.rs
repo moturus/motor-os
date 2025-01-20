@@ -7,6 +7,7 @@ mod simple;
 mod tcp;
 mod tcp_listener;
 mod tcp_stream;
+mod waker;
 
 #[macro_use]
 mod util;
@@ -32,6 +33,7 @@ fn main() {
         .spawn(input_listener)
         .unwrap();
 
+    waker::run_all_tests();
     tcp_stream::run_all_tests();
     tcp_listener::run_all_tests();
     tcp::run_all_tests();
