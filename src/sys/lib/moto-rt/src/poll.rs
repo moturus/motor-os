@@ -74,6 +74,16 @@ pub fn del(poll_fd: RtFd, source_fd: RtFd) -> Result<(), ErrorCode> {
     ok_or_error(vdso_poll_del(poll_fd, source_fd))
 }
 
+pub fn wake(poll_fd: RtFd) -> Result<(), ErrorCode> {
+    let vdso_poll_wake: extern "C" fn(RtFd) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().poll_wake.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_poll_wake(poll_fd))
+}
+
 pub fn wait(
     poll_fd: RtFd,
     events: *mut Event,

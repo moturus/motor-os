@@ -106,7 +106,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-const RT_VERSION: u64 = 7;
+const RT_VERSION: u64 = 8;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -230,6 +230,7 @@ pub struct RtVdsoVtable {
     pub poll_set: AtomicU64,
     pub poll_del: AtomicU64,
     pub poll_wait: AtomicU64,
+    pub poll_wake: AtomicU64,
 }
 
 #[cfg(not(feature = "base"))]
