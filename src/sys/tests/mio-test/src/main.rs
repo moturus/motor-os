@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 mod close_on_drop;
+mod poll;
 mod simple;
 mod tcp;
 mod tcp_listener;
@@ -33,6 +34,7 @@ fn main() {
         .spawn(input_listener)
         .unwrap();
 
+    poll::run_all_tests();
     waker::run_all_tests();
     tcp_stream::run_all_tests();
     tcp_listener::run_all_tests();
