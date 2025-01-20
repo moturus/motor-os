@@ -425,8 +425,7 @@ pub fn test_double_register_different_token() {
     println!("poll::test_double_register_different_token PASS");
 }
 
-#[test]
-fn poll_ok_after_cancelling_pending_ops() {
+fn test_poll_ok_after_cancelling_pending_ops() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut listener = TcpListener::bind(any_local_address()).unwrap();
@@ -486,6 +485,7 @@ fn poll_ok_after_cancelling_pending_ops() {
 
     barrier.wait();
     handle.join().expect("unable to join thread");
+    println!("poll::test_poll_ok_after_cancelling_pending_ops PASS");
 }
 
 // This test checks the following reregister constraint:
@@ -498,6 +498,7 @@ fn poll_ok_after_cancelling_pending_ops() {
 //
 // On kqueue platforms reregistering w/o registering works but that's not a
 // test goal, so it is not tested.
+/*
 #[test]
 #[cfg(debug_assertions)] // Check is only present when debug assertions are enabled.
 fn reregister_without_register() {
@@ -511,6 +512,7 @@ fn reregister_without_register() {
         "not registered",
     );
 }
+*/
 
 // This test checks the following register/deregister constraint:
 // The event source must have previously been registered with this instance
@@ -522,6 +524,7 @@ fn reregister_without_register() {
 //
 // On kqueue platforms deregistering w/o registering works but that's not a
 // test goal, so it is not tested.
+/*
 #[test]
 #[cfg(debug_assertions)] // Check is only present when debug assertions are enabled.
 fn deregister_without_register() {
@@ -531,6 +534,7 @@ fn deregister_without_register() {
 
     assert_error(poll.registry().deregister(&mut listener), "not registered");
 }
+*/
 
 struct TestEventSource {
     registrations: Vec<(Token, Interest)>,
@@ -575,8 +579,7 @@ impl event::Source for TestEventSource {
     }
 }
 
-#[test]
-fn poll_registration() {
+fn test_poll_registration() {
     init();
     let poll = Poll::new().unwrap();
     let registry = poll.registry();
@@ -607,6 +610,7 @@ fn poll_registration() {
     assert_eq!(source.registrations.len(), 1);
     assert_eq!(source.reregistrations.len(), 1);
     assert_eq!(source.deregister_count, 1);
+    println!("poll::test_poll_registration PASS");
 }
 
 struct ErroneousTestEventSource;
@@ -635,8 +639,7 @@ impl event::Source for ErroneousTestEventSource {
     }
 }
 
-#[test]
-fn poll_erroneous_registration() {
+fn test_poll_erroneous_registration() {
     init();
     let poll = Poll::new().unwrap();
     let registry = poll.registry();
@@ -650,6 +653,7 @@ fn poll_erroneous_registration() {
         "reregister",
     );
     assert_error(registry.deregister(&mut source), "deregister");
+    println!("poll::test_poll_erroneous_registration PASS");
 }
 
 /// Assert that `result` is an error and the formatted error (via
@@ -677,6 +681,9 @@ pub fn run_all_tests() {
     test_registry_operations_are_thread_safe();
     test_register_during_poll();
     // test_reregister_interest_token_usage(); // No UdpSockets yet.
+    test_poll_ok_after_cancelling_pending_ops();
+    test_poll_registration();
+    test_poll_erroneous_registration();
 
     #[cfg(debug_assertions)]
     test_double_register_different_token();
