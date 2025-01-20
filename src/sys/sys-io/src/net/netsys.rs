@@ -769,7 +769,13 @@ impl NetSys {
         }
 
         // 3. call connect
-        self.devices[device_idx].connect_socket(smol_handle, &local_addr, &remote_addr);
+        if self.devices[device_idx]
+            .connect_socket(smol_handle, &local_addr, &remote_addr)
+            .is_err()
+        {
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
+            return Some(sqe);
+        }
 
         None
     }

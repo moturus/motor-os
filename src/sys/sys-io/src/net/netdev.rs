@@ -344,7 +344,7 @@ impl NetDev {
         handle: SocketHandle,
         local_addr: &SocketAddr,
         remote_addr: &SocketAddr,
-    ) {
+    ) -> Result<(), ()> {
         let smol_socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
         smol_socket
             .connect(
@@ -352,7 +352,15 @@ impl NetDev {
                 (remote_addr.ip(), remote_addr.port()),
                 (local_addr.ip(), local_addr.port()),
             )
-            .unwrap();
+            .map_err(|_err| {
+                #[cfg(debug_assertions)]
+                log::debug!(
+                    "Connect {:?} => {:?} failed: {:?}",
+                    local_addr,
+                    remote_addr,
+                    _err
+                );
+            })
     }
 
     pub fn poll(&mut self) -> bool {
