@@ -10,7 +10,7 @@ use moto_rt::RtFd;
 use moto_rt::E_BAD_HANDLE;
 
 pub extern "C" fn new() -> RtFd {
-    posix::new_file(|fd| Arc::new(Registry::new(fd)))
+    posix::push_file(Registry::new())
 }
 
 pub extern "C" fn add(poll_fd: RtFd, source_fd: RtFd, token: u64, events: u64) -> ErrorCode {
@@ -69,4 +69,15 @@ pub unsafe extern "C" fn wait(
         Some(moto_rt::time::Instant::from_u64(timeout))
     };
     registry.wait(events, deadline)
+}
+
+pub extern "C" fn wake(poll_fd: RtFd) -> ErrorCode {
+    let Some(posix_file) = posix::get_file(poll_fd) else {
+        return E_BAD_HANDLE;
+    };
+    let Some(registry) = (posix_file.as_ref() as &dyn Any).downcast_ref::<Registry>() else {
+        return E_BAD_HANDLE;
+    };
+
+    registry.wake()
 }

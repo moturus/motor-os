@@ -472,7 +472,7 @@ dependencies = [
  "frusa",
  "intrusive-collections",
  "log",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "x86",
  "x86_64",
@@ -518,7 +518,7 @@ name = "mdbg"
 version = "0.1.0"
 dependencies = [
  "clap",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
 ]
 
@@ -531,11 +531,11 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 [[package]]
 name = "mio"
 version = "1.0.2"
-source = "git+https://github.com/moturus/mio.git?branch=motor-os_20241121#7a178a6a2fd1ed151b0db0863b2aca56979875d1"
+source = "git+https://github.com/moturus/mio.git?branch=motor-os_20241121#81333b8e4106e8128bddecf0ada1d092bdf82dba"
 dependencies = [
  "libc",
  "log",
- "moto-rt 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "wasi",
  "windows-sys 0.52.0",
 ]
@@ -546,7 +546,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "mio",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
 ]
 
 [[package]]
@@ -554,7 +554,7 @@ name = "moto-ipc"
 version = "0.2.5"
 dependencies = [
  "compiler_builtins",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -566,7 +566,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "spin 0.5.2",
 ]
@@ -576,13 +576,13 @@ name = "moto-mpmc"
 version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
 ]
 
 [[package]]
 name = "moto-rt"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",
@@ -591,16 +591,16 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96590845444a3803f897e0f416b59a4a3042c959d3350c115aa209f42b4a41cb"
+checksum = "2c5abaa54d2e595df1de490afe055456e1464e3ae656b218edf7b8c8e4506009"
 
 [[package]]
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
  "compiler_builtins",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -610,7 +610,7 @@ name = "moto-sys-io"
 version = "0.2.4"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "smoltcp",
 ]
@@ -759,7 +759,7 @@ dependencies = [
  "elfloader",
  "frusa",
  "moto-ipc",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "moto-sys-io",
 ]
@@ -928,7 +928,7 @@ dependencies = [
  "ipnetwork",
  "log",
  "moto-ipc",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "moto-sys-io",
  "moto-virtio",
@@ -945,7 +945,7 @@ version = "0.1.0"
 dependencies = [
  "moto-ipc",
  "moto-log",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
 ]
 
@@ -956,7 +956,7 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "x86_64",
 ]
@@ -966,7 +966,7 @@ name = "sysbox"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
  "moto-sys-io",
  "time",
@@ -980,7 +980,7 @@ dependencies = [
  "futures",
  "moto-ipc",
  "moto-mpmc",
- "moto-rt 0.2.5",
+ "moto-rt 0.2.6",
  "moto-sys",
 ]
 

@@ -36,11 +36,11 @@ pub trait ResponseHandler {
 /// Wait objects are owned by their parent objects (e.g. sockets);
 /// but a wait object can be added to multiple "Registries" with different tokens.
 pub struct WaitObject {
-    // Registry FD -> (Registry, Token).
+    // Registry ID -> (Token, Interests).
     // TODO: is there a way to go from Arc<dyn PosixFile> to Arc<Registry>?
     // If so, then we can have Weak<Registry> below.
     #[allow(clippy::type_complexity)]
-    registries: Mutex<BTreeMap<RtFd, (Weak<dyn PosixFile>, Token, Interests)>>,
+    registries: Mutex<BTreeMap<u64, (Token, Interests)>>,
 }
 
 impl Drop for WaitObject {
@@ -60,25 +60,18 @@ impl WaitObject {
 
     pub fn add_interests(
         &self,
-        registry_fd: RtFd,
+        r_id: u64,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        let Some(posix_file) = posix::get_file(registry_fd) else {
-            return Err(E_BAD_HANDLE);
-        };
-        if (posix_file.as_ref() as &dyn Any)
-            .downcast_ref::<Registry>()
-            .is_none()
-        {
+        if REGISTRIES.lock().get(&r_id).is_none() {
             return Err(E_BAD_HANDLE);
         }
-        let registry = Arc::downgrade(&posix_file);
 
         let mut registries = self.registries.lock();
-        match registries.entry(registry_fd) {
+        match registries.entry(r_id) {
             alloc::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((registry, token, interests));
+                entry.insert((token, interests));
             }
             alloc::collections::btree_map::Entry::Occupied(_) => return Err(E_INVALID_ARGUMENT),
         }
@@ -88,34 +81,23 @@ impl WaitObject {
 
     pub fn set_interests(
         &self,
-        registry_fd: RtFd,
+        r_id: u64,
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        let Some(posix_file) = posix::get_file(registry_fd) else {
-            return Err(E_BAD_HANDLE);
-        };
-        if (posix_file.as_ref() as &dyn Any)
-            .downcast_ref::<Registry>()
-            .is_none()
-        {
-            return Err(E_BAD_HANDLE);
-        }
-        let registry = Arc::downgrade(&posix_file);
-
         let mut registries = self.registries.lock();
-        if let Some(val) = registries.get_mut(&registry_fd) {
-            *val = (registry, token, interests);
+        if let Some(val) = registries.get_mut(&r_id) {
+            *val = (token, interests);
             Ok(())
         } else {
             Err(E_INVALID_ARGUMENT)
         }
     }
 
-    pub fn del_interests(&self, registry_fd: RtFd) -> Result<(), ErrorCode> {
+    pub fn del_interests(&self, r_id: u64) -> Result<(), ErrorCode> {
         self.registries
             .lock()
-            .remove(&registry_fd)
+            .remove(&r_id)
             .map(|_| ())
             .ok_or(E_INVALID_ARGUMENT)
     }
@@ -124,17 +106,14 @@ impl WaitObject {
         let mut dropped_registries = alloc::vec::Vec::new();
         let mut registries = self.registries.lock();
         for entry in &*registries {
-            let (registry_id, (registry, token, interests)) = entry;
+            let (registry_id, (token, interests)) = entry;
             // Update interests: *_CLOSED events are always of interest.
             let interests = interests
                 | moto_rt::poll::POLL_READ_CLOSED
                 | moto_rt::poll::POLL_WRITE_CLOSED
                 | moto_rt::poll::POLL_ERROR;
             if interests & events != 0 {
-                if let Some(registry) = registry.upgrade() {
-                    let registry = (registry.as_ref() as &dyn Any)
-                        .downcast_ref::<Registry>()
-                        .unwrap();
+                if let Some(registry) = REGISTRIES.lock().get(registry_id) {
                     registry.on_event(*token, interests & events);
                 } else {
                     dropped_registries.push(*registry_id);
@@ -148,21 +127,57 @@ impl WaitObject {
     }
 }
 
+static REGISTRIES: Mutex<BTreeMap<u64, Arc<Registry>>> = Mutex::new(BTreeMap::new());
+
 pub struct Registry {
-    fd: RtFd,
+    id: u64,
     events: Mutex<BTreeMap<Token, EventBits>>,
     wait_handle: AtomicU64,
+    wait_object: WaitObject,
 }
 
-impl PosixFile for Registry {}
+impl Drop for Registry {
+    fn drop(&mut self) {
+        let _ = REGISTRIES.lock().remove(&self.id);
+    }
+}
+
+impl PosixFile for Registry {
+    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        if interests != moto_rt::poll::POLL_READABLE {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        self.wait_object.add_interests(r_id, token, interests)?;
+        Ok(())
+    }
+
+    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        if interests != moto_rt::poll::POLL_READABLE {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        self.wait_object.set_interests(r_id, token, interests)?;
+        Ok(())
+    }
+
+    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
+        self.wait_object.del_interests(r_id)
+    }
+}
 
 impl Registry {
-    pub fn new(fd: RtFd) -> Self {
-        Self {
-            fd,
+    pub fn new() -> Arc<Self> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+        let result = Arc::new(Self {
+            id,
             events: Mutex::new(BTreeMap::new()),
             wait_handle: AtomicU64::new(SysHandle::NONE.as_u64()),
-        }
+            wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
+        });
+
+        REGISTRIES.lock().insert(id, result.clone());
+        result
     }
 
     pub fn add(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
@@ -170,7 +185,7 @@ impl Registry {
             return E_BAD_HANDLE;
         };
 
-        if let Err(err) = posix_file.poll_add(self.fd, token, interests) {
+        if let Err(err) = posix_file.poll_add(self.id, token, interests) {
             err
         } else {
             E_OK
@@ -182,7 +197,7 @@ impl Registry {
             return E_BAD_HANDLE;
         };
 
-        if let Err(err) = posix_file.poll_set(self.fd, token, interests) {
+        if let Err(err) = posix_file.poll_set(self.id, token, interests) {
             err
         } else {
             E_OK
@@ -194,11 +209,16 @@ impl Registry {
             return E_BAD_HANDLE;
         };
 
-        if let Err(err) = posix_file.poll_del(self.fd) {
+        if let Err(err) = posix_file.poll_del(self.id) {
             err
         } else {
             E_OK
         }
+    }
+
+    pub fn wake(&self) -> ErrorCode {
+        self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+        E_OK
     }
 
     pub fn wait(&self, events_buf: &mut [Event], deadline: Option<moto_rt::time::Instant>) -> i32 {

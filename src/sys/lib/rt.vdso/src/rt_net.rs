@@ -973,20 +973,20 @@ impl PosixFile for TcpStream {
         Ok(())
     }
 
-    fn poll_add(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.add_interests(poll_fd, token, interests)?;
+    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.wait_object.add_interests(r_id, token, interests)?;
         self.maybe_raise_events(interests, token);
         Ok(())
     }
 
-    fn poll_set(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.set_interests(poll_fd, token, interests)?;
+    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.wait_object.set_interests(r_id, token, interests)?;
         self.maybe_raise_events(interests, token);
         Ok(())
     }
 
-    fn poll_del(&self, poll_fd: RtFd) -> Result<(), ErrorCode> {
-        self.wait_object.del_interests(poll_fd)
+    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
+        self.wait_object.del_interests(r_id)
     }
 }
 
@@ -1984,8 +1984,8 @@ impl PosixFile for TcpListener {
         Ok(())
     }
 
-    fn poll_add(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.add_interests(poll_fd, token, interests)?;
+    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.wait_object.add_interests(r_id, token, interests)?;
 
         let have_async_accepts = !self.async_accepts.lock().is_empty();
         if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
@@ -1995,8 +1995,8 @@ impl PosixFile for TcpListener {
         Ok(())
     }
 
-    fn poll_set(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.set_interests(poll_fd, token, interests)?;
+    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.wait_object.set_interests(r_id, token, interests)?;
 
         let have_async_accepts = !self.async_accepts.lock().is_empty();
         if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
@@ -2006,8 +2006,8 @@ impl PosixFile for TcpListener {
         Ok(())
     }
 
-    fn poll_del(&self, poll_fd: RtFd) -> Result<(), ErrorCode> {
-        self.wait_object.del_interests(poll_fd)
+    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
+        self.wait_object.del_interests(r_id)
     }
 }
 

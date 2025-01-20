@@ -37,7 +37,7 @@ use moto_rt::RtVdsoVtable;
 // The entry point.
 #[no_mangle]
 pub extern "C" fn _rt_entry(version: u64) {
-    if version != 7 {
+    if version != 8 {
         // Doing assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
@@ -373,6 +373,10 @@ pub extern "C" fn _rt_entry(version: u64) {
         .store(rt_poll::del as *const () as usize as u64, Ordering::Relaxed);
     vtable.poll_wait.store(
         rt_poll::wait as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.poll_wake.store(
+        rt_poll::wake as *const () as usize as u64,
         Ordering::Relaxed,
     );
 

@@ -39,15 +39,15 @@ pub trait PosixFile: Any + Send + Sync {
     fn close(&self) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
     }
-    fn poll_add(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         todo!()
         // Err(E_INVALID_ARGUMENT)
     }
-    fn poll_set(&self, poll_fd: RtFd, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         todo!()
         // Err(E_INVALID_ARGUMENT)
     }
-    fn poll_del(&self, poll_fd: RtFd) -> Result<(), ErrorCode> {
+    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
         todo!()
         // Err(E_INVALID_ARGUMENT)
     }
