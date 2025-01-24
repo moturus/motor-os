@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2025-01-20
+
+Tokio Mio is more or less ported (excl UDP).
+
 ## 2024-11-12
 
 The migration from moto-runtime to moto-rt/rt.vdso (see below) is complete.
