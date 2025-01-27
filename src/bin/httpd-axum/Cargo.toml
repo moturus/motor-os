@@ -1,0 +1,27 @@
+[package]
+name = "httpd-axum"
+description = "A simple HTTPd serving static content."
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "*"
+axum-server = { version = "*", features = ["tls-rustls-no-provider"] }
+tower-http = { version = "0.6.1", features = ["fs", "trace"] }
+clap = { version = "=4.5.6", features = ["derive"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { git = "https://github.com/moturus/tokio.git", features = ["net", "rt", "rt-multi-thread", "macros"] }
+
+[patch.crates-io]
+ring = { git = "https://github.com/moturus/ring.git" }
+tokio = { git = "https://github.com/moturus/tokio.git" }
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1

@@ -52,6 +52,7 @@ dependencies = [
   "sysbox_debug",
   "rush_debug",
   "httpd_debug",
+  "httpd_axum_debug",
   "kibim_debug",
   "mdbg_debug",
   "rnetbench_debug",
@@ -75,6 +76,7 @@ dependencies = [
   "sysbox_release",
   "rush_release",
   "httpd_release",
+  "httpd_axum_release",
   "kibim_release",
   "mdbg_release",
   "rnetbench_release",
@@ -97,6 +99,7 @@ dependencies = [
   "sysbox_debug",
   "rush_debug",
   "httpd_debug",
+  "httpd_axum_debug",
   "kibim_debug",
   "mdbg_debug",
   "rnetbench_debug",
@@ -119,6 +122,7 @@ dependencies = [
   "sysbox_release",
   "rush_release",
   "httpd_release",
+  "httpd_axum_release",
   "kibim_release",
   "mdbg_release",
   "rnetbench_release",
@@ -344,6 +348,22 @@ script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/httpd" "${MOTO_BIN}/httpd"
+'''
+
+[tasks.httpd_axum_debug]
+cwd = "./src/bin/httpd-axum"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/httpd-axum" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/httpd-axum"
+'''
+
+[tasks.httpd_axum_release]
+cwd = "./src/bin/httpd-axum"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/httpd-axum" "${MOTO_BIN}/httpd-axum"
 '''
 
 [tasks.kibim_debug]
