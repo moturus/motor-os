@@ -46,7 +46,11 @@ async fn main() {
 
     let app = Router::new()
         .fallback_service(ServeDir::new(&args.dir))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http().on_request(()).on_response(
+            |response: &http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
+                tracing::info!("{} ({}us)", response.status().as_u16(), latency.as_micros())
+            },
+        ));
 
     if args.ssl_cert.is_some() {
         rustls::crypto::ring::default_provider()

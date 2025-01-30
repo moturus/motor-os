@@ -7,8 +7,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "*"
-axum-server = { version = "*", features = ["tls-rustls-no-provider"] }
+axum = "0.8.1"
+http= "1.2"
+axum-server = { version = "0.7.1", features = ["tls-rustls-no-provider"] }
 tower-http = { version = "0.6.1", features = ["fs", "trace"] }
 clap = { version = "=4.5.6", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
