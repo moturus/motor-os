@@ -16,7 +16,7 @@ impl elfloader::ElfLoader for Loader<'_> {
             let vaddr_end =
                 crate::mm::align_up(header.virtual_addr() + header.mem_size(), PAGE_SIZE_SMALL);
 
-            // log::debug!(
+            // log::info!(
             //     "ElfLoader: Allocate:: ELF: 0x{:x} sz 0x{:x} => MEM: 0x{:x} sz 0x:{:x}",
             //     header.virtual_addr(),
             //     header.mem_size(),
@@ -57,9 +57,27 @@ impl elfloader::ElfLoader for Loader<'_> {
         use elfloader::arch::x86_64::RelocationTypes::*;
         use elfloader::RelocationType::x86_64;
 
+        let remote_addr: u64 = entry.offset;
+
         match entry.rtype {
             x86_64(R_AMD64_RELATIVE) => {
-                panic!("elf loader: relocation not supported");
+                // panic!("elf loader: relocation not supported");
+                // We don't relocate currently.
+                // This type requires addend to be present.
+                let addend: u64 = // self.offset + //  TODO: do relocate, i.e. offset != 0
+                    entry
+                        .addend
+                        .ok_or(elfloader::ElfLoaderErr::UnsupportedRelocationEntry)?;
+
+                // Need to write (addend + base) into addr.
+                unsafe {
+                    let buf: &[u8] = core::slice::from_raw_parts(
+                        &addend as *const _ as *const u8,
+                        core::mem::size_of::<u64>(),
+                    );
+                    self.address_space.copy_to_user(buf, remote_addr).unwrap();
+                }
+                Ok(())
             }
             x86_64(R_AMD64_NONE) => Ok(()),
             _ => {
@@ -85,7 +103,10 @@ pub fn load_elf(
     }
 
     if elf_binary.interpreter().is_some() {
-        log::error!("The ELF binary has a dynamic interpreter.");
+        log::error!(
+            "The ELF binary has a dynamic interpreter: {:?}.",
+            elf_binary.interpreter()
+        );
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
