@@ -184,8 +184,8 @@ impl Blk {
         assert!((consumed == 512) || (consumed == 513));
 
         // todo!("add vring_get_isr");
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::AcqRel);
         let status = unsafe { (status_addr as *const u8).read_volatile() };
         if status == VIRTIO_BLK_S_OK {
             Ok(())

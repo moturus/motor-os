@@ -195,7 +195,6 @@ impl FileSystemInner {
         }
 
         self.cache.push(path.to_owned(), curr_dir);
-
         Ok(curr_dir)
     }
 }

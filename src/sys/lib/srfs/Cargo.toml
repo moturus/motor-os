@@ -11,5 +11,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 bitflags = "2.4.*"
 log = "0.4.20"
-lru = { version = "0.12.3", default-features = false }
+lru = { version = "0.13.0", default-features = false }
 srfs-core = { version="0.1", features=["std"] }
