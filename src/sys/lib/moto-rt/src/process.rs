@@ -366,7 +366,7 @@ fn encode_env(keys: Vec<String>, vals: Vec<String>) -> (u64, Option<core::alloc:
             pos += 4;
 
             let bytes = arg.as_bytes();
-            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
             pos += (bytes.len() + 3) & !3_usize;
         };
 
@@ -417,7 +417,7 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
             pos += 4;
 
             let bytes = arg.as_bytes();
-            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
             pos += (bytes.len() + 3) & !3_usize;
         };
 

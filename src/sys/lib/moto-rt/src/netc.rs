@@ -14,6 +14,14 @@ impl From<in_addr> for core::net::Ipv4Addr {
     }
 }
 
+impl From<core::net::Ipv4Addr> for in_addr {
+    fn from(addr: core::net::Ipv4Addr) -> in_addr {
+        in_addr {
+            s_addr: u32::from_ne_bytes(addr.octets()),
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct sockaddr_in {

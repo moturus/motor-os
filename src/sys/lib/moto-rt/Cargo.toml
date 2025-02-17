@@ -6,7 +6,7 @@ keywords = ["moturus", "motor-os"]
 readme = "README.md"
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS Runtime."
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 
 [lib]
@@ -26,3 +26,6 @@ rustc-dep-of-std = [
     "core",
     "compiler_builtins",
 ]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }
