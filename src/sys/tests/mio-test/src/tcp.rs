@@ -771,7 +771,7 @@ fn test_local_addr_ready() {
                         .write(&[1, 2, 3])
                         .unwrap();
                     assert_eq!(n, 3);
-                    handler.accepted = None; // TODO(posk): this line triggers close/disconnect,
+                    handler.accepted = None; // TODO: this line triggers close/disconnect,
                                              // which makes client closed,
                                              // which returns error on peer_addr() below.
                 }
