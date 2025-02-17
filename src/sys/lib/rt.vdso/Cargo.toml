@@ -25,6 +25,9 @@ moto-rt     = { path = "../moto-rt"     }
 moto-sys    = { path = "../moto-sys"    }
 moto-sys-io = { path = "../moto-sys-io" }
 
+# These are needed for memcpy and similar.
+compiler_builtins = { version = "0.1", features = ["mem"] }
+
 # external dependencies
 crossbeam = { version = "0.8.4", default-features = false }
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -33,3 +36,10 @@ crossbeam-queue = { version = "0.3", default-features = false, features = ["allo
 [features]
 # If enabled, extra runtime checks/assertions are performed.
 netdev = []
+
+[lints.rust]
+unexpected_cfgs = { level = 'allow', check-cfg = [ 'cfg(test)'] }
+
+[profile.release]
+codegen-units = 1
+lto = true

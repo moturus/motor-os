@@ -38,7 +38,7 @@ fn init_remote_vdso(address_space: SysHandle, entry_point: u64) -> Result<(), Er
     assert_eq!(remote, moto_rt::RT_VDSO_BYTES_ADDR);
 
     unsafe {
-        core::intrinsics::copy_nonoverlapping(
+        core::ptr::copy_nonoverlapping(
             moto_rt::RT_VDSO_BYTES_ADDR as usize as *const u8,
             local as usize as *mut u8,
             vdso_bytes_sz as usize,
@@ -145,7 +145,7 @@ impl RemoteLoader {
 
         let offset = dst - remote_region_start;
 
-        core::intrinsics::copy_nonoverlapping(
+        core::ptr::copy_nonoverlapping(
             src,
             (local_region_start + offset) as usize as *mut u8,
             sz as usize,

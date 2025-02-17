@@ -223,10 +223,6 @@ struct Loader {
 
 impl Loader {
     unsafe fn write_remotely(&mut self, dst: u64, src: *const u8, sz: u64) {
-        assert_eq!(
-            dst & (moto_sys::sys_mem::PAGE_SIZE_SMALL - 1),
-            (src as usize as u64) & (moto_sys::sys_mem::PAGE_SIZE_SMALL - 1)
-        );
         // There shouldn't be too many entries in the map, so we can just linearly iterate.
         let mut region: Option<(u64, u64, u64)> = None;
         for entry in &self.mapped_regions {
@@ -248,7 +244,7 @@ impl Loader {
 
         let offset = dst - remote_region_start;
 
-        core::intrinsics::copy_nonoverlapping(
+        core::ptr::copy_nonoverlapping(
             src,
             (local_region_start + offset) as usize as *mut u8,
             sz as usize,
@@ -276,6 +272,8 @@ impl elfloader::ElfLoader for Loader {
                 moto_sys::sys_mem::PAGE_SIZE_SMALL,
             );
 
+            // TODO: Implement proper RelRo.
+            /*
             let mut flags = moto_sys::SysMem::F_SHARE_SELF;
             if header.flags().is_read() {
                 flags |= moto_sys::SysMem::F_READABLE;
@@ -283,6 +281,10 @@ impl elfloader::ElfLoader for Loader {
             if header.flags().is_write() {
                 flags |= moto_sys::SysMem::F_WRITABLE;
             }
+            */
+            let flags = moto_sys::SysMem::F_SHARE_SELF
+                | moto_sys::SysMem::F_READABLE
+                | moto_sys::SysMem::F_WRITABLE;
 
             let num_pages = (vaddr_end - vaddr_start) >> moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2;
 
@@ -461,7 +463,7 @@ unsafe fn create_remote_args(
         *((pos as *mut u32).as_mut().unwrap()) = arg.len() as u32;
         pos += 4;
 
-        core::intrinsics::copy_nonoverlapping(arg.as_ptr(), pos as *mut u8, arg.len());
+        core::ptr::copy_nonoverlapping(arg.as_ptr(), pos as *mut u8, arg.len());
         pos += (arg.len() + 3) & !3_usize;
     };
 
@@ -934,7 +936,7 @@ fn encode_env(keys: Vec<String>, vals: Vec<String>) -> Result<u64, ErrorCode> {
             pos += 4;
 
             let bytes = arg.as_bytes();
-            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
             pos += (bytes.len() + 3) & !3_usize;
         };
 
@@ -986,7 +988,7 @@ fn encode_args(args: Vec<String>) -> Result<u64, ErrorCode> {
             pos += 4;
 
             let bytes = arg.as_bytes();
-            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), pos as *mut u8, bytes.len());
             pos += (bytes.len() + 3) & !3_usize;
         };
 

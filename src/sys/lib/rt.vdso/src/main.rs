@@ -2,7 +2,6 @@
 #![no_main]
 #![allow(unused)]
 #![feature(str_from_raw_parts)]
-#![feature(trait_upcasting)]
 
 mod load;
 mod posix;
@@ -36,15 +35,15 @@ use moto_rt::RtVdsoVtable;
 
 // The entry point.
 #[no_mangle]
-pub extern "C" fn _rt_entry(version: u64) {
-    if version != 8 {
+pub extern "C" fn moturus_start(version: u64) {
+    if version != 9 {
         // Doing assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
     }
 
     let vtable = RtVdsoVtable::get();
-    let self_addr = _rt_entry as *const () as usize as u64;
+    let self_addr = moturus_start as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
     vtable.log_to_kernel.store(

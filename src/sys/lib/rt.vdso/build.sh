@@ -14,21 +14,18 @@ if [ -f "${TARGET_FNAME}" ]; then
     PREV_HASH=$(sha256sum "${TARGET_FNAME}" | awk '{print $1}')
 fi
 
-RUSTFLAGS="-C force-frame-pointers=yes " \
-cargo build --target rt.json -Zbuild-std=core,alloc \
-  -Zbuild-std-features=compiler-builtins-mem --no-default-features --features "netdev" $@
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus --features "netdev" $@
 
-cargo clippy --target rt.json -Zbuild-std=core,alloc \
-  -Zbuild-std-features=compiler-builtins-mem --no-default-features --features "netdev" $@
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus --features "netdev" $@
 
 # Don't update the output file if nothings has changed,
 # otherwise sys-io is always relinked, which takes time.
 TEMP_FNAME="${TARGET_FNAME}".tmp
 
 if [[ "$1" == "--release" ]] ; then
-  strip -o "${TEMP_FNAME}" "${TARGET_DIR}/rt/release/rt"
+  strip -o "${TEMP_FNAME}" "${TARGET_DIR}/x86_64-unknown-moturus/release/rt"
 else
-  strip -o "${TEMP_FNAME}" "${TARGET_DIR}/rt/debug/rt"
+  strip -o "${TEMP_FNAME}" "${TARGET_DIR}/x86_64-unknown-moturus/debug/rt"
 fi
 
 NEW_HASH=$(sha256sum "${TEMP_FNAME}" | awk '{print $1}')
