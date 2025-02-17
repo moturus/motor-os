@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2025-02-17
+
+Rust Motor OS target rebased onto Rust 2025-02-16 nightly version.
+Two main changes:
+- all Motor OS binaries are now position independent;
+- rt.vdso is now using Motor OS target rather than a custom json target.
+
 ## 2025-01-20
 
 Tokio Mio is more or less ported (excl UDP).
