@@ -28,6 +28,7 @@ pub fn load() {
         .expect("Error loading rt.bin elf.");
 
     let vdso_entry_addr: u64 = elf_binary.entry_point() + moto_rt::RT_VDSO_START;
+    assert_ne!(0, vdso_entry_addr);
 
     // Copy VDSO_BYTES into their canonical place.
     let vdso_bytes_sz = VDSO_BYTES.len() as u64;

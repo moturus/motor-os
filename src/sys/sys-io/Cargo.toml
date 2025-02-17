@@ -25,3 +25,6 @@ smoltcp      = "0.12.0"
 spin         = { path = "../../third_party/spin" }
 toml         = "0.8.10"
 
+[profile.release]
+codegen-units = 1
+lto = true

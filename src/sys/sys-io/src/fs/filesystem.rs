@@ -42,7 +42,7 @@ static FS: std::sync::atomic::AtomicPtr<FsHolder> =
     std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 pub fn fs() -> &'static mut Box<dyn FileSystem> {
-    unsafe { &mut (*FS.load(std::sync::atomic::Ordering::Relaxed)).ptr }
+    unsafe { &mut (*FS.load(std::sync::atomic::Ordering::Acquire)).ptr }
 }
 
 pub fn init() {
@@ -115,6 +115,6 @@ pub fn init() {
     let holder = Box::leak(Box::new(FsHolder { ptr: fs.unwrap() }));
 
     assert!(FS
-        .swap(holder, std::sync::atomic::Ordering::Relaxed)
+        .swap(holder, std::sync::atomic::Ordering::AcqRel)
         .is_null());
 }

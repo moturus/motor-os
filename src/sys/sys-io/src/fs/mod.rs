@@ -26,7 +26,9 @@ fn set_temp_dir() {
     let dirname = dir.to_str().unwrap();
 
     if let Ok(_attr) = filesystem::fs().stat(dirname) {
-        filesystem::fs().delete_dir_all(dirname).unwrap();
+        filesystem::fs()
+            .delete_dir_all(dirname)
+            .expect("Failed to delete the temp dir.");
     }
 
     // Read-only FS can't create dirs, so we ignore errors.
