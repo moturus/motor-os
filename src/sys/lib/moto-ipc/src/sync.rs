@@ -139,7 +139,7 @@ impl RawChannel {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        core::intrinsics::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
         Ok(())
     }
 }

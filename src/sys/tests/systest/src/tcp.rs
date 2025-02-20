@@ -283,6 +283,7 @@ fn test_peek() {
 
             let mut buf = [0_u8; 1024];
             #[allow(clippy::needless_range_loop)]
+            #[allow(clippy::manual_slice_fill)]
             for pos in 0..buf.len() {
                 buf[pos] = (pos & 255) as u8;
             }
@@ -341,6 +342,7 @@ fn test_ipv6() {
 
             let mut buf = [0_u8; 1024];
             #[allow(clippy::needless_range_loop)]
+            #[allow(clippy::manual_slice_fill)]
             for pos in 0..buf.len() {
                 buf[pos] = (pos & 255) as u8;
             }
