@@ -10,6 +10,8 @@ use crate::util::{any_local_address, init};
 
 use self::TestState::{AfterRead, Initial};
 
+use mio_moturus as mio;
+
 const SERVER: Token = Token(0);
 const CLIENT: Token = Token(1);
 

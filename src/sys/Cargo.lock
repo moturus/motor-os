@@ -529,13 +529,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
-name = "mio"
+name = "mio-moturus"
 version = "1.0.2"
-source = "git+https://github.com/moturus/mio.git?branch=motor-os_20241121#81333b8e4106e8128bddecf0ada1d092bdf82dba"
+source = "git+https://github.com/moturus/mio.git?branch=motor-os_20250219#f45dccfdf8d68739effe968830c6793c45388226"
 dependencies = [
  "libc",
  "log",
- "moto-rt 0.2.6",
+ "moto-rt 0.2.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "wasi",
  "windows-sys 0.52.0",
 ]
@@ -545,7 +545,7 @@ name = "mio-test"
 version = "0.1.0"
 dependencies = [
  "log",
- "mio",
+ "mio-moturus",
  "moto-rt 0.2.7",
 ]
 
@@ -581,18 +581,18 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c5abaa54d2e595df1de490afe055456e1464e3ae656b218edf7b8c8e4506009"
-
-[[package]]
-name = "moto-rt"
 version = "0.2.7"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
+
+[[package]]
+name = "moto-rt"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd5b390ab0813d6420289dd3a5890f0543a9fcf6baf6f1dd9f099d222c2b2fb0"
 
 [[package]]
 name = "moto-sys"

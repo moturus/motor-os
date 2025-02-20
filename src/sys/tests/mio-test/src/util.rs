@@ -6,6 +6,7 @@ use std::sync::Once;
 use std::time::Duration;
 use std::{env, fmt, fs, io};
 
+use mio_moturus as mio;
 use log::{error, warn};
 use mio::event::Event;
 use mio::net::TcpStream;
