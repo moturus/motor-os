@@ -42,7 +42,7 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
     const MB: usize = 1024 * 1024;
     const DATA_PARTITION_SZ: usize = 64 * MB;
 
-    println!("creating SRFS in {:?}", result_path);
+    // println!("creating SRFS in {:?}", result_path);
     srfs::FileSystem::create_volume(result_path, (DATA_PARTITION_SZ as u64) / srfs::BLOCK_SIZE)
         .unwrap();
 
@@ -58,7 +58,7 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
 
         let mut new_file = filesystem.create_file(dst).unwrap();
 
-        println!("copying {:?} into {:?}", src, result_path);
+        // println!("copying {:?} into {:?}", src, result_path);
         let source_file = File::open(src).unwrap();
         let mut buf_reader = BufReader::new(source_file);
 
@@ -73,16 +73,16 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
         }
     }
 
-    println!("{:?} created (SRFS)", result_path);
+    // println!("{:?} created (SRFS)", result_path);
 }
 
 fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
-    println!("creating flatfs in {:?}", result);
+    // println!("creating flatfs in {:?}", result);
 
     let mut writer = flatfs::Writer::new();
 
     for (src, dst) in files {
-        println!("copying {:?} into {:?}", src, result);
+        // println!("copying {:?} into {:?}", src, result);
         let mut source_file = File::open(src).unwrap();
         let mut bytes: Vec<u8> = Vec::new();
         source_file.read_to_end(&mut bytes).unwrap();
@@ -100,7 +100,7 @@ fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
     o_file.write_all(&o_bytes).unwrap();
     o_file.flush().unwrap();
 
-    println!("{:?} created (flatfs)", result);
+    // println!("{:?} created (flatfs)", result);
 }
 
 #[repr(C)]
@@ -147,18 +147,20 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
     // Align kernel at 512 bytes.
     header.kernel_start = (header.kloader_end + 511) & !511;
     header.kernel_end = header.kernel_start + f_kernel.metadata().unwrap().len() as u32;
+    /*
     println!(
         "kernel start: {} end: {} size: {}",
         header.kernel_start,
         header.kernel_end,
         header.kernel_end - header.kernel_start
     );
+    */
 
     // Align sys-io at 4K.
     header.sys_io_start = (header.kernel_end + 4095) & !4095;
     header.sys_io_end = header.sys_io_start + f_sys_io.metadata().unwrap().len() as u32;
 
-    println!("header: {:#?}", header);
+    // println!("header: {:#?}", header);
     // Write the header.
     let header_bytes =
         unsafe { core::slice::from_raw_parts(initrd_header.as_ptr() as *const u8, 512) };
@@ -169,7 +171,7 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
         initrd.stream_position().unwrap() as u32
     );
 
-    println!("INITRD: {:x?}", header);
+    // println!("INITRD: {:x?}", header);
 
     // Write kloader.
     io::copy(&mut f_kloader, &mut initrd).unwrap();
@@ -247,7 +249,7 @@ fn write_partition(mbr: &mbrman::MBR, idx: usize, partition: &Path, disk: &mut F
     for _ in 0..tail {
         assert_eq!(1, disk.write(&[0]).unwrap());
     }
-    println!("written {written} bytes from {:?}", partition);
+    // println!("written {written} bytes from {:?}", partition);
 }
 
 fn create_mbr_disk(
@@ -258,7 +260,7 @@ fn create_mbr_disk(
     part3_fs: Option<&str>,
     result: &Path,
 ) {
-    println!("creating {:?}", result);
+    // println!("creating {:?}", result);
     let mut boot_sector = File::open(mbr).unwrap();
     let mut mbr = mbrman::MBR::read_from(&mut boot_sector, SECTOR_SIZE).unwrap();
 
@@ -287,7 +289,7 @@ fn create_mbr_disk(
     write_partition(&mbr, 2, part2, &mut disk);
     write_partition(&mbr, 3, part3, &mut disk);
 
-    println!("{:?} created", result);
+    // println!("{:?} created", result);
 }
 
 fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
