@@ -318,7 +318,7 @@ impl Process {
     pub(super) fn put_object(&self, handle: &SysHandle) -> Result<(), ()> {
         if let Some(obj) = {
             let mut objects = self.wait_objects.lock(line!());
-            objects.remove(handle).take()
+            objects.remove(handle)
         } {
             drop(obj);
             Ok(())

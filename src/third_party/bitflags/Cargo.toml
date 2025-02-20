@@ -58,3 +58,6 @@ version = "2.3"
 default = []
 example_generated = []
 rustc-dep-of-std = ["core", "compiler_builtins"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }

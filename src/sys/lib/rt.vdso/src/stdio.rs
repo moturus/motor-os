@@ -89,7 +89,7 @@ impl StdioImpl {
         let to_copy = buf.len().min(self.overflow.len());
         if to_copy > 0 {
             unsafe {
-                core::intrinsics::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     self.overflow.as_ptr(),
                     buf.as_mut_ptr(),
                     to_copy,
@@ -270,7 +270,6 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
         drop(Box::from_raw(thread_arg as *mut RelayArg));
         local_copy.release(SysHandle::SELF);
     })
-    .map(SysHandle::from)
 }
 
 pub fn init() {

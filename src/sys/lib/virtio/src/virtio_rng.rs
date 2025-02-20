@@ -1,5 +1,5 @@
 use super::virtio_device::VirtioDevice;
-use spin::Mutex;
+use crate::spin::Mutex;
 
 static RNG: Mutex<Option<Rng>> = Mutex::new(None);
 

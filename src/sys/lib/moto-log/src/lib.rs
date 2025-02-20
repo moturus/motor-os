@@ -58,7 +58,7 @@ struct BasicLogger {
     _tag: String,
     tag_id: u64,
     enabled: AtomicBool,
-    conn: spin::Mutex<ClientConnection>,
+    conn: std::sync::Mutex<ClientConnection>,
 }
 
 impl Drop for BasicLogger {
@@ -72,7 +72,7 @@ static BASIC_LOGGER: AtomicUsize = AtomicUsize::new(0);
 impl log::Log for BasicLogger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            let mut conn = self.conn.lock();
+            let mut conn = self.conn.lock().unwrap();
             implementation::LogRequest::prepare(conn.data_mut(), self.tag_id, record);
             if conn.do_rpc(None).is_err()
                 || implementation::LogResponse::parse(conn.data()).is_err()
@@ -110,7 +110,7 @@ pub fn init(tag: &str) -> Result<(), StdError> {
         _tag: tag.to_owned(),
         tag_id,
         enabled: AtomicBool::new(true),
-        conn: spin::Mutex::new(conn),
+        conn: std::sync::Mutex::new(conn),
     }));
 
     assert_eq!(
@@ -133,7 +133,7 @@ pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
             }
         };
 
-    let mut conn = logger.conn.lock();
+    let mut conn = logger.conn.lock().unwrap();
     GetTailEntriesRequest::prepare(
         conn.data_mut(),
         implementation::level_as_u8(log::Level::Trace),

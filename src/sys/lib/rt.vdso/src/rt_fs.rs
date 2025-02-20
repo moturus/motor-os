@@ -663,7 +663,7 @@ impl FsClient {
 
         unsafe {
             let bytes = raw_channel.get_bytes(resp.data.as_ptr(), result_sz)?;
-            core::intrinsics::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr(), result_sz);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr(), result_sz);
             file.pos.fetch_add(result_sz as u64, Ordering::Relaxed);
             Ok(result_sz)
         }

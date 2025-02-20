@@ -299,7 +299,7 @@ dependencies = [
  "compiler_builtins",
  "rand",
  "rustc-std-workspace-core",
- "spin 0.9.8",
+ "spin",
  "talc",
 ]
 
@@ -568,7 +568,6 @@ dependencies = [
  "moto-ipc",
  "moto-rt 0.2.7",
  "moto-sys",
- "spin 0.5.2",
 ]
 
 [[package]]
@@ -621,7 +620,6 @@ version = "0.2.0"
 dependencies = [
  "log",
  "moto-sys",
- "spin 0.5.2",
 ]
 
 [[package]]
@@ -845,10 +843,6 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.5.2"
-
-[[package]]
-name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
@@ -935,7 +929,6 @@ dependencies = [
  "moto-virtio",
  "serde",
  "smoltcp",
- "spin 0.5.2",
  "srfs",
  "toml",
 ]

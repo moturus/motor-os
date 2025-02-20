@@ -16,3 +16,6 @@ rustc-dep-of-std = [
     "compiler_builtins",
     "core",
 ]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }

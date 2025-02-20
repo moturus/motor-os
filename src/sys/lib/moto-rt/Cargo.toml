@@ -28,4 +28,4 @@ rustc-dep-of-std = [
 ]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }
+unexpected_cfgs = { level = "allow", check-cfg = [ 'cfg(test)'] }

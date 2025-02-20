@@ -79,7 +79,7 @@ fn get_process_name(pid: u64) -> Result<String, moto_rt::ErrorCode> {
         return Err(moto_rt::E_INTERNAL_ERROR);
     }
     .split('/')
-    .last()
+    .next_back()
     .unwrap();
     Ok(filename.to_owned())
 }

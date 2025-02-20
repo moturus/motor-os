@@ -8,7 +8,7 @@ use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use super::BLOCK_SIZE;
 use super::BLOCK_SIZE_LOG2;
-use spin::Mutex;
+use crate::spin::Mutex;
 
 /*
  *  VIRTIO_BLK_F_SIZE_MAX (1) Maximum size of any single segment is in size_max.

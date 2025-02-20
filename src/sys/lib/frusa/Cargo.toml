@@ -20,3 +20,6 @@ spin = "0.9.8"
 
 [features]
 rustc-dep-of-std = ["core", "compiler_builtins"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }

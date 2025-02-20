@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod pci;
+mod spin;
 mod virtio_blk;
 mod virtio_device;
 pub mod virtio_net;

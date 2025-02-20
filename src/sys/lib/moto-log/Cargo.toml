@@ -9,7 +9,6 @@ edition = "2021"
 moto-ipc = { path = "../../lib/moto-ipc" }
 moto-rt  = { path = "../../lib/moto-rt"  }
 moto-sys = { path = "../../lib/moto-sys" }
-spin = { path = "../../../third_party/spin"}
 
 log = "0.4.21"
 

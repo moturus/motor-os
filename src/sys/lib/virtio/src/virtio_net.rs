@@ -109,7 +109,7 @@ impl Drop for NetDev {
 
 unsafe impl Send for NetDev {}
 
-static NET_DEVICES: spin::Mutex<Vec<NetDev>> = spin::Mutex::new(Vec::new());
+static NET_DEVICES: crate::spin::Mutex<Vec<NetDev>> = crate::spin::Mutex::new(Vec::new());
 
 impl NetDev {
     const VIRTQ_RX: usize = 0;

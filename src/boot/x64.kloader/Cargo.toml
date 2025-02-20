@@ -10,7 +10,6 @@ acpi      = { path = "../../third_party/acpi"      }
 bitflags  = { path = "../../third_party/bitflags"  }
 elfloader = { path = "../../third_party/elfloader" }
 rsdp      = { path = "../../third_party/rsdp"      }
-spin      = { path = "../../third_party/spin"      }
 x86       = { path = "../../third_party/x86"       }
 x86_64    = { path = "../../third_party/x86_64"    }
 

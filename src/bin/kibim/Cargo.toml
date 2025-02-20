@@ -21,3 +21,6 @@ panic = "abort"
 lto = "fat"
 strip = true
 codegen-units = 1
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [ 'cfg(test)'] }
