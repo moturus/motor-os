@@ -30,3 +30,6 @@ replace = "## Unreleased\n\n# {{version}} – {{date}}"
 search = "## Unreleased"
 
 [dependencies]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }

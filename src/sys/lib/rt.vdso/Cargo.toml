@@ -39,7 +39,3 @@ netdev = []
 
 [lints.rust]
 unexpected_cfgs = { level = 'allow', check-cfg = [ 'cfg(test)'] }
-
-[profile.release]
-codegen-units = 1
-lto = true

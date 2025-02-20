@@ -157,6 +157,7 @@ fn format_size(n: u64) -> String {
     }
     // i is the largest value such that 1024 ^ i < n
     // To find i we compute the smallest b such that n <= 1024 ^ b and subtract 1 from it
+    #[allow(clippy::manual_div_ceil)]
     let i = (64 - n.leading_zeros() + 9) / 10 - 1;
     // Compute the size with two decimal places (rounded down) as the last two digits of q
     // This avoid float formatting reducing the binary size

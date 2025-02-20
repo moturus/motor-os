@@ -84,3 +84,6 @@ nightly = [
     "doc_cfg",
 ]
 step_trait = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }

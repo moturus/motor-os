@@ -75,7 +75,9 @@ impl Row {
                     c.into()
                 }),
             );
+            #[allow(clippy::manual_repeat_n)]
             self.cx2rx.extend(std::iter::repeat(rx).take(c.len_utf8()));
+            #[allow(clippy::manual_repeat_n)]
             self.rx2cx.extend(std::iter::repeat(cx).take(n_rend_chars));
             (rx, cx) = (rx + n_rend_chars, cx + c.len_utf8());
         }
@@ -116,6 +118,7 @@ impl Row {
             };
 
             if hl_state == HlState::Normal && syntax.sl_comment_start.iter().any(|s| find_str(s)) {
+                #[allow(clippy::manual_repeat_n)]
                 self.hl.extend(repeat(HlType::Comment).take(line.len() - i));
                 continue;
             }
@@ -134,6 +137,7 @@ impl Row {
                     if hl_state == *mstate {
                         if find_str(end) {
                             // Highlight the remaining symbols of the multi line comment end
+                            #[allow(clippy::manual_repeat_n)]
                             self.hl.extend(repeat(mtype).take(end.len()));
                             hl_state = HlState::Normal;
                         } else {
@@ -142,6 +146,7 @@ impl Row {
                         continue 'syntax_loop;
                     } else if hl_state == HlState::Normal && find_str(start) {
                         // Highlight the remaining symbols of the multi line comment start
+                        #[allow(clippy::manual_repeat_n)]
                         self.hl.extend(repeat(mtype).take(start.len()));
                         hl_state = *mstate;
                         continue 'syntax_loop;
@@ -183,6 +188,7 @@ impl Row {
                 let s_filter = |kw: &str| line.get(i + kw.len()).is_none_or(|c| is_sep(*c));
                 for (keyword_highlight_type, kws) in &syntax.keywords {
                     for keyword in kws.iter().filter(|kw| find_str(kw) && s_filter(kw)) {
+                        #[allow(clippy::manual_repeat_n)]
                         self.hl
                             .extend(repeat(*keyword_highlight_type).take(keyword.len()));
                     }
