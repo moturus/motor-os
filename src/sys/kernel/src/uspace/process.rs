@@ -1178,6 +1178,7 @@ impl Thread {
             user_tcb.user_version = 0;
             user_tcb.self_handle = self.self_handle.as_u64();
             user_tcb.self_tid = self.tid.as_u64();
+            user_tcb.stack_guard = Self::USER_TCB_GUARD;
             user_tcb.tls = 0;
             user_tcb.current_cpu.store(0, Ordering::Relaxed);
             user_tcb.reserved0 = [0; 3];

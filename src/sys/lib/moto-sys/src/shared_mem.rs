@@ -91,6 +91,7 @@ pub struct UserThreadControlBlock {
     pub tls: u64,            // TLS. For userspace use.
     pub self_handle: u64,    // Used to wake this thread.
     pub self_tid: u64,       // This thread's tid.
+    pub stack_guard: u64,    // fs:0x28 - this is what stack protectors use.
     pub current_cpu: core::sync::atomic::AtomicU32,
     pub reserved0: [u8; 3],
     pub name_len: u8,
