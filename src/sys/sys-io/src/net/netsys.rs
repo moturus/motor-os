@@ -1988,7 +1988,7 @@ impl IoSubsystem for NetSys {
 
     fn dump_state(&mut self) {
         for socket in self.tcp_sockets.values() {
-            socket.domp_state();
+            socket.dump_state();
         }
     }
 }

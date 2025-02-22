@@ -81,11 +81,11 @@ impl Drop for MotoSocket {
 
 impl MotoSocket {
     #[allow(unused)]
-    pub(super) fn domp_state(&self) {
+    pub(super) fn dump_state(&self) {
         log::warn!(
             "socket: id {} conn 0x{:x} txq len: {}",
-            self.conn.wait_handle().as_u64(),
             self.id.0,
+            self.conn.wait_handle().as_u64(),
             self.tx_queue.len()
         );
     }
