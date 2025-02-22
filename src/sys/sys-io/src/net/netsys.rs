@@ -24,6 +24,9 @@ const MAX_NUM_LISTENING_SOCKETS: usize = 32;
 // How many concurrent connections per listener (any SocketAddr) to allow.
 const _DEFAULT_MAX_CONNECTIONS_PER_LISTENER: usize = 16;
 
+// TODO: make this configurable.
+const MAX_TCP_SOCKET_CACHE_SIZE: usize = 32;
+
 pub(super) struct NetSys {
     devices: Vec<NetDev>, // Never changes, as device_idx references inside here.
     wait_handles: HashMap<SysHandle, usize>, // Handle -> idx in self.devices.
@@ -681,7 +684,9 @@ impl NetSys {
     fn put_unused_tcp_socket(&mut self, socket: smoltcp::socket::tcp::Socket<'static>) {
         debug_assert_eq!(socket.state(), smoltcp::socket::tcp::State::Closed);
         // TODO: limit the size of the cache (i.e. drop socket if the cache is too large).
-        self.tcp_socket_cache.push(socket);
+        if self.tcp_socket_cache.len() < MAX_TCP_SOCKET_CACHE_SIZE {
+            self.tcp_socket_cache.push(socket);
+        }
     }
 
     fn tcp_stream_connect(
