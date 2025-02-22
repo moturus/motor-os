@@ -1837,6 +1837,17 @@ impl TcpStream {
             // Clear RXQ.
             let mut rxq = self.recv_queue.lock();
             while let Some(msg) = rxq.pop_front() {
+                if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+                    let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+                    match new_state {
+                        TcpState::Closed => {
+                            // Deal only with TX closure: RX closing will happen later.
+                            self.mark_tx_done();
+                        }
+                        _ => panic!("Unexpected TcpState {:?}", new_state),
+                    }
+                    continue;
+                }
                 assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
                 let sz_read = msg.payload.args_64()[1];
                 if sz_read > 0 {
