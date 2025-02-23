@@ -5,7 +5,7 @@ use core::net::Ipv6Addr;
 use core::net::SocketAddr;
 use moto_ipc::io_channel;
 
-pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX;
+pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX; // 4352 == 0x1100
 
 pub const CMD_TCP_LISTENER_BIND: u16 = CMD_MIN; // + 0;
 pub const CMD_TCP_LISTENER_ACCEPT: u16 = CMD_MIN + 1;
@@ -21,9 +21,38 @@ pub const CMD_TCP_STREAM_SET_OPTION: u16 = CMD_MIN + 9;
 pub const CMD_TCP_STREAM_GET_OPTION: u16 = CMD_MIN + 10;
 pub const CMD_TCP_STREAM_CLOSE: u16 = CMD_MIN + 11;
 
-pub const CMD_MAX: u16 = CMD_TCP_STREAM_CLOSE;
+pub const EVT_TCP_STREAM_STATE_CHANGED: u16 = CMD_MIN + 12;
+pub const CMD_MAX: u16 = EVT_TCP_STREAM_STATE_CHANGED;
 
-pub const EVT_TCP_STREAM_STATE_CHANGED: u16 = CMD_MIN;
+#[derive(Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum NetCmd {
+    TcpListenerBind = CMD_MIN,
+    TcpListenerAccept,
+    TcpListenerSetOption,
+    TcpListenerGetOption,
+    TcpListenerDrop,
+    TcpStreamConnect,
+    TcpStreamTx,
+    TcpStreamRx,
+    TcpStreamRxAck,
+    TcpStreamSetOption,
+    TcpStreamGetOption,
+    TcpStreamClose,
+    EvtTcpStreamStateChanged,
+}
+
+const _NET_CMD_CHECK: () = assert!(CMD_MAX == NetCmd::EvtTcpStreamStateChanged as u16);
+
+impl NetCmd {
+    pub fn try_from(val: u16) -> Result<Self, u16> {
+        if !(CMD_MIN..=CMD_MAX).contains(&val) {
+            return Err(val);
+        }
+
+        Ok(unsafe { core::mem::transmute::<u16, Self>(val) })
+    }
+}
 
 pub const TCP_OPTION_SHUT_RD: u64 = 1 << 0;
 pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
