@@ -12,7 +12,7 @@ use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_net::{self, TcpState};
 
 use super::socket::SocketId;
-use super::socket::{MotoSocket, TxDoneAction};
+use super::socket::{DeferredAction, MotoSocket};
 use super::tcp_listener::TcpListener;
 use super::tcp_listener::TcpListenerId;
 use super::RxBuf;
@@ -44,7 +44,7 @@ pub(super) struct NetSys {
     socket_ids: std::collections::BTreeSet<SocketId>,
 
     // If we can't allocate an IO buffer (page) for RX for a socket, the socket is placed here.
-    pending_tcp_rx: VecDeque<SocketId>,
+    deferred_action_sockets: VecDeque<SocketId>,
 
     // "Empty" sockets cached here.
     tcp_socket_cache: Vec<smoltcp::socket::tcp::Socket<'static>>,
@@ -72,7 +72,7 @@ impl NetSys {
             tcp_listeners: HashMap::new(),
             tcp_sockets: HashMap::new(),
             socket_ids: std::collections::BTreeSet::new(),
-            pending_tcp_rx: VecDeque::new(),
+            deferred_action_sockets: VecDeque::new(),
             tcp_socket_cache: Vec::new(),
             pending_completions: VecDeque::new(),
             conn_tcp_listeners: HashMap::new(),
@@ -348,11 +348,10 @@ impl NetSys {
             connect_req: None,
             ephemeral_port: None,
             tx_queue: VecDeque::new(),
-            tx_done_action: None,
+            deferred_action: None,
             rx_seq: 0,
             rx_ack: u64::MAX,
             state: TcpState::Closed,
-            rx_closed_notified: false,
             subchannel_mask: u64::MAX,
             listening_on: None,
             replacement_listener_created: false,
@@ -386,21 +385,20 @@ impl NetSys {
     }
 
     fn drop_tcp_socket(&mut self, socket_id: SocketId) {
-        // Note: cancel_tcp_tx may call drop_tcp_socket recursively (once).
-        self.cancel_tcp_tx(socket_id);
-
-        // First, abort the connection without removing the socket from
-        // self.tcp_sockets, as this may call self.cancel_tcp_tx(),
-        // which will panic if the socket is not found. Yes, we could
-        // change cancel_tcp_tx() to not panic if the socket is not found,
-        // but this will introduce some haziness to the code, and it is
-        // better to keep it tight.
         let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
             s
         } else {
-            // cancel_tcp_tx() dropped the socket already.
+            log::error!("drop_tcp_socket: 0x{:x}: no socket", u64::from(socket_id));
             return;
         };
+        moto_socket.tx_queue.clear();
+        log::debug!(
+            "dropping TCP socket 0x{:x}; RX done: {} TX done: {}",
+            u64::from(socket_id),
+            moto_socket.stats_rx_bytes,
+            moto_socket.stats_tx_bytes
+        );
+        // moto_rt::error::log_backtrace(0);
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -466,9 +464,7 @@ impl NetSys {
         self.put_unused_tcp_socket(smol_socket);
         #[cfg(debug_assertions)]
         log::debug!(
-            "{}:{} dropped tcp socket {}; {} active sockets.",
-            file!(),
-            line!(),
+            "dropped tcp socket 0x{:x}; {} active sockets.",
             u64::from(socket_id),
             self.tcp_sockets.len()
         );
@@ -795,13 +791,23 @@ impl NetSys {
         // Validate that the socket belongs to the connection.
         if let Some(socks) = self.conn_tcp_sockets.get(&conn_handle) {
             if !socks.contains(&socket_id) {
-                log::debug!("{}:{} bad socket", file!(), line!());
+                log::debug!(
+                    "{}:{} bad socket 0x{:x}",
+                    file!(),
+                    line!(),
+                    u64::from(socket_id)
+                );
                 let mut err = *sqe;
-                err.status = moto_rt::E_INVALID_ARGUMENT;
+                err.status = moto_rt::E_NOT_FOUND;
                 return Err(err);
             }
         } else {
-            log::debug!("{}:{} bad socket", file!(), line!());
+            log::debug!(
+                "{}:{} bad socket 0x{:x}",
+                file!(),
+                line!(),
+                u64::from(socket_id)
+            );
             let mut err = *sqe;
             err.status = moto_rt::E_INVALID_ARGUMENT;
             return Err(err);
@@ -877,7 +883,8 @@ impl NetSys {
     ) -> Result<(), ()> {
         let socket_id = match self.tcp_socket_from_msg(conn.wait_handle(), &msg) {
             Ok(s) => s,
-            Err(_) => return Err(()),
+            // Err(_) => return Err(()),
+            Err(_) => return Ok(()), // The socket was dropped.
         };
 
         // Validate that the socket belongs to the connection.
@@ -988,10 +995,6 @@ impl NetSys {
             return sqe;
         }
 
-        let smol_socket = self.devices[moto_socket.device_idx]
-            .sockets
-            .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
-
         match moto_socket.state {
             TcpState::Connecting => unreachable!(), // We eliminated this option above.
             TcpState::Listening | TcpState::PendingAccept => {
@@ -999,32 +1002,27 @@ impl NetSys {
             }
             TcpState::ReadWrite => {
                 if shut_rd && shut_wr {
-                    moto_socket.state = TcpState::Closed;
-                    sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    self.finalize_tcp_tx(socket_id, TxDoneAction::Close);
+                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                    self.deferred_action_sockets.push_back(socket_id);
                 } else if shut_rd {
-                    moto_socket.state = TcpState::WriteOnly;
-                    sqe.payload.args_32_mut()[5] = moto_socket.state.into();
+                    moto_socket.deferred_action = Some(DeferredAction::CloseRd);
+                    self.deferred_action_sockets.push_back(socket_id);
                 } else {
                     assert!(shut_wr);
-                    moto_socket.state = TcpState::ReadOnly;
-                    sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    self.finalize_tcp_tx(socket_id, TxDoneAction::CloseWr);
+                    moto_socket.deferred_action = Some(DeferredAction::CloseWr);
+                    self.deferred_action_sockets.push_back(socket_id);
                 }
             }
             TcpState::ReadOnly => {
                 if shut_rd {
-                    moto_socket.state = TcpState::Closed;
-                    sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    smol_socket.close();
+                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                    self.deferred_action_sockets.push_back(socket_id);
                 }
             }
             TcpState::WriteOnly => {
                 if shut_wr {
-                    assert!(moto_socket.tx_queue.is_empty());
-                    moto_socket.state = TcpState::Closed;
-                    sqe.payload.args_32_mut()[5] = moto_socket.state.into();
-                    self.finalize_tcp_tx(socket_id, TxDoneAction::Close);
+                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                    self.deferred_action_sockets.push_back(socket_id);
                 }
             }
             TcpState::Closed => {}
@@ -1106,7 +1104,14 @@ impl NetSys {
             line!(),
             u64::from(socket_id)
         );
-        self.finalize_tcp_tx(socket_id, TxDoneAction::Drop);
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        moto_socket.deferred_action = Some(DeferredAction::Close);
+
+        // We cannot call self.maybe_complete_deferred_action(socket_id) here
+        // because we need to respond to the close request synchronously, and
+        // the method above pushes sqes to the user.
+        self.deferred_action_sockets.push_back(socket_id);
+
         sqe.status = moto_rt::E_OK;
         Some(sqe)
     }
@@ -1262,6 +1267,11 @@ impl NetSys {
         cqe.handle = moto_socket.id.into();
         api_net::put_socket_addr(&mut cqe.payload, &local_addr);
         cqe.status = moto_rt::E_OK;
+        log::debug!(
+            "on_socket_connected 0x{:x} {:?} -> ...",
+            u64::from(socket_id),
+            local_addr
+        );
         self.pending_completions.push_back(PendingCompletion {
             msg: cqe,
             endpoint_handle: moto_socket.conn.wait_handle(),
@@ -1302,7 +1312,7 @@ impl NetSys {
             Some(s) => s,
             None => return,
         };
-        let mut smol_socket = self.devices[moto_socket.device_idx]
+        let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
 
@@ -1310,11 +1320,9 @@ impl NetSys {
         smol_socket.register_recv_waker(&waker);
         smol_socket.register_send_waker(&waker);
 
-        let may_send = smol_socket.may_send();
         let can_recv = smol_socket.can_recv();
         let can_send = smol_socket.can_send();
         let smol_state = smol_socket.state();
-        let rx_done = moto_socket.rx_closed_notified;
 
         if moto_socket.state == TcpState::Listening
             && smol_socket.state() != smoltcp::socket::tcp::State::Listen
@@ -1327,7 +1335,7 @@ impl NetSys {
             moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
         }
 
-        let mut moto_state = moto_socket.state;
+        let moto_state = moto_socket.state;
 
         /*
           RFC 793: https://datatracker.ietf.org/doc/html/rfc793
@@ -1428,19 +1436,19 @@ impl NetSys {
             smoltcp::socket::tcp::State::Established => {
                 if moto_socket.state == TcpState::Listening {
                     if !self.on_tcp_listener_connected(socket_id) {
-                        return; // Cannot do I/O.
+                        return; // Cannot do I/O yet: need the user to accept the connection.
                     }
                 } else if moto_socket.state == TcpState::Connecting {
                     self.on_socket_connected(socket_id);
                 } else if moto_socket.state == TcpState::PendingAccept {
-                    return; // Cannot do I/O.
+                    return; // Cannot do I/O: the above.
                 }
             }
 
-            // Local TX closed.
-            smoltcp::socket::tcp::State::FinWait1 => match moto_socket.state {
+            // Local TX closed (by a local action).
+            smoltcp::socket::tcp::State::FinWait1 => match moto_state {
                 TcpState::Connecting => {
-                    self.on_connect_failed(socket_id);
+                    self.on_connect_failed(socket_id); // Drops the socket.
                     return;
                 }
                 TcpState::Listening | TcpState::PendingAccept => {
@@ -1448,17 +1456,17 @@ impl NetSys {
                     return;
                 }
                 TcpState::WriteOnly => {
-                    moto_socket.state = TcpState::Closed;
-                    moto_state = moto_socket.state;
-                    log::warn!("remote closed");
-                    self.notify_socket_state_changed(socket_id);
+                    log::debug!(
+                        "socket 0x{:x} WriteOnly => (deferred) Close",
+                        u64::from(socket_id)
+                    );
+                    moto_socket.deferred_action = Some(DeferredAction::Close);
                 }
                 TcpState::ReadWrite => {
-                    moto_socket.state = TcpState::ReadOnly;
-                    self.finalize_tcp_tx(socket_id, TxDoneAction::CloseWr);
+                    moto_socket.deferred_action = Some(DeferredAction::CloseWr);
                 }
-                TcpState::ReadOnly | TcpState::Closed => {}
-                TcpState::_Max => panic!(),
+                TcpState::ReadOnly => {}
+                _ => panic!("Unexpected TcpState {:?}", moto_socket.state),
             },
 
             // The remote socket has closed its write end; we can still
@@ -1471,87 +1479,50 @@ impl NetSys {
                     self.drop_tcp_socket(socket_id);
                     return;
                 }
-                // Trigger rx_done in via do_tcp_rx() below.
-                TcpState::ReadOnly => moto_socket.state = TcpState::Closed,
-                // Trigger rx_done in via do_tcp_rx() below.
-                TcpState::ReadWrite => moto_socket.state = TcpState::WriteOnly,
+                TcpState::ReadOnly => {
+                    log::debug!(
+                        "socket 0x{:x} ReadOnly => (deferred) Close",
+                        u64::from(socket_id)
+                    );
+                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                }
+                TcpState::ReadWrite => {
+                    moto_socket.deferred_action = Some(DeferredAction::CloseRd);
+                }
                 // Nothing to do.
-                TcpState::Closed | TcpState::WriteOnly => {}
-                TcpState::_Max => panic!(),
+                TcpState::WriteOnly => {}
+                _ => panic!("Unexpected TcpState {:?}", moto_state),
             },
 
-            smoltcp::socket::tcp::State::Closed => match moto_socket.state {
+            smoltcp::socket::tcp::State::Closed => match moto_state {
                 TcpState::Connecting => {
-                    self.on_connect_failed(socket_id);
+                    self.on_connect_failed(socket_id); // Will drop the socket.
                     return;
                 }
                 TcpState::Listening | TcpState::PendingAccept => {
                     self.drop_tcp_socket(socket_id);
                     return;
                 }
-                TcpState::ReadOnly | TcpState::ReadWrite | TcpState::WriteOnly => {
-                    moto_socket.state = TcpState::Closed;
-                    moto_state = moto_socket.state;
-                    // log::warn!("remote closed");
-                    self.notify_socket_state_changed(socket_id);
+                TcpState::WriteOnly | TcpState::ReadOnly | TcpState::ReadWrite => {
+                    log::debug!("socket 0x{:x} => (deferred) Close", u64::from(socket_id));
+                    moto_socket.deferred_action = Some(DeferredAction::Close);
                 }
-                TcpState::Closed => {}
-                TcpState::_Max => panic!(),
+                _ => panic!("Unexpected TcpState {:?}", moto_state),
             },
             smoltcp::socket::tcp::State::FinWait2
             | smoltcp::socket::tcp::State::Closing
             | smoltcp::socket::tcp::State::LastAck
-            | smoltcp::socket::tcp::State::TimeWait => {
-                assert!(
-                    moto_socket.state == TcpState::ReadOnly
-                        || moto_socket.state == TcpState::Closed
-                );
-            }
+            | smoltcp::socket::tcp::State::TimeWait => {}
         }
 
-        // #[cfg(debug_assertions)]
-        // if state != smoltcp::socket::tcp::State::Established {
-        //     log::debug!(
-        //         "socket state: {:?} for socket 0x{:x} can_recv: {:?} moto state: {:?}",
-        //         state,
-        //         u64::from(socket_id),
-        //         can_recv,
-        //         dbg_moto_state
-        //     );
-        // }
-
-        if can_recv || !rx_done {
+        if can_recv {
             self.do_tcp_rx(socket_id);
-        } else {
-            match moto_state {
-                TcpState::ReadOnly => {
-                    moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-                    smol_socket = self.devices[moto_socket.device_idx]
-                        .sockets
-                        .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
-                    smol_socket.close();
-                    moto_socket.state = TcpState::Closed;
-                    log::warn!("RX closed: {:?} {:?}", smol_state, moto_state);
-                    self.notify_socket_state_changed(socket_id);
-                }
-                TcpState::ReadWrite => {
-                    let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-                    // MIO tests that local writes succeed, and that remote reads succeed.
-                    moto_socket.state = TcpState::WriteOnly;
-                    log::warn!("RX closed: {:?} {:?}", smol_state, moto_state);
-                    self.notify_rx_done(socket_id);
-                }
-
-                TcpState::WriteOnly | TcpState::Closed => {}
-                _ => panic!("unexpected state: {:?}/{:?}", smol_state, moto_state),
-            }
         }
-
         if can_send {
             self.do_tcp_tx(socket_id);
-        } else if !may_send {
-            self.cancel_tcp_tx(socket_id);
         }
+
+        self.maybe_complete_deferred_action(socket_id);
     }
 
     fn process_polled_sockets(&mut self) {
@@ -1567,8 +1538,8 @@ impl NetSys {
     }
 
     fn notify_socket_state_changed(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get(&socket_id).unwrap();
-        assert_eq!(moto_socket.state, TcpState::Closed);
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+
         let mut msg = io_channel::Msg::new();
         msg.command = api_net::EVT_TCP_STREAM_STATE_CHANGED;
         msg.handle = moto_socket.id.into();
@@ -1581,19 +1552,125 @@ impl NetSys {
         });
     }
 
-    fn do_tcp_rx(&mut self, socket_id: SocketId) {
-        let moto_socket = if let Some(socket) = self.tcp_sockets.get_mut(&socket_id) {
-            socket
-        } else {
-            // The socket may have been closed/removed while sitting on self.pending_tcp_rx.
-            log::debug!(
-                "{}:{} do_tcp_rx: no socket 0x{:x}",
-                file!(),
-                line!(),
-                u64::from(socket_id)
-            );
+    fn maybe_complete_deferred_action(&mut self, socket_id: SocketId) {
+        let Some(moto_socket) = self.tcp_sockets.get_mut(&socket_id) else {
+            // Deferred action sockets may get enqueued more than once.
             return;
         };
+
+        let Some(deferred_action) = moto_socket.deferred_action.as_ref() else {
+            return;
+        };
+        let deferred_action = *deferred_action;
+
+        log::debug!(
+            "deferred action socket 0x{:x} {:?}",
+            u64::from(socket_id),
+            deferred_action
+        );
+        let smol_socket = self.devices[moto_socket.device_idx]
+            .sockets
+            .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
+
+        let may_send = smol_socket.may_send();
+
+        match deferred_action {
+            DeferredAction::CloseRd => {
+                if smol_socket.recv_queue() > 0 {
+                    self.deferred_action_sockets.push_back(socket_id);
+                    return; // Not yet.
+                }
+                match moto_socket.state {
+                    TcpState::ReadWrite => moto_socket.state = TcpState::WriteOnly,
+                    TcpState::ReadOnly => moto_socket.state = TcpState::Closed,
+
+                    // The user can close the read half locally in Rust (shutdown(read)),
+                    // but this has no equivalent in low-level TCP states, so when
+                    // the remote socket calls close(), we generate CloseRd deferred action.
+                    TcpState::WriteOnly => return,
+                    _ => panic!(
+                        "unexpected socket state {:?} for socket 0x{:x}",
+                        moto_socket.state,
+                        u64::from(socket_id)
+                    ),
+                }
+            }
+            DeferredAction::CloseWr => {
+                if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
+                    self.deferred_action_sockets.push_back(socket_id);
+                    return; // Not yet.
+                }
+                match moto_socket.state {
+                    TcpState::ReadWrite => moto_socket.state = TcpState::ReadOnly,
+                    TcpState::WriteOnly => moto_socket.state = TcpState::Closed,
+                    _ => panic!(
+                        "unexpected socket state {:?} for socket 0x{:x}",
+                        moto_socket.state,
+                        u64::from(socket_id)
+                    ),
+                }
+                smol_socket.close();
+            }
+            DeferredAction::Close => {
+                if smol_socket.recv_queue() > 0 {
+                    self.deferred_action_sockets.push_back(socket_id);
+                    log::debug!(
+                        "deferred action socket 0x{:x} {:?} - not yet: recv: {} send: {} smol state: {:?}",
+                        u64::from(socket_id),
+                        deferred_action,
+                        smol_socket.recv_queue(),
+                        smol_socket.send_queue(),
+                        smol_socket.state()
+                    );
+                    return; // Not yet.
+                }
+                if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
+                    self.deferred_action_sockets.push_back(socket_id);
+                    log::debug!(
+                        "deferred action socket 0x{:x} {:?} - not yet; state: {:?} smol state: {:?}",
+                        u64::from(socket_id),
+                        deferred_action,
+                        moto_socket.state,
+                        smol_socket.state()
+                    );
+                    return; // Not yet.
+                }
+                assert_ne!(moto_socket.state, TcpState::Closed);
+                moto_socket.state = TcpState::Closed;
+            }
+        }
+
+        moto_socket.deferred_action = None;
+
+        let moto_state = moto_socket.state;
+        if moto_state == TcpState::Closed {
+            self.notify_socket_state_changed(socket_id);
+            self.drop_tcp_socket(socket_id); // Will abort smol_socket.
+            return;
+        }
+
+        let smol_state = smol_socket.state();
+        let may_send = smol_socket.may_send();
+
+        if !moto_state.can_write() && may_send {
+            smol_socket.close();
+        }
+
+        self.notify_socket_state_changed(socket_id);
+
+        if smol_state == smoltcp::socket::tcp::State::Closed {
+            // We won't poll the smol socket, as it is closed, so we need
+            // to manually poll it via deferred_action_sockets.
+            self.deferred_action_sockets.push_back(socket_id);
+        }
+    }
+
+    fn do_tcp_rx(&mut self, socket_id: SocketId) {
+        let Some(moto_socket) = self.tcp_sockets.get_mut(&socket_id) else {
+            // Deferred action sockets may get enqueued more than once.
+            return;
+        };
+
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -1601,17 +1678,6 @@ impl NetSys {
         if moto_socket.rx_ack == u64::MAX
             || (moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT))
         {
-            // #[cfg(debug_assertions)]
-            // if moto_socket.rx_ack != u64::MAX {
-            //     log::debug!(
-            //         "{}:{} TCP RX: stuck seq: {} ack: {} state: {:?}",
-            //         file!(),
-            //         line!(),
-            //         moto_socket.rx_seq,
-            //         moto_socket.rx_ack,
-            //         moto_socket.state
-            //     );
-            // }
             return;
         }
 
@@ -1621,16 +1687,7 @@ impl NetSys {
                 Ok(page) => page,
                 Err(err) => {
                     assert_eq!(err, moto_rt::E_NOT_READY);
-                    self.pending_tcp_rx.push_back(socket_id);
-                    // #[cfg(debug_assertions)]
-                    // log::debug!(
-                    //     "{}:{} do_tcp_rx: alloc error for socket 0x{:x} mask 0x{:x}",
-                    //     file!(),
-                    //     line!(),
-                    //     u64::from(socket_id),
-                    //     moto_socket.subchannel_mask
-                    // );
-                    // moto_socket.conn.dump_state();
+                    self.deferred_action_sockets.push_back(socket_id);
                     return;
                 }
             };
@@ -1651,15 +1708,6 @@ impl NetSys {
 
             smol_socket.recv(&mut receive_closure).unwrap();
 
-            // #[cfg(debug_assertions)]
-            // log::warn!(
-            //     "{}:{} TcpRx event: seq {} {} bytes",
-            //     file!(),
-            //     line!(),
-            //     moto_socket.rx_seq,
-            //     rx_buf.consumed
-            // );
-
             moto_socket.rx_seq += 1;
             moto_socket.stats_rx_bytes += rx_buf.consumed as u64;
             self.pending_completions.push_back(Self::rx_buf_to_pc(
@@ -1670,54 +1718,19 @@ impl NetSys {
             ));
 
             if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
-                break;
+                self.deferred_action_sockets.push_back(socket_id);
+                return;
             }
         }
 
-        // log::debug!(
-        //     "socket 0x{:x} total RX bytes: {}",
-        //     u64::from(socket_id),
-        //     moto_socket.stats_rx_bytes
-        // );
-
-        // While the process knows about the socket state, it does not know that there are
-        // no cached RX packets. The code below delivers a zero-sized RX packet to that end.
-        if smol_socket.recv_queue() == 0
-            && (moto_socket.state == TcpState::WriteOnly || moto_socket.state == TcpState::Closed)
-            && !moto_socket.rx_closed_notified
-        {
-            // log::warn!("RX done");
-            self.notify_rx_done(socket_id);
-        }
-    }
-
-    fn notify_rx_done(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-        moto_socket.rx_seq += 1;
-
-        let mut msg = io_channel::Msg::new();
-        msg.command = api_net::CMD_TCP_STREAM_RX;
-        msg.handle = moto_socket.id.into();
-        msg.payload.shared_pages_mut()[0] = u16::MAX;
-        msg.payload.args_64_mut()[1] = 0;
-        msg.payload.args_64_mut()[2] = moto_socket.rx_seq;
-        msg.status = moto_rt::E_OK;
-
-        self.pending_completions.push_back(PendingCompletion {
-            msg,
-            endpoint_handle: moto_socket.conn.wait_handle(),
-        });
-        moto_socket.rx_closed_notified = true;
-        log::debug!(
-            "{}:{} RX Closed for socket 0x{:x}",
-            file!(),
-            line!(),
-            u64::from(socket_id)
-        );
+        self.maybe_complete_deferred_action(socket_id);
     }
 
     fn do_tcp_tx(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+        let Some(moto_socket) = self.tcp_sockets.get_mut(&socket_id) else {
+            // Deferred action sockets may get enqueued more than once.
+            return;
+        };
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -1746,56 +1759,7 @@ impl NetSys {
             }
         }
 
-        if moto_socket.tx_queue.is_empty() && (smol_socket.send_queue() == 0) {
-            if let Some(tx_done_action) = moto_socket.tx_done_action {
-                match tx_done_action {
-                    TxDoneAction::CloseWr => {
-                        assert_eq!(TcpState::ReadOnly, moto_socket.state);
-                        smol_socket.close();
-                    }
-                    TxDoneAction::Close => {
-                        moto_socket.state = TcpState::Closed;
-                        smol_socket.close();
-                    }
-                    TxDoneAction::Drop => self.drop_tcp_socket(socket_id),
-                }
-            }
-        }
-    }
-
-    fn cancel_tcp_tx(&mut self, socket_id: SocketId) {
-        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
-            s
-        } else {
-            // cancel_tcp_tx() may be called recursively from drop_tcp_socket().
-            return;
-        };
-        moto_socket.tx_queue.clear();
-        if let Some(tx_done_action) = moto_socket.tx_done_action {
-            if tx_done_action == TxDoneAction::Drop {
-                moto_socket.tx_done_action = None; // Avoid deep recursion.
-                self.drop_tcp_socket(socket_id);
-            }
-        }
-    }
-
-    fn finalize_tcp_tx(&mut self, socket_id: SocketId, tx_done_action: TxDoneAction) {
-        let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
-            s
-        } else {
-            // See drop_tcp_socket(): we carefully order ops so that this does not happen,
-            // but it still happens when the client does something naughty: when our httpd
-            // based on tiny-http runs without Cloudflare proxy, and we ^C httpd, this
-            // line triggers sometimes.
-            log::error!(
-                "Missing socket {} in finalize_tcp_tx.",
-                u64::from(socket_id)
-            );
-            return;
-        };
-
-        moto_socket.tx_done_action = Some(tx_done_action);
-        self.do_tcp_tx(socket_id);
+        self.maybe_complete_deferred_action(socket_id);
     }
 }
 
@@ -1859,6 +1823,7 @@ impl IoSubsystem for NetSys {
     }
 
     fn on_connection_drop(&mut self, conn: SysHandle) {
+        log::debug!("conn 0x{:x} done", conn.as_u64());
         if let Some(tcp_sockets) = self.conn_tcp_sockets.remove(&conn) {
             for socket_id in tcp_sockets {
                 self.drop_tcp_socket(socket_id);
@@ -1875,9 +1840,13 @@ impl IoSubsystem for NetSys {
     }
 
     fn poll(&mut self) -> Option<PendingCompletion> {
-        let mut pending_tcp_rx: VecDeque<SocketId> = VecDeque::new();
-        core::mem::swap(&mut pending_tcp_rx, &mut self.pending_tcp_rx);
-        while let Some(socket_id) = pending_tcp_rx.pop_front() {
+        let mut deferred_action_sockets: VecDeque<SocketId> = VecDeque::new();
+        core::mem::swap(
+            &mut deferred_action_sockets,
+            &mut self.deferred_action_sockets,
+        );
+        while let Some(socket_id) = deferred_action_sockets.pop_front() {
+            self.do_tcp_tx(socket_id); // May insert socket_id back into self.pending_tcp_rx.
             self.do_tcp_rx(socket_id); // May insert socket_id back into self.pending_tcp_rx.
         }
 

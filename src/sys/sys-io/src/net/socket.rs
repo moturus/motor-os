@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use moto_ipc::io_channel;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub(super) struct SocketId(u64);
 
 impl From<u64> for SocketId {
@@ -18,12 +18,19 @@ impl From<SocketId> for u64 {
     }
 }
 
-// What to do with the socket once its TX queue is drained.
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum TxDoneAction {
+// Due to the asyncrhonous nature of our implementation, some
+// shutdown actions are deferred. For example, when the user writes
+// some bytes into the socket and then closes it, the bytes should be
+// sent to the remote socket before the socket is closed and dropped.
+//
+// Similarly, when the remote socket is closed, there still could be
+// RX bytes in local buffers, which have to be delivered to the user
+// before the socket is closed/dropped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum DeferredAction {
+    CloseRd,
     CloseWr,
-    Close,
-    Drop,
+    Close, // Will drop the socket after sending the event to the user.
 }
 
 pub(super) struct MotoSocket {
@@ -45,15 +52,14 @@ pub(super) struct MotoSocket {
 
     pub tx_queue: VecDeque<super::TxBuf>,
 
-    pub tx_done_action: Option<TxDoneAction>,
+    pub deferred_action: Option<DeferredAction>,
 
     pub rx_seq: u64,
     pub rx_ack: u64,
 
+    // Note that this state is at a higher level than the canonical
+    // TcpState (FIN1, FIN2, etc.).
     pub state: moto_sys_io::api_net::TcpState,
-
-    // When the socket becomes CloseWait or Closed, sys-io notifies the client once.
-    pub rx_closed_notified: bool,
 
     // See moto_ipc::io_channel::ServerConnection::alloc_page().
     pub subchannel_mask: u64,
@@ -113,12 +119,6 @@ impl SocketWaker {
     }
 
     fn wake(&self) {
-        // log::debug!(
-        //     "{}:{} socket wake 0x{:x}",
-        //     file!(),
-        //     line!(),
-        //     u64::from(self.socket_id)
-        // );
         self.woken_sockets.borrow_mut().push_back(self.socket_id)
     }
 }

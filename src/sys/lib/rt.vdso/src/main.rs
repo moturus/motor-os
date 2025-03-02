@@ -8,7 +8,6 @@ mod posix;
 mod rt_alloc;
 mod rt_fs;
 mod rt_futex;
-mod rt_net;
 mod rt_poll;
 mod rt_process;
 mod rt_thread;
@@ -16,6 +15,11 @@ mod rt_time;
 mod rt_tls;
 mod runtime;
 mod stdio;
+
+mod net {
+    pub mod rt_net;
+    pub mod inner_rx_stream;
+}
 
 #[macro_use]
 mod util {
@@ -315,22 +319,22 @@ pub extern "C" fn moturus_start(version: u64) {
 
     // Networking.
     vtable.dns_lookup.store(
-        rt_net::dns_lookup as *const () as usize as u64,
+        net::rt_net::dns_lookup as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable
         .net_bind
-        .store(rt_net::bind as *const () as usize as u64, Ordering::Relaxed);
+        .store(net::rt_net::bind as *const () as usize as u64, Ordering::Relaxed);
     vtable.net_listen.store(
-        rt_net::listen as *const () as usize as u64,
+        net::rt_net::listen as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_accept.store(
-        rt_net::accept as *const () as usize as u64,
+        net::rt_net::accept as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_tcp_connect.store(
-        rt_net::tcp_connect as *const () as usize as u64,
+        net::rt_net::tcp_connect as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_udp_connect.store(
@@ -338,24 +342,24 @@ pub extern "C" fn moturus_start(version: u64) {
         Ordering::Relaxed,
     );
     vtable.net_socket_addr.store(
-        rt_net::socket_addr as *const () as usize as u64,
+        net::rt_net::socket_addr as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_peer_addr.store(
-        rt_net::peer_addr as *const () as usize as u64,
+        net::rt_net::peer_addr as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_setsockopt.store(
-        rt_net::setsockopt as *const () as usize as u64,
+        net::rt_net::setsockopt as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_getsockopt.store(
-        rt_net::getsockopt as *const () as usize as u64,
+        net::rt_net::getsockopt as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable
         .net_peek
-        .store(rt_net::peek as *const () as usize as u64, Ordering::Relaxed);
+        .store(net::rt_net::peek as *const () as usize as u64, Ordering::Relaxed);
 
     // Poll.
     vtable
@@ -424,7 +428,7 @@ pub extern "C" fn vdso_internal_helper(
     a5: u64,
 ) -> u64 {
     match a0 {
-        0 => crate::rt_net::vdso_internal_helper(a1, a2, a3, a4, a5),
+        0 => net::rt_net::vdso_internal_helper(a1, a2, a3, a4, a5),
         _ => panic!("Unrecognized option {a0}"),
     }
 }
