@@ -295,7 +295,6 @@ fn test_shutdown_read() {
         target_os = "tvos",
         target_os = "visionos",
         target_os = "watchos",
-        target_os = "moturus",
     ))]
     {
         let mut buf = [0; 20];

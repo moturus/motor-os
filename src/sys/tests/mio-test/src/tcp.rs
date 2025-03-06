@@ -1,6 +1,6 @@
-use mio_moturus as mio;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
+use mio_moturus as mio;
 use std::io::{self, Read, Write};
 use std::net::{self, Shutdown};
 use std::sync::mpsc::channel;
@@ -201,6 +201,7 @@ fn test_read() {
             #[allow(clippy::while_let_loop)]
             loop {
                 if let Ok(amt) = data.socket.read(&mut buf) {
+                    assert_ne!(amt, 0);
                     data.amt += amt;
                 } else {
                     break;
@@ -267,6 +268,7 @@ fn test_peek() {
             #[allow(clippy::while_let_loop)]
             loop {
                 if let Ok(amt) = data.socket.read(&mut buf) {
+                    assert_ne!(amt, 0);
                     data.amt += amt;
                 } else {
                     break;
