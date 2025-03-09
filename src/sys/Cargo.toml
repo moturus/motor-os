@@ -12,6 +12,7 @@ members = [
   "lib/moto-sys-io",
   "lib/srfs",
   "lib/srfs-core",
+  "lib/timeq",
   "lib/virtio",
 
   # system binaries
