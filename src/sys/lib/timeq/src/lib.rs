@@ -18,8 +18,10 @@ struct Entry {
 impl PartialEq for Entry {
     fn eq(&self, other: &Self) -> bool {
         self.at == other.at
-            && (Box::as_ptr(&self.what) as *const () as usize)
-                == (Box::as_ptr(&other.what) as *const () as usize)
+            && core::ptr::eq(
+                Box::as_ptr(&self.what) as *const (),
+                Box::as_ptr(&other.what) as *const (),
+            )
     }
 }
 
@@ -27,16 +29,7 @@ impl Eq for Entry {}
 
 impl PartialOrd for Entry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        if self.at < other.at {
-            return Some(std::cmp::Ordering::Less);
-        }
-
-        if self.at > other.at {
-            return Some(std::cmp::Ordering::Greater);
-        }
-
-        (Box::as_ptr(&self.what) as *const () as usize)
-            .partial_cmp(&(Box::as_ptr(&other.what) as *const () as usize))
+        Some(self.cmp(other))
     }
 }
 
