@@ -1,3 +1,4 @@
+use moto_sys_io::api_net::TcpState;
 use std::task::{RawWaker, RawWakerVTable};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
@@ -33,6 +34,24 @@ pub(super) enum DeferredAction {
     Close, // Will drop the socket after sending the event to the user.
 }
 
+fn add_deferred_action_impl(prev: &mut Option<DeferredAction>, new: DeferredAction) {
+    if new == DeferredAction::Close {
+        *prev = Some(new);
+        return;
+    }
+
+    let Some(prev_val) = *prev else {
+        *prev = Some(new);
+        return;
+    };
+
+    if new == prev_val {
+        return;
+    }
+
+    *prev = Some(DeferredAction::Close);
+}
+
 pub(super) struct MotoSocket {
     pub id: SocketId, // Unique across all devices.
     pub handle: smoltcp::iface::SocketHandle,
@@ -52,7 +71,7 @@ pub(super) struct MotoSocket {
 
     pub tx_queue: VecDeque<super::TxBuf>,
 
-    pub deferred_action: Option<DeferredAction>,
+    deferred_action: Option<DeferredAction>,
 
     pub rx_seq: u64,
     pub rx_ack: u64,
@@ -86,6 +105,35 @@ impl Drop for MotoSocket {
 }
 
 impl MotoSocket {
+    pub(super) fn new(
+        socket_id: SocketId,
+        handle: smoltcp::iface::SocketHandle,
+        device_idx: usize,
+        conn: Rc<io_channel::ServerConnection>,
+        pid: u64,
+    ) -> Self {
+        MotoSocket {
+            id: socket_id,
+            handle,
+            device_idx,
+            conn,
+            pid,
+            listener_id: None,
+            connect_req: None,
+            ephemeral_port: None,
+            tx_queue: VecDeque::new(),
+            deferred_action: None,
+            rx_seq: 0,
+            rx_ack: u64::MAX,
+            state: TcpState::Closed,
+            subchannel_mask: u64::MAX,
+            listening_on: None,
+            replacement_listener_created: false,
+            stats_rx_bytes: 0,
+            stats_tx_bytes: 0,
+        }
+    }
+
     #[allow(unused)]
     pub(super) fn dump_state(&self) {
         log::warn!(
@@ -94,6 +142,14 @@ impl MotoSocket {
             self.conn.wait_handle().as_u64(),
             self.tx_queue.len()
         );
+    }
+
+    pub(super) fn add_deferred_action(&mut self, deferred_action: DeferredAction) {
+        add_deferred_action_impl(&mut self.deferred_action, deferred_action)
+    }
+
+    pub(super) fn take_deferred_action(&mut self) -> Option<DeferredAction> {
+        self.deferred_action.take()
     }
 }
 

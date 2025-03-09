@@ -44,7 +44,9 @@ pub(super) struct NetSys {
     socket_ids: std::collections::BTreeSet<SocketId>,
 
     // If we can't allocate an IO buffer (page) for RX for a socket, the socket is placed here.
-    deferred_action_sockets: VecDeque<SocketId>,
+    // We can't use e.g. a VecDeque because we don't want to have the same socket id on the list
+    // multiple times.
+    deferred_action_sockets: std::collections::BTreeSet<SocketId>,
 
     // "Empty" sockets cached here.
     tcp_socket_cache: Vec<smoltcp::socket::tcp::Socket<'static>>,
@@ -72,7 +74,7 @@ impl NetSys {
             tcp_listeners: HashMap::new(),
             tcp_sockets: HashMap::new(),
             socket_ids: std::collections::BTreeSet::new(),
-            deferred_action_sockets: VecDeque::new(),
+            deferred_action_sockets: std::collections::BTreeSet::new(),
             tcp_socket_cache: Vec::new(),
             pending_completions: VecDeque::new(),
             conn_tcp_listeners: HashMap::new(),
@@ -338,26 +340,7 @@ impl NetSys {
             self.tcp_sockets.len()
         );
 
-        Ok(MotoSocket {
-            id: socket_id,
-            handle,
-            device_idx,
-            conn,
-            pid,
-            listener_id: None,
-            connect_req: None,
-            ephemeral_port: None,
-            tx_queue: VecDeque::new(),
-            deferred_action: None,
-            rx_seq: 0,
-            rx_ack: u64::MAX,
-            state: TcpState::Closed,
-            subchannel_mask: u64::MAX,
-            listening_on: None,
-            replacement_listener_created: false,
-            stats_rx_bytes: 0,
-            stats_tx_bytes: 0,
-        })
+        Ok(MotoSocket::new(socket_id, handle, device_idx, conn, pid))
     }
 
     fn drop_tcp_listener(&mut self, listener_id: TcpListenerId) {
@@ -1002,27 +985,27 @@ impl NetSys {
             }
             TcpState::ReadWrite => {
                 if shut_rd && shut_wr {
-                    moto_socket.deferred_action = Some(DeferredAction::Close);
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::Close);
+                    self.deferred_action_sockets.insert(socket_id);
                 } else if shut_rd {
-                    moto_socket.deferred_action = Some(DeferredAction::CloseRd);
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::CloseRd);
+                    self.deferred_action_sockets.insert(socket_id);
                 } else {
                     assert!(shut_wr);
-                    moto_socket.deferred_action = Some(DeferredAction::CloseWr);
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::CloseWr);
+                    self.deferred_action_sockets.insert(socket_id);
                 }
             }
             TcpState::ReadOnly => {
                 if shut_rd {
-                    moto_socket.deferred_action = Some(DeferredAction::Close);
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::Close);
+                    self.deferred_action_sockets.insert(socket_id);
                 }
             }
             TcpState::WriteOnly => {
                 if shut_wr {
-                    moto_socket.deferred_action = Some(DeferredAction::Close);
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::Close);
+                    self.deferred_action_sockets.insert(socket_id);
                 }
             }
             TcpState::Closed => {}
@@ -1105,12 +1088,12 @@ impl NetSys {
             u64::from(socket_id)
         );
         let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-        moto_socket.deferred_action = Some(DeferredAction::Close);
+        moto_socket.add_deferred_action(DeferredAction::Close);
 
         // We cannot call self.maybe_complete_deferred_action(socket_id) here
         // because we need to respond to the close request synchronously, and
         // the method above pushes sqes to the user.
-        self.deferred_action_sockets.push_back(socket_id);
+        self.deferred_action_sockets.insert(socket_id);
 
         sqe.status = moto_rt::E_OK;
         Some(sqe)
@@ -1460,10 +1443,10 @@ impl NetSys {
                         "socket 0x{:x} WriteOnly => (deferred) Close",
                         u64::from(socket_id)
                     );
-                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                    moto_socket.add_deferred_action(DeferredAction::Close);
                 }
                 TcpState::ReadWrite => {
-                    moto_socket.deferred_action = Some(DeferredAction::CloseWr);
+                    moto_socket.add_deferred_action(DeferredAction::CloseWr);
                 }
                 TcpState::ReadOnly => {}
                 _ => panic!("Unexpected TcpState {:?}", moto_socket.state),
@@ -1484,10 +1467,10 @@ impl NetSys {
                         "socket 0x{:x} ReadOnly => (deferred) Close",
                         u64::from(socket_id)
                     );
-                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                    moto_socket.add_deferred_action(DeferredAction::Close);
                 }
                 TcpState::ReadWrite => {
-                    moto_socket.deferred_action = Some(DeferredAction::CloseRd);
+                    moto_socket.add_deferred_action(DeferredAction::CloseRd);
                 }
                 // Nothing to do.
                 TcpState::WriteOnly => {}
@@ -1505,7 +1488,7 @@ impl NetSys {
                 }
                 TcpState::WriteOnly | TcpState::ReadOnly | TcpState::ReadWrite => {
                     log::debug!("socket 0x{:x} => (deferred) Close", u64::from(socket_id));
-                    moto_socket.deferred_action = Some(DeferredAction::Close);
+                    moto_socket.add_deferred_action(DeferredAction::Close);
                 }
                 _ => panic!("Unexpected TcpState {:?}", moto_state),
             },
@@ -1558,10 +1541,9 @@ impl NetSys {
             return;
         };
 
-        let Some(deferred_action) = moto_socket.deferred_action.as_ref() else {
+        let Some(deferred_action) = moto_socket.take_deferred_action() else {
             return;
         };
-        let deferred_action = *deferred_action;
 
         log::debug!(
             "deferred action socket 0x{:x} {:?}",
@@ -1577,7 +1559,8 @@ impl NetSys {
         match deferred_action {
             DeferredAction::CloseRd => {
                 if smol_socket.recv_queue() > 0 {
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(deferred_action);
+                    self.deferred_action_sockets.insert(socket_id);
                     return; // Not yet.
                 }
                 match moto_socket.state {
@@ -1597,7 +1580,8 @@ impl NetSys {
             }
             DeferredAction::CloseWr => {
                 if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(deferred_action);
+                    self.deferred_action_sockets.insert(socket_id);
                     return; // Not yet.
                 }
                 match moto_socket.state {
@@ -1613,7 +1597,8 @@ impl NetSys {
             }
             DeferredAction::Close => {
                 if smol_socket.recv_queue() > 0 {
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(deferred_action);
+                    self.deferred_action_sockets.insert(socket_id);
                     log::debug!(
                         "deferred action socket 0x{:x} {:?} - not yet: recv: {} send: {} smol state: {:?}",
                         u64::from(socket_id),
@@ -1625,7 +1610,8 @@ impl NetSys {
                     return; // Not yet.
                 }
                 if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
-                    self.deferred_action_sockets.push_back(socket_id);
+                    moto_socket.add_deferred_action(deferred_action);
+                    self.deferred_action_sockets.insert(socket_id);
                     log::debug!(
                         "deferred action socket 0x{:x} {:?} - not yet; state: {:?} smol state: {:?}",
                         u64::from(socket_id),
@@ -1639,8 +1625,6 @@ impl NetSys {
                 moto_socket.state = TcpState::Closed;
             }
         }
-
-        moto_socket.deferred_action = None;
 
         let moto_state = moto_socket.state;
         if moto_state == TcpState::Closed {
@@ -1656,13 +1640,14 @@ impl NetSys {
             smol_socket.close();
         }
 
-        self.notify_socket_state_changed(socket_id);
-
         if smol_state == smoltcp::socket::tcp::State::Closed {
             // We won't poll the smol socket, as it is closed, so we need
             // to manually poll it via deferred_action_sockets.
-            self.deferred_action_sockets.push_back(socket_id);
+            moto_socket.add_deferred_action(deferred_action);
+            self.deferred_action_sockets.insert(socket_id);
         }
+
+        self.notify_socket_state_changed(socket_id);
     }
 
     fn do_tcp_rx(&mut self, socket_id: SocketId) {
@@ -1687,7 +1672,7 @@ impl NetSys {
                 Ok(page) => page,
                 Err(err) => {
                     assert_eq!(err, moto_rt::E_NOT_READY);
-                    self.deferred_action_sockets.push_back(socket_id);
+                    self.deferred_action_sockets.insert(socket_id);
                     return;
                 }
             };
@@ -1718,7 +1703,7 @@ impl NetSys {
             ));
 
             if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
-                self.deferred_action_sockets.push_back(socket_id);
+                self.deferred_action_sockets.insert(socket_id);
                 return;
             }
         }
@@ -1840,14 +1825,16 @@ impl IoSubsystem for NetSys {
     }
 
     fn poll(&mut self) -> Option<PendingCompletion> {
-        let mut deferred_action_sockets: VecDeque<SocketId> = VecDeque::new();
+        let mut deferred_action_sockets: std::collections::BTreeSet<SocketId> =
+            std::collections::BTreeSet::new();
         core::mem::swap(
             &mut deferred_action_sockets,
             &mut self.deferred_action_sockets,
         );
-        while let Some(socket_id) = deferred_action_sockets.pop_front() {
-            self.do_tcp_tx(socket_id); // May insert socket_id back into self.pending_tcp_rx.
-            self.do_tcp_rx(socket_id); // May insert socket_id back into self.pending_tcp_rx.
+
+        while let Some(socket_id) = deferred_action_sockets.pop_first() {
+            self.do_tcp_tx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
+            self.do_tcp_rx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
         }
 
         // client writes (tcp_stream_write) wake sockets; make sure we
