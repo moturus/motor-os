@@ -659,6 +659,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
         ThreadControlBlock::preempt_current_thread_pf(irq_stack, pf_addr); // noreturn
     } else {
         let cpu = super::apic_cpu_id_32();
+
         crate::write_serial!(
             "\n\n#PF (kernel):\n\tcpu: {}\n\tAccessed Address: 0x{:x}\n\tRIP: 0x{:x}\n\terror code: 0x{:x}\n\n",
             cpu,

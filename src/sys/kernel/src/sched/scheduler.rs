@@ -293,10 +293,13 @@ impl Scheduler {
     #[cfg(debug_assertions)]
     fn alive(&self) {
         let now = crate::arch::time::Instant::now().as_u64();
-        self.last_alive_check.store(now, Ordering::Relaxed);
-        let mut check = |_: uCpus, scheduler: &Scheduler| -> bool {
-            let last_check = scheduler.last_alive_check.load(Ordering::Relaxed);
-            if now > (last_check + 10_000_000_000) {
+        self.last_alive_check.store(now, Ordering::Release);
+
+        let mut check = |cpu: uCpus, scheduler: &Scheduler| -> bool {
+            let last_check = scheduler.last_alive_check.load(Ordering::Acquire);
+            if now > (last_check + 100_000_000_000) {
+                log::error!("CPU {cpu} dead: now: {now}; last check: {last_check}. OOPS.");
+                crate::arch::log_backtrace("KERNEL SUICIDE");
                 scheduler.die();
                 return true;
             }
@@ -321,7 +324,7 @@ impl Scheduler {
         #[cfg(debug_assertions)]
         self.last_alive_check.store(
             crate::arch::time::Instant::now().as_u64(),
-            Ordering::Relaxed,
+            Ordering::Release,
         );
 
         let mut last_system_time_update = now_tsc;
@@ -368,7 +371,7 @@ impl Scheduler {
             }
 
             if curr_iteration % 3 == 1 {
-                let maybe_job = { GLOBAL_READY_QUEUE_NORMAL.lock(102).pop_front() };
+                let maybe_job = { GLOBAL_READY_QUEUE_NORMAL.lock(line!()).pop_front() };
                 if let Some(job) = maybe_job {
                     job.run();
                     last_job_iter = curr_iteration;
