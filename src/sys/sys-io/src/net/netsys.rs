@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     rc::Rc,
+    time::Instant,
 };
 
 use crate::runtime::IoSubsystem;
@@ -43,11 +44,6 @@ pub(super) struct NetSys {
     // An ordered list of all sockets in the system, to be used for stats reporting.
     socket_ids: std::collections::BTreeSet<SocketId>,
 
-    // If we can't allocate an IO buffer (page) for RX for a socket, the socket is placed here.
-    // We can't use e.g. a VecDeque because we don't want to have the same socket id on the list
-    // multiple times.
-    deferred_action_sockets: std::collections::BTreeSet<SocketId>,
-
     // "Empty" sockets cached here.
     tcp_socket_cache: Vec<smoltcp::socket::tcp::Socket<'static>>,
 
@@ -59,12 +55,17 @@ pub(super) struct NetSys {
     woken_sockets: Rc<RefCell<VecDeque<SocketId>>>,
     wakers: std::collections::HashMap<SocketId, std::task::Waker>,
 
+    rng: rand::rngs::SmallRng,
+    deferred_sockets: timeq::TimeQ<SocketId>,
+
     // config: config::NetConfig,
     config: super::config::NetConfig,
 }
 
 impl NetSys {
     pub fn new(config: super::config::NetConfig) -> Box<Self> {
+        use rand::SeedableRng;
+
         let devices = super::netdev::init(&config);
         let mut self_ref = Box::new(Self {
             devices,
@@ -74,13 +75,14 @@ impl NetSys {
             tcp_listeners: HashMap::new(),
             tcp_sockets: HashMap::new(),
             socket_ids: std::collections::BTreeSet::new(),
-            deferred_action_sockets: std::collections::BTreeSet::new(),
             tcp_socket_cache: Vec::new(),
             pending_completions: VecDeque::new(),
             conn_tcp_listeners: HashMap::new(),
             conn_tcp_sockets: HashMap::new(),
             woken_sockets: Rc::new(std::cell::RefCell::new(VecDeque::new())),
             wakers: HashMap::new(),
+            rng: rand::rngs::SmallRng::seed_from_u64(1337),
+            deferred_sockets: timeq::TimeQ::default(),
             config,
         });
 
@@ -985,27 +987,27 @@ impl NetSys {
             }
             TcpState::ReadWrite => {
                 if shut_rd && shut_wr {
-                    moto_socket.add_deferred_action(DeferredAction::Close);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
+                    self.defer_socket_action(socket_id, None);
                 } else if shut_rd {
-                    moto_socket.add_deferred_action(DeferredAction::CloseRd);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::CloseRd, Instant::now());
+                    self.defer_socket_action(socket_id, None);
                 } else {
                     assert!(shut_wr);
-                    moto_socket.add_deferred_action(DeferredAction::CloseWr);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::CloseWr, Instant::now());
+                    self.defer_socket_action(socket_id, None);
                 }
             }
             TcpState::ReadOnly => {
                 if shut_rd {
-                    moto_socket.add_deferred_action(DeferredAction::Close);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
+                    self.defer_socket_action(socket_id, None);
                 }
             }
             TcpState::WriteOnly => {
                 if shut_wr {
-                    moto_socket.add_deferred_action(DeferredAction::Close);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
+                    self.defer_socket_action(socket_id, None);
                 }
             }
             TcpState::Closed => {}
@@ -1088,12 +1090,12 @@ impl NetSys {
             u64::from(socket_id)
         );
         let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
-        moto_socket.add_deferred_action(DeferredAction::Close);
+        moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
 
         // We cannot call self.maybe_complete_deferred_action(socket_id) here
         // because we need to respond to the close request synchronously, and
         // the method above pushes sqes to the user.
-        self.deferred_action_sockets.insert(socket_id);
+        self.defer_socket_action(socket_id, None);
 
         sqe.status = moto_rt::E_OK;
         Some(sqe)
@@ -1443,10 +1445,10 @@ impl NetSys {
                         "socket 0x{:x} WriteOnly => (deferred) Close",
                         u64::from(socket_id)
                     );
-                    moto_socket.add_deferred_action(DeferredAction::Close);
+                    moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
                 }
                 TcpState::ReadWrite => {
-                    moto_socket.add_deferred_action(DeferredAction::CloseWr);
+                    moto_socket.add_deferred_action(DeferredAction::CloseWr, Instant::now());
                 }
                 TcpState::ReadOnly => {}
                 _ => panic!("Unexpected TcpState {:?}", moto_socket.state),
@@ -1467,10 +1469,10 @@ impl NetSys {
                         "socket 0x{:x} ReadOnly => (deferred) Close",
                         u64::from(socket_id)
                     );
-                    moto_socket.add_deferred_action(DeferredAction::Close);
+                    moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
                 }
                 TcpState::ReadWrite => {
-                    moto_socket.add_deferred_action(DeferredAction::CloseRd);
+                    moto_socket.add_deferred_action(DeferredAction::CloseRd, Instant::now());
                 }
                 // Nothing to do.
                 TcpState::WriteOnly => {}
@@ -1488,7 +1490,7 @@ impl NetSys {
                 }
                 TcpState::WriteOnly | TcpState::ReadOnly | TcpState::ReadWrite => {
                     log::debug!("socket 0x{:x} => (deferred) Close", u64::from(socket_id));
-                    moto_socket.add_deferred_action(DeferredAction::Close);
+                    moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
                 }
                 _ => panic!("Unexpected TcpState {:?}", moto_state),
             },
@@ -1541,7 +1543,7 @@ impl NetSys {
             return;
         };
 
-        let Some(deferred_action) = moto_socket.take_deferred_action() else {
+        let Some((deferred_action, started)) = moto_socket.take_deferred_action() else {
             return;
         };
 
@@ -1559,8 +1561,8 @@ impl NetSys {
         match deferred_action {
             DeferredAction::CloseRd => {
                 if smol_socket.recv_queue() > 0 {
-                    moto_socket.add_deferred_action(deferred_action);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(deferred_action, started);
+                    self.defer_socket_action(socket_id, Some(started));
                     return; // Not yet.
                 }
                 match moto_socket.state {
@@ -1580,8 +1582,8 @@ impl NetSys {
             }
             DeferredAction::CloseWr => {
                 if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
-                    moto_socket.add_deferred_action(deferred_action);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(deferred_action, started);
+                    self.defer_socket_action(socket_id, Some(started));
                     return; // Not yet.
                 }
                 match moto_socket.state {
@@ -1597,8 +1599,7 @@ impl NetSys {
             }
             DeferredAction::Close => {
                 if smol_socket.recv_queue() > 0 {
-                    moto_socket.add_deferred_action(deferred_action);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(deferred_action, started);
                     log::debug!(
                         "deferred action socket 0x{:x} {:?} - not yet: recv: {} send: {} smol state: {:?}",
                         u64::from(socket_id),
@@ -1607,11 +1608,11 @@ impl NetSys {
                         smol_socket.send_queue(),
                         smol_socket.state()
                     );
+                    self.defer_socket_action(socket_id, Some(started));
                     return; // Not yet.
                 }
                 if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
-                    moto_socket.add_deferred_action(deferred_action);
-                    self.deferred_action_sockets.insert(socket_id);
+                    moto_socket.add_deferred_action(deferred_action, started);
                     log::debug!(
                         "deferred action socket 0x{:x} {:?} - not yet; state: {:?} smol state: {:?}",
                         u64::from(socket_id),
@@ -1619,6 +1620,7 @@ impl NetSys {
                         moto_socket.state,
                         smol_socket.state()
                     );
+                    self.defer_socket_action(socket_id, Some(started));
                     return; // Not yet.
                 }
                 assert_ne!(moto_socket.state, TcpState::Closed);
@@ -1643,8 +1645,8 @@ impl NetSys {
         if smol_state == smoltcp::socket::tcp::State::Closed {
             // We won't poll the smol socket, as it is closed, so we need
             // to manually poll it via deferred_action_sockets.
-            moto_socket.add_deferred_action(deferred_action);
-            self.deferred_action_sockets.insert(socket_id);
+            moto_socket.add_deferred_action(deferred_action, started);
+            self.defer_socket_action(socket_id, Some(started));
         }
 
         self.notify_socket_state_changed(socket_id);
@@ -1672,7 +1674,7 @@ impl NetSys {
                 Ok(page) => page,
                 Err(err) => {
                     assert_eq!(err, moto_rt::E_NOT_READY);
-                    self.deferred_action_sockets.insert(socket_id);
+                    self.defer_socket_action(socket_id, None);
                     return;
                 }
             };
@@ -1703,7 +1705,7 @@ impl NetSys {
             ));
 
             if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
-                self.deferred_action_sockets.insert(socket_id);
+                self.defer_socket_action(socket_id, None);
                 return;
             }
         }
@@ -1745,6 +1747,46 @@ impl NetSys {
         }
 
         self.maybe_complete_deferred_action(socket_id);
+    }
+
+    const MAX_DEFERRED_ACTION_SECS: u64 = 30;
+    const MIN_DEFERRED_ACTION_NS: u64 = 300;
+
+    fn defer_socket_action(&mut self, socket_id: SocketId, started: Option<Instant>) {
+        if let Some(started) = started {
+            if Self::backoff_done(started) {
+                log::debug!(
+                    "Dropping socket 0x{:x} due to timeout.",
+                    u64::from(socket_id)
+                );
+                self.drop_tcp_socket(socket_id);
+                return;
+            }
+        }
+
+        let next = self.backoff(started);
+        self.deferred_sockets.add_at(next, socket_id);
+    }
+
+    fn backoff(&mut self, prev: Option<Instant>) -> Instant {
+        use rand::Rng;
+
+        let now = Instant::now();
+
+        let Some(prev) = prev else {
+            return now
+                + core::time::Duration::from_nanos(self.rng.random_range(
+                    Self::MIN_DEFERRED_ACTION_NS..(Self::MIN_DEFERRED_ACTION_NS * 2),
+                ));
+        };
+
+        let diff: u64 = (now - prev).as_nanos().try_into().unwrap();
+
+        now + core::time::Duration::from_nanos(self.rng.random_range((diff * 4)..(diff * 8)))
+    }
+
+    fn backoff_done(started: Instant) -> bool {
+        (Instant::now() - started).as_secs() > Self::MAX_DEFERRED_ACTION_SECS
     }
 }
 
@@ -1825,14 +1867,9 @@ impl IoSubsystem for NetSys {
     }
 
     fn poll(&mut self) -> Option<PendingCompletion> {
-        let mut deferred_action_sockets: std::collections::BTreeSet<SocketId> =
-            std::collections::BTreeSet::new();
-        core::mem::swap(
-            &mut deferred_action_sockets,
-            &mut self.deferred_action_sockets,
-        );
+        let now = Instant::now();
 
-        while let Some(socket_id) = deferred_action_sockets.pop_first() {
+        while let Some(socket_id) = self.deferred_sockets.pop_at(now) {
             self.do_tcp_tx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
             self.do_tcp_rx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
         }
@@ -1884,6 +1921,18 @@ impl IoSubsystem for NetSys {
                     }
                     None => timeout = Some(timo),
                 }
+            }
+        }
+
+        if let Some(timo) = self.deferred_sockets.next_at() {
+            let timo = timo - Instant::now();
+            match timeout {
+                Some(prev) => {
+                    if prev > timo {
+                        timeout = Some(timo);
+                    }
+                }
+                None => timeout = Some(timo),
             }
         }
 

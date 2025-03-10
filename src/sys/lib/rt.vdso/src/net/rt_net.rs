@@ -902,7 +902,6 @@ pub struct TcpStream {
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let handle = self.handle.load(Ordering::Acquire);
-        moto_log!("dropping TcpStream 0x{:x}", handle);
         if handle == 0 {
             stats_tcp_stream_dropped();
             return;
@@ -1474,6 +1473,9 @@ impl TcpStream {
             }
         }
 
+        if msg.command != api_net::CMD_TCP_STREAM_RX {
+            panic!("bad cmd: {} {}", msg.command, msg.status);
+        }
         assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
         let sz_read = msg.payload.args_64()[1] as usize;
         assert!(sz_read <= moto_ipc::io_channel::PAGE_SIZE);

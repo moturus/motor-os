@@ -1,5 +1,6 @@
 use moto_sys_io::api_net::TcpState;
 use std::task::{RawWaker, RawWakerVTable};
+use std::time::Instant;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use moto_ipc::io_channel;
@@ -34,22 +35,27 @@ pub(super) enum DeferredAction {
     Close, // Will drop the socket after sending the event to the user.
 }
 
-fn add_deferred_action_impl(prev: &mut Option<DeferredAction>, new: DeferredAction) {
+fn add_deferred_action_impl(
+    prev: &mut Option<(DeferredAction, Instant)>,
+    new: DeferredAction,
+    started: Instant,
+) {
     if new == DeferredAction::Close {
-        *prev = Some(new);
+        *prev = Some((new, started));
         return;
     }
 
-    let Some(prev_val) = *prev else {
-        *prev = Some(new);
+    let Some((prev_val, prev_cnt)) = *prev else {
+        *prev = Some((new, started));
         return;
     };
 
     if new == prev_val {
+        *prev = Some((new, prev_cnt.min(started)));
         return;
     }
 
-    *prev = Some(DeferredAction::Close);
+    *prev = Some((DeferredAction::Close, prev_cnt.min(started)));
 }
 
 pub(super) struct MotoSocket {
@@ -71,7 +77,8 @@ pub(super) struct MotoSocket {
 
     pub tx_queue: VecDeque<super::TxBuf>,
 
-    deferred_action: Option<DeferredAction>,
+    // u32 -> deferred action counter, used for backoff and cancelling.
+    deferred_action: Option<(DeferredAction, Instant)>,
 
     pub rx_seq: u64,
     pub rx_ack: u64,
@@ -144,11 +151,15 @@ impl MotoSocket {
         );
     }
 
-    pub(super) fn add_deferred_action(&mut self, deferred_action: DeferredAction) {
-        add_deferred_action_impl(&mut self.deferred_action, deferred_action)
+    pub(super) fn add_deferred_action(
+        &mut self,
+        deferred_action: DeferredAction,
+        started: Instant,
+    ) {
+        add_deferred_action_impl(&mut self.deferred_action, deferred_action, started)
     }
 
-    pub(super) fn take_deferred_action(&mut self) -> Option<DeferredAction> {
+    pub(super) fn take_deferred_action(&mut self) -> Option<(DeferredAction, Instant)> {
         self.deferred_action.take()
     }
 }
