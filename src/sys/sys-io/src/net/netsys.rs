@@ -1547,11 +1547,6 @@ impl NetSys {
             return;
         };
 
-        log::debug!(
-            "deferred action socket 0x{:x} {:?}",
-            u64::from(socket_id),
-            deferred_action
-        );
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::tcp::Socket>(moto_socket.handle);
@@ -1600,26 +1595,11 @@ impl NetSys {
             DeferredAction::Close => {
                 if smol_socket.recv_queue() > 0 {
                     moto_socket.add_deferred_action(deferred_action, started);
-                    log::debug!(
-                        "deferred action socket 0x{:x} {:?} - not yet: recv: {} send: {} smol state: {:?}",
-                        u64::from(socket_id),
-                        deferred_action,
-                        smol_socket.recv_queue(),
-                        smol_socket.send_queue(),
-                        smol_socket.state()
-                    );
                     self.defer_socket_action(socket_id, Some(started));
                     return; // Not yet.
                 }
                 if may_send && (!moto_socket.tx_queue.is_empty() || smol_socket.send_queue() > 0) {
                     moto_socket.add_deferred_action(deferred_action, started);
-                    log::debug!(
-                        "deferred action socket 0x{:x} {:?} - not yet; state: {:?} smol state: {:?}",
-                        u64::from(socket_id),
-                        deferred_action,
-                        moto_socket.state,
-                        smol_socket.state()
-                    );
                     self.defer_socket_action(socket_id, Some(started));
                     return; // Not yet.
                 }

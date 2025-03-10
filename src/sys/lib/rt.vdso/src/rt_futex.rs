@@ -18,9 +18,6 @@ struct WaitQueue {
     num_waiters: AtomicU64,
 }
 
-unsafe impl Sync for WaitQueue {}
-unsafe impl Send for WaitQueue {}
-
 impl WaitQueue {
     fn new() -> Arc<Self> {
         Arc::new(Self {
