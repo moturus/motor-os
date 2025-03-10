@@ -29,6 +29,7 @@ members = [
   # tests
   "tests/mio-test",
   "tests/systest",
+  "tests/tokio-tests",
 ]
 resolver = "2"
 

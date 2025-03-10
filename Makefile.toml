@@ -58,6 +58,7 @@ dependencies = [
   "rnetbench_debug",
   "systest_debug",
   "mio_test_debug",
+  "tokio_tests_debug",
   "make_img_debug",
 ]
 
@@ -82,6 +83,7 @@ dependencies = [
   "rnetbench_release",
   "systest_release",
   "mio_test_release",
+  "tokio_tests_release",
   "make_img_release",
 ]
 
@@ -105,6 +107,7 @@ dependencies = [
   "rnetbench_debug",
   "systest_debug",
   "mio_test_debug",
+  "tokio_tests_debug",
   "make_img_debug",
 ]
 
@@ -128,6 +131,7 @@ dependencies = [
   "rnetbench_release",
   "systest_release",
   "mio_test_release",
+  "tokio_tests_release",
   "make_img_release",
 ]
 
@@ -316,6 +320,22 @@ script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/mio-test" "${MOTO_BIN}/mio-test"
+'''
+
+[tasks.tokio_tests_debug]
+cwd = "./src/sys/tests/tokio-tests"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/tokio-tests" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/tokio-tests"
+'''
+
+[tasks.tokio_tests_release]
+cwd = "./src/sys/tests/tokio_tests"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/tokio-tests" "${MOTO_BIN}/tokio-tests"
 '''
 
 [tasks.rush_debug]

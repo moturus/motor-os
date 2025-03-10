@@ -1,0 +1,9 @@
+[package]
+name = "tokio-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# tokio = { git = "https://github.com/moturus/tokio.git", features = ["net", "process", "rt", "rt-multi-thread", "macros" ] }
+tokio = { git = "https://github.com/moturus/tokio.git", features = ["net", "rt", "rt-multi-thread", "macros", "sync", "time" ] }
+tokio-test = "0.4.4"
