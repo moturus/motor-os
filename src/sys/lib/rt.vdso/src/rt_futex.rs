@@ -1,7 +1,8 @@
 use crate::util::spin;
+use alloc::collections::btree_set::BTreeSet;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
-use core::marker::PhantomPinned;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
@@ -9,67 +10,12 @@ use core::sync::atomic::Ordering;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 
-// We need to be able to remove from the middle of the list, and Rust's
-// standard List does not have this functionality.
-struct WaitQueueEntry {
-    wake_handle: u64,
-    prev: AtomicUsize,
-    next: AtomicUsize,
-    _pin: PhantomPinned,
-}
-
-unsafe impl Sync for WaitQueueEntry {}
-unsafe impl Send for WaitQueueEntry {}
-
-impl WaitQueueEntry {
-    // Lives on stack.
-    fn new() -> Self {
-        Self {
-            wake_handle: 0,
-            prev: AtomicUsize::new(0),
-            next: AtomicUsize::new(0),
-            _pin: PhantomPinned,
-        }
-    }
-
-    unsafe fn insert_before(&mut self, next: &mut WaitQueueEntry) {
-        let prev = (next.prev.load(Ordering::Relaxed) as *mut Self)
-            .as_mut()
-            .unwrap();
-
-        prev.next
-            .store(self as *const _ as usize, Ordering::Relaxed);
-        next.prev
-            .store(self as *const _ as usize, Ordering::Relaxed);
-
-        self.prev
-            .store(prev as *const _ as usize, Ordering::Relaxed);
-        self.next
-            .store(next as *const _ as usize, Ordering::Relaxed);
-    }
-
-    unsafe fn remove(&mut self) {
-        let prev = (self.prev.load(Ordering::Relaxed) as *mut Self)
-            .as_mut()
-            .unwrap();
-        let next = (self.next.load(Ordering::Relaxed) as *mut Self)
-            .as_mut()
-            .unwrap();
-
-        prev.next
-            .store(next as *const _ as usize, Ordering::Relaxed);
-        next.prev
-            .store(prev as *const _ as usize, Ordering::Relaxed);
-
-        self.prev.store(0, Ordering::Relaxed);
-        self.next.store(0, Ordering::Relaxed);
-    }
-}
-
+// The challenge here is that we want to keep first-in, first-out,
+// which calls for VecDeque, and fast access by value. We maintain
+// this by having both a VecDeque and a BTreeSet.
 struct WaitQueue {
-    entries: spin::Mutex<WaitQueueEntry>,
+    entries: spin::Mutex<(VecDeque<u64>, BTreeSet<u64>)>,
     num_waiters: AtomicU64,
-    p_head: usize,
 }
 
 unsafe impl Sync for WaitQueue {}
@@ -77,38 +23,21 @@ unsafe impl Send for WaitQueue {}
 
 impl WaitQueue {
     fn new() -> Arc<Self> {
-        let mut self_ = Arc::new(Self {
-            entries: spin::Mutex::new(WaitQueueEntry::new()),
+        Arc::new(Self {
+            entries: spin::Mutex::new((VecDeque::new(), BTreeSet::new())),
             num_waiters: AtomicU64::new(0),
-            p_head: 0,
-        });
-
-        unsafe {
-            let self_ref: &mut WaitQueue = Arc::get_mut(&mut self_).unwrap_unchecked();
-            let mut head_lock = self_ref.entries.lock();
-            let head: &mut WaitQueueEntry = &mut head_lock;
-            self_ref.p_head = head as *const _ as usize;
-            head.prev.store(self_ref.p_head, Ordering::Relaxed);
-            head.next.store(self_ref.p_head, Ordering::Relaxed);
-        }
-
-        self_
+        })
     }
 
     // Returns true if timed out.
     fn wait(&self, timeout: &Option<moto_rt::time::Instant>) -> bool {
-        let mut entry = WaitQueueEntry::new();
-
         let tcb = moto_sys::UserThreadControlBlock::get();
-        entry.wake_handle = tcb.self_handle;
+        let wake_handle = tcb.self_handle;
 
         {
-            let mut head_lock = self.entries.lock();
-
-            // Safe because under the mutex lock.
-            unsafe {
-                entry.insert_before(&mut head_lock);
-            }
+            let mut entries = self.entries.lock();
+            entries.0.push_back(wake_handle);
+            entries.1.insert(wake_handle);
         }
 
         let timed_out = match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, *timeout) {
@@ -120,31 +49,24 @@ impl WaitQueue {
         };
 
         {
-            let _entries = self.entries.lock();
-            // Safe because under the mutex lock.
-            unsafe {
-                // Entries are removed from the list in wake_one().
-                if entry.next.load(Ordering::Relaxed) != 0 {
-                    entry.remove(); // Timed out.
-                }
-            }
+            let mut entries = self.entries.lock();
+            entries.1.remove(&wake_handle);
+            // Note: we don't search VecDeque.
         }
         timed_out
     }
 
     fn wake_one(&self) -> bool {
-        let wake_handle = {
-            let head = self.entries.lock();
-            let p_first = head.next.load(Ordering::Relaxed);
-            if p_first == self.p_head {
-                return false;
-            }
+        let wake_handle: u64 = {
+            let mut entries = self.entries.lock();
+            loop {
+                let Some(handle) = entries.0.pop_front() else {
+                    return false;
+                };
 
-            // Safe because under the mutex lock.
-            unsafe {
-                let first = (p_first as *mut WaitQueueEntry).as_mut().unwrap();
-                first.remove();
-                first.wake_handle
+                if entries.1.remove(&handle) {
+                    break handle;
+                }
             }
         };
 
@@ -170,7 +92,7 @@ fn futex_wait_impl(
 
     let key = futex as *const _ as usize;
     loop {
-        if futex.load(Ordering::Relaxed) != expected {
+        if futex.load(Ordering::Acquire) != expected {
             return true;
         }
         if let Some(timo) = timeout {
@@ -191,8 +113,8 @@ fn futex_wait_impl(
             }
         };
 
-        queue.num_waiters.fetch_add(1, Ordering::Relaxed);
-        let timed_out = if futex.load(Ordering::Relaxed) == expected {
+        queue.num_waiters.fetch_add(1, Ordering::SeqCst);
+        let timed_out = if futex.load(Ordering::Acquire) == expected {
             queue.wait(&timeout)
         } else {
             false
@@ -200,7 +122,7 @@ fn futex_wait_impl(
 
         {
             let mut lock = FUTEX_WAIT_QUEUES.lock();
-            if 1 == queue.num_waiters.fetch_sub(1, Ordering::Relaxed) {
+            if 1 == queue.num_waiters.fetch_sub(1, Ordering::SeqCst) {
                 if let Some(q) = lock.get(&key) {
                     // It is really hard to get a pointer out of Pin<Arc<_>>.
                     let ref1: &WaitQueue = q;
