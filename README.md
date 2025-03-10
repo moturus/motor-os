@@ -71,7 +71,7 @@ More specifically, these things work:
       will cross-compile for Motor OS and run, subject to "what does not work" below
   * a simple TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided
   * a simple <a href="https://github.com/moturus/rush">unix-like</a> shell in the serial console
-  * a simle <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a>
+  * a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a>
   * basic commands like free, ps, ls, top, cat, ss, etc. (do `ls bin` to list all commands)
 
 ### What does not work
