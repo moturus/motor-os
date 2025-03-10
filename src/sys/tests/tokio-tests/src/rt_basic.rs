@@ -2,26 +2,13 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 use tokio_test::{assert_err, assert_ok};
 
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
-/*
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
-*/
 use std::thread;
-
-/*
-macro_rules! cfg_metrics {
-    ($($t:tt)*) => {
-        #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-        {
-            $( $t )*
-        }
-    }
-}
-*/
 
 fn test_spawned_task_does_not_progress_without_block_on() {
     let (tx, mut rx) = oneshot::channel();
@@ -39,11 +26,10 @@ fn test_spawned_task_does_not_progress_without_block_on() {
     let out = rt.block_on(async { assert_ok!(rx.await) });
 
     assert_eq!(out, "hello");
+    println!("\ttest_spawned_task_does_not_progress_without_block_on PASS");
 }
 
-/*
-#[test]
-fn no_extra_poll() {
+fn test_no_extra_poll() {
     use pin_project_lite::pin_project;
     use std::pin::Pin;
     use std::sync::{
@@ -73,7 +59,7 @@ fn no_extra_poll() {
         }
     }
 
-    let (tx, rx) = support::mpsc_stream::unbounded_channel_stream::<()>();
+    let (tx, rx) = crate::support::mpsc_stream::unbounded_channel_stream::<()>();
     let rx = TrackPolls {
         npolls: Arc::new(AtomicUsize::new(0)),
         s: rx,
@@ -108,10 +94,10 @@ fn no_extra_poll() {
 
     // should have been polled once more: to yield None
     assert_eq!(npolls.load(SeqCst), 1 + 2 + 1);
+    println!("\ttest_no_extra_poll PASS");
 }
 
-#[test]
-fn acquire_mutex_in_drop() {
+fn test_acquire_mutex_in_drop() {
     use futures::future::pending;
     use tokio::task;
 
@@ -144,10 +130,10 @@ fn acquire_mutex_in_drop() {
 
     // Drop the rt
     drop(rt);
+    println!("\ttest_acquire_mutex_in_drop PASS");
 }
 
-#[test]
-fn drop_tasks_in_context() {
+fn test_drop_tasks_in_context() {
     static SUCCESS: AtomicBool = AtomicBool::new(false);
 
     struct ContextOnDrop;
@@ -173,50 +159,10 @@ fn drop_tasks_in_context() {
     drop(rt);
 
     assert!(SUCCESS.load(Ordering::SeqCst));
+    println!("\ttest_drop_tasks_in_context PASS");
 }
 
-#[test]
-#[cfg_attr(target_os = "wasi", ignore = "Wasi does not support panic recovery")]
-#[should_panic(expected = "boom")]
-fn wake_in_drop_after_panic() {
-    struct WakeOnDrop(Option<oneshot::Sender<()>>);
-
-    impl Drop for WakeOnDrop {
-        fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
-        }
-    }
-
-    let rt = rt();
-
-    let (tx1, rx1) = oneshot::channel::<()>();
-    let (tx2, rx2) = oneshot::channel::<()>();
-
-    // Spawn two tasks. We don't know the order in which they are dropped, so we
-    // make both tasks identical. When the first task is dropped, we wake up the
-    // second task. This ensures that we trigger a wakeup on a live task while
-    // handling the "boom" panic, no matter the order in which the tasks are
-    // dropped.
-    rt.spawn(async move {
-        let _wake_on_drop = WakeOnDrop(Some(tx2));
-        let _ = rx1.await;
-        unreachable!()
-    });
-
-    rt.spawn(async move {
-        let _wake_on_drop = WakeOnDrop(Some(tx1));
-        let _ = rx2.await;
-        unreachable!()
-    });
-
-    rt.block_on(async {
-        tokio::task::yield_now().await;
-        panic!("boom");
-    });
-}
-
-#[test]
-fn spawn_two() {
+fn test_spawn_two() {
     let rt = rt();
 
     let out = rt.block_on(async {
@@ -233,23 +179,20 @@ fn spawn_two() {
 
     assert_eq!(out, "ZOMG");
 
-    cfg_metrics! {
-        let metrics = rt.metrics();
-        drop(rt);
-        assert_eq!(0, metrics.remote_schedule_count());
+    let metrics = rt.metrics();
+    drop(rt);
+    assert_eq!(0, metrics.remote_schedule_count());
 
-        let mut local = 0;
-        for i in 0..metrics.num_workers() {
-            local += metrics.worker_local_schedule_count(i);
-        }
-
-        assert_eq!(2, local);
+    let mut local = 0;
+    for i in 0..metrics.num_workers() {
+        local += metrics.worker_local_schedule_count(i);
     }
+
+    assert_eq!(2, local);
+    println!("\ttest_spawn_two PASS");
 }
 
-#[cfg_attr(target_os = "wasi", ignore = "WASI: std::thread::spawn not supported")]
-#[test]
-fn spawn_remote() {
+fn test_spawn_remote() {
     let rt = rt();
 
     let out = rt.block_on(async {
@@ -269,129 +212,23 @@ fn spawn_remote() {
 
     assert_eq!(out, "ZOMG");
 
-    cfg_metrics! {
-        let metrics = rt.metrics();
-        drop(rt);
-        assert_eq!(1, metrics.remote_schedule_count());
+    let metrics = rt.metrics();
+    drop(rt);
+    assert_eq!(1, metrics.remote_schedule_count());
 
-        let mut local = 0;
-        for i in 0..metrics.num_workers() {
-            local += metrics.worker_local_schedule_count(i);
-        }
-
-        assert_eq!(1, local);
+    let mut local = 0;
+    for i in 0..metrics.num_workers() {
+        local += metrics.worker_local_schedule_count(i);
     }
+
+    assert_eq!(1, local);
+    println!("\ttest_spawn_remote PASS");
 }
 
-#[test]
-#[cfg_attr(target_os = "wasi", ignore = "Wasi does not support panic recovery")]
-#[should_panic(
-    expected = "A Tokio 1.x context was found, but timers are disabled. Call `enable_time` on the runtime builder to enable timers."
-)]
-fn timeout_panics_when_no_time_handle() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    rt.block_on(async {
-        let (_tx, rx) = oneshot::channel::<()>();
-        let dur = Duration::from_millis(20);
-        let _ = timeout(dur, rx).await;
-    });
-}
-
-#[cfg(tokio_unstable)]
 mod unstable {
-    use tokio::runtime::{Builder, RngSeed, UnhandledPanic};
+    use tokio::runtime::RngSeed;
 
-    #[test]
-    #[should_panic(
-        expected = "a spawned task panicked and the runtime is configured to shut down on unhandled panic"
-    )]
-    fn shutdown_on_panic() {
-        let rt = Builder::new_current_thread()
-            .unhandled_panic(UnhandledPanic::ShutdownRuntime)
-            .build()
-            .unwrap();
-
-        rt.block_on(async {
-            tokio::spawn(async {
-                panic!("boom");
-            });
-
-            futures::future::pending::<()>().await;
-        })
-    }
-
-    #[test]
-    #[cfg_attr(target_os = "wasi", ignore = "Wasi does not support panic recovery")]
-    fn spawns_do_nothing() {
-        use std::sync::Arc;
-
-        let rt = Builder::new_current_thread()
-            .unhandled_panic(UnhandledPanic::ShutdownRuntime)
-            .build()
-            .unwrap();
-
-        let rt1 = Arc::new(rt);
-        let rt2 = rt1.clone();
-
-        let _ = std::thread::spawn(move || {
-            rt2.block_on(async {
-                tokio::spawn(async {
-                    panic!("boom");
-                });
-
-                futures::future::pending::<()>().await;
-            })
-        })
-        .join();
-
-        let task = rt1.spawn(async {});
-        let res = futures::executor::block_on(task);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    #[cfg_attr(target_os = "wasi", ignore = "Wasi does not support panic recovery")]
-    fn shutdown_all_concurrent_block_on() {
-        const N: usize = 2;
-        use std::sync::{mpsc, Arc};
-
-        let rt = Builder::new_current_thread()
-            .unhandled_panic(UnhandledPanic::ShutdownRuntime)
-            .build()
-            .unwrap();
-
-        let rt = Arc::new(rt);
-        let mut ths = vec![];
-        let (tx, rx) = mpsc::channel();
-
-        for _ in 0..N {
-            let rt = rt.clone();
-            let tx = tx.clone();
-            ths.push(std::thread::spawn(move || {
-                rt.block_on(async {
-                    tx.send(()).unwrap();
-                    futures::future::pending::<()>().await;
-                });
-            }));
-        }
-
-        for _ in 0..N {
-            rx.recv().unwrap();
-        }
-
-        rt.spawn(async {
-            panic!("boom");
-        });
-
-        for th in ths {
-            assert!(th.join().is_err());
-        }
-    }
-
-    #[test]
-    fn rng_seed() {
+    pub fn test_rng_seed() {
         let seed = b"bytes used to generate seed";
         let rt1 = tokio::runtime::Builder::new_current_thread()
             .rng_seed(RngSeed::from_bytes(seed))
@@ -416,10 +253,10 @@ mod unstable {
         });
 
         assert_eq!(rt1_values, rt2_values);
+        println!("\tunstable::test_rng_seed PASS");
     }
 
-    #[test]
-    fn rng_seed_multi_enter() {
+    pub fn test_rng_seed_multi_enter() {
         let seed = b"bytes used to generate seed";
 
         fn two_rand_values() -> (u32, u32) {
@@ -445,9 +282,9 @@ mod unstable {
 
         assert_eq!(rt1_values_1, rt2_values_1);
         assert_eq!(rt1_values_2, rt2_values_2);
+        println!("\tunstable::test_rng_seed_multi_enter PASS");
     }
 }
-*/
 
 fn rt() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -457,5 +294,14 @@ fn rt() -> Runtime {
 }
 
 pub fn run_all_tests() {
+    println!("rt_basic tests start...");
     test_spawned_task_does_not_progress_without_block_on();
+    test_no_extra_poll();
+    test_acquire_mutex_in_drop();
+    test_drop_tasks_in_context();
+    test_spawn_two();
+    test_spawn_remote();
+    unstable::test_rng_seed();
+    unstable::test_rng_seed_multi_enter();
+    println!("rt_basic PASS");
 }

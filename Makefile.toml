@@ -331,7 +331,7 @@ strip -o "${MOTO_BIN}/tokio-tests" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/d
 '''
 
 [tasks.tokio_tests_release]
-cwd = "./src/sys/tests/tokio_tests"
+cwd = "./src/sys/tests/tokio-tests"
 script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus

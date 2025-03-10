@@ -1,6 +1,10 @@
 // mod process_arg0;
 mod rt_basic;
 
+pub mod support {
+    pub mod mpsc_stream;
+}
+
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 fn input_listener() {
     use std::io::Read;
