@@ -1163,6 +1163,7 @@ version = "1.43.0"
 source = "git+https://github.com/moturus/tokio.git#1a6100e1e72fcfd3d0f0bc5f679296e3e7205549"
 dependencies = [
  "backtrace",
+ "bytes",
  "libc",
  "mio",
  "mio-moturus",
