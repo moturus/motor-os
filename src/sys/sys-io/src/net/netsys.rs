@@ -373,7 +373,7 @@ impl NetSys {
         let moto_socket = if let Some(s) = self.tcp_sockets.get_mut(&socket_id) {
             s
         } else {
-            log::error!("drop_tcp_socket: 0x{:x}: no socket", u64::from(socket_id));
+            log::debug!("drop_tcp_socket: 0x{:x}: no socket", u64::from(socket_id));
             return;
         };
         moto_socket.tx_queue.clear();

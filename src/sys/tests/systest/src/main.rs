@@ -633,9 +633,6 @@ fn main() {
 
     std::thread::spawn(input_listener);
 
-    test_liveness();
-    return;
-
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
@@ -643,6 +640,7 @@ fn main() {
     test_cpus();
     tls::test_tls();
     test_caps();
+    test_liveness();
     spawn_wait_kill::test_pid_kill();
     test_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));

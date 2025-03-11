@@ -419,7 +419,7 @@ impl IoRuntime {
                 continue;
             } else {
                 busy_polling_iter += 1;
-                if busy_polling_iter < 16 {
+                if busy_polling_iter < 4 {
                     continue;
                 }
             }
