@@ -97,6 +97,8 @@ pub fn test_array_queue() {
                 msg.data[0] = 1;
                 if queue_2.push(msg).is_ok() {
                     break;
+                } else {
+                    std::thread::yield_now();
                 }
             }
         }
@@ -108,6 +110,8 @@ pub fn test_array_queue() {
                 msg.data[0] = 2;
                 if queue_3.push(msg).is_ok() {
                     break;
+                } else {
+                    std::thread::yield_now();
                 }
             }
         }
@@ -120,6 +124,8 @@ pub fn test_array_queue() {
         let msg = loop {
             if let Some(msg) = queue.pop() {
                 break msg;
+            } else {
+                std::thread::yield_now();
             }
         };
         let val = if msg.data[0] == 1 {

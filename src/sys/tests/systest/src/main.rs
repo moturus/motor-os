@@ -191,10 +191,9 @@ fn test_ipc() {
         (nanos as u64) / STEPS
     );
 
-    println!(
-        "cpu usage: {:.3} {:.3} {:.3} {:.3}",
-        cpu_usage[0], cpu_usage[1], cpu_usage[2], cpu_usage[3]
-    );
+    for cpu in 0..num_cpus {
+        println!("\tCPU {cpu} usage: {:.3}", cpu_usage[cpu as usize]);
+    }
 }
 
 fn test_pipes() {
@@ -556,8 +555,6 @@ fn main() {
 
     std::thread::spawn(input_listener);
 
-    tcp::run_tests();
-
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
@@ -570,6 +567,7 @@ fn main() {
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     test_futex();
+    tcp::run_tests();
 
     spawn_wait_kill::test();
     mpmc::test_mpmc();
