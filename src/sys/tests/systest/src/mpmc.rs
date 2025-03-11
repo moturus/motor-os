@@ -18,6 +18,9 @@ impl Msg {
     }
 }
 
+#[cfg(debug_assertions)]
+const ITERS: u64 = 1_000_000;
+#[cfg(not(debug_assertions))]
 const ITERS: u64 = 10_000_000;
 
 fn send_t(sender: Sender<Msg>) {

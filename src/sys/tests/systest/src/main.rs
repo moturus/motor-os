@@ -10,7 +10,7 @@ mod xor_server;
 use std::{
     io::{Read, Write},
     sync::{
-        atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -106,6 +106,7 @@ fn test_reentrant_mutex() {
 }
 
 fn test_cpus() {
+    // Spin-loop until all CPUs have been "live".
     let mut cpus: Arc<Vec<AtomicBool>> = Arc::new(vec![]);
     for _i in 0..moto_sys::num_cpus() {
         Arc::get_mut(&mut cpus)
@@ -529,6 +530,83 @@ fn test_thread_names() {
     println!("test_thread_names() PASS");
 }
 
+fn test_liveness() {
+    // Spinloop on each CPU; then test that sleep/wake behaves OK.
+    let mut cpus: Arc<Vec<crossbeam::utils::CachePadded<AtomicU64>>> = Arc::new(vec![]);
+    for _i in 0..moto_sys::num_cpus() {
+        Arc::get_mut(&mut cpus)
+            .unwrap()
+            .push(crossbeam::utils::CachePadded::new(AtomicU64::new(0)));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let num_cpus = moto_sys::num_cpus() as u16;
+
+    // Spawn spinning threads, one for each CPU.
+    let mut threads = vec![];
+    for _idx in 0..num_cpus {
+        let cpus_clone = cpus.clone();
+        let stop_clone = stop.clone();
+        threads.push(std::thread::spawn(move || loop {
+            let cpu = moto_sys::current_cpu() as usize;
+            cpus_clone[cpu].fetch_add(1, Ordering::Relaxed);
+
+            if stop_clone.load(Ordering::Relaxed) {
+                break;
+            }
+        }));
+    }
+
+    // Wait until all CPUs are used.
+    for cpu in 0..num_cpus {
+        while cpus[cpu as usize].load(Ordering::Relaxed) < 1000 {}
+    }
+
+    // We are running in a VM. Give the host time to use num_cpus.
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    // Test that this (main) thread is responsive.
+    const NUM_ITERS: usize = 100;
+    assert_eq!(0, NUM_ITERS % 100);
+
+    let mut results: Vec<u64> = Vec::with_capacity(NUM_ITERS);
+    for _ in 0..NUM_ITERS {
+        let started_sleeping = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let slept = std::time::Instant::now() - started_sleeping;
+        results.push(slept.as_millis().try_into().unwrap());
+    }
+
+    results.sort();
+
+    // Sched tick is 10ms or less.
+    const P50: u64 = 15;
+    const P99: u64 = 25;
+
+    let p50 = results[(NUM_ITERS / 2) - 1];
+
+    if p50 > P50 {
+        panic!("test_liveness: p50 {}", p50);
+    }
+
+    let p99 = results[(NUM_ITERS * 99 / 100) - (NUM_ITERS / 100) - 1];
+    if p99 > P99 {
+        panic!("test_liveness: p99 {}", p99);
+    }
+
+    stop.store(true, Ordering::Release);
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    println!(
+        "test_liveness() PASS: p50: {p50}, p99: {p99}, max: {}",
+        results[NUM_ITERS - 1]
+    );
+}
+
 fn input_listener() {
     loop {
         let mut input = [0_u8; 16];
@@ -554,6 +632,9 @@ fn main() {
     unsafe { core::arch::asm!("int 3") }
 
     std::thread::spawn(input_listener);
+
+    test_liveness();
+    return;
 
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
