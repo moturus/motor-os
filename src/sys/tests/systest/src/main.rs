@@ -38,7 +38,7 @@ fn test_syscall() {
 fn test_futex() {
     use moto_rt::futex::*;
 
-    static FUTEX: AtomicU32 = AtomicU32::new(0);
+    let futex = Arc::new(AtomicU32::new(0));
     static COUNTER: AtomicU16 = AtomicU16::new(0);
     const THREADS: u16 = 20;
 
@@ -46,21 +46,22 @@ fn test_futex() {
     let mut threads = vec![];
 
     for _idx in 0..THREADS {
-        threads.push(std::thread::spawn(|| {
-            while FUTEX
+        let futex_clone = futex.clone();
+        threads.push(std::thread::spawn(move || {
+            while futex_clone
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_err()
             {
-                futex_wait(&FUTEX, 1, None);
+                futex_wait(futex_clone.as_ref(), 1, None);
             }
 
             let prev = COUNTER.fetch_add(1, Ordering::Release);
-            FUTEX.store(0, Ordering::Relaxed);
+            futex_clone.store(0, Ordering::Relaxed);
 
             if (prev & 1) == 0 {
-                futex_wake(&FUTEX);
+                futex_wake(futex_clone.as_ref());
             } else {
-                futex_wake_all(&FUTEX);
+                futex_wake_all(futex_clone.as_ref());
             }
         }));
     }
@@ -71,6 +72,35 @@ fn test_futex() {
 
     assert_eq!(THREADS, COUNTER.load(Ordering::Acquire));
     println!("test_futex PASS");
+}
+
+fn test_thread_parking() {
+    // This is a modified example from https://doc.rust-lang.org/std/thread/fn.park.html.
+    let flag = Arc::new(AtomicBool::new(false));
+    let flag2 = Arc::clone(&flag);
+
+    let parked_thread = std::thread::spawn(move || {
+        // We want to wait until the flag is set. We *could* just spin, but using
+        // park/unpark is more efficient.
+        while !flag2.load(Ordering::Relaxed) {
+            std::thread::park();
+            // We *could* get here spuriously, i.e., way before the 10ms below are over!
+            // But that is no problem, we are in a loop until the flag is set anyway.
+        }
+    });
+
+    // Let some time pass for the thread to be spawned.
+    std::thread::sleep(Duration::from_micros(3));
+
+    // Set the flag, and let the thread wake up.
+    // There is no race condition here, if `unpark`
+    // happens first, `park` will return immediately.
+    // Hence there is no risk of a deadlock.
+    flag.store(true, Ordering::Relaxed);
+    parked_thread.thread().unpark();
+
+    parked_thread.join().unwrap();
+    println!("test_thread_parking PASS");
 }
 
 fn test_rt_mutex() {
@@ -641,6 +671,7 @@ fn main() {
     tls::test_tls();
     test_caps();
     test_liveness();
+    test_thread_parking();
     spawn_wait_kill::test_pid_kill();
     test_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
