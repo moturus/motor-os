@@ -585,7 +585,7 @@ pub fn on_timer_irq() {
     let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
     scheduler.timer_irq_tick.store(true, Ordering::Relaxed);
 
-    const SCHED_TICK_MILLIS: u64 = 20;
+    const SCHED_TICK_MILLIS: u64 = 10;
     let when =
         crate::arch::time::Instant::now() + core::time::Duration::from_millis(SCHED_TICK_MILLIS);
 
