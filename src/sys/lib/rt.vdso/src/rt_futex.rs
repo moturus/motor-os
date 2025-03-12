@@ -1,4 +1,3 @@
-use crate::util::spin;
 use alloc::collections::btree_set::BTreeSet;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::collections::BTreeMap;
@@ -7,6 +6,7 @@ use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
+use moto_rt::spinlock::SpinLock;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 
@@ -14,14 +14,14 @@ use moto_sys::SysHandle;
 // which calls for VecDeque, and fast access by value. We maintain
 // this by having both a VecDeque and a BTreeSet.
 struct WaitQueue {
-    entries: spin::Mutex<(VecDeque<u64>, BTreeSet<u64>)>,
+    entries: SpinLock<(VecDeque<u64>, BTreeSet<u64>)>,
     num_waiters: AtomicU64,
 }
 
 impl WaitQueue {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            entries: spin::Mutex::new((VecDeque::new(), BTreeSet::new())),
+            entries: SpinLock::new((VecDeque::new(), BTreeSet::new())),
             num_waiters: AtomicU64::new(0),
         })
     }
@@ -76,8 +76,8 @@ impl WaitQueue {
     }
 }
 
-static FUTEX_WAIT_QUEUES: spin::Mutex<BTreeMap<usize, Arc<WaitQueue>>> =
-    spin::Mutex::new(BTreeMap::new());
+static FUTEX_WAIT_QUEUES: SpinLock<BTreeMap<usize, Arc<WaitQueue>>> =
+    SpinLock::new(BTreeMap::new());
 
 // Returns false on timeout.
 fn futex_wait_impl(

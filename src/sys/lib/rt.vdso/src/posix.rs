@@ -7,13 +7,13 @@
 
 use core::any::Any;
 
-use super::spin::Mutex;
 use crate::stdio::Stdio;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
+use moto_rt::spinlock::SpinLock;
 use moto_rt::ErrorCode;
 use moto_rt::RtFd;
 use moto_rt::E_BAD_HANDLE;
@@ -188,15 +188,15 @@ impl PosixFile for Placeholder {
 /// can probably be made faster using unsafe stuff, but that
 /// would be premature optimization at the moment.
 struct Descriptors {
-    descriptors: Mutex<Vec<Arc<dyn PosixFile>>>,
-    freelist: Mutex<Vec<RtFd>>,
+    descriptors: SpinLock<Vec<Arc<dyn PosixFile>>>,
+    freelist: SpinLock<Vec<RtFd>>,
 }
 
 impl Descriptors {
     const fn new() -> Self {
         Self {
-            descriptors: Mutex::new(Vec::new()),
-            freelist: Mutex::new(Vec::new()),
+            descriptors: SpinLock::new(Vec::new()),
+            freelist: SpinLock::new(Vec::new()),
         }
     }
 

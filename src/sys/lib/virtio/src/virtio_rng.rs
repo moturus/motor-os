@@ -1,7 +1,7 @@
 use super::virtio_device::VirtioDevice;
-use crate::spin::Mutex;
+use moto_rt::spinlock::SpinLock;
 
-static RNG: Mutex<Option<Rng>> = Mutex::new(None);
+static RNG: SpinLock<Option<Rng>> = SpinLock::new(None);
 
 pub(super) struct Rng {
     dev: alloc::boxed::Box<VirtioDevice>,

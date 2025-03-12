@@ -8,7 +8,6 @@ use core::sync::atomic::Ordering;
 
 use crate::posix;
 use crate::posix::PosixFile;
-use crate::spin::Mutex;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
@@ -17,6 +16,7 @@ use moto_rt::poll::Event;
 use moto_rt::poll::EventBits;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
+use moto_rt::spinlock::SpinLock;
 use moto_rt::ErrorCode;
 use moto_rt::RtFd;
 use moto_rt::E_BAD_HANDLE;
@@ -40,7 +40,7 @@ pub struct WaitObject {
     // TODO: is there a way to go from Arc<dyn PosixFile> to Arc<Registry>?
     // If so, then we can have Weak<Registry> below.
     #[allow(clippy::type_complexity)]
-    registries: Mutex<BTreeMap<u64, (Token, Interests)>>,
+    registries: SpinLock<BTreeMap<u64, (Token, Interests)>>,
 }
 
 impl Drop for WaitObject {
@@ -54,7 +54,7 @@ impl Drop for WaitObject {
 impl WaitObject {
     pub fn new(supported_interests: Interests) -> Self {
         Self {
-            registries: Mutex::new(BTreeMap::new()),
+            registries: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -127,11 +127,11 @@ impl WaitObject {
     }
 }
 
-static REGISTRIES: Mutex<BTreeMap<u64, Arc<Registry>>> = Mutex::new(BTreeMap::new());
+static REGISTRIES: SpinLock<BTreeMap<u64, Arc<Registry>>> = SpinLock::new(BTreeMap::new());
 
 pub struct Registry {
     id: u64,
-    events: Mutex<BTreeMap<Token, EventBits>>,
+    events: SpinLock<BTreeMap<Token, EventBits>>,
     wait_handle: AtomicU64,
     wait_object: WaitObject,
 }
@@ -171,7 +171,7 @@ impl Registry {
 
         let result = Arc::new(Self {
             id,
-            events: Mutex::new(BTreeMap::new()),
+            events: SpinLock::new(BTreeMap::new()),
             wait_handle: AtomicU64::new(SysHandle::NONE.as_u64()),
             wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
         });

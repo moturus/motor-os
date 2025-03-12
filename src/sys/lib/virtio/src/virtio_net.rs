@@ -1,7 +1,6 @@
-use core::mem::offset_of;
-
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::mem::offset_of;
 
 use super::le16;
 use super::pci::PciBar;
@@ -109,7 +108,8 @@ impl Drop for NetDev {
 
 unsafe impl Send for NetDev {}
 
-static NET_DEVICES: crate::spin::Mutex<Vec<NetDev>> = crate::spin::Mutex::new(Vec::new());
+static NET_DEVICES: moto_rt::spinlock::SpinLock<Vec<NetDev>> =
+    moto_rt::spinlock::SpinLock::new(Vec::new());
 
 impl NetDev {
     const VIRTQ_RX: usize = 0;

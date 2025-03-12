@@ -17,8 +17,8 @@ mod runtime;
 mod stdio;
 
 mod net {
-    pub mod rt_net;
     pub mod inner_rx_stream;
+    pub mod rt_net;
 }
 
 #[macro_use]
@@ -26,12 +26,9 @@ mod util {
     #[macro_use]
     pub mod logging;
     pub mod scopeguard;
-    pub mod spin;
 }
 
 pub(crate) use util::logging::moto_log;
-pub use util::spin;
-
 extern crate alloc;
 
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
@@ -322,9 +319,10 @@ pub extern "C" fn moturus_start(version: u64) {
         net::rt_net::dns_lookup as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .net_bind
-        .store(net::rt_net::bind as *const () as usize as u64, Ordering::Relaxed);
+    vtable.net_bind.store(
+        net::rt_net::bind as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.net_listen.store(
         net::rt_net::listen as *const () as usize as u64,
         Ordering::Relaxed,
@@ -357,9 +355,10 @@ pub extern "C" fn moturus_start(version: u64) {
         net::rt_net::getsockopt as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .net_peek
-        .store(net::rt_net::peek as *const () as usize as u64, Ordering::Relaxed);
+    vtable.net_peek.store(
+        net::rt_net::peek as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // Poll.
     vtable

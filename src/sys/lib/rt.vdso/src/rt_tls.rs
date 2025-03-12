@@ -1,13 +1,12 @@
-use moto_rt::tls::Key;
-
-use crate::spin;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::*;
+use moto_rt::spinlock::SpinLock;
+use moto_rt::tls::Key;
 
 pub type Dtor = unsafe extern "C" fn(*mut u8);
 
 static NEXT_KEY: AtomicUsize = AtomicUsize::new(1); // Rust does not accept zeroes.
-static KEYS: spin::Mutex<BTreeMap<Key, Option<Dtor>>> = spin::Mutex::new(BTreeMap::new());
+static KEYS: SpinLock<BTreeMap<Key, Option<Dtor>>> = SpinLock::new(BTreeMap::new());
 
 type PerCpuMap = BTreeMap<Key, usize>;
 

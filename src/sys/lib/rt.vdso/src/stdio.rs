@@ -1,9 +1,10 @@
 use crate::posix;
 use crate::posix::PosixFile;
-use crate::{rt_process::ProcessData, rt_process::StdioData, spin::Mutex};
+use crate::{rt_process::ProcessData, rt_process::StdioData};
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 use moto_ipc::sync_pipe::Pipe;
+use moto_rt::spinlock::SpinLock;
 use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
 use moto_sys::SysHandle;
 
@@ -89,11 +90,7 @@ impl StdioImpl {
         let to_copy = buf.len().min(self.overflow.len());
         if to_copy > 0 {
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    self.overflow.as_ptr(),
-                    buf.as_mut_ptr(),
-                    to_copy,
-                );
+                core::ptr::copy_nonoverlapping(self.overflow.as_ptr(), buf.as_mut_ptr(), to_copy);
             }
             if to_copy < self.overflow.len() {
                 let mut remainder = Vec::new();
@@ -136,7 +133,7 @@ impl StdioImpl {
 }
 
 pub struct Stdio {
-    inner: Mutex<StdioImpl>,
+    inner: SpinLock<StdioImpl>,
 }
 
 impl PosixFile for Stdio {
@@ -277,17 +274,17 @@ pub fn init() {
     use posix::PosixFile;
 
     let stdin_fd = posix::push_file(Arc::new(Stdio {
-        inner: Mutex::new(StdioImpl::new(StdioKind::Stdin)),
+        inner: SpinLock::new(StdioImpl::new(StdioKind::Stdin)),
     }));
     assert_eq!(moto_rt::FD_STDIN, stdin_fd);
 
     let stdout_fd = posix::push_file(Arc::new(Stdio {
-        inner: Mutex::new(StdioImpl::new(StdioKind::Stdout)),
+        inner: SpinLock::new(StdioImpl::new(StdioKind::Stdout)),
     }));
     assert_eq!(moto_rt::FD_STDOUT, stdout_fd);
 
     let stderr_fd = posix::push_file(Arc::new(Stdio {
-        inner: Mutex::new(StdioImpl::new(StdioKind::Stderr)),
+        inner: SpinLock::new(StdioImpl::new(StdioKind::Stderr)),
     }));
     assert_eq!(moto_rt::FD_STDERR, stderr_fd);
 }
@@ -365,7 +362,7 @@ fn create_stdio_pipes(
                     moto_ipc::sync_pipe::Pipe::Writer(moto_ipc::sync_pipe::Writer::new(local_data))
                 };
                 let pipe_fd = posix::push_file(Arc::new(StdioPipe {
-                    inner: Mutex::new(pipe),
+                    inner: SpinLock::new(pipe),
                 }));
                 Ok((
                     pipe_fd,
@@ -380,7 +377,7 @@ fn create_stdio_pipes(
                     moto_ipc::sync_pipe::Pipe::Reader(moto_ipc::sync_pipe::Reader::new(local_data))
                 };
                 let pipe_fd = posix::push_file(Arc::new(StdioPipe {
-                    inner: Mutex::new(pipe),
+                    inner: SpinLock::new(pipe),
                 }));
                 Ok((
                     pipe_fd,
@@ -397,7 +394,7 @@ fn create_stdio_pipes(
 }
 
 struct StdioPipe {
-    inner: Mutex<moto_ipc::sync_pipe::Pipe>,
+    inner: SpinLock<moto_ipc::sync_pipe::Pipe>,
 }
 
 impl PosixFile for StdioPipe {

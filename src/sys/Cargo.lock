@@ -703,6 +703,7 @@ name = "moto-virtio"
 version = "0.2.0"
 dependencies = [
  "log",
+ "moto-rt 0.2.7",
  "moto-sys",
 ]
 

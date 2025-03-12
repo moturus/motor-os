@@ -1,14 +1,13 @@
-use core::sync::atomic::*;
-
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::*;
+use moto_rt::spinlock::SpinLock;
 
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use super::BLOCK_SIZE;
 use super::BLOCK_SIZE_LOG2;
-use crate::spin::Mutex;
 
 /*
  *  VIRTIO_BLK_F_SIZE_MAX (1) Maximum size of any single segment is in size_max.
@@ -363,7 +362,7 @@ impl Blk {
     }
 }
 
-static BLK: Mutex<Vec<Blk>> = Mutex::new(vec![]);
+static BLK: SpinLock<Vec<Blk>> = SpinLock::new(vec![]);
 
 pub fn lsblk() -> Vec<Arc<dyn super::BlockDevice>> {
     let mut result: Vec<Arc<dyn super::BlockDevice>> = alloc::vec![];

@@ -86,6 +86,8 @@ pub mod time;
 #[cfg(not(feature = "base"))]
 pub mod tls;
 
+pub mod spinlock;
+
 #[cfg(not(feature = "base"))]
 pub use futex::*;
 
