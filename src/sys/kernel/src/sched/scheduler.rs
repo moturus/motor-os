@@ -299,11 +299,12 @@ impl Scheduler {
             let last_check = scheduler.last_alive_check.load(Ordering::Acquire);
             if now > (last_check + 100_000_000_000) {
                 log::error!("CPU {cpu} dead: now: {now}; last check: {last_check}. OOPS.");
-                crate::arch::log_backtrace("KERNEL SUICIDE");
-                scheduler.die();
-                return true;
+                // crate::arch::log_backtrace("KERNEL SUICIDE");
+                // scheduler.die();
+                true
+            } else {
+                false
             }
-            false
         };
         PERCPU_SCHEDULERS.for_each_cpu(&mut check);
     }

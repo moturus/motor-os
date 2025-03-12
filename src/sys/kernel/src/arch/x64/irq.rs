@@ -668,6 +668,15 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
             irq_stack.error_code
         );
 
+        // If the lines below print, swapsgs is fine.
+        crate::write_serial!("will call current_cpu - ");
+        crate::write_serial!("{}\n\n", super::current_cpu());
+
+        // This prints KPT address in case it got messed up - uncomment debug_assersions
+        // in paging.rs::new_kernel_page_table().
+        let page_table = x86_64::registers::control::Cr3::read();
+        crate::write_serial!("\n\nCR3: {:?}\n\n", page_table);
+
         #[cfg(debug_assertions)]
         crate::arch::log_backtrace("#PF");
 

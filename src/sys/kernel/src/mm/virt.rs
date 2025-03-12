@@ -41,6 +41,7 @@ const ONE_GB: u64 = 1u64 << 30;
 // so let's have these regions large enough to not think about it too much.
 
 pub const VMEM_KERNEL_CODE_START: u64 = super::PAGING_DIRECT_MAP_OFFSET + super::KERNEL_PHYS_START;
+const _: () = assert!(VMEM_KERNEL_CODE_START == 0x400002200000);
 pub const VMEM_KERNEL_DATA_START: u64 = super::PAGING_DIRECT_MAP_OFFSET - (512 * super::ONE_GB);
 
 // NOTE: all of kernel offsets below are relative to VMEM_KERNEL_DYNAMIC_START.
@@ -51,6 +52,7 @@ const VMEM_KSTACKS_START: u64 = VMEM_KSTATIC_END;
 const VMEM_KSTACKS_END: u64 = VMEM_KSTACKS_START + 8 * ONE_GB; // 16 GB
 
 const VMEM_KHEAP_START: u64 = VMEM_KSTACKS_END;
+const _: () = assert!(VMEM_KHEAP_START == 0x3F8400000000);
 const VMEM_KHEAP_END: u64 = VMEM_KHEAP_START + 8 * ONE_GB; // 24 GB
 
 const VMEM_K_MMIO_START: u64 = VMEM_KHEAP_END;
