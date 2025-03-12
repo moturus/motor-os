@@ -1,3 +1,92 @@
+/// A minimalistic SpinLock.
+//
+// A slightly modified version of
+// https://github.com/m-ou-se/rust-atomics-and-locks/blob/main/src/ch4_spin_lock/s3_guard.rs
+//
+// which has this LICENCE:
+//
+// You may use all code in this repository for any purpose.
+//
+// Attribution is appreciated, but not required.
+// An attribution usually includes the book title, author,
+// publisher, and ISBN. For example: "Rust Atomics and
+// Locks by Mara Bos (O’Reilly). Copyright 2023 Mara Bos,
+// 978-1-098-11944-7."
+//
+use core::cell::UnsafeCell;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering::{Acquire, Release};
+
+pub struct SpinLock<T> {
+    locked: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+unsafe impl<T> Sync for SpinLock<T> where T: Send {}
+
+pub struct LockGuard<'a, T> {
+    lock: &'a SpinLock<T>,
+}
+
+unsafe impl<T> Sync for LockGuard<'_, T> where T: Sync {}
+
+impl<T> Default for SpinLock<T>
+where
+    T: Default,
+{
+    fn default() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: T::default().into(),
+        }
+    }
+}
+
+impl<T> SpinLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    #[inline]
+    pub fn lock(&self, _lockword: u32) -> LockGuard<T> {
+        while self.locked.swap(true, Acquire) {
+            core::hint::spin_loop();
+        }
+        LockGuard { lock: self }
+    }
+}
+
+impl<T> Deref for LockGuard<'_, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        // Safety: The very existence of this Guard
+        // guarantees we've exclusively locked the lock.
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<T> DerefMut for LockGuard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        // Safety: The very existence of this Guard
+        // guarantees we've exclusively locked the lock.
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
+impl<T> Drop for LockGuard<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.lock.locked.store(false, Release);
+    }
+}
+
+/*
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -120,3 +209,4 @@ impl<T: ?Sized> Drop for LockGuard<'_, T> {
         self.lock_word.store(0, Ordering::SeqCst);
     }
 }
+*/
