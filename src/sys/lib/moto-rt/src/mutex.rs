@@ -37,12 +37,14 @@ unsafe impl<T> Sync for MutexGuard<'_, T> where T: Sync {}
 
 impl<T> Deref for MutexGuard<'_, T> {
     type Target = T;
+    #[inline]
     fn deref(&self) -> &T {
         unsafe { &*self.mutex.value.get() }
     }
 }
 
 impl<T> DerefMut for MutexGuard<'_, T> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.mutex.value.get() }
     }
@@ -56,6 +58,7 @@ impl<T> Mutex<T> {
         }
     }
 
+    #[inline]
     pub fn lock(&self) -> MutexGuard<T> {
         if self
             .state
@@ -69,6 +72,7 @@ impl<T> Mutex<T> {
     }
 }
 
+#[cold]
 fn lock_contended(state: &AtomicU32) {
     let mut spin_count = 0;
     const MAX_BUSY_LOOP_ITERS: u32 = 100;
@@ -91,6 +95,7 @@ fn lock_contended(state: &AtomicU32) {
 }
 
 impl<T> Drop for MutexGuard<'_, T> {
+    #[inline]
     fn drop(&mut self) {
         if self.mutex.state.swap(UNLOCKED, Release) == LOCKED_YES_WAITERS {
             crate::futex_wake(&self.mutex.state);
