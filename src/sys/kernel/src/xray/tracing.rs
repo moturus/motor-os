@@ -88,21 +88,23 @@ struct Tracer {
 }
 
 impl Tracer {
+    fn start_tracing(&self) {
+        self.tracing.store(true, Ordering::Release);
+    }
     fn stop_tracing(&self) {
         self.tracing.store(false, Ordering::Release);
+    }
+    fn is_tracing(&self) -> bool {
+        self.tracing.load(Ordering::Acquire)
     }
 }
 
 static TRACER: StaticRef<Tracer> = StaticRef::default_const();
 
 pub fn trace(event: &'static str, arg0: u64, arg1: u64, arg2: u64) {
-    let tracer = TRACER.get();
-    if tracer.is_none() {
+    let Some(tracer) = TRACER.get() else {
         return;
-    }
-
-    // Safe because we just checked for is_none() above.
-    let tracer = unsafe { tracer.unwrap_unchecked() };
+    };
     if !tracer.tracing.load(Ordering::Relaxed) {
         return;
     }
@@ -118,21 +120,14 @@ pub fn trace(event: &'static str, arg0: u64, arg1: u64, arg2: u64) {
 }
 
 pub fn trace_irq(irq: u64, arg1: u64, arg2: u64) {
-    let tracer = TRACER.get();
-    if tracer.is_none() {
+    let Some(tracer) = TRACER.get() else {
         return;
-    }
-
-    // Safe because we just checked for is_none() above.
-    let tracer = unsafe { tracer.unwrap_unchecked() };
+    };
     if !tracer.tracing.load(Ordering::Relaxed) {
         return;
     }
-    let buffer = match tracer.buffers.get() {
-        Some(buf) => buf,
-        None => {
-            return; // Don't allocate in IRQ.
-        }
+    let Some(buffer) = tracer.buffers.get() else {
+        return; // Don't allocate in IRQ.
     };
 
     buffer.add_trace("irq", irq, arg1, arg2)
@@ -166,16 +161,24 @@ pub fn dump() {
     let tracer = TRACER.get();
     if tracer.is_none() {
         crate::write_serial!("tracing::dump(): tracing not enabled.\n");
+        DUMPING.store(false, Ordering::Release);
         return;
     }
 
     let tracer = unsafe { tracer.unwrap_unchecked() };
-    tracer.stop_tracing();
+    if !tracer.is_tracing() {
+        crate::write_serial!("tracing::dump(): tracing not enabled.\n");
+        DUMPING.store(false, Ordering::Release);
+        return;
+    }
 
     let mut dump = |cpu: uCpus, buffer: &TraceBuffer| -> bool {
         TraceBuffer::dump(cpu, buffer);
         false
     };
 
+    tracer.stop_tracing();
     tracer.buffers.for_each_cpu(&mut dump);
+    tracer.start_tracing();
+    DUMPING.store(false, Ordering::Release);
 }
