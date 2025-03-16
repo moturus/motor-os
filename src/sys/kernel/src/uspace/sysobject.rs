@@ -55,7 +55,7 @@ impl Drop for SysObject {
         // woken list, so they should never be dropped.
         assert!(!self.is_woken());
 
-        if !self.sibling_dropped.load(Ordering::Relaxed) {
+        if !self.sibling_dropped.load(Ordering::Acquire) {
             super::shared::on_drop(self);
         }
     }
@@ -113,7 +113,7 @@ impl SysObject {
     }
 
     pub fn mark_done(&self) {
-        assert!(!self.done.swap(true, Ordering::Release));
+        assert!(!self.done.swap(true, Ordering::AcqRel));
     }
 
     pub fn done(&self) -> bool {
@@ -122,14 +122,14 @@ impl SysObject {
 
     #[inline(always)]
     pub fn is_woken(&self) -> bool {
-        self.next_woken.load(Ordering::Relaxed) != 0
+        self.next_woken.load(Ordering::Acquire) != 0
     }
 
     #[inline(always)]
     pub fn set_next_woken(&self, next: u64) {
-        debug_assert!(self.wake_event_lock.load(Ordering::Relaxed));
+        debug_assert!(self.wake_event_lock.load(Ordering::Acquire));
         // Use +1 to indicate self is woken even if next is zero.
-        self.next_woken.store(next + 1, Ordering::Relaxed);
+        self.next_woken.store(next + 1, Ordering::Release);
     }
 
     #[inline(always)]
@@ -145,13 +145,13 @@ impl SysObject {
 
     pub fn take_woken(&self) -> (u64, BTreeMap<ThreadId, (Weak<Thread>, SysHandle)>) {
         loop {
-            let prev = self.wake_event_lock.swap(true, Ordering::Acquire);
+            let prev = self.wake_event_lock.swap(true, Ordering::AcqRel);
             if !prev {
                 break;
             }
         }
         // Use -1 because we did a +1 in set_next_woken.
-        let next = self.next_woken.swap(0, Ordering::Relaxed) - 1;
+        let next = self.next_woken.swap(0, Ordering::AcqRel) - 1;
         let threads = core::mem::take(&mut *self.waiting_threads.lock(line!()));
         self.wake_event_lock.store(false, Ordering::Release);
 
@@ -170,9 +170,9 @@ impl SysObject {
     // May be called from IRQ.
     #[inline]
     pub fn wake_irq(self_: &Arc<Self>) {
-        self_.wake_counter.fetch_add(1, Ordering::Release);
+        self_.wake_counter.fetch_add(1, Ordering::AcqRel);
         // Protect against concurrent attempts to add this object to the woken list.
-        let prev = self_.wake_event_lock.swap(true, Ordering::Acquire);
+        let prev = self_.wake_event_lock.swap(true, Ordering::AcqRel);
         if prev {
             return;
         }
@@ -200,9 +200,9 @@ impl SysObject {
 
     // NOT called from IRQ.
     pub fn wake(&self, this_cpu: bool) {
-        self.wake_counter.fetch_add(1, Ordering::Release);
+        self.wake_counter.fetch_add(1, Ordering::AcqRel);
         // Protect against concurrent attempts to add this object to the woken list.
-        let prev = self.wake_event_lock.swap(true, Ordering::Acquire);
+        let prev = self.wake_event_lock.swap(true, Ordering::AcqRel);
         if prev {
             return;
         }
@@ -251,11 +251,17 @@ fn on_object_woke(woken: &Arc<SysObject>) {
     // no taking of locks, no memory allocations.
     debug_assert!(!woken.is_woken());
 
+    let mut iters: u64 = 0;
     loop {
-        let prev_head = WOKEN_OBJECTS.load(Ordering::Relaxed);
+        iters += 1;
+        if iters > 1_000_000 {
+            panic!("{}:{} - loop inside IRQ", file!(), line!());
+        }
+        let prev_head = WOKEN_OBJECTS.load(Ordering::Acquire);
         woken.set_next_woken(prev_head);
 
         // Do Arc::into_raw + clone to keep the refcount up.
+        // Increase the refcount.
         let next_head = Arc::into_raw(woken.clone()) as usize as u64;
 
         if WOKEN_OBJECTS
@@ -263,6 +269,10 @@ fn on_object_woke(woken: &Arc<SysObject>) {
             .is_ok()
         {
             break;
+        } else {
+            // Decrease the refcount.
+            let _ = unsafe { Arc::from_raw(next_head as usize as *const SysObject) };
+            core::hint::spin_loop();
         }
     }
 }
