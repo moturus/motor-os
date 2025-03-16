@@ -20,7 +20,7 @@ impl Timer {
 
         debug_assert!(!when.is_nan());
 
-        let mut job = Job::new(job_fn, thread);
+        let mut job = Job::new(job_fn, thread.get_weak(), 0, cpu);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         job.arg = id;
 

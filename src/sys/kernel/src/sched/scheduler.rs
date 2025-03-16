@@ -47,40 +47,26 @@ static PERCPU_TIMERS: StaticRef<StaticPerCpu<Instant>> = StaticRef::default_cons
 static GLOBAL_READY_QUEUE_NORMAL: StaticRef<crate::util::SpinLock<VecDeque<Job>>> =
     StaticRef::default_const();
 
-#[derive(Clone)]
+/*
 pub enum Priority {
     High,   // Always picked; may starve lower-priority jobs.
     Normal, // Normal jobs (most user jobs).
     Low,    // Low priority jobs. Will run eventually (unless high priority jobs starve the rest).
     Idle,   // Jobs for when there is nothing else to do. May never run.
 }
+*/
 
 pub type SchedulerJobFn = fn(Weak<Thread>, u64);
-
-fn empty_job(_: Weak<Thread>, _: u64) {}
 
 pub struct Job {
     job_fn: SchedulerJobFn,
     thread: Weak<Thread>,
     pub arg: u64,
-    pub prio: Priority,
     pub cpu: uCpus, // uCpus::MAX => not set.
 }
 
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
-
-impl Default for Job {
-    fn default() -> Self {
-        Self {
-            job_fn: empty_job,
-            thread: Weak::default(),
-            arg: 0,
-            prio: Priority::Idle,
-            cpu: uCpus::MAX,
-        }
-    }
-}
 
 impl Job {
     fn new_detached(job_fn: SchedulerJobFn, cpu: uCpus) -> Self {
@@ -88,43 +74,16 @@ impl Job {
             job_fn,
             thread: Weak::default(),
             arg: 0,
-            prio: Priority::Normal,
             cpu,
         }
     }
 
-    pub fn new_with_arg(job_fn: SchedulerJobFn, arg: u64) -> Self {
+    pub fn new(job_fn: SchedulerJobFn, thread: Weak<Thread>, arg: u64, cpu: uCpus) -> Self {
         Job {
             job_fn,
-            thread: Weak::default(),
+            thread,
             arg,
-            prio: Priority::Normal,
-            cpu: uCpus::MAX,
-        }
-    }
-
-    pub fn new(job_fn: SchedulerJobFn, thread: &Thread) -> Self {
-        Job {
-            job_fn,
-            thread: thread.get_weak(),
-            arg: 0,
-            prio: Priority::Normal,
-            cpu: thread.get_cpu_affinity(),
-        }
-    }
-
-    pub fn new_on_current_cpu(job_fn: SchedulerJobFn, thread: &Thread) -> Self {
-        let affined_to = thread.get_cpu_affinity();
-        if affined_to != uCpus::MAX {
-            Job::new(job_fn, thread)
-        } else {
-            Job {
-                job_fn,
-                thread: thread.get_weak(),
-                arg: 0,
-                prio: Priority::Normal,
-                cpu: crate::arch::current_cpu(),
-            }
+            cpu,
         }
     }
 
@@ -133,7 +92,6 @@ impl Job {
             job_fn,
             thread,
             arg,
-            prio: _,
             cpu: _,
         } = self;
         job_fn(thread, arg);
@@ -304,8 +262,6 @@ impl Scheduler {
 
     #[cfg(debug_assertions)]
     fn alive(&self) {
-        use crate::xray::tracing;
-
         let now = crate::arch::time::Instant::now().as_u64();
         self.last_alive_check.store(now, Ordering::Release);
 
@@ -316,7 +272,7 @@ impl Scheduler {
                     "CPU {cpu} dead: now: {now}; last check: {last_check}; idle: {} OOPS.",
                     scheduler.idle.load(Ordering::Acquire)
                 );
-                tracing::dump();
+                crate::xray::tracing::dump();
                 scheduler.die(); // Will print stack if can wake.
                 true
             } else {

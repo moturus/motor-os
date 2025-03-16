@@ -1067,7 +1067,9 @@ impl Thread {
                     *status = ThreadStatus::Live(LiveThreadStatus::Preempted);
                     crate::sched::post(crate::sched::Job::new(
                         Self::job_fn_resume_in_userspace,
-                        self,
+                        self.get_weak(),
+                        self.tid.as_u64(),
+                        self.get_cpu_affinity(),
                     ));
                     Ok(())
                 }
@@ -1231,7 +1233,12 @@ impl Thread {
             }
         };
         if post_exited {
-            crate::sched::post(crate::sched::Job::new(Self::job_fn_on_thread_exited, self));
+            crate::sched::post(crate::sched::Job::new(
+                Self::job_fn_on_thread_exited,
+                self.get_weak(),
+                self.tid.as_u64(),
+                uCpus::MAX,
+            ));
         }
     }
 
@@ -1239,7 +1246,7 @@ impl Thread {
         self.wakes_taken
             .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
 
-        let mut job = crate::sched::Job::new(Self::job_fn_start, self);
+        let mut job = crate::sched::Job::new(Self::job_fn_start, self.get_weak(), 0, uCpus::MAX);
         job.arg = arg;
         crate::sched::post(job);
     }
@@ -1307,7 +1314,12 @@ impl Thread {
                 let (self_mut, mut thread_status_lock) = unsafe { self.get_mut() };
                 if *thread_status_lock != ThreadStatus::Created {
                     assert_matches!(*thread_status_lock, ThreadStatus::Killed(_));
-                    crate::sched::post(crate::sched::Job::new(Self::job_fn_on_thread_exited, self));
+                    crate::sched::post(crate::sched::Job::new(
+                        Self::job_fn_on_thread_exited,
+                        self.get_weak(),
+                        self.tid.as_u64(),
+                        uCpus::MAX,
+                    ));
                     return;
                 }
                 let self_ptr = self_mut as *const Thread;
@@ -1477,7 +1489,12 @@ impl Thread {
         }
 
         if call_on_exited {
-            crate::sched::post(crate::sched::Job::new(Self::job_fn_on_thread_exited, self));
+            crate::sched::post(crate::sched::Job::new(
+                Self::job_fn_on_thread_exited,
+                self.get_weak(),
+                self.tid.as_u64(),
+                uCpus::MAX,
+            ));
         }
     }
 
@@ -1664,12 +1681,19 @@ impl Thread {
         self.trace("thread::post_wake_locked", 0, 0);
         self.tcb.validate_rsp();
         if this_cpu {
-            crate::sched::post(crate::sched::Job::new_on_current_cpu(
+            crate::sched::post(crate::sched::Job::new(
                 Self::job_fn_resume_in_kernel,
-                self,
+                self.get_weak(),
+                self.tid.as_u64(),
+                current_cpu(),
             ));
         } else {
-            crate::sched::post(crate::sched::Job::new(Self::job_fn_resume_in_kernel, self));
+            crate::sched::post(crate::sched::Job::new(
+                Self::job_fn_resume_in_kernel,
+                self.get_weak(),
+                self.tid.as_u64(),
+                self.get_cpu_affinity(),
+            ));
         }
     }
 
@@ -1877,9 +1901,11 @@ impl Thread {
         }
         if resume_in_userspace {
             // Page faults should not lead to CPU migrations.
-            crate::sched::post(crate::sched::Job::new_on_current_cpu(
+            crate::sched::post(crate::sched::Job::new(
                 Self::job_fn_resume_in_userspace,
-                self,
+                self.get_weak(),
+                self.tid.as_u64(),
+                current_cpu(),
             ));
         } else if call_on_exited {
             self.on_thread_exited();
@@ -1922,7 +1948,9 @@ impl Thread {
                     if resume_in_userspace {
                         crate::sched::post(crate::sched::Job::new(
                             Self::job_fn_resume_in_userspace,
-                            self,
+                            self.get_weak(),
+                            self.tid.as_u64(),
+                            self.get_cpu_affinity(),
                         ));
                     } else if call_on_exited {
                         self.on_thread_exited();
@@ -2053,8 +2081,10 @@ impl Thread {
 }
 
 pub fn post_kill_by_pid(pid: u64) {
-    crate::sched::post(crate::sched::Job::new_with_arg(
+    crate::sched::post(crate::sched::Job::new(
         Process::job_fn_kill_by_pid,
+        Weak::default(),
         pid,
+        uCpus::MAX,
     ));
 }
