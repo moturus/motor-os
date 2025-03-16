@@ -52,8 +52,13 @@ impl<T> SpinLock<T> {
     }
 
     #[inline]
-    pub fn lock(&self, _lockword: u32) -> LockGuard<T> {
+    pub fn lock(&self, lockword: u32) -> LockGuard<T> {
+        let mut iters = 0_u64;
         while self.locked.swap(true, Acquire) {
+            iters += 1;
+            if iters > 100_000_000 {
+                panic!("spin_lock.rs: deadlock? {}", lockword);
+            }
             core::hint::spin_loop();
         }
         LockGuard { lock: self }
