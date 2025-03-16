@@ -479,5 +479,7 @@ impl IoRuntime {
 }
 
 pub(super) fn start() {
-    let _ = std::thread::spawn(IoRuntime::start_io_thread);
+    let _ = std::thread::Builder::new()
+        .name("sys-io:io_thread".to_owned())
+        .spawn(IoRuntime::start_io_thread);
 }
