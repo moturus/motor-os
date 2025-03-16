@@ -10,9 +10,9 @@ pub const fn rwlock_new() -> AtomicU32 {
 }
 
 pub fn try_read_lock(lock: &AtomicU32) -> bool {
-    let val = lock.fetch_add(READER, Ordering::Relaxed);
+    let val = lock.fetch_add(READER, Ordering::SeqCst);
     if val > MAX_LOCK_VALUE || val & WRITER != 0 {
-        lock.fetch_sub(READER, Ordering::Relaxed);
+        lock.fetch_sub(READER, Ordering::SeqCst);
         false
     } else {
         true
@@ -29,11 +29,11 @@ pub fn read_lock(lock: &AtomicU32) {
 }
 
 pub fn read_unlock(lock: &AtomicU32) {
-    lock.fetch_sub(READER, Ordering::Relaxed);
+    lock.fetch_sub(READER, Ordering::SeqCst);
 }
 
 pub fn single_write_lock(lock: &AtomicU32) -> bool {
-    let mut val = lock.fetch_or(WRITER, Ordering::Acquire);
+    let mut val = lock.fetch_or(WRITER, Ordering::SeqCst);
     if val & WRITER != 0 {
         return false;
     }
@@ -47,6 +47,6 @@ pub fn single_write_lock(lock: &AtomicU32) -> bool {
 }
 
 pub fn write_unlock(lock: &AtomicU32) {
-    let val = lock.fetch_xor(WRITER, Ordering::Release);
+    let val = lock.fetch_xor(WRITER, Ordering::SeqCst);
     assert_eq!(val & WRITER, WRITER);
 }
