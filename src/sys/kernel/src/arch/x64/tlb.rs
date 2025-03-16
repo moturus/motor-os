@@ -42,6 +42,7 @@ pub fn setup() {
 }
 
 pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
+    crate::xray::tracing::trace("tlb::invalidate: will lock", 0, 0, 0);
     let _lock = MESSAGE.lock.lock(line!());
 
     MESSAGE.page_table.store(page_table, Ordering::Relaxed);
@@ -49,7 +50,7 @@ pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
         .first_page_vaddr
         .store(first_page_vaddr, Ordering::Relaxed);
     MESSAGE.num_pages.store(num_pages, Ordering::Relaxed);
-    MESSAGE.generation.fetch_add(1, Ordering::Release);
+    MESSAGE.generation.fetch_add(1, Ordering::SeqCst);
 
     debug_assert_eq!(0, MESSAGE.cpumask.load(Ordering::Relaxed));
 
@@ -63,31 +64,40 @@ pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
 
     shoot_from_irq(); // Invalidate for the current CPU.
 
-    let done_mask = MESSAGE.done_mask.load(Ordering::Relaxed);
+    let done_mask = MESSAGE.done_mask.load(Ordering::Acquire);
+    let mut counter: u64 = 0;
     while MESSAGE.cpumask.load(Ordering::Relaxed) != done_mask {
+        counter += 1;
+        if counter > 1_000_000 {
+            panic!(
+                "\nTLB shootdown hung: this cpu: {this_cpu}, mask: 0b{:b}",
+                MESSAGE.cpumask.load(Ordering::Acquire)
+            );
+        }
         core::hint::spin_loop();
     }
 
     MESSAGE.cpumask.store(0, Ordering::Release);
     MESSAGE.shootdown_count.fetch_add(1, Ordering::Relaxed);
+    crate::xray::tracing::trace("tlb::invalidate: done", 0, 0, 0);
 }
 
 pub(super) fn shoot_from_irq() {
     // NOTE: called from IRQ.
     let this_cpu = crate::arch::current_cpu();
     let local_generation =
-        1 + PERCPU_PROCESSED_GENERATION.deref()[this_cpu as usize].fetch_add(1, Ordering::Relaxed);
+        1 + PERCPU_PROCESSED_GENERATION.deref()[this_cpu as usize].fetch_add(1, Ordering::SeqCst);
     assert_eq!(local_generation, MESSAGE.generation.load(Ordering::Acquire));
 
     let page_table = MESSAGE.page_table.load(Ordering::Relaxed);
     let first_page_vaddr = MESSAGE.first_page_vaddr.load(Ordering::Relaxed);
     let num_pages = MESSAGE.num_pages.load(Ordering::Relaxed);
 
+    // Do the work.
+    super::paging::invalidate(page_table, first_page_vaddr, num_pages);
+
     // Signal that we got the message.
     MESSAGE
         .cpumask
-        .fetch_or(1_u64 << this_cpu, Ordering::Release);
-
-    // Do the work.
-    super::paging::invalidate(page_table, first_page_vaddr, num_pages);
+        .fetch_or(1_u64 << this_cpu, Ordering::SeqCst);
 }
