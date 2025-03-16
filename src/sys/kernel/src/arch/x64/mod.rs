@@ -164,11 +164,8 @@ pub fn log_backtrace(msg: &str) {
 }
 
 pub fn apic_cpu_id_32() -> u32 {
-    use x86::apic::ApicControl;
-
-    let mut x2apic = x86::apic::x2apic::X2APIC::new();
-    x2apic.attach();
-    x2apic.id()
+    const IA32_X2APIC_APICID: u32 = 0x802;
+    rdmsr(IA32_X2APIC_APICID) as u32
 }
 
 pub fn init_kvm_clock() {
@@ -230,6 +227,19 @@ impl GS {
         core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
     }
 
+    fn slow_swapgs() -> bool {
+        let gsval1 = rdmsr(Self::MSR_IA32_GS_BASE);
+        let gsval2 = rdmsr(Self::MSR_IA32_KERNEL_GSBASE);
+        if gsval1 != gsval2 {
+            unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) }
+            let gsval1 = rdmsr(Self::MSR_IA32_GS_BASE);
+            assert_eq!(gsval1, gsval2);
+            true
+        } else {
+            false
+        }
+    }
+
     fn current_cpu() -> uCpus {
         let result: u64;
 
@@ -288,6 +298,10 @@ impl GS {
             crate::raw_log!("gs val: 0x{:x} GS: {:x?}", gs_val, gs);
         }
     }
+}
+
+pub fn slow_swapgs() -> bool {
+    GS::slow_swapgs()
 }
 
 #[cfg(debug_assertions)]

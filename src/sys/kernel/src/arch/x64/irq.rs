@@ -323,14 +323,12 @@ pub fn x2apic() -> &'static mut x86::apic::x2apic::X2APIC {
 
 extern "x86-interrupt" fn generic_handler_2(stack_frame: InterruptStackFrame) {
     let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_addr(ip);
-    let swapgs = stack_frame.code_segment != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
+    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    super::slow_swapgs();
 
     if uspace {
         super::serial::write_serial_!("\nGENERIC_2 exception in uspace.\n\n");
+        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         super::serial::write_serial_!("\nGENERIC_2 exception in kernel : {:#?}\n\n", stack_frame);
@@ -342,14 +340,12 @@ extern "x86-interrupt" fn generic_handler_2(stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn fp_handler(stack_frame: InterruptStackFrame) {
     let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_addr(ip);
-    let swapgs = stack_frame.code_segment != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
+    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    super::slow_swapgs();
 
     if uspace {
         super::serial::write_serial_!("\nFP exception in uspace.\n\n");
+        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!("\nFP exception in kernel.\n\n");
@@ -359,14 +355,12 @@ extern "x86-interrupt" fn fp_handler(stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_addr(ip);
-    let swapgs = stack_frame.code_segment != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
+    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    super::slow_swapgs();
 
     if uspace {
         crate::write_serial!("\nINVALID OPCODE in uspace.\n\n");
+        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!(
@@ -383,11 +377,8 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 
 extern "x86-interrupt" fn generic_handler2(stack_frame: InterruptStackFrame, error_code: u64) {
     let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_addr(ip);
-    let swapgs = stack_frame.code_segment != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
+    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    super::slow_swapgs();
 
     if uspace {
         crate::write_serial!(
@@ -396,6 +387,7 @@ extern "x86-interrupt" fn generic_handler2(stack_frame: InterruptStackFrame, err
             error_code,
             stack_frame
         );
+        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!(
@@ -437,11 +429,8 @@ extern "x86-interrupt" fn generic_handler3(stack_frame: InterruptStackFrame) -> 
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_addr(ip);
-    let swapgs = stack_frame.code_segment != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
+    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    super::slow_swapgs();
 
     if uspace {
         crate::write_serial!(
@@ -450,7 +439,7 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
             crate::arch::current_cpu(),
             stack_frame
         );
-        // crate::util::tracing::dump();
+        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!("\n#GPF({}) in kernel.\n\n", error_code);
@@ -470,28 +459,13 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
 #[no_mangle]
 pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
     let irq_stack = unsafe { (rsp as usize as *const IrqStack).as_ref().unwrap() };
+    let uspace = !crate::mm::virt::is_kernel_ip(irq_stack.rip);
+    let swapgs = super::slow_swapgs();
 
-    let uspace = !crate::mm::virt::is_kernel_addr(irq_stack.rip);
-    let swapgs = irq_stack.cs != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
-
-    crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 0);
-
-    if uspace && !swapgs {
-        crate::write_serial!(
-            "#IRQ {}:{}: uspace && !swapgs\n",
-            crate::arch::current_cpu(),
-            irq_num
-        );
-    }
-    if swapgs && !uspace {
-        crate::write_serial!(
-            "IRQ {}:{}: swapgs && !uspace\n",
-            crate::arch::current_cpu(),
-            irq_num
-        );
+    if uspace {
+        crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 1);
+    } else {
+        crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 0);
     }
 
     // Note: we don't change the page table; this is mostly OK, as user page tables
@@ -499,12 +473,13 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
 
     match irq_num as u8 {
         3 => {
+            eoi();
             if uspace {
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
             }
-            eoi();
         }
         7 => {
+            eoi();
             if uspace {
                 crate::write_serial!("\nIRQ7 in uspace.\n\n");
                 kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0); // does not return.
@@ -523,44 +498,46 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
         }
         64..=79 => {
             crate::sched::on_custom_irq(irq_num as u8);
+            eoi();
             if uspace {
                 // These are I/O IRQs, make sure the driver is running.
                 //if !ThreadControlBlock::io_thread() {
-                eoi();
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
                                                                            //}
             }
-            eoi();
         }
         IRQ_APIC_TIMER => {
             // Timer.
             crate::sched::local_wake();
+            eoi();
             if uspace {
-                eoi();
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
             } else {
                 // If the timer fires when the CPU is running a userspace thread,
                 // it is preempted and ends up in super::syscall::thread_off_cpu_reason(),
                 // which then calls on_timer_irq().
                 crate::sched::on_timer_irq();
-                eoi();
             }
         }
         IRQ_WAKEUP => {
             crate::sched::local_wake(); // Wakeup.
+            crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 2);
             eoi();
         }
         IRQ_TLB_SHOOTDOWN => {
-            eoi();
+            // Must be called before shoot_from_irq(), otherwise
+            // we will have a deadlock.
             super::tlb::shoot_from_irq();
+            eoi();
         }
         _ => {
+            eoi();
             crate::write_serial!("\n\nUNKNOWN IRQ {}\n\n", irq_num);
         }
     }
 
     if swapgs {
-        unsafe { asm!("swapgs") }
+        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) }
     }
 }
 
@@ -629,16 +606,7 @@ pub fn set_timer(when: super::time::Instant) {
 pub extern "C" fn page_fault_handler_inner(rsp: u64) {
     let irq_stack = unsafe { (rsp as usize as *const IrqStack).as_ref().unwrap() };
     let uspace = (irq_stack.error_code & 4) != 0;
-    let swapgs = irq_stack.cs != 0x8;
-    if swapgs {
-        unsafe { asm!("swapgs") }
-    }
-    if uspace && !swapgs {
-        crate::write_serial!("#PF:{}: uspace && !swapgs\n", crate::arch::current_cpu(),);
-    }
-    if swapgs && !uspace {
-        crate::write_serial!("#PF:{}: swapgs && !uspace\n", crate::arch::current_cpu(),);
-    }
+    super::slow_swapgs();
 
     use x86_64::registers::control::Cr2;
     let rip = irq_stack.rip;
@@ -656,6 +624,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
             );
             kernel_exit();
         }
+        eoi();
         ThreadControlBlock::preempt_current_thread_pf(irq_stack, pf_addr); // noreturn
     } else {
         let cpu = super::apic_cpu_id_32();

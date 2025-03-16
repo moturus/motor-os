@@ -171,7 +171,7 @@ impl ThreadControlBlock {
             owner: UnsafeRef::const_default(),
             syscall_stack_start: 0,
             syscall_rsp: 0,
-            rflags: 0x0202,
+            rflags: 0b1_000_000_010, // Parity + interrupt.
             user_rbp: 0,
             pf_addr: None,
             in_syscall: AtomicBool::new(false),
@@ -213,6 +213,11 @@ impl ThreadControlBlock {
         self.rip
     }
 
+    // Checks that IF flag is set.
+    pub fn check_sti(&self) {
+        assert_ne!(0, self.rflags & (1 << 9));
+    }
+
     pub fn rbp(&self) -> u64 {
         self.user_rbp
     }
@@ -239,6 +244,7 @@ impl ThreadControlBlock {
 
         assert_ne!(0, self.user_page_table);
         assert!(!self.in_syscall.load(Ordering::Relaxed));
+        self.check_sti();
 
         self.set_fs();
         self.xrstor();
@@ -279,6 +285,7 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn die(&self, tocr: u64, addr: u64) -> ! {
+        self.owner().trace("TCP::die()", 0, 0);
         self.owner().process_stats.stop_cpu_usage_kernel();
         self.owner().process_stats.start_cpu_usage_uspace();
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
@@ -352,6 +359,7 @@ impl ThreadControlBlock {
         self.owner().process_stats.start_cpu_usage_kernel();
         self.owner().trace("tcb::resume", self.syscall_rsp, 0);
         self.validate_rsp();
+        self.check_sti();
 
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
 
@@ -429,6 +437,7 @@ impl ThreadControlBlock {
     pub fn resume_preempted_thread(&self) -> ThreadOffCpuReason {
         self.owner().process_stats.start_cpu_usage_uspace();
         self.owner().trace("tcb::resume_preempted_thread", 0, 0);
+        self.check_sti();
         unsafe {
             // Must clear to clear pf_addr.
             let self_mut = (self as *const Self as usize as *mut Self)
@@ -543,6 +552,7 @@ extern "C" fn syscall_handler_rust(
     thread.process_stats.start_cpu_usage_uspace();
 
     tcb.validate_gs();
+    tcb.check_sti();
 
     assert!(tcb
         .in_syscall

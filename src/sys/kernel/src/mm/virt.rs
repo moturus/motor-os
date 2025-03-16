@@ -91,6 +91,10 @@ pub fn is_kernel_addr(vmem_addr: u64) -> bool {
     vmem_addr >= kernel_vmem_offset() // VMEM_USER_END
 }
 
+pub fn is_kernel_ip(vmem_addr: u64) -> bool {
+    vmem_addr >= VMEM_KERNEL_CODE_START
+}
+
 pub fn is_user(vmem_addr: u64) -> bool {
     vmem_addr <= VMEM_USER_END
         || (moto_sys::CUSTOM_USERSPACE_REGION_START..moto_sys::CUSTOM_USERSPACE_REGION_END)
