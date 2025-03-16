@@ -167,7 +167,7 @@ pub fn dump() {
 
     let tracer = unsafe { tracer.unwrap_unchecked() };
     if !tracer.is_tracing() {
-        crate::write_serial!("tracing::dump(): tracing not enabled.\n");
+        crate::write_serial!("tracing::dump(): not tracing.\n");
         DUMPING.store(false, Ordering::Release);
         return;
     }
@@ -177,8 +177,10 @@ pub fn dump() {
         false
     };
 
+    crate::write_serial!("tracing::dump(): starting.\n");
     tracer.stop_tracing();
     tracer.buffers.for_each_cpu(&mut dump);
     tracer.start_tracing();
+    crate::write_serial!("tracing::dump(): done.\n");
     DUMPING.store(false, Ordering::Release);
 }
