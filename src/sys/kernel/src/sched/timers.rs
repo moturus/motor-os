@@ -35,8 +35,8 @@ impl Timer {
         self.cpu
     }
 
-    pub fn job(&self) -> &Job {
-        &self.job
+    pub fn job(self) -> Job {
+        self.job
     }
 
     pub fn when(&self) -> Instant {
@@ -83,7 +83,7 @@ impl TimersInner {
         }
     }
 
-    pub fn add_timer(&mut self, timer: Timer) {
+    fn add_timer(&mut self, timer: Timer) {
         if let Some(set) = self.time_queue.get_mut(&timer.when) {
             set.insert(timer.id);
         } else {
@@ -95,7 +95,7 @@ impl TimersInner {
         self.timers.insert(timer.id, timer);
     }
 
-    pub fn remove_timer(&mut self, timer_id: u64) {
+    fn remove_timer(&mut self, timer_id: u64) {
         if let Some(timer) = self.timers.remove(&timer_id) {
             let set = self.time_queue.get_mut(&timer.when).unwrap();
             assert!(set.remove(&timer.id));
@@ -107,7 +107,7 @@ impl TimersInner {
 
     // Returns Ok(timer) if there is a timer <= cutoff;
     // returns Err(earliest) otherwise.
-    pub fn pop(&mut self, cutoff: Instant) -> Result<Timer, Instant> {
+    fn pop(&mut self, cutoff: Instant) -> Result<Timer, Instant> {
         match self.time_queue.first_entry() {
             Some(mut entry) => {
                 if *entry.key() > cutoff {

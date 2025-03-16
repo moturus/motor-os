@@ -55,9 +55,9 @@ pub enum Priority {
     Idle,   // Jobs for when there is nothing else to do. May never run.
 }
 
-pub type SchedulerJobFn = fn(&Weak<Thread>, u64);
+pub type SchedulerJobFn = fn(Weak<Thread>, u64);
 
-fn empty_job(_: &Weak<Thread>, _: u64) {}
+fn empty_job(_: Weak<Thread>, _: u64) {}
 
 pub struct Job {
     job_fn: SchedulerJobFn,
@@ -128,8 +128,15 @@ impl Job {
         }
     }
 
-    fn run(&self) {
-        (self.job_fn)(&self.thread, self.arg);
+    fn run(self) {
+        let Self {
+            job_fn,
+            thread,
+            arg,
+            prio: _,
+            cpu: _,
+        } = self;
+        job_fn(thread, arg);
     }
 }
 
@@ -287,20 +294,30 @@ impl Scheduler {
     #[cfg(debug_assertions)]
     fn die(&self) {
         self.die_on_next_wake.store(true, Ordering::Release);
-        self.wake();
+        crate::arch::irq::wake_remote_cpu(self.cpu); // Will send an IPI that will call local_wake().
+    }
+
+    #[cfg(debug_assertions)]
+    fn dying(&self) -> bool {
+        self.die_on_next_wake.load(Ordering::Acquire)
     }
 
     #[cfg(debug_assertions)]
     fn alive(&self) {
+        use crate::xray::tracing;
+
         let now = crate::arch::time::Instant::now().as_u64();
         self.last_alive_check.store(now, Ordering::Release);
 
         let mut check = |cpu: uCpus, scheduler: &Scheduler| -> bool {
             let last_check = scheduler.last_alive_check.load(Ordering::Acquire);
-            if now > (last_check + 100_000_000_000) {
-                log::error!("CPU {cpu} dead: now: {now}; last check: {last_check}. OOPS.");
-                // crate::arch::log_backtrace("KERNEL SUICIDE");
-                // scheduler.die();
+            if now > (last_check + 10_000_000_000) && !scheduler.dying() {
+                log::error!(
+                    "CPU {cpu} dead: now: {now}; last check: {last_check}; idle: {} OOPS.",
+                    scheduler.idle.load(Ordering::Acquire)
+                );
+                tracing::dump();
+                scheduler.die(); // Will print stack if can wake.
                 true
             } else {
                 false
@@ -485,7 +502,7 @@ pub fn start() -> ! {
         }
         core::sync::atomic::fence(Ordering::Release);
 
-        fn start_init(_: &Weak<Thread>, _: u64) {
+        fn start_init(_: Weak<Thread>, _: u64) {
             crate::init::start_userspace_processes();
         }
 

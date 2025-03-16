@@ -712,7 +712,8 @@ impl Process {
         }
     }
 
-    fn job_fn_kill_by_pid(_: &Weak<Thread>, pid: u64) {
+    fn job_fn_kill_by_pid(_: Weak<Thread>, pid: u64) {
+        crate::xray::tracing::trace("job_fn_kill_by_pid", pid, 0, 0);
         if let Some(target_stats) = crate::xray::stats::stats_from_pid(pid) {
             if let Some(target) = target_stats.owner.upgrade() {
                 if target.capabilities() & moto_sys::caps::CAP_SYS == 0 {
@@ -837,6 +838,7 @@ impl Drop for Thread {
     fn drop(&mut self) {
         // Note: at this point the thread's process may be gone,
         // so we can't do much here. Use Thread::cleanup().
+        self.trace("Thread::drop", 0, 0);
         log::debug!("thread {} dropped.", self.tid.as_u64());
     }
 }
@@ -882,6 +884,7 @@ impl Thread {
             affined_to: AtomicU32::new(uCpus::MAX as u32),
             process_stats: owner.stats.clone(),
         });
+
         unsafe {
             let (self_mut, _lock) = self_.get_mut();
             self_mut.this = Arc::downgrade(&self_);
@@ -1015,10 +1018,11 @@ impl Thread {
     pub fn debug_name(&self) -> String {
         let parent = self.owner.upgrade().unwrap();
         alloc::format!(
-            "{} {}:{}",
+            "{} {}:{} - '{}'",
             parent.debug_name(),
             parent.pid().as_u64(),
-            self.tid.as_u64()
+            self.tid.as_u64(),
+            self.get_thread_data().thread_name()
         )
     }
 
@@ -1348,7 +1352,9 @@ impl Thread {
                 return;
             }
             core::mem::drop(cpu_usage_scope);
+            self.trace("will spawn usermode", 0, 0);
             self.on_thread_descheduled(tcb.spawn_usermode_thread(arg));
+            self.trace("back from spawn usermode", 0, 0);
         }
     }
 
@@ -1491,6 +1497,7 @@ impl Thread {
              */
             self.tcb.resume(),
         );
+        self.trace("resume_in_kernel back", 0, 0);
     }
 
     fn resume_in_userspace(&self) {
@@ -1515,6 +1522,7 @@ impl Thread {
         if resume {
             log::debug!("resume_in_userspace: {}", self.debug_name());
             self.on_thread_descheduled(self.tcb.resume_preempted_thread());
+            self.trace("resume_in_userspace back", 0, 0);
         }
     }
 
@@ -1880,6 +1888,7 @@ impl Thread {
 
     fn on_thread_descheduled(&self, tocr: ThreadOffCpuReason) {
         crate::util::full_fence();
+        self.trace("on_thread_descheduled", 0, 0);
         match tocr {
             ThreadOffCpuReason::Exited => self.on_thread_exited(),
             ThreadOffCpuReason::Paused => self.on_thread_paused(),
@@ -1988,25 +1997,42 @@ impl Thread {
         }
     }
 
-    fn job_fn_resume_in_userspace(thread: &Weak<Self>, _: u64) {
+    fn job_fn_resume_in_userspace(thread: Weak<Self>, _: u64) {
+        crate::xray::tracing::trace("job_fn_resume_in_userspace", 0, 0, 0);
+        crate::xray::tracing::trace(
+            "job_fn_resume_in_userspace + weak",
+            thread.weak_count() as u64,
+            0,
+            0,
+        );
+        crate::xray::tracing::trace(
+            "job_fn_resume_in_userspace + strong + weak",
+            thread.strong_count() as u64,
+            thread.weak_count() as u64,
+            0,
+        );
         if let Some(thread) = thread.upgrade() {
+            crate::xray::tracing::trace("job_fn_resume_in_userspace 10", 0, 0, 0);
             thread.resume_in_userspace();
         }
     }
 
-    fn job_fn_resume_in_kernel(thread: &Weak<Self>, _: u64) {
+    fn job_fn_resume_in_kernel(thread: Weak<Self>, _: u64) {
+        crate::xray::tracing::trace("job_fn_resume_in_kernel", 0, 0, 0);
         if let Some(thread) = thread.upgrade() {
             thread.resume_in_kernel();
         }
     }
 
-    fn job_fn_start(thread: &Weak<Self>, arg: u64) {
+    fn job_fn_start(thread: Weak<Self>, arg: u64) {
+        crate::xray::tracing::trace("job_fn_start", 0, 0, 0);
         if let Some(thread) = thread.upgrade() {
             thread.do_start(arg);
         }
     }
 
-    fn job_fn_wake_by_timeout(thread: &Weak<Self>, timer_id: u64) {
+    fn job_fn_wake_by_timeout(thread: Weak<Self>, timer_id: u64) {
+        crate::xray::tracing::trace("job_fn_wake_by_timeout", 0, 0, 0);
         if let Some(thread) = thread.upgrade() {
             if thread
                 .timer_id
@@ -2018,7 +2044,8 @@ impl Thread {
         }
     }
 
-    fn job_fn_on_thread_exited(thread: &Weak<Self>, _: u64) {
+    fn job_fn_on_thread_exited(thread: Weak<Self>, _: u64) {
+        crate::xray::tracing::trace("job_fn_on_thread_exited", 0, 0, 0);
         if let Some(thread) = thread.upgrade() {
             thread.on_thread_exited();
         }
