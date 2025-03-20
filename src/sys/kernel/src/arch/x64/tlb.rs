@@ -42,7 +42,12 @@ pub fn setup() {
 }
 
 pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
-    crate::xray::tracing::trace("tlb::invalidate: will lock", 0, 0, 0);
+    crate::xray::tracing::trace(
+        "tlb::invalidate: will lock",
+        page_table,
+        first_page_vaddr,
+        num_pages,
+    );
     let _lock = MESSAGE.lock.lock(line!());
 
     MESSAGE.page_table.store(page_table, Ordering::Relaxed);
