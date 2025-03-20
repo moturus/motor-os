@@ -32,11 +32,5 @@ SECTIONS
     *(.bss .bss.*)
     bss_size = . - bss_start;
   }
-
-  /* Strip symbols from the output binary (comment out to get symbols) */
-  /DISCARD/ : {
-    *(.symtab)
-    *(.strtab)
-  }
 }
 

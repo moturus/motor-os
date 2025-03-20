@@ -99,7 +99,6 @@ pub fn kernel_exit() -> ! {
     loop {} // The above did not work, so just loop
 }
 
-#[cfg(debug_assertions)]
 fn get_backtrace() -> [u64; 256] {
     let mut backtrace: [u64; 256] = [0; 256];
 
@@ -147,7 +146,6 @@ fn get_backtrace() -> [u64; 256] {
     backtrace
 }
 
-#[cfg(debug_assertions)]
 pub fn log_backtrace(msg: &str) {
     let backtrace = get_backtrace();
 

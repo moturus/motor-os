@@ -49,7 +49,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         loop {}
     }
 
-    #[cfg(debug_assertions)]
     crate::arch::log_backtrace("panic");
 
     crate::arch::kernel_exit()

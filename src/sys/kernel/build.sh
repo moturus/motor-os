@@ -36,6 +36,7 @@ else
 
 echo "kernel release build"
 
+RUSTFLAGS="-C force-frame-pointers=yes " \
 cargo build --release --target kernel.json \
    -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
    --no-default-features
