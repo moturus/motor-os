@@ -1,6 +1,5 @@
 use crate::uspace::process::Thread;
 use crate::uspace::process::ThreadOffCpuReason;
-use crate::util::UnsafeRef;
 use core::arch::asm;
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -155,7 +154,7 @@ pub struct ThreadControlBlock {
 
     // crate::uspace::process::Thread that owns this TCB.
     // As struct Thread is !Unpin and owns this TCB, this is safe.
-    owner: UnsafeRef<Thread>,
+    owner: *const Thread,
 
     in_syscall: AtomicBool,
     xsave: xsave::XSave,
@@ -168,7 +167,7 @@ impl ThreadControlBlock {
             user_rsp: 0,
             rip: 0,
             user_page_table: 0,
-            owner: UnsafeRef::const_default(),
+            owner: core::ptr::null(),
             syscall_stack_start: 0,
             syscall_rsp: 0,
             rflags: 0b1_000_000_010, // Parity + interrupt.
@@ -182,31 +181,26 @@ impl ThreadControlBlock {
 
     pub fn init(
         &mut self,
-        owner_addr: u64,
+        owner: *const Thread,
         rip: u64,
         rsp: u64,
         syscall_stack_start: u64,
         upt: u64,
     ) {
         assert!(self.owner.is_null());
-        self.owner
-            .set_from(&UnsafeRef::from_ptr(owner_addr as usize as *const Thread));
+        self.owner = owner;
         self.rip = rip;
         self.user_rsp = rsp;
         self.syscall_stack_start = syscall_stack_start;
         self.user_page_table = upt;
 
-        // self.owner().trace("tcb::init", syscall_stack_start, rsp);
-
-        unsafe {
-            if self.owner.get().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0 {
-                self.rflags |= 3 << 12; // IOPL
-            }
+        if self.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0 {
+            self.rflags |= 3 << 12; // IOPL
         }
     }
 
     fn owner(&self) -> &Thread {
-        unsafe { self.owner.get() }
+        unsafe { self.owner.as_ref().unwrap() }
     }
 
     pub fn rip(&self) -> u64 {

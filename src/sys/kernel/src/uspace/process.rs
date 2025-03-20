@@ -1310,7 +1310,7 @@ impl Thread {
                     crate::sched::post(crate::sched::Job::new(Self::job_fn_on_thread_exited, self));
                     return;
                 }
-                let self_addr = self_mut as *const Thread as usize as u64;
+                let self_ptr = self_mut as *const Thread;
 
                 let kernel_stack_start = kernel_stack_segment.unwrap().end() - mm::PAGE_SIZE_SMALL;
 
@@ -1326,7 +1326,7 @@ impl Thread {
 
                 let tcb = &mut self_mut.tcb;
                 tcb.init(
-                    self_addr,
+                    self_ptr as *const Thread,
                     start + entry_point,
                     // User stack starts after user_tcb.
                     // TODO: userspace with sse enabled uses movaps, which does #GPF(0)
