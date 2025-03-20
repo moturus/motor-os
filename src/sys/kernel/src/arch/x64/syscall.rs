@@ -150,7 +150,7 @@ pub struct ThreadControlBlock {
 
     pf_addr: Option<u64>,
 
-    irq_stack: Option<IrqStack>,
+    irq_stack: IrqStack,
 
     // crate::uspace::process::Thread that owns this TCB.
     // As struct Thread is !Unpin and owns this TCB, this is safe.
@@ -174,7 +174,7 @@ impl ThreadControlBlock {
             user_rbp: 0,
             pf_addr: None,
             in_syscall: AtomicBool::new(false),
-            irq_stack: None,
+            irq_stack: IrqStack::default(),
             xsave: xsave::XSave::default(),
         }
     }
@@ -222,7 +222,7 @@ impl ThreadControlBlock {
 
     pub fn pf_addr_error_code(&self) -> Option<(u64, u64)> {
         self.pf_addr
-            .map(|pf_addr| (pf_addr, self.irq_stack.unwrap().error_code))
+            .map(|pf_addr| (pf_addr, self.irq_stack.error_code))
     }
 
     unsafe fn from_addr(addr: u64) -> &'static mut Self {
@@ -397,7 +397,7 @@ impl ThreadControlBlock {
             this_tcb.rip = irq_stack.rip;
             this_tcb.rflags = irq_stack.flags;
             this_tcb.user_rbp = irq_stack.rbp;
-            this_tcb.irq_stack = Some(*irq_stack);
+            this_tcb.irq_stack = *irq_stack;
             this_tcb.pf_addr = None;
             this_tcb.xsave();
         }
@@ -421,7 +421,7 @@ impl ThreadControlBlock {
             this_tcb.user_rsp = irq_stack.rsp; //irq_stack as *const _ as usize as u64;
             this_tcb.rip = irq_stack.rip;
             this_tcb.rflags = irq_stack.flags;
-            this_tcb.irq_stack = Some(*irq_stack);
+            this_tcb.irq_stack = *irq_stack;
             this_tcb.pf_addr = Some(pf_addr);
         }
         crate::util::full_fence();
@@ -439,8 +439,7 @@ impl ThreadControlBlock {
                 .unwrap();
             self_mut.pf_addr = None;
         }
-        let irq_stack = self.irq_stack.as_ref().unwrap();
-        let stack_addr = irq_stack as *const _ as usize as u64;
+        let stack_addr = &self.irq_stack as *const _ as usize as u64;
 
         self.set_fs();
         self.xrstor();

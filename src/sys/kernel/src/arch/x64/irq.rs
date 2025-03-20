@@ -51,7 +51,7 @@ fn _log_to_cloud_hypervisor(c: u8) {
 
 // Matches struct pt_regs in Linux.
 #[repr(C, align(8))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct IrqStack {
     // Preserved registers.
     pub r15: u64,
