@@ -487,6 +487,10 @@ pub fn post(job: Job) {
             }
             false
         };
+
+        // Note: it's OK if no CPUs are woken by the wake() above,
+        // because _this_ cpu, the cpu on which this code is currently
+        // running, is not sleeping.
         PERCPU_SCHEDULERS.for_each_cpu(&mut wake);
     } else {
         assert!(job.cpu < crate::arch::num_cpus());
