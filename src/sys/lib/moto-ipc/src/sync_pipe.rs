@@ -1,4 +1,4 @@
-use core::sync::atomic::{fence, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use moto_sys::*;
 
@@ -73,8 +73,8 @@ impl PipeBuffer {
 
     fn assert_invariants(&self) {
         assert!(
-            self.reader_counter().load(Ordering::Relaxed)
-                <= self.writer_counter().load(Ordering::Relaxed)
+            self.reader_counter().load(Ordering::SeqCst)
+                <= self.writer_counter().load(Ordering::SeqCst)
         );
     }
 
@@ -89,8 +89,8 @@ impl PipeBuffer {
     }
 
     fn write(&mut self, src: &[u8]) -> usize {
-        let reader_counter = self.reader_counter().load(Ordering::Acquire);
-        let writer_counter = self.writer_counter().load(Ordering::Relaxed);
+        let reader_counter = self.reader_counter().load(Ordering::SeqCst);
+        let writer_counter = self.writer_counter().load(Ordering::SeqCst);
 
         let mut to_write = reader_counter + self.work_buf_len - writer_counter;
 
@@ -106,8 +106,7 @@ impl PipeBuffer {
         if (writer_offset + to_write) <= self.work_buf_len {
             self.work_buf[writer_offset..(writer_offset + to_write)]
                 .copy_from_slice(&src[0..to_write]);
-            fence(Ordering::Release);
-            self.writer_counter().fetch_add(to_write, Ordering::AcqRel);
+            self.writer_counter().fetch_add(to_write, Ordering::SeqCst);
             return to_write;
         }
 
@@ -116,15 +115,14 @@ impl PipeBuffer {
 
         let second_write = to_write - first_write;
         self.work_buf[0..second_write].copy_from_slice(&src[first_write..to_write]);
-        fence(Ordering::Release);
 
-        self.writer_counter().fetch_add(to_write, Ordering::AcqRel);
+        self.writer_counter().fetch_add(to_write, Ordering::SeqCst);
         to_write
     }
 
     fn read(&mut self, dst: &mut [u8]) -> usize {
-        let writer_counter = self.writer_counter().load(Ordering::Acquire);
-        let reader_counter = self.reader_counter().load(Ordering::Relaxed);
+        let writer_counter = self.writer_counter().load(Ordering::SeqCst);
+        let reader_counter = self.reader_counter().load(Ordering::SeqCst);
 
         let mut to_read = writer_counter - reader_counter;
 
@@ -140,7 +138,7 @@ impl PipeBuffer {
         if (reader_offset + to_read) <= self.work_buf_len {
             (&mut *dst)[0..to_read]
                 .copy_from_slice(&self.work_buf[reader_offset..(reader_offset + to_read)]);
-            self.reader_counter().fetch_add(to_read, Ordering::Release);
+            self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
             return to_read;
         }
 
@@ -151,21 +149,21 @@ impl PipeBuffer {
         let second_read = to_read - first_read;
         (&mut *dst)[first_read..to_read].copy_from_slice(&self.work_buf[0..second_read]);
 
-        self.reader_counter().fetch_add(to_read, Ordering::Release);
+        self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
         to_read
     }
 
     // Assuming the reader is gone, restore the unread bytes.
     fn unwrite(&mut self) -> usize {
-        let writer_counter = self.writer_counter().load(Ordering::Acquire);
-        let reader_counter = self.reader_counter().load(Ordering::Relaxed);
+        let writer_counter = self.writer_counter().load(Ordering::SeqCst);
+        let reader_counter = self.reader_counter().load(Ordering::SeqCst);
 
         if writer_counter == reader_counter {
             return 0;
         }
 
         self.writer_counter()
-            .store(reader_counter, Ordering::Release);
+            .store(reader_counter, Ordering::SeqCst);
 
         writer_counter - reader_counter
     }
