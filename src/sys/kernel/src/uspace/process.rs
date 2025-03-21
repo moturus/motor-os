@@ -1338,7 +1338,7 @@ impl Thread {
 
                 let tcb = &mut self_mut.tcb;
                 tcb.init(
-                    self_ptr as *const Thread,
+                    self_ptr,
                     start + entry_point,
                     // User stack starts after user_tcb.
                     // TODO: userspace with sse enabled uses movaps, which does #GPF(0)
