@@ -104,6 +104,9 @@ macro_rules! push_irq_registers {
         push r13
         push r14
         push r15
+
+        push 0x2
+        popfq
     "
     };
 }
