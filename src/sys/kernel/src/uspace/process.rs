@@ -555,7 +555,7 @@ impl Process {
                 log::debug!(
                     "started process {}: '{}'",
                     self.pid().as_u64(),
-                    self.debug_name()
+                    self.debug_name() // This is process debug name, does not acquire a lock.
                 );
                 *status = ProcessStatus::Running;
                 true
@@ -601,7 +601,7 @@ impl Process {
                 log::debug!(
                     "process {} '{}' exiting: no threads left.",
                     self.pid().as_u64(),
-                    self.debug_name()
+                    self.debug_name() // Process debug name, not locking.
                 );
                 // Although it would have been nice to set the process status
                 // to exited now, we need to first get the exit status value
@@ -623,7 +623,7 @@ impl Process {
                 log::debug!(
                     "process {} '{}' exiting: main thread exited.",
                     self.pid().as_u64(),
-                    self.debug_name()
+                    self.debug_name() // Process debug name, not locking.
                 );
                 for thread in self_mut.threads.values() {
                     thread.post_kill(ThreadKilledReason::MainThreadExited);
@@ -640,7 +640,7 @@ impl Process {
                         log::debug!(
                             "process {} '{}' killed: thread {} exited with status {}.",
                             self.pid().as_u64(),
-                            self.debug_name(),
+                            self.debug_name(), // Process debug name, not locking.
                             tid.as_u64(),
                             val
                         );
@@ -656,7 +656,7 @@ impl Process {
                         log::debug!(
                             "process {} '{}' killed: thread {} killed.",
                             self.pid().as_u64(),
-                            self.debug_name(),
+                            self.debug_name(), // Process debug name, not locking.
                             tid.as_u64()
                         );
                         for thread in self_mut.threads.values() {
@@ -694,7 +694,7 @@ impl Process {
                 log::debug!(
                     "Process {}: '{}' exited with status {:?}.",
                     self.pid().as_u64(),
-                    self.debug_name(),
+                    self.debug_name(), // Process debug name, not locking.
                     *status_lock
                 );
 
@@ -1015,11 +1015,12 @@ impl Thread {
         ((self as *const Self as *mut Self).as_mut().unwrap(), lock)
     }
 
+    // Note: debug_name() takes self.status.lock() in get_thread_data().
     pub fn debug_name(&self) -> String {
         let parent = self.owner.upgrade().unwrap();
         alloc::format!(
             "{} {}:{} - '{}'",
-            parent.debug_name(),
+            parent.debug_name(), // Process debug name, not locking.
             parent.pid().as_u64(),
             self.tid.as_u64(),
             self.get_thread_data().thread_name()
@@ -1556,13 +1557,7 @@ impl Thread {
             ThreadStatus::Created => {
                 self.post_start(0);
             }
-            _ => {
-                log::debug!(
-                    "{}: post_wake: not waking: {:?}",
-                    self.debug_name(),
-                    *status
-                );
-            }
+            _ => {}
         }
     }
 
@@ -1656,24 +1651,11 @@ impl Thread {
 
     pub fn wake_by_timeout(&self) {
         let mut status = self.status.lock(line!());
-        match *status {
-            ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
-                *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
+        if let ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) = *status {
+            *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
 
-                self.timed_out.store(true, Ordering::Release);
-
-                self.trace("thread::wake_by_timeout", 0, 0);
-                self.post_wake_locked(false);
-            }
-            _ => {
-                self.trace("thread::wake_by_timeout: not waking", 0, 0);
-                #[cfg(debug_assertions)]
-                log::debug!(
-                    "{}: wake_by_timeout: not waking: {:?}",
-                    self.debug_name(),
-                    *status
-                );
-            }
+            self.timed_out.store(true, Ordering::Release);
+            self.post_wake_locked(false);
         }
     }
 
@@ -1883,7 +1865,7 @@ impl Thread {
                     } else {
                         log::info!(
                             "#PF: thread {} killed: pf_addr: 0x{:x}\n\trip: 0x{:x} stack: 0x{:x?}",
-                            self.debug_name(),
+                            self.tid.as_u64(),
                             pf_addr,
                             self.tcb.rip(),
                             self.user_stack
