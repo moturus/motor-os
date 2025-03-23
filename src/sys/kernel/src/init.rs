@@ -386,7 +386,7 @@ pub fn start_userspace_processes() {
 
     assert_eq!(process.pid().as_u64(), moto_sys::stats::PID_SYS_IO);
 
-    // crate::util::tracing::start();
+    // crate::xray::tracing::start();
     log::debug!("starting sys-io");
     process.start();
     log::set_max_level(log::LevelFilter::Info);

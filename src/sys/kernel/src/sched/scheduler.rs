@@ -283,8 +283,6 @@ impl Scheduler {
     }
 
     fn sched_loop(&mut self) -> ! {
-        use x86_64::instructions::interrupts;
-
         let nosleep = crate::config::get().nosleep;
 
         let mut curr_iteration = 0_u64;
@@ -389,6 +387,8 @@ impl Scheduler {
                 }
                 self.idle.store(false, Ordering::Release);
             } else {
+                use x86_64::instructions::interrupts;
+
                 interrupts::disable();
                 if self.wake.load(Ordering::Acquire) {
                     interrupts::enable();

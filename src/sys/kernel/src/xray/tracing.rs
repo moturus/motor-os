@@ -59,26 +59,30 @@ impl TraceBuffer {
     }
 
     fn add_trace(&mut self, event: &'static str, arg0: u64, arg1: u64, arg2: u64) {
-        let idx = self.next_record.fetch_add(1, Ordering::Relaxed);
-        self.traces[idx & (TRACE_BUFFER_SIZE - 1)] = TraceRecord::new(event, arg0, arg1, arg2)
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let idx = self.next_record.fetch_add(1, Ordering::AcqRel);
+            self.traces[idx & (TRACE_BUFFER_SIZE - 1)] = TraceRecord::new(event, arg0, arg1, arg2)
+        });
     }
 
     fn dump(cpu: uCpus, buffer: &Self) {
-        crate::write_serial!("\nTRACE DUMP for CPU {}:\n\n", cpu);
-        let next = buffer.next_record.load(Ordering::Acquire);
-        if next <= TRACE_BUFFER_SIZE {
-            for idx in 0..next {
-                buffer.traces[idx].dump(cpu);
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            crate::write_serial!("\nTRACE DUMP for CPU {}:\n\n", cpu);
+            let next = buffer.next_record.load(Ordering::Acquire);
+            if next <= TRACE_BUFFER_SIZE {
+                for idx in 0..next {
+                    buffer.traces[idx].dump(cpu);
+                }
+            } else {
+                let next = next & (TRACE_BUFFER_SIZE - 1);
+                for idx in next..TRACE_BUFFER_SIZE {
+                    buffer.traces[idx].dump(cpu);
+                }
+                for idx in 0..next {
+                    buffer.traces[idx].dump(cpu);
+                }
             }
-        } else {
-            let next = next & (TRACE_BUFFER_SIZE - 1);
-            for idx in next..TRACE_BUFFER_SIZE {
-                buffer.traces[idx].dump(cpu);
-            }
-            for idx in 0..next {
-                buffer.traces[idx].dump(cpu);
-            }
-        }
+        });
     }
 }
 
@@ -151,10 +155,8 @@ pub fn stop() {
 // NOTE: might be called from an IRQ context.
 pub fn dump() {
     static DUMPING: AtomicBool = AtomicBool::new(false);
-    if DUMPING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    let dumping = DUMPING.swap(true, Ordering::SeqCst);
+    if dumping {
         return;
     }
 

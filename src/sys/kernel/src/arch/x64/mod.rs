@@ -79,7 +79,7 @@ pub fn rdmsr(msr: u32) -> u64 {
 pub fn kernel_exit() -> ! {
     use x86_64::instructions::port::Port;
 
-    crate::raw_log!("\n\r\n\rvm_exit: bye.\n\r");
+    crate::write_serial!("\n\r\n\rvm_exit: bye.\n\r");
     unsafe {
         // First, try acpi_shutdown, which works in cloud-hypervisor.
 

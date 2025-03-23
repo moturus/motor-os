@@ -1019,7 +1019,7 @@ impl Thread {
     pub fn debug_name(&self) -> String {
         let parent = self.owner.upgrade().unwrap();
         alloc::format!(
-            "{} {}:{} - '{}'",
+            "{} 0x{:x}:0x{:x} - '{}'",
             parent.debug_name(), // Process debug name, not locking.
             parent.pid().as_u64(),
             self.tid.as_u64(),
@@ -1844,6 +1844,7 @@ impl Thread {
         log::trace!("Thread #PF: 0x{:x}", pf_addr);
         let mut resume_in_userspace = false;
         let mut call_on_exited = false;
+        let mut killed_now = false;
 
         {
             let mut status = self.status.lock(line!());
@@ -1863,14 +1864,7 @@ impl Thread {
                             resume_in_userspace = true;
                         }
                     } else {
-                        log::info!(
-                            "#PF: thread {} killed: pf_addr: 0x{:x}\n\trip: 0x{:x} stack: 0x{:x?}",
-                            self.tid.as_u64(),
-                            pf_addr,
-                            self.tcb.rip(),
-                            self.user_stack
-                        );
-                        self.print_backtrace();
+                        killed_now = true;
                         *status = ThreadStatus::Killed(ThreadKilledReason::PageFault);
                         call_on_exited = true;
                     }
@@ -1881,6 +1875,20 @@ impl Thread {
                 _ => panic!("Unexpected thread status {:?}", *status),
             }
         }
+
+        if killed_now {
+            // self.debug_name() locks self.status, so can't do the logging above under the lock.
+            log::info!(
+                "#PF: thread {} killed: pf_addr: 0x{:x}\n\trip: 0x{:x} stack: 0x{:x?}",
+                self.debug_name(),
+                pf_addr,
+                self.tcb.rip(),
+                self.user_stack
+            );
+            self.print_backtrace();
+            // crate::xray::tracing::dump();
+        }
+
         if resume_in_userspace {
             // Page faults should not lead to CPU migrations.
             crate::sched::post(crate::sched::Job::new(

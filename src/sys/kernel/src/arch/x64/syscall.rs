@@ -767,6 +767,13 @@ pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) 
             "mov cr3, rax",
             // Restore kernel RSP.
             "mov rsp, gs:[40]",
+            // eoi.
+            "
+            mov ecx, 0x80b
+            mov eax, 0
+            mov edx, 0
+            wrmsr
+            ",
             pop_preserved_registers!(),
             "mov rax, rdi",
             "sti",

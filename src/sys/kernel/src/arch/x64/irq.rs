@@ -105,9 +105,8 @@ macro_rules! push_irq_registers {
         push r14
         push r15
 
-        push 0x2
-        popfq
-    "
+        cld
+        "
     };
 }
 
@@ -325,13 +324,11 @@ pub fn x2apic() -> &'static mut x86::apic::x2apic::X2APIC {
 }
 
 extern "x86-interrupt" fn generic_handler_2(stack_frame: InterruptStackFrame) {
-    let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    let uspace = stack_frame.code_segment & 0x3 == 3;
     super::slow_swapgs();
 
     if uspace {
         super::serial::write_serial_!("\nGENERIC_2 exception in uspace.\n\n");
-        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         super::serial::write_serial_!("\nGENERIC_2 exception in kernel : {:#?}\n\n", stack_frame);
@@ -342,13 +339,11 @@ extern "x86-interrupt" fn generic_handler_2(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn fp_handler(stack_frame: InterruptStackFrame) {
-    let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    let uspace = stack_frame.code_segment & 0x3 == 3;
     super::slow_swapgs();
 
     if uspace {
         super::serial::write_serial_!("\nFP exception in uspace.\n\n");
-        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!("\nFP exception in kernel.\n\n");
@@ -357,13 +352,11 @@ extern "x86-interrupt" fn fp_handler(stack_frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    let uspace = stack_frame.code_segment & 0x3 == 3;
     super::slow_swapgs();
 
     if uspace {
         crate::write_serial!("\nINVALID OPCODE in uspace.\n\n");
-        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!(
@@ -379,8 +372,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
 }
 
 extern "x86-interrupt" fn generic_handler2(stack_frame: InterruptStackFrame, error_code: u64) {
-    let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    let uspace = stack_frame.code_segment & 0x3 == 3;
     super::slow_swapgs();
 
     if uspace {
@@ -390,7 +382,6 @@ extern "x86-interrupt" fn generic_handler2(stack_frame: InterruptStackFrame, err
             error_code,
             stack_frame
         );
-        eoi();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!(
@@ -431,8 +422,7 @@ extern "x86-interrupt" fn generic_handler3(stack_frame: InterruptStackFrame) -> 
 }
 
 extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_code: u64) {
-    let ip = stack_frame.instruction_pointer.as_u64();
-    let uspace = !crate::mm::virt::is_kernel_ip(ip);
+    let uspace = stack_frame.code_segment & 0x3 == 3;
     super::slow_swapgs();
 
     if uspace {
@@ -442,7 +432,8 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
             crate::arch::current_cpu(),
             stack_frame
         );
-        eoi();
+        crate::xray::tracing::trace_irq(0xdead_beef, 0, 0);
+        crate::xray::tracing::dump();
         kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0);
     } else {
         crate::write_serial!("\n#GPF({}) in kernel.\n\n", error_code);
@@ -462,7 +453,7 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
 #[no_mangle]
 pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
     let irq_stack = unsafe { (rsp as usize as *const IrqStack).as_ref().unwrap() };
-    let uspace = !crate::mm::virt::is_kernel_ip(irq_stack.rip);
+    let uspace = irq_stack.cs & 0x3 == 3;
     let swapgs = super::slow_swapgs();
 
     if uspace {
@@ -476,13 +467,11 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
 
     match irq_num as u8 {
         3 => {
-            eoi();
             if uspace {
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
             }
         }
         7 => {
-            eoi();
             if uspace {
                 crate::write_serial!("\nIRQ7 in uspace.\n\n");
                 kill_current_thread(super::syscall::TOCR_KILLED_GPF, 0); // does not return.
@@ -494,25 +483,24 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
         IRQ_SERIAL => {
             crate::sched::local_wake();
             crate::uspace::serial_console::on_irq(); // Console.
-            eoi();
             if uspace {
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
             }
+            eoi();
         }
         64..=79 => {
             crate::sched::on_custom_irq(irq_num as u8);
-            eoi();
             if uspace {
                 // These are I/O IRQs, make sure the driver is running.
                 //if !ThreadControlBlock::io_thread() {
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
                                                                            //}
             }
+            eoi();
         }
         IRQ_APIC_TIMER => {
             // Timer.
             crate::sched::local_wake();
-            eoi();
             if uspace {
                 ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
             } else {
@@ -520,6 +508,7 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
                 // it is preempted and ends up in super::syscall::thread_off_cpu_reason(),
                 // which then calls on_timer_irq().
                 crate::sched::on_timer_irq();
+                eoi();
             }
         }
         IRQ_WAKEUP => {
@@ -609,6 +598,7 @@ pub fn set_timer(when: super::time::Instant) {
 pub extern "C" fn page_fault_handler_inner(rsp: u64) {
     let irq_stack = unsafe { (rsp as usize as *const IrqStack).as_ref().unwrap() };
     let uspace = (irq_stack.error_code & 4) != 0;
+    let uspace_alternative = irq_stack.cs & 0x3 == 3;
     super::slow_swapgs();
 
     use x86_64::registers::control::Cr2;
@@ -616,20 +606,24 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
 
     let pf_addr = Cr2::read().as_u64();
 
-    if uspace {
-        if (irq_stack.error_code & 4) == 0 {
-            crate::write_serial!(
+    if uspace != uspace_alternative {
+        crate::write_serial!(
                 "\n\n#PF with bad stack or flags:\n\tpf_addr: 0x{:x}\n\tRIP: 0x{:x}\n\tuspace: {} error code: 0x{:x}\n\n",
                 pf_addr,
                 rip,
                 uspace,
                 irq_stack.error_code
             );
-            kernel_exit();
-        }
-        eoi();
+        crate::xray::tracing::trace_irq(14, irq_stack.rip, 88);
+        crate::xray::tracing::dump();
+        kernel_exit();
+    }
+
+    if uspace {
+        crate::xray::tracing::trace_irq(14, irq_stack.rip, 0);
         ThreadControlBlock::preempt_current_thread_pf(irq_stack, pf_addr); // noreturn
     } else {
+        crate::xray::tracing::trace_irq(14, irq_stack.rip, 1);
         let cpu = super::apic_cpu_id_32();
 
         crate::write_serial!(
@@ -641,7 +635,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
         );
 
         // If the lines below print, swapsgs is fine.
-        crate::write_serial!("will call current_cpu - ");
+        crate::write_serial!("current_cpu - ");
         crate::write_serial!("{}\n\n", super::current_cpu());
 
         // This prints KPT address in case it got messed up - uncomment debug_assersions
@@ -649,8 +643,8 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
         let page_table = x86_64::registers::control::Cr3::read();
         crate::write_serial!("\n\nCR3: {:?}\n\n", page_table);
 
-        #[cfg(debug_assertions)]
-        crate::arch::log_backtrace("#PF");
+        // #[cfg(debug_assertions)]
+        // crate::arch::log_backtrace("#PF");
 
         crate::xray::tracing::dump();
 
