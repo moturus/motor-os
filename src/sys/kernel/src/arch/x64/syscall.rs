@@ -530,7 +530,6 @@ extern "C" fn syscall_handler_rust(
     let mut args = SyscallArgs::new(nr_ver, arg0, arg1, arg2, arg3, arg4, arg5);
 
     let tcb = unsafe { ThreadControlBlock::from_addr(super::GS::current_tcb()) };
-    tcb.xsave();
     assert!(tcb
         .in_syscall
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -552,7 +551,6 @@ extern "C" fn syscall_handler_rust(
         .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok());
     tcb.set_fs();
-    tcb.xrstor();
 
     let res: u64 = result.result;
     unsafe {
