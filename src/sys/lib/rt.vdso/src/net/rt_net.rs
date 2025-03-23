@@ -1987,6 +1987,12 @@ impl Drop for TcpListener {
         msg.handle = self.handle;
 
         self.channel().send_msg(msg);
+
+        while let Some((_, stream)) = { self.pending_accept_queues.lock().pop_first() } {
+            // Free up server-allocated pages.
+            clear_rx_queue(&stream, self.channel());
+        }
+
         self.channel().tcp_listener_dropped(self.handle);
 
         stats_tcp_listener_dropped();
