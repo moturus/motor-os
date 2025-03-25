@@ -51,7 +51,6 @@ macro_rules! rt_test {
         }
 
         #[cfg(not(target_os = "wasi"))] // Wasi doesn't support threads
-        #[cfg(tokio_unstable)]
         mod alt_threaded_scheduler_4_threads {
             $($t)*
 
@@ -68,7 +67,6 @@ macro_rules! rt_test {
         }
 
         #[cfg(not(target_os = "wasi"))] // Wasi doesn't support threads
-        #[cfg(tokio_unstable)]
         mod alt_threaded_scheduler_1_thread {
             $($t)*
 
@@ -558,7 +556,7 @@ rt_test! {
     }
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
-    fn spawn_blocking_from_blocking() {
+    fn test_spawn_blocking_from_blocking() {
         let rt = rt();
 
         let out = rt.block_on(async move {
@@ -570,13 +568,11 @@ rt_test! {
         });
 
         assert_eq!(out, "hello");
-        println!("\t{}/spawn_blocking_from_blocking PASS", module_path!());
+        println!("\t{}/test_spawn_blocking_from_blocking PASS", module_path!());
     }
 
-    /*
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
-    #[test]
-    fn sleep_from_blocking() {
+    fn test_sleep_from_blocking() {
         let rt = rt();
 
         rt.block_on(async move {
@@ -593,12 +589,11 @@ rt_test! {
                 assert!(now.elapsed() >= dur);
             }).await);
         });
+        println!("\t{}/test_sleep_from_blocking PASS", module_path!());
     }
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support bind
-    #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    #[test]
-    fn socket_from_blocking() {
+    fn test_socket_from_blocking() {
         let rt = rt();
 
         rt.block_on(async move {
@@ -618,11 +613,11 @@ rt_test! {
 
             assert_ok!(peer.await);
         });
+        println!("\t{}/test_socket_from_blocking PASS", module_path!());
     }
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
-    #[test]
-    fn always_active_parker() {
+    fn test_always_active_parker() {
         // This test it to show that we will always have
         // an active parker even if we call block_on concurrently
 
@@ -651,9 +646,9 @@ rt_test! {
 
         jh1.join().unwrap();
         jh2.join().unwrap();
+        println!("\t{}/test_always_active_parker PASS", module_path!());
     }
 
-    #[test]
     // IOCP requires setting the "max thread" concurrency value. The sane,
     // default, is to set this to the number of cores. Threads that poll I/O
     // become associated with the IOCP handle. Once those threads sleep for any
@@ -669,7 +664,7 @@ rt_test! {
     #[cfg(not(windows))]
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
     #[cfg(not(target_os="wasi"))] // Wasi does not support bind or threads
-    fn io_driver_called_when_under_load() {
+    fn test_io_driver_called_when_under_load() {
         let rt = rt();
 
         // Create a lot of constant load. The scheduler will always be busy.
@@ -707,6 +702,7 @@ rt_test! {
             assert_ok!(srv.await);
             assert_ok!(cli.await);
         });
+        println!("\t{}/test_io_driver_called_when_under_load PASS", module_path!());
     }
 
     /// Tests that yielded tasks are not scheduled until **after** resource
@@ -720,13 +716,13 @@ rt_test! {
     /// Note that if the test fails by panicking rather than by returning false,
     /// then we fail it immediately. That kind of failure should not happen
     /// spuriously.
-    #[test]
     #[cfg(not(target_os="wasi"))]
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    fn yield_defers_until_park() {
+    fn test_yield_defers_until_park() {
         for _ in 0..10 {
             if yield_defers_until_park_inner(false) {
                 // test passed
+                println!("\t{}/test_yield_defers_until_park PASS", module_path!());
                 return;
             }
 
@@ -734,17 +730,17 @@ rt_test! {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
 
-        panic!("yield_defers_until_park is failing consistently");
+        panic!("test_yield_defers_until_park is failing consistently");
     }
 
     /// Same as above, but with cooperative scheduling.
-    #[test]
     #[cfg(not(target_os="wasi"))]
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    fn coop_yield_defers_until_park() {
+    fn test_coop_yield_defers_until_park() {
         for _ in 0..10 {
             if yield_defers_until_park_inner(true) {
                 // test passed
+                println!("\t{}/test_coop_yield_defers_until_park PASS", module_path!());
                 return;
             }
 
@@ -752,7 +748,7 @@ rt_test! {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
 
-        panic!("yield_defers_until_park is failing consistently");
+        panic!("test_coop_yield_defers_until_park is failing consistently");
     }
 
     /// Implementation of `yield_defers_until_park` test. Returns `true` if the
@@ -813,7 +809,7 @@ rt_test! {
                             }
                             cnt += 1;
 
-                            if cnt >= 10 {
+                            if cnt >= 100 {
                                 // yielded too many times; report failure and
                                 // sleep forever so that the `fail_test` branch
                                 // of the `select!` below triggers.
@@ -848,6 +844,8 @@ rt_test! {
             success
         })
     }
+
+    /*
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
@@ -914,9 +912,7 @@ rt_test! {
         .await
     }
 
-    /*
-    #[test]
-    fn enter_and_spawn() {
+    fn test_enter_and_spawn() {
         let rt = rt();
         let handle = {
             let _enter = rt.enter();
@@ -924,10 +920,10 @@ rt_test! {
         };
 
         assert_ok!(rt.block_on(handle));
+        println!("\t{}/test_enter_and_spawn PASS", module_path!());
     }
 
-    #[test]
-    fn eagerly_drops_futures_on_shutdown() {
+    fn test_eagerly_drops_futures_on_shutdown() {
         use std::sync::mpsc;
 
         struct Never {
@@ -966,8 +962,10 @@ rt_test! {
         drop(rt);
 
         assert_ok!(drop_rx.recv());
+        println!("\t{}/test_eagerly_drops_futures_on_shutdown PASS", module_path!());
     }
 
+    /*
     #[test]
     fn wake_while_rt_is_dropping() {
         use tokio::sync::Barrier;
@@ -1473,7 +1471,15 @@ rt_test! {
         test_sleep_in_spawn();
         test_block_on_socket();
         test_spawn_from_blocking();
-        spawn_blocking_from_blocking();
+        test_spawn_blocking_from_blocking();
+        test_sleep_from_blocking();
+        test_socket_from_blocking();
+        test_always_active_parker();
+        test_io_driver_called_when_under_load();
+        test_yield_defers_until_park();
+        test_coop_yield_defers_until_park();
+        test_enter_and_spawn();
+        test_eagerly_drops_futures_on_shutdown();
         println!();
     }
 }

@@ -10,3 +10,6 @@ tokio = { git = "https://github.com/moturus/tokio.git", features = ["io-util", "
 tokio-stream = "0.1"
 tokio-metrics = { git = "https://github.com/moturus/tokio-metrics.git" }
 tokio-test = "0.4.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(tokio_unstable)'] }
