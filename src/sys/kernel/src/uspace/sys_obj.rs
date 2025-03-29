@@ -4,7 +4,6 @@ use super::syscall::*;
 use super::SysObject;
 use alloc::string::String;
 use alloc::sync::Arc;
-use log::LevelFilter;
 use moto_sys::ErrorCode;
 use moto_sys::*;
 use syscalls::SyscallResult;
@@ -98,14 +97,6 @@ fn sys_handle_shared(
     if parent != SysHandle::SELF {
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
-
-    /*
-    if op == SysObj::OP_CREATE && (thread.owner().capabilities() & moto_sys::caps::CAP_SHARE == 0)
-    {
-        log::debug!("Create shared {}: no CAP_SHARE.", args);
-        return Err(moto_rt::E_NOT_ALLOWED);
-    }
-    */
 
     let mut url = None;
     let mut address = None;
@@ -431,41 +422,6 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
         }
         SysObj::OP_QUERY_HANDLE => sys_query_handle(thread, args),
 
-        SysObj::OP_SET_LOG_LEVEL => {
-            if args.version > 0 {
-                return ResultBuilder::version_too_high();
-            }
-
-            if args.flags != 0 {
-                return ResultBuilder::invalid_argument();
-            }
-
-            if thread.owner().capabilities() & moto_sys::caps::CAP_LOG == 0 {
-                return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
-            }
-
-            let curr_log_level = log::max_level() as usize as u64;
-            let next_log_level = args.args[0] as usize;
-
-            let level = match next_log_level {
-                1 => LevelFilter::Error,
-                2 => LevelFilter::Warn,
-                3 => LevelFilter::Info,
-                4 => LevelFilter::Debug,
-                5 => LevelFilter::Trace,
-                _ => {
-                    return ResultBuilder::invalid_argument();
-                }
-            };
-
-            log::set_max_level(level);
-            log::info!(
-                "Thread {} set log level to {:?}",
-                thread.debug_name(),
-                level
-            );
-            ResultBuilder::ok_1(curr_log_level)
-        }
         _ => ResultBuilder::invalid_argument(),
     }
 }

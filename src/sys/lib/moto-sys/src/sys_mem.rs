@@ -25,14 +25,10 @@ pub struct SysMem;
 
 impl SysMem {
     // Operations: just constants, not bit flags.
-    pub const OP_CREATE: u8 = 1;
-    pub const OP_GET: u8 = 2;
-    pub const OP_PUT: u8 = 3;
-    pub const OP_MAP: u8 = 4;
-    pub const OP_UNMAP: u8 = 5;
-    pub const OP_REMAP: u8 = 6;
-    pub const OP_QUERY: u8 = 7;
-    pub const OP_RECLAIM: u8 = 9;
+    pub const OP_MAP: u8 = 1;
+    pub const OP_UNMAP: u8 = 2;
+    pub const OP_QUERY: u8 = 3;
+    pub const OP_RECLAIM: u8 = 4;
 
     // Bit flags for create/map operations.
     pub const F_READABLE: u32 = 1;

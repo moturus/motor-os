@@ -12,8 +12,7 @@ impl SysObj {
     pub const OP_GET: u8 = 1;
     pub const OP_PUT: u8 = 2;
     pub const OP_CREATE: u8 = 3;
-    pub const OP_SET_LOG_LEVEL: u8 = 5;
-    pub const OP_QUERY_HANDLE: u8 = 6;
+    pub const OP_QUERY_HANDLE: u8 = 4;
 
     pub const F_QUERY_PID: u32 = 4;
 
@@ -150,25 +149,6 @@ impl SysObj {
         );
         if result.is_ok() {
             Ok(())
-        } else {
-            Err(result.error_code())
-        }
-    }
-
-    // Level: log::LevelFilter; 3 => Info, 4 => Debug, etc.
-    #[cfg(feature = "userspace")]
-    pub fn set_log_level(level: u8) -> Result<u8, ErrorCode> {
-        let result = do_syscall(
-            pack_nr_ver(SYS_OBJ, Self::OP_SET_LOG_LEVEL, 0, 0),
-            level as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        );
-        if result.is_ok() {
-            Ok(result.data[0] as u8)
         } else {
             Err(result.error_code())
         }

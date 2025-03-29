@@ -8,9 +8,12 @@ pub const CAP_SYS: u64 = 1 << 0;
 pub const CAP_IO_MANAGER: u64 = 1 << 1;
 
 // The process can spawn other processes.
+//
+// Note: at the moment this is not used (every process can spawn).
+//       But there are vague plans to change this.
 pub const CAP_SPAWN: u64 = 1 << 2;
 
-// The process can use SysMem::OP_DEBUG and SysCtl::OP_SET_LOG_LEVEL.
+// The process can use SysRay::OP_LOG.
 pub const CAP_LOG: u64 = 1 << 3;
 
 // This ENV key can be used to specify caps for the
