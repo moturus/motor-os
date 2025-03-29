@@ -74,6 +74,19 @@ fn test_futex() {
     println!("test_futex PASS");
 }
 
+fn test_futex_timeout() {
+    use moto_rt::futex::*;
+
+    let futex = Arc::new(AtomicU32::new(0));
+
+    assert!(!futex_wait(
+        futex.as_ref(),
+        0,
+        Some(std::time::Duration::from_millis(1)),
+    ));
+    println!("test_futex_timeout PASS");
+}
+
 fn test_thread_parking() {
     // This is a modified example from https://doc.rust-lang.org/std/thread/fn.park.html.
     let flag = Arc::new(AtomicBool::new(false));
@@ -677,6 +690,7 @@ fn main() {
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     test_futex();
+    test_futex_timeout();
     tcp::run_tests();
 
     spawn_wait_kill::test();

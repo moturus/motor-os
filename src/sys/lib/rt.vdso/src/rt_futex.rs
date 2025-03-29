@@ -134,13 +134,13 @@ fn futex_wait_impl(
 
     if futex_ref.load(Ordering::Acquire) != expected {
         remove_waiter_from_queue(key, queue);
-        return false;
+        return true;
     }
 
     if let Some(timo) = timeout {
         if timo <= moto_rt::time::Instant::now() {
             remove_waiter_from_queue(key, queue);
-            return true;
+            return false;
         }
     }
 
@@ -167,6 +167,7 @@ fn futex_wake_impl(futex: *const AtomicU32) -> bool {
     queue.wake_one()
 }
 
+// Returns 0 on timeout.
 pub extern "C" fn futex_wait(futex: *const AtomicU32, expected: u32, timeout: u64) -> u32 {
     let timo = match timeout {
         u64::MAX => None,
