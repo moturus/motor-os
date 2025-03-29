@@ -14,43 +14,54 @@ use moto_sys::SysHandle;
 // which calls for VecDeque, and fast access by value. We maintain
 // this by having both a VecDeque and a BTreeSet.
 struct WaitQueue {
+    id: u64, // Needed to differentiate individual queues.
     entries: SpinLock<(VecDeque<u64>, BTreeSet<u64>)>,
-    num_waiters: AtomicU64,
 }
 
 impl WaitQueue {
     fn new() -> Arc<Self> {
+        static ID: AtomicU64 = AtomicU64::new(0);
         Arc::new(Self {
+            id: ID.fetch_add(1, Ordering::Relaxed),
             entries: SpinLock::new((VecDeque::new(), BTreeSet::new())),
-            num_waiters: AtomicU64::new(0),
         })
+    }
+
+    fn add_waiter(&self) {
+        let tcb = moto_sys::UserThreadControlBlock::get();
+        let wake_handle = tcb.self_handle;
+
+        let mut entries = self.entries.lock();
+        entries.0.push_back(wake_handle);
+        assert!(entries.1.insert(wake_handle));
+    }
+
+    // Returns true if the queue is empty.
+    fn remove_waiter(&self) -> bool {
+        let tcb = moto_sys::UserThreadControlBlock::get();
+        let wake_handle = tcb.self_handle;
+
+        let mut entries = self.entries.lock();
+        assert!(entries.1.remove(&wake_handle));
+
+        // Don't search for _this_ entry, it will be cleared during wake.
+        if entries.1.is_empty() {
+            entries.0.clear();
+            true
+        } else {
+            false
+        }
     }
 
     // Returns true if timed out.
     fn wait(&self, timeout: &Option<moto_rt::time::Instant>) -> bool {
-        let tcb = moto_sys::UserThreadControlBlock::get();
-        let wake_handle = tcb.self_handle;
-
-        {
-            let mut entries = self.entries.lock();
-            entries.0.push_back(wake_handle);
-            entries.1.insert(wake_handle);
-        }
-
-        let timed_out = match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, *timeout) {
+        match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, *timeout) {
             Ok(()) => false,
             Err(err) => {
                 assert_eq!(err, moto_rt::E_TIMED_OUT);
                 true
             }
-        };
-
-        {
-            let mut entries = self.entries.lock();
-            entries.1.remove(&wake_handle);
-            // Note: we don't search VecDeque.
         }
-        timed_out
     }
 
     fn wake_one(&self) -> bool {
@@ -61,13 +72,13 @@ impl WaitQueue {
                     return false;
                 };
 
-                if entries.1.remove(&handle) {
+                if entries.1.contains(&handle) {
                     break handle;
                 }
             }
         };
 
-        SysCpu::wake(moto_sys::SysHandle::from_u64(wake_handle)).ok(); // Ignore errors: the wake could have raced with wait.
+        let _ = SysCpu::wake(moto_sys::SysHandle::from_u64(wake_handle)); // Ignore errors: the wake could have raced with wait.
         true
     }
 
@@ -79,68 +90,72 @@ impl WaitQueue {
 static FUTEX_WAIT_QUEUES: SpinLock<BTreeMap<usize, Arc<WaitQueue>>> =
     SpinLock::new(BTreeMap::new());
 
-// Returns false on timeout.
-fn futex_wait_impl(
-    futex: &AtomicU32,
-    expected: u32,
-    timeout: Option<core::time::Duration>,
-) -> bool {
-    let timeout = timeout.map(|dur| moto_rt::time::Instant::now() + dur);
-
-    let key = futex as *const _ as usize;
-    loop {
-        if futex.load(Ordering::Acquire) != expected {
-            return true;
+fn add_waiter_to_queue(key: usize) -> Arc<WaitQueue> {
+    let mut queues_lock = FUTEX_WAIT_QUEUES.lock();
+    let queue = match queues_lock.get(&key) {
+        Some(q) => q.clone(),
+        None => {
+            let q = WaitQueue::new();
+            assert!(queues_lock.insert(key, q.clone()).is_none());
+            q
         }
-        if let Some(timo) = timeout {
-            if timo <= moto_rt::time::Instant::now() {
-                return false;
-            }
-        }
+    };
+    queue.add_waiter(); // Must happen under the global lock.
+    queue
+}
 
-        let queue = {
-            let mut lock = FUTEX_WAIT_QUEUES.lock();
-            match lock.get(&key) {
-                Some(q) => q.clone(),
-                None => {
-                    let q = WaitQueue::new();
-                    lock.insert(key, q.clone());
-                    q
-                }
-            }
-        };
-
-        queue.num_waiters.fetch_add(1, Ordering::SeqCst);
-        let timed_out = if futex.load(Ordering::Acquire) == expected {
-            queue.wait(&timeout)
-        } else {
-            false
-        };
-
-        {
-            let mut lock = FUTEX_WAIT_QUEUES.lock();
-            if 1 == queue.num_waiters.fetch_sub(1, Ordering::SeqCst) {
-                if let Some(q) = lock.get(&key) {
-                    // It is really hard to get a pointer out of Pin<Arc<_>>.
-                    let ref1: &WaitQueue = q;
-                    let ref2: &WaitQueue = &queue;
-                    let ptr1 = ref1 as *const WaitQueue;
-                    let ptr2 = ref2 as *const WaitQueue;
-                    if ptr1 == ptr2 {
-                        lock.remove(&key);
-                    }
-                }
-            }
-        }
-
-        if timed_out {
-            return false;
-        }
+fn remove_waiter_from_queue(key: usize, queue: Arc<WaitQueue>) {
+    let mut queues_lock = FUTEX_WAIT_QUEUES.lock();
+    let empty = queue.remove_waiter(); // Must happen under the global lock.
+    if empty {
+        let removed = queues_lock.remove(&key).unwrap();
+        assert_eq!(removed.id, queue.id);
     }
 }
 
-fn futex_wake_impl(futex: &AtomicU32) -> bool {
+// Returns false on timeout.
+fn futex_wait_impl(
+    futex: *const AtomicU32,
+    expected: u32,
+    timeout: Option<core::time::Duration>,
+) -> bool {
+    // Create abs timeout before anything else, otherwise it will be not as precise, due
+    // to time passage.
+    let timeout = timeout.map(|dur| moto_rt::time::Instant::now() + dur);
+
     let key = futex as *const _ as usize;
+    let futex_ref = unsafe { futex.as_ref().unwrap() };
+    if futex_ref.load(Ordering::Acquire) != expected {
+        return true;
+    }
+
+    // Get/create the queue.
+    let queue = add_waiter_to_queue(key);
+
+    if futex_ref.load(Ordering::Acquire) != expected {
+        remove_waiter_from_queue(key, queue);
+        return false;
+    }
+
+    if let Some(timo) = timeout {
+        if timo <= moto_rt::time::Instant::now() {
+            remove_waiter_from_queue(key, queue);
+            return true;
+        }
+    }
+
+    let timedout = queue.wait(&timeout);
+    remove_waiter_from_queue(key, queue);
+
+    // Note: we DO NOT check futex value again and loop if expected,
+    // because a tokio test will hang. It seems that tokio expects
+    // a wake/wake_all to kick a waiter (all waiters) unconditionally.
+
+    !timedout
+}
+
+fn futex_wake_impl(futex: *const AtomicU32) -> bool {
+    let key = futex as usize;
     let queue = {
         let lock = FUTEX_WAIT_QUEUES.lock();
         match lock.get(&key) {
@@ -152,27 +167,13 @@ fn futex_wake_impl(futex: &AtomicU32) -> bool {
     queue.wake_one()
 }
 
-fn futex_wake_all_impl(futex: &AtomicU32) {
-    let key = futex as *const _ as usize;
-    let queue = {
-        let mut lock = FUTEX_WAIT_QUEUES.lock();
-        if let Some(q) = lock.remove(&key) {
-            q
-        } else {
-            return;
-        }
-    };
-
-    queue.wake_all()
-}
-
 pub extern "C" fn futex_wait(futex: *const AtomicU32, expected: u32, timeout: u64) -> u32 {
     let timo = match timeout {
         u64::MAX => None,
         val => Some(core::time::Duration::from_nanos(val)),
     };
 
-    if futex_wait_impl(unsafe { futex.as_ref().unwrap() }, expected, timo) {
+    if futex_wait_impl(futex, expected, timo) {
         1
     } else {
         0
@@ -180,7 +181,7 @@ pub extern "C" fn futex_wait(futex: *const AtomicU32, expected: u32, timeout: u6
 }
 
 pub extern "C" fn futex_wake(futex: *const AtomicU32) -> u32 {
-    if futex_wake_impl(unsafe { futex.as_ref().unwrap() }) {
+    if futex_wake_impl(futex) {
         1
     } else {
         0
@@ -188,5 +189,14 @@ pub extern "C" fn futex_wake(futex: *const AtomicU32) -> u32 {
 }
 
 pub extern "C" fn futex_wake_all(futex: *const AtomicU32) {
-    futex_wake_all_impl(unsafe { futex.as_ref().unwrap() })
+    let key = futex as usize;
+    let queue = {
+        let lock = FUTEX_WAIT_QUEUES.lock();
+        match lock.get(&key) {
+            Some(q) => q.clone(),
+            None => return,
+        }
+    };
+
+    queue.wake_all()
 }
