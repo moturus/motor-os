@@ -198,7 +198,6 @@ fn read_line(reader: &mut dyn std::io::Read) -> Result<String, u32> {
     loop {
         let sz = reader.read(&mut buf).map_err(|_| 400_u32)?;
         if sz == 0 {
-            println!("err foo 500");
             return Err(400);
         }
 
@@ -208,7 +207,6 @@ fn read_line(reader: &mut dyn std::io::Read) -> Result<String, u32> {
             if line.is_empty() {
                 continue;
             }
-            println!("err foo 550");
             return Err(400);
         }
 
@@ -217,7 +215,6 @@ fn read_line(reader: &mut dyn std::io::Read) -> Result<String, u32> {
         }
 
         if !b.is_ascii() {
-            println!("err foo 580");
             return Err(400);
         }
 
@@ -358,7 +355,6 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
 }
 
 fn write_error(error: u32, writer: &mut dyn std::io::Write) -> Result<(), ()> {
-    println!("error: {error}");
     let str_error = match error {
         400 => "400 Bad Request",
         404 => "404 Not Found",
