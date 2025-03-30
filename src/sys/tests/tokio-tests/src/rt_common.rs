@@ -845,12 +845,9 @@ rt_test! {
         })
     }
 
-    /*
-
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    #[test]
-    fn client_server_block_on() {
+    fn test_client_server_block_on() {
         let rt = rt();
         let (tx, rx) = mpsc::channel();
 
@@ -858,8 +855,10 @@ rt_test! {
 
         assert_ok!(rx.try_recv());
         assert_err!(rx.try_recv());
+        println!("\t{}/test_client_server_block_on PASS", module_path!());
     }
 
+    /*
     #[cfg_attr(target_os = "wasi", ignore = "Wasi does not support threads or panic recovery")]
     #[cfg(panic = "unwind")]
     #[test]
@@ -965,9 +964,7 @@ rt_test! {
         println!("\t{}/test_eagerly_drops_futures_on_shutdown PASS", module_path!());
     }
 
-    /*
-    #[test]
-    fn wake_while_rt_is_dropping() {
+    fn test_wake_while_rt_is_dropping() {
         use tokio::sync::Barrier;
 
         struct OnDrop<F: FnMut()>(F);
@@ -1013,12 +1010,14 @@ rt_test! {
         // Drop the rt. Regardless of which task is dropped first, its destructor will wake the
         // other task.
         drop(rt);
+        println!("\t{}/test_wake_while_rt_is_dropping PASS", module_path!());
     }
 
+    /*
+    // TODO: Motor OS: uncomment when UDP is working.
     #[cfg(not(target_os="wasi"))] // Wasi doesn't support UDP or bind()
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    #[test]
-    fn io_notify_while_shutting_down() {
+    fn test_io_notify_while_shutting_down() {
         use tokio::net::UdpSocket;
         use std::sync::Arc;
 
@@ -1050,11 +1049,12 @@ rt_test! {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             });
         }
+        println!("\t{}/test_io_notify_while_shutting_down PASS", module_path!());
     }
+    */
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
-    #[test]
-    fn shutdown_timeout() {
+    fn test_shutdown_timeout() {
         let (tx, rx) = oneshot::channel();
         let runtime = rt();
 
@@ -1068,11 +1068,11 @@ rt_test! {
         });
 
         Arc::try_unwrap(runtime).unwrap().shutdown_timeout(Duration::from_millis(100));
+        println!("\t{}/test_shutdown_timeout PASS", module_path!());
     }
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
-    #[test]
-    fn shutdown_timeout_0() {
+    fn test_shutdown_timeout_0() {
         let runtime = rt();
 
         runtime.block_on(async move {
@@ -1084,10 +1084,10 @@ rt_test! {
         let now = Instant::now();
         Arc::try_unwrap(runtime).unwrap().shutdown_timeout(Duration::from_nanos(0));
         assert!(now.elapsed().as_secs() < 1);
+        println!("\t{}/test_shutdown_timeout_0 PASS", module_path!());
     }
 
-    #[test]
-    fn shutdown_wakeup_time() {
+    fn test_shutdown_wakeup_time() {
         let runtime = rt();
 
         runtime.block_on(async move {
@@ -1095,19 +1095,20 @@ rt_test! {
         });
 
         Arc::try_unwrap(runtime).unwrap().shutdown_timeout(Duration::from_secs(10_000));
+        println!("\t{}/test_shutdown_wakeup_time PASS", module_path!());
     }
 
     // This test is currently ignored on Windows because of a
     // rust-lang issue in thread local storage destructors.
     // See https://github.com/rust-lang/rust/issues/74875
-    #[test]
     #[cfg(not(windows))]
     #[cfg_attr(target_os = "wasi", ignore = "Wasi does not support threads")]
-    fn runtime_in_thread_local() {
+    fn test_runtime_in_thread_local() {
         use std::cell::RefCell;
         use std::thread;
 
         thread_local!(
+            #[allow(clippy::missing_const_for_thread_local)]
             static R: RefCell<Option<Runtime>> = const { RefCell::new(None) };
         );
 
@@ -1120,6 +1121,7 @@ rt_test! {
 
             let _rt = rt();
         }).join().unwrap();
+        println!("\t{}/test_runtime_in_thread_local PASS", module_path!());
     }
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support bind
@@ -1147,6 +1149,7 @@ rt_test! {
         tx.send(()).unwrap();
     }
 
+    /*
     #[cfg(not(target_os = "wasi"))] // Wasi does not support bind
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
     #[test]
@@ -1452,6 +1455,8 @@ rt_test! {
     */
 
     pub fn run_all_tests() {
+        // test_complete_task_under_load();
+
         test_block_on_sync();
         test_block_on_async();
         test_spawn_one_bg();
@@ -1478,18 +1483,26 @@ rt_test! {
         test_io_driver_called_when_under_load();
         test_yield_defers_until_park();
         test_coop_yield_defers_until_park();
+        test_client_server_block_on();
         test_enter_and_spawn();
         test_eagerly_drops_futures_on_shutdown();
+        test_wake_while_rt_is_dropping();
+        // test_io_notify_while_shutting_down(); // TODO: enable when UDP works.
+        test_shutdown_timeout();
+        test_shutdown_timeout_0();
+        test_shutdown_wakeup_time();
+        test_runtime_in_thread_local();
+
         println!();
     }
 }
 
 pub fn run_all_tests() {
-    println!("rt_common tests start...");
+    println!("\n\nrt_common tests start...");
     current_thread_scheduler::run_all_tests();
     threaded_scheduler_4_threads::run_all_tests();
     threaded_scheduler_1_thread::run_all_tests();
     alt_threaded_scheduler_4_threads::run_all_tests();
     alt_threaded_scheduler_1_thread::run_all_tests();
-    println!("rt_common PASS");
+    println!("rt_common PASS\n\n");
 }
