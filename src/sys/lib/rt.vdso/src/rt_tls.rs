@@ -8,7 +8,9 @@ pub type Dtor = unsafe extern "C" fn(*mut u8);
 static NEXT_KEY: AtomicUsize = AtomicUsize::new(1); // Rust does not accept zeroes.
 static KEYS: SpinLock<BTreeMap<Key, Option<Dtor>>> = SpinLock::new(BTreeMap::new());
 
-type PerCpuMap = BTreeMap<Key, usize>;
+type PerThreadMap = BTreeMap<Key, usize>;
+
+const THREAD_EXITING: u64 = 1;
 
 /// Runtime impl of ```fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key```
 pub unsafe extern "C" fn create(dtor: u64) -> Key {
@@ -25,14 +27,18 @@ pub unsafe extern "C" fn create(dtor: u64) -> Key {
 /// Runtime impl of ```fn set(key: Key, value: *mut u8)```
 pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
     let tcb = moto_sys::UserThreadControlBlock::get_mut();
-    let map: &mut PerCpuMap = unsafe {
+    let map: &mut PerThreadMap = unsafe {
+        if tcb.tls == THREAD_EXITING {
+            // stdlib(?) sets a tombstone value of 0x1, we just ignore here.
+            return;
+        }
         if tcb.tls == 0 {
-            let boxed = alloc::boxed::Box::new(PerCpuMap::new());
+            let boxed = alloc::boxed::Box::new(PerThreadMap::new());
             let ptr = alloc::boxed::Box::into_raw(boxed);
             tcb.tls = ptr as usize as u64;
             ptr.as_mut().unwrap_unchecked()
         } else {
-            let ptr = tcb.tls as *mut PerCpuMap;
+            let ptr = tcb.tls as *mut PerThreadMap;
             ptr.as_mut().unwrap_unchecked()
         }
     };
@@ -43,12 +49,16 @@ pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
 /// Runtime impl of  ```fn get(key: Key) -> *mut u8```
 pub unsafe extern "C" fn get(key: Key) -> *mut u8 {
     let tcb = moto_sys::UserThreadControlBlock::get();
+    if tcb.tls == THREAD_EXITING {
+        // Should we panic here? Probably the user won't be able to fix this...
+        return core::ptr::null_mut();
+    }
     if tcb.tls == 0 {
         return core::ptr::null_mut();
     }
 
     unsafe {
-        let ptr = tcb.tls as usize as *const PerCpuMap;
+        let ptr = tcb.tls as usize as *const PerThreadMap;
         let map = ptr.as_ref().unwrap_unchecked();
         if let Some(value) = map.get(&key) {
             return *value as *mut u8;
@@ -63,16 +73,7 @@ pub unsafe extern "C" fn destroy(key: Key) {
 }
 
 // Returns true if it did some work.
-// Because dtors can change the PerCpuMap, we don't loop through it
-// but carefully touch it once to pop a dtor.
-unsafe fn run_one_dtor() -> bool {
-    let tcb = moto_sys::UserThreadControlBlock::get_mut();
-    if tcb.tls == 0 {
-        return false;
-    }
-
-    let ptr = tcb.tls as *mut PerCpuMap;
-    let map = &mut *ptr;
+unsafe fn run_one_dtor(map: &mut PerThreadMap) -> bool {
     if let Some((key, pval)) = map.pop_first() {
         if pval == 0 {
             return true;
@@ -104,12 +105,14 @@ pub(super) unsafe fn on_thread_exiting() {
         return;
     }
 
-    // Because dtors can mess around with the PerCpuMap, we do the black_box thing.
-    // Otherwise there were #PFs and/or #GPFs.
-    while core::hint::black_box(run_one_dtor()) {}
+    let ptr = tcb.tls as *mut PerThreadMap;
+    let map = &mut *ptr;
+    tcb.tls = THREAD_EXITING;
+
+    while run_one_dtor(map) {}
 
     // Drop the map.
-    let ptr = tcb.tls as *mut PerCpuMap;
     core::mem::drop(alloc::boxed::Box::from_raw(ptr));
+
     tcb.tls = 0;
 }
