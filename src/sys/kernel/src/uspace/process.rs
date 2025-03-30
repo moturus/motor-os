@@ -177,6 +177,8 @@ impl Process {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
+        log::debug!("New process {}", debug_name);
+
         let user_stack = address_space.alloc_user_stack(Thread::DEFAULT_USER_STACK_SIZE_PAGES)?;
 
         let user_mem_stats = address_space.user_mem_stats().clone();
@@ -886,6 +888,7 @@ impl Thread {
         });
 
         unsafe {
+            log::debug!("new thread {}", self_.debug_name());
             let (self_mut, _lock) = self_.get_mut();
             self_mut.this = Arc::downgrade(&self_);
             let self_object = SysObject::new_owned(
@@ -1538,15 +1541,12 @@ impl Thread {
         };
 
         if resume {
-            log::debug!("resume_in_userspace: {}", self.debug_name());
             self.on_thread_descheduled(self.tcb.resume_preempted_thread());
-            self.trace("resume_in_userspace back", 0, 0);
         }
     }
 
     pub fn post_wake(&self, this_cpu: bool) {
         self.trace("thread::post_wake", 0, 0);
-        log::debug!("{}: post wake", self.debug_name());
         self.wakes_queued.fetch_add(1, Ordering::Relaxed);
         let mut status = self.status.lock(line!());
         match *status {
@@ -1886,7 +1886,7 @@ impl Thread {
                 self.user_stack
             );
             self.print_backtrace();
-            // crate::xray::tracing::dump();
+            crate::xray::tracing::dump();
         }
 
         if resume_in_userspace {
@@ -1913,7 +1913,6 @@ impl Thread {
                     self.on_pagefault();
                 } else {
                     self.trace("thread::on_thread_preempted", 0, 0);
-                    log::debug!("thread {} preempted", self.debug_name());
 
                     let mut resume_in_userspace = false;
                     let mut call_on_exited = false;

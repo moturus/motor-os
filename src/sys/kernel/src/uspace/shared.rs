@@ -116,7 +116,6 @@ pub(super) fn create(
     });
 
     let sharer = SysObject::new_owned(url.clone(), self_.clone(), Arc::downgrade(&owner));
-    log::debug!("Created shared id: {} for '{}'", sharer.id(), url);
     // Safe because we just constructed self_ and all references to it are here.
     unsafe {
         let ptr = Arc::as_ptr(&self_) as usize as *mut Shared;

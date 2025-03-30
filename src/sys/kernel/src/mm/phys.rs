@@ -414,7 +414,12 @@ impl<S: PageSize> MemoryArea<S> {
             return result;
         }
 
-        log::debug!("phys: fixed_addr_reserve: 0x{:x}: not found", phys_addr);
+        crate::xray::tracing::trace(
+            "phys: fixed_addr_reserve: 0x{:x}: not found",
+            phys_addr,
+            0,
+            0,
+        );
 
         // VirtIO/MMIO sometimes tries to map pages that are not in our memory map.
         // TODO: figure out how to confirm that the requested address is indeed

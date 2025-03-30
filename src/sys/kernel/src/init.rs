@@ -386,9 +386,14 @@ pub fn start_userspace_processes() {
 
     assert_eq!(process.pid().as_u64(), moto_sys::stats::PID_SYS_IO);
 
-    // crate::xray::tracing::start();
+    crate::xray::tracing::start();
+    #[cfg(debug_assertions)]
+    log::set_max_level(log::LevelFilter::Debug);
+    #[cfg(not(debug_assertions))]
+    log::set_max_level(log::LevelFilter::Info);
+
     log::debug!("starting sys-io");
     process.start();
-    log::set_max_level(log::LevelFilter::Info);
+
     let _ = alloc::sync::Arc::into_raw(process);
 }
