@@ -18,7 +18,7 @@ pub extern "C" fn spawn(
             let rt_args = alloc::boxed::Box::from_raw(thread_arg as usize as *mut RtThreadArgs);
             let thread_fn = rt_args.thread_fn;
             thread_fn(rt_args.thread_arg);
-            super::rt_tls::tmp_on_thread_exiting();
+            super::rt_tls::on_thread_exiting();
             core::mem::drop(rt_args);
         }
         let _ = moto_sys::SysObj::put(SysHandle::SELF);

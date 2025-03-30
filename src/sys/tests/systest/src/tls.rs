@@ -59,3 +59,42 @@ pub fn test_tls() {
     assert_eq!(0, TLS_COUNTER.load(Ordering::Acquire));
     println!("tls_test PASS");
 }
+
+// From https://github.com/rust-lang/rust/issues/74875.
+struct TlsJoiner {
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TlsJoiner {
+    fn new() -> Self {
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        Self {
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for TlsJoiner {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+pub fn test_tls_join() {
+    thread_local!(
+        static R: TlsJoiner = TlsJoiner::new();
+    );
+
+    std::thread::spawn(|| {
+        R.with(|_| {});
+    })
+    .join()
+    .unwrap();
+
+    println!("Done");
+}

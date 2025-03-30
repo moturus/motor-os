@@ -679,6 +679,7 @@ fn main() {
     test_thread_names();
     test_cpus();
     tls::test_tls();
+    tls::test_tls_join();
     test_caps();
     test_liveness();
     test_thread_parking();

@@ -62,26 +62,54 @@ pub unsafe extern "C" fn destroy(key: Key) {
     KEYS.lock().remove(&key);
 }
 
-pub unsafe extern "C" fn tmp_on_thread_exiting() {
+// Returns true if it did some work.
+// Because dtors can change the PerCpuMap, we don't loop through it
+// but carefully touch it once to pop a dtor.
+unsafe fn run_one_dtor() -> bool {
+    let tcb = moto_sys::UserThreadControlBlock::get_mut();
+    if tcb.tls == 0 {
+        return false;
+    }
+
+    let ptr = tcb.tls as *mut PerCpuMap;
+    let map = &mut *ptr;
+    if let Some((key, pval)) = map.pop_first() {
+        if pval == 0 {
+            return true;
+        }
+        // Note: we should not hold the KEYS lock when running dtors,
+        // as a dtor can spawn a thread and then end up here, trying
+        // to acquire the same lock (=> deadlock).
+        let dtor: Option<Dtor> = {
+            let keys = KEYS.lock();
+            if let Some(Some(dtor)) = keys.get(&key) {
+                Some(*dtor)
+            } else {
+                None
+            }
+        };
+
+        if let Some(dtor) = dtor {
+            dtor((pval) as *mut u8);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+pub(super) unsafe fn on_thread_exiting() {
     let tcb = moto_sys::UserThreadControlBlock::get_mut();
     if tcb.tls == 0 {
         return;
     }
 
-    // Run dtors.
-    unsafe {
-        let ptr = tcb.tls as *mut PerCpuMap;
-        let map = &mut *ptr;
-        for (key, pval) in map.iter_mut() {
-            let keys = KEYS.lock();
-            if let Some(Some(dtor)) = keys.get(key) {
-                dtor((*pval) as *mut u8);
-                *pval = 0;
-            }
-        }
+    // Because dtors can mess around with the PerCpuMap, we do the black_box thing.
+    // Otherwise there were #PFs and/or #GPFs.
+    while core::hint::black_box(run_one_dtor()) {}
 
-        // Drop the map.
-        core::mem::drop(alloc::boxed::Box::from_raw(ptr));
-        tcb.tls = 0;
-    }
+    // Drop the map.
+    let ptr = tcb.tls as *mut PerCpuMap;
+    core::mem::drop(alloc::boxed::Box::from_raw(ptr));
+    tcb.tls = 0;
 }
