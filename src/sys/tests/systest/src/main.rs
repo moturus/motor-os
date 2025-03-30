@@ -102,9 +102,6 @@ fn test_thread_parking() {
         }
     });
 
-    // Let some time pass for the thread to be spawned.
-    std::thread::sleep(Duration::from_micros(3));
-
     // Set the flag, and let the thread wake up.
     // There is no race condition here, if `unpark`
     // happens first, `park` will return immediately.
@@ -669,12 +666,12 @@ fn main() {
         subcommand::run_child(args)
     }
 
+    std::thread::spawn(input_listener);
+
     println!("Systest starting...");
 
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
-
-    std::thread::spawn(input_listener);
 
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
