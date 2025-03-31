@@ -139,6 +139,7 @@ macro_rules! naked_irq_handler {
         #[naked]
         unsafe extern "C" fn $handler_name() {
             naked_asm!(
+                "cli",
                 // Some IRQs have error code on stack, some don't. This handler
                 // deals with those that don't. As we use the same struct IrqStack,
                 // which has error code, we manually adjust rsp to accommodate
@@ -198,6 +199,7 @@ pub fn init() {
 
     let idt = IDT.set_per_cpu(Box::leak(Box::new(InterruptDescriptorTable::new())));
     unsafe {
+        // If a stack is not set explicitly below, it is the default stack (at index zero).
         idt.divide_error
             .set_handler_addr(x86_64::VirtAddr::new(irq_handler_0 as usize as u64));
         idt.debug
@@ -219,16 +221,18 @@ pub fn init() {
             .set_handler_addr(x86_64::VirtAddr::new(irq_handler_7 as usize as u64));
         idt.double_fault
             .set_handler_fn(double_fault_handler)
-            .set_stack_index(super::gdt::DOUBLE_FAULT_IST_INDEX); // IRQ 8
+            .set_stack_index(super::gdt::FATAL_FAULT_IST_INDEX); // IRQ 8
 
-        idt.invalid_tss.set_handler_fn(generic_handler2); // 10
+        idt.invalid_tss
+            .set_handler_fn(generic_handler2)
+            .set_stack_index(super::gdt::FATAL_FAULT_IST_INDEX); // 10
 
         idt.segment_not_present
             .set_handler_fn(segment_not_present)
-            .set_stack_index(super::gdt::PAGE_FAULT_IST_INDEX); // IRQ 11
+            .set_stack_index(super::gdt::FATAL_FAULT_IST_INDEX); // IRQ 11
         idt.stack_segment_fault
             .set_handler_fn(stack_segment_fault)
-            .set_stack_index(super::gdt::PAGE_FAULT_IST_INDEX); // IRQ 12
+            .set_stack_index(super::gdt::FATAL_FAULT_IST_INDEX); // IRQ 12
         idt.general_protection_fault
             .set_handler_fn(gpf_handler)
             .set_stack_index(super::gdt::PAGE_FAULT_IST_INDEX); // IRQ 13
@@ -285,10 +289,10 @@ pub fn init() {
                 let entry = &mut idt[irq];
                 entry
                     .set_handler_addr(entry.handler_addr())
-                    .set_stack_index(super::gdt::SERIAL_CONSOLE_IST_INDEX);
+                    .set_stack_index(super::gdt::CUSTOM_IRQ_IST_INDEX);
             }
         }
-    } // if cpu == super::bsp()
+    } // if cpu == super::bsp(): custom IRQs + console
 
     unsafe {
         // timer handler
@@ -655,6 +659,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
 #[naked]
 unsafe extern "C" fn page_fault_handler_asm() {
     naked_asm!(
+        "cli",
         push_irq_registers!(),
         "
         mov rdi, rsp

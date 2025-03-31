@@ -10,11 +10,13 @@ use crate::mm;
 use crate::mm::PAGE_SIZE_SMALL;
 use crate::util::StaticPerCpu;
 
-pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
-pub const PAGE_FAULT_IST_INDEX: u16 = 1;
-pub const BREAKPOINT_IST_INDEX: u16 = 2;
-pub const TIMER_IST_INDEX: u16 = 3;
-pub const SERIAL_CONSOLE_IST_INDEX: u16 = 4;
+pub const DEFAULT_INTERRUPT_STACK: u16 = 0;
+pub const FATAL_FAULT_IST_INDEX: u16 = 1;
+pub const PAGE_FAULT_IST_INDEX: u16 = 2;
+pub const BREAKPOINT_IST_INDEX: u16 = 3;
+pub const TIMER_IST_INDEX: u16 = 4;
+pub const SERIAL_CONSOLE_IST_INDEX: u16 = 5;
+pub const CUSTOM_IRQ_IST_INDEX: u16 = 6;
 
 fn new_tss() -> &'static TaskStateSegment {
     let new_stack = || -> VirtAddr {
@@ -26,12 +28,13 @@ fn new_tss() -> &'static TaskStateSegment {
     };
 
     let mut tss = TaskStateSegment::new();
-    tss.privilege_stack_table[0] = new_stack();
-    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = new_stack();
+    tss.privilege_stack_table[DEFAULT_INTERRUPT_STACK as usize] = new_stack();
+    tss.interrupt_stack_table[FATAL_FAULT_IST_INDEX as usize] = new_stack();
     tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = new_stack();
     tss.interrupt_stack_table[BREAKPOINT_IST_INDEX as usize] = new_stack();
     tss.interrupt_stack_table[TIMER_IST_INDEX as usize] = new_stack();
     tss.interrupt_stack_table[SERIAL_CONSOLE_IST_INDEX as usize] = new_stack();
+    tss.interrupt_stack_table[CUSTOM_IRQ_IST_INDEX as usize] = new_stack();
 
     use alloc::boxed::Box;
     Box::leak(Box::new(tss))
