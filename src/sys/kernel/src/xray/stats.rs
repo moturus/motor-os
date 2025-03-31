@@ -260,11 +260,13 @@ impl KProcessStats {
     }
 
     pub fn process_dropped(&self) {
-        // TODO: the assertion below has triggered once.
-        // Should we make active_threads ops less relaxed? Or remove
-        // the assertion? Or do nothing, as the assertion might
-        // have been triggered by an error that has since been fixed?
-        debug_assert_eq!(0, self.active_threads());
+        if self.active_threads() != 0 {
+            // This has triggered a couple of times.
+            log::error!(
+                "stats: process dropped with {} active threads.",
+                self.active_threads()
+            );
+        }
 
         if let Some(parent) = self.parent.as_ref() {
             parent.active_children.fetch_sub(1, Ordering::Relaxed);
