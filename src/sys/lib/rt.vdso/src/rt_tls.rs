@@ -10,8 +10,6 @@ static KEYS: SpinLock<BTreeMap<Key, Option<Dtor>>> = SpinLock::new(BTreeMap::new
 
 type PerThreadMap = BTreeMap<Key, usize>;
 
-const THREAD_EXITING: u64 = 1;
-
 /// Runtime impl of ```fn create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> Key```
 pub unsafe extern "C" fn create(dtor: u64) -> Key {
     let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
@@ -28,11 +26,10 @@ pub unsafe extern "C" fn create(dtor: u64) -> Key {
 pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
     let tcb = moto_sys::UserThreadControlBlock::get_mut();
     let map: &mut PerThreadMap = unsafe {
-        if tcb.tls == THREAD_EXITING {
-            // stdlib(?) sets a tombstone value of 0x1, we just ignore here.
-            return;
-        }
         if tcb.tls == 0 {
+            if value.is_null() {
+                return;
+            }
             let boxed = alloc::boxed::Box::new(PerThreadMap::new());
             let ptr = alloc::boxed::Box::into_raw(boxed);
             tcb.tls = ptr as usize as u64;
@@ -43,16 +40,20 @@ pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
         }
     };
 
-    map.insert(key, value as usize);
+    let prev_value = if value.is_null() {
+        map.remove(&key)
+    } else {
+        map.insert(key, value as usize)
+    };
+
+    if let Some(prev_value) = prev_value {
+        run_dtor(key, prev_value);
+    }
 }
 
 /// Runtime impl of  ```fn get(key: Key) -> *mut u8```
 pub unsafe extern "C" fn get(key: Key) -> *mut u8 {
     let tcb = moto_sys::UserThreadControlBlock::get();
-    if tcb.tls == THREAD_EXITING {
-        // Should we panic here? Probably the user won't be able to fix this...
-        return core::ptr::null_mut();
-    }
     if tcb.tls == 0 {
         return core::ptr::null_mut();
     }
@@ -61,6 +62,10 @@ pub unsafe extern "C" fn get(key: Key) -> *mut u8 {
         let ptr = tcb.tls as usize as *const PerThreadMap;
         let map = ptr.as_ref().unwrap_unchecked();
         if let Some(value) = map.get(&key) {
+            // if *value == 1 {
+            //     // This is a "sentinel" value.
+            //     return core::ptr::null_mut();
+            // }
             return *value as *mut u8;
         }
     }
@@ -72,27 +77,35 @@ pub unsafe extern "C" fn destroy(key: Key) {
     KEYS.lock().remove(&key);
 }
 
+unsafe fn run_dtor(key: Key, value: usize) {
+    if value == 1 {
+        return; // Sentinel.
+    }
+
+    // Note: we should not hold the KEYS lock when running dtors,
+    // as a dtor can spawn a thread and then end up here, trying
+    // to acquire the same lock (=> deadlock).
+    let dtor: Option<Dtor> = {
+        let keys = KEYS.lock();
+        if let Some(Some(dtor)) = keys.get(&key) {
+            Some(*dtor)
+        } else {
+            None
+        }
+    };
+
+    if let Some(dtor) = dtor {
+        dtor(value as *mut u8);
+    }
+}
+
 // Returns true if it did some work.
 unsafe fn run_one_dtor(map: &mut PerThreadMap) -> bool {
     if let Some((key, pval)) = map.pop_first() {
         if pval == 0 {
             return true;
         }
-        // Note: we should not hold the KEYS lock when running dtors,
-        // as a dtor can spawn a thread and then end up here, trying
-        // to acquire the same lock (=> deadlock).
-        let dtor: Option<Dtor> = {
-            let keys = KEYS.lock();
-            if let Some(Some(dtor)) = keys.get(&key) {
-                Some(*dtor)
-            } else {
-                None
-            }
-        };
-
-        if let Some(dtor) = dtor {
-            dtor((pval) as *mut u8);
-        }
+        run_dtor(key, pval);
         true
     } else {
         false
@@ -100,19 +113,22 @@ unsafe fn run_one_dtor(map: &mut PerThreadMap) -> bool {
 }
 
 pub(super) unsafe fn on_thread_exiting() {
-    let tcb = moto_sys::UserThreadControlBlock::get_mut();
-    if tcb.tls == 0 {
-        return;
+    // Dtors can insert values into TLS, and then a tokio test complains
+    // that a thing was not destroyed, so we need to handle TLS modifications
+    // happening during thread exiting.
+    loop {
+        let tcb = moto_sys::UserThreadControlBlock::get_mut();
+        if tcb.tls == 0 {
+            return;
+        }
+
+        let ptr = tcb.tls as *mut PerThreadMap;
+        let map = &mut *ptr;
+        tcb.tls = 0;
+
+        while run_one_dtor(map) {}
+
+        // Drop the map.
+        core::mem::drop(alloc::boxed::Box::from_raw(ptr));
     }
-
-    let ptr = tcb.tls as *mut PerThreadMap;
-    let map = &mut *ptr;
-    tcb.tls = THREAD_EXITING;
-
-    while run_one_dtor(map) {}
-
-    // Drop the map.
-    core::mem::drop(alloc::boxed::Box::from_raw(ptr));
-
-    tcb.tls = 0;
 }
