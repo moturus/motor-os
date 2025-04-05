@@ -18,6 +18,15 @@ struct WaitQueue {
     entries: SpinLock<(VecDeque<u64>, BTreeSet<u64>)>,
 }
 
+#[cfg(debug_assertions)]
+impl Drop for WaitQueue {
+    fn drop(&mut self) {
+        let guard = self.entries.lock();
+        assert!(guard.0.is_empty());
+        assert!(guard.1.is_empty());
+    }
+}
+
 impl WaitQueue {
     fn new() -> Arc<Self> {
         static ID: AtomicU64 = AtomicU64::new(0);
@@ -28,8 +37,7 @@ impl WaitQueue {
     }
 
     fn add_waiter(&self) {
-        let tcb = moto_sys::UserThreadControlBlock::get();
-        let wake_handle = tcb.self_handle;
+        let wake_handle = moto_sys::current_thread().as_u64();
 
         let mut entries = self.entries.lock();
         entries.0.push_back(wake_handle);
@@ -38,8 +46,7 @@ impl WaitQueue {
 
     // Returns true if the queue is empty.
     fn remove_waiter(&self) -> bool {
-        let tcb = moto_sys::UserThreadControlBlock::get();
-        let wake_handle = tcb.self_handle;
+        let wake_handle = moto_sys::current_thread().as_u64();
 
         let mut entries = self.entries.lock();
         assert!(entries.1.remove(&wake_handle));
@@ -55,6 +62,7 @@ impl WaitQueue {
 
     // Returns true if timed out.
     fn wait(&self, timeout: &Option<moto_rt::time::Instant>) -> bool {
+        // crate::moto_log!("futex will wait");
         match SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, *timeout) {
             Ok(()) => false,
             Err(err) => {
