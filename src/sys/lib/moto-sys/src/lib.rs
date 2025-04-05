@@ -66,6 +66,11 @@ pub fn current_cpu() -> u32 {
 }
 
 #[cfg(feature = "userspace")]
+pub fn current_thread() -> SysHandle {
+    shared_mem::UserThreadControlBlock::this_thread_handle()
+}
+
+#[cfg(feature = "userspace")]
 pub fn num_cpus() -> u32 {
     KernelStaticPage::get().num_cpus
 }
