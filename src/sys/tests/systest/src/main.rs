@@ -4,15 +4,13 @@ mod mpmc;
 mod spawn_wait_kill;
 mod subcommand;
 mod tcp;
+mod threads;
 mod tls;
 mod xor_server;
 
 use std::{
     io::{Read, Write},
-    sync::{
-        atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
-        Arc,
-    },
+    sync::{atomic::*, Arc},
     time::Duration,
 };
 
@@ -33,84 +31,6 @@ fn test_syscall() {
         "test_syscall: {} iterations: {:.2} ns/syscall.",
         ITERS, ns_per_syscall
     );
-}
-
-fn test_futex() {
-    use moto_rt::futex::*;
-
-    let futex = Arc::new(AtomicU32::new(0));
-    static COUNTER: AtomicU16 = AtomicU16::new(0);
-    const THREADS: u16 = 20;
-
-    COUNTER.store(0, Ordering::Release);
-    let mut threads = vec![];
-
-    for _idx in 0..THREADS {
-        let futex_clone = futex.clone();
-        threads.push(std::thread::spawn(move || {
-            while futex_clone
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err()
-            {
-                futex_wait(futex_clone.as_ref(), 1, None);
-            }
-
-            let prev = COUNTER.fetch_add(1, Ordering::Release);
-            futex_clone.store(0, Ordering::Relaxed);
-
-            if (prev & 1) == 0 {
-                futex_wake(futex_clone.as_ref());
-            } else {
-                futex_wake_all(futex_clone.as_ref());
-            }
-        }));
-    }
-
-    for thread in threads {
-        thread.join().unwrap();
-    }
-
-    assert_eq!(THREADS, COUNTER.load(Ordering::Acquire));
-    println!("test_futex PASS");
-}
-
-fn test_futex_timeout() {
-    use moto_rt::futex::*;
-
-    let futex = Arc::new(AtomicU32::new(0));
-
-    assert!(!futex_wait(
-        futex.as_ref(),
-        0,
-        Some(std::time::Duration::from_millis(1)),
-    ));
-    println!("test_futex_timeout PASS");
-}
-
-fn test_thread_parking() {
-    // This is a modified example from https://doc.rust-lang.org/std/thread/fn.park.html.
-    let flag = Arc::new(AtomicBool::new(false));
-    let flag2 = Arc::clone(&flag);
-
-    let parked_thread = std::thread::spawn(move || {
-        // We want to wait until the flag is set. We *could* just spin, but using
-        // park/unpark is more efficient.
-        while !flag2.load(Ordering::Relaxed) {
-            std::thread::park();
-            // We *could* get here spuriously, i.e., way before the 10ms below are over!
-            // But that is no problem, we are in a loop until the flag is set anyway.
-        }
-    });
-
-    // Set the flag, and let the thread wake up.
-    // There is no race condition here, if `unpark`
-    // happens first, `park` will return immediately.
-    // Hence there is no risk of a deadlock.
-    flag.store(true, Ordering::Relaxed);
-    parked_thread.thread().unpark();
-
-    parked_thread.join().unwrap();
-    println!("test_thread_parking PASS");
 }
 
 fn test_rt_mutex() {
@@ -285,21 +205,6 @@ fn test_pipes() {
     println!("test_pipes PASS");
 }
 
-fn test_thread() {
-    use std::sync::atomic::AtomicU64;
-    let atomic = AtomicU64::new(0);
-    let atomic_ref = unsafe { (&atomic as *const AtomicU64).as_ref::<'static>().unwrap() };
-
-    std::thread::spawn(|| {
-        atomic_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    })
-    .join()
-    .unwrap();
-
-    assert_eq!(1, atomic.load(std::sync::atomic::Ordering::Relaxed));
-    println!("test_thread PASS");
-}
-
 fn test_lazy_memory_map() {
     use moto_sys::*;
 
@@ -330,113 +235,6 @@ fn test_lazy_memory_map() {
     // moto_sys::syscalls::SysCtl::set_log_level(prev_log_level).unwrap();
     SysMem::free(addr).unwrap();
     println!("test_lazy_memory_map: done");
-}
-
-fn stress_test_threads() {
-    // Basically, do some cpu-bound stuff and
-    // verify that preemption does not mess up registers.
-    println!("stress_test_threads starting...");
-    const THREADS: usize = 8;
-
-    let shutdown = AtomicBool::new(false);
-    let shutdown_ref = unsafe {
-        (&shutdown as *const AtomicBool)
-            .as_ref::<'static>()
-            .unwrap()
-    };
-
-    let mut handles = Vec::with_capacity(THREADS);
-
-    for _ in 0..THREADS {
-        handles.push(std::thread::spawn(|| {
-            let mut counter: u64 = 0;
-            while !shutdown_ref.load(std::sync::atomic::Ordering::Relaxed) {
-                #[cfg(feature = "test_sse")]
-                {
-                    let af64: f64 = f64::from((counter + 1) as u32);
-                    let bf64: f64 = f64::from((counter + 2) as u32);
-                    let mut res_f64: f64;
-                }
-
-                let mut result: u64;
-                unsafe {
-                    std::arch::asm!(
-                                "
-                        mov rcx, rax
-                        mov rdx, rax
-                        mov rsi, rax
-                        mov rdi, rax
-                        mov r8, rax
-                        mov r9, rax
-                        mov r10, rax
-                        mov r11, rax
-                        mov r12, rax
-                        mov r13, rax
-                        mov r14, rax
-                        mov r15, rax
-
-                        add r15, rax
-                        add r15, rcx
-                        add r15, rdx
-                        add r15, rsi
-                        add r15, rdi
-                        add r15, r8
-                        add r15, r9
-                        add r15, r10
-                        add r15, r11
-                        add r15, r12
-                        add r15, r13
-                        add r15, r14
-                        ",
-                        in("rax") counter,
-                        out("rcx") _,
-                        out("rdx") _,
-                        out("rsi") _,
-                        out("rdi") _,
-                        out("r8") _,
-                        out("r9") _,
-                        out("r10") _,
-                        out("r11") _,
-                        out("r12") _,
-                        out("r13") _,
-                        out("r14") _,
-                        out("r15") result,
-                        options(nomem, nostack)
-                    );
-
-                    #[cfg(feature = "test_sse")]
-                    {
-                        std::arch::asm!(
-                            "addsd {0}, {1}",
-                            inlateout(xmm_reg) af64 => res_f64,
-                            in(xmm_reg) bf64,
-                        );
-                    }
-                }
-                #[cfg(feature = "test_sse")]
-                {
-                    res_f64 *= 13.3;
-                    assert!((res_f64 as i64) < (((counter + 1) * 14) as i64));
-                }
-
-                assert_eq!(result, counter * 13);
-
-                counter += 1;
-                if counter > 1_000_000_000 {
-                    counter = 0;
-                }
-            }
-        }));
-    }
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    shutdown.store(true, Ordering::Release);
-
-    for _ in 0..THREADS {
-        let handle = handles.pop().unwrap();
-        handle.join().unwrap();
-    }
-    println!("stress_test_threads PASS");
 }
 
 fn test_file_write() {
@@ -682,13 +480,10 @@ fn main() {
     tls::test_tls_join();
     test_caps();
     test_liveness();
-    test_thread_parking();
     spawn_wait_kill::test_pid_kill();
     test_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
-    test_futex();
-    test_futex_timeout();
     tcp::run_tests();
 
     spawn_wait_kill::test();
@@ -704,8 +499,7 @@ fn main() {
 
     test_lazy_memory_map();
     test_syscall();
-    stress_test_threads();
-    test_thread();
+    threads::run_all_tests();
     test_ipc();
     test_pipes();
     fs::run_tests();
