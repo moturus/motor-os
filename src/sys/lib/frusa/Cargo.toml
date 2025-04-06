@@ -15,7 +15,6 @@ core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = tru
 
 [dev-dependencies]
 rand = "0.8"
-talc = "4.2.0"
 spin = "0.9.8"
 
 [features]

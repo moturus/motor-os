@@ -358,7 +358,6 @@ dependencies = [
  "rand 0.8.5",
  "rustc-std-workspace-core",
  "spin",
- "talc",
 ]
 
 [[package]]
@@ -1104,15 +1103,6 @@ dependencies = [
  "moto-mpmc",
  "moto-rt 0.2.7",
  "moto-sys",
-]
-
-[[package]]
-name = "talc"
-version = "4.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fcad3be1cfe36eb7d716a04791eba36a197da9d9b6ea1e28e64ac569da3701d"
-dependencies = [
- "lock_api",
 ]
 
 [[package]]
