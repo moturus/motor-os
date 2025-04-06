@@ -1885,8 +1885,8 @@ impl Thread {
                 self.tcb.rip(),
                 self.user_stack
             );
-            self.print_backtrace();
-            crate::xray::tracing::dump();
+            // self.print_backtrace();
+            // crate::xray::tracing::dump();
         }
 
         if resume_in_userspace {
