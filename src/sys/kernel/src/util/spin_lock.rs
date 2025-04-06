@@ -16,7 +16,7 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering::{Acquire, Release};
+use core::sync::atomic::Ordering::{AcqRel, Release};
 
 pub struct SpinLock<T> {
     locked: AtomicBool,
@@ -54,7 +54,7 @@ impl<T> SpinLock<T> {
     #[inline]
     pub fn lock(&self, lockword: u32) -> LockGuard<T> {
         let mut iters = 0_u64;
-        while self.locked.swap(true, Acquire) {
+        while self.locked.swap(true, AcqRel) {
             iters += 1;
             if iters > 100_000_000 {
                 panic!("spin_lock.rs: deadlock? {}", lockword);
