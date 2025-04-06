@@ -3,7 +3,6 @@
 #![feature(alloc_error_handler)]
 #![feature(stmt_expr_attributes)]
 #![feature(core_intrinsics)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(atomic_from_mut)]
 #![feature(naked_functions)]
@@ -32,9 +31,6 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
     serial::write_serial!("PANIC: {info}\n");
     util::vmm_exit()
 }
-
-// use core::arch::global_asm;
-// global_asm!(include_str!("bootup_bsp.s"), options(att_syntax, raw));
 
 use crate::util::vmm_exit;
 use core::arch::asm;
