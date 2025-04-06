@@ -7,6 +7,7 @@
 
 #![no_std]
 #![feature(test)]
+#![allow(clippy::ptr_eq)]
 
 mod rwlock;
 
