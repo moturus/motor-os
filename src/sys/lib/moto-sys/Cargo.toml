@@ -11,12 +11,11 @@ edition = "2021"
 
 [dependencies]
 alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
-compiler_builtins = { version = "0.1", optional = true }
 core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
 moto-rt = { path = "../moto-rt", optional = true }
 
 [features]
 base = ["moto-rt/base"]
 default = ["userspace"]
-rustc-dep-of-std = [ "alloc", "compiler_builtins", "core", "userspace" ]
+rustc-dep-of-std = [ "alloc", "core", "userspace" ]
 userspace = ["moto-rt"]

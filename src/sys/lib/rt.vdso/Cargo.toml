@@ -21,12 +21,9 @@ test = false
 elfloader   = { path = "../../../third_party/elfloader" }
 frusa       = { path = "../frusa"       }
 moto-ipc    = { path = "../moto-ipc"    }
-moto-rt     = { path = "../moto-rt"     }
+moto-rt     = { path = "../moto-rt", features = ["libc"] }
 moto-sys    = { path = "../moto-sys"    }
 moto-sys-io = { path = "../moto-sys-io" }
-
-# These are needed for memcpy and similar.
-compiler_builtins = { version = "0.1", features = ["mem"] }
 
 # external dependencies
 crossbeam = { version = "0.8.4", default-features = false }

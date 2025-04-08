@@ -37,7 +37,7 @@ use moto_rt::RtVdsoVtable;
 // The entry point.
 #[no_mangle]
 pub extern "C" fn moturus_start(version: u64) {
-    if version != 9 {
+    if version != 10 {
         // Doing assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
