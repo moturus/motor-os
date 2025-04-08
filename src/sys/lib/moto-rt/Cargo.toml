@@ -6,7 +6,7 @@ keywords = ["moturus", "motor-os"]
 readme = "README.md"
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS Runtime."
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 
 [lib]
@@ -21,6 +21,7 @@ compiler_builtins = { version = "0.1", optional = true }
 
 [features]
 base = []
+libc = []
 rustc-dep-of-std = [
     "alloc",
     "core",

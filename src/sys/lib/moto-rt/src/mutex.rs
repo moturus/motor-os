@@ -59,7 +59,7 @@ impl<T> Mutex<T> {
     }
 
     #[inline]
-    pub fn lock(&self) -> MutexGuard<T> {
+    pub fn lock(&self) -> MutexGuard<'_, T> {
         if self
             .state
             .compare_exchange(UNLOCKED, LOCKED_NO_WAITERS, Acquire, Relaxed)

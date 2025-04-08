@@ -57,7 +57,7 @@ pub const RT_VDSO_VTABLE_VADDR: u64 = RT_VDSO_START - MOTO_SYS_PAGE_SIZE_SMALL;
 
 // Rust's dependency on libc runs deep, without these many binaries
 // fail to link.
-#[cfg(feature = "rustc-dep-of-std")]
+#[cfg(any(feature = "libc", feature = "rustc-dep-of-std"))]
 pub mod libc;
 
 #[cfg(not(feature = "base"))]
@@ -108,7 +108,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-pub const RT_VERSION: u64 = 9;
+pub const RT_VERSION: u64 = 10;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -334,5 +334,7 @@ pub fn internal_helper(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
 #[panic_handler]
 fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
     error::log_panic(info);
+    // If the panic is logged to stderr, we should sleep a bit before exiting, as our stdio is async.
+    crate::thread::sleep_until(crate::time::Instant::now() + core::time::Duration::from_micros(100));
     process::exit(-1)
 }
