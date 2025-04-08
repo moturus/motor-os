@@ -265,7 +265,7 @@ impl Editor {
                 self.update_window_size()?;
                 self.refresh_screen()?;
             }
-            let mut bytes = sys::stdin()?.bytes();
+            let mut bytes = std::io::BufReader::new(sys::stdin()?).bytes();
             // Match on the next byte received or, if the first byte is <ESC> ('\x1b'), on the next
             // few bytes.
             match bytes.next().transpose()? {
@@ -502,6 +502,7 @@ impl Editor {
                 // this case, so we need to check the last byte directly.
                 let mut file = File::open(path)?;
                 file.seek(io::SeekFrom::End(0))?;
+                #[allow(clippy::unbuffered_bytes)]
                 if file.bytes().next().transpose()?.is_none_or(|b| b == b'\n') {
                     self.rows.push(Row::new(Vec::new()));
                 }
