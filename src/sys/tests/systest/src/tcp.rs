@@ -382,7 +382,7 @@ fn test_ipv6() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
-pub fn run_tests() {
+pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
