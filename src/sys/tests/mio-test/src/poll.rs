@@ -623,7 +623,7 @@ impl event::Source for ErroneousTestEventSource {
         _token: Token,
         _interests: Interest,
     ) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Other, "register"))
+        Err(io::Error::other("register"))
     }
 
     fn reregister(
@@ -632,11 +632,11 @@ impl event::Source for ErroneousTestEventSource {
         _token: Token,
         _interests: Interest,
     ) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Other, "reregister"))
+        Err(io::Error::other("reregister"))
     }
 
     fn deregister(&mut self, _registry: &Registry) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Other, "deregister"))
+        Err(io::Error::other("deregister"))
     }
 }
 

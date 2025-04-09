@@ -1226,7 +1226,7 @@ impl SelectedOperation<'_> {
     /// ```
     pub fn send<T>(mut self, s: &Sender<T>, msg: T) -> Result<(), SendError<T>> {
         assert!(
-            s as *const Sender<T> as *const u8 == self.ptr,
+            core::ptr::eq(s as *const Sender<T> as *const u8, self.ptr),
             "passed a sender that wasn't selected",
         );
         let res = unsafe { channel::write(s, &mut self.token, msg) };
@@ -1260,7 +1260,7 @@ impl SelectedOperation<'_> {
     /// ```
     pub fn recv<T>(mut self, r: &Receiver<T>) -> Result<T, RecvError> {
         assert!(
-            r as *const Receiver<T> as *const u8 == self.ptr,
+            core::ptr::eq(r as *const Receiver<T> as *const u8, self.ptr),
             "passed a receiver that wasn't selected",
         );
         let res = unsafe { channel::read(r, &mut self.token) };
