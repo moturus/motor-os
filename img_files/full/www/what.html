@@ -69,7 +69,7 @@ More specifically, these things work:
   <li>I/O subsystem (in the userspace)</li>
 	<ul>
 	   <li>VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio">drivers</a></li>
-	   <li>two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs">flatfs</a>)</li>
+       <li>two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs">flatfs</a>)</li>
 	   <li><a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking (TCP only at the moment)</li>
       <ul><li>max host-guest TCP throughput is about 10Gbps at the moment</li></ul>
 	</ul>
@@ -82,9 +82,12 @@ More specifically, these things work:
 		   <li>Rust programs that use Rust standard library and do not depend, directly or indirectly, on Unix or Windows FFI,
       will cross-compile for Motor OS and run, subject to "what does not work" below</li>
 		</ul>
+       <li>Tokio Runtime is working</li>
+       <li>Tokio/MIO async TCP APIs are working</li>
 	   <li>a simple TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided</li>
+	   <li>an axum/tokio-based TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> is also provided</li>
 	   <li>a simple <a href="https://github.com/moturus/rush">unix-like</a> shell in the serial console</li>
-	   <li>a simle <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a></li>
+	   <li>a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a></li>
      <li>basic commands like free, ps, ls, top, cat, ss, etc. (do `ls bin` to list all commands)</li>
 	</ul>
 </ul> 
@@ -107,8 +110,7 @@ but are slow (synchronous) and will have to be reimplemented using Motor OS asyn
 <li>The ecosystem outside Rust std:</li>
    <ul>
       <li>"sans-io" crates and crates like rand or rustls can be compiled and used with minor tweaks</li>
-      <li>crates depending on specific async runtimes (e.g. Tokio) will not compile at the moment</li>
-	<ul><li><a href="https://github.com/tokio-rs/mio">Tokio Mio</a> will soon be ported</li></ul>
+      <li>async Rust: Tokio is only partially ported, so most crates won't work without some refactoring</li>
       <li>crates that are wrappers around native Linux or Windows APIs will not work, obviously</li>
    </ul>
 </ul>

@@ -69,7 +69,9 @@ More specifically, these things work:
   * Rust's standard library mostly ported
     * Rust programs that use Rust standard library and do not depend, directly or indirectly, on Unix or Windows FFI,
       will cross-compile for Motor OS and run, subject to "what does not work" below
+  * Tokio runtime and tokio/mio async TCP APIs are working
   * a simple TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided
+  * an axum/tokio-based TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> s also provided
   * a simple <a href="https://github.com/moturus/rush">unix-like</a> shell in the serial console
   * a simple <a href="https://github.com/moturus/motor-os/tree/main/src/bin/kibim">text editor</a>
   * basic commands like free, ps, ls, top, cat, ss, etc. (do `ls bin` to list all commands)
@@ -88,7 +90,6 @@ but are slow (synchronous) and will have to be reimplemented using Motor OS asyn
 * The ecosystem outside Rust std:
   * "sans-io" crates and crates like rand or rustls can be compiled and used with minor tweaks
   * crates depending on specific async runtimes (e.g. Tokio) will not compile at the moment
-    * [Tokio Mio](https://github.com/tokio-rs/mio) will soon be ported
   * crates that are wrappers around native Linux or Windows APIs will not work, obviously
 
 ## How can I build/run it?

@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2025-04-08
+
+- Tokio runtime and tokio/mio async TCP APIs are working.
+- Motor OS rebased on top of Rust 2025-04-05 rustlang nightly version.
+
 ## 2025-02-17
 
 Rust Motor OS target rebased onto Rust 2025-02-16 nightly version.
