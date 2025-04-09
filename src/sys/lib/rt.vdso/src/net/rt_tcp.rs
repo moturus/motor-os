@@ -632,7 +632,7 @@ impl TcpStream {
     }
 
     fn channel(&self) -> &NetChannel {
-        &self.channel_reservation.channel()
+        self.channel_reservation.channel()
     }
 
     fn maybe_raise_events(&self, interests: Interests) {

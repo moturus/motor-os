@@ -469,9 +469,6 @@ fn main() {
 
     std::thread::spawn(input_listener);
 
-    udp::run_all_tests();
-    return;
-
     println!("Systest starting...");
 
     // Test that a userspace interrupt is handled correctly.
