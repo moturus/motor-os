@@ -1149,11 +1149,9 @@ rt_test! {
         tx.send(()).unwrap();
     }
 
-    /*
     #[cfg(not(target_os = "wasi"))] // Wasi does not support bind
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    #[test]
-    fn local_set_block_on_socket() {
+    fn test_local_set_block_on_socket() {
         let rt = rt();
         let local = task::LocalSet::new();
 
@@ -1171,12 +1169,12 @@ rt_test! {
             TcpStream::connect(&addr).await.unwrap();
             rx.await.unwrap();
         });
+        println!("\t{}/test_local_set_block_on_socket PASS", module_path!());
     }
 
     #[cfg(not(target_os = "wasi"))] // Wasi does not support bind
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
-    #[test]
-    fn local_set_client_server_block_on() {
+    fn test_local_set_client_server_block_on() {
         let rt = rt();
         let (tx, rx) = mpsc::channel();
 
@@ -1186,6 +1184,7 @@ rt_test! {
 
         assert_ok!(rx.try_recv());
         assert_err!(rx.try_recv());
+        println!("\t{}/test_local_set_client_server_block_on PASS", module_path!());
     }
 
     #[cfg(not(target_os = "wasi"))] // Wasi does not support bind
@@ -1213,8 +1212,7 @@ rt_test! {
         tx.send(()).unwrap();
     }
 
-    #[test]
-    fn coop() {
+    fn test_coop() {
         use std::task::Poll::Ready;
         use tokio::sync::mpsc;
 
@@ -1239,10 +1237,10 @@ rt_test! {
                 panic!("did not yield");
             }).await;
         });
+        println!("\t{}/test_coop PASS", module_path!());
     }
 
-    #[test]
-    fn coop_unconstrained() {
+    fn test_coop_unconstrained() {
         use std::task::Poll::Ready;
         use tokio::sync::mpsc;
 
@@ -1265,11 +1263,10 @@ rt_test! {
                 Ready(())
             })).await;
         });
+        println!("\t{}/test_coop_unconstrained PASS", module_path!());
     }
 
-    #[cfg(tokio_unstable)]
-    #[test]
-    fn coop_consume_budget() {
+    fn test_coop_consume_budget() {
         let rt = rt();
 
         rt.block_on(async {
@@ -1290,12 +1287,12 @@ rt_test! {
                 std::task::Poll::Ready(())
             }).await;
         });
+        println!("\t{}/test_coop_consume_budget PASS", module_path!());
     }
 
     // Tests that the "next task" scheduler optimization is not able to starve
     // other tasks.
-    #[test]
-    fn ping_pong_saturation() {
+    fn test_ping_pong_saturation() {
         use std::sync::atomic::{Ordering, AtomicBool};
         use tokio::sync::mpsc;
 
@@ -1354,11 +1351,11 @@ rt_test! {
                 t.await.unwrap();
             }
         });
+        println!("\t{}/test_ping_pong_saturation PASS", module_path!());
     }
 
-    #[test]
     #[cfg(not(target_os="wasi"))]
-    fn shutdown_concurrent_spawn() {
+    fn test_shutdown_concurrent_spawn() {
         const NUM_TASKS: usize = 10_000;
         for _ in 0..5 {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1389,18 +1386,17 @@ rt_test! {
 
             th.join().unwrap();
         }
+        println!("\t{}/test_shutdown_concurrent_spawn PASS", module_path!());
     }
 
-    #[test]
-    #[cfg_attr(target_family = "wasm", ignore)]
-    fn wake_by_ref_from_thread_local() {
+    fn test_wake_by_ref_from_thread_local() {
         wake_from_thread_local(true);
+        println!("\t{}/test_wake_by_ref_from_thread_local PASS", module_path!());
     }
 
-    #[test]
-    #[cfg_attr(target_family = "wasm", ignore)]
-    fn wake_by_val_from_thread_local() {
+    fn test_wake_by_val_from_thread_local() {
         wake_from_thread_local(false);
+        println!("\t{}/test_wake_by_val_from_thread_local PASS", module_path!());
     }
 
     fn wake_from_thread_local(by_ref: bool) {
@@ -1426,6 +1422,7 @@ rt_test! {
         }
 
         std::thread_local! {
+            #[allow(clippy::missing_const_for_thread_local)]
             static TL_DATA: RefCell<Option<TLData>> = const { RefCell::new(None) };
         };
 
@@ -1452,11 +1449,8 @@ rt_test! {
 
         assert!(recv.recv().unwrap());
     }
-    */
 
     pub fn run_all_tests() {
-        // test_complete_task_under_load();
-
         test_block_on_sync();
         test_block_on_async();
         test_spawn_one_bg();
@@ -1492,6 +1486,15 @@ rt_test! {
         test_shutdown_timeout_0();
         test_shutdown_wakeup_time();
         test_runtime_in_thread_local();
+        test_local_set_block_on_socket();
+        test_local_set_client_server_block_on();
+        test_coop();
+        test_coop_unconstrained();
+        test_coop_consume_budget();
+        test_ping_pong_saturation();
+        test_shutdown_concurrent_spawn();
+        test_wake_by_ref_from_thread_local();
+        test_wake_by_val_from_thread_local();
 
         println!();
     }
