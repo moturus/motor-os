@@ -1,6 +1,7 @@
 // mod process_arg0;
 mod rt_basic;
 mod rt_common;
+mod rt_handle;
 
 pub mod support {
     pub mod mpsc_stream;
@@ -29,6 +30,7 @@ fn main() {
 
     rt_basic::run_all_tests();
     rt_common::run_all_tests();
+    rt_handle::run_all_tests();
 
     println!("tokio-tests PASS");
 }
