@@ -29,6 +29,7 @@ use moto_sys_io::api_net::IO_SUBCHANNELS;
 
 use super::rt_tcp::TcpListener;
 use super::rt_tcp::TcpStream;
+use super::rt_udp::UdpSocket;
 
 pub unsafe extern "C" fn dns_lookup(
     host_bytes: *const u8,
@@ -66,16 +67,22 @@ pub unsafe extern "C" fn dns_lookup(
 
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
     if proto == moto_rt::net::PROTO_UDP {
-        todo!()
-    } else if proto != moto_rt::net::PROTO_TCP {
-        return -(E_NOT_IMPLEMENTED as RtFd);
+        let addr = unsafe { (*addr).into() };
+        let udp_socket = match super::rt_udp::UdpSocket::bind(&addr) {
+            Ok(x) => x,
+            Err(err) => return -(err as RtFd),
+        };
+        posix::push_file(udp_socket)
+    } else if proto == moto_rt::net::PROTO_TCP {
+        let addr = unsafe { (*addr).into() };
+        let listener = match super::rt_tcp::TcpListener::bind(&addr) {
+            Ok(x) => x,
+            Err(err) => return -(err as RtFd),
+        };
+        posix::push_file(listener)
+    } else {
+        -(E_NOT_IMPLEMENTED as RtFd)
     }
-    let addr = unsafe { (*addr).into() };
-    let listener = match super::rt_tcp::TcpListener::bind(&addr) {
-        Ok(x) => x,
-        Err(err) => return -(err as RtFd),
-    };
-    posix::push_file(listener)
 }
 
 pub extern "C" fn listen(rt_fd: RtFd, max_backlog: u32) -> ErrorCode {
@@ -260,6 +267,8 @@ static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
     num_tcp_listeners: AtomicU64::new(0),
     #[cfg(feature = "netdev")]
     num_tcp_streams: AtomicU64::new(0),
+    #[cfg(feature = "netdev")]
+    num_udp_sockets: AtomicU64::new(0),
 });
 
 pub fn stats_tcp_listener_created() {
@@ -282,6 +291,16 @@ pub fn stats_tcp_stream_dropped() {
     NET.lock().num_tcp_streams.fetch_sub(1, Ordering::Relaxed);
 }
 
+pub fn stats_udp_socket_created() {
+    #[cfg(feature = "netdev")]
+    NET.lock().num_udp_sockets.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn stats_udp_socket_dropped() {
+    #[cfg(feature = "netdev")]
+    NET.lock().num_udp_sockets.fetch_sub(1, Ordering::Relaxed);
+}
+
 struct NetRuntime {
     // Channels at capacity. We need sets, but this is rustc-dep-of-std, and our options are limited.
     full_channels: BTreeMap<u64, Arc<NetChannel>>,
@@ -292,6 +311,8 @@ struct NetRuntime {
     num_tcp_listeners: AtomicU64,
     #[cfg(feature = "netdev")]
     num_tcp_streams: AtomicU64,
+    #[cfg(feature = "netdev")]
+    num_udp_sockets: AtomicU64,
 }
 
 impl NetRuntime {
@@ -362,6 +383,7 @@ pub struct NetChannel {
     // owns tcp streams, and we want to clear things away when the user drops them.
     tcp_streams: Mutex<BTreeMap<u64, Weak<TcpStream>>>,
     tcp_listeners: Mutex<BTreeMap<u64, Weak<TcpListener>>>,
+    udp_sockets: Mutex<BTreeMap<u64, Weak<UdpSocket>>>,
 
     next_msg_id: CachePadded<AtomicU64>, // A counter.
 
@@ -624,6 +646,7 @@ impl NetChannel {
             subchannels_in_use,
             tcp_streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),
+            udp_sockets: Mutex::new(BTreeMap::new()),
             reservations: AtomicU8::new(0),
             next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
@@ -673,11 +696,19 @@ impl NetChannel {
         assert!(self.subchannels_in_use[idx as usize].swap(false, Ordering::AcqRel));
     }
 
-    pub fn tcp_stream_created(&self, stream: &super::rt_tcp::TcpStream) {
+    pub fn tcp_stream_created(&self, stream: &TcpStream) {
         assert!(self
             .tcp_streams
             .lock()
             .insert(stream.handle(), stream.weak())
+            .is_none());
+    }
+
+    pub fn udp_socket_created(&self, socket: &UdpSocket) {
+        assert!(self
+            .udp_sockets
+            .lock()
+            .insert(socket.handle(), socket.weak())
             .is_none());
     }
 
@@ -800,8 +831,21 @@ impl NetChannel {
             msg.handle
         );
         */
-        match msg.command {
-            api_net::CMD_TCP_STREAM_RX => {
+        let Ok(cmd) = api_net::NetCmd::try_from(msg.command) else {
+            // This is logged always because if a new incoming message is added that
+            // has to be handled but is not, we may have a problem.
+            moto_log!(
+                "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
+                file!(),
+                line!(),
+                msg.command,
+                msg.handle
+            );
+            return;
+        };
+
+        match cmd {
+            api_net::NetCmd::TcpStreamRx => {
                 // RX raced with the client dropping the sream. Need to get page to free it.
                 let sz_read = msg.payload.args_64()[1];
                 assert_ne!(0, sz_read);
@@ -809,17 +853,16 @@ impl NetChannel {
                 // Get the page so that it is properly dropped.
                 let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
             }
-            api_net::EVT_TCP_STREAM_STATE_CHANGED => {}
-            api_net::CMD_TCP_STREAM_CLOSE => {}
+            api_net::NetCmd::EvtTcpStreamStateChanged => {}
+            api_net::NetCmd::TcpStreamClose => {}
             _ => {
-                // #[cfg(debug_assertions)]
                 // This is logged always because if a new incoming message is added that
                 // has to be handled but is not, we may have a problem.
                 moto_log!(
-                    "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
+                    "{}:{} orphan incoming message {:?} for 0x{:x}; release i/o page?",
                     file!(),
                     line!(),
-                    msg.command,
+                    cmd,
                     msg.handle
                 );
             }
@@ -885,10 +928,10 @@ pub fn clear_rx_queue(
     // Clear RX queue: basically, free up server-allocated pages.
     let mut rxq = rx_queue.lock();
     while let Some(msg) = rxq.pop_front() {
-        if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+        if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             continue;
         }
-        assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
+        assert_eq!(msg.command, api_net::NetCmd::TcpStreamRx as u16);
         let sz_read = msg.payload.args_64()[1];
         if sz_read > 0 {
             let _ = channel.conn.get_page(msg.payload.shared_pages()[0]);

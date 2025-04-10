@@ -7,23 +7,6 @@ use moto_ipc::io_channel;
 
 pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX; // 4352 == 0x1100
 
-pub const CMD_TCP_LISTENER_BIND: u16 = CMD_MIN; // + 0;
-pub const CMD_TCP_LISTENER_ACCEPT: u16 = CMD_MIN + 1;
-pub const CMD_TCP_LISTENER_SET_OPTION: u16 = CMD_MIN + 2;
-pub const CMD_TCP_LISTENER_GET_OPTION: u16 = CMD_MIN + 3;
-pub const CMD_TCP_LISTENER_DROP: u16 = CMD_MIN + 4;
-
-pub const CMD_TCP_STREAM_CONNECT: u16 = CMD_MIN + 5;
-pub const CMD_TCP_STREAM_TX: u16 = CMD_MIN + 6;
-pub const CMD_TCP_STREAM_RX: u16 = CMD_MIN + 7;
-pub const CMD_TCP_STREAM_RX_ACK: u16 = CMD_MIN + 8;
-pub const CMD_TCP_STREAM_SET_OPTION: u16 = CMD_MIN + 9;
-pub const CMD_TCP_STREAM_GET_OPTION: u16 = CMD_MIN + 10;
-pub const CMD_TCP_STREAM_CLOSE: u16 = CMD_MIN + 11;
-
-pub const EVT_TCP_STREAM_STATE_CHANGED: u16 = CMD_MIN + 12;
-pub const CMD_MAX: u16 = EVT_TCP_STREAM_STATE_CHANGED;
-
 #[derive(Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum NetCmd {
@@ -40,17 +23,26 @@ pub enum NetCmd {
     TcpStreamGetOption,
     TcpStreamClose,
     EvtTcpStreamStateChanged,
+    UdpSocketBind,
+    NetCmdMax,
 }
 
-const _NET_CMD_CHECK: () = assert!(CMD_MAX == NetCmd::EvtTcpStreamStateChanged as u16);
+pub const CMD_MAX: u16 = (NetCmd::NetCmdMax as u16) - 1;
 
 impl NetCmd {
-    pub fn try_from(val: u16) -> Result<Self, u16> {
-        if !(CMD_MIN..=CMD_MAX).contains(&val) {
+    pub const fn try_from(val: u16) -> Result<Self, u16> {
+        if val < CMD_MIN {
+            return Err(val);
+        }
+        if val >= CMD_MAX {
             return Err(val);
         }
 
         Ok(unsafe { core::mem::transmute::<u16, Self>(val) })
+    }
+
+    pub const fn as_u16(self) -> u16 {
+        self as u16
     }
 }
 
@@ -150,7 +142,7 @@ impl TcpState {
 /// `num_listeners` can be no more than 32.
 pub fn bind_tcp_listener_request(addr: &SocketAddr, num_listeners: Option<u8>) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = CMD_TCP_LISTENER_BIND;
+    msg.command = NetCmd::TcpListenerBind as u16;
     msg.flags = num_listeners.unwrap_or(0) as u32;
     put_socket_addr(&mut msg.payload, addr);
 
@@ -159,7 +151,7 @@ pub fn bind_tcp_listener_request(addr: &SocketAddr, num_listeners: Option<u8>) -
 
 pub fn accept_tcp_listener_request(handle: u64, subchannel_mask: u64) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = CMD_TCP_LISTENER_ACCEPT;
+    msg.command = NetCmd::TcpListenerAccept as u16;
     msg.handle = handle;
     msg.payload.args_64_mut()[0] = subchannel_mask;
 
@@ -168,7 +160,7 @@ pub fn accept_tcp_listener_request(handle: u64, subchannel_mask: u64) -> io_chan
 
 pub fn tcp_stream_connect_request(addr: &SocketAddr, subchannel_idx: u8) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = CMD_TCP_STREAM_CONNECT;
+    msg.command = NetCmd::TcpStreamConnect as u16;
     msg.payload.args_8_mut()[23] = subchannel_idx;
     put_socket_addr(&mut msg.payload, addr);
     msg.flags = u32::MAX; // Timeout.
@@ -182,7 +174,7 @@ pub fn tcp_stream_connect_timeout_request(
     timeout: moto_rt::time::Instant,
 ) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = CMD_TCP_STREAM_CONNECT;
+    msg.command = NetCmd::TcpStreamConnect as u16;
     msg.payload.args_8_mut()[23] = subchannel_idx;
     put_socket_addr(&mut msg.payload, addr);
 
@@ -213,7 +205,7 @@ pub fn tcp_stream_tx_msg(
     timestamp: u64,
 ) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = CMD_TCP_STREAM_TX;
+    msg.command = NetCmd::TcpStreamTx as u16;
     msg.handle = handle;
     msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
     msg.payload.args_64_mut()[1] = sz as u64;
@@ -229,7 +221,7 @@ pub fn tcp_stream_rx_msg(
     rx_seq: u64,
 ) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
-    msg.command = CMD_TCP_STREAM_RX;
+    msg.command = NetCmd::TcpStreamRx as u16;
     msg.handle = handle;
     msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
     msg.payload.args_64_mut()[1] = sz as u64;
@@ -267,4 +259,12 @@ fn test_get_put_socket_addr() {
     put_socket_addr(&mut payload, &addr_in);
     let addr_out = get_socket_addr(&payload);
     assert_eq!(addr_in, addr_out);
+}
+
+pub fn bind_udp_socket_request(addr: &SocketAddr) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::UdpSocketBind as u16;
+    put_socket_addr(&mut msg.payload, addr);
+
+    msg
 }

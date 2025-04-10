@@ -1526,7 +1526,7 @@ impl NetSys {
         let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
 
         let mut msg = io_channel::Msg::new();
-        msg.command = api_net::EVT_TCP_STREAM_STATE_CHANGED;
+        msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
         msg.handle = moto_socket.id.into();
         msg.payload.args_32_mut()[0] = moto_socket.state.into();
         msg.status = moto_rt::E_OK;
@@ -1795,25 +1795,37 @@ impl IoSubsystem for NetSys {
 
         // log::debug!("{}:{} got SQE cmd {}", file!(), line!(), msg.command);
 
-        match msg.command {
-            api_net::CMD_TCP_LISTENER_BIND => Ok(Some(self.tcp_listener_bind(conn, msg))),
-            api_net::CMD_TCP_LISTENER_ACCEPT => self.tcp_listener_accept(conn, msg),
-            api_net::CMD_TCP_LISTENER_DROP => self.tcp_listener_drop(conn, msg).map(|_| None),
-            api_net::CMD_TCP_LISTENER_SET_OPTION => {
+        let Ok(net_cmd) = api_net::NetCmd::try_from(msg.command) else {
+            #[cfg(debug_assertions)]
+            log::debug!(
+                "{}:{} unrecognized command {} from endpoint 0x{:x}",
+                file!(),
+                line!(),
+                msg.command,
+                conn.wait_handle().as_u64()
+            );
+
+            return Err(());
+        };
+        match net_cmd {
+            api_net::NetCmd::TcpListenerBind => Ok(Some(self.tcp_listener_bind(conn, msg))),
+            api_net::NetCmd::TcpListenerAccept => self.tcp_listener_accept(conn, msg),
+            api_net::NetCmd::TcpListenerDrop => self.tcp_listener_drop(conn, msg).map(|_| None),
+            api_net::NetCmd::TcpListenerSetOption => {
                 Ok(Some(self.tcp_listener_set_option(conn, msg)))
             }
-            api_net::CMD_TCP_LISTENER_GET_OPTION => {
+            api_net::NetCmd::TcpListenerGetOption => {
                 Ok(Some(self.tcp_listener_get_option(conn, msg)))
             }
-            api_net::CMD_TCP_STREAM_CONNECT => Ok(self.tcp_stream_connect(conn, msg)),
-            api_net::CMD_TCP_STREAM_TX => {
+            api_net::NetCmd::TcpStreamConnect => Ok(self.tcp_stream_connect(conn, msg)),
+            api_net::NetCmd::TcpStreamTx => {
                 self.tcp_stream_write(conn, msg);
                 Ok(None)
             }
-            api_net::CMD_TCP_STREAM_RX_ACK => self.tcp_stream_rx_ack(conn, msg).map(|_| None),
-            api_net::CMD_TCP_STREAM_SET_OPTION => Ok(Some(self.tcp_stream_set_option(conn, msg))),
-            api_net::CMD_TCP_STREAM_GET_OPTION => Ok(Some(self.tcp_stream_get_option(conn, msg))),
-            api_net::CMD_TCP_STREAM_CLOSE => Ok(self.tcp_stream_close(conn, msg)),
+            api_net::NetCmd::TcpStreamRxAck => self.tcp_stream_rx_ack(conn, msg).map(|_| None),
+            api_net::NetCmd::TcpStreamSetOption => Ok(Some(self.tcp_stream_set_option(conn, msg))),
+            api_net::NetCmd::TcpStreamGetOption => Ok(Some(self.tcp_stream_get_option(conn, msg))),
+            api_net::NetCmd::TcpStreamClose => Ok(self.tcp_stream_close(conn, msg)),
             _ => {
                 #[cfg(debug_assertions)]
                 log::debug!(

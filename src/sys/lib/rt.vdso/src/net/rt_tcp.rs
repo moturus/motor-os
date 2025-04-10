@@ -72,7 +72,7 @@ pub struct TcpListener {
 impl Drop for TcpListener {
     fn drop(&mut self) {
         let mut msg = io_channel::Msg::new();
-        msg.command = api_net::CMD_TCP_LISTENER_DROP;
+        msg.command = api_net::NetCmd::TcpListenerDrop as u16;
         msg.handle = self.handle;
 
         self.channel().send_msg(msg);
@@ -427,7 +427,7 @@ impl TcpListener {
             return moto_rt::E_INVALID_ARGUMENT;
         }
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_LISTENER_SET_OPTION;
+        req.command = api_net::NetCmd::TcpListenerSetOption as u16;
         req.handle = self.handle;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_8_mut()[23] = ttl as u8;
@@ -436,7 +436,7 @@ impl TcpListener {
 
     fn ttl(&self) -> Result<u32, ErrorCode> {
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_LISTENER_GET_OPTION;
+        req.command = api_net::NetCmd::TcpListenerGetOption as u16;
         req.handle = self.handle;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().send_receive(req);
@@ -535,7 +535,7 @@ impl Drop for TcpStream {
 
         if self.tcp_state() != TcpState::Closed {
             let mut req = io_channel::Msg::new();
-            req.command = api_net::CMD_TCP_STREAM_CLOSE;
+            req.command = api_net::NetCmd::TcpStreamClose as u16;
             req.handle = self.handle();
 
             // TODO: is this unwrap OK?
@@ -559,7 +559,7 @@ impl Drop for TcpStream {
         // Clear TX queue (of length 0 or 1).
         let tx_msg = self.tx_msg.lock().take();
         if let Some((msg, _)) = tx_msg {
-            assert_eq!(msg.command, api_net::CMD_TCP_STREAM_TX);
+            assert_eq!(msg.command, api_net::NetCmd::TcpStreamTx as u16);
             let sz_read = msg.payload.args_64()[1];
             if sz_read > 0 {
                 let _ = self.channel().get_page(msg.payload.shared_pages()[0]);
@@ -615,7 +615,7 @@ impl PosixFile for TcpStream {
 
 impl ResponseHandler for TcpStream {
     fn on_response(&self, resp: io_channel::Msg) {
-        assert_eq!(resp.command, api_net::CMD_TCP_STREAM_CONNECT);
+        assert_eq!(resp.command, api_net::NetCmd::TcpStreamConnect as u16);
         self.on_connect_response(resp);
     }
 }
@@ -682,7 +682,7 @@ impl TcpStream {
 
     fn ack_rx(&self) {
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_STREAM_RX_ACK;
+        req.command = api_net::NetCmd::TcpStreamRxAck as u16;
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = self.next_rx_seq.load(Ordering::Relaxed) - 1;
         self.channel().send_msg(req);
@@ -717,7 +717,7 @@ impl TcpStream {
 
             // No need to raise POLL_READABLE, as this is not a state change
             // (receive queue non-empty).
-            if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+            if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
                 let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
                 if !new_state.can_write() {
                     // We cannot close the socket yet as there are RX bytes (potentially).
@@ -729,25 +729,23 @@ impl TcpStream {
         }
 
         // RXQ is empty.
-        match msg.command {
-            api_net::CMD_TCP_STREAM_RX => {
-                recv_q.push_back(msg);
-                drop(recv_q);
-                // The RXQ was empty, this is a new (edge) event.
-                self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
-            }
-            api_net::EVT_TCP_STREAM_STATE_CHANGED => {
-                drop(recv_q);
-                let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
-                self.set_tcp_state(new_state);
-            }
-            _ => panic!(
+        if msg.command == (api_net::NetCmd::TcpStreamRx as u16) {
+            recv_q.push_back(msg);
+            drop(recv_q);
+            // The RXQ was empty, this is a new (edge) event.
+            self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+        } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+            drop(recv_q);
+            let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+            self.set_tcp_state(new_state);
+        } else {
+            panic!(
                 "{}:{}: Unrecognized msg {} for stream 0x{:x}",
                 file!(),
                 line!(),
                 msg.command,
                 msg.handle
-            ),
+            )
         }
 
         rx_lock.take().unwrap_or(SysHandle::NONE)
@@ -771,27 +769,25 @@ impl TcpStream {
 
         let msg = recv_q.pop_front().unwrap();
 
-        match msg.command {
-            api_net::CMD_TCP_STREAM_RX => {
-                let sz_read = msg.payload.args_64()[1] as usize;
-                if sz_read > 0 {
-                    recv_q.push_back(msg);
-                    drop(recv_q);
-                    self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
-                }
-            }
-            api_net::EVT_TCP_STREAM_STATE_CHANGED => {
-                let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+        if msg.command == (api_net::NetCmd::TcpStreamRx as u16) {
+            let sz_read = msg.payload.args_64()[1] as usize;
+            if sz_read > 0 {
+                recv_q.push_back(msg);
                 drop(recv_q);
-                self.set_tcp_state(new_state);
+                self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
             }
-            _ => panic!(
+        } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+            let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
+            drop(recv_q);
+            self.set_tcp_state(new_state);
+        } else {
+            panic!(
                 "{}:{}: Unrecognized msg {} for stream 0x{:x}",
                 file!(),
                 line!(),
                 msg.command,
                 msg.handle
-            ),
+            );
         }
     }
 
@@ -1093,7 +1089,7 @@ impl TcpStream {
             }
         };
 
-        if msg.command == api_net::EVT_TCP_STREAM_STATE_CHANGED {
+        if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             // Note: this message was preprocessed in process_incoming_msg,
             // and the state was set to read-only.
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
@@ -1110,10 +1106,9 @@ impl TcpStream {
             }
         }
 
-        if msg.command != api_net::CMD_TCP_STREAM_RX {
+        if msg.command != (api_net::NetCmd::TcpStreamRx as u16) {
             panic!("bad cmd: {} {}", msg.command, msg.status);
         }
-        assert_eq!(msg.command, api_net::CMD_TCP_STREAM_RX);
         let sz_read = msg.payload.args_64()[1] as usize;
         assert!(sz_read <= moto_ipc::io_channel::PAGE_SIZE);
         assert_ne!(0, sz_read);
@@ -1481,7 +1476,7 @@ impl TcpStream {
         }
 
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = option;
         let resp = self.channel().send_receive(req);
@@ -1509,7 +1504,7 @@ impl TcpStream {
 
     fn set_nodelay(&self, nodelay: u8) -> ErrorCode {
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         req.payload.args_64_mut()[1] = nodelay as u64;
@@ -1518,7 +1513,7 @@ impl TcpStream {
 
     fn nodelay(&self) -> Result<u8, ErrorCode> {
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_STREAM_GET_OPTION;
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         let resp = self.channel().send_receive(req);
@@ -1533,7 +1528,7 @@ impl TcpStream {
 
     fn set_ttl(&self, ttl: u32) -> ErrorCode {
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_STREAM_SET_OPTION;
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_32_mut()[2] = ttl;
@@ -1542,7 +1537,7 @@ impl TcpStream {
 
     fn ttl(&self) -> Result<u32, ErrorCode> {
         let mut req = io_channel::Msg::new();
-        req.command = api_net::CMD_TCP_STREAM_GET_OPTION;
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().send_receive(req);
