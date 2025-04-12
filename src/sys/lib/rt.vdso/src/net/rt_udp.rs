@@ -16,6 +16,7 @@ pub struct UdpSocket {
     handle: u64,
     wait_object: WaitObject,
     nonblocking: AtomicBool,
+    subchannel_mask: u64, // Never changes.
     me: Weak<UdpSocket>,
 }
 
@@ -39,8 +40,11 @@ impl UdpSocket {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let req = api_net::bind_udp_socket_request(&socket_addr);
-        let channel_reservation = super::rt_net::reserve_channel();
+        let mut channel_reservation = super::rt_net::reserve_channel();
+        channel_reservation.reserve_subchannel();
+        let subchannel_mask = channel_reservation.subchannel_mask();
+        let req =
+            api_net::bind_udp_socket_request(&socket_addr, channel_reservation.subchannel_idx());
         let resp = channel_reservation.channel().send_receive(req);
         if resp.status() != moto_rt::E_OK {
             return Err(resp.status());
@@ -59,6 +63,7 @@ impl UdpSocket {
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
             wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
+            subchannel_mask,
             me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);

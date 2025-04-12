@@ -3,17 +3,18 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr},
     rc::Rc,
+    sync::Arc,
     time::Instant,
 };
 
-use crate::runtime::IoSubsystem;
-use crate::runtime::PendingCompletion;
+use crate::{net::netdev::EphemeralTcpPort, runtime::PendingCompletion};
+use crate::{net::socket::UdpSocket, runtime::IoSubsystem};
 use moto_ipc::io_channel;
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_net::{self, TcpState};
 
 use super::socket::SocketId;
-use super::socket::{DeferredAction, MotoSocket};
+use super::socket::{DeferredAction, TcpSocket};
 use super::tcp_listener::TcpListener;
 use super::tcp_listener::TcpListenerId;
 use super::RxBuf;
@@ -39,18 +40,21 @@ pub(super) struct NetSys {
 
     // NetSys owns all listeners, sockets, etc. in the system, via the hash maps below.
     tcp_listeners: HashMap<TcpListenerId, TcpListener>,
-    tcp_sockets: HashMap<SocketId, MotoSocket>, // Active connections.
+    tcp_sockets: HashMap<SocketId, TcpSocket>, // Active connections.
+    udp_sockets: HashMap<SocketId, UdpSocket>,
 
     // An ordered list of all sockets in the system, to be used for stats reporting.
     socket_ids: std::collections::BTreeSet<SocketId>,
 
     // "Empty" sockets cached here.
     tcp_socket_cache: Vec<smoltcp::socket::tcp::Socket<'static>>,
+    udp_socket_cache: Vec<smoltcp::socket::udp::Socket<'static>>,
 
     // Conn ID -> TCP listeners/sockets. Needed to e.g. protect one process
     // accessing another process's sockets, and to drop/clear when the process dies.
     conn_tcp_listeners: HashMap<SysHandle, HashSet<TcpListenerId>>,
     conn_tcp_sockets: HashMap<SysHandle, HashSet<SocketId>>,
+    conn_udp_sockets: HashMap<SysHandle, HashSet<SocketId>>,
 
     woken_sockets: Rc<RefCell<VecDeque<SocketId>>>,
     wakers: std::collections::HashMap<SocketId, std::task::Waker>,
@@ -58,33 +62,54 @@ pub(super) struct NetSys {
     rng: rand::rngs::SmallRng,
     deferred_sockets: timeq::TimeQ<SocketId>,
 
-    // config: config::NetConfig,
+    // When a listener allocates an ephemeral port, the port is then shared
+    // with the incoming tcp streams, so it is reference-counted. When the
+    // last reference is dropped, it is added here to be released.
+    ephemeral_tcp_ports_to_clear: crossbeam::queue::SegQueue<(usize, u16)>,
+
     config: super::config::NetConfig,
 }
+
+// We have one mutable reference that belongs to runtime, and one
+// atomic/immutable reference here to short-circuit some (rare) ops.
+static NET_SYS: std::sync::atomic::AtomicPtr<NetSys> =
+    std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 impl NetSys {
     pub fn new(config: super::config::NetConfig) -> Box<Self> {
         use rand::SeedableRng;
 
         let devices = super::netdev::init(&config);
-        let mut self_ref = Box::new(Self {
+        let self_ref = Box::new(Self {
             devices,
             wait_handles: HashMap::new(),
             ip_addresses: HashMap::new(),
             next_id: 1,
             tcp_listeners: HashMap::new(),
             tcp_sockets: HashMap::new(),
+            udp_sockets: HashMap::new(),
             socket_ids: std::collections::BTreeSet::new(),
             tcp_socket_cache: Vec::new(),
+            udp_socket_cache: Vec::new(),
             pending_completions: VecDeque::new(),
             conn_tcp_listeners: HashMap::new(),
             conn_tcp_sockets: HashMap::new(),
+            conn_udp_sockets: HashMap::new(),
             woken_sockets: Rc::new(std::cell::RefCell::new(VecDeque::new())),
             wakers: HashMap::new(),
             rng: rand::rngs::SmallRng::seed_from_u64(1337),
             deferred_sockets: timeq::TimeQ::default(),
+            ephemeral_tcp_ports_to_clear: crossbeam::queue::SegQueue::new(),
             config,
         });
+
+        let mut self_ref = unsafe {
+            let self_ptr = Box::into_raw(self_ref);
+            assert!(NET_SYS
+                .swap(self_ptr, std::sync::atomic::Ordering::AcqRel)
+                .is_null());
+            Box::from_raw(self_ptr)
+        };
 
         for idx in 0..self_ref.devices.len() {
             let device = &self_ref.devices[idx];
@@ -100,6 +125,15 @@ impl NetSys {
         }
 
         self_ref
+    }
+
+    fn get() -> &'static Self {
+        unsafe {
+            NET_SYS
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .as_ref()
+                .unwrap()
+        }
     }
 
     fn tcp_listener_bind(
@@ -160,22 +194,27 @@ impl NetSys {
         // Allocate/assign port, if needed.
         let mut allocated_port = None;
         if socket_addr.port() == 0 {
-            let local_port = match self.devices[device_idx.unwrap()].get_ephemeral_port(&ip_addr) {
-                Some(port) => port,
-                None => {
-                    log::info!("get_ephemeral_port({:?}) failed", ip_addr);
-                    sqe.status = moto_rt::E_OUT_OF_MEMORY;
-                    return sqe;
-                }
-            };
+            let local_port =
+                match self.devices[device_idx.unwrap()].get_ephemeral_tcp_port(&ip_addr) {
+                    Some(port) => port,
+                    None => {
+                        log::info!("get_ephemeral_port({:?}) failed", ip_addr);
+                        sqe.status = moto_rt::E_OUT_OF_MEMORY;
+                        return sqe;
+                    }
+                };
             socket_addr.set_port(local_port);
             api_net::put_socket_addr(&mut sqe.payload, &socket_addr);
-            allocated_port = Some(local_port);
+            allocated_port = Some(Arc::new(EphemeralTcpPort {
+                dev_idx: device_idx.unwrap(),
+                port: local_port,
+            }));
         }
 
         // Create TcpListener object.
         let listener_id: TcpListenerId = self.next_id().into();
-        let listener = TcpListener::new(conn.clone(), socket_addr);
+        let mut listener = TcpListener::new(conn.clone(), socket_addr);
+        listener.ephemeral_tcp_port = allocated_port;
         self.tcp_listeners.insert(listener_id, listener);
 
         let conn_listeners = match self.conn_tcp_listeners.get_mut(&conn.wait_handle()) {
@@ -237,9 +276,6 @@ impl NetSys {
                         .remove(&listener_id));
                     self.drop_tcp_listener(listener_id);
 
-                    if let Some(port) = allocated_port {
-                        self.devices[device_idx].free_ephemeral_port(port);
-                    }
                     sqe.status = err;
                     return sqe;
                 }
@@ -261,15 +297,20 @@ impl NetSys {
         assert!(!socket_addr.ip().is_unspecified());
 
         for _ in 0..num_listeners {
-            let (conn, ttl) = {
+            let (conn, ttl, shared_port) = {
                 let listener = self.tcp_listeners.get_mut(&listener_id).unwrap();
 
-                (listener.conn().clone(), listener.ttl())
+                (
+                    listener.conn().clone(),
+                    listener.ttl(),
+                    listener.ephemeral_tcp_port.clone(),
+                )
             };
             let conn_handle = conn.wait_handle();
-            let mut moto_socket = self.new_socket_for_device(device_idx, conn)?;
+            let mut moto_socket = self.new_tcp_socket_for_device(device_idx, conn)?;
             let socket_id = moto_socket.id;
             moto_socket.listener_id = Some(listener_id);
+            moto_socket.shared_ephemeral_port = shared_port;
             self.tcp_listeners
                 .get_mut(&listener_id)
                 .unwrap()
@@ -316,14 +357,14 @@ impl NetSys {
         Ok(())
     }
 
-    fn new_socket_for_device(
+    fn new_tcp_socket_for_device(
         &mut self,
         device_idx: usize,
         conn: Rc<io_channel::ServerConnection>,
-    ) -> Result<MotoSocket, ErrorCode> {
+    ) -> Result<TcpSocket, ErrorCode> {
         let pid = moto_sys::SysObj::get_pid(conn.wait_handle())?;
 
-        let mut smol_socket = self.get_unused_tcp_socket()?;
+        let mut smol_socket = self.get_unused_tcp_socket();
         let socket_id = self.next_id().into();
 
         let socket_waker = super::socket::SocketWaker::new(socket_id, self.woken_sockets.clone());
@@ -342,7 +383,41 @@ impl NetSys {
             self.tcp_sockets.len()
         );
 
-        Ok(MotoSocket::new(socket_id, handle, device_idx, conn, pid))
+        Ok(TcpSocket::new(socket_id, handle, device_idx, conn, pid))
+    }
+
+    fn new_udp_socket_for_device(
+        &mut self,
+        device_idx: usize,
+        conn: Rc<io_channel::ServerConnection>,
+        socket_addr: SocketAddr,
+    ) -> Result<UdpSocket, ErrorCode> {
+        let pid = moto_sys::SysObj::get_pid(conn.wait_handle())?;
+
+        let mut smol_socket = self.get_unused_udp_socket();
+        if let Err(err) = smol_socket.bind((socket_addr.ip(), socket_addr.port())) {
+            log::error!("smoltcp bind error: {:?}", err);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let socket_id = self.next_id().into();
+
+        let socket_waker = super::socket::SocketWaker::new(socket_id, self.woken_sockets.clone());
+        let waker = unsafe { std::task::Waker::from_raw(socket_waker.into_raw_waker()) };
+        smol_socket.register_recv_waker(&waker);
+        smol_socket.register_send_waker(&waker);
+        self.wakers.insert(socket_id, waker);
+
+        let handle = self.devices[device_idx].sockets.add(smol_socket);
+
+        log::debug!(
+            "{}:{} new UDP socket 0x{:x}; {} active sockets.",
+            file!(),
+            line!(),
+            u64::from(socket_id),
+            self.udp_sockets.len()
+        );
+
+        Ok(UdpSocket::new(socket_id, handle, device_idx, conn, pid))
     }
 
     fn drop_tcp_listener(&mut self, listener_id: TcpListenerId) {
@@ -433,16 +508,15 @@ impl NetSys {
         }
 
         // Remove and cache the unused smol_socket.
-        let smol_socket = match self.devices[moto_socket.device_idx]
+        let smoltcp::socket::Socket::Tcp(smol_socket) = self.devices[moto_socket.device_idx]
             .sockets
             .remove(moto_socket.handle)
-        {
-            smoltcp::socket::Socket::Tcp(s) => s,
-            _ => panic!(),
+        else {
+            panic!();
         };
 
         if let Some(port) = moto_socket.ephemeral_port.take() {
-            self.devices[moto_socket.device_idx].free_ephemeral_port(port);
+            self.devices[moto_socket.device_idx].free_ephemeral_tcp_port(port);
         }
 
         assert_eq!(smol_socket.state(), smoltcp::socket::tcp::State::Closed);
@@ -452,6 +526,65 @@ impl NetSys {
             "dropped tcp socket 0x{:x}; {} active sockets.",
             u64::from(socket_id),
             self.tcp_sockets.len()
+        );
+    }
+
+    fn drop_udp_socket(&mut self, socket_id: SocketId) {
+        let moto_socket = if let Some(s) = self.udp_sockets.get_mut(&socket_id) {
+            s
+        } else {
+            log::debug!("drop_udp_socket: 0x{:x}: no socket", u64::from(socket_id));
+            return;
+        };
+        moto_socket.tx_queue.clear();
+        log::debug!(
+            "dropping UDP socket 0x{:x}; RX done: {} TX done: {}",
+            u64::from(socket_id),
+            moto_socket.stats_rx_bytes,
+            moto_socket.stats_tx_bytes
+        );
+        let smol_socket = self.devices[moto_socket.device_idx]
+            .sockets
+            .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
+
+        smol_socket.close();
+
+        // Remove the waker so that any polls on the socket from below don't trigger
+        // wakeups on the dropped socket.
+        self.wakers.remove(&socket_id);
+
+        // Now we can remove moto_socket.
+        let mut moto_socket = self.udp_sockets.remove(&socket_id).unwrap();
+        assert!(self.socket_ids.remove(&socket_id));
+        while let Some(tx_buf) = moto_socket.tx_queue.pop_front() {
+            core::mem::drop(tx_buf);
+        }
+
+        if let Some(conn_sockets) = self
+            .conn_tcp_sockets
+            .get_mut(&moto_socket.conn.wait_handle())
+        {
+            assert!(conn_sockets.remove(&socket_id));
+        }
+
+        // Remove and cache the unused smol_socket.
+        let smoltcp::socket::Socket::Udp(smol_socket) = self.devices[moto_socket.device_idx]
+            .sockets
+            .remove(moto_socket.handle)
+        else {
+            panic!();
+        };
+
+        if let Some(port) = moto_socket.ephemeral_port.take() {
+            self.devices[moto_socket.device_idx].free_ephemeral_udp_port(port);
+        }
+
+        self.put_unused_udp_socket(smol_socket);
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "dropped udp socket 0x{:x}; {} active sockets.",
+            u64::from(socket_id),
+            self.udp_sockets.len()
         );
     }
 
@@ -646,11 +779,9 @@ impl NetSys {
         Ok(())
     }
 
-    fn get_unused_tcp_socket(
-        &mut self,
-    ) -> Result<smoltcp::socket::tcp::Socket<'static>, ErrorCode> {
+    fn get_unused_tcp_socket(&mut self) -> smoltcp::socket::tcp::Socket<'static> {
         if let Some(socket) = self.tcp_socket_cache.pop() {
-            Ok(socket)
+            socket
         } else {
             const RX_BUF_SZ: usize =
                 io_channel::PAGE_SIZE * (api_net::TCP_RX_MAX_INFLIGHT as usize);
@@ -658,15 +789,37 @@ impl NetSys {
             let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 16384 * 2]);
 
             log::debug!("{}:{} new TCP socket", file!(), line!());
-            Ok(smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer))
+            smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer)
         }
     }
 
     fn put_unused_tcp_socket(&mut self, socket: smoltcp::socket::tcp::Socket<'static>) {
         debug_assert_eq!(socket.state(), smoltcp::socket::tcp::State::Closed);
-        // TODO: limit the size of the cache (i.e. drop socket if the cache is too large).
         if self.tcp_socket_cache.len() < MAX_TCP_SOCKET_CACHE_SIZE {
             self.tcp_socket_cache.push(socket);
+        }
+    }
+
+    fn get_unused_udp_socket(&mut self) -> smoltcp::socket::udp::Socket<'static> {
+        if let Some(socket) = self.udp_socket_cache.pop() {
+            socket
+        } else {
+            let udp_rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
+                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8],
+                vec![0; 65536],
+            );
+            let udp_tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
+                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8],
+                vec![0; 65536],
+            );
+            smoltcp::socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer)
+        }
+    }
+
+    fn put_unused_udp_socket(&mut self, socket: smoltcp::socket::udp::Socket<'static>) {
+        debug_assert!(!socket.is_open());
+        if self.udp_socket_cache.len() < MAX_TCP_SOCKET_CACHE_SIZE {
+            self.udp_socket_cache.push(socket);
         }
     }
 
@@ -698,7 +851,7 @@ impl NetSys {
             return Some(sqe);
         };
 
-        let local_port = match self.devices[device_idx].get_ephemeral_port(&local_ip_addr) {
+        let local_port = match self.devices[device_idx].get_ephemeral_tcp_port(&local_ip_addr) {
             Some(port) => port,
             None => {
                 log::info!("get_ephemeral_port({:?}) failed", local_ip_addr);
@@ -707,12 +860,10 @@ impl NetSys {
             }
         };
 
-        let mut moto_socket = match self.new_socket_for_device(device_idx, conn.clone()) {
-            Ok(s) => s,
-            Err(err) => {
-                sqe.status = err;
-                return Some(sqe);
-            }
+        let Ok(mut moto_socket) = self.new_tcp_socket_for_device(device_idx, conn.clone()) else {
+            self.devices[device_idx].free_ephemeral_tcp_port(local_port);
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
+            return Some(sqe);
         };
         moto_socket.subchannel_mask = api_net::io_subchannel_mask(sqe.payload.args_8()[23]);
 
@@ -1768,6 +1919,99 @@ impl NetSys {
     fn backoff_done(started: Instant) -> bool {
         (Instant::now() - started).as_secs() > Self::MAX_DEFERRED_ACTION_SECS
     }
+
+    fn udp_socket_bind(
+        &mut self,
+        conn: &Rc<io_channel::ServerConnection>,
+        mut sqe: io_channel::Msg,
+    ) -> io_channel::Msg {
+        if self.devices.is_empty() {
+            sqe.status = moto_rt::E_NOT_FOUND;
+            return sqe;
+        }
+
+        let mut socket_addr = api_net::get_socket_addr(&sqe.payload);
+
+        crate::moto_log!("UDP bind: validate addr/port not in use");
+        // for listener in self.tcp_listeners.values() {
+        //     if *listener.socket_addr() == socket_addr {
+        //         sqe.status = moto_rt::E_ALREADY_IN_USE;
+        //         return sqe;
+        //     }
+        // }
+
+        // Verify that the IP is valid (if present) before the socket is created.
+        let ip_addr = socket_addr.ip();
+
+        if ip_addr.is_unspecified() {
+            // We don't allow binding to an unspecified addr (yet?).
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
+            return sqe;
+        }
+        let device_idx = {
+            match self.ip_addresses.get(&ip_addr) {
+                Some(idx) => *idx,
+                None => {
+                    #[cfg(debug_assertions)]
+                    log::info!("IP addr {:?} not found", ip_addr);
+                    sqe.status = moto_rt::E_INVALID_ARGUMENT;
+                    return sqe;
+                }
+            }
+        };
+
+        // Allocate/assign port, if needed.
+        let mut allocated_port = None;
+        if socket_addr.port() == 0 {
+            let local_port = match self.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
+                Some(port) => port,
+                None => {
+                    log::error!("get_ephemeral_udp_port({:?}) failed", ip_addr);
+                    sqe.status = moto_rt::E_OUT_OF_MEMORY;
+                    return sqe;
+                }
+            };
+            socket_addr.set_port(local_port);
+            api_net::put_socket_addr(&mut sqe.payload, &socket_addr);
+            allocated_port = Some(local_port);
+        }
+
+        let Ok(mut udp_socket) =
+            self.new_udp_socket_for_device(device_idx, conn.clone(), socket_addr)
+        else {
+            if let Some(port) = allocated_port {
+                self.devices[device_idx].free_ephemeral_udp_port(port);
+            }
+            sqe.status = moto_rt::E_INVALID_ARGUMENT;
+            return sqe;
+        };
+
+        udp_socket.subchannel_mask = api_net::io_subchannel_mask(sqe.payload.args_8()[23]);
+        let udp_socket_id = udp_socket.id;
+        self.socket_ids.insert(udp_socket.id);
+        self.udp_sockets.insert(udp_socket.id, udp_socket);
+
+        let conn_udp_sockets = match self.conn_udp_sockets.get_mut(&conn.wait_handle()) {
+            Some(val) => val,
+            None => {
+                self.conn_udp_sockets
+                    .insert(conn.wait_handle(), HashSet::new());
+                self.conn_udp_sockets.get_mut(&conn.wait_handle()).unwrap()
+            }
+        };
+        assert!(conn_udp_sockets.insert(udp_socket_id));
+
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "sys-io: new udp socket on {:?}, conn: 0x{:x}",
+            socket_addr,
+            conn.wait_handle().as_u64()
+        );
+
+        sqe.handle = udp_socket_id.into();
+        sqe.status = moto_rt::E_OK;
+        sqe
+    }
 }
 
 impl IoSubsystem for NetSys {
@@ -1826,6 +2070,8 @@ impl IoSubsystem for NetSys {
             api_net::NetCmd::TcpStreamSetOption => Ok(Some(self.tcp_stream_set_option(conn, msg))),
             api_net::NetCmd::TcpStreamGetOption => Ok(Some(self.tcp_stream_get_option(conn, msg))),
             api_net::NetCmd::TcpStreamClose => Ok(self.tcp_stream_close(conn, msg)),
+
+            api_net::NetCmd::UdpSocketBind => Ok(Some(self.udp_socket_bind(conn, msg))),
             _ => {
                 #[cfg(debug_assertions)]
                 log::debug!(
@@ -1843,6 +2089,12 @@ impl IoSubsystem for NetSys {
 
     fn on_connection_drop(&mut self, conn: SysHandle) {
         log::debug!("conn 0x{:x} done", conn.as_u64());
+        if let Some(udp_sockets) = self.conn_udp_sockets.remove(&conn) {
+            for socket_id in udp_sockets {
+                self.drop_udp_socket(socket_id);
+            }
+        }
+
         if let Some(tcp_sockets) = self.conn_tcp_sockets.remove(&conn) {
             for socket_id in tcp_sockets {
                 self.drop_tcp_socket(socket_id);
@@ -1993,4 +2245,10 @@ impl IoSubsystem for NetSys {
             socket.dump_state();
         }
     }
+}
+
+pub(super) fn on_ephemeral_tcp_port_dropped(device_idx: usize, port: u16) {
+    NetSys::get()
+        .ephemeral_tcp_ports_to_clear
+        .push((device_idx, port));
 }

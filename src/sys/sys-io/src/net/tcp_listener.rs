@@ -2,6 +2,7 @@ use std::{
     collections::{HashSet, VecDeque},
     net::SocketAddr,
     rc::Rc,
+    sync::Arc,
 };
 
 use moto_ipc::io_channel;
@@ -39,6 +40,8 @@ pub struct TcpListener {
     // Pure listening sockets. We need to track them to drop when the listener is dropped.
     listening_sockets: HashSet<SocketId>,
 
+    pub ephemeral_tcp_port: Option<Arc<super::netdev::EphemeralTcpPort>>,
+
     // Will be applied to all new sockets.
     ttl: u8,
 }
@@ -61,6 +64,7 @@ impl TcpListener {
             pending_accepts: VecDeque::new(),
             pending_sockets: VecDeque::new(),
             listening_sockets: HashSet::new(),
+            ephemeral_tcp_port: None,
             ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
         }
     }

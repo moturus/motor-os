@@ -27,7 +27,7 @@ pub enum NetCmd {
     NetCmdMax,
 }
 
-pub const CMD_MAX: u16 = (NetCmd::NetCmdMax as u16) - 1;
+pub const CMD_MAX: u16 = NetCmd::NetCmdMax as u16;
 
 impl NetCmd {
     pub const fn try_from(val: u16) -> Result<Self, u16> {
@@ -261,9 +261,10 @@ fn test_get_put_socket_addr() {
     assert_eq!(addr_in, addr_out);
 }
 
-pub fn bind_udp_socket_request(addr: &SocketAddr) -> io_channel::Msg {
+pub fn bind_udp_socket_request(addr: &SocketAddr, subchannel_idx: u8) -> io_channel::Msg {
     let mut msg = io_channel::Msg::new();
     msg.command = NetCmd::UdpSocketBind as u16;
+    msg.payload.args_8_mut()[23] = subchannel_idx;
     put_socket_addr(&mut msg.payload, addr);
 
     msg

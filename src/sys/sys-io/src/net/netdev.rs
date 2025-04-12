@@ -236,7 +236,8 @@ pub(super) struct NetDev {
     iface: smoltcp::iface::Interface,
     pub sockets: SocketSet<'static>,
 
-    ports_in_use: std::collections::HashSet<u16>,
+    tcp_ports_in_use: std::collections::HashSet<u16>,
+    udp_ports_in_use: std::collections::HashSet<u16>,
 }
 
 impl NetDev {
@@ -307,7 +308,8 @@ impl NetDev {
             device,
             iface,
             sockets: SocketSet::new(vec![]),
-            ports_in_use: std::collections::HashSet::new(),
+            tcp_ports_in_use: std::collections::HashSet::new(),
+            udp_ports_in_use: std::collections::HashSet::new(),
         }
     }
 
@@ -322,11 +324,11 @@ impl NetDev {
         &self.config
     }
 
-    pub fn get_ephemeral_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
+    pub fn get_ephemeral_tcp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
         // TODO: do better than a linear search.
         for port in Self::EPHEMERAL_PORT_MIN..=Self::EPHEMERAL_PORT_MAX {
-            if !self.ports_in_use.contains(&port) {
-                self.ports_in_use.insert(port);
+            if !self.tcp_ports_in_use.contains(&port) {
+                self.tcp_ports_in_use.insert(port);
                 return Some(port);
             }
         }
@@ -334,8 +336,24 @@ impl NetDev {
         None
     }
 
-    pub fn free_ephemeral_port(&mut self, port: u16) {
-        self.ports_in_use.remove(&port);
+    pub fn free_ephemeral_tcp_port(&mut self, port: u16) {
+        self.tcp_ports_in_use.remove(&port);
+    }
+
+    pub fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
+        // TODO: do better than a linear search.
+        for port in Self::EPHEMERAL_PORT_MIN..=Self::EPHEMERAL_PORT_MAX {
+            if !self.udp_ports_in_use.contains(&port) {
+                self.udp_ports_in_use.insert(port);
+                return Some(port);
+            }
+        }
+
+        None
+    }
+
+    pub fn free_ephemeral_udp_port(&mut self, port: u16) {
+        self.udp_ports_in_use.remove(&port);
     }
 
     // Have to have this as a method here because it borrows self twice: for the socket and for the iface.
@@ -423,4 +441,15 @@ pub(super) fn init(config: &super::config::NetConfig) -> Vec<NetDev> {
     }
 
     result
+}
+
+pub(super) struct EphemeralTcpPort {
+    pub dev_idx: usize,
+    pub port: u16,
+}
+
+impl Drop for EphemeralTcpPort {
+    fn drop(&mut self) {
+        super::netsys::on_ephemeral_tcp_port_dropped(self.dev_idx, self.port);
+    }
 }

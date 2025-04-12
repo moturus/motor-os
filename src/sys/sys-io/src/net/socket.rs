@@ -1,9 +1,12 @@
 use moto_sys_io::api_net::TcpState;
+use std::sync::Arc;
 use std::task::{RawWaker, RawWakerVTable};
 use std::time::Instant;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use moto_ipc::io_channel;
+
+use super::netdev::EphemeralTcpPort;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub(super) struct SocketId(u64);
@@ -58,13 +61,13 @@ fn add_deferred_action_impl(
     *prev = Some((DeferredAction::Close, prev_cnt.min(started)));
 }
 
-pub(super) struct MotoSocket {
+pub(super) struct TcpSocket {
     pub id: SocketId, // Unique across all devices.
     pub handle: smoltcp::iface::SocketHandle,
     pub device_idx: usize,
 
     pub conn: Rc<io_channel::ServerConnection>,
-    pub pid: u64,
+    pub pid: u64, // Used for stats. Cached to avoid doing a syscall.
 
     // We need socket's original listener to let it know when a socket has been closed
     // or connected or whatever: accept() requests use listener_id.
@@ -73,7 +76,11 @@ pub(super) struct MotoSocket {
     // We also need to track the issuing connect request.
     pub connect_req: Option<moto_ipc::io_channel::Msg>,
 
+    // This is an ephemeral port allocated to this socket.
     pub ephemeral_port: Option<u16>,
+
+    // This is a shared ephemeral port.
+    pub shared_ephemeral_port: Option<Arc<EphemeralTcpPort>>,
 
     pub tx_queue: VecDeque<super::TxBuf>,
 
@@ -102,7 +109,7 @@ pub(super) struct MotoSocket {
     pub stats_tx_bytes: u64, // Bytes received from the application.
 }
 
-impl Drop for MotoSocket {
+impl Drop for TcpSocket {
     fn drop(&mut self) {
         assert!(self.listener_id.is_none());
         assert!(self.connect_req.is_none());
@@ -111,7 +118,7 @@ impl Drop for MotoSocket {
     }
 }
 
-impl MotoSocket {
+impl TcpSocket {
     pub(super) fn new(
         socket_id: SocketId,
         handle: smoltcp::iface::SocketHandle,
@@ -119,7 +126,7 @@ impl MotoSocket {
         conn: Rc<io_channel::ServerConnection>,
         pid: u64,
     ) -> Self {
-        MotoSocket {
+        TcpSocket {
             id: socket_id,
             handle,
             device_idx,
@@ -128,6 +135,7 @@ impl MotoSocket {
             listener_id: None,
             connect_req: None,
             ephemeral_port: None,
+            shared_ephemeral_port: None,
             tx_queue: VecDeque::new(),
             deferred_action: None,
             rx_seq: 0,
@@ -161,6 +169,71 @@ impl MotoSocket {
 
     pub(super) fn take_deferred_action(&mut self) -> Option<(DeferredAction, Instant)> {
         self.deferred_action.take()
+    }
+}
+
+pub(super) struct UdpSocket {
+    pub id: SocketId, // Unique across all devices.
+    pub handle: smoltcp::iface::SocketHandle,
+    pub device_idx: usize,
+
+    pub conn: Rc<io_channel::ServerConnection>,
+    pub pid: u64, // Used for stats. Cached to avoid doing a syscall.
+
+    pub ephemeral_port: Option<u16>,
+
+    pub tx_queue: VecDeque<super::TxBuf>,
+
+    pub rx_seq: u64,
+    pub rx_ack: u64,
+
+    // See moto_ipc::io_channel::ServerConnection::alloc_page().
+    pub subchannel_mask: u64,
+
+    // stats
+    pub stats_rx_bytes: u64, // Bytes sent to the application.
+    pub stats_tx_bytes: u64, // Bytes received from the application.
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        assert!(self.ephemeral_port.is_none());
+        assert!(self.tx_queue.is_empty());
+    }
+}
+
+impl UdpSocket {
+    pub(super) fn new(
+        socket_id: SocketId,
+        handle: smoltcp::iface::SocketHandle,
+        device_idx: usize,
+        conn: Rc<io_channel::ServerConnection>,
+        pid: u64,
+    ) -> Self {
+        UdpSocket {
+            id: socket_id,
+            handle,
+            device_idx,
+            conn,
+            pid,
+            ephemeral_port: None,
+            tx_queue: VecDeque::new(),
+            rx_seq: 0,
+            rx_ack: u64::MAX,
+            subchannel_mask: u64::MAX,
+            stats_rx_bytes: 0,
+            stats_tx_bytes: 0,
+        }
+    }
+
+    #[allow(unused)]
+    pub(super) fn dump_state(&self) {
+        log::warn!(
+            "socket: id {} conn 0x{:x} txq len: {}",
+            self.id.0,
+            self.conn.wait_handle().as_u64(),
+            self.tx_queue.len()
+        );
     }
 }
 
