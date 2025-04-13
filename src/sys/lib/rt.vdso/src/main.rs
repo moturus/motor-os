@@ -36,11 +36,13 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
+const RT_VERSION: u64 = 11;
+
 // The entry point.
 #[no_mangle]
 pub extern "C" fn moturus_start(version: u64) {
-    if version != 10 {
-        // Doing assert or panic will #PF, so we use lower-level API.
+    if version != RT_VERSION {
+        // Doing an assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
     }
@@ -359,6 +361,26 @@ pub extern "C" fn moturus_start(version: u64) {
     );
     vtable.net_peek.store(
         net::rt_net::peek as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_recv_from.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_peek_from.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_send_to.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_multicast_op_v4.store(
+        vdso_unimplemented as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.net_udp_multicast_op_v6.store(
+        vdso_unimplemented as *const () as usize as u64,
         Ordering::Relaxed,
     );
 
