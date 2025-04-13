@@ -108,7 +108,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-pub const RT_VERSION: u64 = 10;
+pub const RT_VERSION: u64 = 11;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -225,6 +225,8 @@ pub struct RtVdsoVtable {
     pub net_udp_recv_from: AtomicU64,
     pub net_udp_peek_from: AtomicU64,
     pub net_udp_send_to: AtomicU64,
+    pub net_udp_multicast_op_v4: AtomicU64,
+    pub net_udp_multicast_op_v6: AtomicU64,
 
     // Polling.
     pub poll_new: AtomicU64,
@@ -335,6 +337,8 @@ pub fn internal_helper(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
 fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
     error::log_panic(info);
     // If the panic is logged to stderr, we should sleep a bit before exiting, as our stdio is async.
-    crate::thread::sleep_until(crate::time::Instant::now() + core::time::Duration::from_micros(100));
+    crate::thread::sleep_until(
+        crate::time::Instant::now() + core::time::Duration::from_micros(100),
+    );
     process::exit(-1)
 }

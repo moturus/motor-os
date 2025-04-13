@@ -23,6 +23,12 @@ pub const SO_NODELAY: u64 = 4;
 pub const SO_TTL: u64 = 5;
 pub const SO_NONBLOCKING: u64 = 6;
 pub const SO_ERROR: u64 = 7;
+pub const SO_ONLY_IPV6: u64 = 8;
+pub const SO_LINGER: u64 = 9;
+pub const SO_BROADCAST: u64 = 10;
+pub const SO_MULTICAST_LOOP_V4: u64 = 11;
+pub const SO_MULTICAST_LOOP_V6: u64 = 12;
+pub const SO_MULTICAST_TTL_V4: u64 = 13;
 
 fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
     let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
@@ -42,6 +48,21 @@ fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), Error
     };
 
     ok_or_error(vdso_getsockopt(rt_fd, opt, ptr, len))
+}
+
+pub fn setsockopt_bool(rt_fd: RtFd, val: bool, opt: u64) -> Result<(), ErrorCode> {
+    let val: u8 = if val { 1 } else { 0 };
+    setsockopt(rt_fd, opt, &val as *const _ as usize, 1)
+}
+
+pub fn getsockopt_bool(rt_fd: RtFd, opt: u64) -> Result<bool, ErrorCode> {
+    let mut val = 0_u8;
+    getsockopt(rt_fd, opt, &mut val as *mut _ as usize, 1)?;
+    match val {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => panic!("bad bool opt val {val} for opt {opt}"),
+    }
 }
 
 pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
@@ -148,12 +169,12 @@ pub fn ttl(rt_fd: RtFd) -> Result<u32, ErrorCode> {
     Ok(ttl)
 }
 
-pub fn set_only_v6(_rt_fd: RtFd, _only_v6: bool) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_only_v6(rt_fd: RtFd, only_v6: bool) -> Result<(), ErrorCode> {
+    setsockopt_bool(rt_fd, only_v6, SO_ONLY_IPV6)
 }
 
-pub fn only_v6(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
-    todo!()
+pub fn only_v6(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+    getsockopt_bool(rt_fd, SO_ONLY_IPV6)
 }
 
 pub fn take_error(rt_fd: RtFd) -> Result<ErrorCode, ErrorCode> {
@@ -163,8 +184,7 @@ pub fn take_error(rt_fd: RtFd) -> Result<ErrorCode, ErrorCode> {
 }
 
 pub fn set_nonblocking(rt_fd: RtFd, nonblocking: bool) -> Result<(), ErrorCode> {
-    let nonblocking: u8 = if nonblocking { 1 } else { 0 };
-    setsockopt(rt_fd, SO_NONBLOCKING, &nonblocking as *const _ as usize, 1)
+    setsockopt_bool(rt_fd, nonblocking, SO_NONBLOCKING)
 }
 
 pub fn peek(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -257,103 +277,221 @@ pub fn shutdown(rt_fd: RtFd, shutdown: u8) -> Result<(), ErrorCode> {
     setsockopt(rt_fd, SO_SHUTDOWN, &shutdown as *const _ as usize, 1)
 }
 
-pub fn set_linger(_rt_fd: RtFd, _timeout: Option<Duration>) -> Result<(), ErrorCode> {
-    todo!()
+const MAX_LINGER_MS: u64 = 60_000; // 60 sec.
+pub fn set_linger(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {
+    let linger_millis: u64 = if let Some(timo) = timeout {
+        let millis = timo.as_millis();
+        if millis > (MAX_LINGER_MS as u128) {
+            MAX_LINGER_MS
+        } else {
+            millis as u64
+        }
+    } else {
+        u64::MAX
+    };
+    setsockopt(rt_fd, SO_LINGER, &linger_millis as *const u64 as usize, 8)
 }
 
-pub fn linger(_rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
-    todo!()
-}
-
-pub fn set_nodelay(rt_fd: RtFd, nodelay: bool) -> Result<(), ErrorCode> {
-    let nodelay: u8 = if nodelay { 1 } else { 0 };
-    setsockopt(rt_fd, SO_NODELAY, &nodelay as *const _ as usize, 1)
-}
-
-pub fn nodelay(rt_fd: RtFd) -> Result<bool, ErrorCode> {
-    let mut nodelay = 0_u8;
-    getsockopt(rt_fd, SO_NODELAY, &mut nodelay as *mut _ as usize, 1)?;
-    match nodelay {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => panic!("bad nodelay {nodelay}"),
+pub fn linger(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
+    let mut linger_millis = 0_u64;
+    getsockopt(rt_fd, SO_LINGER, &mut linger_millis as *mut _ as usize, 8)?;
+    match linger_millis {
+        val if val <= MAX_LINGER_MS => Ok(Some(Duration::from_millis(val))),
+        u64::MAX => Ok(None),
+        _ => panic!("bad linger {linger_millis}"),
     }
 }
 
-pub fn set_udp_broadcast(_rt_fd: RtFd, _broadcast: bool) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_nodelay(rt_fd: RtFd, nodelay: bool) -> Result<(), ErrorCode> {
+    setsockopt_bool(rt_fd, nodelay, SO_NODELAY)
 }
 
-pub fn udp_broadcast(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
-    todo!()
+pub fn nodelay(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+    getsockopt_bool(rt_fd, SO_NODELAY)
 }
 
-pub fn udp_recv_from(_rt_fd: RtFd, _buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
-    todo!()
+pub fn set_udp_broadcast(rt_fd: RtFd, val: bool) -> Result<(), ErrorCode> {
+    setsockopt_bool(rt_fd, val, SO_BROADCAST)
 }
 
-pub fn udp_peek_from(_rt_fd: RtFd, _buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
-    todo!()
+pub fn udp_broadcast(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+    getsockopt_bool(rt_fd, SO_BROADCAST)
 }
 
-pub fn udp_send_to(_rt_fd: RtFd, _buf: &[u8], _addr: &netc::sockaddr) -> Result<usize, ErrorCode> {
-    todo!()
+pub fn udp_recv_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
+    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
+
+    let vdso_udp_recv_from: extern "C" fn(i32, *mut u8, usize, *mut netc::sockaddr) -> i64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .net_udp_recv_from
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let res = vdso_udp_recv_from(rt_fd, buf.as_mut_ptr(), buf.len(), &mut addr as *mut _);
+    if res < 0 {
+        Err((-res) as ErrorCode)
+    } else {
+        Ok(((res as usize), addr))
+    }
 }
 
-pub fn set_udp_multicast_loop_v4(_rt_fd: RtFd, _val: bool) -> Result<(), ErrorCode> {
-    todo!()
+pub fn udp_peek_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
+    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
+
+    let vdso_udp_peek_from: extern "C" fn(i32, *mut u8, usize, *mut netc::sockaddr) -> i64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .net_udp_peek_from
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let res = vdso_udp_peek_from(rt_fd, buf.as_mut_ptr(), buf.len(), &mut addr as *mut _);
+    if res < 0 {
+        Err((-res) as ErrorCode)
+    } else {
+        Ok(((res as usize), addr))
+    }
 }
 
-pub fn udp_multicast_loop_v4(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
-    todo!()
+pub fn udp_send_to(rt_fd: RtFd, buf: &[u8], addr: &netc::sockaddr) -> Result<usize, ErrorCode> {
+    let vdso_udp_send_to: extern "C" fn(i32, *const u8, usize, *const netc::sockaddr) -> i64 = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().net_udp_send_to.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    to_result!(vdso_udp_send_to(
+        rt_fd,
+        buf.as_ptr(),
+        buf.len(),
+        addr as *const _
+    ))
 }
 
-pub fn set_udp_multicast_ttl_v4(_rt_fd: RtFd, _val: u32) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_udp_multicast_loop_v4(rt_fd: RtFd, val: bool) -> Result<(), ErrorCode> {
+    setsockopt_bool(rt_fd, val, SO_MULTICAST_LOOP_V4)
 }
 
-pub fn udp_multicast_ttl_v4(_rt_fd: RtFd) -> Result<u32, ErrorCode> {
-    todo!()
+pub fn udp_multicast_loop_v4(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+    getsockopt_bool(rt_fd, SO_MULTICAST_LOOP_V4)
 }
 
-pub fn set_udp_multicast_loop_v6(_rt_fd: RtFd, _val: bool) -> Result<(), ErrorCode> {
-    todo!()
+pub fn set_udp_multicast_ttl_v4(rt_fd: RtFd, val: u32) -> Result<(), ErrorCode> {
+    setsockopt(rt_fd, SO_MULTICAST_TTL_V4, &val as *const _ as usize, 4)
 }
 
-pub fn udp_multicast_loop_v6(_rt_fd: RtFd) -> Result<bool, ErrorCode> {
-    todo!()
+pub fn udp_multicast_ttl_v4(rt_fd: RtFd) -> Result<u32, ErrorCode> {
+    let mut ttl = 0_u32;
+    getsockopt(rt_fd, SO_MULTICAST_TTL_V4, &mut ttl as *mut _ as usize, 4)?;
+    Ok(ttl)
 }
+
+pub fn set_udp_multicast_loop_v6(rt_fd: RtFd, val: bool) -> Result<(), ErrorCode> {
+    setsockopt_bool(rt_fd, val, SO_MULTICAST_LOOP_V6)
+}
+
+pub fn udp_multicast_loop_v6(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+    getsockopt_bool(rt_fd, SO_MULTICAST_LOOP_V6)
+}
+
+pub const JOIN_MULTICAST_OP: u64 = 1;
+pub const LEAVE_MULTICAST_OP: u64 = 2;
 
 pub fn join_udp_multicast_v4(
-    _rt_fd: RtFd,
-    _addr: &netc::in_addr,
-    _iface: &netc::in_addr,
+    rt_fd: RtFd,
+    addr: &netc::in_addr,
+    iface: &netc::in_addr,
 ) -> Result<(), ErrorCode> {
-    todo!()
+    let vdso_multicast_op_v4: extern "C" fn(
+        i32,
+        u64,
+        *const netc::in_addr,
+        *const netc::in_addr,
+    ) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .net_udp_multicast_op_v4
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_multicast_op_v4(
+        rt_fd,
+        JOIN_MULTICAST_OP,
+        addr as *const _,
+        iface as *const _,
+    ))
 }
 
 pub fn leave_udp_multicast_v4(
-    _rt_fd: RtFd,
-    _addr: &netc::in_addr,
-    _iface: &netc::in_addr,
+    rt_fd: RtFd,
+    addr: &netc::in_addr,
+    iface: &netc::in_addr,
 ) -> Result<(), ErrorCode> {
-    todo!()
+    let vdso_multicast_op_v4: extern "C" fn(
+        i32,
+        u64,
+        *const netc::in_addr,
+        *const netc::in_addr,
+    ) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .net_udp_multicast_op_v4
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_multicast_op_v4(
+        rt_fd,
+        LEAVE_MULTICAST_OP,
+        addr as *const _,
+        iface as *const _,
+    ))
 }
 
 pub fn join_udp_multicast_v6(
-    _rt_fd: RtFd,
-    _addr: &netc::in6_addr,
-    _iface: u32,
+    rt_fd: RtFd,
+    addr: &netc::in6_addr,
+    iface: u32,
 ) -> Result<(), ErrorCode> {
-    todo!()
+    let vdso_multicast_op_v6: extern "C" fn(i32, u64, *const netc::in6_addr, u32) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .net_udp_multicast_op_v6
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_multicast_op_v6(
+        rt_fd,
+        JOIN_MULTICAST_OP,
+        addr as *const _,
+        iface,
+    ))
 }
 
 pub fn leave_udp_multicast_v6(
-    _rt_fd: RtFd,
-    _addr: &netc::in6_addr,
-    _iface: u32,
+    rt_fd: RtFd,
+    addr: &netc::in6_addr,
+    iface: u32,
 ) -> Result<(), ErrorCode> {
-    todo!()
+    let vdso_multicast_op_v6: extern "C" fn(i32, u64, *const netc::in6_addr, u32) -> ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get()
+                .net_udp_multicast_op_v6
+                .load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    ok_or_error(vdso_multicast_op_v6(
+        rt_fd,
+        LEAVE_MULTICAST_OP,
+        addr as *const _,
+        iface,
+    ))
 }
 
 pub fn lookup_host(
