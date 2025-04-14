@@ -114,7 +114,11 @@ impl WaitObject {
                 | moto_rt::poll::POLL_ERROR;
             if interests & events != 0 {
                 if let Some(registry) = REGISTRIES.lock().get(registry_id) {
-                    registry.on_event(*token, interests & events);
+                    if let Some(registry) = registry.upgrade() {
+                        registry.on_event(*token, interests & events);
+                    } else {
+                        dropped_registries.push(*registry_id);
+                    }
                 } else {
                     dropped_registries.push(*registry_id);
                 }
@@ -127,7 +131,7 @@ impl WaitObject {
     }
 }
 
-static REGISTRIES: SpinLock<BTreeMap<u64, Arc<Registry>>> = SpinLock::new(BTreeMap::new());
+static REGISTRIES: SpinLock<BTreeMap<u64, Weak<Registry>>> = SpinLock::new(BTreeMap::new());
 
 pub struct Registry {
     id: u64,
@@ -176,7 +180,7 @@ impl Registry {
             wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
         });
 
-        REGISTRIES.lock().insert(id, result.clone());
+        REGISTRIES.lock().insert(id, Arc::downgrade(&result));
         result
     }
 
