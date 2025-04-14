@@ -2,9 +2,9 @@
 
 Contributions are welcome.
 
-In addition to using Github [discussions](https://github.com/moturus/motor-os/discussions)
-and [issues](https://github.com/moturus/motor-os/issues) features, you can also
-join our [Discord server](https://discord.gg/2vrrcJRPdt).
+Please post to Github [discussions](https://github.com/moturus/motor-os/discussions)
+and/or [issues](https://github.com/moturus/motor-os/issues) to discuss what you'd like
+to do, unless it is a simple quick fix, in which case a quick PR is quite enough.
 
 ## License
 
