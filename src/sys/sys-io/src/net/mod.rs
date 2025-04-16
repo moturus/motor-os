@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use moto_ipc::io_channel;
 
 mod config;
@@ -19,12 +21,12 @@ pub fn init() -> Box<dyn crate::runtime::IoSubsystem> {
     netsys::NetSys::new(config)
 }
 
-struct RxBuf {
+struct TcpRxBuf {
     pub page: io_channel::IoPage,
     pub consumed: usize,
 }
 
-impl RxBuf {
+impl TcpRxBuf {
     fn new(page: io_channel::IoPage) -> Self {
         Self { page, consumed: 0 }
     }
@@ -39,13 +41,13 @@ impl RxBuf {
     }
 }
 
-struct TxBuf {
+struct TcpTxBuf {
     page: io_channel::IoPage,
     len: usize,
     consumed: usize,
 }
 
-impl TxBuf {
+impl TcpTxBuf {
     fn bytes(&self) -> &[u8] {
         &self.page.bytes()[self.consumed..self.len]
     }
@@ -57,5 +59,29 @@ impl TxBuf {
 
     fn is_consumed(&self) -> bool {
         self.consumed == self.len
+    }
+}
+
+struct UdpTxBuf {
+    page: io_channel::IoPage,
+    fragment_id: u16,
+    sz: u16,
+    addr: SocketAddr,
+}
+
+struct UdpPacket {
+    page: Option<(io_channel::IoPage, usize)>,
+    bytes: Vec<u8>,
+    addr: SocketAddr,
+}
+
+impl UdpPacket {
+    fn slice(&self) -> &[u8] {
+        if let Some((page, sz)) = self.page.as_ref() {
+            assert!(self.bytes.is_empty());
+            &page.bytes()[0..(*sz)]
+        } else {
+            &self.bytes
+        }
     }
 }

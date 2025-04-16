@@ -225,6 +225,73 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
     }
 }
 
+pub unsafe extern "C" fn udp_recv_from(
+    rt_fd: RtFd,
+    buf: *mut u8,
+    buf_sz: usize,
+    addr: *mut netc::sockaddr,
+) -> i64 {
+    udp_recv_or_peek_from(rt_fd, buf, buf_sz, addr, false)
+}
+
+pub unsafe extern "C" fn udp_peek_from(
+    rt_fd: RtFd,
+    buf: *mut u8,
+    buf_sz: usize,
+    addr: *mut netc::sockaddr,
+) -> i64 {
+    udp_recv_or_peek_from(rt_fd, buf, buf_sz, addr, true)
+}
+
+unsafe fn udp_recv_or_peek_from(
+    rt_fd: RtFd,
+    buf: *mut u8,
+    buf_sz: usize,
+    addr: *mut netc::sockaddr,
+    peek: bool,
+) -> i64 {
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return -(E_BAD_HANDLE as i64);
+    };
+    let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    let buf = core::slice::from_raw_parts_mut(buf, buf_sz);
+    match udp_socket.recv_or_peek_from(buf, peek) {
+        Ok((sz, from)) => {
+            *addr = from.into();
+            sz as i64
+        }
+        Err(err) => -(err as i64),
+    }
+}
+
+pub unsafe extern "C" fn udp_send_to(
+    rt_fd: RtFd,
+    buf: *const u8,
+    buf_sz: usize,
+    addr: *const netc::sockaddr,
+) -> i64 {
+    let addr = unsafe { (*addr).into() };
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return -(E_BAD_HANDLE as i64);
+    };
+    let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    else {
+        return -(E_BAD_HANDLE as i64);
+    };
+
+    let buf = core::slice::from_raw_parts(buf, buf_sz);
+    match udp_socket.send_to(buf, &addr) {
+        Ok(sz) => sz as i64,
+        Err(err) => -(err as i64),
+    }
+}
+
 #[allow(unused)]
 pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
     match a1 {
@@ -493,16 +560,25 @@ impl NetChannel {
         while let Ok(msg) = self.conn.recv() {
             fence(Ordering::SeqCst);
             received_messages += 1;
-            // crate::util::moto_log!(
-            //     "{}:{} got resp for msg {}:0x{:x}:{}",
-            //     file!(),
-            //     line!(),
-            //     msg.id,
-            //     msg.handle,
-            //     msg.command
-            // );
+
+            #[cfg(debug_assertions)]
+            crate::moto_log!(
+                "{}:{} got msg {}:0x{:x}:{}",
+                file!(),
+                line!(),
+                msg.id,
+                msg.handle,
+                msg.command
+            );
+
+            let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
 
             let wait_handle: SysHandle = if msg.id == 0 {
+                if cmd.is_udp() {
+                    self.on_udp_msg(msg);
+                    continue;
+                }
+
                 // This is an incoming packet, or similar, without a dedicated waiter.
                 let stream_handle = msg.handle;
                 let stream = {
@@ -564,6 +640,22 @@ impl NetChannel {
         }
 
         true
+    }
+
+    fn on_udp_msg(&self, msg: io_channel::Msg) {
+        assert_eq!(0, msg.id); // UDP is now always async.
+
+        let socket: Option<Arc<UdpSocket>> = self
+            .udp_sockets
+            .lock()
+            .get_mut(&msg.handle)
+            .and_then(|s| s.upgrade());
+
+        if let Some(udp_socket) = socket {
+            udp_socket.process_incoming_msg(msg);
+        } else {
+            self.on_orphan_message(msg);
+        }
     }
 
     // Attempts to send some messages. Returns true if the io thread may sleep.

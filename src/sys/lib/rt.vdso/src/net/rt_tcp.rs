@@ -315,8 +315,6 @@ impl TcpListener {
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
-            stats_rx_bytes: AtomicU64::new(0).into(),
-            stats_tx_bytes: AtomicU64::new(0).into(),
             error: AtomicU16::new(E_OK),
         });
         crate::net::rt_net::stats_tcp_stream_created();
@@ -488,9 +486,6 @@ pub struct TcpStream {
     recv_queue: Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
     next_rx_seq: CachePadded<AtomicU64>,
 
-    // A partially consumed incoming RX. MUST NOT be locked when recv_queue lock is acquired.
-    // rx_buf: Mutex<Option<RxBuf>>,
-
     // A pending tx message.
     tx_msg: Mutex<Option<(io_channel::Msg, usize)>>,
 
@@ -518,9 +513,6 @@ pub struct TcpStream {
     tx_timeout_ns: AtomicU64,
 
     subchannel_mask: u64, // Never changes.
-
-    stats_rx_bytes: CachePadded<AtomicU64>,
-    stats_tx_bytes: CachePadded<AtomicU64>,
 
     error: AtomicU16, // Erorr during async ops.
 }
@@ -830,8 +822,6 @@ impl TcpStream {
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
-            stats_rx_bytes: AtomicU64::new(0).into(),
-            stats_tx_bytes: AtomicU64::new(0).into(),
             error: AtomicU16::new(E_OK),
         });
         super::rt_net::stats_tcp_stream_created();
@@ -1130,17 +1120,6 @@ impl TcpStream {
         //     rx_seq
         // );
 
-        self.stats_rx_bytes
-            .fetch_add(sz_read as u64, Ordering::Relaxed);
-        // #[cfg(debug_assertions)]
-        // moto_log!(
-        //     "{}:{} stream 0x{:x}: total RX bytes {}",
-        //     file!(),
-        //     line!(),
-        //     msg.handle,
-        //     self.stats_rx_bytes.load(Ordering::Relaxed)
-        // );
-
         recv_q.push_bytes(io_page, sz_read);
         drop(recv_q);
 
@@ -1358,16 +1337,6 @@ impl TcpStream {
         let msg =
             api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
         self.channel().send_msg(msg);
-        self.stats_tx_bytes
-            .fetch_add(write_sz as u64, Ordering::Relaxed);
-        // #[cfg(debug_assertions)]
-        // moto_log!(
-        //     "{}:{} stream 0x{:x} TX bytes {}",
-        //     file!(),
-        //     line!(),
-        //     self.handle(),
-        //     self.stats_tx_bytes.load(Ordering::Relaxed)
-        // );
         Ok(write_sz)
     }
 
@@ -1421,18 +1390,6 @@ impl TcpStream {
 
     fn try_tx(&self, msg: io_channel::Msg, write_sz: usize) -> Result<(), io_channel::Msg> {
         self.channel().post_msg(msg)?;
-
-        self.stats_tx_bytes
-            .fetch_add(write_sz as u64, Ordering::Relaxed);
-        // #[cfg(debug_assertions)]
-        // moto_log!(
-        //     "{}:{} stream 0x{:x} TX bytes {}",
-        //     file!(),
-        //     line!(),
-        //     self.handle(),
-        //     self.stats_tx_bytes.load(Ordering::Relaxed)
-        // );
-
         Ok(())
     }
 

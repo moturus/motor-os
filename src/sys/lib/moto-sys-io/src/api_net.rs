@@ -24,6 +24,8 @@ pub enum NetCmd {
     TcpStreamClose,
     EvtTcpStreamStateChanged,
     UdpSocketBind,
+    UdpSocketTx,
+    UdpSocketRx,
     NetCmdMax,
 }
 
@@ -43,6 +45,13 @@ impl NetCmd {
 
     pub const fn as_u16(self) -> u16 {
         self as u16
+    }
+
+    pub const fn is_udp(&self) -> bool {
+        matches!(
+            self,
+            NetCmd::UdpSocketBind | NetCmd::UdpSocketTx | NetCmd::UdpSocketRx
+        )
     }
 }
 
@@ -226,6 +235,42 @@ pub fn tcp_stream_rx_msg(
     msg.payload.shared_pages_mut()[0] = io_channel::IoPage::into_u16(io_page);
     msg.payload.args_64_mut()[1] = sz as u64;
     msg.payload.args_64_mut()[2] = rx_seq;
+
+    msg
+}
+
+pub fn udp_socket_tx_msg(
+    handle: u64,
+    io_page: io_channel::IoPage,
+    fragment_id: u16,
+    sz: u16,
+    addr: &SocketAddr,
+) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::UdpSocketTx as u16;
+    msg.handle = handle;
+    put_socket_addr(&mut msg.payload, addr); // uses [0..=8]
+    msg.payload.args_16_mut()[9] = fragment_id;
+    msg.payload.args_16_mut()[10] = sz;
+    msg.payload.shared_pages_mut()[11] = io_channel::IoPage::into_u16(io_page);
+
+    msg
+}
+
+pub fn udp_socket_rx_msg(
+    handle: u64,
+    io_page: io_channel::IoPage,
+    fragment_id: u16,
+    sz: u16,
+    addr: &SocketAddr,
+) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::UdpSocketRx as u16;
+    msg.handle = handle;
+    put_socket_addr(&mut msg.payload, addr); // uses [0..=8]
+    msg.payload.args_16_mut()[9] = fragment_id;
+    msg.payload.args_16_mut()[10] = sz;
+    msg.payload.shared_pages_mut()[11] = io_channel::IoPage::into_u16(io_page);
 
     msg
 }

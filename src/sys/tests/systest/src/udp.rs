@@ -13,6 +13,8 @@ fn test_udp_basic() {
     assert_eq!(amt, buf1.len());
     assert_eq!(src, a1);
     assert_eq!(&buf1, &buf2[0..amt]);
+
+    println!("test_udp_basic() PASS");
 }
 
 pub fn run_all_tests() {

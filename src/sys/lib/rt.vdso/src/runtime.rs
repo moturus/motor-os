@@ -9,8 +9,10 @@ use core::sync::atomic::Ordering;
 use crate::posix;
 use crate::posix::PosixFile;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
+use alloc::vec::Vec;
 use moto_ipc::io_channel;
 use moto_rt::poll::Event;
 use moto_rt::poll::EventBits;
@@ -41,6 +43,9 @@ pub struct WaitObject {
     // If so, then we can have Weak<Registry> below.
     #[allow(clippy::type_complexity)]
     registries: SpinLock<BTreeMap<u64, (Token, Interests)>>,
+
+    // Waiters internal to vdso (blocking API).
+    local_waiters: SpinLock<BTreeMap<SysHandle, Interests>>,
 }
 
 impl Drop for WaitObject {
@@ -55,6 +60,7 @@ impl WaitObject {
     pub fn new(supported_interests: Interests) -> Self {
         Self {
             registries: SpinLock::new(BTreeMap::new()),
+            local_waiters: SpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -103,31 +109,57 @@ impl WaitObject {
     }
 
     pub fn on_event(&self, events: EventBits) {
-        let mut dropped_registries = alloc::vec::Vec::new();
-        let mut registries = self.registries.lock();
-        for entry in &*registries {
-            let (registry_id, (token, interests)) = entry;
-            // Update interests: *_CLOSED events are always of interest.
-            let interests = interests
-                | moto_rt::poll::POLL_READ_CLOSED
-                | moto_rt::poll::POLL_WRITE_CLOSED
-                | moto_rt::poll::POLL_ERROR;
-            if interests & events != 0 {
-                if let Some(registry) = REGISTRIES.lock().get(registry_id) {
-                    if let Some(registry) = registry.upgrade() {
-                        registry.on_event(*token, interests & events);
+        {
+            // TODO: call registry.on_event() without holding the mutex.
+            let mut dropped_registries = alloc::vec::Vec::new();
+            let mut registries = self.registries.lock();
+            for entry in &*registries {
+                let (registry_id, (token, interests)) = entry;
+                // Update interests: *_CLOSED events are always of interest.
+                let interests = interests
+                    | moto_rt::poll::POLL_READ_CLOSED
+                    | moto_rt::poll::POLL_WRITE_CLOSED
+                    | moto_rt::poll::POLL_ERROR;
+                if interests & events != 0 {
+                    if let Some(registry) = REGISTRIES.lock().get(registry_id) {
+                        if let Some(registry) = registry.upgrade() {
+                            registry.on_event(*token, interests & events);
+                        } else {
+                            dropped_registries.push(*registry_id);
+                        }
                     } else {
                         dropped_registries.push(*registry_id);
                     }
-                } else {
-                    dropped_registries.push(*registry_id);
+                }
+            }
+            for id in dropped_registries {
+                registries.remove(&id);
+            }
+        }
+
+        let mut threads_to_wake = Vec::new();
+        {
+            for entry in &*self.local_waiters.lock() {
+                let (thread, interests) = entry;
+                if interests & events != 0 {
+                    threads_to_wake.push(*thread);
                 }
             }
         }
 
-        for id in dropped_registries {
-            registries.remove(&id);
+        for thread in threads_to_wake {
+            let _ = moto_sys::SysCpu::wake(thread);
         }
+    }
+
+    // This is only used internally.
+    pub fn wait(&self, interest: Interests, deadline: Option<moto_rt::time::Instant>) {
+        let this_thread = moto_sys::current_thread();
+        self.local_waiters.lock().insert(this_thread, interest);
+
+        let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, deadline);
+
+        self.local_waiters.lock().remove(&this_thread);
     }
 }
 

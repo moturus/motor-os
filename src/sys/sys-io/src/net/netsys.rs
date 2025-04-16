@@ -13,12 +13,12 @@ use moto_ipc::io_channel;
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_net::{self, TcpState};
 
-use super::socket::SocketId;
 use super::socket::{DeferredAction, TcpSocket};
-use super::tcp_listener::TcpListener;
-use super::tcp_listener::TcpListenerId;
-use super::RxBuf;
-use super::{netdev::NetDev, TxBuf};
+use super::TcpRxBuf;
+use super::{netdev::NetDev, TcpTxBuf};
+use super::{smoltcp_helpers::socket_addr_from_endpoint, tcp_listener::TcpListenerId};
+use super::{socket::SocketId, UdpTxBuf};
+use super::{socket::SocketKind, tcp_listener::TcpListener};
 
 // How many listening sockets to open (per specific SocketAddr).
 const DEFAULT_NUM_LISTENING_SOCKETS: usize = 4;
@@ -212,7 +212,7 @@ impl NetSys {
         }
 
         // Create TcpListener object.
-        let listener_id: TcpListenerId = self.next_id().into();
+        let listener_id: TcpListenerId = self.next_id(SocketKind::Tcp).into();
         let mut listener = TcpListener::new(conn.clone(), socket_addr);
         listener.ephemeral_tcp_port = allocated_port;
         self.tcp_listeners.insert(listener_id, listener);
@@ -365,7 +365,7 @@ impl NetSys {
         let pid = moto_sys::SysObj::get_pid(conn.wait_handle())?;
 
         let mut smol_socket = self.get_unused_tcp_socket();
-        let socket_id = self.next_id().into();
+        let socket_id = self.next_id(SocketKind::Tcp).into();
 
         let socket_waker = super::socket::SocketWaker::new(socket_id, self.woken_sockets.clone());
         let waker = unsafe { std::task::Waker::from_raw(socket_waker.into_raw_waker()) };
@@ -399,7 +399,7 @@ impl NetSys {
             log::error!("smoltcp bind error: {:?}", err);
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        let socket_id = self.next_id().into();
+        let socket_id = self.next_id(SocketKind::Udp).into();
 
         let socket_waker = super::socket::SocketWaker::new(socket_id, self.woken_sockets.clone());
         let waker = unsafe { std::task::Waker::from_raw(socket_waker.into_raw_waker()) };
@@ -536,7 +536,7 @@ impl NetSys {
             log::debug!("drop_udp_socket: 0x{:x}: no socket", u64::from(socket_id));
             return;
         };
-        moto_socket.tx_queue.clear();
+        moto_socket.raw_tx_queue.clear();
         log::debug!(
             "dropping UDP socket 0x{:x}; RX done: {} TX done: {}",
             u64::from(socket_id),
@@ -556,7 +556,7 @@ impl NetSys {
         // Now we can remove moto_socket.
         let mut moto_socket = self.udp_sockets.remove(&socket_id).unwrap();
         assert!(self.socket_ids.remove(&socket_id));
-        while let Some(tx_buf) = moto_socket.tx_queue.pop_front() {
+        while let Some(tx_buf) = moto_socket.raw_tx_queue.pop_front() {
             core::mem::drop(tx_buf);
         }
 
@@ -952,32 +952,59 @@ impl NetSys {
         Ok(socket_id)
     }
 
+    fn udp_socket_from_msg(
+        &self,
+        conn_handle: SysHandle,
+        sqe: &io_channel::Msg,
+    ) -> Result<SocketId, io_channel::Msg> {
+        let socket_id: SocketId = sqe.handle.into();
+
+        // Validate that the socket belongs to the connection.
+        if let Some(socks) = self.conn_udp_sockets.get(&conn_handle) {
+            if !socks.contains(&socket_id) {
+                log::debug!(
+                    "{}:{} bad socket 0x{:x}",
+                    file!(),
+                    line!(),
+                    u64::from(socket_id)
+                );
+                let mut err = *sqe;
+                err.status = moto_rt::E_NOT_FOUND;
+                return Err(err);
+            }
+        } else {
+            log::debug!(
+                "{}:{} bad socket 0x{:x}",
+                file!(),
+                line!(),
+                u64::from(socket_id)
+            );
+            let mut err = *sqe;
+            err.status = moto_rt::E_INVALID_ARGUMENT;
+            return Err(err);
+        }
+
+        Ok(socket_id)
+    }
+
     // Note: does not return anything because TX is one-way, nobody is listening for TX responses.
-    fn tcp_stream_write(&mut self, conn: &Rc<io_channel::ServerConnection>, msg: io_channel::Msg) {
+    fn tcp_stream_tx(&mut self, conn: &Rc<io_channel::ServerConnection>, msg: io_channel::Msg) {
         // Note: we need to get the page so that it is freed.
         let page_idx = msg.payload.shared_pages()[0];
         let page = if let Ok(page) = conn.get_page(page_idx) {
             page
         } else {
+            // TODO: drop the connection?
+            log::debug!("tcp_stream_write w/o bytes???");
             return;
         };
-        let socket_id = if let Ok(s) = self.tcp_socket_from_msg(conn.wait_handle(), &msg) {
-            s
-        } else {
+        let Ok(socket_id) = self.tcp_socket_from_msg(conn.wait_handle(), &msg) else {
             return;
         };
-
-        // Validate that the socket belongs to the connection.
-        if let Some(socks) = self.conn_tcp_sockets.get(&conn.wait_handle()) {
-            if !socks.contains(&socket_id) {
-                return;
-            }
-        } else {
-            return;
-        }
 
         let sz = msg.payload.args_64()[1] as usize;
         if sz > io_channel::PAGE_SIZE {
+            // TODO: drop the connection?
             return;
         }
 
@@ -986,29 +1013,18 @@ impl NetSys {
             TcpState::Connecting | TcpState::Listening | TcpState::PendingAccept => panic!(),
             TcpState::ReadWrite | TcpState::WriteOnly => {}
             TcpState::ReadOnly | TcpState::Closed => {
-                // log::debug!(
-                //     "{}:{} write request issued for non-writable socket 0x{:x}",
-                //     file!(),
-                //     line!(),
-                //     u64::from(socket_id)
-                // );
                 return;
             }
             TcpState::_Max => panic!(),
         }
 
         moto_socket.stats_tx_bytes += sz as u64;
-        moto_socket.tx_queue.push_back(TxBuf {
+        moto_socket.tx_queue.push_back(TcpTxBuf {
             page,
             len: sz,
             consumed: 0,
         });
 
-        // log::debug!(
-        //     "socket 0x{:x} total TX bytes: {}",
-        //     u64::from(socket_id),
-        //     moto_socket.stats_tx_bytes
-        // );
         self.do_tcp_tx(socket_id);
     }
 
@@ -1252,10 +1268,14 @@ impl NetSys {
         Some(sqe)
     }
 
-    fn next_id(&mut self) -> u64 {
+    fn next_id(&mut self, kind: SocketKind) -> u64 {
         let res = self.next_id;
         self.next_id += 1;
-        res
+
+        match kind {
+            SocketKind::Tcp => (res << 1) + 1,
+            SocketKind::Udp => res << 1,
+        }
     }
 
     fn device_idx_from_name(&self, name: &str) -> usize {
@@ -1283,7 +1303,7 @@ impl NetSys {
     fn rx_buf_to_pc(
         socket_id: SocketId,
         endpoint_handle: SysHandle,
-        x_buf: RxBuf,
+        x_buf: TcpRxBuf,
         rx_seq: u64,
     ) -> PendingCompletion {
         let (io_page, sz) = (x_buf.page, x_buf.consumed);
@@ -1661,14 +1681,54 @@ impl NetSys {
         self.maybe_complete_deferred_action(socket_id);
     }
 
+    fn on_udp_socket_poll(&mut self, socket_id: SocketId) {
+        log::debug!("on_udp_socket_poll 0x{:x}", u64::from(socket_id));
+
+        let waker = if let Some(waker) = self.wakers.get(&socket_id) {
+            waker.clone()
+        } else {
+            return; // The socket has been removed/aborted.
+        };
+        let moto_socket = match self.udp_sockets.get_mut(&socket_id) {
+            Some(s) => s,
+            None => return,
+        };
+        let smol_socket = self.devices[moto_socket.device_idx]
+            .sockets
+            .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
+
+        // Registered wakers fire only once, so we need to re-register them every time.
+        smol_socket.register_recv_waker(&waker);
+        smol_socket.register_send_waker(&waker);
+
+        let can_recv = smol_socket.can_recv();
+        let can_send = smol_socket.can_send();
+
+        log::debug!(
+            "on_udp_socket_poll 0x{:x}: can_recv: {} can_send: {}",
+            u64::from(socket_id),
+            can_recv,
+            can_send
+        );
+        if can_recv {
+            self.do_udp_rx(socket_id);
+        }
+
+        if can_send {
+            self.do_udp_tx(socket_id);
+        }
+    }
+
     fn process_polled_sockets(&mut self) {
         loop {
-            let socket_id = if let Some(socket_id) = self.woken_sockets.borrow_mut().pop_front() {
-                socket_id
-            } else {
+            let Some(socket_id) = self.woken_sockets.borrow_mut().pop_front() else {
                 break;
             };
-            self.on_tcp_socket_poll(socket_id);
+
+            match socket_id.kind() {
+                SocketKind::Tcp => self.on_tcp_socket_poll(socket_id),
+                SocketKind::Udp => self.on_udp_socket_poll(socket_id),
+            }
         }
         assert!(self.woken_sockets.borrow().is_empty());
     }
@@ -1689,6 +1749,11 @@ impl NetSys {
     }
 
     fn maybe_complete_deferred_action(&mut self, socket_id: SocketId) {
+        if socket_id.kind() == SocketKind::Udp {
+            log::error!("maybe_complete_deferred_action: UDP not impl");
+            return;
+        }
+
         let Some(moto_socket) = self.tcp_sockets.get_mut(&socket_id) else {
             // Deferred action sockets may get enqueued more than once.
             return;
@@ -1809,7 +1874,7 @@ impl NetSys {
                     return;
                 }
             };
-            let mut rx_buf = RxBuf::new(page);
+            let mut rx_buf = TcpRxBuf::new(page);
             let mut receive_closure = |bytes: &mut [u8]| {
                 let len = bytes.len().min(io_channel::PAGE_SIZE - rx_buf.consumed);
                 unsafe {
@@ -1839,6 +1904,111 @@ impl NetSys {
                 self.defer_socket_action(socket_id, None);
                 return;
             }
+        }
+
+        self.maybe_complete_deferred_action(socket_id);
+    }
+
+    fn do_udp_rx(&mut self, socket_id: SocketId) {
+        log::debug!("do_udp_rx: 0x{:x}", u64::from(socket_id));
+        let Some(moto_socket) = self.udp_sockets.get_mut(&socket_id) else {
+            // Deferred action sockets may get enqueued more than once.
+            return;
+        };
+
+        let smol_socket = self.devices[moto_socket.device_idx]
+            .sockets
+            .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
+
+        log::debug!("do_udp_rx: 0x{:x} 200", u64::from(socket_id));
+        if moto_socket.rx_ack == u64::MAX
+            || (moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT))
+        {
+            return;
+        }
+
+        log::debug!("do_udp_rx: 0x{:x} 300", u64::from(socket_id));
+        while let Ok((buf, udp_metadata)) = smol_socket.recv() {
+            log::debug!(
+                "UDP: got {} bytes from {:?}",
+                buf.len(),
+                udp_metadata.endpoint
+            );
+            if buf.len() <= io_channel::PAGE_SIZE {
+                let io_page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
+                    Ok(page) => page,
+                    Err(err) => {
+                        assert_eq!(err, moto_rt::E_NOT_READY);
+                        self.defer_socket_action(socket_id, None);
+                        return;
+                    }
+                };
+                io_page.bytes_mut()[0..buf.len()].clone_from_slice(buf);
+                moto_socket.rx_seq += 1;
+                moto_socket.stats_rx_bytes += buf.len() as u64;
+                let addr: SocketAddr = socket_addr_from_endpoint(udp_metadata.endpoint);
+
+                let mut msg = moto_sys_io::api_net::udp_socket_rx_msg(
+                    socket_id.into(),
+                    io_page,
+                    0,
+                    buf.len() as u16,
+                    &addr,
+                );
+                msg.status = moto_rt::E_OK;
+
+                self.pending_completions.push_back(PendingCompletion {
+                    msg,
+                    endpoint_handle: moto_socket.conn.wait_handle(),
+                });
+
+                if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
+                    self.defer_socket_action(socket_id, None);
+                    return;
+                }
+            } else {
+                todo!()
+            }
+            /*
+            let page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
+                Ok(page) => page,
+                Err(err) => {
+                    assert_eq!(err, moto_rt::E_NOT_READY);
+                    self.defer_socket_action(socket_id, None);
+                    return;
+                }
+            };
+            let mut rx_buf = TcpRxBuf::new(page);
+            let mut receive_closure = |bytes: &mut [u8]| {
+                let len = bytes.len().min(io_channel::PAGE_SIZE - rx_buf.consumed);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        rx_buf.bytes_mut().as_mut_ptr(),
+                        len,
+                    );
+                }
+
+                rx_buf.consume(len);
+                (len, ())
+            };
+
+            smol_socket.recv(&mut receive_closure).unwrap();
+
+            moto_socket.rx_seq += 1;
+            moto_socket.stats_rx_bytes += rx_buf.consumed as u64;
+            self.pending_completions.push_back(Self::rx_buf_to_pc(
+                socket_id,
+                moto_socket.conn.wait_handle(),
+                rx_buf,
+                moto_socket.rx_seq,
+            ));
+
+            if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
+                self.defer_socket_action(socket_id, None);
+                return;
+            }
+            */
         }
 
         self.maybe_complete_deferred_action(socket_id);
@@ -1880,6 +2050,39 @@ impl NetSys {
         self.maybe_complete_deferred_action(socket_id);
     }
 
+    fn do_udp_tx(&mut self, socket_id: SocketId) {
+        let Some(moto_socket) = self.udp_sockets.get_mut(&socket_id) else {
+            // Deferred action sockets may get enqueued more than once.
+            return;
+        };
+        let smol_socket = self.devices[moto_socket.device_idx]
+            .sockets
+            .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
+
+        while let Some(packet) = moto_socket.next_tx_packet() {
+            if let Err(err) = smol_socket.send_slice(packet.slice(), packet.addr) {
+                match err {
+                    smoltcp::socket::udp::SendError::Unaddressable => {
+                        log::warn!("Cannot send UDP packet to {:?}.", packet.addr);
+                        // TODO: do we need to notify the user?
+                        continue;
+                    }
+                    smoltcp::socket::udp::SendError::BufferFull => {
+                        // Can't send the packet: re-insert it into the pending queue.
+                        moto_socket.tx_queue.push_front(packet);
+                        return;
+                    }
+                }
+            } else {
+                log::debug!(
+                    "UDP: sent {} bytes to {:?}",
+                    packet.slice().len(),
+                    packet.addr
+                );
+            }
+        }
+    }
+
     const MAX_DEFERRED_ACTION_SECS: u64 = 30;
     const MIN_DEFERRED_ACTION_NS: u64 = 300;
 
@@ -1890,7 +2093,11 @@ impl NetSys {
                     "Dropping socket 0x{:x} due to timeout.",
                     u64::from(socket_id)
                 );
-                self.drop_tcp_socket(socket_id);
+
+                match socket_id.kind() {
+                    SocketKind::Tcp => self.drop_tcp_socket(socket_id),
+                    SocketKind::Udp => self.drop_udp_socket(socket_id),
+                };
                 return;
             }
         }
@@ -2012,6 +2219,36 @@ impl NetSys {
         sqe.status = moto_rt::E_OK;
         sqe
     }
+
+    fn udp_socket_tx(&mut self, conn: &Rc<io_channel::ServerConnection>, sqe: io_channel::Msg) {
+        // Note: we need to get the page so that it is freed.
+        let page_idx = sqe.payload.shared_pages()[11];
+        let page = if let Ok(page) = conn.get_page(page_idx) {
+            page
+        } else {
+            // TODO: drop the connection?
+            log::debug!("udp_socket_tx w/o bytes???");
+            return;
+        };
+        let Ok(socket_id) = self.udp_socket_from_msg(conn.wait_handle(), &sqe) else {
+            // TODO: drop the connection?
+            return;
+        };
+
+        let addr = api_net::get_socket_addr(&sqe.payload);
+        let fragment_id = sqe.payload.args_16()[9];
+        let sz = sqe.payload.args_16()[10];
+        let moto_socket = self.udp_sockets.get_mut(&socket_id).unwrap();
+        moto_socket.stats_tx_bytes += sz as u64;
+        moto_socket.raw_tx_queue.push_back(UdpTxBuf {
+            page,
+            fragment_id,
+            sz,
+            addr,
+        });
+
+        self.do_udp_tx(socket_id);
+    }
 }
 
 impl IoSubsystem for NetSys {
@@ -2063,7 +2300,7 @@ impl IoSubsystem for NetSys {
             }
             api_net::NetCmd::TcpStreamConnect => Ok(self.tcp_stream_connect(conn, msg)),
             api_net::NetCmd::TcpStreamTx => {
-                self.tcp_stream_write(conn, msg);
+                self.tcp_stream_tx(conn, msg);
                 Ok(None)
             }
             api_net::NetCmd::TcpStreamRxAck => self.tcp_stream_rx_ack(conn, msg).map(|_| None),
@@ -2072,6 +2309,10 @@ impl IoSubsystem for NetSys {
             api_net::NetCmd::TcpStreamClose => Ok(self.tcp_stream_close(conn, msg)),
 
             api_net::NetCmd::UdpSocketBind => Ok(Some(self.udp_socket_bind(conn, msg))),
+            api_net::NetCmd::UdpSocketTx => {
+                self.udp_socket_tx(conn, msg);
+                Ok(None)
+            }
             _ => {
                 #[cfg(debug_assertions)]
                 log::debug!(

@@ -7,9 +7,34 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use moto_ipc::io_channel;
 
 use super::netdev::EphemeralTcpPort;
+use super::UdpPacket;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SocketKind {
+    Tcp,
+    Udp,
+}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub(super) struct SocketId(u64);
+
+impl SocketId {
+    pub fn kind(&self) -> SocketKind {
+        if self.0 & 1 != 0 {
+            SocketKind::Tcp
+        } else {
+            SocketKind::Udp
+        }
+    }
+
+    pub fn is_tcp(&self) -> bool {
+        self.kind() == SocketKind::Tcp
+    }
+
+    pub fn is_udp(&self) -> bool {
+        self.kind() == SocketKind::Udp
+    }
+}
 
 impl From<u64> for SocketId {
     fn from(value: u64) -> Self {
@@ -82,7 +107,7 @@ pub(super) struct TcpSocket {
     // This is a shared ephemeral port.
     pub shared_ephemeral_port: Option<Arc<EphemeralTcpPort>>,
 
-    pub tx_queue: VecDeque<super::TxBuf>,
+    pub tx_queue: VecDeque<super::TcpTxBuf>,
 
     // u32 -> deferred action counter, used for backoff and cancelling.
     deferred_action: Option<(DeferredAction, Instant)>,
@@ -126,6 +151,7 @@ impl TcpSocket {
         conn: Rc<io_channel::ServerConnection>,
         pid: u64,
     ) -> Self {
+        debug_assert!(socket_id.is_tcp());
         TcpSocket {
             id: socket_id,
             handle,
@@ -139,7 +165,7 @@ impl TcpSocket {
             tx_queue: VecDeque::new(),
             deferred_action: None,
             rx_seq: 0,
-            rx_ack: u64::MAX,
+            rx_ack: u64::MAX, // Can't do RX until the first rx ack.
             state: TcpState::Closed,
             subchannel_mask: u64::MAX,
             listening_on: None,
@@ -182,7 +208,8 @@ pub(super) struct UdpSocket {
 
     pub ephemeral_port: Option<u16>,
 
-    pub tx_queue: VecDeque<super::TxBuf>,
+    pub raw_tx_queue: VecDeque<super::UdpTxBuf>,
+    pub tx_queue: VecDeque<super::UdpPacket>,
 
     pub rx_seq: u64,
     pub rx_ack: u64,
@@ -198,7 +225,7 @@ pub(super) struct UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         assert!(self.ephemeral_port.is_none());
-        assert!(self.tx_queue.is_empty());
+        assert!(self.raw_tx_queue.is_empty());
     }
 }
 
@@ -210,6 +237,7 @@ impl UdpSocket {
         conn: Rc<io_channel::ServerConnection>,
         pid: u64,
     ) -> Self {
+        debug_assert!(socket_id.is_udp());
         UdpSocket {
             id: socket_id,
             handle,
@@ -217,12 +245,38 @@ impl UdpSocket {
             conn,
             pid,
             ephemeral_port: None,
+            raw_tx_queue: VecDeque::new(),
             tx_queue: VecDeque::new(),
             rx_seq: 0,
-            rx_ack: u64::MAX,
+            rx_ack: 0, // Unlike TCP, can do rx immediately.
             subchannel_mask: u64::MAX,
             stats_rx_bytes: 0,
             stats_tx_bytes: 0,
+        }
+    }
+
+    pub(super) fn next_tx_packet(&mut self) -> Option<UdpPacket> {
+        if let Some(packet) = self.tx_queue.pop_front() {
+            return Some(packet);
+        }
+
+        let tx_buf = self.raw_tx_queue.front()?;
+
+        if tx_buf.fragment_id == 0 {
+            let super::UdpTxBuf {
+                page,
+                fragment_id: _,
+                sz,
+                addr,
+            } = self.raw_tx_queue.pop_front().unwrap();
+
+            Some(UdpPacket {
+                page: Some((page, sz as usize)),
+                bytes: vec![],
+                addr,
+            })
+        } else {
+            todo!()
         }
     }
 
@@ -232,7 +286,7 @@ impl UdpSocket {
             "socket: id {} conn 0x{:x} txq len: {}",
             self.id.0,
             self.conn.wait_handle().as_u64(),
-            self.tx_queue.len()
+            self.raw_tx_queue.len()
         );
     }
 }

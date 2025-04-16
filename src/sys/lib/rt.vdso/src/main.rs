@@ -364,15 +364,15 @@ pub extern "C" fn moturus_start(version: u64) {
         Ordering::Relaxed,
     );
     vtable.net_udp_recv_from.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_recv_from as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_udp_peek_from.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_peek_from as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_udp_send_to.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_send_to as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_udp_multicast_op_v4.store(
