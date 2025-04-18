@@ -1,0 +1,13 @@
+[package]
+name = "moto-io-internal"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moto-ipc         = { path = "../moto-ipc"    }
+moto-rt          = { path = "../moto-rt"     }
+moto-sys-io      = { path = "../moto-sys-io" }
+
+[features]
