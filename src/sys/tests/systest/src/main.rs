@@ -469,9 +469,6 @@ fn main() {
 
     std::thread::spawn(input_listener);
 
-    // udp::run_all_tests();
-    // return;
-
     println!("Systest starting...");
 
     // Test that a userspace interrupt is handled correctly.
@@ -491,7 +488,7 @@ fn main() {
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     tcp::run_all_tests();
-    // udp::run_all_tests();
+    udp::run_all_tests();
 
     spawn_wait_kill::test();
     mpmc::test_mpmc();

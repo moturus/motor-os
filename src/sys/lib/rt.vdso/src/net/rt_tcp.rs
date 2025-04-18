@@ -532,16 +532,6 @@ impl Drop for TcpStream {
 
             // TODO: is this unwrap OK?
             self.channel().post_msg(req).unwrap();
-            /*
-            if moto_sys::UserThreadControlBlock::get().self_handle
-                == self.channel().io_thread_wake_handle.load(Ordering::Relaxed)
-            {
-                // We cannot do send_receive here because it will block the IO thread.
-                self.channel().send_queue.push(req).unwrap(); // TODO: don't panic on failure.
-            } else {
-                let _ = self.channel().send_receive(req);
-            }
-            */
         }
         // moto_log!("TcpStream dropped");
 

@@ -642,6 +642,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-io-internal"
+version = "0.1.0"
+dependencies = [
+ "moto-ipc",
+ "moto-rt 0.2.11",
+ "moto-sys-io",
+]
+
+[[package]]
 name = "moto-ipc"
 version = "0.2.5"
 dependencies = [
@@ -872,6 +881,7 @@ dependencies = [
  "crossbeam-queue",
  "elfloader",
  "frusa",
+ "moto-io-internal",
  "moto-ipc",
  "moto-rt 0.2.11",
  "moto-sys",
@@ -1053,6 +1063,7 @@ dependencies = [
  "flatfs",
  "ipnetwork",
  "log",
+ "moto-io-internal",
  "moto-ipc",
  "moto-rt 0.2.11",
  "moto-sys",

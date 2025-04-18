@@ -4,6 +4,7 @@ members = [
   "lib/flatfs",
   "lib/frusa",
   "lib/rt.vdso",
+  "lib/moto-io-internal",
   "lib/moto-ipc",
   "lib/moto-log",
   "lib/moto-mpmc",

@@ -947,6 +947,12 @@ impl NetChannel {
             }
             api_net::NetCmd::EvtTcpStreamStateChanged => {}
             api_net::NetCmd::TcpStreamClose => {}
+            api_net::NetCmd::UdpSocketTxRx => {
+                // RX raced with the client dropping the sream. Need to get page to free it.
+                // Get the page so that it is properly dropped.
+                let _ = self.conn.get_page(msg.payload.shared_pages()[11]);
+            }
+            api_net::NetCmd::UdpSocketTxRxAck => {}
             _ => {
                 // This is logged always because if a new incoming message is added that
                 // has to be handled but is not, we may have a problem.

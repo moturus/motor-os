@@ -10,6 +10,21 @@ use core::time::Duration;
 #[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 
+// In theory, max UDP payload over IPv4 is
+// 65507 = 65535 - 20 (IP header) - 8 (UDP header).
+//
+// But in practice smoltcp refuses to fragment UDP datagrams
+// larger than 65493 bytes, so our practical MAX UDP payload is
+// this weird number.
+//
+// Some argue that it does not make sense to fragment UDP
+// datagrams, and so UDP payload should be 1472, or less.
+// While smoltcp may well be susceptible to DDOS fragmentation
+// atacks in this case, and so we may have to eventually
+// disable UDP packet (de)fragmentation, for now we try
+// to do our best and allow large UDP payloads.
+pub const MAX_UDP_PAYLOAD: usize = 65493;
+
 pub const SHUTDOWN_READ: u8 = 1;
 pub const SHUTDOWN_WRITE: u8 = 2;
 

@@ -18,12 +18,13 @@ test = false
 [dependencies]
 
 # internal dependencies
-elfloader   = { path = "../../../third_party/elfloader" }
-frusa       = { path = "../frusa"       }
-moto-ipc    = { path = "../moto-ipc"    }
-moto-rt     = { path = "../moto-rt", features = ["libc"] }
-moto-sys    = { path = "../moto-sys"    }
-moto-sys-io = { path = "../moto-sys-io" }
+elfloader        = { path = "../../../third_party/elfloader" }
+frusa            = { path = "../frusa"       }
+moto-io-internal = { path = "../moto-io-internal" }
+moto-ipc         = { path = "../moto-ipc"    }
+moto-rt          = { path = "../moto-rt", features = ["libc"] }
+moto-sys         = { path = "../moto-sys"    }
+moto-sys-io      = { path = "../moto-sys-io" }
 
 # external dependencies
 crossbeam = { version = "0.8.4", default-features = false }

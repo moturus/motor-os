@@ -57,7 +57,7 @@ pub fn test_tls() {
     t3.join().unwrap();
 
     assert_eq!(0, TLS_COUNTER.load(Ordering::Acquire));
-    println!("tls_test PASS");
+    println!("test_tls PASS");
 }
 
 // From https://github.com/rust-lang/rust/issues/74875.
@@ -96,5 +96,5 @@ pub fn test_tls_join() {
     .join()
     .unwrap();
 
-    println!("Done");
+    println!("test_tls_join PASS");
 }

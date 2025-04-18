@@ -3,6 +3,7 @@
 //! Somewhat similar to Linux's epoll, but supports only edge-triggered events.
 
 use core::any::Any;
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
@@ -44,8 +45,8 @@ pub struct WaitObject {
     #[allow(clippy::type_complexity)]
     registries: SpinLock<BTreeMap<u64, (Token, Interests)>>,
 
-    // Waiters internal to vdso (blocking API).
-    local_waiters: SpinLock<BTreeMap<SysHandle, Interests>>,
+    readable_futex: AtomicU32,
+    writable_futex: AtomicU32,
 }
 
 impl Drop for WaitObject {
@@ -57,10 +58,15 @@ impl Drop for WaitObject {
 }
 
 impl WaitObject {
+    const FUTEX_EMPTY: u32 = 0;
+    const FUTEX_WAITING: u32 = 1;
+    const FUTEX_WAKING: u32 = 2;
+
     pub fn new(supported_interests: Interests) -> Self {
         Self {
             registries: SpinLock::new(BTreeMap::new()),
-            local_waiters: SpinLock::new(BTreeMap::new()),
+            readable_futex: AtomicU32::new(0),
+            writable_futex: AtomicU32::new(0),
         }
     }
 
@@ -137,29 +143,48 @@ impl WaitObject {
             }
         }
 
-        let mut threads_to_wake = Vec::new();
-        {
-            for entry in &*self.local_waiters.lock() {
-                let (thread, interests) = entry;
-                if interests & events != 0 {
-                    threads_to_wake.push(*thread);
-                }
-            }
+        if events & moto_rt::poll::POLL_READABLE != 0 {
+            Self::wake_futex(&self.readable_futex);
         }
+        if events & moto_rt::poll::POLL_WRITABLE != 0 {
+            Self::wake_futex(&self.writable_futex);
+        }
+    }
 
-        for thread in threads_to_wake {
-            let _ = moto_sys::SysCpu::wake(thread);
+    fn wake_futex(futex: &AtomicU32) {
+        let prev = futex.swap(Self::FUTEX_WAKING, Ordering::AcqRel);
+        if prev == Self::FUTEX_EMPTY {
+            return;
         }
+        moto_rt::futex_wake_all(futex);
     }
 
     // This is only used internally.
     pub fn wait(&self, interest: Interests, deadline: Option<moto_rt::time::Instant>) {
-        let this_thread = moto_sys::current_thread();
-        self.local_waiters.lock().insert(this_thread, interest);
+        let futex: &AtomicU32 = match interest {
+            moto_rt::poll::POLL_READABLE => &self.readable_futex,
+            moto_rt::poll::POLL_WRITABLE => &self.writable_futex,
+            _ => panic!("Bad interest: {interest}"),
+        };
 
-        let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, deadline);
+        let prev = futex.swap(Self::FUTEX_WAITING, Ordering::AcqRel);
+        if prev != Self::FUTEX_EMPTY {
+            return;
+        }
 
-        self.local_waiters.lock().remove(&this_thread);
+        let _ = moto_rt::futex_wait(
+            futex,
+            Self::FUTEX_WAITING,
+            deadline.map(|val| val.duration_since(moto_rt::time::Instant::now())),
+        );
+
+        // Consume the wakeup.
+        let _ = futex.compare_exchange(
+            Self::FUTEX_WAKING,
+            Self::FUTEX_EMPTY,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
     }
 }
 

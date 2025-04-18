@@ -7,14 +7,15 @@ edition = "2021"
 
 [dependencies]
 # Internal.
-flatfs       = { path = "../lib/flatfs"      }
-moto-ipc     = { path = "../lib/moto-ipc"    }
-moto-rt      = { path = "../lib/moto-rt"     }
-moto-sys     = { path = "../lib/moto-sys"    }
-moto-sys-io  = { path = "../lib/moto-sys-io", features = ["std"] }
-moto-virtio  = { path = "../lib/virtio"      }
-srfs         = { path = "../lib/srfs"        }
-timeq        = { path = "../lib/timeq"       }
+flatfs           = { path = "../lib/flatfs"           }
+moto-io-internal = { path = "../lib/moto-io-internal" }
+moto-ipc         = { path = "../lib/moto-ipc"         }
+moto-rt          = { path = "../lib/moto-rt"          }
+moto-sys         = { path = "../lib/moto-sys"         }
+moto-sys-io      = { path = "../lib/moto-sys-io", features = ["std"] }
+moto-virtio      = { path = "../lib/virtio"           }
+srfs             = { path = "../lib/srfs"             }
+timeq            = { path = "../lib/timeq"            }
 
 # External.
 elfloader    = { path = "../../third_party/elfloader" }

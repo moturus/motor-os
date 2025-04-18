@@ -13,11 +13,11 @@ use moto_ipc::io_channel;
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_net::{self, TcpState};
 
+use super::socket::SocketId;
 use super::socket::{DeferredAction, TcpSocket};
 use super::TcpRxBuf;
 use super::{netdev::NetDev, TcpTxBuf};
 use super::{smoltcp_helpers::socket_addr_from_endpoint, tcp_listener::TcpListenerId};
-use super::{socket::SocketId, UdpTxBuf};
 use super::{socket::SocketKind, tcp_listener::TcpListener};
 
 // How many listening sockets to open (per specific SocketAddr).
@@ -391,6 +391,7 @@ impl NetSys {
         device_idx: usize,
         conn: Rc<io_channel::ServerConnection>,
         socket_addr: SocketAddr,
+        subchannel_mask: u64,
     ) -> Result<UdpSocket, ErrorCode> {
         let pid = moto_sys::SysObj::get_pid(conn.wait_handle())?;
 
@@ -417,7 +418,14 @@ impl NetSys {
             self.udp_sockets.len()
         );
 
-        Ok(UdpSocket::new(socket_id, handle, device_idx, conn, pid))
+        Ok(UdpSocket::new(
+            socket_id,
+            handle,
+            device_idx,
+            conn,
+            pid,
+            subchannel_mask,
+        ))
     }
 
     fn drop_tcp_listener(&mut self, listener_id: TcpListenerId) {
@@ -536,7 +544,9 @@ impl NetSys {
             log::debug!("drop_udp_socket: 0x{:x}: no socket", u64::from(socket_id));
             return;
         };
-        moto_socket.raw_tx_queue.clear();
+        if let Some(_msg) = moto_socket.rx_queue.take_msg() {
+            todo!("free the io page")
+        }
         log::debug!(
             "dropping UDP socket 0x{:x}; RX done: {} TX done: {}",
             u64::from(socket_id),
@@ -556,12 +566,9 @@ impl NetSys {
         // Now we can remove moto_socket.
         let mut moto_socket = self.udp_sockets.remove(&socket_id).unwrap();
         assert!(self.socket_ids.remove(&socket_id));
-        while let Some(tx_buf) = moto_socket.raw_tx_queue.pop_front() {
-            core::mem::drop(tx_buf);
-        }
 
         if let Some(conn_sockets) = self
-            .conn_tcp_sockets
+            .conn_udp_sockets
             .get_mut(&moto_socket.conn.wait_handle())
         {
             assert!(conn_sockets.remove(&socket_id));
@@ -805,11 +812,11 @@ impl NetSys {
             socket
         } else {
             let udp_rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8],
+                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
                 vec![0; 65536],
             );
             let udp_tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 8],
+                vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
                 vec![0; 65536],
             );
             smoltcp::socket::udp::Socket::new(udp_rx_buffer, udp_tx_buffer)
@@ -1910,7 +1917,6 @@ impl NetSys {
     }
 
     fn do_udp_rx(&mut self, socket_id: SocketId) {
-        log::debug!("do_udp_rx: 0x{:x}", u64::from(socket_id));
         let Some(moto_socket) = self.udp_sockets.get_mut(&socket_id) else {
             // Deferred action sockets may get enqueued more than once.
             return;
@@ -1920,98 +1926,25 @@ impl NetSys {
             .sockets
             .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
 
-        log::debug!("do_udp_rx: 0x{:x} 200", u64::from(socket_id));
-        if moto_socket.rx_ack == u64::MAX
-            || (moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT))
-        {
-            return;
+        let page_allocator = |subchannel_mask| moto_socket.conn.alloc_page(subchannel_mask);
+
+        if let Ok((buf, udp_metadata)) = smol_socket.recv() {
+            let addr: SocketAddr = socket_addr_from_endpoint(udp_metadata.endpoint);
+            moto_socket.rx_queue.push_back(buf, addr);
         }
 
-        log::debug!("do_udp_rx: 0x{:x} 300", u64::from(socket_id));
-        while let Ok((buf, udp_metadata)) = smol_socket.recv() {
-            log::debug!(
-                "UDP: got {} bytes from {:?}",
-                buf.len(),
-                udp_metadata.endpoint
-            );
-            if buf.len() <= io_channel::PAGE_SIZE {
-                let io_page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
-                    Ok(page) => page,
-                    Err(err) => {
-                        assert_eq!(err, moto_rt::E_NOT_READY);
-                        self.defer_socket_action(socket_id, None);
-                        return;
-                    }
-                };
-                io_page.bytes_mut()[0..buf.len()].clone_from_slice(buf);
-                moto_socket.rx_seq += 1;
-                moto_socket.stats_rx_bytes += buf.len() as u64;
-                let addr: SocketAddr = socket_addr_from_endpoint(udp_metadata.endpoint);
+        while let Some(mut msg) = moto_socket.rx_queue.pop_front(page_allocator) {
+            msg.status = moto_rt::E_OK;
 
-                let mut msg = moto_sys_io::api_net::udp_socket_rx_msg(
-                    socket_id.into(),
-                    io_page,
-                    0,
-                    buf.len() as u16,
-                    &addr,
-                );
-                msg.status = moto_rt::E_OK;
-
-                self.pending_completions.push_back(PendingCompletion {
-                    msg,
-                    endpoint_handle: moto_socket.conn.wait_handle(),
-                });
-
-                if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
-                    self.defer_socket_action(socket_id, None);
-                    return;
-                }
-            } else {
-                todo!()
-            }
-            /*
-            let page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
-                Ok(page) => page,
-                Err(err) => {
-                    assert_eq!(err, moto_rt::E_NOT_READY);
-                    self.defer_socket_action(socket_id, None);
-                    return;
-                }
-            };
-            let mut rx_buf = TcpRxBuf::new(page);
-            let mut receive_closure = |bytes: &mut [u8]| {
-                let len = bytes.len().min(io_channel::PAGE_SIZE - rx_buf.consumed);
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        rx_buf.bytes_mut().as_mut_ptr(),
-                        len,
-                    );
-                }
-
-                rx_buf.consume(len);
-                (len, ())
-            };
-
-            smol_socket.recv(&mut receive_closure).unwrap();
-
-            moto_socket.rx_seq += 1;
-            moto_socket.stats_rx_bytes += rx_buf.consumed as u64;
-            self.pending_completions.push_back(Self::rx_buf_to_pc(
-                socket_id,
-                moto_socket.conn.wait_handle(),
-                rx_buf,
-                moto_socket.rx_seq,
-            ));
-
-            if moto_socket.rx_seq > (moto_socket.rx_ack + api_net::TCP_RX_MAX_INFLIGHT) {
-                self.defer_socket_action(socket_id, None);
-                return;
-            }
-            */
+            self.pending_completions.push_back(PendingCompletion {
+                msg,
+                endpoint_handle: moto_socket.conn.wait_handle(),
+            });
         }
 
-        self.maybe_complete_deferred_action(socket_id);
+        if !moto_socket.rx_queue.is_empty() || smol_socket.can_recv() {
+            self.defer_socket_action(socket_id, None);
+        }
     }
 
     fn do_tcp_tx(&mut self, socket_id: SocketId) {
@@ -2055,31 +1988,53 @@ impl NetSys {
             // Deferred action sockets may get enqueued more than once.
             return;
         };
+
+        let conn = moto_socket.conn.clone();
+
         let smol_socket = self.devices[moto_socket.device_idx]
             .sockets
             .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
 
-        while let Some(packet) = moto_socket.next_tx_packet() {
-            if let Err(err) = smol_socket.send_slice(packet.slice(), packet.addr) {
+        let mut did_send = false;
+        loop {
+            let Ok(datagram) = moto_socket.tx_queue.next_datagram() else {
+                log::info!(
+                    "Killing process 0x{:x} due to bad UDP fragment",
+                    moto_socket.pid
+                );
+                let _ = moto_sys::SysCpu::kill_remote(conn.wait_handle());
+                return;
+            };
+
+            let Some(datagram) = datagram else {
+                break;
+            };
+
+            if let Err(err) = smol_socket.send_slice(datagram.slice(), datagram.addr) {
                 match err {
                     smoltcp::socket::udp::SendError::Unaddressable => {
-                        log::warn!("Cannot send UDP packet to {:?}.", packet.addr);
+                        log::debug!("Cannot send UDP packet to {:?}.", datagram.addr);
                         // TODO: do we need to notify the user?
                         continue;
                     }
                     smoltcp::socket::udp::SendError::BufferFull => {
                         // Can't send the packet: re-insert it into the pending queue.
-                        moto_socket.tx_queue.push_front(packet);
-                        return;
+                        moto_socket.tx_queue.push_front(datagram);
+                        break;
                     }
                 }
             } else {
+                did_send = true;
                 log::debug!(
                     "UDP: sent {} bytes to {:?}",
-                    packet.slice().len(),
-                    packet.addr
+                    datagram.slice().len(),
+                    datagram.addr
                 );
             }
+        }
+
+        if did_send {
+            self.udp_tx_ack(&conn, socket_id);
         }
     }
 
@@ -2127,6 +2082,15 @@ impl NetSys {
         (Instant::now() - started).as_secs() > Self::MAX_DEFERRED_ACTION_SECS
     }
 
+    fn udp_socket_drop(&mut self, conn: &Rc<io_channel::ServerConnection>, sqe: io_channel::Msg) {
+        let Ok(socket_id) = self.udp_socket_from_msg(conn.wait_handle(), &sqe) else {
+            // TODO: drop the connection?
+            return;
+        };
+
+        self.drop_udp_socket(socket_id);
+    }
+
     fn udp_socket_bind(
         &mut self,
         conn: &Rc<io_channel::ServerConnection>,
@@ -2140,12 +2104,6 @@ impl NetSys {
         let mut socket_addr = api_net::get_socket_addr(&sqe.payload);
 
         crate::moto_log!("UDP bind: validate addr/port not in use");
-        // for listener in self.tcp_listeners.values() {
-        //     if *listener.socket_addr() == socket_addr {
-        //         sqe.status = moto_rt::E_ALREADY_IN_USE;
-        //         return sqe;
-        //     }
-        // }
 
         // Verify that the IP is valid (if present) before the socket is created.
         let ip_addr = socket_addr.ip();
@@ -2160,7 +2118,7 @@ impl NetSys {
                 Some(idx) => *idx,
                 None => {
                     #[cfg(debug_assertions)]
-                    log::info!("IP addr {:?} not found", ip_addr);
+                    log::debug!("IP addr {:?} not found", ip_addr);
                     sqe.status = moto_rt::E_INVALID_ARGUMENT;
                     return sqe;
                 }
@@ -2173,7 +2131,7 @@ impl NetSys {
             let local_port = match self.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
                 Some(port) => port,
                 None => {
-                    log::error!("get_ephemeral_udp_port({:?}) failed", ip_addr);
+                    log::warn!("get_ephemeral_udp_port({:?}) failed", ip_addr);
                     sqe.status = moto_rt::E_OUT_OF_MEMORY;
                     return sqe;
                 }
@@ -2183,9 +2141,12 @@ impl NetSys {
             allocated_port = Some(local_port);
         }
 
-        let Ok(mut udp_socket) =
-            self.new_udp_socket_for_device(device_idx, conn.clone(), socket_addr)
-        else {
+        let Ok(udp_socket) = self.new_udp_socket_for_device(
+            device_idx,
+            conn.clone(),
+            socket_addr,
+            api_net::io_subchannel_mask(sqe.payload.args_8()[23]),
+        ) else {
             if let Some(port) = allocated_port {
                 self.devices[device_idx].free_ephemeral_udp_port(port);
             }
@@ -2193,7 +2154,6 @@ impl NetSys {
             return sqe;
         };
 
-        udp_socket.subchannel_mask = api_net::io_subchannel_mask(sqe.payload.args_8()[23]);
         let udp_socket_id = udp_socket.id;
         self.socket_ids.insert(udp_socket.id);
         self.udp_sockets.insert(udp_socket.id, udp_socket);
@@ -2221,33 +2181,46 @@ impl NetSys {
     }
 
     fn udp_socket_tx(&mut self, conn: &Rc<io_channel::ServerConnection>, sqe: io_channel::Msg) {
-        // Note: we need to get the page so that it is freed.
-        let page_idx = sqe.payload.shared_pages()[11];
-        let page = if let Ok(page) = conn.get_page(page_idx) {
-            page
-        } else {
-            // TODO: drop the connection?
-            log::debug!("udp_socket_tx w/o bytes???");
-            return;
-        };
         let Ok(socket_id) = self.udp_socket_from_msg(conn.wait_handle(), &sqe) else {
+            // Note: we need to get the page so that it is freed.
+            let page_idx = sqe.payload.shared_pages()[11];
+            let _ = conn.get_page(page_idx);
             // TODO: drop the connection?
             return;
         };
 
-        let addr = api_net::get_socket_addr(&sqe.payload);
         let fragment_id = sqe.payload.args_16()[9];
-        let sz = sqe.payload.args_16()[10];
         let moto_socket = self.udp_sockets.get_mut(&socket_id).unwrap();
-        moto_socket.stats_tx_bytes += sz as u64;
-        moto_socket.raw_tx_queue.push_back(UdpTxBuf {
-            page,
-            fragment_id,
-            sz,
-            addr,
-        });
+        if moto_socket
+            .tx_queue
+            .push_back(sqe, |idx| conn.get_page(idx))
+            .is_err()
+        {
+            log::info!(
+                "Killing process 0x{:x} due to bad UDP fragment",
+                moto_socket.pid
+            );
+            let _ = moto_sys::SysCpu::kill_remote(conn.wait_handle());
+            return;
+        }
+
+        if fragment_id != 0 {
+            // Notify the client that we've consumed the io page.
+            self.udp_tx_ack(conn, socket_id);
+        }
 
         self.do_udp_tx(socket_id);
+    }
+
+    fn udp_tx_ack(&mut self, conn: &Rc<io_channel::ServerConnection>, socket_id: SocketId) {
+        let mut msg = io_channel::Msg::new();
+        msg.command = api_net::NetCmd::UdpSocketTxRxAck.as_u16();
+        msg.handle = u64::from(socket_id);
+
+        self.pending_completions.push_back(PendingCompletion {
+            msg,
+            endpoint_handle: conn.wait_handle(),
+        });
     }
 }
 
@@ -2309,7 +2282,11 @@ impl IoSubsystem for NetSys {
             api_net::NetCmd::TcpStreamClose => Ok(self.tcp_stream_close(conn, msg)),
 
             api_net::NetCmd::UdpSocketBind => Ok(Some(self.udp_socket_bind(conn, msg))),
-            api_net::NetCmd::UdpSocketTx => {
+            api_net::NetCmd::UdpSocketDrop => {
+                self.udp_socket_drop(conn, msg);
+                Ok(None)
+            }
+            api_net::NetCmd::UdpSocketTxRx => {
                 self.udp_socket_tx(conn, msg);
                 Ok(None)
             }
@@ -2355,8 +2332,16 @@ impl IoSubsystem for NetSys {
         let now = Instant::now();
 
         while let Some(socket_id) = self.deferred_sockets.pop_at(now) {
-            self.do_tcp_tx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
-            self.do_tcp_rx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
+            match socket_id.kind() {
+                SocketKind::Tcp => {
+                    self.do_tcp_tx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
+                    self.do_tcp_rx(socket_id); // May insert socket_id back into self.deferred_action_sockets.
+                }
+                SocketKind::Udp => {
+                    self.do_udp_tx(socket_id);
+                    self.do_udp_rx(socket_id);
+                }
+            }
         }
 
         // client writes (tcp_stream_write) wake sockets; make sure we

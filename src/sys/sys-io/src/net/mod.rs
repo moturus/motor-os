@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use moto_ipc::io_channel;
 
 mod config;
@@ -59,29 +57,5 @@ impl TcpTxBuf {
 
     fn is_consumed(&self) -> bool {
         self.consumed == self.len
-    }
-}
-
-struct UdpTxBuf {
-    page: io_channel::IoPage,
-    fragment_id: u16,
-    sz: u16,
-    addr: SocketAddr,
-}
-
-struct UdpPacket {
-    page: Option<(io_channel::IoPage, usize)>,
-    bytes: Vec<u8>,
-    addr: SocketAddr,
-}
-
-impl UdpPacket {
-    fn slice(&self) -> &[u8] {
-        if let Some((page, sz)) = self.page.as_ref() {
-            assert!(self.bytes.is_empty());
-            &page.bytes()[0..(*sz)]
-        } else {
-            &self.bytes
-        }
     }
 }

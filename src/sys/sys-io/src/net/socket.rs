@@ -1,3 +1,4 @@
+use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
 use moto_sys_io::api_net::TcpState;
 use std::sync::Arc;
 use std::task::{RawWaker, RawWakerVTable};
@@ -7,7 +8,6 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use moto_ipc::io_channel;
 
 use super::netdev::EphemeralTcpPort;
-use super::UdpPacket;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum SocketKind {
@@ -204,18 +204,14 @@ pub(super) struct UdpSocket {
     pub device_idx: usize,
 
     pub conn: Rc<io_channel::ServerConnection>,
+
+    #[allow(unused)]
     pub pid: u64, // Used for stats. Cached to avoid doing a syscall.
 
     pub ephemeral_port: Option<u16>,
 
-    pub raw_tx_queue: VecDeque<super::UdpTxBuf>,
-    pub tx_queue: VecDeque<super::UdpPacket>,
-
-    pub rx_seq: u64,
-    pub rx_ack: u64,
-
-    // See moto_ipc::io_channel::ServerConnection::alloc_page().
-    pub subchannel_mask: u64,
+    pub tx_queue: UdpDefragmentingQueue,
+    pub rx_queue: UdpFragmentingQueue,
 
     // stats
     pub stats_rx_bytes: u64, // Bytes sent to the application.
@@ -225,7 +221,6 @@ pub(super) struct UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         assert!(self.ephemeral_port.is_none());
-        assert!(self.raw_tx_queue.is_empty());
     }
 }
 
@@ -236,6 +231,7 @@ impl UdpSocket {
         device_idx: usize,
         conn: Rc<io_channel::ServerConnection>,
         pid: u64,
+        subchannel_mask: u64,
     ) -> Self {
         debug_assert!(socket_id.is_udp());
         UdpSocket {
@@ -245,49 +241,21 @@ impl UdpSocket {
             conn,
             pid,
             ephemeral_port: None,
-            raw_tx_queue: VecDeque::new(),
-            tx_queue: VecDeque::new(),
-            rx_seq: 0,
-            rx_ack: 0, // Unlike TCP, can do rx immediately.
-            subchannel_mask: u64::MAX,
+            tx_queue: UdpDefragmentingQueue::new(),
+            rx_queue: UdpFragmentingQueue::new(socket_id.0, subchannel_mask),
             stats_rx_bytes: 0,
             stats_tx_bytes: 0,
         }
     }
 
-    pub(super) fn next_tx_packet(&mut self) -> Option<UdpPacket> {
-        if let Some(packet) = self.tx_queue.pop_front() {
-            return Some(packet);
-        }
-
-        let tx_buf = self.raw_tx_queue.front()?;
-
-        if tx_buf.fragment_id == 0 {
-            let super::UdpTxBuf {
-                page,
-                fragment_id: _,
-                sz,
-                addr,
-            } = self.raw_tx_queue.pop_front().unwrap();
-
-            Some(UdpPacket {
-                page: Some((page, sz as usize)),
-                bytes: vec![],
-                addr,
-            })
-        } else {
-            todo!()
-        }
-    }
-
     #[allow(unused)]
     pub(super) fn dump_state(&self) {
-        log::warn!(
-            "socket: id {} conn 0x{:x} txq len: {}",
-            self.id.0,
-            self.conn.wait_handle().as_u64(),
-            self.raw_tx_queue.len()
-        );
+        // log::warn!(
+        //     "socket: id {} conn 0x{:x} txq len: {}",
+        //     self.id.0,
+        //     self.conn.wait_handle().as_u64(),
+        //     self.tx_queue.len()
+        // );
     }
 }
 
