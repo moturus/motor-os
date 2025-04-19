@@ -49,7 +49,17 @@ fn test_udp_large_packets() {
     println!("test_udp_large_packets() PASS");
 }
 
+fn test_udp_double_bind() {
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
+    let sock = std::net::UdpSocket::bind(addr).unwrap();
+    assert!(std::net::UdpSocket::bind(addr).is_err()); // Can't bind again to the same address.
+    drop(sock);
+    let _ = std::net::UdpSocket::bind(addr).unwrap(); // Can bind now that `sock` is dropped.
+    println!("test_udp_double_bind() PASS");
+}
+
 pub fn run_all_tests() {
     test_udp_basic();
     test_udp_large_packets();
+    test_udp_double_bind();
 }

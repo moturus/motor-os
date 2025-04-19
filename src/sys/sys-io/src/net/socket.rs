@@ -1,5 +1,6 @@
 use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
 use moto_sys_io::api_net::TcpState;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{RawWaker, RawWakerVTable};
 use std::time::Instant;
@@ -213,6 +214,8 @@ pub(super) struct UdpSocket {
     pub tx_queue: UdpDefragmentingQueue,
     pub rx_queue: UdpFragmentingQueue,
 
+    pub socket_addr: SocketAddr,
+
     // stats
     pub stats_rx_bytes: u64, // Bytes sent to the application.
     pub stats_tx_bytes: u64, // Bytes received from the application.
@@ -232,6 +235,7 @@ impl UdpSocket {
         conn: Rc<io_channel::ServerConnection>,
         pid: u64,
         subchannel_mask: u64,
+        socket_addr: SocketAddr,
     ) -> Self {
         debug_assert!(socket_id.is_udp());
         UdpSocket {
@@ -245,6 +249,7 @@ impl UdpSocket {
             rx_queue: UdpFragmentingQueue::new(socket_id.0, subchannel_mask),
             stats_rx_bytes: 0,
             stats_tx_bytes: 0,
+            socket_addr,
         }
     }
 

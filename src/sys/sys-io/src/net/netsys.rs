@@ -43,6 +43,8 @@ pub(super) struct NetSys {
     tcp_sockets: HashMap<SocketId, TcpSocket>, // Active connections.
     udp_sockets: HashMap<SocketId, UdpSocket>,
 
+    udp_addresses_in_use: HashSet<SocketAddr>,
+
     // An ordered list of all sockets in the system, to be used for stats reporting.
     socket_ids: std::collections::BTreeSet<SocketId>,
 
@@ -88,6 +90,7 @@ impl NetSys {
             tcp_listeners: HashMap::new(),
             tcp_sockets: HashMap::new(),
             udp_sockets: HashMap::new(),
+            udp_addresses_in_use: HashSet::new(),
             socket_ids: std::collections::BTreeSet::new(),
             tcp_socket_cache: Vec::new(),
             udp_socket_cache: Vec::new(),
@@ -425,6 +428,7 @@ impl NetSys {
             conn,
             pid,
             subchannel_mask,
+            socket_addr,
         ))
     }
 
@@ -544,6 +548,8 @@ impl NetSys {
             log::debug!("drop_udp_socket: 0x{:x}: no socket", u64::from(socket_id));
             return;
         };
+
+        assert!(self.udp_addresses_in_use.remove(&moto_socket.socket_addr));
         if let Some(_msg) = moto_socket.rx_queue.take_msg() {
             todo!("free the io page")
         }
@@ -2103,7 +2109,10 @@ impl NetSys {
 
         let mut socket_addr = api_net::get_socket_addr(&sqe.payload);
 
-        crate::moto_log!("UDP bind: validate addr/port not in use");
+        if self.udp_addresses_in_use.contains(&socket_addr) {
+            sqe.status = moto_rt::E_ALREADY_IN_USE;
+            return sqe;
+        }
 
         // Verify that the IP is valid (if present) before the socket is created.
         let ip_addr = socket_addr.ip();
@@ -2156,6 +2165,7 @@ impl NetSys {
 
         let udp_socket_id = udp_socket.id;
         self.socket_ids.insert(udp_socket.id);
+        self.udp_addresses_in_use.insert(socket_addr);
         self.udp_sockets.insert(udp_socket.id, udp_socket);
 
         let conn_udp_sockets = match self.conn_udp_sockets.get_mut(&conn.wait_handle()) {
