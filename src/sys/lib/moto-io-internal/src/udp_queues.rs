@@ -204,6 +204,15 @@ impl UdpDefragmentingQueue {
         assert!(self.datagram.replace(datagram).is_none());
         Ok(true)
     }
+
+    #[allow(clippy::result_unit_err)]
+    pub fn peek_datagram(&mut self) -> Result<Option<&UdpDatagram>, ()> {
+        if !self.have_datagram()? {
+            return Ok(None);
+        }
+
+        Ok(self.datagram.as_ref())
+    }
 }
 
 pub struct UdpDatagram {

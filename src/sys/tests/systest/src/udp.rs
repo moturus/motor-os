@@ -10,6 +10,12 @@ fn test_udp_basic() {
     assert_eq!(buf1.len(), s1.send_to(&buf1, a2).unwrap());
 
     let mut buf2 = [0; 100];
+
+    let (amt, src) = s2.peek_from(&mut buf2).unwrap();
+    assert_eq!(amt, buf1.len());
+    assert_eq!(src, a1);
+    assert_eq!(&buf1, &buf2[0..amt]);
+
     let (amt, src) = s2.recv_from(&mut buf2).unwrap();
 
     assert_eq!(amt, buf1.len());

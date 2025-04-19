@@ -198,7 +198,28 @@ impl UdpSocket {
         buf: &mut [u8],
         peek: bool,
     ) -> Result<(usize, SocketAddr), ErrorCode> {
+        if peek {
+            self.peek_from_nonblocking(buf)
+        } else {
+            self.recv_from_nonblocking(buf)
+        }
+    }
+
+    fn recv_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
         let Some(datagram) = self.rx_queue.lock().next_datagram().unwrap() else {
+            return Err(E_NOT_READY);
+        };
+
+        let bytes = datagram.slice();
+        let sz = bytes.len().min(buf.len());
+        buf[0..sz].clone_from_slice(&bytes[0..sz]);
+
+        Ok((sz, datagram.addr))
+    }
+
+    fn peek_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
+        let mut rx_queue = self.rx_queue.lock();
+        let Some(datagram) = rx_queue.peek_datagram().unwrap() else {
             return Err(E_NOT_READY);
         };
 
