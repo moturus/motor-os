@@ -198,6 +198,12 @@ pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> 
         }
         return E_INVALID_ARGUMENT;
     };
+    if let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    {
+        *addr = (*udp_socket.local_addr()).into();
+        return E_OK;
+    };
     if let Some(tcp_listener) =
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
     {

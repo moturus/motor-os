@@ -6,6 +6,9 @@ fn test_udp_basic() {
     let s1 = std::net::UdpSocket::bind(a1).unwrap();
     let s2 = std::net::UdpSocket::bind(a2).unwrap();
 
+    assert_eq!(a1, s1.local_addr().unwrap());
+    assert_eq!(a2, s2.local_addr().unwrap());
+
     let buf1 = [7; 10];
     assert_eq!(buf1.len(), s1.send_to(&buf1, a2).unwrap());
 

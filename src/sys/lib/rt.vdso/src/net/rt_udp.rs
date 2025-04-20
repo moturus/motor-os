@@ -12,46 +12,6 @@ use moto_rt::{E_NOT_READY, E_TIMED_OUT};
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
-/*
-pub fn udp_recv_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
-    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
-
-    let vdso_udp_recv_from: extern "C" fn(i32, *mut u8, usize, *mut netc::sockaddr) -> i64 = unsafe {
-        core::mem::transmute(
-            RtVdsoVtable::get()
-                .net_udp_recv_from
-                .load(Ordering::Relaxed) as usize as *const (),
-        )
-    };
-
-    let res = vdso_udp_recv_from(rt_fd, buf.as_mut_ptr(), buf.len(), &mut addr as *mut _);
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(((res as usize), addr))
-    }
-}
-
-pub fn udp_peek_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
-    let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
-
-    let vdso_udp_peek_from: extern "C" fn(i32, *mut u8, usize, *mut netc::sockaddr) -> i64 = unsafe {
-        core::mem::transmute(
-            RtVdsoVtable::get()
-                .net_udp_peek_from
-                .load(Ordering::Relaxed) as usize as *const (),
-        )
-    };
-
-    let res = vdso_udp_peek_from(rt_fd, buf.as_mut_ptr(), buf.len(), &mut addr as *mut _);
-    if res < 0 {
-        Err((-res) as ErrorCode)
-    } else {
-        Ok(((res as usize), addr))
-    }
-}
-*/
-
 pub struct UdpSocket {
     channel_reservation: ChannelReservation,
     local_addr: SocketAddr,
@@ -101,6 +61,10 @@ impl UdpSocket {
 
     fn channel(&self) -> &NetChannel {
         self.channel_reservation.channel()
+    }
+
+    pub fn local_addr(&self) -> &SocketAddr {
+        &self.local_addr
     }
 
     pub fn bind(socket_addr: &SocketAddr) -> Result<Arc<UdpSocket>, ErrorCode> {
