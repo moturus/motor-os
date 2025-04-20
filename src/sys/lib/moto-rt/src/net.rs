@@ -132,14 +132,14 @@ pub fn tcp_connect(
     to_result!(vdso_tcp_connect(addr, timeout, nonblocking))
 }
 
-pub fn udp_connect(addr: &netc::sockaddr) -> Result<(), ErrorCode> {
-    let vdso_udp_connect: extern "C" fn(*const netc::sockaddr) -> ErrorCode = unsafe {
+pub fn udp_connect(rt_fd: RtFd, addr: &netc::sockaddr) -> Result<(), ErrorCode> {
+    let vdso_udp_connect: extern "C" fn(RtFd, *const netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_udp_connect.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_udp_connect(addr))
+    ok_or_error(vdso_udp_connect(rt_fd, addr))
 }
 
 pub fn socket_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
