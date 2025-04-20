@@ -176,15 +176,24 @@ pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return -(E_BAD_HANDLE as i64);
     };
-    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
-        return -(E_INVALID_ARGUMENT as i64);
-    };
 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-    match tcp_stream.peek(buf) {
-        Ok(sz) => sz as i64,
-        Err(err) => -(err as i64),
+
+    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+        match tcp_stream.peek(buf) {
+            Ok(sz) => return sz as i64,
+            Err(err) => return -(err as i64),
+        }
     }
+
+    if let Some(udp_socket) = (posix_file.as_ref() as &dyn Any).downcast_ref::<UdpSocket>() {
+        match udp_socket.peek(buf) {
+            Ok(sz) => return sz as i64,
+            Err(err) => return -(err as i64),
+        }
+    }
+
+    -(E_BAD_HANDLE as i64)
 }
 
 pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
@@ -218,17 +227,28 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() else {
-        return E_BAD_HANDLE;
+    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+        match tcp_stream.peer_addr() {
+            Ok(peer_addr) => {
+                *addr = peer_addr.into();
+                return E_OK;
+            }
+            Err(err) => return err,
+        }
+    }
+    if let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    {
+        match udp_socket.peer_addr() {
+            Some(peer_addr) => {
+                *addr = peer_addr.into();
+                return E_OK;
+            }
+            None => return moto_rt::E_NOT_CONNECTED,
+        }
     };
 
-    match tcp_stream.peer_addr() {
-        Ok(peer_addr) => {
-            *addr = peer_addr.into();
-            E_OK
-        }
-        Err(err) => err,
-    }
+    E_BAD_HANDLE
 }
 
 pub unsafe extern "C" fn udp_recv_from(
@@ -296,6 +316,21 @@ pub unsafe extern "C" fn udp_send_to(
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
     }
+}
+
+pub unsafe extern "C" fn udp_connect(rt_fd: RtFd, addr: *const netc::sockaddr) -> ErrorCode {
+    let addr = unsafe { (*addr).into() };
+    let Some(posix_file) = posix::get_file(rt_fd) else {
+        return E_BAD_HANDLE;
+    };
+    let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    else {
+        return E_BAD_HANDLE;
+    };
+
+    udp_socket.connect(&addr);
+    moto_rt::E_OK
 }
 
 #[allow(unused)]

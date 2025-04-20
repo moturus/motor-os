@@ -36,7 +36,7 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
-const RT_VERSION: u64 = 11;
+const RT_VERSION: u64 = 12;
 
 // The entry point.
 #[no_mangle]
@@ -340,7 +340,7 @@ pub extern "C" fn moturus_start(version: u64) {
         Ordering::Relaxed,
     );
     vtable.net_udp_connect.store(
-        vdso_unimplemented as *const () as usize as u64,
+        net::rt_net::udp_connect as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.net_socket_addr.store(

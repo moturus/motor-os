@@ -23,6 +23,8 @@ pub struct UdpSocket {
     tx_queue: Mutex<UdpFragmentingQueue>,
     rx_queue: Mutex<UdpDefragmentingQueue>,
 
+    peer_addr: Mutex<Option<SocketAddr>>,
+
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
 
@@ -67,6 +69,10 @@ impl UdpSocket {
         &self.local_addr
     }
 
+    pub fn peer_addr(&self) -> Option<SocketAddr> {
+        *self.peer_addr.lock()
+    }
+
     pub fn bind(socket_addr: &SocketAddr) -> Result<Arc<UdpSocket>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
@@ -99,6 +105,7 @@ impl UdpSocket {
             wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
             subchannel_mask,
             tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
+            peer_addr: Mutex::new(None),
             rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
             rx_timeout_ns: AtomicU64::new(0),
             tx_timeout_ns: AtomicU64::new(0),
@@ -116,6 +123,10 @@ impl UdpSocket {
         );
 
         Ok(udp_socket)
+    }
+
+    pub fn connect(&self, addr: &SocketAddr) {
+        *self.peer_addr.lock() = Some(*addr);
     }
 
     pub fn recv_or_peek_from(
@@ -170,8 +181,18 @@ impl UdpSocket {
     }
 
     fn recv_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
-        let Some(datagram) = self.rx_queue.lock().next_datagram().unwrap() else {
-            return Err(E_NOT_READY);
+        let datagram = loop {
+            let Some(datagram) = self.rx_queue.lock().next_datagram().unwrap() else {
+                return Err(E_NOT_READY);
+            };
+
+            if let Some(peer_addr) = self.peer_addr() {
+                if peer_addr != datagram.addr {
+                    continue;
+                }
+            }
+
+            break datagram;
         };
 
         let bytes = datagram.slice();
@@ -183,8 +204,20 @@ impl UdpSocket {
 
     fn peek_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
         let mut rx_queue = self.rx_queue.lock();
-        let Some(datagram) = rx_queue.peek_datagram().unwrap() else {
-            return Err(E_NOT_READY);
+        let datagram = loop {
+            let Some(datagram) = rx_queue.peek_datagram().unwrap() else {
+                return Err(E_NOT_READY);
+            };
+
+            if let Some(peer_addr) = self.peer_addr() {
+                if peer_addr != datagram.addr {
+                    // Need to remove the datagram from the queue.
+                    let _ = rx_queue.next_datagram();
+                    continue;
+                }
+            }
+
+            break datagram;
         };
 
         let bytes = datagram.slice();
@@ -296,6 +329,30 @@ impl UdpSocket {
             _ => panic!("Unexpected UDP cmd: {:?}", cmd),
         }
     }
+
+    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        if self.peer_addr().is_none() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        };
+
+        self.recv_or_peek_from(buf, true).map(|(sz, _)| sz)
+    }
 }
 
-impl PosixFile for UdpSocket {}
+impl PosixFile for UdpSocket {
+    fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        let Some(addr) = self.peer_addr() else {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        };
+
+        self.send_to(buf, &addr)
+    }
+
+    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        if self.peer_addr().is_none() {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        };
+
+        self.recv_or_peek_from(buf, false).map(|(sz, _)| sz)
+    }
+}
