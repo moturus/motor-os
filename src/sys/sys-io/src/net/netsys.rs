@@ -1695,8 +1695,6 @@ impl NetSys {
     }
 
     fn on_udp_socket_poll(&mut self, socket_id: SocketId) {
-        log::debug!("on_udp_socket_poll 0x{:x}", u64::from(socket_id));
-
         let waker = if let Some(waker) = self.wakers.get(&socket_id) {
             waker.clone()
         } else {
@@ -1717,12 +1715,12 @@ impl NetSys {
         let can_recv = smol_socket.can_recv();
         let can_send = smol_socket.can_send();
 
-        log::debug!(
-            "on_udp_socket_poll 0x{:x}: can_recv: {} can_send: {}",
-            u64::from(socket_id),
-            can_recv,
-            can_send
-        );
+        // log::debug!(
+        //     "on_udp_socket_poll 0x{:x}: can_recv: {} can_send: {}",
+        //     u64::from(socket_id),
+        //     can_recv,
+        //     can_send
+        // );
         if can_recv {
             self.do_udp_rx(socket_id);
         }

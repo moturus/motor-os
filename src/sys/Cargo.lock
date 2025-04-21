@@ -623,7 +623,7 @@ dependencies = [
 [[package]]
 name = "mio-moturus"
 version = "1.0.3"
-source = "git+https://github.com/moturus/mio.git?branch=motor-os_2025-04-07#f412622ccc2d51cb28fcb17f938bdd0c9bd27edb"
+source = "git+https://github.com/moturus/mio.git?branch=motor-os_2025-04-07#7f8367228fda9f2f969864d71f3244737356f384"
 dependencies = [
  "libc",
  "log",

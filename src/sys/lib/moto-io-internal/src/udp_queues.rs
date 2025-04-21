@@ -103,19 +103,24 @@ impl UdpDefragmentingQueue {
     where
         F: PageGetter,
     {
-        let page_idx = msg.payload.shared_pages()[11];
-        let page = page_getter(page_idx)?;
-
         let addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
-        let fragment_id = msg.payload.args_16()[9];
         let sz = msg.payload.args_16()[10];
-        if (sz as usize) > io_channel::PAGE_SIZE {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
+        let fragment_id = msg.payload.args_16()[9];
 
-        self.queue
-            .push_back(UdpFragment::from(page, fragment_id, sz, addr));
+        let fragment = if sz == 0 {
+            assert_eq!(0, fragment_id);
+            UdpFragment::empty(addr)
+        } else {
+            let page_idx = msg.payload.shared_pages()[11];
+            let page = page_getter(page_idx)?;
+            if (sz as usize) > io_channel::PAGE_SIZE {
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
 
+            UdpFragment::from(page, fragment_id, sz, addr)
+        };
+
+        self.queue.push_back(fragment);
         Ok(())
     }
 
@@ -252,6 +257,12 @@ impl UdpDatagram {
     where
         F: PageAllocator,
     {
+        if self.bytes.is_empty() {
+            return Some(moto_sys_io::api_net::udp_socket_tx_rx_empty_msg(
+                socket_id, &self.addr,
+            ));
+        }
+
         assert!(self.consumed < self.bytes.len());
         debug_assert_eq!(0, self.consumed & (io_channel::PAGE_SIZE - 1));
         let remains = self.bytes.len() - self.consumed;
@@ -304,6 +315,16 @@ struct UdpFragment {
 }
 
 impl UdpFragment {
+    fn empty(addr: SocketAddr) -> Self {
+        Self {
+            page: None,
+            bytes: Vec::new(),
+            fragment_id: 0,
+            sz: 0,
+            addr,
+        }
+    }
+
     fn from(page: io_channel::IoPage, fragment_id: u16, sz: u16, addr: SocketAddr) -> Self {
         if fragment_id == 0 {
             Self {

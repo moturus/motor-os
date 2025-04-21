@@ -7,6 +7,8 @@ use core::net::SocketAddr;
 use core::sync::atomic::*;
 use moto_io_internal::udp_queues::{PageAllocator, UdpDefragmentingQueue, UdpFragmentingQueue};
 use moto_ipc::io_channel;
+use moto_rt::poll::Interests;
+use moto_rt::poll::Token;
 use moto_rt::{mutex::Mutex, ErrorCode};
 use moto_rt::{E_NOT_READY, E_TIMED_OUT};
 use moto_sys_io::api_net;
@@ -400,12 +402,13 @@ impl UdpSocket {
                 //     Err(err) => err,
                 // }
             }
-            // moto_rt::net::SO_ERROR => {
-            //     assert_eq!(len, 2);
-            //     let err = self.take_error();
-            //     *(ptr as *mut u16) = err;
-            //     moto_rt::E_OK
-            // }
+            moto_rt::net::SO_ERROR => {
+                assert_eq!(len, 2);
+                // let err = self.take_error();
+                // *(ptr as *mut u16) = err;
+                *(ptr as *mut u16) = moto_rt::E_OK;
+                moto_rt::E_OK
+            }
             _ => panic!("unrecognized option {option}"),
         }
     }
@@ -425,6 +428,25 @@ impl UdpSocket {
     fn write_timeout(&self) -> u64 {
         self.tx_timeout_ns.load(Ordering::Relaxed)
     }
+
+    fn maybe_raise_events(&self, interests: Interests) {
+        let mut events = 0;
+
+        if (interests & moto_rt::poll::POLL_WRITABLE != 0) && !self.tx_queue.lock().is_full() {
+            events |= moto_rt::poll::POLL_WRITABLE;
+        }
+
+        if (interests & moto_rt::poll::POLL_READABLE) != 0 {
+            let mut buf = [0_u8; 4];
+            if self.peek_from_nonblocking(&mut buf).is_ok() {
+                events |= moto_rt::poll::POLL_READABLE;
+            }
+        }
+
+        if events != 0 {
+            self.wait_object.on_event(events);
+        }
+    }
 }
 
 impl PosixFile for UdpSocket {
@@ -442,5 +464,21 @@ impl PosixFile for UdpSocket {
         };
 
         self.recv_or_peek_from(buf, false).map(|(sz, _)| sz)
+    }
+
+    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.wait_object.add_interests(r_id, token, interests)?;
+        self.maybe_raise_events(interests);
+        Ok(())
+    }
+
+    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.wait_object.set_interests(r_id, token, interests)?;
+        self.maybe_raise_events(interests);
+        Ok(())
+    }
+
+    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
+        self.wait_object.del_interests(r_id)
     }
 }

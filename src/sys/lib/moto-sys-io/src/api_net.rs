@@ -261,6 +261,15 @@ pub fn udp_socket_tx_rx_msg(
     msg
 }
 
+pub fn udp_socket_tx_rx_empty_msg(handle: u64, addr: &SocketAddr) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::UdpSocketTxRx as u16;
+    msg.handle = handle;
+    put_socket_addr(&mut msg.payload, addr); // uses [0..=8]
+
+    msg
+}
+
 pub fn get_socket_addr(payload: &io_channel::Payload) -> SocketAddr {
     let octets: [u8; 16] = payload.args_8()[0..16].try_into().unwrap();
     let ipv6 = Ipv6Addr::from(octets);

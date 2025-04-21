@@ -8,6 +8,7 @@ mod simple;
 mod tcp;
 mod tcp_listener;
 mod tcp_stream;
+mod udp_socket;
 mod waker;
 
 #[macro_use]
@@ -34,12 +35,13 @@ fn main() {
         .spawn(input_listener)
         .unwrap();
 
+    simple::test();
     poll::run_all_tests();
     waker::run_all_tests();
     tcp_stream::run_all_tests();
     tcp_listener::run_all_tests();
     tcp::run_all_tests();
-    simple::test();
+    udp_socket::run_all_tests();
     close_on_drop::test_close_on_drop();
 
     std::thread::sleep(Duration::from_millis(100));
