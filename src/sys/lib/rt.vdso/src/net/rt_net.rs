@@ -151,6 +151,10 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
     {
         tcp_listener.setsockopt(option, ptr, len)
+    } else if let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    {
+        udp_socket.setsockopt(option, ptr, len)
     } else {
         E_BAD_HANDLE
     }
@@ -167,6 +171,10 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
     {
         tcp_listener.getsockopt(option, ptr, len)
+    } else if let Some(udp_socket) =
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+    {
+        udp_socket.getsockopt(option, ptr, len)
     } else {
         E_BAD_HANDLE
     }

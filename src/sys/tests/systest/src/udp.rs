@@ -25,7 +25,7 @@ fn test_udp_basic() {
     assert_eq!(src, a1);
     assert_eq!(&buf1, &buf2[0..amt]);
 
-    println!("test_udp_basic() PASS");
+    println!("-- test_udp_basic() PASS");
 }
 
 fn test_udp_large_packets() {
@@ -55,7 +55,7 @@ fn test_udp_large_packets() {
         assert_eq!(buf2[4097], (idx % 255) as u8);
     }
 
-    println!("test_udp_large_packets() PASS");
+    println!("-- test_udp_large_packets() PASS");
 }
 
 fn test_udp_double_bind() {
@@ -64,7 +64,7 @@ fn test_udp_double_bind() {
     assert!(std::net::UdpSocket::bind(addr).is_err()); // Can't bind again to the same address.
     drop(sock);
     let _ = std::net::UdpSocket::bind(addr).unwrap(); // Can bind now that `sock` is dropped.
-    println!("test_udp_double_bind() PASS");
+    println!("-- test_udp_double_bind() PASS");
 }
 
 fn test_udp_connect() {
@@ -109,8 +109,56 @@ fn test_udp_connect() {
     assert_eq!(amt, buf1.len());
     assert_eq!(&buf1, &buf2[0..amt]);
 
-    println!("test_udp_basic() PASS");
-    println!("test_udp_connect() PASS");
+    println!("-- test_udp_connect() PASS");
+}
+
+fn test_udp_timeouts() {
+    let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
+    let s1 = std::net::UdpSocket::bind(a1).unwrap();
+
+    // No timeouts by default.
+    assert!(s1.write_timeout().unwrap().is_none());
+    assert!(s1.read_timeout().unwrap().is_none());
+
+    // Set timeouts.
+    let timo = std::time::Duration::from_millis(1);
+    s1.set_write_timeout(Some(timo)).unwrap();
+    s1.set_read_timeout(Some(timo)).unwrap();
+
+    assert_eq!(timo, s1.write_timeout().unwrap().unwrap());
+    assert_eq!(timo, s1.read_timeout().unwrap().unwrap());
+
+    #[allow(unused)]
+    let mut buf = &mut [0; 64];
+    assert_eq!(
+        s1.peek_from(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert_eq!(
+        s1.recv_from(buf).err().unwrap().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+
+    // Clear timeouts.
+    s1.set_write_timeout(None).unwrap();
+    s1.set_read_timeout(None).unwrap();
+
+    assert!(s1.write_timeout().unwrap().is_none());
+    assert!(s1.read_timeout().unwrap().is_none());
+
+    // Disallow zero timeouts: see
+    // https://doc.rust-lang.org/std/net/struct.UdpSocket.html#method.set_write_timeout
+    let zero = std::time::Duration::new(0, 0);
+    assert_eq!(
+        s1.set_write_timeout(Some(zero)).err().unwrap().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        s1.set_read_timeout(Some(zero)).err().unwrap().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+
+    println!("-- test_udp_timeouts() PASS");
 }
 
 pub fn run_all_tests() {
@@ -118,4 +166,6 @@ pub fn run_all_tests() {
     test_udp_large_packets();
     test_udp_double_bind();
     test_udp_connect();
+    test_udp_timeouts();
+    println!("UDP tests PASS");
 }

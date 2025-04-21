@@ -107,8 +107,8 @@ impl UdpSocket {
             tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
             rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
-            rx_timeout_ns: AtomicU64::new(0),
-            tx_timeout_ns: AtomicU64::new(0),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
             me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
@@ -140,7 +140,7 @@ impl UdpSocket {
 
         let deadline = {
             let timo = self.tx_timeout_ns.load(Ordering::Relaxed);
-            if timo == 0 {
+            if timo == u64::MAX {
                 None
             } else {
                 Some(moto_rt::time::Instant::now() + core::time::Duration::from_nanos(timo))
@@ -238,7 +238,7 @@ impl UdpSocket {
 
         let deadline = {
             let timo = self.tx_timeout_ns.load(Ordering::Relaxed);
-            if timo == 0 {
+            if timo == u64::MAX {
                 None
             } else {
                 Some(moto_rt::time::Instant::now() + core::time::Duration::from_nanos(timo))
@@ -336,6 +336,94 @@ impl UdpSocket {
         };
 
         self.recv_or_peek_from(buf, true).map(|(sz, _)| sz)
+    }
+
+    fn set_nonblocking(&self, val: bool) {
+        self.nonblocking.store(val, Ordering::Release);
+    }
+
+    pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_NONBLOCKING => {
+                assert_eq!(len, 1);
+                let nonblocking = *(ptr as *const u8);
+                if nonblocking > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
+                }
+                self.set_nonblocking(nonblocking == 1);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = *(ptr as *const u64);
+                self.set_read_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = *(ptr as *const u64);
+                self.set_write_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                let _ttl = *(ptr as *const u32);
+                // self.set_ttl(ttl)
+                panic!("UDP: set_ttl() not implemented")
+            }
+            _ => panic!("unrecognized option {option}"),
+        }
+    }
+
+    pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.read_timeout();
+                *(ptr as *mut u64) = timeout;
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.write_timeout();
+                *(ptr as *mut u64) = timeout;
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                panic!("UDP: ttl() not implemented")
+                // match self.ttl() {
+                //     Ok(ttl) => {
+                //         *(ptr as *mut u32) = ttl;
+                //         moto_rt::E_OK
+                //     }
+                //     Err(err) => err,
+                // }
+            }
+            // moto_rt::net::SO_ERROR => {
+            //     assert_eq!(len, 2);
+            //     let err = self.take_error();
+            //     *(ptr as *mut u16) = err;
+            //     moto_rt::E_OK
+            // }
+            _ => panic!("unrecognized option {option}"),
+        }
+    }
+
+    fn set_read_timeout(&self, timeout_ns: u64) {
+        self.rx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
+    }
+
+    fn set_write_timeout(&self, timeout_ns: u64) {
+        self.tx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
+    }
+
+    fn read_timeout(&self) -> u64 {
+        self.rx_timeout_ns.load(Ordering::Relaxed)
+    }
+
+    fn write_timeout(&self) -> u64 {
+        self.tx_timeout_ns.load(Ordering::Relaxed)
     }
 }
 
