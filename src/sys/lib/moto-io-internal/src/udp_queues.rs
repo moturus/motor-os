@@ -1,6 +1,11 @@
 //! The largest buffer a Motor OS process can send to sys-io (the IO driver)
 //! is 4K, but UDP datagrams can be much larger, so they must be
 //! fragmented and then reassembled.
+//!
+//! In addition, the fragmenting queue will drop datagrams if it
+//! reaches its max length, to avoid DDOSing the OS if the app
+//! is slower to process incoming UDP datagrams than they are
+//! received.
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use core::net::SocketAddr;
 use moto_ipc::io_channel;
@@ -23,7 +28,7 @@ pub trait PageAllocator = FnOnce(u64) -> Result<io_channel::IoPage, ErrorCode>;
 pub trait PageGetter = FnOnce(u16) -> Result<io_channel::IoPage, ErrorCode>;
 
 impl UdpFragmentingQueue {
-    const MAX_LEN: usize = 8;
+    const MAX_LEN: usize = 16;
 
     pub fn new(socket_id: u64, subchannel_mask: u64) -> Self {
         Self {
@@ -47,7 +52,9 @@ impl UdpFragmentingQueue {
     }
 
     pub fn push_back(&mut self, bytes: &[u8], addr: SocketAddr) {
-        self.queue.push_back(UdpDatagram::new(bytes, addr))
+        if self.queue.len() < Self::MAX_LEN {
+            self.queue.push_back(UdpDatagram::new(bytes, addr))
+        }
     }
 
     pub fn push_front(&mut self, msg: io_channel::Msg) {
