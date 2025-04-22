@@ -432,11 +432,10 @@ impl UdpSocket {
             events |= moto_rt::poll::POLL_WRITABLE;
         }
 
-        if (interests & moto_rt::poll::POLL_READABLE) != 0 {
-            let mut buf = [0_u8; 4];
-            if self.peek_from_nonblocking(&mut buf).is_ok() {
-                events |= moto_rt::poll::POLL_READABLE;
-            }
+        if (interests & moto_rt::poll::POLL_READABLE) != 0
+            && self.rx_queue.lock().have_datagram().unwrap()
+        {
+            events |= moto_rt::poll::POLL_READABLE;
         }
 
         if events != 0 {

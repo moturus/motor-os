@@ -4,7 +4,6 @@ use log::{debug, info};
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Registry, Token};
 use std::net::{self, IpAddr, SocketAddr};
-#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::str;
 use std::sync::{Arc, Barrier};
@@ -669,7 +668,6 @@ fn test_connected_udp_socket_unconnected_methods() {
     println!("udp_socket::test_connected_udp_socket_unconnected_methods PASS");
 }
 
-/*
 fn test_udp_socket_raw_fd() {
     init();
 
@@ -686,11 +684,8 @@ fn test_udp_socket_raw_fd() {
 
     println!("udp_socket::test_udp_socket_raw_fd PASS");
 }
-*/
 
-/*
-#[test]
-fn udp_socket_register() {
+fn test_udp_socket_register() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket = UdpSocket::bind(any_local_address()).unwrap();
@@ -701,10 +696,11 @@ fn udp_socket_register() {
     expect_no_events(&mut poll, &mut events);
 
     // NOTE: more tests are done in the smoke tests above.
+
+    println!("udp_socket::test_udp_socket_register PASS");
 }
 
-#[test]
-fn udp_socket_reregister() {
+fn test_udp_socket_reregister() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket = UdpSocket::bind(any_local_address()).unwrap();
@@ -737,10 +733,11 @@ fn udp_socket_reregister() {
     expect_read!(socket.recv_from(&mut buf), DATA1, __anywhere);
 
     thread_handle.join().expect("unable to join thread");
+
+    println!("udp_socket::test_udp_socket_reregister PASS");
 }
 
-#[test]
-fn udp_socket_no_events_after_deregister() {
+fn test_udp_socket_no_events_after_deregister() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket = UdpSocket::bind(any_local_address()).unwrap();
@@ -765,6 +762,8 @@ fn udp_socket_no_events_after_deregister() {
     expect_read!(socket.recv_from(&mut buf), DATA1, __anywhere);
 
     thread_handle.join().expect("unable to join thread");
+
+    println!("udp_socket::test_udp_socket_no_events_after_deregister PASS");
 }
 
 /// Sends `n_packets` packets to `address`, over UDP, after the `barrier` is
@@ -783,6 +782,7 @@ fn send_packets(
     })
 }
 
+/*
 pub struct UdpHandlerSendRecv {
     tx: UdpSocket,
     rx: UdpSocket,
@@ -1180,7 +1180,9 @@ pub fn run_all_tests() {
     test_reconnect_udp_socket_receiving();
     test_unconnected_udp_socket_connected_methods();
     test_connected_udp_socket_unconnected_methods();
-    // test_udp_socket_raw_fd();
+    test_udp_socket_raw_fd();
+    test_udp_socket_register();
+    test_udp_socket_reregister();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("udp_socket ALL PASS");

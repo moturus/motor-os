@@ -549,21 +549,28 @@ impl NetSys {
             return;
         };
 
-        assert!(self.udp_addresses_in_use.remove(&moto_socket.socket_addr));
-        if let Some(_msg) = moto_socket.rx_queue.take_msg() {
-            todo!("free the io page")
+        let socket_addr = moto_socket.socket_addr;
+        if let Some(msg) = moto_socket.rx_queue.take_msg() {
+            // Need to free the stranded page.
+            let sz = msg.payload.args_16()[10];
+            if sz != 0 {
+                let page_idx = msg.payload.shared_pages()[11];
+                let _page = moto_socket.conn.get_page(page_idx).unwrap();
+            }
         }
-        log::debug!(
-            "dropping UDP socket 0x{:x}; RX done: {} TX done: {}",
-            u64::from(socket_id),
-            moto_socket.stats_rx_bytes,
-            moto_socket.stats_tx_bytes
-        );
-        let smol_socket = self.devices[moto_socket.device_idx]
+
+        let device_idx = moto_socket.device_idx;
+        let smol_socket = self.devices[device_idx]
             .sockets
             .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
+        if smol_socket.send_queue() > 0 {
+            // A MIO UDP test sends a UDP packet and immediately drops the socket,
+            // so we need to give the socket a chance to actually send the packet out.
+            self.devices[device_idx].poll();
+        }
 
-        smol_socket.close();
+        assert!(self.udp_addresses_in_use.remove(&socket_addr));
+        log::debug!("dropping UDP socket 0x{:x}", u64::from(socket_id),);
 
         // Remove the waker so that any polls on the socket from below don't trigger
         // wakeups on the dropped socket.
@@ -581,12 +588,14 @@ impl NetSys {
         }
 
         // Remove and cache the unused smol_socket.
-        let smoltcp::socket::Socket::Udp(smol_socket) = self.devices[moto_socket.device_idx]
+        let smoltcp::socket::Socket::Udp(mut smol_socket) = self.devices[moto_socket.device_idx]
             .sockets
             .remove(moto_socket.handle)
         else {
             panic!();
         };
+
+        smol_socket.close();
 
         if let Some(port) = moto_socket.ephemeral_port.take() {
             self.devices[moto_socket.device_idx].free_ephemeral_udp_port(port);
@@ -1934,12 +1943,19 @@ impl NetSys {
 
         if let Ok((buf, udp_metadata)) = smol_socket.recv() {
             let addr: SocketAddr = socket_addr_from_endpoint(udp_metadata.endpoint);
+            log::debug!(
+                "UDP socket 0x{:x} got {} bytes from {:?}",
+                u64::from(socket_id),
+                buf.len(),
+                addr
+            );
             moto_socket.rx_queue.push_back(buf, addr);
         }
 
         while let Some(mut msg) = moto_socket.rx_queue.pop_front(page_allocator) {
             msg.status = moto_rt::E_OK;
 
+            log::debug!("pending RX msg for UDP socket 0x{:x}", u64::from(socket_id));
             self.pending_completions.push_back(PendingCompletion {
                 msg,
                 endpoint_handle: moto_socket.conn.wait_handle(),
@@ -2030,7 +2046,8 @@ impl NetSys {
             } else {
                 did_send = true;
                 log::debug!(
-                    "UDP: sent {} bytes to {:?}",
+                    "UDP: socket 0x{:x} sent {} bytes to {:?}",
+                    u64::from(socket_id),
                     datagram.slice().len(),
                     datagram.addr
                 );
@@ -2230,6 +2247,15 @@ impl NetSys {
             endpoint_handle: conn.wait_handle(),
         });
     }
+
+    fn poll_devices(&mut self) -> bool {
+        let mut polled = false;
+        for dev in &mut self.devices {
+            polled |= dev.poll();
+        }
+
+        polled
+    }
 }
 
 impl IoSubsystem for NetSys {
@@ -2361,10 +2387,7 @@ impl IoSubsystem for NetSys {
         }
 
         loop {
-            let mut polled = false;
-            for dev in &mut self.devices {
-                polled |= dev.poll();
-            }
+            let polled = self.poll_devices();
 
             // Sometimes, e.g. on listener bind, sockets will get polled/woken
             // outside of dev.poll(), so we cannot rely on only !polled.

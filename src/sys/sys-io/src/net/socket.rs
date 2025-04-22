@@ -215,10 +215,6 @@ pub(super) struct UdpSocket {
     pub rx_queue: UdpFragmentingQueue,
 
     pub socket_addr: SocketAddr,
-
-    // stats
-    pub stats_rx_bytes: u64, // Bytes sent to the application.
-    pub stats_tx_bytes: u64, // Bytes received from the application.
 }
 
 impl Drop for UdpSocket {
@@ -247,8 +243,6 @@ impl UdpSocket {
             ephemeral_port: None,
             tx_queue: UdpDefragmentingQueue::new(),
             rx_queue: UdpFragmentingQueue::new(socket_id.0, subchannel_mask),
-            stats_rx_bytes: 0,
-            stats_tx_bytes: 0,
             socket_addr,
         }
     }
