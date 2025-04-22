@@ -2,8 +2,8 @@ use mio_moturus as mio;
 
 use log::{debug, info};
 use mio::net::UdpSocket;
-use mio::{Events, Interest, Poll, Registry, Token};
-use std::net::{self, IpAddr, SocketAddr};
+use mio::{Events, Interest, Poll, Token};
+use std::net::{self, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::str;
 use std::sync::{Arc, Barrier};
@@ -1049,9 +1049,9 @@ pub fn multicast() {
         }
     }
 }
+*/
 
-#[test]
-fn et_behavior_recv() {
+fn test_et_behavior_recv() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -1102,10 +1102,11 @@ fn et_behavior_recv() {
 
     let mut buf = [0; 20];
     expect_read!(socket2.recv(&mut buf), DATA1);
+
+    println!("udp_socket::test_et_behavior_recv PASS");
 }
 
-#[test]
-fn et_behavior_recv_from() {
+fn test_et_behavior_recv_from() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -1162,8 +1163,9 @@ fn et_behavior_recv_from() {
 
     assert!(socket1.take_error().unwrap().is_none());
     assert!(socket2.take_error().unwrap().is_none());
+
+    println!("udp_socket::test_et_behavior_recv_from PASS");
 }
-*/
 
 pub fn run_all_tests() {
     #[cfg(not(debug_assertions))]
@@ -1184,9 +1186,12 @@ pub fn run_all_tests() {
     test_udp_socket_raw_fd();
     test_udp_socket_register();
     test_udp_socket_reregister();
+    test_udp_socket_no_events_after_deregister();
     test_udp_socket();
     test_udp_socket_send_recv();
     test_udp_socket_discard();
+    test_et_behavior_recv();
+    test_et_behavior_recv_from();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("udp_socket ALL PASS");
