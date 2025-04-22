@@ -782,7 +782,6 @@ fn send_packets(
     })
 }
 
-/*
 pub struct UdpHandlerSendRecv {
     tx: UdpSocket,
     rx: UdpSocket,
@@ -885,27 +884,26 @@ fn connected_sockets() -> (UdpSocket, UdpSocket) {
     (tx, rx)
 }
 
-#[test]
-pub fn udp_socket() {
+pub fn test_udp_socket() {
     init();
 
     let tx = UdpSocket::bind(any_local_address()).unwrap();
     let rx = UdpSocket::bind(any_local_address()).unwrap();
 
     send_recv_udp(tx, rx, false);
+    println!("udp_socket::test_udp_socket PASS");
 }
 
-#[test]
-pub fn udp_socket_send_recv() {
+pub fn test_udp_socket_send_recv() {
     init();
 
     let (tx, rx) = connected_sockets();
 
     send_recv_udp(tx, rx, true);
+    println!("udp_socket::test_udp_socket_send_recv PASS");
 }
 
-#[test]
-pub fn udp_socket_discard() {
+pub fn test_udp_socket_discard() {
     init();
 
     let mut tx = UdpSocket::bind(any_local_address()).unwrap();
@@ -942,8 +940,11 @@ pub fn udp_socket_discard() {
             }
         }
     }
+
+    println!("udp_socket::test_udp_socket_discard PASS");
 }
 
+/*
 pub struct UdpHandler {
     tx: UdpSocket,
     rx: UdpSocket,
@@ -1183,6 +1184,9 @@ pub fn run_all_tests() {
     test_udp_socket_raw_fd();
     test_udp_socket_register();
     test_udp_socket_reregister();
+    test_udp_socket();
+    test_udp_socket_send_recv();
+    test_udp_socket_discard();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("udp_socket ALL PASS");

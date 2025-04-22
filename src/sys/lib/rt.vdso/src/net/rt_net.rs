@@ -999,7 +999,10 @@ impl NetChannel {
             api_net::NetCmd::UdpSocketTxRx => {
                 // RX raced with the client dropping the sream. Need to get page to free it.
                 // Get the page so that it is properly dropped.
-                let _ = self.conn.get_page(msg.payload.shared_pages()[11]);
+                let sz = msg.payload.args_16()[10];
+                if sz != 0 {
+                    let _ = self.conn.get_page(msg.payload.shared_pages()[11]);
+                }
             }
             api_net::NetCmd::UdpSocketTxRxAck => {}
             _ => {
