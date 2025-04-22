@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2025-04-22
+
+- UDP is working, excl. multicast/broadcst (both std::net and mio/tokio).
+
 ## 2025-04-08
 
 - Tokio runtime and tokio/mio async TCP APIs are working.

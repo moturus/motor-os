@@ -1013,8 +1013,6 @@ rt_test! {
         println!("\t{}/test_wake_while_rt_is_dropping PASS", module_path!());
     }
 
-    /*
-    // TODO: Motor OS: uncomment when UDP is working.
     #[cfg(not(target_os="wasi"))] // Wasi doesn't support UDP or bind()
     #[cfg_attr(miri, ignore)] // No `socket` in miri.
     fn test_io_notify_while_shutting_down() {
@@ -1051,7 +1049,6 @@ rt_test! {
         }
         println!("\t{}/test_io_notify_while_shutting_down PASS", module_path!());
     }
-    */
 
     #[cfg(not(target_os="wasi"))] // Wasi does not support threads
     fn test_shutdown_timeout() {
@@ -1481,7 +1478,7 @@ rt_test! {
         test_enter_and_spawn();
         test_eagerly_drops_futures_on_shutdown();
         test_wake_while_rt_is_dropping();
-        // test_io_notify_while_shutting_down(); // TODO: enable when UDP works.
+        test_io_notify_while_shutting_down();
         test_shutdown_timeout();
         test_shutdown_timeout_0();
         test_shutdown_wakeup_time();
