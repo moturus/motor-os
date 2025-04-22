@@ -333,10 +333,6 @@ impl UdpSocket {
     }
 
     pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        if self.peer_addr().is_none() {
-            return Err(moto_rt::E_NOT_CONNECTED);
-        };
-
         self.recv_or_peek_from(buf, true).map(|(sz, _)| sz)
     }
 
@@ -459,10 +455,6 @@ impl PosixFile for UdpSocket {
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        if self.peer_addr().is_none() {
-            return Err(moto_rt::E_NOT_CONNECTED);
-        };
-
         self.recv_or_peek_from(buf, false).map(|(sz, _)| sz)
     }
 

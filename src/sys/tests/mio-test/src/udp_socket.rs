@@ -285,8 +285,9 @@ fn get_multicast_loop_v6_without_previous_set() {
         .expect("unable to get multicast_loop_v6 for UDP socket");
 }
 
-#[test]
-fn connected_udp_socket_ipv4() {
+*/
+
+fn test_connected_udp_socket_ipv4() {
     let socket1 = UdpSocket::bind(any_local_address()).unwrap();
     let address1 = socket1.local_addr().unwrap();
 
@@ -297,10 +298,10 @@ fn connected_udp_socket_ipv4() {
     socket2.connect(address1).unwrap();
 
     smoke_test_connected_udp_socket(socket1, socket2);
+    println!("udp_socket::test_connected_udp_socket_ipv4 PASS");
 }
 
-#[test]
-fn connected_udp_socket_ipv6() {
+fn test_connected_udp_socket_ipv6() {
     let socket1 = UdpSocket::bind(any_local_ipv6_address()).unwrap();
     let address1 = socket1.local_addr().unwrap();
 
@@ -311,10 +312,10 @@ fn connected_udp_socket_ipv6() {
     socket2.connect(address1).unwrap();
 
     smoke_test_connected_udp_socket(socket1, socket2);
+    println!("udp_socket::test_connected_udp_socket_ipv6 PASS");
 }
 
-#[test]
-fn connected_udp_socket_std() {
+fn test_connected_udp_socket_std() {
     let socket1 = net::UdpSocket::bind(any_local_address()).unwrap();
     let address1 = socket1.local_addr().unwrap();
 
@@ -333,6 +334,7 @@ fn connected_udp_socket_std() {
     let socket2 = UdpSocket::from_std(socket2);
 
     smoke_test_connected_udp_socket(socket1, socket2);
+    println!("udp_socket::test_connected_udp_socket_std PASS");
 }
 
 fn smoke_test_connected_udp_socket(mut socket1: UdpSocket, mut socket2: UdpSocket) {
@@ -394,8 +396,7 @@ fn smoke_test_connected_udp_socket(mut socket1: UdpSocket, mut socket2: UdpSocke
     assert!(socket2.take_error().unwrap().is_none());
 }
 
-#[test]
-fn reconnect_udp_socket_sending() {
+fn test_reconnect_udp_socket_sending() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -455,10 +456,10 @@ fn reconnect_udp_socket_sending() {
     assert!(socket1.take_error().unwrap().is_none());
     assert!(socket2.take_error().unwrap().is_none());
     assert!(socket3.take_error().unwrap().is_none());
+    println!("udp_socket::test_reconnect_udp_socket_sending PASS");
 }
 
-#[test]
-fn reconnect_udp_socket_receiving() {
+fn test_reconnect_udp_socket_receiving() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -539,10 +540,10 @@ fn reconnect_udp_socket_receiving() {
     assert!(socket1.take_error().unwrap().is_none());
     assert!(socket2.take_error().unwrap().is_none());
     assert!(socket3.take_error().unwrap().is_none());
+    println!("udp_socket::test_reconnect_udp_socket_receiving PASS");
 }
 
-#[test]
-fn unconnected_udp_socket_connected_methods() {
+fn test_unconnected_udp_socket_connected_methods() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -564,7 +565,10 @@ fn unconnected_udp_socket_connected_methods() {
 
     // Socket is unconnected, but we're using an connected method.
     if cfg!(not(any(target_os = "hurd", target_os = "windows"))) {
-        assert_error(socket1.send(DATA1), "address required");
+        assert_eq!(
+            socket1.send(DATA1).err().unwrap().kind(),
+            std::io::ErrorKind::NotConnected
+        );
     }
     if cfg!(target_os = "windows") {
         assert_error(
@@ -590,10 +594,10 @@ fn unconnected_udp_socket_connected_methods() {
 
     assert!(socket1.take_error().unwrap().is_none());
     assert!(socket2.take_error().unwrap().is_none());
+    println!("udp_socket::test_unconnected_udp_socket_connected_methods PASS");
 }
 
-#[test]
-fn connected_udp_socket_unconnected_methods() {
+fn test_connected_udp_socket_unconnected_methods() {
     let (mut poll, mut events) = init_with_poll();
 
     let mut socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -632,7 +636,8 @@ fn connected_udp_socket_unconnected_methods() {
         target_os = "android",
         target_os = "hurd",
         target_os = "linux",
-        target_os = "windows"
+        target_os = "windows",
+        target_os = "moturus"
     )))]
     assert_error(socket1.send_to(DATA1, address2), "already connected");
     // Even if the address is the same.
@@ -640,7 +645,8 @@ fn connected_udp_socket_unconnected_methods() {
         target_os = "android",
         target_os = "hurd",
         target_os = "linux",
-        target_os = "windows"
+        target_os = "windows",
+        target_os = "moturus"
     )))]
     assert_error(socket1.send_to(DATA1, address3), "already connected");
 
@@ -659,11 +665,12 @@ fn connected_udp_socket_unconnected_methods() {
     assert!(socket1.take_error().unwrap().is_none());
     assert!(socket2.take_error().unwrap().is_none());
     assert!(socket3.take_error().unwrap().is_none());
+
+    println!("udp_socket::test_connected_udp_socket_unconnected_methods PASS");
 }
 
-#[cfg(unix)]
-#[test]
-fn udp_socket_raw_fd() {
+/*
+fn test_udp_socket_raw_fd() {
     init();
 
     let socket = UdpSocket::bind(any_local_address()).unwrap();
@@ -676,8 +683,12 @@ fn udp_socket_raw_fd() {
     let socket = unsafe { UdpSocket::from_raw_fd(raw_fd2) };
     assert_eq!(socket.as_raw_fd(), raw_fd1);
     assert_eq!(socket.local_addr().unwrap(), address);
-}
 
+    println!("udp_socket::test_udp_socket_raw_fd PASS");
+}
+*/
+
+/*
 #[test]
 fn udp_socket_register() {
     let (mut poll, mut events) = init_with_poll();
@@ -1162,6 +1173,14 @@ pub fn run_all_tests() {
     test_unconnected_udp_socket_ipv4();
     test_unconnected_udp_socket_ipv6();
     test_unconnected_udp_socket_std();
+    test_connected_udp_socket_ipv4();
+    test_connected_udp_socket_ipv6();
+    test_connected_udp_socket_std();
+    test_reconnect_udp_socket_sending();
+    test_reconnect_udp_socket_receiving();
+    test_unconnected_udp_socket_connected_methods();
+    test_connected_udp_socket_unconnected_methods();
+    // test_udp_socket_raw_fd();
 
     std::thread::sleep(Duration::from_millis(100));
     println!("udp_socket ALL PASS");
