@@ -2,14 +2,22 @@
 mod windows;
 
 #[cfg(not(windows))]
+#[cfg(not(target_os = "moturus"))]
 #[cfg(not(target_arch = "wasm32"))]
 mod unix;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+#[cfg(target_os = "moturus")]
+mod wasm;
+
+#[cfg(target_os = "moturus")]
+pub use wasm::{memset, mlock, munlock};
+
 // Re-export functions based on the platform
 #[cfg(not(windows))]
+#[cfg(not(target_os = "moturus"))]
 #[cfg(not(target_arch = "wasm32"))]
 pub use unix::{memset, mlock, munlock};
 #[cfg(target_arch = "wasm32")]
