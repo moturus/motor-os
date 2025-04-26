@@ -1,0 +1,16 @@
+[package]
+name = "russhd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+russh = "0.52.0"
+rand_core = { version = "0.6" }
+tokio = "*"
+
+[patch.crates-io]
+tokio = { git = "https://github.com/moturus/tokio.git", branch = "motor-os_2025-04-07" }
+
+getrandom       = { path = "../../third_party/getrandom-0.2.16"       , features = ["rdrand"]}
+home            = { path = "../../third_party/home-0.5.11"            }
+russh-cryptovec = { path = "../../third_party/russh-cryptovec-0.52.0" }
