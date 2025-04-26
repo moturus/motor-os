@@ -64,3 +64,6 @@ features = [
 [target."cfg(unix)".dependencies.nix]
 version = "0.29"
 features = ["mman"]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [ 'cfg(target_os, values("moturus"))'] }

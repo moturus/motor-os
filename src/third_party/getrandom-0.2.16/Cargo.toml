@@ -119,3 +119,6 @@ default-features = false
 [target."cfg(unix)".dependencies.libc]
 version = "0.2.154"
 default-features = false
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [ 'cfg(target_os, values("moturus"))'] }

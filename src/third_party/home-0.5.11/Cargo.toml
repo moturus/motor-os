@@ -64,6 +64,7 @@ priority = -1
 
 [lints.rust]
 rust_2018_idioms = "warn"
+unexpected_cfgs = { level = "allow", check-cfg = [ 'cfg(target_os, values("moturus"))'] }
 
 [lints.rustdoc]
 private_intra_doc_links = "allow"

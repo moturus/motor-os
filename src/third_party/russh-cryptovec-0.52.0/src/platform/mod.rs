@@ -26,6 +26,7 @@ pub use wasm::{memset, mlock, munlock};
 pub use windows::{memset, mlock, munlock};
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_os = "moturus"))]
 mod error {
     use std::error::Error;
     use std::fmt::Display;
@@ -63,6 +64,7 @@ mod error {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_os = "moturus"))]
 pub use error::MemoryLockError;
 
 #[cfg(test)]
