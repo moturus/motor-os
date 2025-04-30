@@ -1,11 +1,12 @@
 #![no_std]
 
-#[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 
 pub mod io_channel;
 pub mod sync;
-pub mod sync_pipe;
+
+#[cfg(feature = "stdio-pipe")]
+pub mod stdio_pipe;
 
 #[macro_export]
 macro_rules! moto_log {

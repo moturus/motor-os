@@ -1,6 +1,6 @@
 [package]
 name = "moto-ipc"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["The Moturus Project Developers"]
 license = "MIT OR Apache-2.0"
 keywords = ["moturus", "motor-os"]
@@ -13,8 +13,5 @@ edition = "2021"
 moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }
 
-alloc = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
-core = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
-
 [features]
-rustc-dep-of-std = [ "alloc", "core", "moto-sys/rustc-dep-of-std" ]
+stdio-pipe = []

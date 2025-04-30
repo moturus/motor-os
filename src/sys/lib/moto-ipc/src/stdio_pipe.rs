@@ -1,3 +1,11 @@
+//! A simplex pipe used exclusively by rt.vdso for cross-process stdio.
+//!
+//! The module belongs into rt.vdso, but then it would be difficult to test it,
+//! as `cargo test` isn't easy for cross-compiled stuff, and our vdso is an even
+//! more exotic target than a normal motor-os binary.
+//!
+//! DO NOT USE outside of rt.vdso.
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use moto_sys::*;

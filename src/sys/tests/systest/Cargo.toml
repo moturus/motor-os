@@ -8,7 +8,7 @@ edition = "2021"
 
 [dependencies]
 moto-rt      = { path = "../../lib/moto-rt"     }
-moto-ipc     = { path = "../../lib/moto-ipc"    }
+moto-ipc     = { path = "../../lib/moto-ipc"    , features = ["stdio-pipe"]}
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-mpmc    = { path = "../../lib/moto-mpmc"   }
 

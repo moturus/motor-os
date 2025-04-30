@@ -652,12 +652,10 @@ dependencies = [
 
 [[package]]
 name = "moto-ipc"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "moto-rt 0.2.12",
  "moto-sys",
- "rustc-std-workspace-alloc",
- "rustc-std-workspace-core",
 ]
 
 [[package]]
