@@ -65,12 +65,12 @@ fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), Error
     ok_or_error(vdso_getsockopt(rt_fd, opt, ptr, len))
 }
 
-pub fn setsockopt_bool(rt_fd: RtFd, val: bool, opt: u64) -> Result<(), ErrorCode> {
+fn setsockopt_bool(rt_fd: RtFd, val: bool, opt: u64) -> Result<(), ErrorCode> {
     let val: u8 = if val { 1 } else { 0 };
     setsockopt(rt_fd, opt, &val as *const _ as usize, 1)
 }
 
-pub fn getsockopt_bool(rt_fd: RtFd, opt: u64) -> Result<bool, ErrorCode> {
+fn getsockopt_bool(rt_fd: RtFd, opt: u64) -> Result<bool, ErrorCode> {
     let mut val = 0_u8;
     getsockopt(rt_fd, opt, &mut val as *mut _ as usize, 1)?;
     match val {
