@@ -7,7 +7,6 @@
 
 use core::any::Any;
 
-use crate::stdio::Stdio;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

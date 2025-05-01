@@ -8,6 +8,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use moto_rt::spinlock::SpinLock;
 use moto_sys::*;
 
 struct PipeBuffer {
@@ -177,210 +178,76 @@ impl PipeBuffer {
     }
 }
 
-pub struct Reader {
-    buffer: PipeBuffer,
+pub struct StdioPipe {
+    buffer: Option<SpinLock<PipeBuffer>>,
+    is_reader: bool,
+    handle: SysHandle,
 }
 
-pub struct Writer {
-    buffer: PipeBuffer,
-}
-
-impl Reader {
-    /// # Safety
-    ///
-    /// Assumes pipe_data is properly initialized.
-    pub unsafe fn new(pipe_data: RawPipeData) -> Reader {
-        Reader {
-            buffer: PipeBuffer::new(
-                pipe_data.buf_addr,
-                pipe_data.buf_size,
-                SysHandle::from_u64(pipe_data.ipc_handle),
-            ),
+impl StdioPipe {
+    pub const fn new_empty() -> Self {
+        Self {
+            buffer: None,
+            is_reader: false,
+            handle: SysHandle::NONE,
         }
     }
 
-    pub fn handle(&self) -> SysHandle {
-        self.buffer.ipc_handle
+    /// Construct a reader pipe.
+    ///
+    /// # Safety
+    ///
+    /// pipe_data must be properly set up.
+    pub unsafe fn new_reader(pipe_data: RawPipeData) -> Self {
+        Self {
+            buffer: Some(SpinLock::new(PipeBuffer::new(
+                pipe_data.buf_addr,
+                pipe_data.buf_size,
+                SysHandle::from_u64(pipe_data.ipc_handle),
+            ))),
+            is_reader: true,
+            handle: SysHandle::from_u64(pipe_data.ipc_handle),
+        }
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    /// Construct a writer pipe.
+    ///
+    /// # Safety
+    ///
+    /// pipe_data must be properly set up.
+    pub unsafe fn new_writer(pipe_data: RawPipeData) -> Self {
+        Self {
+            buffer: Some(SpinLock::new(PipeBuffer::new(
+                pipe_data.buf_addr,
+                pipe_data.buf_size,
+                SysHandle::from_u64(pipe_data.ipc_handle),
+            ))),
+            is_reader: false,
+            handle: SysHandle::from_u64(pipe_data.ipc_handle),
+        }
+    }
+
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         self.read_timeout(buf, None)
     }
 
     pub fn read_timeout(
-        &mut self,
+        &self,
         buf: &mut [u8],
         timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
-        self.buffer.assert_invariants();
-        if buf.is_empty() {
+        if !self.is_reader {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        // Even if the remote end is gone (self.buffer.error_code.is_err()),
-        // we should complete reading bytes left in the buffer.
-        'outer: loop {
-            while !self.buffer.can_read() {
-                if self.buffer.error_code != moto_rt::E_OK {
-                    break 'outer;
-                }
-                if let Err(e) = SysCpu::wait(
-                    &mut [self.buffer.ipc_handle],
-                    self.buffer.ipc_handle,
-                    SysHandle::NONE,
-                    timeout,
-                ) {
-                    self.buffer.error_code = e;
-                    break 'outer;
-                }
-            }
-            let read = self.buffer.read(buf);
-            if read > 0 {
-                if self.buffer.error_code != moto_rt::E_OK {
-                    return Ok(read);
-                }
-                if let Err(e) = SysCpu::wake(self.buffer.ipc_handle) {
-                    // Cache the error.
-                    self.buffer.error_code = e;
-                }
-                return Ok(read);
-            }
-        }
-
-        // One last read: if the remote process wrote something
-        // and then exited, we don't want to lose that.
-        let read = self.buffer.read(buf);
-        if read > 0 {
-            if self.buffer.error_code == moto_rt::E_TIMED_OUT {
-                self.buffer.error_code = moto_rt::E_OK;
-            }
-            return Ok(read);
-        }
-
-        if self.buffer.error_code == moto_rt::E_TIMED_OUT {
-            self.buffer.error_code = moto_rt::E_OK;
-            Err(moto_rt::E_TIMED_OUT)
+        if let Some(buffer) = self.buffer.as_ref() {
+            Self::read_timeout_impl(&mut buffer.lock(), buf, timeout)
         } else {
-            Err(self.buffer.error_code)
+            Ok(0)
         }
     }
 
-    pub fn total_read(&self) -> usize {
-        self.buffer.reader_counter().load(Ordering::Relaxed)
-    }
-}
-
-impl Writer {
-    /// # Safety
-    ///
-    /// Assumes pipe_data is properly initialized.
-    pub unsafe fn new(pipe_data: RawPipeData) -> Writer {
-        Writer {
-            buffer: PipeBuffer::new(
-                pipe_data.buf_addr,
-                pipe_data.buf_size,
-                SysHandle::from_u64(pipe_data.ipc_handle),
-            ),
-        }
-    }
-
-    pub fn handle(&self) -> SysHandle {
-        self.buffer.ipc_handle
-    }
-
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.write_timeout(buf, None)
-    }
-
-    pub fn write_timeout(
-        &mut self,
-        buf: &[u8],
-        timeout: Option<moto_rt::time::Instant>,
-    ) -> Result<usize, ErrorCode> {
-        if self.buffer.error_code != moto_rt::E_OK {
-            return Err(self.buffer.error_code);
-        }
-        self.buffer.assert_invariants();
-        if buf.is_empty() {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-
-        let mut written = 0_usize;
-
-        loop {
-            while !self.buffer.can_write() {
-                if let Err(err) = SysCpu::wait(
-                    &mut [self.buffer.ipc_handle],
-                    self.buffer.ipc_handle,
-                    SysHandle::NONE,
-                    timeout,
-                ) {
-                    self.buffer.error_code = err;
-                    written = written.saturating_sub(self.buffer.unwrite());
-                    if written > 0 {
-                        return Ok(written);
-                    } else {
-                        return Err(err);
-                    }
-                }
-            }
-
-            written += self.buffer.write(&buf[written..]);
-            if written == buf.len() {
-                if let Err(err) = SysCpu::wake(self.buffer.ipc_handle) {
-                    // Cache the error.
-                    self.buffer.error_code = err;
-                    written = written.saturating_sub(self.buffer.unwrite());
-                    if written > 0 {
-                        return Ok(written);
-                    } else {
-                        return Err(err);
-                    }
-                }
-                return Ok(written);
-            }
-        }
-    }
-
-    pub fn total_written(&self) -> usize {
-        self.buffer.writer_counter().load(Ordering::Relaxed)
-    }
-}
-
-#[derive(Default)]
-pub enum Pipe {
-    Reader(Reader),
-    Writer(Writer),
-    #[default]
-    Empty,
-    Null,
-}
-
-impl Pipe {
-    pub const fn new() -> Self {
-        Self::Empty
-    }
-
-    pub const fn empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read_timeout(buf, None)
-    }
-
-    pub fn read_timeout(
-        &mut self,
-        buf: &mut [u8],
-        timeout: Option<moto_rt::time::Instant>,
-    ) -> Result<usize, ErrorCode> {
-        match self {
-            Self::Reader(reader) => reader.read_timeout(buf, timeout),
-            Self::Null => Ok(0),
-            _ => Err(moto_rt::E_INVALID_ARGUMENT),
-        }
-    }
-
+    /*
     pub fn read_to_end(&mut self, buf: &mut alloc::vec::Vec<u8>) -> Result<usize, ErrorCode> {
         let mut temp_vec = alloc::vec::Vec::new();
         let mut size = 0_usize;
@@ -400,28 +267,160 @@ impl Pipe {
             }
         }
     }
+    */
 
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize, ErrorCode> {
+    pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         self.write_timeout(buf, None)
     }
 
     pub fn write_timeout(
-        &mut self,
+        &self,
         buf: &[u8],
         timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
-        match self {
-            Self::Writer(writer) => writer.write_timeout(buf, timeout),
-            Self::Null => Ok(0),
-            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        if let Some(buffer) = self.buffer.as_ref() {
+            Self::write_timeout_impl(&mut buffer.lock(), buf, timeout)
+        } else {
+            Ok(0)
         }
     }
 
     pub fn handle(&self) -> SysHandle {
-        match self {
-            Self::Reader(reader) => reader.buffer.ipc_handle,
-            Self::Writer(writer) => writer.buffer.ipc_handle,
-            _ => SysHandle::NONE,
+        self.handle
+    }
+
+    pub fn total_read(&self) -> usize {
+        if !self.is_reader {
+            return 0;
+        }
+
+        if let Some(buffer) = self.buffer.as_ref() {
+            buffer.lock().reader_counter().load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    pub fn total_written(&self) -> usize {
+        if self.is_reader {
+            return 0;
+        }
+        if let Some(buffer) = self.buffer.as_ref() {
+            buffer.lock().writer_counter().load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    fn read_timeout_impl(
+        buffer: &mut PipeBuffer,
+        buf: &mut [u8],
+        timeout: Option<moto_rt::time::Instant>,
+    ) -> Result<usize, ErrorCode> {
+        buffer.assert_invariants();
+        if buf.is_empty() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        // Even if the remote end is gone (self.buffer.error_code.is_err()),
+        // we should complete reading bytes left in the buffer.
+        'outer: loop {
+            while !buffer.can_read() {
+                if buffer.error_code != moto_rt::E_OK {
+                    break 'outer;
+                }
+                if let Err(e) = SysCpu::wait(
+                    &mut [buffer.ipc_handle],
+                    buffer.ipc_handle,
+                    SysHandle::NONE,
+                    timeout,
+                ) {
+                    buffer.error_code = e;
+                    break 'outer;
+                }
+            }
+            let read = buffer.read(buf);
+            if read > 0 {
+                if buffer.error_code != moto_rt::E_OK {
+                    return Ok(read);
+                }
+                if let Err(e) = SysCpu::wake(buffer.ipc_handle) {
+                    // Cache the error.
+                    buffer.error_code = e;
+                }
+                return Ok(read);
+            }
+        }
+
+        // One last read: if the remote process wrote something
+        // and then exited, we don't want to lose that.
+        let read = buffer.read(buf);
+        if read > 0 {
+            if buffer.error_code == moto_rt::E_TIMED_OUT {
+                buffer.error_code = moto_rt::E_OK;
+            }
+            return Ok(read);
+        }
+
+        if buffer.error_code == moto_rt::E_TIMED_OUT {
+            buffer.error_code = moto_rt::E_OK;
+            Err(moto_rt::E_TIMED_OUT)
+        } else {
+            Err(buffer.error_code)
+        }
+    }
+
+    fn write_timeout_impl(
+        buffer: &mut PipeBuffer,
+        buf: &[u8],
+        timeout: Option<moto_rt::time::Instant>,
+    ) -> Result<usize, ErrorCode> {
+        if buffer.error_code != moto_rt::E_OK {
+            return Err(buffer.error_code);
+        }
+        buffer.assert_invariants();
+        if buf.is_empty() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let mut written = 0_usize;
+
+        loop {
+            while !buffer.can_write() {
+                if let Err(err) = SysCpu::wait(
+                    &mut [buffer.ipc_handle],
+                    buffer.ipc_handle,
+                    SysHandle::NONE,
+                    timeout,
+                ) {
+                    buffer.error_code = err;
+                    written = written.saturating_sub(buffer.unwrite());
+                    if written > 0 {
+                        return Ok(written);
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+
+            written += buffer.write(&buf[written..]);
+            if written == buf.len() {
+                if let Err(err) = SysCpu::wake(buffer.ipc_handle) {
+                    // Cache the error.
+                    buffer.error_code = err;
+                    written = written.saturating_sub(buffer.unwrite());
+                    if written > 0 {
+                        return Ok(written);
+                    } else {
+                        return Err(err);
+                    }
+                }
+                return Ok(written);
+            }
         }
     }
 }

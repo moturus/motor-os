@@ -3,7 +3,7 @@ use crate::posix::PosixFile;
 use crate::{rt_process::ProcessData, rt_process::StdioData};
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
-use moto_ipc::stdio_pipe::Pipe;
+use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::spinlock::SpinLock;
 use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
 use moto_sys::SysHandle;
@@ -20,7 +20,7 @@ impl StdioKind {
         matches!(self, StdioKind::Stdin)
     }
 
-    pub fn get(&self) -> &'static Stdio {
+    fn get(&self) -> &'static SelfStdio {
         let fd = match self {
             Self::Stdin => moto_rt::FD_STDIN,
             Self::Stdout => moto_rt::FD_STDOUT,
@@ -30,11 +30,11 @@ impl StdioKind {
         let Some(posix_file) = posix::get_file(fd) else {
             panic!();
         };
-        let Some(stdio) = (posix_file.as_ref() as &dyn Any).downcast_ref::<Stdio>() else {
+        let Some(stdio) = (posix_file.as_ref() as &dyn Any).downcast_ref::<SelfStdio>() else {
             panic!();
         };
         unsafe {
-            (stdio as *const _ as usize as *const Stdio)
+            (stdio as *const _ as usize as *const SelfStdio)
                 .as_ref()
                 .unwrap()
         }
@@ -42,7 +42,7 @@ impl StdioKind {
 }
 struct StdioImpl {
     kind: StdioKind,
-    pipe: Pipe,
+    pipe: StdioPipe,
     overflow: Vec<u8>,
 }
 
@@ -57,23 +57,19 @@ impl StdioImpl {
                 StdioKind::Stderr => &proc_data.stderr,
             };
             if pipe_data.pipe_addr == 0 {
-                Pipe::Null
+                StdioPipe::new_empty()
             } else if kind.is_reader() {
-                Pipe::Reader(moto_ipc::stdio_pipe::Reader::new(
-                    moto_ipc::stdio_pipe::RawPipeData {
-                        buf_addr: pipe_data.pipe_addr as usize,
-                        buf_size: pipe_data.pipe_size as usize,
-                        ipc_handle: pipe_data.handle,
-                    },
-                ))
+                StdioPipe::new_reader(moto_ipc::stdio_pipe::RawPipeData {
+                    buf_addr: pipe_data.pipe_addr as usize,
+                    buf_size: pipe_data.pipe_size as usize,
+                    ipc_handle: pipe_data.handle,
+                })
             } else {
-                Pipe::Writer(moto_ipc::stdio_pipe::Writer::new(
-                    moto_ipc::stdio_pipe::RawPipeData {
-                        buf_addr: pipe_data.pipe_addr as usize,
-                        buf_size: pipe_data.pipe_size as usize,
-                        ipc_handle: pipe_data.handle,
-                    },
-                ))
+                StdioPipe::new_writer(moto_ipc::stdio_pipe::RawPipeData {
+                    buf_addr: pipe_data.pipe_addr as usize,
+                    buf_size: pipe_data.pipe_size as usize,
+                    ipc_handle: pipe_data.handle,
+                })
             }
         };
         Self {
@@ -132,11 +128,11 @@ impl StdioImpl {
     }
 }
 
-pub struct Stdio {
+struct SelfStdio {
     inner: SpinLock<StdioImpl>,
 }
 
-impl PosixFile for Stdio {
+impl PosixFile for SelfStdio {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         self.inner.lock().read(buf)
     }
@@ -179,7 +175,7 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
             // See also https://devblogs.microsoft.com/oldnewthing/20111202-00/?p=8983.
             let stdin = from.get();
             let mut stdin_lock = stdin.inner.lock();
-            let mut dest = unsafe { moto_ipc::stdio_pipe::Writer::new(to) };
+            let mut dest = unsafe { StdioPipe::new_writer(to) };
             let mut buf = [0_u8; 80];
 
             // We need to break if the child exits, so we wait for the child or for the data,
@@ -234,7 +230,7 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
                 }
             } // loop
         } else {
-            let mut dest = unsafe { moto_ipc::stdio_pipe::Reader::new(to) };
+            let mut dest = unsafe { StdioPipe::new_reader(to) };
             let mut buf = [0_u8; 80];
             while let Ok(sz) = dest.read(&mut buf) {
                 if sz > 0 {
@@ -273,17 +269,17 @@ pub fn init() {
     use alloc::sync::Arc;
     use posix::PosixFile;
 
-    let stdin_fd = posix::push_file(Arc::new(Stdio {
+    let stdin_fd = posix::push_file(Arc::new(SelfStdio {
         inner: SpinLock::new(StdioImpl::new(StdioKind::Stdin)),
     }));
     assert_eq!(moto_rt::FD_STDIN, stdin_fd);
 
-    let stdout_fd = posix::push_file(Arc::new(Stdio {
+    let stdout_fd = posix::push_file(Arc::new(SelfStdio {
         inner: SpinLock::new(StdioImpl::new(StdioKind::Stdout)),
     }));
     assert_eq!(moto_rt::FD_STDOUT, stdout_fd);
 
-    let stderr_fd = posix::push_file(Arc::new(Stdio {
+    let stderr_fd = posix::push_file(Arc::new(SelfStdio {
         inner: SpinLock::new(StdioImpl::new(StdioKind::Stderr)),
     }));
     assert_eq!(moto_rt::FD_STDERR, stderr_fd);
@@ -358,12 +354,8 @@ fn create_stdio_pipes(
             let (local_data, remote_data) =
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
             if kind == moto_rt::FD_STDIN {
-                let pipe = unsafe {
-                    moto_ipc::stdio_pipe::Pipe::Writer(moto_ipc::stdio_pipe::Writer::new(
-                        local_data,
-                    ))
-                };
-                let pipe_fd = posix::push_file(Arc::new(StdioPipe {
+                let pipe = unsafe { StdioPipe::new_writer(local_data) };
+                let pipe_fd = posix::push_file(Arc::new(ChildStdio {
                     inner: SpinLock::new(pipe),
                 }));
                 Ok((
@@ -375,12 +367,8 @@ fn create_stdio_pipes(
                     },
                 ))
             } else {
-                let pipe = unsafe {
-                    moto_ipc::stdio_pipe::Pipe::Reader(moto_ipc::stdio_pipe::Reader::new(
-                        local_data,
-                    ))
-                };
-                let pipe_fd = posix::push_file(Arc::new(StdioPipe {
+                let pipe = unsafe { StdioPipe::new_reader(local_data) };
+                let pipe_fd = posix::push_file(Arc::new(ChildStdio {
                     inner: SpinLock::new(pipe),
                 }));
                 Ok((
@@ -397,11 +385,11 @@ fn create_stdio_pipes(
     }
 }
 
-struct StdioPipe {
-    inner: SpinLock<moto_ipc::stdio_pipe::Pipe>,
+struct ChildStdio {
+    inner: SpinLock<moto_ipc::stdio_pipe::StdioPipe>,
 }
 
-impl PosixFile for StdioPipe {
+impl PosixFile for ChildStdio {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         self.inner.lock().read(buf)
     }

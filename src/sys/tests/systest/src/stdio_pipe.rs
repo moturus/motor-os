@@ -1,11 +1,13 @@
+use moto_ipc::stdio_pipe::StdioPipe;
+
 fn test_stdio_pipe_basic() {
     use moto_sys::syscalls::*;
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
     let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
-    let mut reader = unsafe { moto_ipc::stdio_pipe::Reader::new(d1) };
-    let mut writer = unsafe { moto_ipc::stdio_pipe::Writer::new(d2) };
+    let reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
 
     let reader_thread = std::thread::spawn(move || {
         let mut step = 1_usize;
