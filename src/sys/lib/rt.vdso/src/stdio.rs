@@ -355,9 +355,7 @@ fn create_stdio_pipes(
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
             if kind == moto_rt::FD_STDIN {
                 let pipe = unsafe { StdioPipe::new_writer(local_data) };
-                let pipe_fd = posix::push_file(Arc::new(ChildStdio {
-                    inner: SpinLock::new(pipe),
-                }));
+                let pipe_fd = posix::push_file(Arc::new(ChildStdio { inner: pipe }));
                 Ok((
                     pipe_fd,
                     StdioData {
@@ -368,9 +366,7 @@ fn create_stdio_pipes(
                 ))
             } else {
                 let pipe = unsafe { StdioPipe::new_reader(local_data) };
-                let pipe_fd = posix::push_file(Arc::new(ChildStdio {
-                    inner: SpinLock::new(pipe),
-                }));
+                let pipe_fd = posix::push_file(Arc::new(ChildStdio { inner: pipe }));
                 Ok((
                     pipe_fd,
                     StdioData {
@@ -386,16 +382,16 @@ fn create_stdio_pipes(
 }
 
 struct ChildStdio {
-    inner: SpinLock<moto_ipc::stdio_pipe::StdioPipe>,
+    inner: StdioPipe,
 }
 
 impl PosixFile for ChildStdio {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.inner.lock().read(buf)
+        self.inner.read(buf)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.inner.lock().write(buf)
+        self.inner.write(buf)
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {
