@@ -247,28 +247,6 @@ impl StdioPipe {
         }
     }
 
-    /*
-    pub fn read_to_end(&mut self, buf: &mut alloc::vec::Vec<u8>) -> Result<usize, ErrorCode> {
-        let mut temp_vec = alloc::vec::Vec::new();
-        let mut size = 0_usize;
-        loop {
-            temp_vec.resize(256, 0_u8);
-            if let Ok(sz) = self.read(&mut temp_vec[..]) {
-                if sz == 0 {
-                    return Ok(size);
-                }
-                size += sz;
-                temp_vec.truncate(sz);
-                buf.append(&mut temp_vec);
-            } else if size != 0 {
-                return Ok(size);
-            } else {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-        }
-    }
-    */
-
     pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         self.write_timeout(buf, None)
     }

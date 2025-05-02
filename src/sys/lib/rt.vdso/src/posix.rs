@@ -167,19 +167,19 @@ pub extern "C" fn posix_duplicate(rt_fd: RtFd) -> RtFd {
 struct Placeholder;
 impl PosixFile for Placeholder {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        panic!()
+        Err(E_BAD_HANDLE)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        panic!()
+        Err(E_BAD_HANDLE)
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {
-        panic!()
+        Err(E_BAD_HANDLE)
     }
 
     fn close(&self) -> Result<(), ErrorCode> {
-        panic!()
+        Err(E_BAD_HANDLE)
     }
 }
 

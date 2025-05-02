@@ -93,6 +93,12 @@ fn do_command(cmd: String) {
     }
 
     match words[0] {
+        "echo1" => {
+            println!("{}", cmd.trim());
+        }
+        "echo2" => {
+            eprintln!("{}", cmd.trim());
+        }
         "oom" => {
             assert_eq!(1, words.len());
             trigger_oom()
