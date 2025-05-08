@@ -1,16 +1,14 @@
 #![allow(dead_code, unused_macros)]
+use log::{error, warn};
+use mio::event::Event;
+use mio::net::TcpStream;
+use mio::{Events, Interest, Poll, Token};
 use std::net::SocketAddr;
 use std::ops::BitOr;
 use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
 use std::{env, fmt, fs, io};
-
-use mio_moturus as mio;
-use log::{error, warn};
-use mio::event::Event;
-use mio::net::TcpStream;
-use mio::{Events, Interest, Poll, Token};
 
 pub fn init() {
     static INIT: Once = Once::new();

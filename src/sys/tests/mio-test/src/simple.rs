@@ -3,7 +3,6 @@
 // the server responds "pong".
 const NUM_CLIENTS: usize = 4;
 
-use mio_moturus as mio;
 // This is a modified tcp_server.rs example from toko-rs/mio.
 use mio::event::Event;
 use mio::net::TcpListener;

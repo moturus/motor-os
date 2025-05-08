@@ -1,5 +1,3 @@
-use mio_moturus as mio;
-
 use log::{debug, info};
 use mio::net::UdpSocket;
 use mio::{Events, Interest, Poll, Token};

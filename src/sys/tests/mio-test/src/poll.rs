@@ -5,7 +5,6 @@ use std::time::Duration;
 use std::{fmt, io};
 
 use mio::event::Source;
-use mio_moturus as mio;
 // use mio::net::{TcpListener, TcpStream, UdpSocket};
 use mio::net::{TcpListener, TcpStream};
 use mio::{event, Events, Interest, Poll, Registry, Token};

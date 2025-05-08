@@ -1,4 +1,3 @@
-use mio_moturus as mio;
 use mio::net::TcpListener;
 use mio::{Interest, Token};
 use std::io::{self, Read};

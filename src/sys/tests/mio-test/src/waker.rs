@@ -1,4 +1,3 @@
-use mio_moturus as mio;
 use mio::{Events, Poll, Token, Waker};
 use std::sync::{Arc, Barrier};
 use std::thread;

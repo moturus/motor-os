@@ -1,6 +1,5 @@
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
-use mio_moturus as mio;
 use std::io::{self, Read, Write};
 use std::net::{self, Shutdown};
 use std::sync::mpsc::channel;
