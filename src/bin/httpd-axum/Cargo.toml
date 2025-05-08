@@ -15,11 +15,12 @@ clap = { version = "=4.5.6", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { git = "https://github.com/moturus/tokio.git", branch = "motor-os_2025-04-07", features = ["net", "rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.44.2", features = ["net", "rt", "rt-multi-thread", "macros"] }
 
 [patch.crates-io]
 ring = { git = "https://github.com/moturus/ring.git" }
-tokio = { git = "https://github.com/moturus/tokio.git", branch = "motor-os_2025-04-07" }
+mio   = { git = "https://github.com/moturus/mio.git", branch = "mio-moturus-v1.0.1" }
+tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-moturus-1.44.2" }
 
 [profile.release]
 panic = "abort"

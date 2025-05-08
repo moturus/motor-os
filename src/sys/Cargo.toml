@@ -44,6 +44,9 @@ moto-virtio  = { path = "lib/virtio"          }
 srfs-core    = { path = "lib/srfs-core"       }
 srfs         = { path = "lib/srfs"            }
 
+mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-moturus-v1.0.1" }
+tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-moturus-1.44.2" }
+
 [profile.dev]
 panic = "abort"
 

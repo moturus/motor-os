@@ -6,9 +6,10 @@ edition = "2021"
 [dependencies]
 futures = "0.3.31"
 pin-project-lite = "0.2.16"
-tokio = { git = "https://github.com/moturus/tokio.git", branch = "motor-os_2025-04-07", features = ["io-util", "net", "rt", "rt-multi-thread", "macros", "sync", "time" ] }
+# NOTE: tokio is patched in the workspace Cargo.toml
+tokio = { version = "1.44.2", features = ["io-util", "net", "rt", "rt-multi-thread", "macros", "sync", "time" ] }
 tokio-stream = "0.1"
-tokio-metrics = { git = "https://github.com/moturus/tokio-metrics.git" }
+tokio-metrics = "0.4.2"
 tokio-test = "0.4.4"
 
 [lints.rust]

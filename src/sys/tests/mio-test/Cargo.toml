@@ -5,5 +5,7 @@ edition = "2021"
 
 [dependencies]
 log = "0.4.8"
-mio = { git = "https://github.com/moturus/mio.git", branch = "mio-moturus-v1.0.1", features = ["net", "os-poll"]}
 moto-rt = { path = "../../lib/moto-rt" }
+
+# NOTE: mio is patched in the workspace Cargo.toml
+mio = { version = "1.0.1", features = ["net", "os-poll"]}
