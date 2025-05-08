@@ -35,6 +35,8 @@ fn main() {
         .spawn(input_listener)
         .unwrap();
 
+    env_logger::init();
+
     simple::test();
     poll::run_all_tests();
     waker::run_all_tests();
