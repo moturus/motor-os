@@ -8,7 +8,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use moto_rt::spinlock::SpinLock;
+use moto_rt::{spinlock::SpinLock, E_INVALID_ARGUMENT};
 use moto_sys::*;
 
 struct PipeBuffer {
@@ -193,6 +193,34 @@ impl StdioPipe {
         }
     }
 
+    pub fn is_reader(&self) -> bool {
+        self.is_reader
+    }
+
+    pub fn can_read(&self) -> bool {
+        if !self.is_reader {
+            return false;
+        }
+
+        let Some(buffer) = self.buffer.as_ref() else {
+            return false;
+        };
+
+        buffer.lock().can_read()
+    }
+
+    pub fn can_write(&self) -> bool {
+        if self.is_reader {
+            return false;
+        }
+
+        let Some(buffer) = self.buffer.as_ref() else {
+            return false;
+        };
+
+        buffer.lock().can_write()
+    }
+
     /// Construct a reader pipe.
     ///
     /// # Safety
@@ -247,6 +275,30 @@ impl StdioPipe {
         }
     }
 
+    pub fn nonblocking_read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        let Some(buffer) = self.buffer.as_ref() else {
+            return Err(E_INVALID_ARGUMENT);
+        };
+
+        let mut buffer = buffer.lock();
+        if buffer.error_code != moto_rt::E_OK {
+            return Err(buffer.error_code);
+        }
+
+        let sz = buffer.read(buf);
+        if sz == 0 {
+            return Err(moto_rt::E_NOT_READY);
+        }
+
+        if let Err(e) = SysCpu::wake(self.handle) {
+            // Cache the error.
+            buffer.error_code = e;
+            return Err(e);
+        }
+
+        Ok(sz)
+    }
+
     pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         self.write_timeout(buf, None)
     }
@@ -265,6 +317,30 @@ impl StdioPipe {
         } else {
             Ok(0)
         }
+    }
+
+    pub fn nonblocking_write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        let Some(buffer) = self.buffer.as_ref() else {
+            return Err(E_INVALID_ARGUMENT);
+        };
+
+        let mut buffer = buffer.lock();
+        if buffer.error_code != moto_rt::E_OK {
+            return Err(buffer.error_code);
+        }
+
+        let sz = buffer.write(buf);
+        if sz == 0 {
+            return Err(moto_rt::E_NOT_READY);
+        }
+
+        if let Err(e) = SysCpu::wake(self.handle) {
+            // Cache the error.
+            buffer.error_code = e;
+            return Err(e);
+        }
+
+        Ok(sz)
     }
 
     pub fn handle(&self) -> SysHandle {
