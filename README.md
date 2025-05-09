@@ -61,7 +61,7 @@ More specifically, these things work:
 * I/O subsystem (in the userspace)
   * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio">drivers</a>
   * two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs">flatfs</a>)
-  * <a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking (TCP only at the moment)
+  * <a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking
     * max host-guest TCP throughput is about 10Gbps at the moment
 * the userspace:
   * multiple processes, with preemption
@@ -89,7 +89,7 @@ but are slow (synchronous) and will have to be reimplemented using Motor OS asyn
   * UDP broadcast/multicast not implemented (yet?)
 * The ecosystem outside Rust std:
   * "sans-io" crates and crates like rand or rustls can be compiled and used with minor tweaks
-  * crates depending on specific async runtimes (e.g. Tokio) will not compile at the moment
+  * async Rust: Tokio is only partially ported, so most crates won't work without some refactoring
   * crates that are wrappers around native Linux or Windows APIs will not work, obviously
 
 ## How can I build/run it?
