@@ -18,7 +18,7 @@ pub type Token = u64;
 pub type Interests = u64;
 pub type EventBits = u64;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Event {
     pub token: Token,
     pub events: EventBits,
