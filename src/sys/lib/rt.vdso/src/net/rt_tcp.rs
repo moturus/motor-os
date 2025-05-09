@@ -13,6 +13,7 @@ use core::sync::atomic::*;
 use core::time::Duration;
 use crossbeam::utils::CachePadded;
 use moto_ipc::io_channel;
+use moto_rt::RtFd;
 use moto_rt::error::*;
 use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
@@ -20,12 +21,11 @@ use moto_rt::netc;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::time::Instant;
-use moto_rt::RtFd;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
-use moto_sys_io::api_net::TcpState;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
+use moto_sys_io::api_net::TcpState;
 
 use super::rt_net::ChannelReservation;
 use super::rt_net::NetChannel;
@@ -135,11 +135,12 @@ impl ResponseHandler for TcpListener {
         // otherwise racing accept may miss the queue).
         if wake_handle != SysHandle::NONE {
             // The accept was blocking; a thread is waiting.
-            assert!(self
-                .sync_accepts
-                .lock()
-                .insert(req.req.id, PendingAccept { req, resp })
-                .is_none());
+            assert!(
+                self.sync_accepts
+                    .lock()
+                    .insert(req.req.id, PendingAccept { req, resp })
+                    .is_none()
+            );
             let _ = moto_sys::SysCpu::wake(wake_handle);
             return;
         }
@@ -190,7 +191,15 @@ impl TcpListener {
             channel_reservation,
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
-            wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
+
+            // While a TCP Listener never becomes writable, a MIO test expects
+            // a successful WRITABLE interest registration:
+            // https://github.com/tokio-rs/mio/blob/9a9d691891d5f7d91c7493b65d0b80726699faa8/tests/poll.rs#L56
+            // so we have to allow that.
+            wait_object: WaitObject::new(
+                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
+            ),
+
             accept_requests: Mutex::new(BTreeMap::new()),
             async_accepts: Mutex::new(VecDeque::new()),
             sync_accepts: Mutex::new(BTreeMap::new()),
@@ -321,11 +330,12 @@ impl TcpListener {
 
         new_stream.channel().tcp_stream_created(&new_stream);
         // Now we can remove the queue.
-        assert!(self
-            .pending_accept_queues
-            .lock()
-            .remove(&pending_accept.resp.handle)
-            .is_some());
+        assert!(
+            self.pending_accept_queues
+                .lock()
+                .remove(&pending_accept.resp.handle)
+                .is_some()
+        );
 
         new_stream.ack_rx();
         new_stream.on_accepted();
@@ -365,11 +375,12 @@ impl TcpListener {
             req,
         };
 
-        assert!(self
-            .accept_requests
-            .lock()
-            .insert(req.id, accept_request)
-            .is_none());
+        assert!(
+            self.accept_requests
+                .lock()
+                .insert(req.id, accept_request)
+                .is_none()
+        );
 
         channel
             .post_msg_with_response_waiter(req, self.me.clone())

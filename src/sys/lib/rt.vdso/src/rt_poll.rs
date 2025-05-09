@@ -4,10 +4,10 @@ use crate::runtime::Registry;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::sync::Arc;
 use core::any::Any;
-use moto_rt::poll::Event;
+use moto_rt::E_BAD_HANDLE;
 use moto_rt::ErrorCode;
 use moto_rt::RtFd;
-use moto_rt::E_BAD_HANDLE;
+use moto_rt::poll::Event;
 
 pub extern "C" fn new() -> RtFd {
     posix::push_file(Registry::new())

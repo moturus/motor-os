@@ -1,11 +1,15 @@
 use crate::posix;
 use crate::posix::PosixFile;
 use crate::{rt_process::ProcessData, rt_process::StdioData};
+use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
+use core::sync::atomic::*;
 use moto_ipc::stdio_pipe::StdioPipe;
+use moto_rt::poll::Interests;
+use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
-use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
+use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
 use moto_sys::SysHandle;
 
 #[derive(Debug, PartialEq)]
@@ -355,7 +359,7 @@ fn create_stdio_pipes(
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
             if kind == moto_rt::FD_STDIN {
                 let pipe = unsafe { StdioPipe::new_writer(local_data) };
-                let pipe_fd = posix::push_file(Arc::new(ChildStdio { inner: pipe }));
+                let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
                 Ok((
                     pipe_fd,
                     StdioData {
@@ -366,7 +370,7 @@ fn create_stdio_pipes(
                 ))
             } else {
                 let pipe = unsafe { StdioPipe::new_reader(local_data) };
-                let pipe_fd = posix::push_file(Arc::new(ChildStdio { inner: pipe }));
+                let pipe_fd = posix::push_file(ChildStdio::from_inner(pipe));
                 Ok((
                     pipe_fd,
                     StdioData {
@@ -383,15 +387,72 @@ fn create_stdio_pipes(
 
 struct ChildStdio {
     inner: StdioPipe,
+    nonblocking: AtomicBool,
+    waiting_handle: Arc<super::runtime::WaitingHandle>,
+}
+
+impl ChildStdio {
+    fn from_inner(inner: StdioPipe) -> Arc<Self> {
+        let wait_handle = inner.handle();
+        let supported_interests = if inner.is_reader() {
+            moto_rt::poll::POLL_READABLE
+        } else {
+            moto_rt::poll::POLL_WRITABLE
+        };
+
+        Arc::new_cyclic(|me| Self {
+            inner,
+            nonblocking: AtomicBool::new(false),
+            waiting_handle: super::runtime::WaitingHandle::new(
+                wait_handle,
+                me.clone() as _,
+                supported_interests,
+            ),
+        })
+    }
+}
+
+impl super::runtime::WaitHandleHolder for ChildStdio {
+    fn check_interests(&self, interests: Interests) -> moto_rt::poll::EventBits {
+        let mut events = 0;
+
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.inner.can_read() {
+            events |= moto_rt::poll::POLL_READABLE;
+        }
+
+        if (interests & moto_rt::poll::POLL_WRITABLE != 0) && self.inner.can_write() {
+            events |= moto_rt::poll::POLL_WRITABLE;
+        }
+
+        events
+    }
 }
 
 impl PosixFile for ChildStdio {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.inner.read(buf)
+        if self.nonblocking.load(Ordering::Acquire) {
+            self.inner.nonblocking_read(buf).inspect_err(|e| {
+                if *e == moto_rt::E_NOT_READY {
+                    self.waiting_handle
+                        .reset_interest(moto_rt::poll::POLL_READABLE);
+                }
+            })
+        } else {
+            self.inner.read(buf)
+        }
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.inner.write(buf)
+        if self.nonblocking.load(Ordering::Acquire) {
+            self.inner.nonblocking_write(buf).inspect_err(|e| {
+                if *e == moto_rt::E_NOT_READY {
+                    self.waiting_handle
+                        .reset_interest(moto_rt::poll::POLL_WRITABLE);
+                }
+            })
+        } else {
+            self.inner.write(buf)
+        }
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {
@@ -400,5 +461,22 @@ impl PosixFile for ChildStdio {
 
     fn close(&self) -> Result<(), ErrorCode> {
         Ok(())
+    }
+
+    fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
+        self.nonblocking.store(val, Ordering::Release);
+        Ok(())
+    }
+
+    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.waiting_handle.add_interests(r_id, token, interests)
+    }
+
+    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+        self.waiting_handle.set_interests(r_id, token, interests)
+    }
+
+    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
+        self.waiting_handle.del_interests(r_id)
     }
 }

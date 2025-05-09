@@ -10,14 +10,14 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use moto_rt::poll::Interests;
-use moto_rt::poll::Token;
-use moto_rt::spinlock::SpinLock;
-use moto_rt::ErrorCode;
-use moto_rt::RtFd;
 use moto_rt::E_BAD_HANDLE;
 use moto_rt::E_INVALID_ARGUMENT;
 use moto_rt::E_OK;
+use moto_rt::ErrorCode;
+use moto_rt::RtFd;
+use moto_rt::poll::Interests;
+use moto_rt::poll::Token;
+use moto_rt::spinlock::SpinLock;
 
 pub trait PosixFile: Any + Send + Sync {
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -37,6 +37,9 @@ pub trait PosixFile: Any + Send + Sync {
     }
     fn close(&self) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
+    }
+    fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
+        Err(moto_rt::E_NOT_IMPLEMENTED)
     }
     fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         todo!()
@@ -214,7 +217,14 @@ impl Descriptors {
             if let Some(entry) = descriptors.get_mut(fd as usize) {
                 let mut val: Arc<dyn PosixFile> = Arc::new(Placeholder);
                 core::mem::swap(&mut val, entry);
-                Some(val)
+                if (val.as_ref() as &dyn Any)
+                    .downcast_ref::<Placeholder>()
+                    .is_some()
+                {
+                    None
+                } else {
+                    Some(val)
+                }
             } else {
                 return None;
             }
@@ -248,7 +258,14 @@ impl Descriptors {
         let mut descriptors = self.descriptors.lock();
 
         let entry = descriptors.get_mut(fd as usize).unwrap();
-        *entry = val;
+        core::mem::swap(&mut val, entry);
+
+        #[cfg(debug_assertions)]
+        assert!(
+            (val.as_ref() as &dyn Any)
+                .downcast_ref::<Placeholder>()
+                .is_some()
+        );
 
         fd
     }

@@ -39,7 +39,7 @@ use moto_rt::RtVdsoVtable;
 const RT_VERSION: u64 = 12;
 
 // The entry point.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moturus_start(version: u64) {
     if version != RT_VERSION {
         // Doing an assert or panic will #PF, so we use lower-level API.

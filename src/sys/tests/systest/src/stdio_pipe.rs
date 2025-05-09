@@ -2,7 +2,6 @@ use moto_ipc::stdio_pipe::StdioPipe;
 
 fn test_stdio_pipe_basic() {
     use moto_sys::syscalls::*;
-    std::thread::sleep(std::time::Duration::from_millis(1000));
 
     let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
@@ -113,7 +112,168 @@ fn test_stdio_pipe_fd() {
     println!("test_stdio_pipe_fd PASS");
 }
 
+fn test_stdio_pipe_async_fd() {
+    use std::io::Read;
+    use std::io::Write;
+
+    let mut child = std::process::Command::new(std::env::args().next().unwrap())
+        .arg("subcommand")
+        .env("some_key", "some_val")
+        .env("none_key", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let child_stdin = child.stdin.take().unwrap();
+    let child_stdout = child.stdout.take().unwrap();
+    let child_stderr = child.stderr.take().unwrap();
+
+    let mut buf = [0; 64];
+
+    // Test read/write through fd.
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+    let raw_fd = child_stdin.into_raw_fd();
+    let mut child_stdin = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    moto_rt::net::set_nonblocking(child_stdin.as_raw_fd(), true).unwrap();
+
+    let raw_fd = child_stdout.into_raw_fd();
+    let mut child_stdout = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    moto_rt::net::set_nonblocking(child_stdout.as_raw_fd(), true).unwrap();
+
+    let raw_fd = child_stderr.into_raw_fd();
+    let mut child_stderr = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    moto_rt::net::set_nonblocking(child_stderr.as_raw_fd(), true).unwrap();
+
+    const STDIN: u64 = 20;
+    const STDOUT: u64 = 21;
+    const STDERR: u64 = 22;
+
+    const READABLE: u64 = moto_rt::poll::POLL_READABLE;
+    const WRITABLE: u64 = moto_rt::poll::POLL_WRITABLE;
+
+    let registry = moto_rt::poll::new().unwrap();
+
+    let mut events = [moto_rt::poll::Event::default(); 3];
+
+    moto_rt::poll::add(registry, child_stdout.as_raw_fd(), STDOUT, READABLE).unwrap();
+    assert!(moto_rt::poll::add(registry, child_stdout.as_raw_fd(), STDOUT, WRITABLE).is_err());
+
+    moto_rt::poll::add(registry, child_stderr.as_raw_fd(), STDERR, READABLE).unwrap();
+    assert!(moto_rt::poll::add(registry, child_stderr.as_raw_fd(), STDERR, WRITABLE).is_err());
+
+    // Nothing to read.
+    assert_eq!(
+        0,
+        moto_rt::poll::wait(
+            registry,
+            (&mut events) as *mut _,
+            3,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(1))
+        )
+        .unwrap()
+    );
+
+    assert_eq!(
+        std::io::ErrorKind::WouldBlock,
+        child_stdout.read(&mut buf).err().unwrap().kind()
+    );
+
+    assert_eq!(
+        std::io::ErrorKind::WouldBlock,
+        child_stderr.read(&mut buf).err().unwrap().kind()
+    );
+
+    // But we can write.
+    moto_rt::poll::add(registry, child_stdin.as_raw_fd(), STDIN, WRITABLE).unwrap();
+    assert!(moto_rt::poll::add(registry, child_stdin.as_raw_fd(), STDIN, READABLE).is_err());
+    assert_eq!(
+        1,
+        moto_rt::poll::wait(registry, (&mut events) as *mut _, 3, None).unwrap()
+    );
+
+    assert_eq!(events[0].token, STDIN);
+    assert_eq!(events[0].events, WRITABLE);
+
+    let msg1 = b"echo1 foo bar baz\n";
+    child_stdin.write_all(msg1).unwrap();
+
+    // Stop polling stdin.
+    moto_rt::poll::del(registry, child_stdin.as_raw_fd()).unwrap();
+
+    // Check that we have one reatable event on stdout.
+    assert_eq!(
+        1,
+        moto_rt::poll::wait(registry, (&mut events) as *mut _, 3, None).unwrap()
+    );
+    assert_eq!(events[0].token, STDOUT);
+    assert_eq!(events[0].events, READABLE);
+
+    let mut sz = 0;
+    while sz < msg1.len() {
+        sz += child_stdout.read(&mut buf[sz..msg1.len()]).unwrap_or(0);
+    }
+    assert_eq!(msg1, &buf[0..msg1.len()]);
+    assert_eq!(
+        std::io::ErrorKind::WouldBlock,
+        child_stdout.read(&mut buf).err().unwrap().kind()
+    );
+
+    let msg2 = b"echo2 blah blah blah\n";
+    child_stdin.write_all(msg2).unwrap();
+
+    // Check that we have one reatable event on stderr.
+    assert_eq!(
+        1,
+        moto_rt::poll::wait(registry, (&mut events) as *mut _, 3, None).unwrap()
+    );
+    assert_eq!(events[0].token, STDERR);
+    assert_eq!(events[0].events, READABLE);
+
+    let mut sz = 0;
+    while sz < msg2.len() {
+        sz += child_stderr.read(&mut buf[sz..msg2.len()]).unwrap_or(0);
+    }
+    assert_eq!(msg2, &buf[0..msg2.len()]);
+    assert_eq!(
+        std::io::ErrorKind::WouldBlock,
+        child_stderr.read(&mut buf).err().unwrap().kind()
+    );
+
+    // Test that close() works.
+    // Put some bytes into child_stderr.
+    child_stdin.write_all(msg2).unwrap();
+    drop(child_stderr); // This closes the FD.
+    let mut child_stderr = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    assert!(child_stderr.read(&mut buf).is_err());
+
+    // Nothing to read.
+    assert_eq!(
+        0,
+        moto_rt::poll::wait(
+            registry,
+            (&mut events) as *mut _,
+            3,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(1))
+        )
+        .unwrap()
+    );
+
+    child_stdin.write_all(b"exit 0\n").unwrap();
+    child_stdin.flush().unwrap();
+    child.wait().unwrap();
+
+    moto_rt::fs::close(registry).unwrap();
+
+    println!("test_stdio_pipe_async_fd PASS");
+}
+
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
+    test_stdio_pipe_async_fd();
+
+    eprintln!("TODO: fix and test flush()");
 }

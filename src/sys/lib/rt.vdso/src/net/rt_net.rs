@@ -155,6 +155,16 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
     {
         udp_socket.setsockopt(option, ptr, len)
+    } else if option == moto_rt::net::SO_NONBLOCKING {
+        assert_eq!(len, 1);
+        let nonblocking = *(ptr as *const u8);
+        if nonblocking > 1 {
+            return moto_rt::E_INVALID_ARGUMENT;
+        }
+        match posix_file.set_nonblocking(nonblocking == 1) {
+            Ok(_) => E_OK,
+            Err(err) => err,
+        }
     } else {
         E_BAD_HANDLE
     }

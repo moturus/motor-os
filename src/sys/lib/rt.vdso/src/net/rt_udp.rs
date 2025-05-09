@@ -9,8 +9,8 @@ use moto_io_internal::udp_queues::{PageAllocator, UdpDefragmentingQueue, UdpFrag
 use moto_ipc::io_channel;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
-use moto_rt::{mutex::Mutex, ErrorCode};
 use moto_rt::{E_NOT_READY, E_TIMED_OUT};
+use moto_rt::{ErrorCode, mutex::Mutex};
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
@@ -104,7 +104,9 @@ impl UdpSocket {
             channel_reservation,
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
-            wait_object: WaitObject::new(moto_rt::poll::POLL_READABLE),
+            wait_object: WaitObject::new(
+                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
+            ),
             subchannel_mask,
             tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
             peer_addr: Mutex::new(None),
