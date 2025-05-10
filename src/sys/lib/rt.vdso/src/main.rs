@@ -5,6 +5,7 @@
 
 mod load;
 mod posix;
+mod proc_fd;
 mod rt_alloc;
 mod rt_fs;
 mod rt_futex;

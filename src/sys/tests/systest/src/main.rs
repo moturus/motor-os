@@ -1,4 +1,5 @@
 #![feature(addr_parse_ascii)]
+#![feature(moturus_ext)]
 
 // mod channel_test;
 mod fs;
@@ -436,6 +437,8 @@ fn main() {
     tls::test_tls_join();
     test_caps();
     test_liveness();
+
+    spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
     test_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
@@ -443,7 +446,6 @@ fn main() {
     tcp::run_all_tests();
     udp::run_all_tests();
 
-    spawn_wait_kill::test();
     mpmc::test_mpmc();
     mpmc::test_array_queue();
     // channel_test::test_io_channel();

@@ -24,6 +24,24 @@ pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
 
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    if (path_bytes.len() > HANDLE_URL_PREFIX.len())
+        && (&path_bytes[0..HANDLE_URL_PREFIX.len()] == HANDLE_URL_PREFIX.as_bytes())
+    {
+        match opts {
+            O_HANDLE_CHILD => {
+                let Ok(handle_str) = core::str::from_utf8(&path_bytes[HANDLE_URL_PREFIX.len()..])
+                else {
+                    return -(E_INVALID_ARGUMENT as i32);
+                };
+
+                let Ok(handle) = handle_str.parse::<u64>() else {
+                    return -(E_INVALID_ARGUMENT as i32);
+                };
+                return crate::proc_fd::new_child_fd(handle.into());
+            }
+            _ => return -(E_INVALID_ARGUMENT as i32),
+        }
+    }
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
     let file = match FsClient::file_open(path, opts) {
         Ok(file) => file,
@@ -34,7 +52,7 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
 }
 
 pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
-    // TODO: the following four lines is boilerplace repeated several times to get
+    // TODO: the following four lines is boilerplate repeated several times to get
     // a specific type out of fd; maybe there is a way to do that using a generic
     // function or a macro? The challenge is that the final variable (a reference)
     // borrows the first variable (an Arc), and borrow checker complains...

@@ -25,6 +25,10 @@ pub fn spawn() -> Subcommand {
 }
 
 impl Subcommand {
+    pub fn std_child(&mut self) -> &mut std::process::Child {
+        &mut self.inst
+    }
+
     pub fn do_exit(&mut self, code: i32) {
         use std::io::Write;
         self.stdin

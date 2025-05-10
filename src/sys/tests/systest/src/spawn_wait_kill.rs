@@ -2,7 +2,7 @@ use moto_sys::stats::ProcessStatsV1;
 
 use crate::subcommand;
 
-pub fn test() {
+pub fn smoke_test() {
     // Normal exit.
     let mut child = subcommand::spawn();
     let start = std::time::Instant::now();
@@ -11,9 +11,31 @@ pub fn test() {
 
     assert!(child.try_wait().unwrap().is_none()); // Still running.
 
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::os::moturus::ChildExt;
+
+    // Test "Child FD" feature.
+    let handle = child.std_child().sys_handle();
+    let fd = moto_rt::fs::open(
+        format!("handle://{}", handle).as_str(),
+        moto_rt::fs::O_HANDLE_CHILD,
+    )
+    .unwrap();
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let res = std::sync::atomic::AtomicU64::new(0);
+    let buf: &mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(&res as *const _ as usize as *mut u8, 8) };
+    assert_eq!(
+        file.read(buf).err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+
     child.do_exit(1234);
     assert_eq!(1234, child.wait().unwrap().code().unwrap());
     assert!(start.elapsed() > spin_time);
+    assert_eq!(8, file.read(buf).unwrap());
+    assert_eq!(1234, res.load(std::sync::atomic::Ordering::Acquire));
 
     // kill.
     let mut child = subcommand::spawn();
@@ -21,7 +43,7 @@ pub fn test() {
     child.kill();
     assert_eq!(-1, child.wait().unwrap().code().unwrap());
 
-    println!("spawn_wait_kill test PASS");
+    println!("spawn_wait_kill smoke_test PASS");
 }
 
 pub fn test_pid_kill() {
@@ -66,5 +88,5 @@ pub fn test_pid_kill() {
     // sys-io usually has PID 2.
     assert!(moto_sys::SysCpu::kill_pid(2).is_err());
 
-    println!("test_pid_kill test PASS");
+    println!("test_pid_kill PASS");
 }

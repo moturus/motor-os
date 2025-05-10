@@ -19,6 +19,7 @@ use core::sync::atomic::Ordering;
 extern crate alloc;
 
 pub const TEMP_DIR: &str = "/sys/tmp";
+pub const HANDLE_URL_PREFIX: &str = "handle://";
 
 /// The maximum length of a file/directory absolute path, in bytes.
 ///
@@ -47,6 +48,9 @@ pub const O_APPEND: u32 = 1 << 2;
 pub const O_TRUNCATE: u32 = 1 << 3;
 pub const O_CREATE: u32 = 1 << 4;
 pub const O_CREATE_NEW: u32 = 1 << 5;
+
+// When "opening a handle".
+pub const O_HANDLE_CHILD: u32 = 1;
 
 // Seek option.
 pub const SEEK_SET: u8 = 0;
