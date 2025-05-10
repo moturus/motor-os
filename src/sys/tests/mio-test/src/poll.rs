@@ -225,6 +225,9 @@ pub fn registry_ops_flow(
     init_interests: Interest,
     final_interests: Interest,
 ) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let _ = registry.as_raw_fd();
+
     registry.register(source, token, init_interests).unwrap();
     registry.deregister(source).unwrap();
 
