@@ -7,7 +7,7 @@ edition = "2021"
 futures = "0.3.31"
 pin-project-lite = "0.2.16"
 # NOTE: tokio is patched in the workspace Cargo.toml
-tokio = { version = "1.44.2", features = ["io-util", "net", "rt", "rt-multi-thread", "macros", "sync", "time" ] }
+tokio = { version = "1.44.2", features = ["io-util", "net", "rt", "rt-multi-thread", "macros", "process", "sync", "time" ] }
 tokio-stream = "0.1"
 tokio-metrics = "0.4.2"
 tokio-test = "0.4.4"

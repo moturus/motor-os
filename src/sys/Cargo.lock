@@ -159,9 +159,9 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "clap"
-version = "4.5.37"
+version = "4.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eccb054f56cbd38340b380d4a8e69ef1f02f1af43db2f0cc817a4774d80ae071"
+checksum = "ed93b9805f8ba930df42c2590f05453d5ec36cbb85d018868a5b24d31f6ac000"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -169,9 +169,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.37"
+version = "4.5.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efd9466fac8543255d3b1fcad4762c5e116ffe808c8a3043d4263cd4fd4862a2"
+checksum = "379026ff283facf611b0ea629334361c4211d1b12ee01024eec1591133b04120"
 dependencies = [
  "anstream",
  "anstyle",
@@ -606,7 +606,7 @@ dependencies = [
  "frusa",
  "intrusive-collections",
  "log",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
  "x86",
  "x86_64",
@@ -652,7 +652,7 @@ name = "mdbg"
 version = "0.1.0"
 dependencies = [
  "clap",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -679,7 +679,7 @@ dependencies = [
  "hermit-abi",
  "libc",
  "log",
- "moto-rt 0.2.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt",
  "wasi",
  "windows-sys 0.52.0",
 ]
@@ -691,7 +691,7 @@ dependencies = [
  "env_logger",
  "log",
  "mio",
- "moto-rt 0.2.12",
+ "moto-rt",
 ]
 
 [[package]]
@@ -699,7 +699,7 @@ name = "moto-io-internal"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys-io",
 ]
 
@@ -707,7 +707,7 @@ dependencies = [
 name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -717,7 +717,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -726,7 +726,7 @@ name = "moto-mpmc"
 version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -740,16 +740,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "moto-rt"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45e1af2d2617be3236cbd967b4ae72a83e42e7b9f1847a148fb5d93631cf643c"
-
-[[package]]
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.2.12",
+ "moto-rt",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -759,7 +753,7 @@ name = "moto-sys-io"
 version = "0.2.4"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
  "smoltcp",
 ]
@@ -769,7 +763,7 @@ name = "moto-virtio"
 version = "0.2.0"
 dependencies = [
  "log",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -977,7 +971,7 @@ dependencies = [
  "frusa",
  "moto-io-internal",
  "moto-ipc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
  "moto-sys-io",
 ]
@@ -1039,6 +1033,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87607cb1398ed59d48732e575a4c28a7a8ebf2454b964fe3f224f2afc07909e1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9203b8055f63a2a00e2f593bb0510367fe707d7ff1e5c872de2f537b339e5410"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -1159,7 +1162,7 @@ dependencies = [
  "log",
  "moto-io-internal",
  "moto-ipc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
  "moto-sys-io",
  "moto-virtio",
@@ -1177,7 +1180,7 @@ version = "0.1.0"
 dependencies = [
  "moto-ipc",
  "moto-log",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -1188,7 +1191,7 @@ dependencies = [
  "log",
  "moto-ipc",
  "moto-log",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
  "x86_64",
 ]
@@ -1198,7 +1201,7 @@ name = "sysbox"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
  "moto-sys-io",
  "time",
@@ -1212,7 +1215,7 @@ dependencies = [
  "futures",
  "moto-ipc",
  "moto-mpmc",
- "moto-rt 0.2.12",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -1262,13 +1265,15 @@ version = "0.1.0"
 [[package]]
 name = "tokio"
 version = "1.44.2"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#243b6be244934b79de5033feb24650bbbc237688"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#2049d9f95118d8cf4a6e5a49472ad24f08a57c5d"
 dependencies = [
  "backtrace",
  "bytes",
  "libc",
  "mio",
+ "moto-rt",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.52.0",
@@ -1277,7 +1282,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "2.5.0"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#243b6be244934b79de5033feb24650bbbc237688"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#2049d9f95118d8cf4a6e5a49472ad24f08a57c5d"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -1,4 +1,4 @@
-// mod process_arg0;
+mod process;
 mod rt_basic;
 mod rt_common;
 mod rt_handle;
@@ -26,8 +26,7 @@ fn input_listener() {
 fn main() {
     std::thread::spawn(input_listener);
 
-    // process_arg0::arg0().await;
-
+    process::run_all_tests();
     rt_basic::run_all_tests();
     rt_common::run_all_tests();
     rt_handle::run_all_tests();
