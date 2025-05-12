@@ -262,7 +262,7 @@ fn test_stdio_pipe_async_fd() {
     );
 
     child_stdin.write_all(b"exit 0\n").unwrap();
-    child_stdin.flush().unwrap();
+    while child_stdin.flush().is_err() {}
     child.wait().unwrap();
 
     moto_rt::fs::close(registry).unwrap();
@@ -270,10 +270,40 @@ fn test_stdio_pipe_async_fd() {
     println!("test_stdio_pipe_async_fd PASS");
 }
 
+fn test_stdio_pipe_flush() {
+    use moto_sys::syscalls::*;
+
+    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+
+    let reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+
+    let writer_thread = std::thread::spawn(move || {
+        let buf = b"foobar";
+        assert_eq!(writer.write(buf).unwrap(), buf.len());
+        assert_eq!(
+            writer.flush_nonblocking().err().unwrap(),
+            moto_rt::E_NOT_READY
+        );
+        sender.send(()).unwrap();
+        writer.flush().unwrap();
+        assert!(writer.flush_nonblocking().is_ok());
+    });
+
+    // Wait a bit.
+    receiver.recv().unwrap();
+    let mut buf = [0; 64];
+    let _ = reader.read(&mut buf).unwrap();
+    writer_thread.join().unwrap();
+
+    println!("test_stdio_pipe_flush PASS");
+}
+
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
     test_stdio_pipe_async_fd();
-
-    eprintln!("TODO: fix and test flush()");
+    test_stdio_pipe_flush();
 }

@@ -303,6 +303,69 @@ impl StdioPipe {
         self.write_timeout(buf, None)
     }
 
+    pub fn flush_nonblocking(&self) -> Result<(), ErrorCode> {
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let Some(buffer_ref) = self.buffer.as_ref() else {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        };
+
+        let mut buffer = buffer_ref.lock();
+
+        if buffer.error_code != moto_rt::E_OK {
+            return Err(buffer.error_code);
+        }
+
+        if !buffer.can_read() {
+            return Ok(());
+        }
+
+        if let Err(e) = SysCpu::wake(self.handle) {
+            // Cache the error.
+            buffer.error_code = e;
+            return Err(e);
+        }
+
+        if !buffer.can_read() {
+            return Ok(());
+        }
+
+        Err(moto_rt::E_NOT_READY)
+    }
+
+    pub fn flush(&self) -> Result<(), ErrorCode> {
+        if self.is_reader {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let Some(buffer_ref) = self.buffer.as_ref() else {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        };
+
+        let mut buffer = buffer_ref.lock();
+
+        while buffer.can_read() {
+            if let Err(err) = SysCpu::wait(
+                &mut [buffer.ipc_handle],
+                buffer.ipc_handle,
+                SysHandle::NONE,
+                None,
+            ) {
+                buffer.error_code = err;
+                let _ = buffer.unwrite();
+                if !buffer.can_read() {
+                    return Ok(());
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn write_timeout(
         &self,
         buf: &[u8],

@@ -9,7 +9,7 @@ use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
-use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
+use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
 use moto_sys::SysHandle;
 
 #[derive(Debug, PartialEq)]
@@ -456,7 +456,11 @@ impl PosixFile for ChildStdio {
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {
-        Ok(())
+        if self.nonblocking.load(Ordering::Acquire) {
+            self.inner.flush_nonblocking()
+        } else {
+            self.inner.flush()
+        }
     }
 
     fn close(&self) -> Result<(), ErrorCode> {
