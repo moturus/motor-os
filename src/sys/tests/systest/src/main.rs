@@ -5,7 +5,7 @@
 mod fs;
 mod mpmc;
 mod spawn_wait_kill;
-mod stdio_pipe;
+mod stdio;
 mod subcommand;
 mod tcp;
 mod threads;
@@ -229,27 +229,6 @@ fn test_file_write() {
     println!("test_file_write() PASS");
 }
 
-#[allow(unused)]
-fn test_stdio() {
-    fn func(num: i32) {
-        for i in 0..5 {
-            println!("test_stdio {}: {}", num, i);
-        }
-    }
-
-    func(0);
-
-    let t1 = std::thread::spawn(|| func(1));
-    let t2 = std::thread::spawn(|| func(2));
-    let t3 = std::thread::spawn(|| func(3));
-
-    t1.join().unwrap();
-    t2.join().unwrap();
-    t3.join().unwrap();
-
-    println!("test_stdio() PASS");
-}
-
 fn test_oom() {
     let mut child = subcommand::spawn();
     child.oom();
@@ -453,14 +432,13 @@ fn main() {
     // channel_test::test_io_throughput();
     test_reentrant_mutex();
     // tcp::test_wget();
-    // test_stdio();
     test_file_write();
 
     test_lazy_memory_map();
     test_syscall();
     threads::run_all_tests();
     test_ipc();
-    stdio_pipe::run_all_tests();
+    stdio::run_all_tests();
     fs::run_tests();
 
     println!("PASS");
