@@ -63,6 +63,7 @@ fn main() {
         moto_sys::SysObj::get(SysHandle::KERNEL, 0, "serial_console").unwrap();
     let mut command = std::process::Command::new(fname);
     command.env_clear();
+    command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());

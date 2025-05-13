@@ -301,9 +301,25 @@ fn test_stdio_pipe_flush() {
     println!("test_stdio_pipe_flush PASS");
 }
 
+fn test_stdio_is_terminal() {
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        println!("test_stdio_is_terminal: SKIPPED");
+        return;
+    }
+
+    // This spawns a piped ChildStdio, and by default it is not a terminal.
+    let mut child = crate::subcommand::spawn();
+    assert!(!child.is_terminal());
+
+    println!("test_stdio_is_terminal PASS");
+}
+
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
     test_stdio_pipe_async_fd();
     test_stdio_pipe_flush();
+    test_stdio_is_terminal();
 }

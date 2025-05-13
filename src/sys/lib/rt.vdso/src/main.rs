@@ -37,7 +37,7 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
-const RT_VERSION: u64 = 12;
+const RT_VERSION: u64 = 13;
 
 // The entry point.
 #[unsafe(no_mangle)]

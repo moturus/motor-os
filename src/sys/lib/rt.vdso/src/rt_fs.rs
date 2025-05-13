@@ -15,8 +15,18 @@ use moto_rt::RtFd;
 use moto_sys_io::api_fs::*;
 
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
-    if rt_fd <= 2 {
-        1 // TODO: do it properly
+    #[allow(clippy::manual_range_contains)]
+    if rt_fd < 0 || rt_fd > 2 {
+        return 0;
+    }
+
+    let Some(env_var) = moto_rt::process::getenv(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY)
+    else {
+        return 0;
+    };
+
+    if env_var == "TRUE" || env_var == "true" {
+        1
     } else {
         0
     }

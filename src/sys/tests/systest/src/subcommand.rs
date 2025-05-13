@@ -25,6 +25,9 @@ pub fn spawn() -> Subcommand {
 }
 
 impl Subcommand {
+    const IS_TERMINAL_TRUE: i32 = 1234;
+    const IS_TERMINAL_FALSE: i32 = 4568;
+
     pub fn std_child(&mut self) -> &mut std::process::Child {
         &mut self.inst
     }
@@ -67,6 +70,20 @@ impl Subcommand {
         use std::io::Write;
         self.stdin.write_all(b"xor_service\n").unwrap();
         self.stdin.flush().unwrap();
+    }
+
+    pub fn is_terminal(&mut self) -> bool {
+        use std::io::Write;
+
+        self.stdin.write_all(b"is_terminal\n").unwrap();
+        self.stdin.flush().unwrap();
+
+        let code = self.wait().unwrap().code().unwrap();
+        match code {
+            Self::IS_TERMINAL_TRUE => true,
+            Self::IS_TERMINAL_FALSE => false,
+            _ => panic!(),
+        }
     }
 }
 
@@ -119,6 +136,15 @@ fn do_command(cmd: String) {
             assert_eq!(2, words.len());
             let code = words[1].parse::<i32>().unwrap();
             std::process::exit(code)
+        }
+        "is_terminal" => {
+            use std::io::IsTerminal;
+
+            if std::io::stdin().is_terminal() {
+                std::process::exit(Subcommand::IS_TERMINAL_TRUE)
+            } else {
+                std::process::exit(Subcommand::IS_TERMINAL_FALSE)
+            }
         }
         "xor_service" => crate::xor_server::start(),
         _ => panic!("unknown command: {:?}", words),

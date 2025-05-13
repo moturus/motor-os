@@ -205,9 +205,9 @@ checksum = "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990"
 
 [[package]]
 name = "compiler_builtins"
-version = "0.1.158"
+version = "0.1.159"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "164cdc689e4c6d69417f77a5f48be240c291e84fbef0b1281755dc754b19c809"
+checksum = "448068da8f2326b2a0472353cb401dd8795a89c007ef30fff90f50706e862e72"
 
 [[package]]
 name = "const-default"
@@ -674,7 +674,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.0.1"
-source = "git+https://github.com/moturus/mio.git?branch=mio-moturus-v1.0.1#30e032c0e4b24a74e1b729e1a9fe65a653ec3ce7"
+source = "git+https://github.com/moturus/mio.git?branch=mio-moturus-v1.0.1#3b916172a16558c25931a3c83db07ab299e67b7e"
 dependencies = [
  "hermit-abi",
  "libc",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.2.12"
+version = "0.13.0"
 dependencies = [
  "compiler_builtins",
  "rustc-std-workspace-alloc",
@@ -1265,7 +1265,7 @@ version = "0.1.0"
 [[package]]
 name = "tokio"
 version = "1.44.2"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#2049d9f95118d8cf4a6e5a49472ad24f08a57c5d"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#3efe4de8ae94cbb841b02506ddb147733db24640"
 dependencies = [
  "backtrace",
  "bytes",
@@ -1282,7 +1282,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "2.5.0"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#2049d9f95118d8cf4a6e5a49472ad24f08a57c5d"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-moturus-1.44.2#3efe4de8ae94cbb841b02506ddb147733db24640"
 dependencies = [
  "proc-macro2",
  "quote",

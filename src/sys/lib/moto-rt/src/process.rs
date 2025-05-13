@@ -21,6 +21,11 @@ pub const STDIO_INHERIT: RtFd = -((crate::error::E_MAX as RtFd) + 1);
 pub const STDIO_NULL: RtFd = -((crate::error::E_MAX as RtFd) + 2);
 pub const STDIO_MAKE_PIPE: RtFd = -((crate::error::E_MAX as RtFd) + 3);
 
+/// If this ENV var is present, and its value is "true" or "TRUE",
+/// the stdio of the process will return true on is_terminal(), otherwise
+/// false.
+pub const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
+
 /// Get all commandline args for the current process.
 pub fn args() -> alloc::vec::Vec<String> {
     let vdso_args: extern "C" fn() -> u64 = unsafe {
@@ -207,10 +212,14 @@ pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCod
     let mut keys = alloc::vec![];
     let mut vals = alloc::vec![];
 
+    let mut have_is_terminal = false;
+
     for (k, v) in &args.env {
         if k == "PWD" {
             // Ignore the env var.
             continue;
+        } else if k == STDIO_IS_TERMINAL_ENV_KEY {
+            have_is_terminal = true;
         }
         keys.push(k.clone());
         vals.push(v.clone());
@@ -229,6 +238,11 @@ pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCod
     };
     keys.push("PWD".to_owned());
     vals.push(pwd);
+
+    if !have_is_terminal && args.stdin == STDIO_INHERIT && args.stdout == STDIO_INHERIT {
+        keys.push(STDIO_IS_TERMINAL_ENV_KEY.to_owned());
+        vals.push("true".to_owned());
+    }
 
     let (rt_args, args_layout) = encode_args(&args.args);
     let (env, env_layout) = encode_env(keys, vals);
