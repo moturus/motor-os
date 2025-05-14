@@ -674,7 +674,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.0.1"
-source = "git+https://github.com/moturus/mio.git?branch=mio-moturus-v1.0.1#3b916172a16558c25931a3c83db07ab299e67b7e"
+source = "git+https://github.com/moturus/mio.git?branch=mio-moturus-v1.0.1#53df92f7b43cad980feff38cc738711314707450"
 dependencies = [
  "hermit-abi",
  "libc",
