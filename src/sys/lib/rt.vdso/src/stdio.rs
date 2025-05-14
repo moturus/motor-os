@@ -1,5 +1,5 @@
-use crate::posix;
 use crate::posix::PosixFile;
+use crate::posix::{self, PosixKind};
 use crate::{rt_process::ProcessData, rt_process::StdioData};
 use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
@@ -137,6 +137,9 @@ struct SelfStdio {
 }
 
 impl PosixFile for SelfStdio {
+    fn kind(&self) -> PosixKind {
+        PosixKind::SelfStdio
+    }
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         self.inner.lock().read(buf)
     }
@@ -394,11 +397,10 @@ struct ChildStdio {
 impl ChildStdio {
     fn from_inner(inner: StdioPipe) -> Arc<Self> {
         let wait_handle = inner.handle();
-        let supported_interests = if inner.is_reader() {
-            moto_rt::poll::POLL_READABLE
-        } else {
-            moto_rt::poll::POLL_WRITABLE
-        };
+        // Tokio uses both readable and writable by default.
+        // We can probably hack it so that it sends only relevant
+        // interests, but why complicate things?
+        let supported_interests = moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE;
 
         Arc::new_cyclic(|me| Self {
             inner,
@@ -429,6 +431,10 @@ impl super::runtime::WaitHandleHolder for ChildStdio {
 }
 
 impl PosixFile for ChildStdio {
+    fn kind(&self) -> PosixKind {
+        PosixKind::ChildStdio
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         if self.nonblocking.load(Ordering::Acquire) {
             self.inner.nonblocking_read(buf).inspect_err(|e| {

@@ -10,16 +10,32 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use moto_rt::E_BAD_HANDLE;
-use moto_rt::E_INVALID_ARGUMENT;
-use moto_rt::E_OK;
-use moto_rt::ErrorCode;
-use moto_rt::RtFd;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
+use moto_rt::ErrorCode;
+use moto_rt::RtFd;
+use moto_rt::E_BAD_HANDLE;
+use moto_rt::E_INVALID_ARGUMENT;
+use moto_rt::E_OK;
+
+#[derive(Debug)]
+pub enum PosixKind {
+    ChildProcess,
+    ChildStdio,
+    File,
+    Placeholder,
+    PollRegistry,
+    ReadDir,
+    SelfStdio,
+    TcpListener,
+    TcpStream,
+    UdpSocket,
+}
 
 pub trait PosixFile: Any + Send + Sync {
+    fn kind(&self) -> PosixKind;
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
@@ -169,6 +185,10 @@ pub extern "C" fn posix_duplicate(rt_fd: RtFd) -> RtFd {
 
 struct Placeholder;
 impl PosixFile for Placeholder {
+    fn kind(&self) -> PosixKind {
+        PosixKind::Placeholder
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
@@ -261,11 +281,9 @@ impl Descriptors {
         core::mem::swap(&mut val, entry);
 
         #[cfg(debug_assertions)]
-        assert!(
-            (val.as_ref() as &dyn Any)
-                .downcast_ref::<Placeholder>()
-                .is_some()
-        );
+        assert!((val.as_ref() as &dyn Any)
+            .downcast_ref::<Placeholder>()
+            .is_some());
 
         fd
     }

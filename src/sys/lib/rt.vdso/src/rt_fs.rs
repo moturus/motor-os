@@ -4,6 +4,7 @@ use core::sync::atomic::Ordering;
 
 use crate::posix;
 use crate::posix::PosixFile;
+use crate::posix::PosixKind;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -284,7 +285,11 @@ pub struct ReadDir {
     fd: u64,
 }
 
-impl PosixFile for ReadDir {}
+impl PosixFile for ReadDir {
+    fn kind(&self) -> PosixKind {
+        PosixKind::ReadDir
+    }
+}
 
 impl ReadDir {
     fn from(path: String, resp: &ReadDirResponse) -> Result<ReadDir, ErrorCode> {
@@ -302,6 +307,10 @@ pub struct File {
 }
 
 impl PosixFile for File {
+    fn kind(&self) -> PosixKind {
+        PosixKind::File
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         FsClient::read(self, buf)
     }

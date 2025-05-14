@@ -1,4 +1,5 @@
 use super::rt_net::{ChannelReservation, NetChannel};
+use crate::posix::PosixKind;
 use crate::{posix::PosixFile, runtime::WaitObject};
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::{Arc, Weak};
@@ -9,8 +10,8 @@ use moto_io_internal::udp_queues::{PageAllocator, UdpDefragmentingQueue, UdpFrag
 use moto_ipc::io_channel;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
+use moto_rt::{mutex::Mutex, ErrorCode};
 use moto_rt::{E_NOT_READY, E_TIMED_OUT};
-use moto_rt::{ErrorCode, mutex::Mutex};
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
@@ -447,6 +448,10 @@ impl UdpSocket {
 }
 
 impl PosixFile for UdpSocket {
+    fn kind(&self) -> PosixKind {
+        PosixKind::UdpSocket
+    }
+
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         let Some(addr) = self.peer_addr() else {
             return Err(moto_rt::E_NOT_CONNECTED);

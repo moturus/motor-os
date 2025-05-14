@@ -1,5 +1,5 @@
-use crate::posix;
 use crate::posix::PosixFile;
+use crate::posix::{self, PosixKind};
 use crate::{rt_process::ProcessData, rt_process::StdioData};
 use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
@@ -50,6 +50,10 @@ impl super::runtime::WaitHandleHolder for ChildFd {
 }
 
 impl PosixFile for ChildFd {
+    fn kind(&self) -> PosixKind {
+        PosixKind::ChildProcess
+    }
+
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         if buf.len() != 8 {
             return Err(moto_rt::E_INVALID_ARGUMENT);

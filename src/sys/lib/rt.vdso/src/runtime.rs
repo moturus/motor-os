@@ -9,23 +9,24 @@ use core::sync::atomic::Ordering;
 
 use crate::posix;
 use crate::posix::PosixFile;
+use crate::posix::PosixKind;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 use moto_ipc::io_channel;
-use moto_rt::E_BAD_HANDLE;
-use moto_rt::E_INVALID_ARGUMENT;
-use moto_rt::E_OK;
-use moto_rt::E_TIMED_OUT;
-use moto_rt::ErrorCode;
-use moto_rt::RtFd;
 use moto_rt::poll::Event;
 use moto_rt::poll::EventBits;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
+use moto_rt::ErrorCode;
+use moto_rt::RtFd;
+use moto_rt::E_BAD_HANDLE;
+use moto_rt::E_INVALID_ARGUMENT;
+use moto_rt::E_OK;
+use moto_rt::E_TIMED_OUT;
 use moto_sys::SysHandle;
 
 pub trait ResponseHandler {
@@ -376,6 +377,10 @@ impl Drop for Registry {
 }
 
 impl PosixFile for Registry {
+    fn kind(&self) -> PosixKind {
+        PosixKind::PollRegistry
+    }
+
     fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
         if interests != moto_rt::poll::POLL_READABLE {
             return Err(moto_rt::E_INVALID_ARGUMENT);
