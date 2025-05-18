@@ -66,11 +66,7 @@ pub fn log_backtrace(rt_fd: crate::RtFd) {
 
 #[cfg(not(feature = "base"))]
 pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
-    if moturus_log_panics_to_kernel() {
-        log_to_kernel("PANIC"); // Log w/o allocations.
-        moto_log!("PANIC: {}", info);
-        log_backtrace(-1);
-    } else {
+    if crate::fs::is_terminal(crate::FD_STDERR) {
         #[cfg(not(feature = "rustc-dep-of-std"))]
         extern crate alloc;
 
@@ -78,16 +74,11 @@ pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
         let msg = alloc::format!("PANIC: {}\n", info);
         let _ = crate::fs::write(crate::FD_STDERR, msg.as_bytes());
         log_backtrace(crate::FD_STDERR);
+    } else {
+        log_to_kernel("PANIC"); // Log w/o allocations.
+        moto_log!("PANIC: {}", info);
+        log_backtrace(-1);
     }
-}
-
-#[cfg(not(feature = "base"))]
-#[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn moturus_log_panics_to_kernel() -> bool {
-    // Normal binaries should log panics to their stderr. But sys-io, sys-tty, and sys-init
-    // don't have stdio, so they will override this function to log via SysMem::log().
-    false
 }
 
 #[cfg(not(feature = "base"))]
