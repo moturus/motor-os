@@ -31,14 +31,6 @@ struct Shared {
 unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
-/*
-impl Drop for Shared {
-    fn drop(&mut self) {
-        log::debug!("Dropping Shared.");
-    }
-}
-*/
-
 impl Shared {
     fn wake_other(&self, wakee_id: u64, wakee_thread: SysHandle, this_cpu: bool) -> Result<(), ()> {
         if let Some(sharer) = self.sharer.upgrade() {
@@ -67,12 +59,10 @@ impl Shared {
             if sharer.id() == child.id() {
                 let lock = self.sharee.lock(line!());
                 if let Some(sharee) = lock.upgrade() {
-                    // SysObject::wake(&sharee, false);
-                    sharee.on_sibling_dropped();
+                    sharee.on_sibling_dropped(); // Wakes the peer.
                 }
             } else {
-                // SysObject::wake(&sharer, false);
-                sharer.on_sibling_dropped();
+                sharer.on_sibling_dropped(); // Wakes the peer.
             }
         }
     }
@@ -220,6 +210,7 @@ pub(super) fn get(
     Ok(sharee)
 }
 
+/// Attempts to wake the peer.
 pub(super) fn try_wake(
     maybe_shared: &Arc<SysObject>,
     wakee_thread: SysHandle,
