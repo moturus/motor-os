@@ -237,7 +237,9 @@ impl LogServer {
 
     fn run(&mut self) -> ! {
         loop {
-            let wakers = self.ipc_server.wait(SysHandle::NONE, &[]).unwrap();
+            let Ok(wakers) = self.ipc_server.wait(SysHandle::NONE, &[]) else {
+                continue; // A client dropped.
+            };
 
             for waker in &wakers {
                 self.process_ipc(waker);
