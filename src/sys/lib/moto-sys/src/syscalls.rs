@@ -141,6 +141,7 @@ pub(crate) fn pack_nr_ver(syscall_number: u8, operation: u8, flags: u32, version
 // standard arguments: rdi, rsi, rdx, rcx, r8, r9
 // our syscall arguments: rdi, rsi, rdx, r10, r8, r9
 #[cfg(feature = "userspace")]
+#[inline(never)]
 pub fn do_syscall(
     nr_ver: u64,
     arg0: u64,
