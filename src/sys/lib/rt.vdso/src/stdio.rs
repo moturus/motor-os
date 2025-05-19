@@ -426,6 +426,11 @@ impl super::runtime::WaitHandleHolder for ChildStdio {
             events |= moto_rt::poll::POLL_WRITABLE;
         }
 
+        if events == 0 && self.inner.is_err() {
+            events = moto_rt::poll::POLL_READ_CLOSED | moto_rt::poll::POLL_WRITE_CLOSED;
+            crate::moto_log!("stdio.rs: reporting closed");
+        }
+
         events
     }
 }

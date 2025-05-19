@@ -81,14 +81,22 @@ pub extern "C" fn kill(handle: u64) -> moto_rt::ErrorCode {
     }
 }
 pub extern "C" fn wait(handle: u64) -> moto_rt::ErrorCode {
-    match moto_sys::SysCpu::wait(
-        &mut [handle.into()],
-        moto_sys::SysHandle::NONE,
-        moto_sys::SysHandle::NONE,
-        None,
-    ) {
-        Ok(()) => moto_rt::E_OK,
-        Err(err) => err,
+    loop {
+        match moto_sys::SysCpu::wait(
+            &mut [handle.into()],
+            moto_sys::SysHandle::NONE,
+            moto_sys::SysHandle::NONE,
+            None,
+        ) {
+            Ok(()) => match moto_sys::SysRay::process_status(handle.into()) {
+                Ok(s) => match s {
+                    Some(s) => return moto_rt::E_OK,
+                    None => continue,
+                },
+                Err(err) => return err,
+            },
+            Err(err) => return err,
+        }
     }
 }
 

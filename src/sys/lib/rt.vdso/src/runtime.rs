@@ -227,6 +227,18 @@ pub struct WaitingHandle {
     this: Weak<Self>,
 }
 
+impl Drop for WaitingHandle {
+    fn drop(&mut self) {
+        loop {
+            let Some((r_id, (token, interests, event_bits))) = self.registries.lock().pop_first()
+            else {
+                break;
+            };
+            self.check_interests_for_registry(r_id);
+        }
+    }
+}
+
 impl WaitingHandle {
     pub fn new(
         wait_handle: SysHandle,
@@ -324,7 +336,7 @@ impl WaitingHandle {
 
     // Called by a woken registry to check if this object's owner has a new event to report.
     fn check_interests_for_registry(&self, r_id: u64) {
-        let (token, event_bits) = {
+        let (token, new_events) = {
             let mut registries = self.registries.lock();
             let Some((token, interests, events)) = registries.get_mut(&r_id) else {
                 return;
@@ -349,7 +361,7 @@ impl WaitingHandle {
 
         if let Some(registry) = REGISTRIES.lock().get(&r_id) {
             if let Some(registry) = registry.upgrade() {
-                registry.on_event(token, event_bits);
+                registry.on_event(token, new_events);
             } else {
                 panic!()
             }
@@ -497,6 +509,8 @@ impl Registry {
                 Ordering::Release,
             );
             if !self.events.lock().is_empty() {
+                self.wait_handle
+                    .store(SysHandle::NONE.as_u64(), Ordering::Release);
                 break;
             }
 
@@ -532,7 +546,14 @@ impl Registry {
                 // The first object is the bad handle.
                 assert!(!wait_handles.is_empty());
                 let bad_handle = wait_handles[0];
-                self.waiting_handle_objects.lock().remove(&bad_handle);
+                if let Some(obj) = Option::flatten(
+                    self.waiting_handle_objects
+                        .lock()
+                        .remove(&bad_handle)
+                        .map(|o| o.upgrade()),
+                ) {
+                    obj.check_interests_for_registry(self.id);
+                }
                 continue;
             }
             for handle in &wait_handles {

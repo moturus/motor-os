@@ -272,15 +272,17 @@ impl ClientConnection {
             let seq = self
                 .req::<RequestHeader>()
                 .seq
-                .fetch_add(1, Ordering::AcqRel);
+                .fetch_add(1, Ordering::SeqCst);
             assert_eq!(seq, self.seq);
             assert_eq!(seq & 1, 0);
-            self.seq = seq + 1;
+            self.seq += 1;
 
+            // moto_rt::moto_log!("do_rpc 200 {:?}", self.handle);
             loop {
                 let mut handles = [self.handle];
                 let res = SysCpu::wait(&mut handles, self.handle, SysHandle::NONE, timeout);
 
+                fence(core::sync::atomic::Ordering::SeqCst);
                 if res.is_ok() {
                     let seq = self.resp::<ResponseHeader>().seq.load(Ordering::SeqCst);
                     if self.seq == seq {
@@ -472,11 +474,11 @@ impl LocalServerConnection {
 
     pub fn finish_rpc(&mut self) -> Result<(), ErrorCode> {
         if self.connected() {
+            self.seq += 2;
             let seq = self
                 .resp::<ResponseHeader>()
                 .seq
                 .fetch_add(1, Ordering::SeqCst);
-            self.seq += 2;
             assert_eq!(self.seq, seq + 1);
             assert_eq!(0, self.seq & 1);
             SysCpu::wake(self.handle).inspect_err(|err| {
@@ -511,7 +513,7 @@ impl LocalServerConnection {
     }
 
     pub fn have_req(&self) -> bool {
-        let seq = self.req::<RequestHeader>().seq.load(Ordering::Acquire);
+        let seq = self.req::<RequestHeader>().seq.load(Ordering::SeqCst);
         if seq == self.seq {
             false
         } else {
@@ -601,7 +603,7 @@ impl LocalServer {
             waiters.push(*k);
         }
 
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, None).map_err(|err| {
             assert_eq!(err, moto_rt::E_BAD_HANDLE);
             let mut bad_extras = Vec::new();
@@ -637,7 +639,7 @@ impl LocalServer {
             wakers.push(handle);
         }
 
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         Ok(wakers)
     }
 

@@ -54,16 +54,22 @@ impl Shared {
         Err(())
     }
 
+    fn on_sharer_dropped(&self) {
+        let lock = self.sharee.lock(line!());
+        if let Some(sharee) = lock.upgrade() {
+            sharee.on_sibling_dropped(); // Wakes the peer.
+        }
+    }
+
     fn on_drop(&self, child: &SysObject) {
         if let Some(sharer) = self.sharer.upgrade() {
-            if sharer.id() == child.id() {
-                let lock = self.sharee.lock(line!());
-                if let Some(sharee) = lock.upgrade() {
-                    sharee.on_sibling_dropped(); // Wakes the peer.
-                }
-            } else {
-                sharer.on_sibling_dropped(); // Wakes the peer.
-            }
+            // Can't upgrade an object being dropped.
+            assert_ne!(sharer.id(), child.id());
+
+            sharer.on_sibling_dropped(); // Wakes the peer.
+        } else {
+            // This is called from sharer's on_drop.
+            self.on_sharer_dropped();
         }
     }
 }
@@ -284,7 +290,7 @@ pub(super) fn create_ipc_pair(
     let process2 = process_from_handle(&requestor, process2_handle)?;
 
     let url = IPC_PAIR_URL.clone();
-    let shared = Arc::new(Shared {
+    let mut shared = Arc::new(Shared {
         page_type: PageType::Unknown,
         page_num: 0,
         owner_addr: 0,
@@ -295,10 +301,10 @@ pub(super) fn create_ipc_pair(
     });
 
     let obj1 = SysObject::new_owned(url.clone(), shared.clone(), Arc::downgrade(&process1));
-    // Safe because we just constructed shared and all references to it are here.
+
+    // Safety: nobody else uses shared yet.
     unsafe {
-        let ptr = Arc::as_ptr(&shared) as usize as *mut Shared;
-        (*ptr).sharer = Arc::downgrade(&obj1);
+        Arc::get_mut_unchecked(&mut shared).sharer = Arc::downgrade(&obj1);
     }
 
     let obj2 = SysObject::new_owned(url.clone(), shared.clone(), Arc::downgrade(&process2));

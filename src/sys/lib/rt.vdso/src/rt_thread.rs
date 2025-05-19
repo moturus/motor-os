@@ -96,7 +96,7 @@ pub extern "C" fn join(handle: u64) -> ErrorCode {
                     break;
                 } // else => spurious wakeup.
             }
-            Err(_) => {
+            Err(_err) => {
                 // TODO: figure out a way to report bad handle (e.g. not a thread handle)
                 assert_eq!(handles[0], handle);
                 break;

@@ -316,10 +316,74 @@ fn test_stdio_is_terminal() {
     println!("test_stdio_is_terminal PASS");
 }
 
+fn test_stdio_reader_wake_on_writer_drop() {
+    use moto_sys::SysHandle;
+
+    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+
+    let reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
+
+    let reader_thread = std::thread::spawn(move || loop {
+        let mut buf = [0; 64];
+
+        let Ok(read) = reader.read(&mut buf) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+    });
+
+    let buf = [0; 64];
+    let _ = writer.write(&buf).unwrap();
+
+    // Sleep a bit to let the reader go into wait().
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    core::mem::drop(writer);
+
+    reader_thread.join().unwrap();
+
+    println!("test_stdio_reader_wake_on_writer_drop PASS");
+}
+
+fn test_stdio_writer_wake_on_reader_drop() {
+    use moto_sys::SysHandle;
+
+    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+
+    let reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
+
+    let writer_thread = std::thread::spawn(move || loop {
+        let buf = [0; 64];
+
+        let Ok(written) = writer.write(&buf) else {
+            break;
+        };
+        if written == 0 {
+            break;
+        }
+    });
+
+    let mut buf = [0; 64];
+    let _ = reader.read(&mut buf).unwrap();
+
+    // Sleep a bit to let the writer go into wait().
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    core::mem::drop(reader);
+
+    writer_thread.join().unwrap();
+
+    println!("test_stdio_writer_wake_on_reader_drop PASS");
+}
+
 pub fn run_all_tests() {
     test_stdio_pipe_basic();
     test_stdio_pipe_fd();
     test_stdio_pipe_async_fd();
     test_stdio_pipe_flush();
     test_stdio_is_terminal();
+    test_stdio_reader_wake_on_writer_drop();
+    test_stdio_writer_wake_on_reader_drop();
 }

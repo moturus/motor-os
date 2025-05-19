@@ -21,9 +21,6 @@ struct PipeBuffer {
 
 impl Drop for PipeBuffer {
     fn drop(&mut self) {
-        if self.error_code == moto_rt::E_OK {
-            SysCpu::wake(self.ipc_handle).ok();
-        }
         moto_sys::SysObj::put(self.ipc_handle).unwrap();
         moto_sys::SysMem::unmap(SysHandle::SELF, 0, u64::MAX, self.buf_addr as u64).unwrap();
     }
@@ -219,6 +216,14 @@ impl StdioPipe {
         };
 
         buffer.lock().can_write()
+    }
+
+    pub fn is_err(&self) -> bool {
+        let Some(buffer) = self.buffer.as_ref() else {
+            return false;
+        };
+
+        buffer.lock().error_code != moto_rt::E_OK
     }
 
     /// Construct a reader pipe.
