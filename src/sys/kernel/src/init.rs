@@ -146,7 +146,7 @@ pub fn init_exited(init: &crate::uspace::Process) -> ! {
     match status {
         crate::uspace::process::ProcessStatus::Exited(exit_code) => {
             if exit_code == 0 {
-                log::info!("sys-io exited with status {}.", exit_code);
+                log::debug!("sys-io exited with status {}.", exit_code);
             } else {
                 log::warn!("sys-io exited with status {}.", exit_code);
             }

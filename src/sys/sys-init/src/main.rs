@@ -100,5 +100,6 @@ fn main() {
         .unwrap();
     tty.wait().unwrap();
 
+    #[cfg(debug_assertions)]
     let _ = moto_sys::SysRay::log("tty stopped. Shutting down.");
 }
