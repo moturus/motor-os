@@ -1,19 +1,57 @@
-use std::collections::HashMap;
+#![allow(unexpected_cfgs)]
+
+#[cfg(not(target_os = "moturus"))]
+compile_error!("RUSSHD is not (yet?) compatible with non-motor-os targets.");
+
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::*;
 
 use rand_core::OsRng;
-use russh::keys::{Certificate, *};
 use russh::server::{Msg, Server as _, Session};
 use russh::*;
-use tokio::sync::Mutex;
 
-#[tokio::main]
+mod config;
+
+// Intercept Ctrl+C ourselves if the OS does not do it for us.
+fn input_listener() {
+    use std::io::Read;
+
+    loop {
+        let mut input = [0_u8; 16];
+        let sz = std::io::stdin().read(&mut input).unwrap();
+        for b in &input[0..sz] {
+            if *b == 3 {
+                println!("\ncaught ^C: exiting.");
+                std::process::exit(0);
+            }
+        }
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // env_logger::builder()
-    //     .filter_level(log::LevelFilter::Debug)
-    //     .init();
+    std::thread::spawn(input_listener);
 
-    let config = russh::server::Config {
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        // .filter_level(log::LevelFilter::Debug)
+        .init();
+
+    let args = Vec::from_iter(std::env::args());
+    assert!(!args.is_empty());
+    if args.len() != 2 {
+        eprintln!("Usage: {} %CONFIG_FILENAME", args[0]);
+        return;
+    }
+
+    let Ok(program_config) = config::read_from_file(&args[1]) else {
+        eprintln!("Error reading config file '{}'.", args[1]);
+        return;
+    };
+
+    log::warn!("TODO: read the server's private key from ext. storage.");
+    let russh_config = russh::server::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
@@ -21,124 +59,449 @@ async fn main() {
             russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap(),
         ],
         preferred: Preferred {
-            // kex: std::borrow::Cow::Owned(vec![russh::kex::DH_GEX_SHA256]),
             ..Preferred::default()
         },
         ..Default::default()
     };
-    let config = Arc::new(config);
-    let mut sh = Server {
-        clients: Arc::new(Mutex::new(HashMap::new())),
-        id: 0,
-    };
-    sh.run_on_address(config, ("0.0.0.0", 2222)).await.unwrap();
+    let config = Arc::new(russh_config);
+    let mut sh = ConnectionHandler::new(program_config.clone(), None);
+
+    log::info!("Starting SSHD on {:?}.", program_config.listen_on());
+    sh.run_on_address(config, program_config.listen_on())
+        .await
+        .unwrap();
 }
 
-#[derive(Clone)]
-struct Server {
-    clients: Arc<Mutex<HashMap<usize, (ChannelId, russh::server::Handle)>>>,
-    id: usize,
+#[allow(unused)]
+#[derive(Debug)]
+struct PtyRequest {
+    cols: u32,
+    rows: u32,
+
+    #[allow(unused)]
+    modes: Vec<(Pty, u32)>,
 }
 
-impl Server {
-    async fn post(&mut self, data: CryptoVec) {
-        let mut clients = self.clients.lock().await;
-        for (id, (channel, s)) in clients.iter_mut() {
-            if *id != self.id {
-                let _ = s.data(*channel, data.clone()).await;
-            }
+/// Handles a client connection, which can _potentially_ have multiple channels
+/// (multiple shell sessions, port forwarding, sftp, etc.). But in our current
+/// implementation we support only a single channel.
+struct ConnectionHandler {
+    id: u64,
+    config: Arc<config::Config>,
+
+    // shell_sessions: Mutex<HashMap<ChannelId, ShellSession>>,
+    channel: Option<(ChannelId, server::Handle)>,
+    remote_addr: Option<SocketAddr>,
+    pty_request: Option<PtyRequest>,
+    authenticated_user: Option<String>,
+
+    stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+}
+
+impl ConnectionHandler {
+    fn new(config: Arc<config::Config>, remote_addr: Option<SocketAddr>) -> Self {
+        static ID: AtomicU64 = AtomicU64::new(0);
+        Self {
+            config,
+            channel: None,
+            pty_request: None,
+            id: ID.fetch_add(1, Ordering::Relaxed) + 1,
+            remote_addr,
+            authenticated_user: None,
+            stdin_tx: None,
         }
     }
+
+    async fn auth_reject_with_methods(&mut self) -> Result<server::Auth, russh::Error> {
+        Ok(server::Auth::Reject {
+            proceed_with_methods: Some(russh::MethodSet::from(
+                (vec![russh::MethodKind::Password]).as_slice(),
+            )),
+            partial_success: false,
+        })
+    }
+
+    async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
+        use std::process::Stdio;
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+
+        let (channel, session) = self.channel.as_ref().unwrap();
+
+        // let mut child = tokio::process::Command::new(self.config.shell())
+        let mut child = tokio::process::Command::new("bin/rush")
+            .arg("-i")
+            .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .inspect_err(|e| log::warn!("Error spawning shell {}: {:?}", self.config.shell(), e))?;
+
+        let data = CryptoVec::from("\n\rHello! Welcome to Motor OS.\r\n\n\r");
+        session
+            .data(*channel, data)
+            .await
+            .map_err(|_| russh::Error::Inconsistent)?;
+
+        // Pipe stdin through.
+        let mut stdin = child.stdin.take().unwrap();
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        self.stdin_tx = Some(stdin_tx);
+
+        tokio::spawn(async move {
+            loop {
+                let Some(data) = stdin_rx.recv().await else {
+                    log::debug!("stdin_rx.recv() returned None");
+                    if stdin_rx.is_closed() {
+                        break;
+                    }
+                    break;
+                };
+                if let Err(err) = stdin.write_all(&data).await {
+                    log::debug!("stdin.write_all() failed with error '{:?}'", err);
+                    break;
+                }
+            }
+        });
+
+        // Pipe stdout through.
+        let mut stdout = child.stdout.take().unwrap();
+
+        let (channel, session_handle) = self.channel.clone().unwrap();
+        let session = session_handle.clone();
+        tokio::spawn(async move {
+            let mut buf = [0_u8; 256];
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(sz) => {
+                        if sz == 0 {
+                            log::debug!("stdout.read() returned zero.");
+                            break;
+                        }
+                        if let Err(err) = Self::output(&session, channel, &buf[0..sz]).await {
+                            log::debug!("session.data() failed with error '{:?}'", err);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log::debug!("stdout.read() failed with error '{:?}'", err);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Pipe stderr through.
+        let mut stderr = child.stderr.take().unwrap();
+
+        let (channel, session_handle) = self.channel.clone().unwrap();
+        let session = session_handle.clone();
+        tokio::spawn(async move {
+            let mut buf = [0_u8; 256];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(sz) => {
+                        if sz == 0 {
+                            log::debug!("stderr.read() returned zero.");
+                            break;
+                        }
+                        if let Err(err) = Self::output(&session, channel, &buf[0..sz]).await {
+                            log::debug!("session.data() failed with error '{:?}'", err);
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        log::debug!("stderr.read() failed with error '{:?}'", err);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Wait for the child.
+        let (channel, session_handle) = self.channel.clone().unwrap();
+        tokio::spawn(async move {
+            match child.wait().await {
+                Ok(status) => {
+                    if let Some(code) = status.code() {
+                        log::info!("child exited with {code}");
+                        let _ = session_handle
+                            .exit_status_request(channel, unsafe {
+                                core::mem::transmute::<i32, u32>(code)
+                            })
+                            .await;
+                    }
+                }
+                Err(err) => {
+                    log::warn!("child.wait() failed: {:?}", err);
+                }
+            }
+
+            let _ = session_handle.eof(channel).await;
+            let _ = session_handle.close(channel).await;
+        });
+
+        Ok(())
+    }
+
+    async fn output(
+        session: &russh::server::Handle,
+        channel: ChannelId,
+        bytes: &[u8],
+    ) -> anyhow::Result<()> {
+        use anyhow::anyhow;
+
+        let mut start = 0;
+        let mut pos = 0;
+        while start < bytes.len() {
+            let mut add_r = false;
+
+            while pos < bytes.len() {
+                if bytes[pos] == b'\n' {
+                    add_r = true;
+                    pos += 1;
+                    break;
+                }
+
+                pos += 1;
+            }
+
+            session
+                .data(channel, bytes[start..pos].into())
+                .await
+                .map_err(|_| anyhow!("Failed to send bytes to the client."))?;
+
+            if add_r {
+                session
+                    .data(channel, [b'\r'].as_slice().into())
+                    .await
+                    .map_err(|_| anyhow!("Failed to send bytes to the client."))?;
+            }
+
+            start = pos;
+        }
+
+        Ok(())
+    }
 }
 
-impl server::Server for Server {
+impl server::Server for ConnectionHandler {
     type Handler = Self;
-    fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
-        let s = self.clone();
-        self.id += 1;
-        s
+    fn new_client(&mut self, addr: Option<std::net::SocketAddr>) -> Self {
+        log::info!("New Client: {:?}", addr);
+        Self::new(self.config.clone(), addr)
     }
-    fn handle_session_error(&mut self, _error: <Self::Handler as russh::server::Handler>::Error) {
-        eprintln!("Session error: {:#?}", _error);
+
+    fn handle_session_error(&mut self, error: <Self::Handler as russh::server::Handler>::Error) {
+        log::info!("Session error: {:?}", error);
     }
 }
 
-impl server::Handler for Server {
+impl server::Handler for ConnectionHandler {
     type Error = russh::Error;
+
+    // // The standard openssh client does not print the banner.
+    // async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
+    //     Ok(Some("Motor OS SSH Server.".to_owned()))
+    // }
+
+    async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
+        self.auth_reject_with_methods().await
+    }
+
+    async fn auth_publickey_offered(
+        &mut self,
+        _user: &str,
+        _public_key: &keys::ssh_key::PublicKey,
+    ) -> Result<server::Auth, Self::Error> {
+        self.auth_reject_with_methods().await
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        _: &str,
+        _key: &keys::ssh_key::PublicKey,
+    ) -> Result<server::Auth, Self::Error> {
+        self.auth_reject_with_methods().await
+    }
+
+    async fn auth_openssh_certificate(
+        &mut self,
+        _user: &str,
+        _certificate: &keys::Certificate,
+    ) -> Result<server::Auth, Self::Error> {
+        self.auth_reject_with_methods().await
+    }
+
+    async fn auth_password(
+        &mut self,
+        user: &str,
+        password: &str,
+    ) -> Result<server::Auth, Self::Error> {
+        if let Some(authenticated) = self.authenticated_user.as_ref() {
+            log::warn!(
+                "auth_password() called for user '{user}' while user '{authenticated}' has been authenticated."
+            );
+            return Ok(server::Auth::reject());
+        }
+
+        Ok(match self.config.authenticate(user, password) {
+            Ok(_) => {
+                log::info!("User {user} authenticated.");
+                self.authenticated_user = Some(user.to_owned());
+                server::Auth::Accept
+            }
+            Err(err) => {
+                log::info!("User {user} failed to authenticate: {:?}.", err);
+                server::Auth::reject()
+            }
+        })
+    }
 
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        {
-            let mut clients = self.clients.lock().await;
-            clients.insert(self.id, (channel.id(), session.handle()));
+        log::info!("New Session: {:?}", channel.id());
+        if self.channel.is_some() {
+            return Ok(false);
         }
+
+        self.channel = Some((channel.id(), session.handle()));
         Ok(true)
     }
 
-    async fn auth_publickey(
+    async fn channel_eof(
         &mut self,
-        _: &str,
-        _key: &ssh_key::PublicKey,
-    ) -> Result<server::Auth, Self::Error> {
-        Ok(server::Auth::Accept)
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // After a client has sent an EOF, indicating that they don't want
+        // to send more data in this session, the channel can be closed.
+        session.close(channel)
     }
 
-    async fn auth_openssh_certificate(
+    #[allow(unused_variables, clippy::too_many_arguments)]
+    async fn pty_request(
         &mut self,
-        _user: &str,
-        _certificate: &Certificate,
-    ) -> Result<server::Auth, Self::Error> {
-        Ok(server::Auth::Accept)
+        channel: ChannelId,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        pix_width: u32,
+        pix_height: u32,
+        modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        log::debug!(
+            "pty_request: {}-'{}': {col_width}:{row_height} - {pix_width}:{pix_height} {:?}",
+            channel,
+            term,
+            modes
+        );
+
+        let Some((chan, _)) = self.channel else {
+            return Err(Self::Error::Inconsistent);
+        };
+        if channel != chan {
+            return Err(Self::Error::Inconsistent);
+        }
+
+        if let Some(prev) = self.pty_request.replace(PtyRequest {
+            cols: col_width,
+            rows: row_height,
+            modes: modes.to_vec(),
+        }) {
+            // Logging as a warning as we don't know what to do here (yet).
+            log::warn!("prev PTY request: {:?}", prev);
+        }
+
+        Ok(())
     }
 
-    async fn data(
+    #[allow(unused_variables)]
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        log::info!("shell_request");
+
+        let Some((chan, _)) = self.channel else {
+            return Err(Self::Error::Inconsistent);
+        };
+        if channel != chan {
+            return Err(Self::Error::Inconsistent);
+        }
+        if self.pty_request.is_none() {
+            return Err(Self::Error::Inconsistent);
+        }
+
+        self.spawn_shell().await
+    }
+
+    #[allow(unused_variables)]
+    async fn exec_request(
         &mut self,
         channel: ChannelId,
         data: &[u8],
         session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        log::info!("exec_request: `{}`", String::from_utf8_lossy(data));
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        log::info!("subsystem_request: {name}");
+        session.channel_failure(channel)
+    }
+
+    async fn data(
+        &mut self,
+        _channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
     ) -> Result<(), Self::Error> {
         // Sending Ctrl+C ends the session and disconnects the client
         if data == [3] {
             return Err(russh::Error::Disconnect);
         }
 
-        let data = CryptoVec::from(format!("Got data: {}\r\n", String::from_utf8_lossy(data)));
-        self.post(data.clone()).await;
-        session.data(channel, data)?;
-        Ok(())
-    }
+        // log::debug!("Got data for {}:{:?}", self.id, channel);
 
-    async fn tcpip_forward(
-        &mut self,
-        address: &str,
-        port: &mut u32,
-        session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        let handle = session.handle();
-        let address = address.to_string();
-        let port = *port;
-        tokio::spawn(async move {
-            let channel = handle
-                .channel_open_forwarded_tcpip(address, port, "1.2.3.4", 1234)
-                .await
-                .unwrap();
-            let _ = channel.data(&b"Hello from a forwarded port"[..]).await;
-            let _ = channel.eof().await;
-        });
-        Ok(true)
+        let Some(stdin_tx) = self.stdin_tx.as_ref() else {
+            log::warn!("Got remote data without local shell session.");
+            return Err(russh::Error::Disconnect);
+        };
+
+        if let Err(err) = stdin_tx.send(data.to_vec()).await {
+            log::warn!("stdin_tx.send() failed with error '{:?}'.", err);
+            return Err(russh::Error::Disconnect);
+        }
+
+        Ok(())
     }
 }
 
-impl Drop for Server {
+impl Drop for ConnectionHandler {
     fn drop(&mut self) {
-        let id = self.id;
-        let clients = self.clients.clone();
-        tokio::spawn(async move {
-            let mut clients = clients.lock().await;
-            clients.remove(&id);
-        });
+        let from = self
+            .remote_addr
+            .map(|addr| format!(" from {:?}", addr))
+            .unwrap_or_default();
+        log::info!(
+            "Dropping Connection #{} for user '{}'{}",
+            self.id,
+            self.authenticated_user.as_ref().unwrap_or(&String::new()),
+            from
+        );
     }
 }
