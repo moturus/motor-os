@@ -391,7 +391,7 @@ fn create_stdio_pipes(
 struct ChildStdio {
     inner: StdioPipe,
     nonblocking: AtomicBool,
-    event_source: Arc<super::runtime::EventSourceWithHandle>,
+    event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl ChildStdio {
@@ -405,7 +405,7 @@ impl ChildStdio {
         Arc::new_cyclic(|me| Self {
             inner,
             nonblocking: AtomicBool::new(false),
-            event_source: super::runtime::EventSourceWithHandle::new(
+            event_source: super::runtime::EventSourceUnmanaged::new(
                 wait_handle,
                 me.clone() as _,
                 supported_interests,
@@ -414,7 +414,7 @@ impl ChildStdio {
     }
 }
 
-impl super::runtime::WaitHandleHolder for ChildStdio {
+impl super::runtime::UnmanagedEventSourceHolder for ChildStdio {
     fn check_interests(&self, interests: Interests) -> moto_rt::poll::EventBits {
         if self.event_source.is_closed() {
             return 0;

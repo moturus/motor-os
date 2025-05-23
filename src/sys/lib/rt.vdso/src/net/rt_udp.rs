@@ -1,6 +1,6 @@
 use super::rt_net::{ChannelReservation, NetChannel};
 use crate::posix::PosixKind;
-use crate::{posix::PosixFile, runtime::EventSource};
+use crate::{posix::PosixFile, runtime::EventSourceManaged};
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -19,7 +19,7 @@ pub struct UdpSocket {
     channel_reservation: ChannelReservation,
     local_addr: SocketAddr,
     handle: u64,
-    event_source: EventSource,
+    event_source: EventSourceManaged,
     nonblocking: AtomicBool,
     subchannel_mask: u64, // Never changes.
 
@@ -105,7 +105,7 @@ impl UdpSocket {
             channel_reservation,
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
-            event_source: EventSource::new(
+            event_source: EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
             subchannel_mask,

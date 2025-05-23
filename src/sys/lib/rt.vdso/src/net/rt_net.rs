@@ -1,7 +1,6 @@
 use crate::posix;
 use crate::posix::PosixFile;
-use crate::runtime::EventSource;
-use crate::runtime::ResponseHandler;
+use crate::runtime::EventSourceManaged;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -385,6 +384,10 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
 //       for performance and robustness.
 //
 // Note: some or all of the above may be outdated.
+
+pub trait ResponseHandler {
+    fn on_response(&self, resp: io_channel::Msg);
+}
 
 static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
     full_channels: BTreeMap::new(),

@@ -19,14 +19,14 @@ pub fn new_child_fd(handle: SysHandle) -> RtFd {
 /// FD from Child handle.
 struct ChildFd {
     handle: SysHandle,
-    event_source: Arc<super::runtime::EventSourceWithHandle>,
+    event_source: Arc<super::runtime::EventSourceUnmanaged>,
 }
 
 impl ChildFd {
     fn from_handle(handle: SysHandle) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             handle,
-            event_source: super::runtime::EventSourceWithHandle::new(
+            event_source: super::runtime::EventSourceUnmanaged::new(
                 handle,
                 me.clone() as _,
                 moto_rt::poll::POLL_READABLE,
@@ -35,7 +35,7 @@ impl ChildFd {
     }
 }
 
-impl super::runtime::WaitHandleHolder for ChildFd {
+impl super::runtime::UnmanagedEventSourceHolder for ChildFd {
     fn check_interests(&self, interests: Interests) -> moto_rt::poll::EventBits {
         if interests != moto_rt::poll::POLL_READABLE {
             return 0;

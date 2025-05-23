@@ -1,8 +1,7 @@
 use crate::posix;
 use crate::posix::PosixFile;
 use crate::posix::PosixKind;
-use crate::runtime::EventSource;
-use crate::runtime::ResponseHandler;
+use crate::runtime::EventSourceManaged;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -30,6 +29,7 @@ use moto_sys_io::api_net::IO_SUBCHANNELS;
 
 use super::rt_net::ChannelReservation;
 use super::rt_net::NetChannel;
+use super::rt_net::ResponseHandler;
 
 struct AcceptRequest {
     channel_reservation: Option<ChannelReservation>,
@@ -46,7 +46,7 @@ pub struct TcpListener {
     channel_reservation: ChannelReservation,
     handle: u64,
     nonblocking: AtomicBool,
-    event_source: EventSource,
+    event_source: EventSourceManaged,
 
     // All outgoing accept requests are stored here: req_id => req.
     accept_requests: Mutex<BTreeMap<u64, AcceptRequest>>,
@@ -215,7 +215,7 @@ impl TcpListener {
             // a successful WRITABLE interest registration:
             // https://github.com/tokio-rs/mio/blob/9a9d691891d5f7d91c7493b65d0b80726699faa8/tests/poll.rs#L56
             // so we have to allow that.
-            event_source: EventSource::new(
+            event_source: EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
 
@@ -327,7 +327,7 @@ impl TcpListener {
             local_addr: Mutex::new(Some(self.socket_addr)),
             remote_addr,
             handle: AtomicU64::new(pending_accept.resp.handle),
-            event_source: EventSource::new(
+            event_source: EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
             me: me.clone(),
@@ -505,7 +505,7 @@ pub struct TcpStream {
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
-    event_source: EventSource,
+    event_source: EventSourceManaged,
     nonblocking: AtomicBool,
     me: Weak<TcpStream>,
 
@@ -844,7 +844,7 @@ impl TcpStream {
             local_addr: Mutex::new(None),
             remote_addr: *socket_addr,
             handle: AtomicU64::new(SysHandle::NONE.into()),
-            event_source: EventSource::new(
+            event_source: EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
             me: me.clone(),
