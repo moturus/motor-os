@@ -19,14 +19,14 @@ pub fn new_child_fd(handle: SysHandle) -> RtFd {
 /// FD from Child handle.
 struct ChildFd {
     handle: SysHandle,
-    waiting_handle: Arc<super::runtime::WaitingHandle>,
+    event_source: Arc<super::runtime::EventSourceWithHandle>,
 }
 
 impl ChildFd {
     fn from_handle(handle: SysHandle) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             handle,
-            waiting_handle: super::runtime::WaitingHandle::new(
+            event_source: super::runtime::EventSourceWithHandle::new(
                 handle,
                 me.clone() as _,
                 moto_rt::poll::POLL_READABLE,
@@ -46,6 +46,10 @@ impl super::runtime::WaitHandleHolder for ChildFd {
         } else {
             0
         }
+    }
+
+    fn on_handle_error(&self) {
+        self.event_source.on_closed_remotely(true);
     }
 }
 
@@ -82,7 +86,8 @@ impl PosixFile for ChildFd {
         Ok(())
     }
 
-    fn close(&self) -> Result<(), ErrorCode> {
+    fn close(&self, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(source_fd);
         Ok(())
     }
 
@@ -94,15 +99,29 @@ impl PosixFile for ChildFd {
         }
     }
 
-    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.waiting_handle.add_interests(r_id, token, interests)
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .add_interests(r_id, source_fd, token, interests)
     }
 
-    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.waiting_handle.set_interests(r_id, token, interests)
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .set_interests(r_id, source_fd, token, interests)
     }
 
-    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
-        self.waiting_handle.del_interests(r_id)
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(r_id, source_fd)
     }
 }

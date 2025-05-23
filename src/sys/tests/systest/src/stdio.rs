@@ -171,7 +171,7 @@ fn test_stdio_pipe_async_fd() {
             registry,
             (&mut events) as *mut _,
             3,
-            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(1))
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(15))
         )
         .unwrap()
     );
@@ -203,7 +203,7 @@ fn test_stdio_pipe_async_fd() {
     // Stop polling stdin.
     moto_rt::poll::del(registry, child_stdin.as_raw_fd()).unwrap();
 
-    // Check that we have one reatable event on stdout.
+    // Check that we have one readable event on stdout.
     assert_eq!(
         1,
         moto_rt::poll::wait(registry, (&mut events) as *mut _, 3, None).unwrap()
@@ -224,7 +224,7 @@ fn test_stdio_pipe_async_fd() {
     let msg2 = b"echo2 blah blah blah\n";
     child_stdin.write_all(msg2).unwrap();
 
-    // Check that we have one reatable event on stderr.
+    // Check that we have one readable event on stderr.
     assert_eq!(
         1,
         moto_rt::poll::wait(registry, (&mut events) as *mut _, 3, None).unwrap()
@@ -249,21 +249,51 @@ fn test_stdio_pipe_async_fd() {
     let mut child_stderr = unsafe { std::fs::File::from_raw_fd(raw_fd) };
     assert!(child_stderr.read(&mut buf).is_err());
 
-    // Nothing to read.
+    // Because we closed stderr "on our side", no events are polled.
     assert_eq!(
         0,
         moto_rt::poll::wait(
             registry,
             (&mut events) as *mut _,
             3,
-            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(1))
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(15))
         )
         .unwrap()
     );
 
+    // Stop polling stderr.
+    moto_rt::poll::del(registry, raw_fd).unwrap();
+
+    assert_eq!(
+        0,
+        moto_rt::poll::wait(
+            registry,
+            (&mut events) as *mut _,
+            3,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(15))
+        )
+        .unwrap()
+    );
+
+    // Tell child to exit.
     child_stdin.write_all(b"exit 0\n").unwrap();
     while child_stdin.flush().is_err() {}
     child.wait().unwrap();
+
+    // Stdout is now closed "on the remote side", so we see an event.
+    assert_eq!(
+        1,
+        moto_rt::poll::wait(
+            registry,
+            (&mut events) as *mut _,
+            3,
+            Some(moto_rt::time::Instant::now() + std::time::Duration::from_millis(15))
+        )
+        .unwrap()
+    );
+
+    assert_eq!(events[0].token, STDOUT);
+    assert_eq!(events[0].events, moto_rt::poll::POLL_READ_CLOSED);
 
     moto_rt::fs::close(registry).unwrap();
 

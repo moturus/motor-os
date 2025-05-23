@@ -1,6 +1,6 @@
 use super::rt_net::{ChannelReservation, NetChannel};
 use crate::posix::PosixKind;
-use crate::{posix::PosixFile, runtime::WaitObject};
+use crate::{posix::PosixFile, runtime::EventSource};
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -11,7 +11,7 @@ use moto_ipc::io_channel;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::{mutex::Mutex, ErrorCode};
-use moto_rt::{E_NOT_READY, E_TIMED_OUT};
+use moto_rt::{RtFd, E_NOT_READY, E_TIMED_OUT};
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
@@ -19,7 +19,7 @@ pub struct UdpSocket {
     channel_reservation: ChannelReservation,
     local_addr: SocketAddr,
     handle: u64,
-    wait_object: WaitObject,
+    event_source: EventSource,
     nonblocking: AtomicBool,
     subchannel_mask: u64, // Never changes.
 
@@ -105,7 +105,7 @@ impl UdpSocket {
             channel_reservation,
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
-            wait_object: WaitObject::new(
+            event_source: EventSource::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
             subchannel_mask,
@@ -168,7 +168,7 @@ impl UdpSocket {
                 }
             }
 
-            self.wait_object
+            self.event_source
                 .wait(moto_rt::poll::POLL_READABLE, deadline);
         }
     }
@@ -266,7 +266,7 @@ impl UdpSocket {
                 }
             }
 
-            self.wait_object
+            self.event_source
                 .wait(moto_rt::poll::POLL_WRITABLE, deadline);
         }
     }
@@ -324,11 +324,11 @@ impl UdpSocket {
                     rx_queue.have_datagram().unwrap()
                 };
                 if notify {
-                    self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+                    self.event_source.on_event(moto_rt::poll::POLL_READABLE);
                 }
             }
             api_net::NetCmd::UdpSocketTxRxAck => {
-                self.wait_object.on_event(moto_rt::poll::POLL_WRITABLE);
+                self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
                 self.try_tx();
             }
             _ => panic!("Unexpected UDP cmd: {:?}", cmd),
@@ -442,7 +442,7 @@ impl UdpSocket {
         }
 
         if events != 0 {
-            self.wait_object.on_event(events);
+            self.event_source.on_event(events);
         }
     }
 }
@@ -464,19 +464,38 @@ impl PosixFile for UdpSocket {
         self.recv_or_peek_from(buf, false).map(|(sz, _)| sz)
     }
 
-    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.add_interests(r_id, token, interests)?;
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(rt_fd);
+        Ok(())
+    }
+
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .add_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
-    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.set_interests(r_id, token, interests)?;
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .set_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
-    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
-        self.wait_object.del_interests(r_id)
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(r_id, source_fd)
     }
 }

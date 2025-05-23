@@ -1,7 +1,7 @@
 use crate::posix;
 use crate::posix::PosixFile;
+use crate::runtime::EventSource;
 use crate::runtime::ResponseHandler;
-use crate::runtime::WaitObject;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;

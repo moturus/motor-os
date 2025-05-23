@@ -149,7 +149,7 @@ impl PosixFile for SelfStdio {
     fn flush(&self) -> Result<(), ErrorCode> {
         self.inner.lock().flush()
     }
-    fn close(&self) -> Result<(), ErrorCode> {
+    fn close(&self, _rt_fd: RtFd) -> Result<(), ErrorCode> {
         todo!()
     }
 }
@@ -391,7 +391,7 @@ fn create_stdio_pipes(
 struct ChildStdio {
     inner: StdioPipe,
     nonblocking: AtomicBool,
-    waiting_handle: Arc<super::runtime::WaitingHandle>,
+    event_source: Arc<super::runtime::EventSourceWithHandle>,
 }
 
 impl ChildStdio {
@@ -405,7 +405,7 @@ impl ChildStdio {
         Arc::new_cyclic(|me| Self {
             inner,
             nonblocking: AtomicBool::new(false),
-            waiting_handle: super::runtime::WaitingHandle::new(
+            event_source: super::runtime::EventSourceWithHandle::new(
                 wait_handle,
                 me.clone() as _,
                 supported_interests,
@@ -416,6 +416,9 @@ impl ChildStdio {
 
 impl super::runtime::WaitHandleHolder for ChildStdio {
     fn check_interests(&self, interests: Interests) -> moto_rt::poll::EventBits {
+        if self.event_source.is_closed() {
+            return 0;
+        }
         let mut events = 0;
 
         if (interests & moto_rt::poll::POLL_READABLE != 0) && self.inner.can_read() {
@@ -426,12 +429,11 @@ impl super::runtime::WaitHandleHolder for ChildStdio {
             events |= moto_rt::poll::POLL_WRITABLE;
         }
 
-        if events == 0 && self.inner.is_err() {
-            events = moto_rt::poll::POLL_READ_CLOSED | moto_rt::poll::POLL_WRITE_CLOSED;
-            crate::moto_log!("stdio.rs: reporting closed");
-        }
-
         events
+    }
+
+    fn on_handle_error(&self) {
+        self.event_source.on_closed_remotely(true);
     }
 }
 
@@ -441,12 +443,13 @@ impl PosixFile for ChildStdio {
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+        if self.event_source.is_closed() {
+            return Ok(0);
+        }
         if self.nonblocking.load(Ordering::Acquire) {
-            self.inner.nonblocking_read(buf).inspect_err(|e| {
-                if *e == moto_rt::E_NOT_READY {
-                    self.waiting_handle
-                        .reset_interest(moto_rt::poll::POLL_READABLE);
-                }
+            self.inner.nonblocking_read(buf).inspect_err(|_| {
+                self.event_source
+                    .reset_interest(moto_rt::poll::POLL_READABLE);
             })
         } else {
             self.inner.read(buf)
@@ -454,12 +457,14 @@ impl PosixFile for ChildStdio {
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        if self.event_source.is_closed() {
+            // return Ok(0);
+            return Err(moto_rt::E_BAD_HANDLE);
+        }
         if self.nonblocking.load(Ordering::Acquire) {
-            self.inner.nonblocking_write(buf).inspect_err(|e| {
-                if *e == moto_rt::E_NOT_READY {
-                    self.waiting_handle
-                        .reset_interest(moto_rt::poll::POLL_WRITABLE);
-                }
+            self.inner.nonblocking_write(buf).inspect_err(|_| {
+                self.event_source
+                    .reset_interest(moto_rt::poll::POLL_WRITABLE);
             })
         } else {
             self.inner.write(buf)
@@ -474,7 +479,8 @@ impl PosixFile for ChildStdio {
         }
     }
 
-    fn close(&self) -> Result<(), ErrorCode> {
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -483,15 +489,29 @@ impl PosixFile for ChildStdio {
         Ok(())
     }
 
-    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.waiting_handle.add_interests(r_id, token, interests)
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .add_interests(r_id, source_fd, token, interests)
     }
 
-    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.waiting_handle.set_interests(r_id, token, interests)
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .set_interests(r_id, source_fd, token, interests)
     }
 
-    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
-        self.waiting_handle.del_interests(r_id)
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(r_id, source_fd)
     }
 }

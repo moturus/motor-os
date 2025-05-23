@@ -1,8 +1,8 @@
 use crate::posix;
 use crate::posix::PosixFile;
 use crate::posix::PosixKind;
+use crate::runtime::EventSource;
 use crate::runtime::ResponseHandler;
-use crate::runtime::WaitObject;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -46,7 +46,7 @@ pub struct TcpListener {
     channel_reservation: ChannelReservation,
     handle: u64,
     nonblocking: AtomicBool,
-    wait_object: WaitObject,
+    event_source: EventSource,
 
     // All outgoing accept requests are stored here: req_id => req.
     accept_requests: Mutex<BTreeMap<u64, AcceptRequest>>,
@@ -94,34 +94,49 @@ impl PosixFile for TcpListener {
         PosixKind::TcpListener
     }
 
-    fn close(&self) -> Result<(), ErrorCode> {
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(rt_fd);
         Ok(())
     }
 
-    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.add_interests(r_id, token, interests)?;
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .add_interests(r_id, source_fd, token, interests)?;
 
         let have_async_accepts = !self.async_accepts.lock().is_empty();
         if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
-            self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+            self.event_source.on_event(moto_rt::poll::POLL_READABLE);
         }
 
         Ok(())
     }
 
-    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.set_interests(r_id, token, interests)?;
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .set_interests(r_id, source_fd, token, interests)?;
 
         let have_async_accepts = !self.async_accepts.lock().is_empty();
         if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
-            self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+            self.event_source.on_event(moto_rt::poll::POLL_READABLE);
         }
 
         Ok(())
     }
 
-    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
-        self.wait_object.del_interests(r_id)
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(r_id, source_fd)
     }
 }
 
@@ -156,7 +171,7 @@ impl ResponseHandler for TcpListener {
             self.post_accept(false).unwrap(); // TODO: how to post an accept later?
         }
 
-        self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+        self.event_source.on_event(moto_rt::poll::POLL_READABLE);
     }
 }
 
@@ -200,7 +215,7 @@ impl TcpListener {
             // a successful WRITABLE interest registration:
             // https://github.com/tokio-rs/mio/blob/9a9d691891d5f7d91c7493b65d0b80726699faa8/tests/poll.rs#L56
             // so we have to allow that.
-            wait_object: WaitObject::new(
+            event_source: EventSource::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
 
@@ -312,7 +327,7 @@ impl TcpListener {
             local_addr: Mutex::new(Some(self.socket_addr)),
             remote_addr,
             handle: AtomicU64::new(pending_accept.resp.handle),
-            wait_object: WaitObject::new(
+            event_source: EventSource::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
             me: me.clone(),
@@ -490,7 +505,7 @@ pub struct TcpStream {
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
-    wait_object: WaitObject,
+    event_source: EventSource,
     nonblocking: AtomicBool,
     me: Weak<TcpStream>,
 
@@ -591,24 +606,39 @@ impl PosixFile for TcpStream {
         Ok(())
     }
 
-    fn close(&self) -> Result<(), ErrorCode> {
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.on_closed_locally(rt_fd);
         Ok(())
     }
 
-    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.add_interests(r_id, token, interests)?;
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .add_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
-    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
-        self.wait_object.set_interests(r_id, token, interests)?;
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
+        self.event_source
+            .set_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
-    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
-        self.wait_object.del_interests(r_id)
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        self.event_source.del_interests(r_id, source_fd)
     }
 }
 
@@ -647,7 +677,7 @@ impl TcpStream {
                 | moto_rt::poll::POLL_READ_CLOSED
                 | moto_rt::poll::POLL_READABLE
                 | moto_rt::poll::POLL_WRITABLE;
-            self.wait_object.on_event(events);
+            self.event_source.on_event(events);
             return;
         }
 
@@ -675,7 +705,7 @@ impl TcpStream {
         }
 
         if events != 0 {
-            self.wait_object.on_event(events);
+            self.event_source.on_event(events);
         }
     }
 
@@ -732,7 +762,7 @@ impl TcpStream {
             recv_q.push_back(msg);
             drop(recv_q);
             // The RXQ was empty, this is a new (edge) event.
-            self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+            self.event_source.on_event(moto_rt::poll::POLL_READABLE);
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             drop(recv_q);
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
@@ -773,7 +803,7 @@ impl TcpStream {
             if sz_read > 0 {
                 recv_q.push_back(msg);
                 drop(recv_q);
-                self.wait_object.on_event(moto_rt::poll::POLL_READABLE);
+                self.event_source.on_event(moto_rt::poll::POLL_READABLE);
             }
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
@@ -814,7 +844,7 @@ impl TcpStream {
             local_addr: Mutex::new(None),
             remote_addr: *socket_addr,
             handle: AtomicU64::new(SysHandle::NONE.into()),
-            wait_object: WaitObject::new(
+            event_source: EventSource::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
             ),
             me: me.clone(),
@@ -865,7 +895,7 @@ impl TcpStream {
 
             self.error.store(resp.status(), Ordering::Release);
 
-            self.wait_object.on_event(
+            self.event_source.on_event(
                 moto_rt::poll::POLL_READ_CLOSED
                     | moto_rt::poll::POLL_WRITE_CLOSED
                     | moto_rt::poll::POLL_ERROR,
@@ -882,7 +912,7 @@ impl TcpStream {
         assert_eq!(prev, TcpState::Connecting.into());
         self.channel().tcp_stream_created(self);
 
-        self.wait_object.on_event(moto_rt::poll::POLL_WRITABLE);
+        self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
 
         self.ack_rx();
 
@@ -1059,7 +1089,7 @@ impl TcpStream {
         }
 
         if events != 0 {
-            self.wait_object.on_event(events);
+            self.event_source.on_event(events);
         }
     }
 
@@ -1242,7 +1272,7 @@ impl TcpStream {
 
     pub fn maybe_can_write(&self) {
         if self.have_write_buffer_space() {
-            self.wait_object.on_event(moto_rt::poll::POLL_WRITABLE);
+            self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
         } else {
             self.channel().add_write_waiter(self);
         }

@@ -51,22 +51,36 @@ pub trait PosixFile: Any + Send + Sync {
     fn flush(&self) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
     }
-    fn close(&self) -> Result<(), ErrorCode> {
+
+    // rt_fd indicates which FD is closed.
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
     }
     fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
         Err(moto_rt::E_NOT_IMPLEMENTED)
     }
-    fn poll_add(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
         todo!()
         // Err(E_INVALID_ARGUMENT)
     }
-    fn poll_set(&self, r_id: u64, token: Token, interests: Interests) -> Result<(), ErrorCode> {
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> Result<(), ErrorCode> {
         todo!()
         // Err(E_INVALID_ARGUMENT)
     }
-    fn poll_del(&self, r_id: u64) -> Result<(), ErrorCode> {
-        todo!()
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
+        panic!("Unexpected poll_del for {:?}", self.kind())
         // Err(E_INVALID_ARGUMENT)
     }
 }
@@ -167,7 +181,7 @@ pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
         return E_BAD_HANDLE;
     };
 
-    match posix_file.close() {
+    match posix_file.close(rt_fd) {
         Ok(()) => E_OK,
         Err(err) => err,
     }
@@ -201,7 +215,7 @@ impl PosixFile for Placeholder {
         Err(E_BAD_HANDLE)
     }
 
-    fn close(&self) -> Result<(), ErrorCode> {
+    fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
     }
 }

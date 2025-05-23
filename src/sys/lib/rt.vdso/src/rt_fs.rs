@@ -303,7 +303,14 @@ pub struct File {
     // TODO: implement get_file_attr by fd, remove abs_path.
     abs_path: String,
     fd: u64,
+
     pos: AtomicU64, // Atomic because read operations take &File, but change pos.
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        let _ = FsClient::close_fd(self.fd, CloseFdRequest::F_FILE);
+    }
 }
 
 impl PosixFile for File {
@@ -323,8 +330,8 @@ impl PosixFile for File {
         Ok(())
     }
 
-    fn close(&self) -> Result<(), ErrorCode> {
-        FsClient::close_fd(self.fd, CloseFdRequest::F_FILE)
+    fn close(&self, _rt_fd: RtFd) -> Result<(), ErrorCode> {
+        Ok(())
     }
 }
 
