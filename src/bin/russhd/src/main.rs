@@ -1,8 +1,5 @@
 #![allow(unexpected_cfgs)]
 
-#[cfg(not(target_os = "moturus"))]
-compile_error!("RUSSHD is not (yet?) compatible with non-motor-os targets.");
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::*;
