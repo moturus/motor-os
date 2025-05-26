@@ -1,17 +1,17 @@
-# Building Motūrus OS
+# Building Motor OS
 
-Motūrus OS is built on Linux. There are three steps:
+Motor OS is built on Linux. There are three steps:
 
 * install build tools on the host Linux (10-20 min)
-* build Motūrus OS target for Rust (30-60 min)
-* build Motūrus OS (2-5 min)
+* build Motor OS target for Rust (30-60 min)
+* build Motor OS (2-5 min)
 
 Time estimates above assume a fairly modern 8-core/16-thread x64 CPU
 or better, and a fast SSD drive.
 
 ## Install build tools
 
-Motūrus OS requires Linux host, as it depends on KVM. While any
+Motor OS requires Linux host, as it depends on KVM. While any
 Linux will probably do, the instructions below assume you are
 running Ubuntu 22.04. This will also work with Ubuntu 22.04 under WSL2.
 
@@ -50,16 +50,16 @@ $ cd motor-os
 $ git submodule update --init --recursive
 ```
 
-## Build Motūrus OS target for Rust
+## Build Motor OS target for Rust
 
-Check out Rust sources with Motūrus target added:
+Check out Rust sources with Motor target added:
 
 ```
 $ cd $MOTORH
 $ git clone -b motor-os_2025-04-05 https://github.com/moturus/rust.git
 ```
 
-Build Rust Motūrus target/toolchain:
+Build Rust Motor target/toolchain:
 
 ```
 $ cd $MOTORH/rust
@@ -73,7 +73,7 @@ $ rustup toolchain link dev-x86_64-unknown-moturus \
     $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
 ```
 
-## Build Motūrus OS
+## Build Motor OS
 
 ```
 $ cd $MOTORH/motor-os
@@ -88,7 +88,7 @@ $ sudo ip addr add 192.168.4.1/24 dev moto-tap
 $ sudo ip link set moto-tap up
 ```
 
-## Run Motūrus OS
+## Run Motor OS
 
 If all of the above completed successfully, you can now do
 

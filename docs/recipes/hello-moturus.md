@@ -1,10 +1,10 @@
-# Hello Motūrus
+# Hello Motor OS
 
 In this example, we will compile and run the final project
 ([a multithreaded web server](https://doc.rust-lang.org/book/ch20-00-final-project-a-web-server.html))
-from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motūrus VM, with minor changes.
+from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor VM, with minor changes.
 
-First, make sure that you can [build and run Motūrus OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
+First, make sure that you can [build and run Motor OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
 
 Then run
 
@@ -178,14 +178,14 @@ impl Worker {
 
 This code is exactly the same as in Rust Book.
 
-Now build the web server for Motūrus OS:
+Now build the web server for Motor OS:
 
 ```
 cargo +dev-x86_64-unknown-moturus build --release \
   --target x86_64-unknown-moturus
 ```
 
-Now add the web server to the Motūrus OS image:
+Now add the web server to the Motor OS image:
 
 ```
 mkdir $MOTORH/img_files/full/hello
@@ -208,7 +208,7 @@ Filename: ```hello.html```:
   </head>
   <body>
     <h1>Hello!</h1>
-    <p>Hi from Motūrus OS</p>
+    <p>Hi from Motor OS</p>
   </body>
 </html>
 ```
@@ -229,21 +229,21 @@ Filename: ```404.html```:
 </html>
 ```
 
-Now build a new Motūrus OS VM image:
+Now build a new Motor OS VM image:
 
 ```
 cd $MOTORH
 cargo make boot_img_release
 ```
 
-Run Motūrus OS:
+Run Motor OS:
 
 ```
 $ cd $MOTORH/motor-os/vm_images/release
 $ ./run-qemu-web.sh
 ```
 
-Inside Motūrus OS shell:
+Inside Motor OS shell:
 
 ```
 rush /$: cd hello
