@@ -70,6 +70,7 @@ More specifically, these things work:
     * Rust programs that use Rust standard library and do not depend, directly or indirectly, on Unix or Windows FFI,
       will cross-compile for Motor OS and run, subject to "what does not work" below
   * Tokio runtime and tokio/mio async TCP/UDP APIs are working
+  * <a href="https://github.com/moturus/motor-os/tree/main/src/bin/russhd">SSH server</a>
   * a simple TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd">httpd</a> is provided
   * an axum/tokio-based TLS-enabled <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> s also provided
   * a simple <a href="https://github.com/moturus/rush">unix-like</a> shell in the serial console

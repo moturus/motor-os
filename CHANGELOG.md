@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2025-05-26
+
+* Tokio process feature works (async child, async stdio);
+* SSH server (russhd) works:
+  * password and pubkey authentication
+  * interactive shell
+  * TODO: exec
+
 ## 2025-04-22
 
 - UDP is working, excl. multicast/broadcst (both std::net and mio/tokio).
