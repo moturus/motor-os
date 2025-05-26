@@ -17,6 +17,9 @@ toml         = "0.8.10"
 
 moto-rt      = "0.13.0"
 
+[dev-dependencies]
+ssh-encoding = "0.2.0"
+
 [patch.crates-io]
 mio   = { git = "https://github.com/moturus/mio.git"  , branch = "mio-moturus-v1.0.1"   }
 tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-moturus-1.44.2" }

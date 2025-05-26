@@ -1436,6 +1436,7 @@ dependencies = [
  "russh",
  "serde",
  "sha2",
+ "ssh-encoding",
  "tokio",
  "toml",
 ]

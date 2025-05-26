@@ -4,11 +4,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::*;
 
-use rand_core::OsRng;
 use russh::server::{Msg, Server as _, Session};
 use russh::*;
 
-mod config;
+use russhd::config;
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 fn input_listener() {
@@ -47,14 +46,16 @@ async fn main() {
         return;
     };
 
-    log::warn!("TODO: read the server's private key from ext. storage.");
+    if program_config.is_default() {
+        eprint!("\n\nWARNING: {}: one of configuration secrets", args[0]);
+        eprintln!(" is set to a default/test value. This is NOT secure.\n\n");
+    }
+
     let russh_config = russh::server::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
-        keys: vec![
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::Algorithm::Ed25519).unwrap(),
-        ],
+        keys: vec![program_config.host_key().clone()],
         preferred: Preferred {
             ..Preferred::default()
         },
@@ -86,7 +87,6 @@ struct ConnectionHandler {
     id: u64,
     config: Arc<config::Config>,
 
-    // shell_sessions: Mutex<HashMap<ChannelId, ShellSession>>,
     channel: Option<(ChannelId, server::Handle)>,
     remote_addr: Option<SocketAddr>,
     pty_request: Option<PtyRequest>,
@@ -109,15 +109,6 @@ impl ConnectionHandler {
         }
     }
 
-    async fn auth_reject_with_methods(&mut self) -> Result<server::Auth, russh::Error> {
-        Ok(server::Auth::Reject {
-            proceed_with_methods: Some(russh::MethodSet::from(
-                (vec![russh::MethodKind::Password]).as_slice(),
-            )),
-            partial_success: false,
-        })
-    }
-
     async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
         use std::process::Stdio;
         use tokio::io::AsyncReadExt;
@@ -125,17 +116,30 @@ impl ConnectionHandler {
 
         let (channel, session) = self.channel.as_ref().unwrap();
 
+        #[cfg(target_os = "moturus")]
+        let shell = "/bin/rush";
+        #[cfg(not(target_os = "moturus"))]
+        let shell = "/bin/bash";
+
         // let mut child = tokio::process::Command::new(self.config.shell())
-        let mut child = tokio::process::Command::new("bin/rush")
-            .arg("-i")
-            .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
+        let mut cmd = tokio::process::Command::new(shell);
+        cmd.arg("-i");
+
+        #[cfg(target_os = "moturus")]
+        cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .inspect_err(|e| log::warn!("Error spawning shell {}: {:?}", self.config.shell(), e))?;
+            .inspect_err(|e| log::warn!("Error spawning shell {}: {:?}", shell, e))?;
 
+        #[cfg(target_os = "moturus")]
         let data = CryptoVec::from("\n\rHello! Welcome to Motor OS.\r\n\n\r");
+        #[cfg(not(target_os = "moturus"))]
+        let data = CryptoVec::from("Hello! Welcome to RUSSHD.\r\n\r\n");
+
         session
             .data(*channel, data)
             .await
@@ -303,32 +307,89 @@ impl server::Handler for ConnectionHandler {
     //     Ok(Some("Motor OS SSH Server.".to_owned()))
     // }
 
-    async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
-        self.auth_reject_with_methods().await
+    async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {
+        let can_pwd = self.config.can_auth_pwd(user);
+        let can_key = self.config.can_auth_pubkey(user);
+
+        if !can_pwd && !can_key {
+            return Ok(server::Auth::reject());
+        }
+
+        let mut methods = vec![];
+        if can_pwd {
+            methods.push(russh::MethodKind::Password);
+        }
+        if can_key {
+            methods.push(russh::MethodKind::PublicKey);
+        }
+
+        Ok(server::Auth::Reject {
+            proceed_with_methods: Some(russh::MethodSet::from((methods).as_slice())),
+            partial_success: false,
+        })
     }
 
     async fn auth_publickey_offered(
         &mut self,
-        _user: &str,
-        _public_key: &keys::ssh_key::PublicKey,
+        user: &str,
+        public_key: &keys::ssh_key::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
-        self.auth_reject_with_methods().await
+        let can_pwd = self.config.can_auth_pwd(user);
+        let can_key = self.config.can_auth_pubkey(user);
+
+        if !can_pwd && !can_key {
+            return Ok(server::Auth::reject());
+        }
+
+        if can_key && self.config.authenticate_pubkey(user, public_key).is_ok() {
+            return Ok(server::Auth::Accept);
+        }
+
+        let mut methods = vec![];
+        if can_pwd {
+            methods.push(russh::MethodKind::Password);
+        }
+        if can_key {
+            methods.push(russh::MethodKind::PublicKey);
+        }
+
+        Ok(server::Auth::Reject {
+            proceed_with_methods: Some(russh::MethodSet::from((methods).as_slice())),
+            partial_success: true,
+        })
     }
 
     async fn auth_publickey(
         &mut self,
-        _: &str,
-        _key: &keys::ssh_key::PublicKey,
+        user: &str,
+        key: &keys::ssh_key::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
-        self.auth_reject_with_methods().await
+        if let Some(authenticated) = self.authenticated_user.as_ref() {
+            log::warn!(
+                "auth_pubkey() called for user '{user}' while user '{authenticated}' has been authenticated."
+            );
+            return Ok(server::Auth::reject());
+        }
+
+        match self.config.authenticate_pubkey(user, key) {
+            Ok(_) => {
+                log::info!("User {user} authenticated.");
+                self.authenticated_user = Some(user.to_owned());
+                Ok(server::Auth::Accept)
+            }
+            Err(err) => {
+                log::info!("User {user} failed to authenticate: {:?}.", err);
+                Ok(server::Auth::reject())
+            }
+        }
     }
 
     async fn auth_openssh_certificate(
         &mut self,
-        _user: &str,
+        user: &str,
         _certificate: &keys::Certificate,
     ) -> Result<server::Auth, Self::Error> {
-        self.auth_reject_with_methods().await
+        self.auth_none(user).await
     }
 
     async fn auth_password(
@@ -343,17 +404,17 @@ impl server::Handler for ConnectionHandler {
             return Ok(server::Auth::reject());
         }
 
-        Ok(match self.config.authenticate(user, password) {
+        match self.config.authenticate_pwd(user, password) {
             Ok(_) => {
                 log::info!("User {user} authenticated.");
                 self.authenticated_user = Some(user.to_owned());
-                server::Auth::Accept
+                Ok(server::Auth::Accept)
             }
             Err(err) => {
                 log::info!("User {user} failed to authenticate: {:?}.", err);
-                server::Auth::reject()
+                Ok(server::Auth::reject())
             }
-        })
+        }
     }
 
     async fn channel_open_session(

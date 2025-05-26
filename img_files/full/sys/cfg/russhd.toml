@@ -1,7 +1,0 @@
-version = 1
-listen_on = '0.0.0.0:2222'
-shell = 'rush'
-
-[users.motor]
-salt = 'd6973342749609329b41f52d390fcd0a4732df20e15dc6766d37f09ac8f129a1'
-password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d41'

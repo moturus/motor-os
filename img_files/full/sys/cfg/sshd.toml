@@ -1,0 +1,41 @@
+# Note: this is a test sshd.toml file.
+#
+# It contains test keys and similarly insecure data (e.g. password hash).
+# Remove and/or regenerate all secrets for production deployment.
+
+# ------------------------ SSHD CONFIGURATION ------------------------
+
+version = 1
+listen_on = '0.0.0.0:2222'
+
+# the default/test host key
+
+host_key = """-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACCOL5sIfuwv5TaS4iNec2TlPJ5fow/1nEQQVIy+eLk90wAAAIjvOC/D7zgv
+wwAAAAtzc2gtZWQyNTUxOQAAACCOL5sIfuwv5TaS4iNec2TlPJ5fow/1nEQQVIy+eLk90w
+AAAEAIyXvYqbau3uMgFiaVFLN+W1NGPW6XNXNfGKiRpyUXW44vmwh+7C/lNpLiI15zZOU8
+nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----"""
+
+# the public key of the host key above:
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4vmwh+7C/lNpLiI15zZOU8nl+jD/WcRBBUjL54uT3T
+
+# ---------------------------------- USERS ----------------------------
+
+# the default/test user: username: motor, password: vroomvroom
+[users.motor]
+salt = 'd6973342749609329b41f52d390fcd0a4732df20e15dc6766d37f09ac8f129a1'
+password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d41'
+
+
+# the following test key has this matching private key:
+#   -----BEGIN OPENSSH PRIVATE KEY-----
+#   b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+#   QyNTUxOQAAACDKo5VI3gXKrx8svkb1S+eKX8iu74+ZAJCUbfqi5WVjxwAAAIibWu1hm1rt
+#   YQAAAAtzc2gtZWQyNTUxOQAAACDKo5VI3gXKrx8svkb1S+eKX8iu74+ZAJCUbfqi5WVjxw
+#   AAAEDcrKFmgS6474l297L4EWqp+dXnX5vSqvz4i9w4473TmMqjlUjeBcqvHyy+RvVL54pf
+#   yK7vj5kAkJRt+qLlZWPHAAAAAAECAwQF
+#   -----END OPENSSH PRIVATE KEY-----
+
+authorized_key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqjlUjeBcqvHyy+RvVL54pfyK7vj5kAkJRt+qLlZWPH'
