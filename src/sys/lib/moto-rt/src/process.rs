@@ -307,7 +307,7 @@ fn convert_exit_status(exit_status: u64) -> i32 {
     if exit_status & 0xffff_ffff_0000_0000 == 0 {
         // Map u64 to i32.
         let status_u32: u32 = exit_status as u32;
-        unsafe { core::mem::transmute::<u32, i32>(status_u32) }
+        u32::cast_signed(status_u32)
     } else {
         // The process exited not via Rust's std::process::exit, but
         // via a lower-level syscall. Don't try to second-guess what

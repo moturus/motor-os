@@ -6,7 +6,7 @@ keywords = ["moturus", "motor-os"]
 readme = "README.md"
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS Runtime."
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 
 [lib]

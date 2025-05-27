@@ -71,7 +71,7 @@ pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
         extern crate alloc;
 
         let _ = crate::fs::write(crate::FD_STDERR, b"PANIC\n"); // Log w/o allocations.
-        let msg = alloc::format!("PANIC: {}\n", info);
+        let msg = alloc::format!("PANIC: {info}\n");
         let _ = crate::fs::write(crate::FD_STDERR, msg.as_bytes());
         log_backtrace(crate::FD_STDERR);
     } else {
