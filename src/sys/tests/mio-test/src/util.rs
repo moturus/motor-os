@@ -139,7 +139,7 @@ pub fn expect_events(poll: &mut Poll, events: &mut Events, mut expected: Vec<Exp
                 expected.swap_remove(index);
             } else {
                 // Must accept sporadic events.
-                warn!("got unexpected event: {:?}", event);
+                warn!("got unexpected event: {event:?}");
             }
         }
 
@@ -150,8 +150,7 @@ pub fn expect_events(poll: &mut Poll, events: &mut Events, mut expected: Vec<Exp
 
     assert!(
         expected.is_empty(),
-        "the following expected events were not found: {:?}",
-        expected
+        "the following expected events were not found: {expected:?}"
     );
 }
 
@@ -160,7 +159,7 @@ pub fn expect_no_events(poll: &mut Poll, events: &mut Events) {
         .expect("unable to poll");
     if !events.is_empty() {
         for event in events.iter() {
-            error!("unexpected event: {:?}", event);
+            error!("unexpected event: {event:?}");
         }
         panic!("received events, but didn't expect any, see above");
     }
@@ -173,9 +172,7 @@ pub fn assert_error<T, E: fmt::Display>(result: Result<T, E>, expected_msg: &str
         Ok(_) => panic!("unexpected OK result"),
         Err(err) => assert!(
             err.to_string().contains(expected_msg),
-            "wanted: {}, got: {}",
-            expected_msg,
-            err,
+            "wanted: {expected_msg}, got: {err}"
         ),
     }
 }
@@ -185,7 +182,7 @@ pub fn assert_would_block<T>(result: io::Result<T>) {
     match result {
         Ok(_) => panic!("unexpected OK result, expected a `WouldBlock` error"),
         Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
-        Err(err) => panic!("unexpected error result: {}", err),
+        Err(err) => panic!("unexpected error result: {err}"),
     }
 }
 

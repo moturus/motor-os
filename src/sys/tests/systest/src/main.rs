@@ -32,10 +32,7 @@ fn test_syscall() {
 
     let ns_per_syscall = (elapsed.as_nanos() as f64) / (ITERS as f64);
 
-    println!(
-        "test_syscall: {} iterations: {:.2} ns/syscall.",
-        ITERS, ns_per_syscall
-    );
+    println!("test_syscall: {ITERS} iterations: {ns_per_syscall:.2} ns/syscall.");
 }
 
 fn test_rt_mutex() {
@@ -209,7 +206,7 @@ fn test_file_write() {
         .write(true)
         .create_new(true)
         .open(path.clone())
-        .unwrap_or_else(|_| panic!("Failed to create {:?}", path));
+        .unwrap_or_else(|_| panic!("Failed to create {path:?}"));
 
     file.write_all(WRITTEN.as_bytes()).unwrap();
     std::mem::drop(file); // Close it.
@@ -361,12 +358,12 @@ fn test_liveness() {
     let p50 = results[(NUM_ITERS / 2) - 1];
 
     if p50 > P50 {
-        panic!("test_liveness: p50 {}", p50);
+        panic!("test_liveness: p50 {p50}");
     }
 
     let p99 = results[(NUM_ITERS * 99 / 100) - (NUM_ITERS / 100) - 1];
     if p99 > P99 {
-        panic!("test_liveness: p99 {}", p99);
+        panic!("test_liveness: p99 {p99}");
     }
 
     stop.store(true, Ordering::Release);

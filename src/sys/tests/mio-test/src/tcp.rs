@@ -261,7 +261,7 @@ fn test_peek() {
             match data.socket.peek(&mut buf) {
                 Ok(_) => (),
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(err) => panic!("unexpected error: {}", err),
+                Err(err) => panic!("unexpected error: {err}"),
             }
 
             #[allow(clippy::while_let_loop)]
@@ -511,7 +511,7 @@ fn test_connection_reset_by_peer() {
                         break 'outer;
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(e) => panic!("unexpected error {:?}", e),
+                    Err(e) => panic!("unexpected error {e:?}"),
                 }
             }
         }
@@ -538,7 +538,7 @@ fn test_connection_reset_by_peer() {
                 match server.read(&mut buf) {
                     Ok(0) | Err(_) => {}
 
-                    Ok(x) => panic!("expected empty buffer but read {} bytes", x),
+                    Ok(x) => panic!("expected empty buffer but read {x} bytes"),
                 }
                 println!("tcp::test_connection_reset_by_peer PASS");
                 return;
@@ -558,7 +558,7 @@ fn test_connect_error() {
             // unfortunately doesn't get us the code coverage we want.
             return;
         }
-        Err(e) => panic!("TcpStream::connect unexpected error {:?}", e),
+        Err(e) => panic!("TcpStream::connect unexpected error {e:?}"),
     };
 
     poll.registry()
@@ -627,7 +627,7 @@ fn test_write_error() {
             Ok(_) => {}
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => wait_writable(),
             Err(e) => {
-                println!("good error: {}", e);
+                println!("good error: {e}");
                 break;
             }
         }
@@ -825,7 +825,7 @@ fn test_write_then_drop() {
     }
     if events.iter().count() != 1 {
         for event in &events {
-            println!("bad events: {:?}", event);
+            println!("bad events: {event:?}");
         }
     }
     std::thread::sleep(Duration::from_millis(100));

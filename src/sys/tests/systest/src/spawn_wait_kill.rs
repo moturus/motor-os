@@ -18,7 +18,7 @@ pub fn smoke_test() {
     // Test "Child FD" feature.
     let handle = child.std_child().sys_handle();
     let fd = moto_rt::fs::open(
-        format!("handle://{}", handle).as_str(),
+        format!("handle://{handle}").as_str(),
         moto_rt::fs::O_HANDLE_CHILD,
     )
     .unwrap();

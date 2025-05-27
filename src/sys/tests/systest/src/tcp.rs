@@ -47,8 +47,8 @@ fn server_thread(start: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
             }
             Err(e) => {
                 std::thread::sleep(std::time::Duration::from_secs(1));
-                println!("Error: ----------- {} ----------------", e);
-                panic!("{}", e)
+                println!("Error: ----------- {e} ----------------");
+                panic!("{e}")
                 /* connection failed */
             }
         }
@@ -69,8 +69,8 @@ fn client_iter() {
             assert_eq!(rx, [254, 253, 252, 251, 250, 249, 248, 247]);
         }
         Err(e) => {
-            println!("Failed to receive data: {}", e);
-            panic!("{:?}", e)
+            println!("Failed to receive data: {e}");
+            panic!("{e:?}")
         }
     }
     let _ = stream.shutdown(std::net::Shutdown::Both);

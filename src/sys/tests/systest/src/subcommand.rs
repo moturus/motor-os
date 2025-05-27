@@ -35,7 +35,7 @@ impl Subcommand {
     pub fn do_exit(&mut self, code: i32) {
         use std::io::Write;
         self.stdin
-            .write_all(format!("exit {}\n", code).as_bytes())
+            .write_all(format!("exit {code}\n").as_bytes())
             .unwrap();
         self.stdin.flush().unwrap();
     }
@@ -89,7 +89,7 @@ impl Subcommand {
 
 pub fn run_child(args: Vec<String>) -> ! {
     if args.len() != 2 || args[1] != "subcommand" {
-        panic!("bad args: {:?}", args)
+        panic!("bad args: {args:?}")
     }
 
     assert_eq!(std::env::var("some_key").unwrap(), "some_val");
@@ -147,7 +147,7 @@ fn do_command(cmd: String) {
             }
         }
         "xor_service" => crate::xor_server::start(),
-        _ => panic!("unknown command: {:?}", words),
+        _ => panic!("unknown command: {words:?}"),
     }
 }
 
