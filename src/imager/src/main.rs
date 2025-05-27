@@ -299,7 +299,7 @@ fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
 
     for entry in dir_to_add
         .read_dir()
-        .unwrap_or_else(|_| panic!("Error reading dir {:?}", dir_to_add))
+        .unwrap_or_else(|_| panic!("Error reading dir {dir_to_add:?}"))
         .flatten()
     {
         let key = entry.path();
@@ -325,19 +325,19 @@ Motūrus OS image builder usage:
 
 fn clear_dir_or_exit(dir: &PathBuf) {
     if dir.exists() && !dir.is_dir() {
-        eprintln!("'{:?}': not a directory.", dir);
+        eprintln!("'{dir:?}': not a directory.");
         std::process::exit(1);
     }
 
     if dir.exists() {
         if let Err(err) = std::fs::remove_dir_all(dir.as_path()) {
-            eprintln!("Error removing '{:?}': {:?}", dir, err);
+            eprintln!("Error removing '{dir:?}': {err:?}");
             std::process::exit(1);
         }
     }
 
     if let Err(err) = std::fs::create_dir_all(dir.as_path()) {
-        eprintln!("Error creating '{:?}': {:?}", dir, err);
+        eprintln!("Error creating '{dir:?}': {err:?}");
         std::process::exit(1);
     }
 }
@@ -361,7 +361,7 @@ fn main() {
 
     let bin_dir = motorh.join("build").join("bin").join(deb_rel);
     if !bin_dir.is_dir() {
-        eprintln!("'{:?}': not a directory.\n", bin_dir);
+        eprintln!("'{bin_dir:?}': not a directory.\n");
         print_usage_and_exit()
     }
 
@@ -438,8 +438,5 @@ fn main() {
         &img_dir.join("moturus.web.img"),
     );
 
-    println!(
-        "Motūrus OS {} image built successfully in {:?}",
-        deb_rel, img_dir
-    );
+    println!("Motūrus OS {deb_rel} image built successfully in {img_dir:?}");
 }
