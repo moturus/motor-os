@@ -45,6 +45,7 @@ impl<T> StaticPerCpu<T> {
         unsafe { &mut *(addr as *mut T) }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn get(&self) -> Option<&mut T> {
         let addr: usize = self.data[crate::arch::current_cpu() as usize].load(Ordering::Relaxed);
         if addr == 0 {

@@ -30,6 +30,7 @@ impl<T: Slabbable> SlabArc<T> {
         unsafe { self.data.as_ref() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self) -> Option<&mut T> {
         unsafe { self.data.as_mut() }
     }

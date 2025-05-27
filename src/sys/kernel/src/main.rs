@@ -10,7 +10,6 @@
 #![feature(assert_matches)]
 #![feature(btreemap_alloc)]
 #![feature(core_intrinsics)]
-#![feature(naked_functions)]
 #![feature(concat_idents)]
 #![feature(get_mut_unchecked)]
 

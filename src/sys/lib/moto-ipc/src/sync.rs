@@ -77,6 +77,7 @@ impl RawChannel {
     /// # Safety
     ///
     /// Assumes RawChannel is properly initialized and contains T.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_at_mut<T: Sized>(
         &self,
         buf: *mut T,
@@ -121,6 +122,7 @@ impl RawChannel {
     /// # Safety
     ///
     /// Assumes RawChannel is properly initialized.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_bytes_mut(&self, buf: *mut u8, size: usize) -> Result<&mut [u8], ErrorCode> {
         let start_addr = buf as usize;
         if (start_addr < self.addr) || ((start_addr + size) > (self.addr + self.size)) {

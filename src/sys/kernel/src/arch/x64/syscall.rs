@@ -568,7 +568,7 @@ extern "C" fn syscall_handler_rust(
     res // rax
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn spawn_usermode_thread_asm() {
     // rdi, rsi, rdx = TCB, rcx, r8, r9
     naked_asm!(
@@ -617,7 +617,7 @@ unsafe extern "C" fn spawn_usermode_thread_asm() {
     );
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn syscall_handler_asm() {
     naked_asm!(
         "cli", // Disable interrupts.
@@ -706,7 +706,7 @@ unsafe extern "C" fn syscall_handler_asm() {
     );
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn syscall_pause_asm() {
     naked_asm!(
         // We are now in syscall, with syscall stack.
@@ -726,7 +726,7 @@ unsafe extern "C" fn syscall_pause_asm() {
     );
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn syscall_resume_asm() {
     naked_asm!(
         // We are now in kernel.
@@ -743,7 +743,7 @@ unsafe extern "C" fn syscall_resume_asm() {
     );
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn syscall_exit_asm() -> ! {
     naked_asm!(
         // Restore the kernel RSP.
@@ -755,58 +755,54 @@ unsafe extern "C" fn syscall_exit_asm() -> ! {
     );
 }
 
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) -> ! {
-    unsafe {
-        naked_asm!(
-            "cli",
-            // Restore the kernel page table.
-            "mov rax, gs:[24]", // KPT
-            "mov cr3, rax",
-            // Restore kernel RSP.
-            "mov rsp, gs:[40]",
-            // eoi.
-            "
-            mov ecx, 0x80b
-            mov eax, 0
-            mov edx, 0
-            wrmsr
-            ",
-            pop_preserved_registers!(),
-            "mov rax, rdi",
-            "sti",
-            "ret",
-        )
-    }
+    naked_asm!(
+        "cli",
+        // Restore the kernel page table.
+        "mov rax, gs:[24]", // KPT
+        "mov cr3, rax",
+        // Restore kernel RSP.
+        "mov rsp, gs:[40]",
+        // eoi.
+        "
+        mov ecx, 0x80b
+        mov eax, 0
+        mov edx, 0
+        wrmsr
+        ",
+        pop_preserved_registers!(),
+        "mov rax, rdi",
+        "sti",
+        "ret",
+    )
 }
 
-#[naked]
+#[unsafe(naked)]
 pub extern "C" fn preempt_current_thread_asm() -> ! {
-    unsafe {
-        naked_asm!(
-            "cli",
-            // Restore the kernel page table.
-            "mov rax, gs:[24]",  // KPT
-            "mov cr3, rax",
-            // Restore kernel RSP.
-            "mov rsp, gs:[40]",
-            // eoi.
-            "
-            mov ecx, 0x80b
-            mov eax, 0
-            mov edx, 0
-            wrmsr
-            ",
-            pop_preserved_registers!(),
-            "mov rax, {RESULT}",
-            "sti",
-            "ret",
-            RESULT = const(TOCR_PREEMPTED),
-        )
-    }
+    naked_asm!(
+        "cli",
+        // Restore the kernel page table.
+        "mov rax, gs:[24]",  // KPT
+        "mov cr3, rax",
+        // Restore kernel RSP.
+        "mov rsp, gs:[40]",
+        // eoi.
+        "
+        mov ecx, 0x80b
+        mov eax, 0
+        mov edx, 0
+        wrmsr
+        ",
+        pop_preserved_registers!(),
+        "mov rax, {RESULT}",
+        "sti",
+        "ret",
+        RESULT = const(TOCR_PREEMPTED),
+    )
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn resume_preempted_thread_asm() {
     naked_asm!(
         "cli", // Disable interrupts; iretq enables them.

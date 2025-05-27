@@ -144,7 +144,7 @@ fn get_thread_trace(
 
 fn print_stack_trace(proc_name: &str, dbg_handle: moto_sys::SysHandle, tid: u64) {
     let thread_data = SysRay::dbg_get_thread_data_v1(dbg_handle, tid).unwrap();
-    println!("# {:?}", thread_data);
+    println!("# {thread_data:?}");
 
     let backtrace = get_thread_trace(dbg_handle, &thread_data);
 
@@ -180,7 +180,7 @@ fn print_stack_trace(proc_name: &str, dbg_handle: moto_sys::SysHandle, tid: u64)
                 in_vdso = false;
                 write!(&mut writer, " \\\n  ^^^").ok();
             }
-            write!(&mut writer, " \\\n  0x{:x}", addr).ok();
+            write!(&mut writer, " \\\n  0x{addr:x}").ok();
         }
     };
 
@@ -213,7 +213,7 @@ fn cmd_print_stacks(pid: u64) -> Result<(), moto_rt::ErrorCode> {
                     std::process::exit(1)
                 }
                 _ => {
-                    eprintln!("dbg_attach({pid}) failed with {:?}", err);
+                    eprintln!("dbg_attach({pid}) failed with {err:?}");
                     std::process::exit(1)
                 }
             }

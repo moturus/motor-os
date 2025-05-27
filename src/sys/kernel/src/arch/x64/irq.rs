@@ -136,7 +136,7 @@ pub(crate) use pop_irq_registers;
 
 macro_rules! naked_irq_handler {
     ($handler_name: ident, $irqnum:literal) => {
-        #[naked]
+        #[unsafe(naked)]
         unsafe extern "C" fn $handler_name() {
             naked_asm!(
                 "cli",
@@ -655,7 +655,7 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
     }
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn page_fault_handler_asm() {
     naked_asm!(
         "cli",

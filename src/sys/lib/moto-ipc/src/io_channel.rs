@@ -239,6 +239,7 @@ impl RawChannel {
         assert_eq!(0, self.server_pages_in_use.load(Ordering::Relaxed));
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn page_bytes(&self, raw_page: RawIoPage) -> Result<&mut [u8], ErrorCode> {
         if raw_page.page_idx >= (CHANNEL_PAGE_COUNT as u16) {
             return Err(moto_rt::E_INVALID_ARGUMENT);

@@ -114,7 +114,7 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
 }
 
 pub extern "C" fn exit(code: i32) -> ! {
-    let code = unsafe { core::mem::transmute::<i32, u32>(code) } as u64;
+    let code = i32::cast_unsigned(code) as u64;
     moto_sys::SysCpu::exit(code)
 }
 
