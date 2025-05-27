@@ -63,7 +63,7 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
             crate::do_throughput_write(tcp_stream, None);
         }
         _ => {
-            eprintln!("unrecognized command: {}", cmd);
+            eprintln!("unrecognized command: {cmd}");
         }
     }
 

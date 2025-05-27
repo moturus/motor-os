@@ -315,13 +315,13 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
                     .as_bytes(),
                 )
                 .map_err(|err| {
-                    println!("write headers failed with erro {:?}", err);
+                    println!("write headers failed with erro {err:?}");
                 })?;
                 writer.write_all(&bytes).map_err(|err| {
-                    println!("write bytes failed with err {:?}", err);
+                    println!("write bytes failed with err {err:?}");
                 })?;
                 return writer.flush().map_err(|err| {
-                    println!("writer flush failed with err {:?}", err);
+                    println!("writer flush failed with err {err:?}");
                 });
             }
             log_request(404, request.url.as_bytes());
@@ -340,13 +340,13 @@ fn handle_request(request: HttpRequest, writer: &mut dyn std::io::Write) -> Resu
 
         writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-type: text/html;charset=UTF-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             bytes.len()).as_bytes()).map_err(|err| {
-                println!("write headers failed with erro {:?}", err);
+                println!("write headers failed with erro {err:?}");
             })?;
         writer.write_all(bytes).map_err(|err| {
-            println!("write bytes failed with err {:?}", err);
+            println!("write bytes failed with err {err:?}");
         })?;
         return writer.flush().map_err(|err| {
-            println!("writer flush failed with err {:?}", err);
+            println!("writer flush failed with err {err:?}");
         });
     }
 
@@ -578,7 +578,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut conn = match ClientConnection::new(stream, tls_config) {
                 Ok(conn) => conn,
                 Err(err) => {
-                    println!("ClientConnection::new() failed with {:?}", err);
+                    println!("ClientConnection::new() failed with {err:?}");
                     CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     return;
                 }

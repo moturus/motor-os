@@ -40,7 +40,7 @@ fn connect_with_retry(addr: SocketAddr) -> TcpStream {
             return stream;
         }
     }
-    panic!("Failed to connect to {:?}", addr)
+    panic!("Failed to connect to {addr:?}")
 }
 
 fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
@@ -72,7 +72,7 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
             do_throughput_cmd(cmd, addr, args)?;
         }
         _ => {
-            panic!("unrecognized command: {}", cmd);
+            panic!("unrecognized command: {cmd}");
         }
     }
 

@@ -594,7 +594,7 @@ impl Editor {
                 // Draw an empty row
                 self.draw_left_padding(buffer, '~')?;
                 if self.is_empty() && i == self.screen_rows / 3 {
-                    let welcome_message = concat!("Kibi for Motūrus OS");
+                    let welcome_message = "Kibi for Motūrus OS";
                     write!(buffer, "{:^1$.1$}", welcome_message, self.screen_cols)?;
                 }
             }
@@ -768,7 +768,7 @@ impl Editor {
     ///
     /// Will Return `Err` if any error occur.
     pub fn run(&mut self, file_name: &Option<String>) -> Result<(), Error> {
-        println!("kibi run: {:?}", file_name);
+        println!("kibi run: {file_name:?}");
         if let Some(path) = file_name.as_ref().map(|p| sys::path(p.as_str())) {
             self.select_syntax_highlight(path.as_path())?;
             self.load(path.as_path())?;

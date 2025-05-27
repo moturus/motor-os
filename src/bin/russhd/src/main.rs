@@ -133,7 +133,7 @@ impl ConnectionHandler {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .inspect_err(|e| log::warn!("Error spawning shell {}: {:?}", shell, e))?;
+            .inspect_err(|e| log::warn!("Error spawning shell {shell}: {e:?}"))?;
 
         #[cfg(target_os = "moturus")]
         let data = CryptoVec::from("\n\rHello! Welcome to Motor OS.\r\n\n\r");
@@ -160,7 +160,7 @@ impl ConnectionHandler {
                     break;
                 };
                 if let Err(err) = stdin.write_all(&data).await {
-                    log::debug!("stdin.write_all() failed with error '{:?}'", err);
+                    log::debug!("stdin.write_all() failed with error '{err:?}'");
                     break;
                 }
             }
@@ -181,12 +181,12 @@ impl ConnectionHandler {
                             break;
                         }
                         if let Err(err) = Self::output(&session, channel, &buf[0..sz]).await {
-                            log::debug!("session.data() failed with error '{:?}'", err);
+                            log::debug!("session.data() failed with error '{err:?}'");
                             break;
                         }
                     }
                     Err(err) => {
-                        log::debug!("stdout.read() failed with error '{:?}'", err);
+                        log::debug!("stdout.read() failed with error '{err:?}'");
                         break;
                     }
                 }
@@ -208,12 +208,12 @@ impl ConnectionHandler {
                             break;
                         }
                         if let Err(err) = Self::output(&session, channel, &buf[0..sz]).await {
-                            log::debug!("session.data() failed with error '{:?}'", err);
+                            log::debug!("session.data() failed with error '{err:?}'");
                             break;
                         }
                     }
                     Err(err) => {
-                        log::debug!("stderr.read() failed with error '{:?}'", err);
+                        log::debug!("stderr.read() failed with error '{err:?}'");
                         break;
                     }
                 }
@@ -228,14 +228,12 @@ impl ConnectionHandler {
                     if let Some(code) = status.code() {
                         log::info!("child exited with {code}");
                         let _ = session_handle
-                            .exit_status_request(channel, unsafe {
-                                core::mem::transmute::<i32, u32>(code)
-                            })
+                            .exit_status_request(channel, i32::cast_unsigned(code))
                             .await;
                     }
                 }
                 Err(err) => {
-                    log::warn!("child.wait() failed: {:?}", err);
+                    log::warn!("child.wait() failed: {err:?}");
                 }
             }
 
@@ -290,12 +288,12 @@ impl ConnectionHandler {
 impl server::Server for ConnectionHandler {
     type Handler = Self;
     fn new_client(&mut self, addr: Option<std::net::SocketAddr>) -> Self {
-        log::info!("New Client: {:?}", addr);
+        log::info!("New Client: {addr:?}");
         Self::new(self.config.clone(), addr)
     }
 
     fn handle_session_error(&mut self, error: <Self::Handler as russh::server::Handler>::Error) {
-        log::info!("Session error: {:?}", error);
+        log::info!("Session error: {error:?}");
     }
 }
 
@@ -378,7 +376,7 @@ impl server::Handler for ConnectionHandler {
                 Ok(server::Auth::Accept)
             }
             Err(err) => {
-                log::info!("User {user} failed to authenticate: {:?}.", err);
+                log::info!("User {user} failed to authenticate: {err:?}.");
                 Ok(server::Auth::reject())
             }
         }
@@ -411,7 +409,7 @@ impl server::Handler for ConnectionHandler {
                 Ok(server::Auth::Accept)
             }
             Err(err) => {
-                log::info!("User {user} failed to authenticate: {:?}.", err);
+                log::info!("User {user} failed to authenticate: {err:?}.");
                 Ok(server::Auth::reject())
             }
         }
@@ -454,10 +452,7 @@ impl server::Handler for ConnectionHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         log::debug!(
-            "pty_request: {}-'{}': {col_width}:{row_height} - {pix_width}:{pix_height} {:?}",
-            channel,
-            term,
-            modes
+            "pty_request: {channel}-'{term}': {col_width}:{row_height} - {pix_width}:{pix_height} {modes:?}"
         );
 
         let Some((chan, _)) = self.channel else {
@@ -473,7 +468,7 @@ impl server::Handler for ConnectionHandler {
             modes: modes.to_vec(),
         }) {
             // Logging as a warning as we don't know what to do here (yet).
-            log::warn!("prev PTY request: {:?}", prev);
+            log::warn!("prev PTY request: {prev:?}");
         }
 
         Ok(())
@@ -541,7 +536,7 @@ impl server::Handler for ConnectionHandler {
         };
 
         if let Err(err) = stdin_tx.send(data.to_vec()).await {
-            log::warn!("stdin_tx.send() failed with error '{:?}'.", err);
+            log::warn!("stdin_tx.send() failed with error '{err:?}'.");
             return Err(russh::Error::Disconnect);
         }
 
@@ -553,7 +548,7 @@ impl Drop for ConnectionHandler {
     fn drop(&mut self) {
         let from = self
             .remote_addr
-            .map(|addr| format!(" from {:?}", addr))
+            .map(|addr| format!(" from {addr:?}"))
             .unwrap_or_default();
         log::info!(
             "Dropping Connection #{} for user '{}'{}",
