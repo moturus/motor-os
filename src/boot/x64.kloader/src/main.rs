@@ -5,7 +5,6 @@
 #![feature(core_intrinsics)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(atomic_from_mut)]
-#![feature(naked_functions)]
 #![feature(assert_matches)]
 #![no_main]
 

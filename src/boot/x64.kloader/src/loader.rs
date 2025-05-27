@@ -88,7 +88,7 @@ pub fn load_kernel_bsp(pvh: &'static crate::pvh::PvhStartInfo, num_cpus: u32, st
     unsafe { jump_to_kernel(bootup_info_addr, entry_point) }
 }
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn jump_to_kernel(arg0: u64, entry_point: u64) -> ! {
     // rdi, rsi, rdx
     core::arch::naked_asm!("call rsi")
