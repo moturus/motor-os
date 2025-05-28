@@ -591,13 +591,13 @@ fn run_elf(
             if let Ok(env_caps) = u64::from_str_radix(v.trim_start_matches("0x"), 16) {
                 caps = env_caps;
             } else {
-                crate::moto_log!("could not parse caps {}", v);
+                crate::moto_log!("could not parse caps {v}");
             }
         }
     }
 
     // Create the process from the address space.
-    let proc_url = alloc::format!("process:entry_point={};capabilities={}", load_result, caps);
+    let proc_url = alloc::format!("process:entry_point={load_result};capabilities={caps}");
     let process = moto_sys::syscalls::RaiiHandle::from(moto_sys::SysObj::create(
         address_space.syshandle(),
         0,

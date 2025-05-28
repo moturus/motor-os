@@ -101,7 +101,7 @@ pub extern "C" fn log_backtrace(rt_fd: moto_rt::RtFd) {
                 in_vdso = false;
                 write!(&mut writer, " \\\n  ^^^");
             }
-            write!(&mut writer, " \\\n  0x{:x}", addr).ok();
+            write!(&mut writer, " \\\n  0x{addr:x}").ok();
         }
     }
 

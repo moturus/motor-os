@@ -387,6 +387,7 @@ impl EventSourceUnmanaged {
         self.closed.store(true, Ordering::Release);
 
         let mut registries = BTreeMap::new();
+        #[allow(clippy::swap_with_temporary)]
         core::mem::swap(&mut registries, &mut self.base.registries.lock());
 
         if !leave_tombstones {
