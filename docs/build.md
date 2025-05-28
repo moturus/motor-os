@@ -31,8 +31,8 @@ $ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```
-$ rustup default nightly-2025-04-05
-$ rustup component add rust-src --toolchain nightly-2025-04-05-x86_64-unknown-linux-gnu
+$ rustup default nightly-2025-05-26
+$ rustup component add rust-src --toolchain nightly-2025-05-26-x86_64-unknown-linux-gnu
 $ cargo install --force cargo-make
 ```
 
@@ -56,7 +56,7 @@ Check out Rust sources with Motor target added:
 
 ```
 $ cd $MOTORH
-$ git clone -b motor-os_2025-04-05 https://github.com/moturus/rust.git
+$ git clone -b motor-os_2025-05-26 https://github.com/moturus/rust.git
 ```
 
 Build Rust Motor target/toolchain:
