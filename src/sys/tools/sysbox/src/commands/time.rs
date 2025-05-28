@@ -40,5 +40,5 @@ pub fn do_command(args: &[String]) {
     let minutes = secs / 60;
     let secs = secs % 60;
 
-    println!("\nreal  {}m{}.{:03}s", minutes, secs, millis);
+    println!("\nreal  {minutes}m{secs}.{millis:03}s");
 }

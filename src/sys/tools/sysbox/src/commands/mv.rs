@@ -16,7 +16,7 @@ pub fn do_command(args: &[String]) {
     match old.chars().last() {
         Some(c) => {
             if c == '/' {
-                eprintln!("mv: bad argument: '{}'", old);
+                eprintln!("mv: bad argument: '{old}'");
 
                 std::process::exit(1);
             }
@@ -43,13 +43,13 @@ pub fn do_command(args: &[String]) {
         let mut new_path = std::path::Path::new(new).to_path_buf();
         new_path.push(fname);
         if let Err(err) = std::fs::rename(old_path, new_path.as_path()) {
-            eprintln!("mv failed: {:?}", err);
+            eprintln!("mv failed: {err:?}");
         }
 
         return;
     }
 
     if let Err(err) = std::fs::rename(old_path, std::path::Path::new(new)) {
-        eprintln!("mv failed: {:?}", err);
+        eprintln!("mv failed: {err:?}");
     }
 }

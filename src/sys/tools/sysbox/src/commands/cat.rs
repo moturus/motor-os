@@ -23,11 +23,11 @@ pub fn do_command(args: &[String]) {
 fn cat_file(fname: &str) {
     match std::fs::read(Path::new(fname)) {
         Ok(bytes) => match std::str::from_utf8(bytes.as_ref()) {
-            Ok(s) => print!("{}", s),
-            Err(_) => println!("Can't cat a binary file '{}'.", fname),
+            Ok(s) => print!("{s}"),
+            Err(_) => println!("Can't cat a binary file '{fname}'."),
         },
         Err(err) => {
-            println!("cat: error reading file '{}': {:?}.", fname, err);
+            println!("cat: error reading file '{fname}': {err:?}.");
         }
     }
 }

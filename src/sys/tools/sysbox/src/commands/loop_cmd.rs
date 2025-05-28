@@ -51,7 +51,7 @@ fn input_listener(input_queue: Arc<Mutex<VecDeque<u8>>>, input_futex: Arc<Atomic
 fn child_listener(mut child: std::process::Child, child_futex: Arc<AtomicU32>) {
     let res = child.wait().unwrap();
     if !res.success() {
-        println!("loop: child failed: {:?}", res);
+        println!("loop: child failed: {res:?}");
         std::process::exit(1);
     }
     child_futex.store(EVENT_CHILD_EXIT, Ordering::Release);

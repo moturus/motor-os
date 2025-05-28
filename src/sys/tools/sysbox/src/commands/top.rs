@@ -296,7 +296,7 @@ fn format_value(ctx: &Context, val: f64) -> String {
             }
         }
         Mode::Total => {
-            let res = format!("{:.3}", val);
+            let res = format!("{val:.3}");
             if res.as_str() == "0.000" {
                 empty.to_owned()
             } else {

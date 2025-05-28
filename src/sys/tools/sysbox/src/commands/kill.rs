@@ -21,6 +21,6 @@ pub fn do_command(args: &[String]) {
     };
 
     if let Err(err) = moto_sys::SysCpu::kill_pid(pid) {
-        eprintln!("kill failed: {:?}", err);
+        eprintln!("kill failed: {err:?}");
     }
 }

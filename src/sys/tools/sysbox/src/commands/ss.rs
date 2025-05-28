@@ -22,7 +22,7 @@ pub fn do_command(args: &[String]) {
         }
 
         for stat in stats {
-            println!("{:?}", stat);
+            println!("{stat:?}");
         }
 
         num_sockets += stats.len();

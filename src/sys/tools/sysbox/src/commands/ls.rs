@@ -53,12 +53,12 @@ pub fn do_command(args: &[String]) {
 fn list_detailed(dir: &str, list_dots: bool) {
     let path = std::fs::canonicalize(Path::new(dir));
     if path.is_err() {
-        eprintln!("error reading directory '{}'.\n", dir);
+        eprintln!("error reading directory '{dir}'.\n");
         return;
     }
     let readdir = std::fs::read_dir(path.unwrap().as_path());
     if readdir.is_err() {
-        eprintln!("error reading directory '{}'.\n", dir);
+        eprintln!("error reading directory '{dir}'.\n");
         return;
     }
 
@@ -112,7 +112,7 @@ fn list_detailed(dir: &str, list_dots: bool) {
                     for _ in 0..size_len {
                         print!(" ");
                     }
-                    println!(" {}{}{}", dir_in, fname, dir_out);
+                    println!(" {dir_in}{fname}{dir_out}");
                 } else if ft.is_file() {
                     println!(
                         "f {:width$} {}{}{}",
@@ -123,7 +123,7 @@ fn list_detailed(dir: &str, list_dots: bool) {
                         width = size_len,
                     );
                 } else {
-                    println!("? {}", fname);
+                    println!("? {fname}");
                 }
             }
             Err(_) => {
@@ -136,12 +136,12 @@ fn list_detailed(dir: &str, list_dots: bool) {
 fn list_plain(dir: &str, list_dots: bool) {
     let path = std::fs::canonicalize(Path::new(dir));
     if path.is_err() {
-        eprintln!("error reading directory '{}' (1).\n", dir);
+        eprintln!("error reading directory '{dir}' (1).\n");
         return;
     }
     let readdir = std::fs::read_dir(path.unwrap().as_path());
     if readdir.is_err() {
-        eprintln!("error reading directory '{}' (2).\n", dir);
+        eprintln!("error reading directory '{dir}' (2).\n");
         return;
     }
 
@@ -183,11 +183,11 @@ fn list_plain(dir: &str, list_dots: bool) {
             continue;
         }
         if ft.is_dir() {
-            print!("{}{}{} ", dir_in, fname, dir_out);
+            print!("{dir_in}{fname}{dir_out} ");
         } else if ft.is_file() {
-            print!("{}{}{} ", file_in, fname, file_out);
+            print!("{file_in}{fname}{file_out} ");
         } else {
-            print!("? {}", fname);
+            print!("? {fname}");
         }
     }
     println!();
