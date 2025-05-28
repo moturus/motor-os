@@ -1,6 +1,3 @@
-// TODO: attribute the code below properly (either Phil-Opp or CHV "firmware").
-use core::mem::size_of;
-
 // ----------------------------------------------------------------------------
 // GDT descriptor
 // ----------------------------------------------------------------------------
@@ -47,7 +44,7 @@ pub struct Pointer {
 
 impl Pointer {
     const fn new(gdt: &'static [GDTDescriptor]) -> Self {
-        let size = gdt.len() * size_of::<GDTDescriptor>();
+        let size = core::mem::size_of_val(gdt);
         Self {
             limit: size as u16 - 1,
             base: &gdt[0],
