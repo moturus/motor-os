@@ -109,7 +109,7 @@ fn sys_log(
     let bytes = match address_space.read_from_user(virt_addr, sz) {
         Ok(bytes) => bytes,
         Err(err) => {
-            log::debug!("sys_log: read from user failed: {:?}", err);
+            log::debug!("sys_log: read from user failed: {err:?}");
             return ResultBuilder::invalid_argument();
         }
     };

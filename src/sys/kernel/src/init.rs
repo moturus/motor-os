@@ -146,9 +146,9 @@ pub fn init_exited(init: &crate::uspace::Process) -> ! {
     match status {
         crate::uspace::process::ProcessStatus::Exited(exit_code) => {
             if exit_code == 0 {
-                log::debug!("sys-io exited with status {}.", exit_code);
+                log::debug!("sys-io exited with status {exit_code}.");
             } else {
-                log::warn!("sys-io exited with status {}.", exit_code);
+                log::warn!("sys-io exited with status {exit_code}.");
             }
             crate::arch::kernel_exit();
         }
@@ -157,7 +157,7 @@ pub fn init_exited(init: &crate::uspace::Process) -> ! {
             crate::arch::kernel_exit();
         }
         _ => {
-            log::error!("sys-io: unexpected status: {:?}.", status);
+            log::error!("sys-io: unexpected status: {status:?}.");
             panic!()
         }
     }

@@ -32,7 +32,7 @@ fn process_wait_handles(
                 .load(Ordering::Relaxed) as u64)
             || (h_sz == 0)
         {
-            log::info!("too many wait handles: {}", h_sz);
+            log::info!("too many wait handles: {h_sz}");
             return ResultBuilder::invalid_argument();
         }
 

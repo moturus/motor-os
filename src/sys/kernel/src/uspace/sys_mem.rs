@@ -14,12 +14,12 @@ fn sys_mmio_map(
     num_pages: u64,
 ) -> SyscallResult {
     if virt_addr != u64::MAX {
-        log::debug!("sys_mem_impl: bad virt_addr: 0x{:x}", virt_addr);
+        log::debug!("sys_mem_impl: bad virt_addr: 0x{virt_addr:x}");
         return ResultBuilder::invalid_argument();
     }
 
     if page_size != sys_mem::PAGE_SIZE_SMALL {
-        log::debug!("sys_mem_impl: bad page_size: 0x{:x}", page_size);
+        log::debug!("sys_mem_impl: bad page_size: 0x{page_size:x}");
         return ResultBuilder::invalid_argument();
     }
 
@@ -72,11 +72,7 @@ fn sys_map(
             return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         if flags != (SysMem::F_READABLE | SysMem::F_WRITABLE) || num_pages != 1 {
-            log::debug!(
-                "sys_map: bad flags: 0x{:x} or num_pages: {}",
-                flags,
-                num_pages
-            );
+            log::debug!("sys_map: bad flags: 0x{flags:x} or num_pages: {num_pages}");
             return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT);
         }
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
@@ -221,7 +217,7 @@ fn sys_map(
             flags &= !SysMem::F_WRITABLE;
         }
         if flags != 0 {
-            log::debug!("sys_mem_impl: bad map flags: 0x{:x}", flags);
+            log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
             return ResultBuilder::invalid_argument();
         }
 
@@ -236,7 +232,7 @@ fn sys_map(
         };
     }
 
-    log::debug!("sys_mem_impl: bad map flags: 0x{:x}", flags);
+    log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
     ResultBuilder::invalid_argument()
 }
 
@@ -248,17 +244,17 @@ fn sys_unmap(
     virt_addr: u64,
 ) -> SyscallResult {
     if flags != 0 {
-        log::debug!("sys_unmap: unrecognized flags 0x{:x}", flags);
+        log::debug!("sys_unmap: unrecognized flags 0x{flags:x}");
         return ResultBuilder::invalid_argument();
     }
     if phys_addr != u64::MAX {
-        log::debug!("sys_mem_query: invalid phys_addr: 0x{:x}", phys_addr);
+        log::debug!("sys_mem_query: invalid phys_addr: 0x{phys_addr:x}");
         return ResultBuilder::invalid_argument();
     }
 
     match address_space.unmap(virt_addr) {
         Err(err) => {
-            log::debug!("sys_unmap: 0x{:x} failed: {:?}", virt_addr, err);
+            log::debug!("sys_unmap: 0x{virt_addr:x} failed: {err:?}");
             ResultBuilder::invalid_argument()
         }
         Ok(()) => ResultBuilder::ok(),
@@ -306,24 +302,19 @@ fn sys_mem_query(
     num_pages: u64,
 ) -> SyscallResult {
     if flags != 0 {
-        log::trace!("sys_mem_query: unrecognized flags 0x{:x}", flags);
+        log::trace!("sys_mem_query: unrecognized flags 0x{flags:x}");
         return ResultBuilder::invalid_argument();
     }
 
     if phys_addr != u64::MAX || page_size != 0 || num_pages != 0 {
-        log::trace!(
-            "sys_mem_query: invalid args: 0x{:x} 0x{:x} 0x{:x}",
-            phys_addr,
-            page_size,
-            num_pages
-        );
+        log::trace!("sys_mem_query: invalid args: 0x{phys_addr:x} 0x{page_size:x} 0x{num_pages:x}");
         return ResultBuilder::invalid_argument();
     }
 
     if let Some(phys_addr) = address_space.virt_to_phys(virt_addr) {
         ResultBuilder::ok_1(phys_addr)
     } else {
-        log::trace!("sys_mem_query: virt_to_phys: not found: 0x{:x}", virt_addr);
+        log::trace!("sys_mem_query: virt_to_phys: not found: 0x{virt_addr:x}");
         ResultBuilder::invalid_argument()
     }
 }

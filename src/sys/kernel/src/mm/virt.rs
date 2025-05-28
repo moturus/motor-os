@@ -425,7 +425,7 @@ impl VmemRegion {
         };
 
         if (vaddr_start < self.segment.start) || ((vaddr_start + size) >= self.segment.end()) {
-            log::debug!("allocate_user_fixed failed for addr 0x{:x}", vaddr_start);
+            log::debug!("allocate_user_fixed failed for addr 0x{vaddr_start:x}");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
@@ -433,7 +433,7 @@ impl VmemRegion {
 
         // Validate that there is no overlap with existing segments.
         if segments.intersects(&memory_segment) {
-            log::debug!("allocate_user_fixed failed for addr 0x{:x}", vaddr_start);
+            log::debug!("allocate_user_fixed failed for addr 0x{vaddr_start:x}");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
@@ -859,11 +859,7 @@ impl UserAddressSpaceBase {
         addr_there: u64,
         mapping_options: MappingOptions,
     ) -> Result<(), ErrorCode> {
-        log::trace!(
-            "share_with: here: 0x{:x} there: 0x{:x}",
-            addr_here,
-            addr_there
-        );
+        log::trace!("share_with: here: 0x{addr_here:x} there: 0x{addr_there:x}");
         let ptr_here = self as *const _ as usize;
         let ptr_there = other as *const _ as usize;
         if ptr_here == ptr_there {

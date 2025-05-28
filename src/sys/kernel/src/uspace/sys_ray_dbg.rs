@@ -49,7 +49,7 @@ impl DebugSession {
             *ss = Some(session.clone());
             session
         };
-        log::info!("New debug session {:?}", session);
+        log::info!("New debug session {session:?}");
 
         let sys_object = SysObject::new_owned(
             Arc::new(alloc::format!(

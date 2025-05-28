@@ -177,7 +177,7 @@ impl Process {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        log::debug!("New process {}", debug_name);
+        log::debug!("New process {debug_name}");
 
         let user_stack = address_space.alloc_user_stack(Thread::DEFAULT_USER_STACK_SIZE_PAGES)?;
 
@@ -1843,7 +1843,7 @@ impl Thread {
     fn on_pagefault(&self) {
         let (pf_addr, error_code) = self.tcb.pf_addr_error_code().unwrap();
         self.trace("thread pagefault", pf_addr, error_code);
-        log::trace!("Thread #PF: 0x{:x}", pf_addr);
+        log::trace!("Thread #PF: 0x{pf_addr:x}");
         let mut resume_in_userspace = false;
         let mut call_on_exited = false;
         let mut killed_now = false;

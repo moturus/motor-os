@@ -136,8 +136,7 @@ pub(super) fn create(
                     let pid = proc.pid();
                     if pid != owner.pid() {
                         log::debug!(
-                            "User error: Shared URL '{}' exists with a different owner.",
-                            url
+                            "User error: Shared URL '{url}' exists with a different owner."
                         );
                         return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
@@ -172,17 +171,17 @@ pub(super) fn get(
             let shared = list.front().unwrap();
 
             if shared.page_type != page_type || shared.page_num != page_num {
-                log::debug!("shared: get: '{}': pages don't match.", url);
+                log::debug!("shared: get: '{url}': pages don't match.");
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             }
             let result = list.pop_front().unwrap();
             if list.is_empty() {
                 listeners.remove(&url);
             }
-            log::debug!("shared: got '{}'.", url);
+            log::debug!("shared: got '{url}'.");
             result
         } else {
-            log::debug!("shared: get: bad url: '{}'.", url);
+            log::debug!("shared: get: bad url: '{url}'.");
             return Err(moto_rt::E_NOT_FOUND);
         }
     };

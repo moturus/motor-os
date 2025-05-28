@@ -175,7 +175,7 @@ pub fn init() {
     }
 
     let cpu = super::current_cpu();
-    log::trace!("amd64::irq::init() for cpu {}", cpu);
+    log::trace!("amd64::irq::init() for cpu {cpu}");
     if cpu == super::bsp() {
         IDT.set(Box::leak(Box::new(
             StaticPerCpu::<InterruptDescriptorTable>::init(),
@@ -693,7 +693,7 @@ unsafe fn lapic_write(reg: u32, val: u32) {
 
 unsafe fn lapic_init() {
     let cpu = super::current_cpu();
-    log::trace!("lapic_init() for cpu {}", cpu);
+    log::trace!("lapic_init() for cpu {cpu}");
     if cpu == super::bsp() {
         // Upon boot, we marked the first 32+M of phys memory as in use.
         // Now mark LAPIC_BASE as available, so that mmio_map() below succeeds.
@@ -763,7 +763,7 @@ static mut IOAPIC_VIRT_ADDR: u64 = 0;
 
 unsafe fn ioapic_init() {
     let cpu = super::current_cpu();
-    log::trace!("ioapic_init() for cpu {}", cpu);
+    log::trace!("ioapic_init() for cpu {cpu}");
     if cpu == super::bsp() {
         let mapping = crate::mm::mmio::mmio_map(IOAPIC_BASE, 1).unwrap();
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);

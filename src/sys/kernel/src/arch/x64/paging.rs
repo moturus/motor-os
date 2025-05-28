@@ -306,7 +306,7 @@ impl PageTableImpl {
         {
             // remove this block
             if !table_l1.get(idx_l1).is_empty() {
-                log::error!("map 0x:{:x}: already there.", virt_addr);
+                log::error!("map 0x:{virt_addr:x}: already there.");
             }
         }
         assert!(table_l1.get(idx_l1).is_empty());

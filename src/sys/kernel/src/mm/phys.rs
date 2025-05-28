@@ -219,7 +219,7 @@ impl<S: PageSize> DesignatedSegment<S> {
         }
 
         if cnt < num {
-            log::debug!("Contiguous OOM: requested {} in use: 0b{:b}", num, prev);
+            log::debug!("Contiguous OOM: requested {num} in use: 0b{prev:b}");
             return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
@@ -236,7 +236,7 @@ impl<S: PageSize> DesignatedSegment<S> {
         );
 
         if let Err(prev) = res {
-            log::debug!("Contiguous OOM: requested {} in use: 0b{:b}", num, prev);
+            log::debug!("Contiguous OOM: requested {num} in use: 0b{prev:b}");
             return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
@@ -265,7 +265,7 @@ impl<S: PageSize> DesignatedSegment<S> {
             }
             let prev = self.used_bitmap.load(Ordering::Relaxed);
             if prev & bit == bit {
-                log::warn!("fixed_addr_reserve: already in use: addr: 0x{:x}", addr);
+                log::warn!("fixed_addr_reserve: already in use: addr: 0x{addr:x}");
                 return Err(moto_rt::E_ALREADY_IN_USE);
             }
             let next = prev | bit;
@@ -486,10 +486,7 @@ impl<S: PageSize> MemoryArea<S> {
 
     fn allocate_contiguous_frames(&self, num_frames: u64) -> Result<u64, ErrorCode> {
         if num_frames > 256 {
-            log::debug!(
-                "Alloc: OOM: too many contiguous frames requested: {}.",
-                num_frames
-            );
+            log::debug!("Alloc: OOM: too many contiguous frames requested: {num_frames}.");
             Err(moto_rt::E_OUT_OF_MEMORY)
         } else if num_frames == 1 {
             self.allocate_frame()

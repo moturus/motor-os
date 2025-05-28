@@ -134,11 +134,7 @@ impl UserAddressSpace {
         if new_total > self.max_memory.load(Ordering::Relaxed) {
             #[cfg(debug_assertions)]
             {
-                log::error!(
-                    "user OOM: user usage {} when allocating {}",
-                    new_total,
-                    bytes
-                );
+                log::error!("user OOM: user usage {new_total} when allocating {bytes}",);
                 crate::arch::log_backtrace("user OOM");
             }
             self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
@@ -161,11 +157,7 @@ impl UserAddressSpace {
         let new_total = bytes + self.total_usage.fetch_add(bytes, Ordering::AcqRel);
         if new_total > self.max_memory.load(Ordering::Relaxed) {
             #[cfg(debug_assertions)]
-            log::info!(
-                "user OOM: user usage {} when allocating {}",
-                new_total,
-                bytes
-            );
+            log::info!("user OOM: user usage {new_total} when allocating {bytes}");
             self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
             Err(moto_rt::E_OUT_OF_MEMORY)
         } else {
@@ -210,7 +202,7 @@ impl UserAddressSpace {
         mapping_options: super::MappingOptions,
         other: &UserAddressSpace,
     ) -> Result<(u64, u64), ErrorCode> {
-        log::trace!("alloc_user_shared: 0x{:x}", vaddr);
+        log::trace!("alloc_user_shared: 0x{vaddr:x}");
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
         if other
@@ -281,7 +273,7 @@ impl UserAddressSpace {
             )
             .unwrap();
 
-        log::trace!("alloc_user_shared ok: 0x{:x} 0x{:x}", addr_here, addr_there);
+        log::trace!("alloc_user_shared ok: 0x{addr_here:x} 0x{addr_there:x}");
         Ok((addr_here, addr_there))
     }
 

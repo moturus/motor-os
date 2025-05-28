@@ -30,7 +30,7 @@ impl Drop for MemStats {
     fn drop(&mut self) {
         // assert_eq!(0, self.total());
         if self.total() != 0 {
-            log::error!("Non-empty MemStats dropped: {:?}.", self);
+            log::error!("Non-empty MemStats dropped: {self:?}.");
         }
     }
 }

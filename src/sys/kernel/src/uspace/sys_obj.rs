@@ -40,14 +40,14 @@ fn sys_handle_create(
                 }
 
                 if !suffix.starts_with("debug_name=") {
-                    log::debug!("SysHandle::create: bad url: '{}'", url);
+                    log::debug!("SysHandle::create: bad url: '{url}'");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
 
                 let debug_name = if let Some((_, s)) = suffix.split_once('=') {
                     s
                 } else {
-                    log::debug!("SysHandle::create: bad url: '{}'", url);
+                    log::debug!("SysHandle::create: bad url: '{url}'");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 };
 
@@ -62,7 +62,7 @@ fn sys_handle_create(
                     address_space,
                     alloc::sync::Weak::new(),
                 );
-                log::debug!("created {}", url);
+                log::debug!("created {url}");
                 return Ok(thread.owner().add_object(sys_object));
             }
             "process" => {
@@ -71,10 +71,10 @@ fn sys_handle_create(
                     parent,
                     &moto_sys::url_decode(suffix),
                 ) {
-                    log::debug!("created {}", url);
+                    log::debug!("created {url}");
                     return Ok(thread.owner().add_object(process.self_object().unwrap()));
                 } else {
-                    log::debug!("Error creating process '{}'", url);
+                    log::debug!("Error creating process '{url}'");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             }
@@ -84,7 +84,7 @@ fn sys_handle_create(
             _ => {}
         }
     }
-    log::debug!("SysHandle::CREATE: bad url: '{}'", url);
+    log::debug!("SysHandle::CREATE: bad url: '{url}'");
     Err(moto_rt::E_INVALID_ARGUMENT)
 }
 
@@ -111,7 +111,7 @@ fn sys_handle_shared(
                     if let Ok(num) = suffix.parse::<u64>() {
                         address = Some(num);
                     } else {
-                        log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
+                        log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
                         return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
                 }
@@ -119,7 +119,7 @@ fn sys_handle_shared(
                     "small" => page_type = Some(PageType::SmallPage),
                     "mid" => page_type = Some(PageType::MidPage),
                     _ => {
-                        log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
+                        log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
                         return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
                 },
@@ -127,23 +127,23 @@ fn sys_handle_shared(
                     if let Ok(num) = suffix.parse::<u16>() {
                         page_num = Some(num);
                     } else {
-                        log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
+                        log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
                         return Err(moto_rt::E_INVALID_ARGUMENT);
                     }
                 }
                 _ => {
-                    log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
+                    log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             }
         } else {
-            log::debug!("SysHandle::CREATE shared: bad argument: {}", entry);
+            log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
     }
 
     if url.is_none() || address.is_none() || page_type.is_none() || page_num.is_none() {
-        log::debug!("SysHandle::CREATE shared: bad arguments: {}", args);
+        log::debug!("SysHandle::CREATE shared: bad arguments: {args}");
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
@@ -233,7 +233,7 @@ fn sys_handle_get(
                     _ => {}
                 }
             }
-            log::debug!("SysHandle::GET: bad url: '{}'", url);
+            log::debug!("SysHandle::GET: bad url: '{url}'");
             Err(moto_rt::E_INVALID_ARGUMENT)
         }
     }
