@@ -198,7 +198,7 @@ impl NetDev {
 
         // NOTE: neither CHV nor QEMU have VIRTIO_F_IN_ORDER available.
         #[cfg(debug_assertions)]
-        log::debug!("NET features available: 0x{:x}", features_available);
+        log::debug!("NET features available: 0x{features_available:x}");
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
             log::warn!("Virtio NET device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",

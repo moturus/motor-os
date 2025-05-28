@@ -76,7 +76,7 @@ impl Blk {
     // Step 4
     fn negotiate_features(&mut self) -> Result<(), ()> {
         let features_available = self.dev.get_available_features();
-        log::debug!("BLK devices features: 0x{:x}", features_available);
+        log::debug!("BLK devices features: 0x{features_available:x}");
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
             log::warn!("Virtio BLK device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",

@@ -10,7 +10,7 @@ mod tcp_listener;
 pub fn init() -> Box<dyn crate::runtime::IoSubsystem> {
     let config = match config::load() {
         Ok(cfg) => cfg,
-        Err(err) => panic!("Couldn't load sys-net.toml: {:?}", err),
+        Err(err) => panic!("Couldn't load sys-net.toml: {err:?}"),
     };
 
     #[cfg(debug_assertions)]

@@ -232,7 +232,7 @@ impl Driver {
         let old = req.old(&raw_channel)?;
         let new = req.new(&raw_channel)?;
 
-        log::debug!("driver: rename: {} -> {}", old, new);
+        log::debug!("driver: rename: {old} -> {new}");
 
         super::filesystem::fs().rename(old, new)?;
         let resp = raw_channel.get_mut::<RenameResponse>();

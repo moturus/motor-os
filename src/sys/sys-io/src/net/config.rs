@@ -43,14 +43,14 @@ impl std::str::FromStr for MacAddress {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let maybe_bytes: Vec<&str> = s.split(':').collect();
         if maybe_bytes.len() != 6 {
-            return Err(format!("Failed to parse MAC: {}.", s));
+            return Err(format!("Failed to parse MAC: {s}."));
         }
 
         let mut mac = [0_u8; 6];
         for idx in 0..6 {
             let maybe_byte = maybe_bytes[idx].as_bytes();
             if maybe_byte.len() != 2 {
-                return Err(format!("Failed to parse MAC: {}.", s));
+                return Err(format!("Failed to parse MAC: {s}."));
             }
 
             let b0 = ox_char_to_byte(maybe_byte[0])?;

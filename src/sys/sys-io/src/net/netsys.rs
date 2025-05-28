@@ -177,7 +177,7 @@ impl NetSys {
                 Some(idx) => Some(*idx),
                 None => {
                     #[cfg(debug_assertions)]
-                    log::info!("IP addr {:?} not found", ip_addr);
+                    log::info!("IP addr {ip_addr:?} not found");
                     sqe.status = moto_rt::E_INVALID_ARGUMENT;
                     return sqe;
                 }
@@ -201,7 +201,7 @@ impl NetSys {
                 match self.devices[device_idx.unwrap()].get_ephemeral_tcp_port(&ip_addr) {
                     Some(port) => port,
                     None => {
-                        log::info!("get_ephemeral_port({:?}) failed", ip_addr);
+                        log::info!("get_ephemeral_port({ip_addr:?}) failed");
                         sqe.status = moto_rt::E_OUT_OF_MEMORY;
                         return sqe;
                     }
@@ -400,7 +400,7 @@ impl NetSys {
 
         let mut smol_socket = self.get_unused_udp_socket();
         if let Err(err) = smol_socket.bind((socket_addr.ip(), socket_addr.port())) {
-            log::error!("smoltcp bind error: {:?}", err);
+            log::error!("smoltcp bind error: {err:?}");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         let socket_id = self.next_id(SocketKind::Udp).into();
@@ -719,7 +719,7 @@ impl NetSys {
                 msg.status = moto_rt::E_OK;
             }
             _ => {
-                log::debug!("Invalid option 0x{}", options);
+                log::debug!("Invalid option 0x{options:x}");
                 msg.status = moto_rt::E_INVALID_ARGUMENT;
             }
         }
@@ -769,7 +769,7 @@ impl NetSys {
                 msg.status = moto_rt::E_OK;
             }
             _ => {
-                log::debug!("Invalid option 0x{}", options);
+                log::debug!("Invalid option 0x{options:x}");
                 msg.status = moto_rt::E_INVALID_ARGUMENT;
             }
         }
@@ -876,7 +876,7 @@ impl NetSys {
         let local_port = match self.devices[device_idx].get_ephemeral_tcp_port(&local_ip_addr) {
             Some(port) => port,
             None => {
-                log::info!("get_ephemeral_port({:?}) failed", local_ip_addr);
+                log::info!("get_ephemeral_port({local_ip_addr:?}) failed");
                 sqe.status = moto_rt::E_OUT_OF_MEMORY;
                 return Some(sqe);
             }
@@ -1160,7 +1160,7 @@ impl NetSys {
 
         if options != 0 {
             sqe.status = moto_rt::E_INVALID_ARGUMENT;
-            log::warn!("unrecognized TCP option 0x{:x}", options);
+            log::warn!("unrecognized TCP option 0x{options:x}");
             return sqe;
         }
 
@@ -1253,7 +1253,7 @@ impl NetSys {
                 sqe.status = moto_rt::E_OK;
             }
             _ => {
-                log::debug!("Invalid option 0x{}", options);
+                log::debug!("Invalid option 0x{options}");
                 sqe.status = moto_rt::E_INVALID_ARGUMENT;
             }
         }
@@ -1651,7 +1651,7 @@ impl NetSys {
             // write into our side, and the remote socket can read.
             smoltcp::socket::tcp::State::CloseWait => match moto_state {
                 TcpState::Connecting => {
-                    panic!("bad state transition: {:?} => CloseWait", moto_state)
+                    panic!("bad state transition: {moto_state:?} => CloseWait")
                 } // Impossible.
                 TcpState::Listening | TcpState::PendingAccept => {
                     self.drop_tcp_socket(socket_id);
@@ -1669,7 +1669,7 @@ impl NetSys {
                 }
                 // Nothing to do.
                 TcpState::WriteOnly => {}
-                _ => panic!("Unexpected TcpState {:?}", moto_state),
+                _ => panic!("Unexpected TcpState {moto_state:?}"),
             },
 
             smoltcp::socket::tcp::State::Closed => match moto_state {
@@ -1685,7 +1685,7 @@ impl NetSys {
                     log::debug!("socket 0x{:x} => (deferred) Close", u64::from(socket_id));
                     moto_socket.add_deferred_action(DeferredAction::Close, Instant::now());
                 }
-                _ => panic!("Unexpected TcpState {:?}", moto_state),
+                _ => panic!("Unexpected TcpState {moto_state:?}"),
             },
             smoltcp::socket::tcp::State::FinWait2
             | smoltcp::socket::tcp::State::Closing
@@ -2142,7 +2142,7 @@ impl NetSys {
                 Some(idx) => *idx,
                 None => {
                     #[cfg(debug_assertions)]
-                    log::debug!("IP addr {:?} not found", ip_addr);
+                    log::debug!("IP addr {ip_addr:?} not found");
                     sqe.status = moto_rt::E_INVALID_ARGUMENT;
                     return sqe;
                 }
@@ -2155,7 +2155,7 @@ impl NetSys {
             let local_port = match self.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
                 Some(port) => port,
                 None => {
-                    log::warn!("get_ephemeral_udp_port({:?}) failed", ip_addr);
+                    log::warn!("get_ephemeral_udp_port({ip_addr:?}) failed");
                     sqe.status = moto_rt::E_OUT_OF_MEMORY;
                     return sqe;
                 }

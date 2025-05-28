@@ -27,7 +27,7 @@ fn process_config() -> Result<Config, String> {
         } else if let Some(file) = line.trim().strip_prefix("log:") {
             log = Some(file.to_owned());
         } else {
-            return Err(format!("'/sys/cfg/sys-init.cfg': bad line {}", curr_line));
+            return Err(format!("'/sys/cfg/sys-init.cfg': bad line {curr_line}"));
         }
     }
 
@@ -54,8 +54,8 @@ fn main() {
 
     let config = process_config();
     if let Err(msg) = config {
-        log::error!("sys-init: {}", msg);
-        SysRay::log(format!("sys-init: {}", msg).as_str()).unwrap();
+        log::error!("sys-init: {msg}");
+        SysRay::log(format!("sys-init: {msg}").as_str()).unwrap();
         std::process::exit(1);
     }
 
@@ -73,7 +73,7 @@ fn main() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .unwrap_or_else(|_| panic!("Error spawning {}", log));
+            .unwrap_or_else(|_| panic!("Error spawning {log}"));
 
         // The logserver has just started. It needs time to start
         // listening, so we need to retry a few times.

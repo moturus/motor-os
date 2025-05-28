@@ -239,21 +239,12 @@ impl PciBar {
         //    bar, mmio, prefetchable, is_64, sz, addr);
 
         log::debug!(
-            "Mapping PciBar: device: {:?} bar: {} phys_addr: 0x{:x} sz: 0x{:x}",
-            pci_device_id,
-            idx,
-            phys_addr,
-            sz
+            "Mapping PciBar: device: {pci_device_id:?} bar: {idx} phys_addr: 0x{phys_addr:x} sz: 0x{sz:x}"
         );
 
         let virt_addr = super::mapper().mmio_map(phys_addr, sz).unwrap();
         log::debug!(
-            "Mapped PciBar: device: {:?} bar: {} phys_addr: 0x{:x} sz: 0x{:x} to virt 0x{:x}",
-            pci_device_id,
-            idx,
-            phys_addr,
-            sz,
-            virt_addr
+            "Mapped PciBar: device: {pci_device_id:?} bar: {idx} phys_addr: 0x{phys_addr:x} sz: 0x{sz:x} to virt 0x{virt_addr:x}"
         );
 
         PciBar {

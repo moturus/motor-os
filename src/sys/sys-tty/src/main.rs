@@ -20,8 +20,7 @@ fn read_config() -> String {
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
         Err(err) => {
-            moto_sys::SysRay::log(format!("Error reading '{}': {:?}", config_path, err).as_str())
-                .ok();
+            moto_sys::SysRay::log(format!("Error reading '{config_path}': {err:?}").as_str()).ok();
             std::process::exit(1);
         }
     }

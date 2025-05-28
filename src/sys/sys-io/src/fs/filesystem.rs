@@ -66,7 +66,7 @@ pub fn init() {
             match super::mbr::Mbr::parse(block.as_slice()) {
                 Ok(mbr) => {
                     for pte in &mbr.entries {
-                        log::trace!("MBR PTE: {:?}", pte);
+                        log::trace!("MBR PTE: {pte:?}");
                         match pte.partition_type {
                             super::mbr::PartitionType::FlatFs => {
                                 if fs.is_some() {
@@ -97,8 +97,8 @@ pub fn init() {
                     }
                 }
                 Err(err) => {
-                    crate::moto_log!("Failed to read MBR: {}", err);
-                    log::warn!("Failed to read MBR: {}", err);
+                    crate::moto_log!("Failed to read MBR: {err}");
+                    log::warn!("Failed to read MBR: {err}");
                 }
             }
         } else {

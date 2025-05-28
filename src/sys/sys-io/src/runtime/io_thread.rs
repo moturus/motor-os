@@ -95,7 +95,7 @@ impl IoRuntime {
             let listener = match io_channel::ServerConnection::create("sys-io") {
                 Ok(server) => server,
                 Err(err) => {
-                    panic!("Failed to spawn a sys-io listener: {:?}", err);
+                    panic!("Failed to spawn a sys-io listener: {err:?}");
                 }
             };
 

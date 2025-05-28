@@ -72,7 +72,7 @@ impl moto_virtio::KernelAdapter for Mapper {
             SysHandle::NONE,
             None,
         ) {
-            log::error!("KernelAdapter::wait() failed: {:?}", err);
+            log::error!("KernelAdapter::wait() failed: {err:?}");
             Err(())
         } else {
             Ok(())

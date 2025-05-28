@@ -175,31 +175,21 @@ impl VirtioDevice {
 
         let kind = VirtioDeviceKind::from_device_id(device_id.device_id());
         if let VirtioDeviceKind::Unknown(x) = kind {
-            log::warn!(
-                "Skipping VirtIO device_id with unknown device_id id 0x{:x}",
-                x
-            );
+            log::warn!("Skipping VirtIO device_id with unknown device_id id 0x{x:x}");
             return Err(());
         }
 
         let reg_1 = device_id.read_config_u32(0x04);
         let status = ((reg_1 >> 16) & 0xFFFF) as u16;
         if status & pci::PCI_STATUS_CAP_LIST == 0 {
-            log::warn!(
-                "VirtIO device_id {:?}: wrong status: {:x}",
-                device_id,
-                status
-            );
+            log::warn!("VirtIO device_id {device_id:?}: wrong status: {status:x}");
             return Err(());
         }
 
         let reg_2 = device_id.read_config_u32(0x08);
         let revision_id = (reg_2 & 0xff) as u8;
         if revision_id == 0 {
-            log::warn!(
-                "VirtIO device_id {:?}: legacy device_id (revision_id)",
-                device_id
-            );
+            log::warn!("VirtIO device_id {device_id:?}: legacy device_id (revision_id)");
             return Err(());
         }
 
@@ -219,26 +209,16 @@ impl VirtioDevice {
         }
 
         if common_cap.is_none() {
-            log::warn!(
-                "VirtIO device_id {:?}: VirtioPciCommonCfg not found.",
-                device_id
-            );
+            log::warn!("VirtIO device_id {device_id:?}: VirtioPciCommonCfg not found.");
             return Err(());
         }
 
         let common_cfg = common_cap.unwrap();
-        log::trace!(
-            "VirtIO device_id {:?}: common cap (cfg): {:?}",
-            device_id,
-            common_cfg
-        );
+        log::trace!("VirtIO device_id {device_id:?}: common cap (cfg): {common_cfg:?}");
 
         let min_len = core::mem::size_of::<VirtioPciCommonCfgLayout>();
         if (common_cfg.length as usize) < min_len {
-            log::warn!(
-                "VirtIO device_id {:?}: VirtioPciCommonCfg: bad length.",
-                device_id
-            );
+            log::warn!("VirtIO device_id {device_id:?}: VirtioPciCommonCfg: bad length.");
             return Err(());
         }
 
@@ -249,7 +229,7 @@ impl VirtioDevice {
         let status = cfg_bar.readb(
             common_cfg.offset as u64 + offset_of!(VirtioPciCommonCfgLayout, device_status) as u64,
         );
-        log::debug!("Detected VirtIO device {:?} status: {}.", kind, status);
+        log::debug!("Detected VirtIO device {kind:?} status: {status}.");
 
         let mut device_cfg: Option<VirtioPciCap> = None;
         for cap in &virtio_caps {
@@ -258,7 +238,7 @@ impl VirtioDevice {
                 if cap.bar != common_cfg.bar {
                     pci_device.bars[cap.bar as usize] = Some(PciBar::init(device_id, cap.bar));
                 }
-                log::trace!("VirtIO device_id {:?}: device cap: {:?}", device_id, cap);
+                log::trace!("VirtIO device_id {device_id:?}: device cap: {cap:?}");
                 break;
             }
         }
@@ -675,7 +655,7 @@ impl VirtioDevice {
                 cfg_bar.write_u16(bar_offset + queue_size_offset, MAX_QUEUE_SIZE);
                 queue_size = cfg_bar.read_u16(bar_offset + queue_size_offset);
                 if queue_size > MAX_QUEUE_SIZE {
-                    log::error!("VirtIO queue size too large: {}", queue_size);
+                    log::error!("VirtIO queue size too large: {queue_size}");
                     return Err(());
                 }
             }

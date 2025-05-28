@@ -372,12 +372,7 @@ impl NetDev {
             )
             .map_err(|_err| {
                 #[cfg(debug_assertions)]
-                log::debug!(
-                    "Connect {:?} => {:?} failed: {:?}",
-                    local_addr,
-                    remote_addr,
-                    _err
-                );
+                log::debug!("Connect {local_addr:?} => {remote_addr:?} failed: {_err:?}");
             })
     }
 

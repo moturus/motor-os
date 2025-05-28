@@ -94,17 +94,17 @@ pub type StdError = Box<dyn std::error::Error + Send + Sync>;
 
 pub fn init(tag: &str) -> Result<(), StdError> {
     let mut conn = ClientConnection::new(moto_ipc::sync::ChannelSize::Small)
-        .map_err(|e| StdError::from(format!("ClientConnection failed (1) with error {:?}.", e)))?;
+        .map_err(|e| StdError::from(format!("ClientConnection failed (1) with error {e:?}.")))?;
 
     conn.connect("sys-log")
-        .map_err(|e| StdError::from(format!("ClientConnection failed (2) with error {:?}.", e)))?;
+        .map_err(|e| StdError::from(format!("ClientConnection failed (2) with error {e:?}.")))?;
 
     implementation::ConnectRequest::prepare(conn.data_mut(), tag);
     conn.do_rpc(None)
-        .map_err(|e| StdError::from(format!("ClientConnection failed (3) with error {:?}.", e)))?;
+        .map_err(|e| StdError::from(format!("ClientConnection failed (3) with error {e:?}.")))?;
 
     let tag_id = implementation::ConnectResponse::parse(conn.data())
-        .map_err(|e| StdError::from(format!("ClientConnection failed (4) with error {:?}.", e)))?;
+        .map_err(|e| StdError::from(format!("ClientConnection failed (4) with error {e:?}.")))?;
 
     let logger = Box::leak(Box::new(BasicLogger {
         _tag: tag.to_owned(),
@@ -141,11 +141,11 @@ pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
     );
 
     conn.do_rpc(None)
-        .map_err(|e| StdError::from(format!("GetUtf8TailRequest failed with error {:?}.", e)))?;
+        .map_err(|e| StdError::from(format!("GetUtf8TailRequest failed with error {e:?}.")))?;
 
     let resp = match GetTailEntriesResponse::parse(conn.data()) {
         Ok(vec) => vec,
-        Err(e) => return Err(StdError::from(format!("Bad GetUtf8TailResponse: {:?}", e))),
+        Err(e) => return Err(StdError::from(format!("Bad GetUtf8TailResponse: {e:?}"))),
     };
 
     let mut result = Vec::with_capacity(resp.len());
