@@ -8,6 +8,7 @@ use russh::server::{Msg, Server as _, Session};
 use russh::*;
 
 use russhd::config;
+use russhd::local_session::StdinTx;
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 fn input_listener() {
@@ -92,7 +93,7 @@ struct ConnectionHandler {
     pty_request: Option<PtyRequest>,
     authenticated_user: Option<String>,
 
-    stdin_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    stdin_tx: Option<StdinTx>,
 }
 
 impl ConnectionHandler {
@@ -110,176 +111,32 @@ impl ConnectionHandler {
     }
 
     async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
-        use std::process::Stdio;
-        use tokio::io::AsyncReadExt;
-        use tokio::io::AsyncWriteExt;
-
-        let (channel, session) = self.channel.as_ref().unwrap();
-
         #[cfg(target_os = "moturus")]
-        let shell = "/bin/rush";
+        let cmd = "/bin/rush -i";
         #[cfg(not(target_os = "moturus"))]
-        let shell = "/bin/bash";
+        let cmd = "/bin/bash -i";
 
-        // let mut child = tokio::process::Command::new(self.config.shell())
-        let mut cmd = tokio::process::Command::new(shell);
-        cmd.arg("-i");
+        let (channel, session) = self.channel.clone().unwrap();
+        let session_clone = session.clone();
+        self.stdin_tx = Some(russhd::local_session::spawn(cmd, channel, session).await?);
 
-        #[cfg(target_os = "moturus")]
-        cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
-
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .inspect_err(|e| log::warn!("Error spawning shell {shell}: {e:?}"))?;
-
+        // Show a greeting.
         #[cfg(target_os = "moturus")]
         let data = CryptoVec::from("\n\rHello! Welcome to Motor OS.\r\n\n\r");
         #[cfg(not(target_os = "moturus"))]
         let data = CryptoVec::from("Hello! Welcome to RUSSHD.\r\n\r\n");
 
-        session
-            .data(*channel, data)
+        session_clone
+            .data(channel, data)
             .await
             .map_err(|_| russh::Error::Inconsistent)?;
-
-        // Pipe stdin through.
-        let mut stdin = child.stdin.take().unwrap();
-        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
-        self.stdin_tx = Some(stdin_tx);
-
-        tokio::spawn(async move {
-            loop {
-                let Some(data) = stdin_rx.recv().await else {
-                    log::debug!("stdin_rx.recv() returned None");
-                    if stdin_rx.is_closed() {
-                        break;
-                    }
-                    break;
-                };
-                if let Err(err) = stdin.write_all(&data).await {
-                    log::debug!("stdin.write_all() failed with error '{err:?}'");
-                    break;
-                }
-            }
-        });
-
-        // Pipe stdout through.
-        let mut stdout = child.stdout.take().unwrap();
-
-        let (channel, session_handle) = self.channel.clone().unwrap();
-        let session = session_handle.clone();
-        tokio::spawn(async move {
-            let mut buf = [0_u8; 256];
-            loop {
-                match stdout.read(&mut buf).await {
-                    Ok(sz) => {
-                        if sz == 0 {
-                            log::debug!("stdout.read() returned zero.");
-                            break;
-                        }
-                        if let Err(err) = Self::output(&session, channel, &buf[0..sz]).await {
-                            log::debug!("session.data() failed with error '{err:?}'");
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        log::debug!("stdout.read() failed with error '{err:?}'");
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Pipe stderr through.
-        let mut stderr = child.stderr.take().unwrap();
-
-        let (channel, session_handle) = self.channel.clone().unwrap();
-        let session = session_handle.clone();
-        tokio::spawn(async move {
-            let mut buf = [0_u8; 256];
-            loop {
-                match stderr.read(&mut buf).await {
-                    Ok(sz) => {
-                        if sz == 0 {
-                            log::debug!("stderr.read() returned zero.");
-                            break;
-                        }
-                        if let Err(err) = Self::output(&session, channel, &buf[0..sz]).await {
-                            log::debug!("session.data() failed with error '{err:?}'");
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        log::debug!("stderr.read() failed with error '{err:?}'");
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Wait for the child.
-        let (channel, session_handle) = self.channel.clone().unwrap();
-        tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => {
-                    if let Some(code) = status.code() {
-                        log::info!("child exited with {code}");
-                        let _ = session_handle
-                            .exit_status_request(channel, i32::cast_unsigned(code))
-                            .await;
-                    }
-                }
-                Err(err) => {
-                    log::warn!("child.wait() failed: {err:?}");
-                }
-            }
-
-            let _ = session_handle.eof(channel).await;
-            let _ = session_handle.close(channel).await;
-        });
 
         Ok(())
     }
 
-    async fn output(
-        session: &russh::server::Handle,
-        channel: ChannelId,
-        bytes: &[u8],
-    ) -> anyhow::Result<()> {
-        use anyhow::anyhow;
-
-        let mut start = 0;
-        let mut pos = 0;
-        while start < bytes.len() {
-            let mut add_r = false;
-
-            while pos < bytes.len() {
-                if bytes[pos] == b'\n' {
-                    add_r = true;
-                    pos += 1;
-                    break;
-                }
-
-                pos += 1;
-            }
-
-            session
-                .data(channel, bytes[start..pos].into())
-                .await
-                .map_err(|_| anyhow!("Failed to send bytes to the client."))?;
-
-            if add_r {
-                session
-                    .data(channel, [b'\r'].as_slice().into())
-                    .await
-                    .map_err(|_| anyhow!("Failed to send bytes to the client."))?;
-            }
-
-            start = pos;
-        }
+    async fn exec(&mut self, cmdline: &str) -> Result<(), russh::Error> {
+        let (channel, session) = self.channel.clone().unwrap();
+        self.stdin_tx = Some(russhd::local_session::spawn(cmdline, channel, session).await?);
 
         Ok(())
     }
@@ -502,8 +359,12 @@ impl server::Handler for ConnectionHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        log::info!("exec_request: `{}`", String::from_utf8_lossy(data));
-        Ok(())
+        let Ok(cmdline) = str::from_utf8(data) else {
+            return Err(Self::Error::IO(std::io::ErrorKind::InvalidInput.into()));
+        };
+
+        log::info!("exec_request: `{cmdline}`");
+        self.exec(cmdline).await
     }
 
     #[allow(unused_variables)]

@@ -12,6 +12,7 @@ russh        = "=0.52.0"
 rand_core    = "0.6"
 serde        = { version = "1.0.*", features = ["derive"] }
 sha2         = "=0.10.8"
+shell-words  = "1.1"
 tokio        = { version = "=1.44.2", features = ["process", "rt", "sync"] }
 toml         = "0.8.10"
 
