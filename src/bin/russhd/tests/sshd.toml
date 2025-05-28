@@ -30,6 +30,7 @@ password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d4
 
 
 # the following test key has this matching private key:
+#
 #   -----BEGIN OPENSSH PRIVATE KEY-----
 #   b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
 #   QyNTUxOQAAACDKo5VI3gXKrx8svkb1S+eKX8iu74+ZAJCUbfqi5WVjxwAAAIibWu1hm1rt
@@ -37,5 +38,8 @@ password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d4
 #   AAAEDcrKFmgS6474l297L4EWqp+dXnX5vSqvz4i9w4473TmMqjlUjeBcqvHyy+RvVL54pf
 #   yK7vj5kAkJRt+qLlZWPHAAAAAAECAwQF
 #   -----END OPENSSH PRIVATE KEY-----
+#
+# To use it, save the private key above in ~/tmp/motor.key and run:
+# ssh -p 2222 -o IdentitiesOnly=yes -i ~/tmp/motor.key motor@192.168.4.2
 
 authorized_key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqjlUjeBcqvHyy+RvVL54pfyK7vj5kAkJRt+qLlZWPH'
