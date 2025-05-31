@@ -1219,7 +1219,9 @@ version = "0.1.0"
 dependencies = [
  "crossbeam",
  "futures",
+ "log",
  "moto-ipc",
+ "moto-log",
  "moto-mpmc",
  "moto-rt",
  "moto-sys",

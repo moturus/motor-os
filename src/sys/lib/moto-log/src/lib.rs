@@ -1,7 +1,7 @@
 // Provides a centralized implementation of log interface/facade for motor-os.
 // Somewhat outdated/unused.
 
-// TODO: at the moment moto-log is very simple and rather slow. A faster
+// TODO: at the moment moto-log is very simple (synchronous) and slow. A faster
 // implementation could cache logs locally per-cpu or per-thread
 // and flush to moto-logger asynchronously.
 
@@ -14,25 +14,24 @@ use implementation::{GetTailEntriesRequest, GetTailEntriesResponse};
 use log::Record;
 use moto_ipc::sync::ClientConnection;
 
-pub const LOG_ERROR_EXIT_CODE: i32 = 0xbad106;
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LogEntry {
     pub tag: String,
-    pub timestamp: std::time::SystemTime,
+    pub timestamp: moto_rt::time::Instant,
     pub level: u8,
     pub msg: String,
 }
 
-fn log_level_to_str(level: u8) -> &'static str {
-    match level {
-        0 => "FATAL",
-        1 => "ERROR",
-        2 => "WARN",
-        3 => "INFO",
-        4 => "DEBUG",
-        5 => "TRACE",
-        _ => "UNKNOWN",
+impl LogEntry {
+    pub fn level(&self) -> log::Level {
+        match self.level {
+            1 => log::Level::Error,
+            2 => log::Level::Warn,
+            3 => log::Level::Info,
+            4 => log::Level::Debug,
+            5 => log::Level::Trace,
+            x => panic!("bad log level {x}"),
+        }
     }
 }
 
@@ -41,30 +40,21 @@ impl Display for LogEntry {
         write!(
             f,
             "{} {} {} {}",
-            moto_rt::time::UtcDateTime::from_unix_nanos(
-                self.timestamp
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ),
+            // Safety: todo: make it more precise, maybe by converting
+            // from instant to systemtime in sys-log.
+            unsafe { moto_rt::time::UtcDateTime::from_instant(self.timestamp) },
             self.tag,
-            log_level_to_str(self.level),
+            self.level(),
             self.msg
         )
     }
 }
 
 struct BasicLogger {
-    _tag: String,
+    tag: String,
     tag_id: u64,
     enabled: AtomicBool,
     conn: std::sync::Mutex<ClientConnection>,
-}
-
-impl Drop for BasicLogger {
-    fn drop(&mut self) {
-        todo!("disconnect") // This seems to never happen.
-    }
 }
 
 static BASIC_LOGGER: AtomicUsize = AtomicUsize::new(0);
@@ -77,8 +67,7 @@ impl log::Log for BasicLogger {
             if conn.do_rpc(None).is_err()
                 || implementation::LogResponse::parse(conn.data()).is_err()
             {
-                panic!("error logging: what do we do here?");
-                // std::process::exit(LOG_ERROR_EXIT_CODE);
+                todo!("implement fallback logging: to stderr, if available, or to the kernel (SysRay)");
             }
         }
     }
@@ -107,7 +96,7 @@ pub fn init(tag: &str) -> Result<(), StdError> {
         .map_err(|e| StdError::from(format!("ClientConnection failed (4) with error {e:?}.")))?;
 
     let logger = Box::leak(Box::new(BasicLogger {
-        _tag: tag.to_owned(),
+        tag: tag.to_owned(),
         tag_id,
         enabled: AtomicBool::new(true),
         conn: std::sync::Mutex::new(conn),
@@ -152,9 +141,12 @@ pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
     for idx in (0..resp.len()).rev() {
         let entry = &resp[idx];
         result.push(LogEntry {
-            tag: entry.tag_id.to_string(),
-            // timestamp: moto_sys_rt::time::system_time_from_u64(entry.timestamp),
-            timestamp: std::time::UNIX_EPOCH + std::time::Duration::from_nanos(entry.timestamp),
+            tag: if logger.tag_id == entry.tag_id {
+                logger.tag.clone()
+            } else {
+                entry.tag_id.to_string()
+            },
+            timestamp: moto_rt::time::Instant::from_u64(entry.timestamp),
             level: entry.log_level,
             msg: std::str::from_utf8(entry.bytes).unwrap().to_owned(),
         });
@@ -240,14 +232,15 @@ pub mod implementation {
         pub log_level: u8,
         pub payload_size: u32,
         pub tag_id: u64,
-        pub timestamp: u64,
+        pub timestamp: u64, // Instant::as_u64().
     }
 
     impl LogRequest {
         pub fn prepare(buffer: &mut [u8], tag_id: u64, record: &log::Record) {
             let buf_len = buffer.len();
 
-            // Safe because Self is POD, so transmuting into it is safe.
+            // Safe because Self is POD, so transmuting into it is safe, and because we validate
+            // that prefix is empty (i.e. that the buffer is already properly aligned).
             let (prefix, data, _) = unsafe { buffer.align_to_mut::<Self>() };
             assert!(prefix.is_empty());
             assert!(!data.is_empty());
@@ -257,10 +250,6 @@ pub mod implementation {
             req.header.ver = 0;
             req.log_level = level_as_u8(record.level());
             req.tag_id = tag_id;
-            // req.timestamp = std::time::SystemTime::now()
-            //     .duration_since(std::time::UNIX_EPOCH)
-            //     .unwrap()
-            //     .as_nanos() as u64;
             req.timestamp = moto_rt::time::Instant::now().as_u64();
 
             let payload = format!(

@@ -9,11 +9,13 @@ edition = "2021"
 [dependencies]
 moto-rt      = { path = "../../lib/moto-rt"     }
 moto-ipc     = { path = "../../lib/moto-ipc"    , features = ["stdio-pipe"]}
+moto-log     = { path = "../../lib/moto-log"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-mpmc    = { path = "../../lib/moto-mpmc"   }
 
 crossbeam = "0.8.4"
 futures = "0.3"
+log = "0.4.21"
 
-[features]
-test_sse = []
+# [features]
+# test_sse = []

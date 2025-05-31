@@ -254,7 +254,7 @@ impl LogServer {
         }
 
         let mut log_server = LogServer {
-            ipc_server: LocalServer::new("sys-log", ChannelSize::Small, 2, 2).unwrap(),
+            ipc_server: LocalServer::new("sys-log", ChannelSize::Small, 10, 2).unwrap(),
             next_tag_id: 1,
             next_record_id: 0,
             records,

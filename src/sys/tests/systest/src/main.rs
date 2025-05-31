@@ -3,6 +3,7 @@
 
 // mod channel_test;
 mod fs;
+mod logging;
 mod mpmc;
 mod spawn_wait_kill;
 mod stdio;
@@ -171,22 +172,23 @@ fn test_lazy_memory_map() {
         1,
     )
     .unwrap();
-    // let prev_log_level = moto_sys::syscalls::SysCtl::set_log_level(4).unwrap();
+
     let buf = unsafe {
         core::slice::from_raw_parts_mut(addr as usize as *mut u8, sys_mem::PAGE_SIZE_SMALL as usize)
     };
+
     #[allow(clippy::needless_range_loop)]
     for idx in 0..buf.len() {
         assert_eq!(0, buf[idx]);
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
+
     #[allow(clippy::needless_range_loop)]
     for idx in 0..buf.len() {
         buf[idx] = (idx % (u8::MAX as usize)) as u8;
         assert_eq!(buf[idx], (idx % (u8::MAX as usize)) as u8);
     }
 
-    // moto_sys::syscalls::SysCtl::set_log_level(prev_log_level).unwrap();
     SysMem::free(addr).unwrap();
     println!("test_lazy_memory_map: done");
 }
@@ -407,6 +409,7 @@ fn main() {
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
+    logging::run_all_tests();
     test_thread_names();
     test_cpus();
     tls::test_tls();

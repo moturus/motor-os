@@ -35,13 +35,6 @@ fn test_thread_preemption() {
         handles.push(std::thread::spawn(|| {
             let mut counter: u64 = 0;
             while !shutdown_ref.load(std::sync::atomic::Ordering::Relaxed) {
-                #[cfg(feature = "test_sse")]
-                {
-                    let af64: f64 = f64::from((counter + 1) as u32);
-                    let bf64: f64 = f64::from((counter + 2) as u32);
-                    let mut res_f64: f64;
-                }
-
                 let mut result: u64;
                 unsafe {
                     std::arch::asm!(
@@ -87,20 +80,6 @@ fn test_thread_preemption() {
                         out("r15") result,
                         options(nomem, nostack)
                     );
-
-                    #[cfg(feature = "test_sse")]
-                    {
-                        std::arch::asm!(
-                            "addsd {0}, {1}",
-                            inlateout(xmm_reg) af64 => res_f64,
-                            in(xmm_reg) bf64,
-                        );
-                    }
-                }
-                #[cfg(feature = "test_sse")]
-                {
-                    res_f64 *= 13.3;
-                    assert!((res_f64 as i64) < (((counter + 1) * 14) as i64));
                 }
 
                 assert_eq!(result, counter * 13);

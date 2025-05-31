@@ -265,6 +265,17 @@ impl core::fmt::Display for UtcDateTime {
 }
 
 impl UtcDateTime {
+    /// Converts a value of Instant into UtcDateTime.
+    ///
+    /// # Safety
+    ///
+    /// If the host adjust its date/time while the guest is running,
+    /// the result may be way off, so should only be used in non-critical
+    /// situations such as tests.
+    pub unsafe fn from_instant(ts: Instant) -> Self {
+        Self::from_unix_nanos(abs_ticks_to_nanos(ts.as_u64()))
+    }
+
     pub fn from_unix_nanos(nanos: u128) -> Self {
         let st = nanos as u64;
         let nanosecond = (st % (1000 * 1000 * 1000)) as u32;

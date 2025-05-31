@@ -143,7 +143,7 @@ fn sys_handle_shared(
     }
 
     if url.is_none() || address.is_none() || page_type.is_none() || page_num.is_none() {
-        log::debug!("SysHandle::CREATE shared: bad arguments: {args}");
+        log::debug!("sys_handle_shared: bad arguments: {args}");
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
 
