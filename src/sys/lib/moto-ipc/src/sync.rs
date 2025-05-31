@@ -608,10 +608,10 @@ impl LocalServer {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         SysCpu::wait(&mut waiters[..], swap_target, SysHandle::NONE, None).map_err(|err| {
             assert_eq!(err, moto_rt::E_BAD_HANDLE);
-            let mut bad_extras = Vec::new();
+            let mut bad_handles = Vec::new();
             for waiter in &waiters {
                 if *waiter == SysHandle::NONE {
-                    continue;
+                    break;
                 }
                 if let Some(mut conn) = self.active_conns.remove(waiter) {
                     assert!(conn.connected());
@@ -620,10 +620,10 @@ impl LocalServer {
                     // A remote process can connect to the listener and then drop.
                     listener.disconnect();
                 } else {
-                    bad_extras.push(*waiter);
+                    bad_handles.push(*waiter);
                 }
             }
-            bad_extras
+            bad_handles
         })?;
 
         let mut wakers = Vec::with_capacity(waiters.len());
