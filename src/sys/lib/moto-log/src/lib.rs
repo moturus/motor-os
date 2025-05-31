@@ -1,5 +1,5 @@
-// Provides a centralized implementation of log interface/facade for motor-os.
-// Somewhat outdated/unused.
+//! Provides a centralized implementation of log interface/facade for motor-os.
+//! See sys-log for more details on where log entries go.
 
 // TODO: at the moment moto-log is very simple (synchronous) and slow. A faster
 // implementation could cache logs locally per-cpu or per-thread
@@ -7,7 +7,7 @@
 
 use std::{
     fmt::Display,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use implementation::{GetTailEntriesRequest, GetTailEntriesResponse};
@@ -50,16 +50,25 @@ impl Display for LogEntry {
     }
 }
 
-struct BasicLogger {
+struct MotoLogger {
     tag: String,
     tag_id: u64,
-    enabled: AtomicBool,
     conn: std::sync::Mutex<ClientConnection>,
 }
 
-static BASIC_LOGGER: AtomicUsize = AtomicUsize::new(0);
+static MOTO_LOGGER: AtomicUsize = AtomicUsize::new(0);
 
-impl log::Log for BasicLogger {
+fn moto_logger() -> Option<&'static MotoLogger> {
+    let addr = MOTO_LOGGER.load(Ordering::Relaxed);
+    if addr == 0 {
+        return None;
+    }
+
+    // Safety: MOTO_LOGGER is initialized below in init().
+    unsafe { (addr as *const MotoLogger).as_ref() }
+}
+
+impl log::Log for MotoLogger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             let mut conn = self.conn.lock().unwrap();
@@ -73,7 +82,7 @@ impl log::Log for BasicLogger {
     }
 
     fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+        true
     }
 
     fn flush(&self) {}
@@ -95,32 +104,28 @@ pub fn init(tag: &str) -> Result<(), StdError> {
     let tag_id = implementation::ConnectResponse::parse(conn.data())
         .map_err(|e| StdError::from(format!("ClientConnection failed (4) with error {e:?}.")))?;
 
-    let logger = Box::leak(Box::new(BasicLogger {
+    let logger = Box::leak(Box::new(MotoLogger {
         tag: tag.to_owned(),
         tag_id,
-        enabled: AtomicBool::new(true),
         conn: std::sync::Mutex::new(conn),
     }));
 
     assert_eq!(
         0,
-        BASIC_LOGGER.swap(logger as *mut _ as usize, Ordering::Relaxed)
+        MOTO_LOGGER.swap(logger as *mut _ as usize, Ordering::Relaxed)
     );
 
-    log::set_logger(logger).map_err(|err| StdError::from(format!("{err}")))
+    log::set_logger(logger)
+        .map_err(|err| StdError::from(format!("{err}")))
+        .map(|()| log::set_max_level(log::LevelFilter::Info))
 }
 
 pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
-    // Safe because BASIC_LOGGER is either null or points to a valid BasicLogger.
-    let logger =
-        match unsafe { (BASIC_LOGGER.load(Ordering::Relaxed) as *const BasicLogger).as_ref() } {
-            Some(obj) => obj,
-            None => {
-                return Err(StdError::from(
-                    "Moturus logging not initialized.".to_string(),
-                ));
-            }
-        };
+    let Some(logger) = moto_logger() else {
+        return Err(StdError::from(
+            "Moturus logging not initialized.".to_string(),
+        ));
+    };
 
     let mut conn = logger.conn.lock().unwrap();
     GetTailEntriesRequest::prepare(
