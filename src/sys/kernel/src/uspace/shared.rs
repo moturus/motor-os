@@ -131,24 +131,19 @@ pub(super) fn create(
                 return Ok(sharer);
             }
 
-            match shared.unwrap().owner.upgrade() {
-                Some(proc) => {
-                    let pid = proc.pid();
-                    if pid != owner.pid() {
-                        log::debug!(
-                            "User error: Shared URL '{url}' exists with a different owner."
-                        );
-                        return Err(moto_rt::E_INVALID_ARGUMENT);
-                    }
+            let Some(proc) = shared.unwrap().owner.upgrade() else {
+                list.pop_front();
+                continue;
+            };
 
-                    list.push_back(self_);
-                    return Ok(sharer);
-                }
-                None => {
-                    list.pop_front();
-                    continue;
-                }
+            let pid = proc.pid();
+            if pid != owner.pid() {
+                log::debug!("User error: Shared URL '{url}' exists with a different owner.");
+                return Err(moto_rt::E_INVALID_ARGUMENT);
             }
+
+            list.push_back(self_);
+            return Ok(sharer);
         }
     } else {
         let mut list = LinkedList::new();
@@ -165,21 +160,31 @@ pub(super) fn get(
     page_type: PageType,
     page_num: u16,
 ) -> Result<Arc<SysObject>, ErrorCode> {
-    let listener = {
+    let (listener, owner_process) = {
         let mut listeners = LISTENERS.lock(line!());
         if let Some(list) = listeners.get_mut(&url) {
-            let shared = list.front().unwrap();
+            loop {
+                // We must loop here to clear orphan listeners.
+                let Some(shared) = list.front() else {
+                    listeners.remove(&url);
+                    return Err(moto_rt::E_NOT_FOUND);
+                };
 
-            if shared.page_type != page_type || shared.page_num != page_num {
-                log::debug!("shared: get: '{url}': pages don't match.");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                if shared.page_type != page_type || shared.page_num != page_num {
+                    log::debug!("shared: get: '{url}': pages don't match.");
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                }
+                let listener = list.pop_front().unwrap();
+
+                let Some(proc) = listener.owner.upgrade() else {
+                    continue;
+                };
+                if list.is_empty() {
+                    listeners.remove(&url);
+                }
+                log::debug!("shared: got '{url}'.");
+                break (listener, proc);
             }
-            let result = list.pop_front().unwrap();
-            if list.is_empty() {
-                listeners.remove(&url);
-            }
-            log::debug!("shared: got '{url}'.");
-            result
         } else {
             log::debug!("shared: get: bad url: '{url}'.");
             return Err(moto_rt::E_NOT_FOUND);
@@ -188,7 +193,6 @@ pub(super) fn get(
 
     debug_assert!(listener.sharee.lock(line!()).upgrade().is_none());
 
-    let owner_process = listener.owner.upgrade().unwrap();
     let mapping_result = crate::mm::user::UserAddressSpace::map_shared(
         owner_process.address_space(),
         listener.owner_addr,
