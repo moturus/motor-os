@@ -265,6 +265,11 @@ impl core::fmt::Display for UtcDateTime {
 }
 
 impl UtcDateTime {
+    pub fn now() -> Self {
+        // Safe because it is now.
+        unsafe { Self::from_instant(Instant::now()) }
+    }
+
     /// Converts a value of Instant into UtcDateTime.
     ///
     /// # Safety
