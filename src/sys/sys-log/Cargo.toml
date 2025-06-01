@@ -10,4 +10,3 @@ moto-ipc = { path = "../lib/moto-ipc" }
 moto-rt  = { path = "../lib/moto-rt"  }
 moto-sys = { path = "../lib/moto-sys" }
 moto-log = { path = "../lib/moto-log" }
-

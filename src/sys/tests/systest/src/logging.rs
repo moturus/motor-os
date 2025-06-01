@@ -2,35 +2,29 @@ fn basic() {
     moto_log::init("systest").unwrap();
     log::set_max_level(log::LevelFilter::Trace);
 
-    let timestamp_1 = moto_rt::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    let log = std::fs::read_to_string("/sys/logs/systest.log").unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(1, lines.len());
+    assert!(lines[0].contains(":I - started log for 'systest'"));
+
     log::info!("foo");
     log::warn!("bar");
-    log::error!("baz");
-    let timestamp_2 = moto_rt::time::Instant::now();
+    log::debug!("another debug string");
+    log::trace!("baz"); // should flush.
 
-    let log_entries = moto_log::get_tail_entries().unwrap();
-    assert_eq!(3, log_entries.len());
+    std::thread::sleep(std::time::Duration::from_millis(30));
 
-    let e1 = &log_entries[0];
-    assert_eq!(e1.level(), log::Level::Info);
-    assert_eq!(e1.tag.as_str(), "systest");
-    assert!(e1.msg.contains("foo"));
-    assert!(e1.timestamp >= timestamp_1);
-    assert!(e1.timestamp <= timestamp_2);
+    let log = std::fs::read_to_string("/sys/logs/systest.log").unwrap();
+    let lines: Vec<&str> = log.lines().collect();
 
-    let e2 = &log_entries[1];
-    assert_eq!(e2.level(), log::Level::Warn);
-    assert_eq!(e2.tag.as_str(), "systest");
-    assert!(e2.msg.contains("bar"));
-    assert!(e2.timestamp >= timestamp_1);
-    assert!(e2.timestamp <= timestamp_2);
-
-    let e3 = &log_entries[2];
-    assert_eq!(e3.level(), log::Level::Error);
-    assert_eq!(e3.tag.as_str(), "systest");
-    assert!(e3.msg.contains("baz"));
-    assert!(e3.timestamp >= timestamp_1);
-    assert!(e3.timestamp <= timestamp_2);
+    assert_eq!(5, lines.len());
+    assert!(lines[0].ends_with(":I - started log for 'systest'"));
+    assert!(lines[1].ends_with(":I - systest::logging:12 - foo"));
+    assert!(lines[2].ends_with(":W - systest::logging:13 - bar"));
+    assert!(lines[3].ends_with(":D - systest::logging:14 - another debug string"));
+    assert!(lines[4].ends_with(":T - systest::logging:15 - baz"));
 
     println!("logging::basic test PASS");
 }

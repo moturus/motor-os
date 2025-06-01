@@ -4,12 +4,17 @@ use moto_ipc::sync::*;
 use moto_sys::SysHandle;
 use moto_sys::SysRay;
 
+mod io_thread;
+
+#[derive(Clone)]
 struct Connection {
-    _tag: String,
+    tag: String,
     tag_id: u64,
+    handle: SysHandle,
 }
 
 struct LogRecord {
+    handle: SysHandle,
     log_level: u8,
     tag_id: u64,
     timestamp: u64,
@@ -18,23 +23,15 @@ struct LogRecord {
 
 struct LogServer {
     ipc_server: LocalServer,
+    sender: std::sync::mpsc::Sender<io_thread::Msg>,
     next_tag_id: u64,
-
-    records: Vec<Option<LogRecord>>,
-    next_record_id: usize,
 }
 
 impl LogServer {
-    const MAX_RECORDS: usize = 100;
-
-    fn add_log_record(&mut self, record: LogRecord) {
-        self.records[self.next_record_id % Self::MAX_RECORDS] = Some(record);
-        self.next_record_id += 1;
-    }
-
     fn process_connect_request(
         conn: &mut LocalServerConnection,
-        next_tag_id: u64,
+        sender: &std::sync::mpsc::Sender<io_thread::Msg>,
+        next_tag_id: &mut u64,
     ) -> Result<(), ()> {
         use moto_log::implementation::*;
         let req = unsafe {
@@ -47,30 +44,46 @@ impl LogServer {
             return Err(());
         }
 
+        if (req.payload_size as usize) > moto_log::MAX_TAG_LEN {
+            return Err(());
+        }
+
         let tag_bytes = &conn.data()[size_of::<ConnectRequest>()
             ..(size_of::<ConnectRequest>() + (req.payload_size as usize))];
-        if let Ok(tag) = std::str::from_utf8(tag_bytes) {
-            conn.set_extension::<Connection>(Box::new(Connection {
-                tag_id: next_tag_id,
-                _tag: tag.to_owned(),
-            }));
-
-            let resp = unsafe {
-                (conn.data_mut().as_ptr() as *mut ConnectResponse)
-                    .as_mut()
-                    .unwrap()
-            };
-            resp.tag_id = next_tag_id;
-            resp.header.result = 0;
-
-            Ok(())
-        } else {
+        let Ok(tag) = std::str::from_utf8(tag_bytes) else {
             SysRay::log("Bad tag.").ok();
-            Err(())
-        }
+            return Err(());
+        };
+
+        let tag_id = *next_tag_id;
+        *next_tag_id += 1;
+
+        let conn_obj = Connection {
+            tag_id,
+            tag: tag.to_owned(),
+            handle: conn.handle(),
+        };
+
+        // We offload most processing to a separate IO thread to respond faster.
+        sender
+            .send(io_thread::Msg::NewConnection(conn_obj))
+            .unwrap();
+
+        let resp = unsafe {
+            (conn.data_mut().as_ptr() as *mut ConnectResponse)
+                .as_mut()
+                .unwrap()
+        };
+        resp.tag_id = tag_id;
+        resp.header.result = 0;
+
+        Ok(())
     }
 
-    fn process_log_request(conn: &mut LocalServerConnection) -> Result<LogRecord, ()> {
+    fn process_log_request(
+        conn: &mut LocalServerConnection,
+        sender: &std::sync::mpsc::Sender<io_thread::Msg>,
+    ) -> Result<(), ()> {
         use moto_log::implementation::*;
 
         let req = unsafe {
@@ -80,12 +93,7 @@ impl LogServer {
         };
         assert_eq!(req.header.cmd, CMD_LOG);
 
-        let ext = match conn.extension::<Connection>() {
-            Some(ext) => ext,
-            None => return Err(()),
-        };
-
-        if req.header.ver != 0 || req.tag_id != ext.tag_id {
+        if req.header.ver != 0 {
             return Err(());
         }
 
@@ -95,11 +103,15 @@ impl LogServer {
         let payload = std::str::from_utf8(payload_bytes).map_err(|_| ())?;
 
         let record = LogRecord {
+            handle: conn.handle(),
             log_level: req.log_level,
             tag_id: req.tag_id,
             timestamp: req.timestamp,
             msg: payload.to_owned(),
         };
+
+        // We offload most processing to a separate IO thread to respond faster.
+        sender.send(io_thread::Msg::Record(record)).unwrap();
 
         let resp = unsafe {
             (conn.data_mut().as_ptr() as *mut LogResponse)
@@ -108,89 +120,19 @@ impl LogServer {
         };
         resp.header.result = 0;
 
-        Ok(record)
-    }
-
-    fn process_get_tail_entries_request(
-        conn: &mut LocalServerConnection,
-        records: &[Option<LogRecord>],
-        next_record_id: usize,
-    ) -> Result<(), ()> {
-        use moto_log::implementation::*;
-
-        let req = unsafe {
-            (conn.data().as_ptr() as *const GetTailEntriesRequest)
-                .as_ref()
-                .unwrap()
-        };
-        assert_eq!(req.header.cmd, CMD_GET_TAIL_ENTRIES);
-
-        if req.header.ver != 0 {
-            return Err(());
-        }
-        if req.tag_id != 0 {
-            SysRay::log("sys-log: filtering by TAG ID not implemented").ok();
-            return Err(());
-        }
-
-        let max_sz = conn.channel_size();
-
-        let out_buf = conn.data_mut();
-
-        let mut idx = next_record_id + Self::MAX_RECORDS - 1;
-        let mut num_entries = 0_u32;
-        let mut pos = size_of::<GetTailEntriesResponse>();
-        while idx >= next_record_id {
-            if let Some(record) = &records[idx % Self::MAX_RECORDS] {
-                let entry_size = size_of::<LogEntryHeader>() + record.msg.len();
-                if pos + entry_size > max_sz {
-                    break;
-                }
-
-                // Safe because we are sure the memory is available and aligned properly.
-                let header = unsafe {
-                    (out_buf[pos..].as_mut_ptr() as *mut LogEntryHeader)
-                        .as_mut()
-                        .unwrap()
-                };
-                header.tag_id = record.tag_id;
-                header.timestamp = record.timestamp;
-                header.log_level = record.log_level;
-                header.payload_size = record.msg.len() as u32;
-
-                pos += size_of::<LogEntryHeader>();
-                out_buf[pos..(pos + record.msg.len())].copy_from_slice(record.msg.as_bytes());
-
-                pos += record.msg.len();
-                pos = (pos + 7) & !7; // Align to 8 bytes.
-                if pos >= max_sz {
-                    break;
-                }
-
-                idx -= 1;
-                num_entries += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Safe because out_buf has more bytes than the response size.
-        let resp = unsafe {
-            (out_buf.as_mut_ptr() as *mut GetTailEntriesResponse)
-                .as_mut()
-                .unwrap()
-        };
-
-        resp.header.result = 0;
-        resp.num_entries = num_entries;
-
         Ok(())
     }
 
-    fn process_ipc(&mut self, waker: &SysHandle) {
+    fn process_ipc(&mut self, waker: SysHandle) {
         use moto_log::implementation::*;
 
-        let conn = self.ipc_server.get_connection(*waker).unwrap();
+        let LogServer {
+            sender,
+            ipc_server,
+            next_tag_id,
+        } = self;
+
+        let conn = ipc_server.get_connection(waker).unwrap();
         assert!(conn.connected());
         if !conn.have_req() {
             return;
@@ -198,27 +140,9 @@ impl LogServer {
 
         let cmd = unsafe { conn.raw_channel().get::<RequestHeader>().cmd };
 
-        let mut record = None;
-
         let res = match cmd {
-            CMD_LOG => {
-                if let Ok(rec) = Self::process_log_request(conn) {
-                    record = Some(rec);
-                    Ok(())
-                } else {
-                    Err(())
-                }
-            }
-            CMD_CONNECT => {
-                let res = Self::process_connect_request(conn, self.next_tag_id);
-                if res.is_ok() {
-                    self.next_tag_id += 1;
-                }
-                res
-            }
-            CMD_GET_TAIL_ENTRIES => {
-                Self::process_get_tail_entries_request(conn, &self.records, self.next_record_id)
-            }
+            CMD_LOG => Self::process_log_request(conn, sender),
+            CMD_CONNECT => Self::process_connect_request(conn, sender, next_tag_id),
             _ => Err(()),
         };
 
@@ -229,35 +153,36 @@ impl LogServer {
         }
 
         let _ = conn.finish_rpc();
-
-        if let Some(record) = record {
-            self.add_log_record(record);
-        }
     }
 
     fn run(&mut self) -> ! {
         loop {
-            let Ok(wakers) = self.ipc_server.wait(SysHandle::NONE, &[]) else {
-                continue; // A client dropped.
-            };
-
-            for waker in &wakers {
-                self.process_ipc(waker);
+            match self.ipc_server.wait(SysHandle::NONE, &[]) {
+                Ok(wakers) => {
+                    for waker in wakers {
+                        self.process_ipc(waker);
+                    }
+                }
+                Err(dropped_conns) => {
+                    for conn in dropped_conns {
+                        self.sender
+                            .send(io_thread::Msg::DroppedConnection(conn))
+                            .unwrap();
+                    }
+                }
             }
         }
     }
 
     fn start() -> ! {
-        let mut records = Vec::with_capacity(Self::MAX_RECORDS);
-        for _ in 0..Self::MAX_RECORDS {
-            records.push(None);
-        }
+        // We offload most processing to a separate IO thread to respond faster.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        io_thread::spawn(receiver);
 
         let mut log_server = LogServer {
             ipc_server: LocalServer::new("sys-log", ChannelSize::Small, 10, 2).unwrap(),
             next_tag_id: 1,
-            next_record_id: 0,
-            records,
+            sender,
         };
 
         #[cfg(debug_assertions)]

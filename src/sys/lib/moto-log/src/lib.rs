@@ -4,15 +4,18 @@
 // TODO: at the moment moto-log is very simple (synchronous) and slow. A faster
 // implementation could cache logs locally per-cpu or per-thread
 // and flush to moto-logger asynchronously.
+//
+// TL;DR: use it for logging, not tracing.
 
 use std::{
     fmt::Display,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use implementation::{GetTailEntriesRequest, GetTailEntriesResponse};
 use log::Record;
 use moto_ipc::sync::ClientConnection;
+
+pub const MAX_TAG_LEN: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -51,22 +54,11 @@ impl Display for LogEntry {
 }
 
 struct MotoLogger {
-    tag: String,
     tag_id: u64,
     conn: std::sync::Mutex<ClientConnection>,
 }
 
 static MOTO_LOGGER: AtomicUsize = AtomicUsize::new(0);
-
-fn moto_logger() -> Option<&'static MotoLogger> {
-    let addr = MOTO_LOGGER.load(Ordering::Relaxed);
-    if addr == 0 {
-        return None;
-    }
-
-    // Safety: MOTO_LOGGER is initialized below in init().
-    unsafe { (addr as *const MotoLogger).as_ref() }
-}
 
 impl log::Log for MotoLogger {
     fn log(&self, record: &Record) {
@@ -90,7 +82,12 @@ impl log::Log for MotoLogger {
 
 pub type StdError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Install Motor OS system logger as the default logger in the process.
 pub fn init(tag: &str) -> Result<(), StdError> {
+    if tag.len() > MAX_TAG_LEN {
+        return Err(StdError::from("Tag string is too long."));
+    }
+
     let mut conn = ClientConnection::new(moto_ipc::sync::ChannelSize::Small)
         .map_err(|e| StdError::from(format!("ClientConnection failed (1) with error {e:?}.")))?;
 
@@ -105,14 +102,13 @@ pub fn init(tag: &str) -> Result<(), StdError> {
         .map_err(|e| StdError::from(format!("ClientConnection failed (4) with error {e:?}.")))?;
 
     let logger = Box::leak(Box::new(MotoLogger {
-        tag: tag.to_owned(),
         tag_id,
         conn: std::sync::Mutex::new(conn),
     }));
 
     assert_eq!(
         0,
-        MOTO_LOGGER.swap(logger as *mut _ as usize, Ordering::Relaxed)
+        MOTO_LOGGER.swap(logger as *mut _ as usize, Ordering::AcqRel)
     );
 
     log::set_logger(logger)
@@ -120,50 +116,10 @@ pub fn init(tag: &str) -> Result<(), StdError> {
         .map(|()| log::set_max_level(log::LevelFilter::Info))
 }
 
-pub fn get_tail_entries() -> Result<Vec<LogEntry>, StdError> {
-    let Some(logger) = moto_logger() else {
-        return Err(StdError::from(
-            "Moturus logging not initialized.".to_string(),
-        ));
-    };
-
-    let mut conn = logger.conn.lock().unwrap();
-    GetTailEntriesRequest::prepare(
-        conn.data_mut(),
-        implementation::level_as_u8(log::Level::Trace),
-        0,
-    );
-
-    conn.do_rpc(None)
-        .map_err(|e| StdError::from(format!("GetUtf8TailRequest failed with error {e:?}.")))?;
-
-    let resp = match GetTailEntriesResponse::parse(conn.data()) {
-        Ok(vec) => vec,
-        Err(e) => return Err(StdError::from(format!("Bad GetUtf8TailResponse: {e:?}"))),
-    };
-
-    let mut result = Vec::with_capacity(resp.len());
-    for idx in (0..resp.len()).rev() {
-        let entry = &resp[idx];
-        result.push(LogEntry {
-            tag: if logger.tag_id == entry.tag_id {
-                logger.tag.clone()
-            } else {
-                entry.tag_id.to_string()
-            },
-            timestamp: moto_rt::time::Instant::from_u64(entry.timestamp),
-            level: entry.log_level,
-            msg: std::str::from_utf8(entry.bytes).unwrap().to_owned(),
-        });
-    }
-
-    Ok(result)
-}
-
 // Implementation details.
 #[doc(hidden)]
 pub mod implementation {
-    use moto_ipc::sync::{RequestHeader, ResponseHeader};
+    // use moto_ipc::sync::{RequestHeader, ResponseHeader};
     use moto_sys::ErrorCode;
     use std::mem::size_of;
 
@@ -180,7 +136,6 @@ pub mod implementation {
     pub const LOG_LEVEL_TRACE: u8 = 5;
 
     pub fn level_as_u8(level: log::Level) -> u8 {
-        // log::Level has repr(usize)
         level as usize as u8
     }
 
@@ -290,120 +245,5 @@ pub mod implementation {
                 e => Err(e),
             }
         }
-    }
-
-    #[repr(C, align(8))]
-    pub struct DisconnectRequest {
-        pub header: RequestHeader,
-    }
-
-    #[repr(C, align(8))]
-    pub struct DisconnectResponse {
-        pub header: ResponseHeader,
-    }
-
-    #[repr(C, align(8))]
-    pub struct GetTailEntriesRequest {
-        pub header: RequestHeader,
-        pub log_level: u8,
-        pub _pad: u32,
-        pub tag_id: u64,
-    }
-
-    impl GetTailEntriesRequest {
-        pub fn prepare(buffer: &mut [u8], log_level: u8, tag_id: u64) {
-            // Safe because Self is POD, so transmuting into it is safe.
-            let (prefix, data, _) = unsafe { buffer.align_to_mut::<Self>() };
-            assert!(prefix.is_empty());
-            assert!(!data.is_empty());
-
-            let req = &mut data[0];
-            req.header.cmd = CMD_GET_TAIL_ENTRIES;
-            req.header.ver = 0;
-            req.log_level = log_level;
-            req.tag_id = tag_id;
-        }
-    }
-
-    #[repr(C, align(8))]
-    pub struct GetTailEntriesResponse {
-        pub header: ResponseHeader,
-        pub num_entries: u32, // Size of the payload.
-    }
-
-    pub struct LogEntry<'a> {
-        pub tag_id: u64,
-        pub timestamp: u64,
-        pub log_level: u8,
-        pub bytes: &'a [u8],
-    }
-
-    impl GetTailEntriesResponse {
-        pub fn parse(buffer: &[u8]) -> Result<Vec<LogEntry<'_>>, ErrorCode> {
-            assert!(buffer.len() >= size_of::<Self>());
-
-            // Safe because Self is POD, so transmuting into it is safe.
-            let (prefix, data, _) = unsafe { buffer.align_to::<Self>() };
-            assert!(prefix.is_empty());
-
-            match data[0].header.result {
-                0 => {
-                    let mut pos = size_of::<Self>();
-                    let num_entries = data[0].num_entries as usize;
-                    let mut result = Vec::with_capacity(num_entries);
-
-                    for _ in 0..num_entries {
-                        pos = (pos + 7) & !7; // Align to 8 bytes.
-                        if pos >= buffer.len() {
-                            moto_sys::SysRay::log("bad tail entries response (1)").ok();
-                            return Err(moto_rt::E_INTERNAL_ERROR);
-                        }
-                        let curr_buffer = &buffer[pos..];
-                        if curr_buffer.len() < size_of::<LogEntryHeader>() {
-                            moto_sys::SysRay::log("bad tail entries response (2)").ok();
-                            return Err(moto_rt::E_INTERNAL_ERROR);
-                        }
-
-                        // Safe because we aligned curr_buffer properly and ensured it is large enough.
-                        let header = unsafe {
-                            (curr_buffer.as_ptr() as *const LogEntryHeader)
-                                .as_ref()
-                                .unwrap()
-                        };
-
-                        if pos + size_of::<LogEntryHeader>() + (header.payload_size as usize)
-                            > buffer.len()
-                        {
-                            moto_sys::SysRay::log("bad tail entries response (3)").ok();
-                            return Err(moto_rt::E_INTERNAL_ERROR);
-                        }
-
-                        let bytes = &curr_buffer[size_of::<LogEntryHeader>()
-                            ..(size_of::<LogEntryHeader>() + (header.payload_size as usize))];
-
-                        result.push(LogEntry {
-                            tag_id: header.tag_id,
-                            timestamp: header.timestamp,
-                            log_level: header.log_level,
-                            bytes,
-                        });
-
-                        pos += size_of::<LogEntryHeader>() + (header.payload_size as usize);
-                    }
-
-                    Ok(result)
-                }
-                e => Err(e),
-            }
-        }
-    }
-
-    // When querying the server, e.g. via CMD_GET_UTF8_TAIL, this precedes raw bytes.
-    #[repr(C, align(8))]
-    pub struct LogEntryHeader {
-        pub tag_id: u64,
-        pub timestamp: u64,
-        pub payload_size: u32,
-        pub log_level: u8,
     }
 }
