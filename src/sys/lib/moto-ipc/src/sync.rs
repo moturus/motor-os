@@ -616,6 +616,7 @@ impl LocalServer {
                 if let Some(mut conn) = self.active_conns.remove(waiter) {
                     assert!(conn.connected());
                     conn.disconnect();
+                    bad_handles.push(*waiter);
                 } else if let Some(mut listener) = self.listeners.remove(waiter) {
                     // A remote process can connect to the listener and then drop.
                     listener.disconnect();
