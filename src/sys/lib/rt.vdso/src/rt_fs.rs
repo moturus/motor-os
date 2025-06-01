@@ -133,7 +133,14 @@ pub extern "C" fn rename(
     new_ptr: *const u8,
     new_size: usize,
 ) -> ErrorCode {
-    todo!()
+    let old_bytes = unsafe { core::slice::from_raw_parts(old_ptr, old_size) };
+    let old = unsafe { core::str::from_utf8_unchecked(old_bytes) };
+    let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_size) };
+    let new = unsafe { core::str::from_utf8_unchecked(new_bytes) };
+    match FsClient::rename(old, new) {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
 }
 
 pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
