@@ -33,14 +33,11 @@ impl Dispatcher {
     fn run() {
         let self_ = Self::get();
         loop {
-            match self_.ipc_server.wait(SysHandle::NONE, &[]) {
-                Ok(wakers) => {
-                    for waker in &wakers {
-                        self_.process_ipc(waker);
-                    }
+            if let Ok(wakers) = self_.ipc_server.wait(SysHandle::NONE, &[]) {
+                for waker in &wakers {
+                    self_.process_ipc(waker);
                 }
-                Err(wakers) => assert_eq!(wakers.len(), 0),
-            }
+            } // else: somebody disconnected.
         }
     }
 

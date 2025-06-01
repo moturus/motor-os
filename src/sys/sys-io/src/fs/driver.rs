@@ -93,13 +93,8 @@ impl Driver {
 
         let self_ = Self::get();
         loop {
-            let wait_result = self_.ipc_server.wait(SysHandle::NONE, &[]);
-            let wakers = match wait_result {
-                Ok(wakers) => wakers,
-                Err(bad_wakers) => {
-                    assert!(bad_wakers.is_empty());
-                    continue;
-                }
+            let Ok(wakers) = self_.ipc_server.wait(SysHandle::NONE, &[]) else {
+                continue;
             };
 
             for waker in &wakers {
@@ -391,6 +386,7 @@ impl Driver {
         if flags != moto_rt::fs::O_READ
             && flags != moto_rt::fs::O_WRITE
             && flags != moto_rt::fs::O_APPEND
+            && flags != (moto_rt::fs::O_READ | moto_rt::fs::O_WRITE)
         {
             moto_sys::SysRay::log(
                 alloc::format!(
