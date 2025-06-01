@@ -134,7 +134,7 @@ impl FileSystemInner {
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<()> {
-        log::debug!("rename 0: {old} -> {new}");
+        log::debug!("rename: {old} -> {new}");
 
         let entry = self.get_entry(old)?;
 
@@ -145,8 +145,6 @@ impl FileSystemInner {
         } else {
             new_child
         };
-
-        log::debug!("rename: {old} -> {new_parent:?} {new_child}");
 
         self.fs_core
             .move_rename(entry, new_parent, new_child)
