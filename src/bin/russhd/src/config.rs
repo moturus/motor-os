@@ -64,14 +64,23 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
         false
     }
 
-    fn new(conf: ConfigV1) -> anyhow::Result<Arc<Self>> {
-        let listen_on = SocketAddr::from_str(&conf.listen_on)?;
+    fn new(conf: ConfigV1) -> Result<Arc<Self>, russh::Error> {
+        let listen_on = SocketAddr::from_str(&conf.listen_on).map_err(|e| {
+            russh::Error::InvalidConfig(format!("Error parsing {}: {e:?}", &conf.listen_on))
+        })?;
         let host_key = russh::keys::PrivateKey::from_openssh(&conf.host_key)?;
 
         let mut users = HashMap::new();
         for (username, user_cfg) in &conf.users {
-            let salt = hex::decode(&user_cfg.salt)?;
-            let password_hash = hex::decode(&user_cfg.password_hash)?;
+            let salt = hex::decode(&user_cfg.salt).map_err(|e| {
+                russh::Error::InvalidConfig(format!("Bad salt {}: {e:?}", &user_cfg.salt))
+            })?;
+            let password_hash = hex::decode(&user_cfg.password_hash).map_err(|e| {
+                russh::Error::InvalidConfig(format!(
+                    "Bad password hash {}: {e:?}",
+                    &user_cfg.password_hash
+                ))
+            })?;
             let pub_key = if user_cfg.authorized_key.is_empty() {
                 None
             } else {
@@ -106,9 +115,9 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
         &self.host_key
     }
 
-    pub fn authenticate_pwd(&self, username: &str, password: &str) -> anyhow::Result<()> {
+    pub fn authenticate_pwd(&self, username: &str, password: &str) -> Result<(), russh::Error> {
         let Some(user) = self.users.get(username) else {
-            anyhow::bail!("User not found.");
+            return Err(russh::Error::NotAuthenticated);
         };
 
         user.autenticate_pwd(password)
@@ -118,9 +127,9 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
         &self,
         username: &str,
         key: &russh::keys::PublicKey,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), russh::Error> {
         let Some(user) = self.users.get(username) else {
-            anyhow::bail!("User not found.");
+            return Err(russh::Error::NotAuthenticated);
         };
 
         user.autenticate_pubkey(key)
@@ -152,7 +161,7 @@ pub struct User {
 }
 
 impl User {
-    fn autenticate_pwd(&self, password: &str) -> anyhow::Result<()> {
+    fn autenticate_pwd(&self, password: &str) -> Result<(), russh::Error> {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(&self.salt);
@@ -160,30 +169,34 @@ impl User {
         let password_hash = hasher.finalize();
 
         if !self.password_hash.eq(password_hash.as_slice()) {
-            anyhow::bail!("Wrong password.");
+            return Err(russh::Error::NotAuthenticated);
         }
 
         Ok(())
     }
 
-    fn autenticate_pubkey(&self, key: &russh::keys::PublicKey) -> anyhow::Result<()> {
+    fn autenticate_pubkey(&self, key: &russh::keys::PublicKey) -> Result<(), russh::Error> {
         let Some(pubkey) = self.pubkey.as_ref() else {
-            anyhow::bail!("User has no public key.");
+            return Err(russh::Error::NotAuthenticated);
         };
 
         if pubkey.eq(key) {
             Ok(())
         } else {
-            anyhow::bail!("Wrong public key.");
+            Err(russh::Error::NotAuthenticated)
         }
     }
 }
 
-pub fn read_from_file(path: &str) -> anyhow::Result<Arc<Config>> {
+pub fn read_from_file(path: &str) -> Result<Arc<Config>, russh::Error> {
     let toml_str = std::fs::read_to_string(path)?;
-    let config_v1 = toml::from_str::<ConfigV1>(&toml_str)?;
+    let config_v1 = toml::from_str::<ConfigV1>(&toml_str)
+        .map_err(|e| russh::Error::InvalidConfig(format!("Error parsing config toml: {e:?}.")))?;
     if config_v1.version != 1 {
-        anyhow::bail!("Unsupported config version.");
+        return Err(russh::Error::InvalidConfig(format!(
+            "Unsupported config version {}.",
+            config_v1.version
+        )));
     }
 
     Config::new(config_v1)

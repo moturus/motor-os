@@ -19,7 +19,7 @@ fn input_listener() {
         let sz = std::io::stdin().read(&mut input).unwrap();
         for b in &input[0..sz] {
             if *b == 3 {
-                println!("\ncaught ^C: exiting.");
+                log::info!("Got ^C. Bye!");
                 std::process::exit(0);
             }
         }
@@ -38,18 +38,20 @@ async fn main() {
     let args = Vec::from_iter(std::env::args());
     assert!(!args.is_empty());
     if args.len() != 2 {
-        eprintln!("Usage: {} %CONFIG_FILENAME", args[0]);
+        log::error!("Usage: {} %CONFIG_FILENAME", args[0]);
         return;
     }
 
     let Ok(program_config) = config::read_from_file(&args[1]) else {
-        eprintln!("Error reading config file '{}'.", args[1]);
+        log::error!("Error reading config file '{}'.", args[1]);
         return;
     };
 
     if program_config.is_default() {
-        eprint!("\n\nWARNING: {}: one of configuration secrets", args[0]);
-        eprintln!(" is set to a default/test value. This is NOT secure.\n\n");
+        log::error!(
+            "\n\nWARNING: {}: one of configuration secrets is set to a default/test value. This is NOT secure.\n\n",
+            args[0]
+        );
     }
 
     let russh_config = russh::server::Config {

@@ -63,8 +63,10 @@ pub async fn spawn(
                         log::debug!("stdout.read() returned zero.");
                         break;
                     }
-                    if let Err(err) = send_output(&session_handle, channel, &buf[0..sz]).await {
-                        log::debug!("session.data() failed with error '{err:?}'");
+                    if send_output(&session_handle, channel, &buf[0..sz])
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -89,8 +91,10 @@ pub async fn spawn(
                         log::debug!("stderr.read() returned zero.");
                         break;
                     }
-                    if let Err(err) = send_output(&session_handle, channel, &buf[0..sz]).await {
-                        log::debug!("session.data() failed with error '{err:?}'");
+                    if send_output(&session_handle, channel, &buf[0..sz])
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -130,17 +134,15 @@ async fn send_output(
     session: &russh::server::Handle,
     channel: russh::ChannelId,
     bytes: &[u8],
-) -> anyhow::Result<()> {
-    use anyhow::anyhow;
-
+) -> Result<(), ()> {
     let mut start = 0;
     let mut pos = 0;
     while start < bytes.len() {
-        let mut add_r = false;
+        let mut add_cr = false;
 
         while pos < bytes.len() {
             if bytes[pos] == b'\n' {
-                add_r = true;
+                add_cr = true;
                 pos += 1;
                 break;
             }
@@ -151,13 +153,13 @@ async fn send_output(
         session
             .data(channel, bytes[start..pos].into())
             .await
-            .map_err(|_| anyhow!("Failed to send bytes to the client."))?;
+            .map_err(|_| log::debug!("Failed to send bytes to the client."))?;
 
-        if add_r {
+        if add_cr {
             session
                 .data(channel, [b'\r'].as_slice().into())
                 .await
-                .map_err(|_| anyhow!("Failed to send bytes to the client."))?;
+                .map_err(|_| log::debug!("Failed to send bytes to the client."))?;
         }
 
         start = pos;
