@@ -10,6 +10,6 @@ moto-ipc = { path = "../../lib/moto-ipc" }
 moto-rt  = { path = "../../lib/moto-rt"  }
 moto-sys = { path = "../../lib/moto-sys" }
 
-log = "0.4.21"
+log = "=0.4.27"
 
 [features]
