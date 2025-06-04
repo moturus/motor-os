@@ -19,6 +19,7 @@ moto-rt      = "0.13.0"
 
 [target.'cfg(target_os = "moturus")'.dependencies]
 moto-log     = { path = "../../sys/lib/moto-log" }
+moto-sys     = { path = "../../sys/lib/moto-sys" }
 
 [dev-dependencies]
 ssh-encoding = "0.2.0"

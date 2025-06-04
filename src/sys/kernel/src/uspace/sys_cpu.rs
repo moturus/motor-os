@@ -387,6 +387,10 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
 
     let target = SysHandle::from_u64(args.args[0]);
     if target == SysHandle::KERNEL {
+        if killer.capabilities() & moto_sys::caps::CAP_SHUTDOWN != 0 {
+            log::info!("Shutting down via `{}`", killer.owner().debug_name());
+            crate::arch::kernel_exit();
+        }
         // TODO: check for CAP_SHUTDOWN.
         return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
     }

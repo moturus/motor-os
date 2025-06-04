@@ -1455,6 +1455,7 @@ dependencies = [
  "log",
  "moto-log",
  "moto-rt 0.13.1",
+ "moto-sys",
  "rand_core",
  "russh",
  "serde",

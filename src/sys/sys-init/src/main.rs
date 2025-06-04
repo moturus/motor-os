@@ -6,7 +6,7 @@ use moto_sys::*;
 struct Config {
     pub tty: String,
     pub log: Option<String>,
-    pub services: Vec<String>,
+    pub services: Vec<(u64, String)>,
 }
 
 fn process_config() -> Result<Config, String> {
@@ -27,8 +27,8 @@ fn process_config() -> Result<Config, String> {
             continue;
         }
 
-        if let Some(cmd) = line.strip_prefix("svc:") {
-            services.push(cmd.to_owned());
+        if let Some(cap_cmd) = line.strip_prefix("svc:") {
+            services.push(process_service_line(cap_cmd));
         } else if let Some(file) = line.strip_prefix("tty:") {
             tty = Some(file.to_owned());
         } else if let Some(file) = line.strip_prefix("log:") {
@@ -108,8 +108,8 @@ fn main() {
     if !config.services.is_empty() {
         let services = config.services;
         std::thread::spawn(move || {
-            for cmd in services {
-                spawn_service(cmd.as_str());
+            for (caps, cmd) in services {
+                spawn_service(caps, cmd.as_str());
             }
         });
     }
@@ -130,7 +130,32 @@ fn main() {
     let _ = moto_sys::SysRay::log("tty stopped. Shutting down.");
 }
 
-fn spawn_service(cmd: &str) {
+fn process_service_line(cap_cmd: &str) -> (u64, String) {
+    let Some(pos) = cap_cmd.find(':') else {
+        return (0, cap_cmd.to_owned());
+    };
+
+    let (caps, cmd) = cap_cmd.split_at(pos);
+    if cmd.is_empty() {
+        let _ = SysRay::log(format!("sys-init: bad service definition '{cap_cmd}'").as_str());
+        std::process::exit(1);
+    }
+
+    let cmd = cmd[1..].trim();
+    if cmd.is_empty() {
+        let _ = SysRay::log(format!("sys-init: bad service definition '{cap_cmd}'").as_str());
+        std::process::exit(1);
+    }
+
+    let Ok(caps) = caps.parse() else {
+        let _ = SysRay::log(format!("sys-init: bad service definition '{cap_cmd}'").as_str());
+        std::process::exit(1);
+    };
+
+    (caps, cmd.to_owned())
+}
+
+fn spawn_service(caps: u64, cmd: &str) {
     let Ok(words) = shell_words::split(cmd) else {
         let _ = SysRay::log(format!("sys-init: bad command'{cmd}'").as_str());
         std::process::exit(1);
@@ -139,15 +164,19 @@ fn spawn_service(cmd: &str) {
     let mut command = std::process::Command::new(&words[0]);
     command.args(&words[1..]);
 
+    if caps != 0 {
+        command.env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, format!("0x{caps:x}"));
+    }
+
     let _child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .inspect_err(|e| {
-            let _ = SysRay::log(format!("sys-init: bad command'{cmd}': {e:?}").as_str());
+            let _ = SysRay::log(format!("sys-init: bad command '{cmd}': {e:?}").as_str());
             std::process::exit(1);
         });
 
-    log::info!("Started service '{cmd}'");
+    log::info!("Started service '{cmd}'; capabilities: 0x{caps:x}.");
 }
