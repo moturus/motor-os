@@ -23,14 +23,14 @@ struct LogRecord {
 
 struct LogServer {
     ipc_server: LocalServer,
-    sender: std::sync::mpsc::Sender<io_thread::Msg>,
+    sender: std::sync::mpsc::SyncSender<io_thread::Msg>,
     next_tag_id: u64,
 }
 
 impl LogServer {
     fn process_connect_request(
         conn: &mut LocalServerConnection,
-        sender: &std::sync::mpsc::Sender<io_thread::Msg>,
+        sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
         next_tag_id: &mut u64,
     ) -> Result<(), ()> {
         use moto_log::implementation::*;
@@ -82,7 +82,7 @@ impl LogServer {
 
     fn process_log_request(
         conn: &mut LocalServerConnection,
-        sender: &std::sync::mpsc::Sender<io_thread::Msg>,
+        sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
     ) -> Result<(), ()> {
         use moto_log::implementation::*;
 
@@ -176,7 +176,7 @@ impl LogServer {
 
     fn start() -> ! {
         // We offload most processing to a separate IO thread to respond faster.
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(64);
         io_thread::spawn(receiver);
 
         let mut log_server = LogServer {
