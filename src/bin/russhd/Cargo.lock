@@ -924,9 +924,27 @@ source = "git+https://github.com/moturus/mio.git?branch=mio-moturus-v1.0.1#53df9
 dependencies = [
  "hermit-abi",
  "libc",
- "moto-rt",
+ "moto-rt 0.13.1",
  "wasi",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "moto-ipc"
+version = "0.2.6"
+dependencies = [
+ "moto-rt 0.13.2",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-log"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "moto-ipc",
+ "moto-rt 0.13.2",
+ "moto-sys",
 ]
 
 [[package]]
@@ -934,6 +952,17 @@ name = "moto-rt"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c591d6b6a913681d43be52885b0bce841f69aff43dac1c5ef852d400a24783b"
+
+[[package]]
+name = "moto-rt"
+version = "0.13.2"
+
+[[package]]
+name = "moto-sys"
+version = "0.2.4"
+dependencies = [
+ "moto-rt 0.13.2",
+]
 
 [[package]]
 name = "nix"
@@ -1424,7 +1453,8 @@ dependencies = [
  "env_logger",
  "hex",
  "log",
- "moto-rt",
+ "moto-log",
+ "moto-rt 0.13.1",
  "rand_core",
  "russh",
  "serde",
@@ -1694,7 +1724,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "moto-rt",
+ "moto-rt 0.13.1",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

@@ -1,5 +1,8 @@
 #![allow(unexpected_cfgs)]
 
+#[cfg(target_os = "moturus")]
+use std::io::IsTerminal;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::*;
@@ -11,12 +14,19 @@ use russhd::config;
 use russhd::local_session::StdinTx;
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
+#[cfg(target_os = "moturus")]
 fn input_listener() {
     use std::io::Read;
 
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
     loop {
         let mut input = [0_u8; 16];
         let sz = std::io::stdin().read(&mut input).unwrap();
+        if sz == 0 {
+            break;
+        }
         for b in &input[0..sz] {
             if *b == 3 {
                 log::info!("Got ^C. Bye!");
@@ -28,12 +38,17 @@ fn input_listener() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    std::thread::spawn(input_listener);
+    #[cfg(target_os = "moturus")]
+    if std::io::stdin().is_terminal() {
+        std::thread::spawn(input_listener);
 
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
-        // .filter_level(log::LevelFilter::Debug)
-        .init();
+        env_logger::builder()
+            .filter_level(log::LevelFilter::Info)
+            // .filter_level(log::LevelFilter::Debug)
+            .init();
+    } else {
+        moto_log::init("russhd").unwrap();
+    }
 
     let args = Vec::from_iter(std::env::args());
     assert!(!args.is_empty());
