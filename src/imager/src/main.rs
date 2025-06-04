@@ -27,14 +27,14 @@ static BIN_FULL: [&str; 14] = [
     "bin/rush",
     "bin/russhd",
     "sys/mdbg",
-    "sys/rnetbench",
     "sys/sys-init",
     "sys/sys-log",
     "sys/sys-tty",
     "sys/sysbox",
-    "sys/systest",
-    "sys/mio-test",
-    "sys/tokio-tests",
+    "sys/tests/rnetbench",
+    "sys/tests/systest",
+    "sys/tests/mio-test",
+    "sys/tests/tokio-tests",
 ];
 
 // For the "web" image.
