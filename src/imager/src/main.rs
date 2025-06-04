@@ -38,7 +38,7 @@ static BIN_FULL: [&str; 14] = [
 ];
 
 // For the "web" image.
-static BIN_WEB: [&str; 4] = ["bin/httpd", "sys/sys-init", "sys/sys-log", "sys/sys-tty"];
+static BIN_WEB: [&str; 3] = ["bin/httpd-axum", "sys/sys-init", "sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
