@@ -1,10 +1,12 @@
-// use moto_sys::caps::{CAP_IO_MANAGER, CAP_LOG, CAP_SHARE, CAP_SPAWN};
+use std::process::Stdio;
+
 use moto_sys::*;
 
 #[derive(Debug)]
 struct Config {
     pub tty: String,
     pub log: Option<String>,
+    pub services: Vec<String>,
 }
 
 fn process_config() -> Result<Config, String> {
@@ -13,19 +15,26 @@ fn process_config() -> Result<Config, String> {
 
     let mut tty = None;
     let mut log = None;
+    let mut services = vec![];
 
     let mut curr_line = 0_u32;
-    for line in cfg_data.lines() {
+    for mut line in cfg_data.lines() {
         curr_line += 1;
 
-        if line.trim().is_empty() {
+        line = line.trim();
+
+        if line.is_empty() {
             continue;
         }
 
-        if let Some(file) = line.trim().strip_prefix("tty:") {
+        if let Some(cmd) = line.strip_prefix("svc:") {
+            services.push(cmd.to_owned());
+        } else if let Some(file) = line.strip_prefix("tty:") {
             tty = Some(file.to_owned());
-        } else if let Some(file) = line.trim().strip_prefix("log:") {
+        } else if let Some(file) = line.strip_prefix("log:") {
             log = Some(file.to_owned());
+        } else if line.as_bytes()[0] == b'#' {
+            continue;
         } else {
             return Err(format!("'/sys/cfg/sys-init.cfg': bad line {curr_line}"));
         }
@@ -38,6 +47,7 @@ fn process_config() -> Result<Config, String> {
     let config = Config {
         tty: tty.unwrap(),
         log,
+        services,
     };
 
     Ok(config)
@@ -52,14 +62,16 @@ fn main() {
         moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
     );
 
-    let config = process_config();
-    if let Err(msg) = config {
-        log::error!("sys-init: {msg}");
-        SysRay::log(format!("sys-init: {msg}").as_str()).unwrap();
-        std::process::exit(1);
-    }
+    let config = match process_config() {
+        Ok(c) => c,
+        Err(msg) => {
+            log::error!("sys-init: {msg}");
+            SysRay::log(format!("sys-init: {msg}").as_str()).unwrap();
+            std::process::exit(1);
+        }
+    };
 
-    let config = config.unwrap();
+    // First spawn sys-log, then services, then sys-tty.
 
     if let Some(log) = &config.log {
         // We just spawn sys-log, don't track/wait. Should we?
@@ -80,15 +92,26 @@ fn main() {
         let log_start = std::time::Instant::now();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(1));
-            if log_start.elapsed().as_secs() > 5 {
+            let elapsed = log_start.elapsed().as_millis();
+            if elapsed > 5_000 {
                 SysRay::log("sys-init: failed to initialize logging").unwrap();
                 std::process::exit(1);
             }
             if moto_log::init("sys-init").is_ok() {
+                log::info!("Started sys-log in {elapsed} ms.");
                 break;
             }
         }
         log::set_max_level(log::LevelFilter::Info);
+    }
+
+    if !config.services.is_empty() {
+        let services = config.services;
+        std::thread::spawn(move || {
+            for cmd in services {
+                spawn_service(cmd.as_str());
+            }
+        });
     }
 
     let mut tty = std::process::Command::new(config.tty.as_str())
@@ -98,8 +121,33 @@ fn main() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+
+    log::info!("Started tty.");
     tty.wait().unwrap();
+    log::info!("tty stopped. Shutting down.");
 
     #[cfg(debug_assertions)]
     let _ = moto_sys::SysRay::log("tty stopped. Shutting down.");
+}
+
+fn spawn_service(cmd: &str) {
+    let Ok(words) = shell_words::split(cmd) else {
+        let _ = SysRay::log(format!("sys-init: bad command'{cmd}'").as_str());
+        std::process::exit(1);
+    };
+
+    let mut command = std::process::Command::new(&words[0]);
+    command.args(&words[1..]);
+
+    let _child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .inspect_err(|e| {
+            let _ = SysRay::log(format!("sys-init: bad command'{cmd}': {e:?}").as_str());
+            std::process::exit(1);
+        });
+
+    log::info!("Started service '{cmd}'");
 }
