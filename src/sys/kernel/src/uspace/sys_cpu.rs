@@ -386,6 +386,11 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
     }
 
     let target = SysHandle::from_u64(args.args[0]);
+    if target == SysHandle::KERNEL {
+        // TODO: check for CAP_SHUTDOWN.
+        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+    }
+
     if let Err(err) = killer.owner().kill(target) {
         return ResultBuilder::result(err);
     }

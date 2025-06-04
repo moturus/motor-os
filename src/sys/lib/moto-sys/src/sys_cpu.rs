@@ -51,6 +51,10 @@ impl SysCpu {
         unreachable!();
     }
 
+    /// Kill a child process.
+    ///
+    /// Note: if target is SysHandle::KERNEL, the system will shut down.
+    ///       This is a privileged operation (CAP_SHUTDOWN).
     #[cfg(feature = "userspace")]
     pub fn kill(target: SysHandle) -> Result<(), ErrorCode> {
         let result = do_syscall(
@@ -70,6 +74,7 @@ impl SysCpu {
         }
     }
 
+    /// Kill a peer process. Only sys-io is allowed to do that.
     #[cfg(feature = "userspace")]
     pub fn kill_remote(target: SysHandle) -> Result<(), ErrorCode> {
         let result = do_syscall(
@@ -89,6 +94,8 @@ impl SysCpu {
         }
     }
 
+    /// Kill a process by its PID. Killing a system process
+    /// or an ancestor is not allowed.
     #[cfg(feature = "userspace")]
     pub fn kill_pid(target: u64) -> Result<(), ErrorCode> {
         let result = do_syscall(

@@ -409,6 +409,12 @@ fn main() {
     std::env::set_var("foo", "bar");
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
+    // We should never be allowed to shut down the sytem.
+    assert_eq!(
+        moto_sys::SysCpu::kill(SysHandle::KERNEL).err().unwrap(),
+        moto_rt::E_NOT_ALLOWED
+    );
+
     logging::run_all_tests();
     test_thread_names();
     test_cpus();
