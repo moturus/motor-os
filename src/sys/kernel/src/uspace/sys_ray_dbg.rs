@@ -86,6 +86,11 @@ fn sys_dbg_attach(thread: &crate::uspace::process::Thread, args: &SyscallArgs) -
     let mut stats = crate::xray::stats::stats_from_pid(thread.owner().pid().as_u64());
     while let Some(parent) = stats {
         if parent.pid().as_u64() == pid {
+            #[cfg(debug_assertions)]
+            log::info!(
+                "sys_dbg_attach: not allowed: parent: {}, target: {pid}",
+                parent.pid().as_u64()
+            );
             return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
         stats = parent.parent();
