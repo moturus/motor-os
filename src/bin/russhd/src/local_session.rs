@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 pub type StdinTx = tokio::sync::mpsc::Sender<Vec<u8>>;
 
 pub async fn spawn(
     cmdline: &str,
     channel: russh::ChannelId,
     session: russh::server::Handle,
+    cfg: &Arc<crate::config::Config>,
 ) -> Result<StdinTx, russh::Error> {
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
@@ -19,6 +22,9 @@ pub async fn spawn(
 
     let mut cmd = tokio::process::Command::new(&words[0]);
     cmd.args(&words[1..]);
+    if !cfg.path().is_empty() {
+        cmd.env("PATH", cfg.path());
+    }
 
     #[cfg(target_os = "moturus")]
     cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");

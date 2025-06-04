@@ -135,7 +135,8 @@ impl ConnectionHandler {
 
         let (channel, session) = self.channel.clone().unwrap();
         let session_clone = session.clone();
-        self.stdin_tx = Some(russhd::local_session::spawn(cmd, channel, session).await?);
+        self.stdin_tx =
+            Some(russhd::local_session::spawn(cmd, channel, session, &self.config).await?);
 
         // Show a greeting.
         #[cfg(target_os = "moturus")]
@@ -153,7 +154,8 @@ impl ConnectionHandler {
 
     async fn exec(&mut self, cmdline: &str) -> Result<(), russh::Error> {
         let (channel, session) = self.channel.clone().unwrap();
-        self.stdin_tx = Some(russhd::local_session::spawn(cmdline, channel, session).await?);
+        self.stdin_tx =
+            Some(russhd::local_session::spawn(cmdline, channel, session, &self.config).await?);
 
         Ok(())
     }

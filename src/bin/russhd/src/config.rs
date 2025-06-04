@@ -19,6 +19,9 @@ struct ConfigV1 {
     listen_on: String, // e.g. '0.0.0.0:2222'
     host_key: String,  // openssh host key (private)
 
+    #[serde(default)]
+    path: String,
+
     users: HashMap<String, UserCfgV1>,
 }
 
@@ -26,6 +29,7 @@ pub struct Config {
     users: HashMap<String, User>,
     listen_on: SocketAddr,
     host_key: russh::keys::PrivateKey,
+    path: String,
 }
 
 impl Config {
@@ -104,6 +108,7 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
             users,
             listen_on,
             host_key,
+            path: conf.path,
         }))
     }
 
@@ -113,6 +118,10 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
 
     pub fn host_key(&self) -> &russh::keys::PrivateKey {
         &self.host_key
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     pub fn authenticate_pwd(&self, username: &str, password: &str) -> Result<(), russh::Error> {
