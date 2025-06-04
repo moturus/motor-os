@@ -33,7 +33,7 @@ impl Connection {
     fn new(tag: String, tag_id: u64) -> Self {
         let mut fname_bytes = vec![];
         for c in tag.chars() {
-            if c.is_ascii_alphanumeric() {
+            if c.is_ascii_alphanumeric() || c == '-' {
                 fname_bytes.push(c as u8);
             } else {
                 fname_bytes.push(b'_');
