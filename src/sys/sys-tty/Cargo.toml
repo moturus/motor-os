@@ -9,8 +9,5 @@ edition = "2021"
 moto-ipc = { path = "../lib/moto-ipc" }
 moto-rt  = { path = "../lib/moto-rt"  }
 moto-sys = { path = "../lib/moto-sys" }
-moto-log = { path = "../lib/moto-log" }
 x86_64   = { path = "../../third_party/x86_64"}  # Used for port I/O.
-
-log = "0.4.21"
 

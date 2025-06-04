@@ -20,26 +20,18 @@ fn read_config() -> String {
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
         Ok(config) => config,
         Err(err) => {
-            moto_sys::SysRay::log(format!("Error reading '{config_path}': {err:?}").as_str()).ok();
+            write_serial!("sys-tty: error reading '{config_path}': {err:?}");
             std::process::exit(1);
         }
     }
 }
 
 fn main() {
-    #[cfg(debug_assertions)]
-    moto_sys::SysRay::log("sys-tty started").ok();
-    moto_log::init("sys-tty").unwrap();
-
-    log::set_max_level(log::LevelFilter::Trace);
-    #[cfg(debug_assertions)]
-    log::debug!("sys-tty started");
-
     let config = read_config();
     let words: Vec<_> = config.split_whitespace().collect();
 
     if words.is_empty() {
-        moto_sys::SysRay::log("Error: empty config.").ok();
+        write_serial!("sys-tty: error: empty config.");
         std::process::exit(1);
     }
 
