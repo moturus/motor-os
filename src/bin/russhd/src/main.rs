@@ -403,13 +403,6 @@ impl server::Handler for ConnectionHandler {
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Sending Ctrl+C ends the session and disconnects the client
-        if data == [3] {
-            return Err(russh::Error::Disconnect);
-        }
-
-        // log::debug!("Got data for {}:{:?}", self.id, channel);
-
         let Some(stdin_tx) = self.stdin_tx.as_ref() else {
             log::warn!("Got remote data without local shell session.");
             return Err(russh::Error::Disconnect);
