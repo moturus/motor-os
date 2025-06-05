@@ -153,6 +153,32 @@ impl ConnectionHandler {
     }
 
     async fn exec(&mut self, cmdline: &str) -> Result<(), russh::Error> {
+        #[cfg(target_os = "moturus")]
+        if cmdline == "shutdown" {
+            if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SHUTDOWN == 0 {
+                log::info!("`shutdown`: no CAP_SHUTDOWN.");
+                return Err(russh::Error::RequestDenied);
+            }
+
+            let (channel, session) = self.channel.clone().unwrap();
+            let _ = session.exit_status_request(channel, 0).await;
+            let _ = session.eof(channel).await;
+            let _ = session.close(channel).await;
+
+            tokio::spawn(async {
+                log::info!("shutdown initiated");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+                if moto_sys::SysCpu::kill(moto_sys::SysHandle::KERNEL).is_err() {
+                    log::error!("shutdown failed");
+                } else {
+                    unreachable!()
+                }
+            });
+
+            return Ok(());
+        }
+
         let (channel, session) = self.channel.clone().unwrap();
         self.stdin_tx =
             Some(russhd::local_session::spawn(cmdline, channel, session, &self.config).await?);

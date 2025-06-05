@@ -12,16 +12,6 @@ pub async fn spawn(
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    #[cfg(target_os = "moturus")]
-    if cmdline == "shutdown" {
-        if moto_sys::SysCpu::kill(moto_sys::SysHandle::KERNEL).is_err() {
-            log::info!("`shutdown` failed");
-            return Err(russh::Error::RequestDenied);
-        } else {
-            unreachable!()
-        }
-    }
-
     let Ok(words) = shell_words::split(cmdline) else {
         return Err(russh::Error::IO(std::io::ErrorKind::InvalidInput.into()));
     };
