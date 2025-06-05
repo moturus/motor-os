@@ -58,7 +58,7 @@ fn main() {
     SysRay::log("sys-init started").ok();
 
     assert_eq!(
-        1,
+        moto_sys::caps::CAP_SYS,
         moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
     );
 
