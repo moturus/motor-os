@@ -9,6 +9,9 @@ use super::virtio_device::VirtioDevice;
 use super::BLOCK_SIZE;
 use super::BLOCK_SIZE_LOG2;
 
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!("Little Endian is often assumed here.");
+
 /*
  *  VIRTIO_BLK_F_SIZE_MAX (1) Maximum size of any single segment is in size_max.
  *  VIRTIO_BLK_F_SEG_MAX (2) Maximum number of segments in a request is in seg_max.
@@ -128,12 +131,8 @@ impl Blk {
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
         // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
-        let mut status_64 = 0_u64;
+        let mut status_64 = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
         let status_addr = &mut status_64 as *mut _ as usize;
-        unsafe {
-            let status = status_addr as *mut u8;
-            status.write_volatile(VIRTIO_BLK_S_UNSUPP);
-        }
 
         use super::virtio_queue::UserData;
         let buffs: [UserData; 3] = [
