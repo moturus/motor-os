@@ -28,6 +28,7 @@ members = [
   "tools/sysbox",
 
   # tests
+  "tests/crossbench",
   "tests/mio-test",
   "tests/systest",
   "tests/tokio-tests",
@@ -47,6 +48,8 @@ srfs         = { path = "lib/srfs"            }
 
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-moturus-v1.0.1" }
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-moturus-1.44.2" }
+
+getrandom    = { path = "../third_party/getrandom-0.2.16", features = ["rdrand"]}
 
 [profile.dev]
 panic = "abort"

@@ -60,6 +60,7 @@ dependencies = [
   "systest_debug",
   "mio_test_debug",
   "tokio_tests_debug",
+  "crossbench_debug",
   "make_img_debug",
 ]
 
@@ -86,6 +87,7 @@ dependencies = [
   "systest_release",
   "mio_test_release",
   "tokio_tests_release",
+  "crossbench_release",
   "make_img_release",
 ]
 
@@ -111,6 +113,7 @@ dependencies = [
   "systest_debug",
   "mio_test_debug",
   "tokio_tests_debug",
+  "crossbench_debug",
   "make_img_debug",
 ]
 
@@ -136,6 +139,7 @@ dependencies = [
   "systest_release",
   "mio_test_release",
   "tokio_tests_release",
+  "crossbench_release",
   "make_img_release",
 ]
 
@@ -452,6 +456,22 @@ script = '''
 cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
 cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
 cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/rnetbench" "${MOTO_BIN}/rnetbench"
+'''
+
+[tasks.crossbench_debug]
+cwd = "./src/sys/tests/crossbench"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus
+strip -o "${MOTO_BIN}/crossbench" "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/debug/crossbench"
+'''
+
+[tasks.crossbench_release]
+cwd = "./src/sys/tests/crossbench"
+script = '''
+cargo +dev-x86_64-unknown-moturus build --release --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-moturus clippy --release --target x86_64-unknown-moturus
+cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/crossbench" "${MOTO_BIN}/crossbench"
 '''
 
 [tasks.make_img_debug]

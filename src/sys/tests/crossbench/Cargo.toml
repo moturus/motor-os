@@ -1,0 +1,12 @@
+[package]
+name = "crossbench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.8"
+hdrhistogram = "7.5"
+clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(target_family = "unix")'.dependencies]
+nix = { version = "0.28", features = ["fs", "uio"] }
