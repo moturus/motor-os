@@ -46,7 +46,7 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
 
         let max_offset = (TEST_FILE_SIZE - BLOCK_SIZE) as u64;
         let random_offset = rng.gen_range(0..=max_offset);
-        let aligned_offset = (random_offset / BLOCK_SIZE as u64) * BLOCK_SIZE as u64;
+        let aligned_offset = random_offset & !(BLOCK_SIZE as u64 - 1);
 
         let start = Instant::now();
 
@@ -92,6 +92,25 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
     println!(
         "99.99th:        {:.2}",
         histogram.value_at_percentile(99.99) as f64 / 1000.0
+    );
+
+    println!("\nReading the file sequentially.");
+    let mut offset = 0;
+    let start = Instant::now();
+    while offset < TEST_FILE_SIZE {
+        #[cfg(target_family = "unix")]
+        let bytes_read = read_at(&file, buffer, offset as u64)?;
+
+        #[cfg(target_os = "moturus")]
+        let bytes_read = read_at(&mut file, buffer, offset as u64)?;
+
+        assert_eq!(bytes_read, BLOCK_SIZE);
+        offset += BLOCK_SIZE;
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "Sequential read throughput: {:.3} MB/sec.\n",
+        ((TEST_FILE_SIZE >> 20) as f64) / (elapsed.as_secs_f64())
     );
 
     Ok(())

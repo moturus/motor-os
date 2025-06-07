@@ -10,8 +10,10 @@ struct Config {
 }
 
 fn process_config() -> Result<Config, String> {
+    SysRay::log("will load sys-init.cfg").ok();
     let cfg_data = std::fs::read_to_string("/sys/cfg/sys-init.cfg")
         .expect("Error loading /sys/cfg/sys-init.cfg");
+    SysRay::log("sys-init.cfg loaded").ok();
 
     let mut tty = None;
     let mut log = None;
@@ -114,6 +116,7 @@ fn main() {
         });
     }
 
+    SysRay::log("sys-init: starting sys-tty").ok();
     let mut tty = std::process::Command::new(config.tty.as_str())
         .env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, "0xffffffffffffffff")
         .stdin(std::process::Stdio::null())
