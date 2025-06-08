@@ -52,6 +52,7 @@ rustdoc-args = [
 ]
 
 [features]
+default = ["rdrand"]
 custom = []
 js = [
     "wasm-bindgen",

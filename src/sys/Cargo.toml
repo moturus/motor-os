@@ -49,7 +49,7 @@ srfs         = { path = "lib/srfs"            }
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-moturus-v1.0.1" }
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-moturus-1.44.2" }
 
-getrandom    = { path = "../third_party/getrandom-0.2.16", features = ["rdrand"]}
+getrandom    = { path = "../third_party/getrandom-0.2.16" }
 
 [profile.dev]
 panic = "abort"
