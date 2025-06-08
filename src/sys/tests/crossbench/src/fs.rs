@@ -41,6 +41,7 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
         args.iters
     );
 
+    let start = Instant::now();
     for iter in 0..args.iters {
         use rand::Rng;
 
@@ -66,31 +67,42 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
             println!("...{}% complete", (iter + 1) * 100 / args.iters);
         }
     }
+    let elapsed = start.elapsed();
 
     println!("\n--- Random Access Latency Results (in usec) ---");
-    println!("Mean:           {:.2}", histogram.mean() / 1000.0);
-    println!("StdDev:         {:.2}", histogram.stdev() / 1000.0);
-    println!("Min:            {:.2}", histogram.min() as f64 / 1000.0);
-    println!("Max:            {:.2}", histogram.max() as f64 / 1000.0);
+    println!("Mean:               {:>8.2}", histogram.mean() / 1000.0);
+    println!("StdDev:             {:>8.2}", histogram.stdev() / 1000.0);
+    println!(
+        "Min:                {:>8.2}",
+        histogram.min() as f64 / 1000.0
+    );
+    println!(
+        "Max:                {:>8.2}",
+        histogram.max() as f64 / 1000.0
+    );
+    println!(
+        "Throughput (MB/s):  {:>8.2}",
+        ((args.iters as usize * BLOCK_SIZE) as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0)
+    );
     println!("\n--- Percentiles (in usec) ---");
     println!(
-        "50th (Median):  {:.2}",
+        "50th (Median):  {:>8.2}",
         histogram.value_at_percentile(50.0) as f64 / 1000.0
     );
     println!(
-        "90th:           {:.2}",
+        "90th:           {:>8.2}",
         histogram.value_at_percentile(90.0) as f64 / 1000.0
     );
     println!(
-        "99th:           {:.2}",
+        "99th:           {:>8.2}",
         histogram.value_at_percentile(99.0) as f64 / 1000.0
     );
     println!(
-        "99.9th:         {:.2}",
+        "99.9th:         {:>8.2}",
         histogram.value_at_percentile(99.9) as f64 / 1000.0
     );
     println!(
-        "99.99th:        {:.2}",
+        "99.99th:        {:>8.2}",
         histogram.value_at_percentile(99.99) as f64 / 1000.0
     );
 
