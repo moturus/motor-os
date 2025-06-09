@@ -447,14 +447,7 @@ impl Block {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                (self as *const _ as usize as *const u8)
-                    .as_ref()
-                    .unwrap_unchecked(),
-                BLOCK_SIZE as usize,
-            )
-        }
+        &self.bytes
     }
 
     pub fn as_data_bytes_in_meta(&self) -> &[u8] {
@@ -470,14 +463,7 @@ impl Block {
     }
 
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                (self as *mut _ as usize as *mut u8)
-                    .as_mut()
-                    .unwrap_unchecked(),
-                BLOCK_SIZE as usize,
-            )
-        }
+        &mut self.bytes
     }
 
     pub fn as_data_bytes_in_meta_mut(&mut self) -> &mut [u8] {
