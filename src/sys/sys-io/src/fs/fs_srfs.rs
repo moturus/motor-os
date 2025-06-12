@@ -1,8 +1,13 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    io::ErrorKind,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use super::filesystem::FileSystem;
 use alloc::sync::Arc;
 use moto_sys::ErrorCode;
+
+use std::io::Result as IoResult;
 
 const BLOCK_4K: usize = 4096;
 const BLOCK_512: usize = 512;
@@ -39,7 +44,7 @@ impl super::filesystem::DirectoryEntry for DirectoryEntrySrFs {
     }
 
     fn filename(&self) -> &str {
-        self.inner.file_name()
+        self.inner.file_name().as_str()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -47,7 +52,7 @@ impl super::filesystem::DirectoryEntry for DirectoryEntrySrFs {
     }
 
     fn path(&self) -> &str {
-        self.inner.path()
+        self.inner.path().as_str()
     }
 
     fn size(&self) -> Result<u64, ErrorCode> {
@@ -78,23 +83,23 @@ impl super::DirectoryIter for DirectoryIterSrFs {}
 
 impl super::filesystem::FileSystem for FileSystemSrFS {
     fn open_file(&mut self, path: &str) -> Result<Box<dyn super::File>, ErrorCode> {
-        let inner = self.inner.open_file(path).map_err(to_error_code)?;
+        let inner = self.inner.open_file(path.into()).map_err(to_error_code)?;
         Ok(Box::new(File { inner }))
     }
 
     fn create_file(&mut self, path: &str) -> Result<(), ErrorCode> {
-        let _ = self.inner.create_file(path).map_err(to_error_code)?;
+        let _ = self.inner.create_file(path.into()).map_err(to_error_code)?;
         Ok(())
     }
 
     fn iter(&mut self, path: &str) -> Result<Box<dyn super::DirectoryIter>, ErrorCode> {
-        let inner = self.inner.read_dir(path).map_err(to_error_code)?;
+        let inner = self.inner.read_dir(path.into()).map_err(to_error_code)?;
         Ok(Box::new(DirectoryIterSrFs { inner }))
     }
 
     fn stat(&mut self, path: &str) -> Result<moto_rt::fs::FileAttr, ErrorCode> {
         use moto_rt::fs::FileAttr;
-        let attr = self.inner.stat(path).map_err(to_error_code)?;
+        let attr = self.inner.stat(path.into()).map_err(to_error_code)?;
 
         Ok(FileAttr {
             version: 1,
@@ -112,11 +117,11 @@ impl super::filesystem::FileSystem for FileSystemSrFS {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), ErrorCode> {
-        self.inner.create_dir(path).map_err(to_error_code)
+        self.inner.create_dir(path.into()).map_err(to_error_code)
     }
 
     fn unlink(&mut self, path: &str) -> Result<(), ErrorCode> {
-        self.inner.unlink(path).map_err(to_error_code)
+        self.inner.unlink(path.into()).map_err(to_error_code)
     }
 
     fn delete_dir(&mut self, path: &str) -> Result<(), ErrorCode> {
@@ -147,7 +152,9 @@ impl super::filesystem::FileSystem for FileSystemSrFS {
     }
 
     fn rename(&mut self, old: &str, new: &str) -> Result<(), ErrorCode> {
-        self.inner.rename(old, new).map_err(to_error_code)
+        self.inner
+            .rename(old.into(), new.into())
+            .map_err(to_error_code)
     }
 }
 
@@ -181,7 +188,7 @@ impl srfs::SyncBlockDevice for DeviceAdapter {
         self.blocks4k
     }
 
-    fn read_block(&mut self, block_no: u64, buf: &mut [u8]) -> Result<(), srfs::FsError> {
+    fn read_block(&mut self, block_no: u64, buf: &mut [u8]) -> IoResult<()> {
         debug_assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_4K - 1));
         debug_assert_eq!(BLOCK_4K, buf.len());
 
@@ -191,10 +198,10 @@ impl srfs::SyncBlockDevice for DeviceAdapter {
                 self.lba_offset + (block_no << BLOCK_4K.ilog2()),
                 VIRTIO_BLOCKS_IN_SRFS_BLOCKS,
             )
-            .map_err(|_| srfs::FsError::IoError)
+            .map_err(|_| ErrorKind::Other.into())
     }
 
-    fn write_block(&mut self, block_no: u64, buf: &[u8]) -> Result<(), srfs::FsError> {
+    fn write_block(&mut self, block_no: u64, buf: &[u8]) -> IoResult<()> {
         debug_assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_4K - 1));
         debug_assert_eq!(BLOCK_4K, buf.len());
 
@@ -204,7 +211,7 @@ impl srfs::SyncBlockDevice for DeviceAdapter {
                 self.lba_offset + (block_no << BLOCK_4K.ilog2()),
                 VIRTIO_BLOCKS_IN_SRFS_BLOCKS,
             )
-            .map_err(|_| srfs::FsError::IoError)
+            .map_err(|_| ErrorKind::Other.into())
     }
 }
 

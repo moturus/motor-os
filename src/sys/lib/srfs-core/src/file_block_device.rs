@@ -1,12 +1,10 @@
-extern crate std;
-
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, Write},
+    io::{ErrorKind, Read, Result, Seek, Write},
     path::Path,
 };
 
-use crate::{FsError, BLOCK_SIZE};
+use async_fs::BLOCK_SIZE;
 
 pub struct FileBlockDevice {
     file: File,
@@ -18,7 +16,7 @@ impl FileBlockDevice {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let len = file.metadata()?.len();
-        if len & (BLOCK_SIZE - 1) != 0 {
+        if len & (BLOCK_SIZE as u64 - 1) != 0 {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
 
@@ -46,43 +44,41 @@ impl crate::SyncBlockDevice for FileBlockDevice {
         self.num_blocks
     }
 
-    fn read_block(&mut self, block_no: u64, buf: &mut [u8]) -> Result<(), FsError> {
-        if block_no >= self.num_blocks || buf.len() != BLOCK_SIZE as usize {
-            return Err(FsError::InvalidArgument);
+    fn read_block(&mut self, block_no: u64, buf: &mut [u8]) -> Result<()> {
+        if block_no >= self.num_blocks || buf.len() != BLOCK_SIZE {
+            return Err(ErrorKind::InvalidInput.into());
         }
 
-        if (buf.as_ptr() as usize) & (BLOCK_SIZE as usize - 1) != 0 {
-            return Err(FsError::InvalidArgument);
+        if (buf.as_ptr() as usize) & (BLOCK_SIZE - 1) != 0 {
+            return Err(ErrorKind::InvalidInput.into());
         }
 
         self.file
-            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE))
-            .map_err(|_| FsError::IoError)?;
+            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE as u64))?;
 
-        let read = self.file.read(buf).map_err(|_| FsError::IoError)?;
-        if read != BLOCK_SIZE as usize {
-            return Err(FsError::InvalidArgument);
+        let read = self.file.read(buf)?;
+        if read != BLOCK_SIZE {
+            return Err(ErrorKind::InvalidInput.into());
         }
 
         Ok(())
     }
 
-    fn write_block(&mut self, block_no: u64, buf: &[u8]) -> Result<(), FsError> {
-        if block_no >= self.num_blocks || buf.len() != BLOCK_SIZE as usize {
-            return Err(FsError::InvalidArgument);
+    fn write_block(&mut self, block_no: u64, buf: &[u8]) -> Result<()> {
+        if block_no >= self.num_blocks || buf.len() != BLOCK_SIZE {
+            return Err(ErrorKind::InvalidInput.into());
         }
 
-        if (buf.as_ptr() as usize) & (BLOCK_SIZE as usize - 1) != 0 {
-            return Err(FsError::InvalidArgument);
+        if (buf.as_ptr() as usize) & (BLOCK_SIZE - 1) != 0 {
+            return Err(ErrorKind::InvalidInput.into());
         }
 
         self.file
-            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE))
-            .map_err(|_| FsError::IoError)?;
+            .seek(std::io::SeekFrom::Start(block_no * BLOCK_SIZE as u64))?;
 
-        let written = self.file.write(buf).map_err(|_| FsError::IoError)?;
-        if written != BLOCK_SIZE as usize {
-            return Err(FsError::InvalidArgument);
+        let written = self.file.write(buf)?;
+        if written != BLOCK_SIZE {
+            return Err(ErrorKind::InvalidInput.into());
         }
 
         Ok(())

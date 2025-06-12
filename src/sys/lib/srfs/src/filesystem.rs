@@ -1,6 +1,6 @@
-use srfs_core::{EntryId, EntryKind, FsError, SyncFileSystem};
+use camino::{Utf8Path, Utf8PathBuf};
+use srfs_core::{EntryId, EntryKind, ROOT_DIR_ID, SyncFileSystem};
 
-use crate::error;
 use std::{
     cell::RefCell,
     io::{Error, ErrorKind, Result},
@@ -9,7 +9,7 @@ use std::{
 
 pub(crate) struct FileSystemInner {
     fs_core: srfs_core::SyncFileSystem,
-    cache: lru::LruCache<String, srfs_core::EntryId>, // path => entry
+    cache: lru::LruCache<Utf8PathBuf, srfs_core::EntryId>, // path => entry
 }
 
 impl FileSystemInner {
@@ -17,13 +17,12 @@ impl FileSystemInner {
         &mut self.fs_core
     }
 
-    fn create_child_dir(&mut self, parent: EntryId, child: &str) -> Result<EntryId> {
-        self.fs_core
-            .add_directory(parent, child)
-            .map_err(error::to_ioerror)
+    fn create_child_dir(&mut self, parent: EntryId, child: &Utf8Path) -> Result<EntryId> {
+        self.fs_core.add_directory(parent, child)
     }
 
-    fn create_dir(&mut self, path: &str) -> Result<()> {
+    fn create_dir(&mut self, path: &Utf8Path) -> Result<()> {
+        assert!(path.is_absolute());
         let (parent, child) = self.split_parent_child(path)?;
 
         let result = self.create_child_dir(parent, child)?;
@@ -31,76 +30,49 @@ impl FileSystemInner {
         Ok(())
     }
 
-    fn create_dir_all(&mut self, path: &str) -> Result<()> {
-        if path.is_empty() {
-            return Err(ErrorKind::InvalidFilename.into());
+    fn create_dir_all(&mut self, path: &Utf8Path) -> Result<EntryId> {
+        assert!(path.is_absolute());
+
+        if let Ok(entry) = self.get_entry(path) {
+            return Ok(entry);
         }
 
-        let path = if path.starts_with('/') {
-            path.strip_prefix('/').unwrap()
-        } else {
-            path
-        };
+        let parent = path.parent().unwrap();
+        let parent_id = self.create_dir_all(parent)?; // Recursion.
+        let entry = self.create_child_dir(parent_id, path.file_name().unwrap().into())?;
 
-        if self.cache.contains(path) {
-            return Ok(());
-        }
-
-        let ancestors = path.split('/');
-        let mut curr_dir = srfs_core::SyncFileSystem::root_dir_id();
-        for ancestor in ancestors {
-            let entry = self.fs_core.get_directory_entry_by_name(curr_dir, ancestor);
-            if let Err(err) = entry {
-                if err == FsError::NotFound {
-                    curr_dir = self.create_child_dir(curr_dir, ancestor)?;
-                    continue;
-                } else {
-                    return Err(error::to_ioerror(err));
-                }
-            }
-
-            curr_dir = entry.unwrap().id;
-        }
-
-        self.cache.push(path.to_owned(), curr_dir);
-        Ok(())
+        self.cache.push(path.to_owned(), entry);
+        Ok(entry)
     }
 
-    fn create_file(&mut self, path: &str) -> Result<EntryId> {
+    fn create_file(&mut self, path: &Utf8Path) -> Result<EntryId> {
+        assert!(path.is_absolute());
         let (parent, child) = self.split_parent_child(path)?;
 
-        self.fs_core
-            .add_file(parent, child)
-            .map_err(error::to_ioerror)
+        self.fs_core.add_file(parent, child)
     }
 
-    fn split_parent_child<'b>(&mut self, path: &'b str) -> Result<(EntryId, &'b str)> {
-        let (dir, filename) = if let Some(pair) = path.rsplit_once('/') {
-            pair
-        } else {
-            ("", path)
+    fn split_parent_child<'b>(&mut self, path: &'b Utf8Path) -> Result<(EntryId, &'b Utf8Path)> {
+        let Some(filename) = path.file_name() else {
+            return Err(Error::from(ErrorKind::InvalidFilename));
         };
 
-        let dir = if dir.starts_with('/') {
-            dir.strip_prefix('/').unwrap()
-        } else {
+        let dir = if let Some(dir) = path.parent() {
             dir
-        };
-
-        let parent = if dir.is_empty() {
-            SyncFileSystem::root_dir_id()
         } else {
-            let maybe_dir = self.get_entry(dir)?;
-            if maybe_dir.kind() != EntryKind::Directory {
-                return Err(Error::from(ErrorKind::InvalidFilename));
-            }
-            maybe_dir
+            return Ok((SyncFileSystem::root_dir_id(), filename.into()));
         };
 
-        Ok((parent, filename))
+        let maybe_dir = self.get_entry(dir)?;
+        if maybe_dir.kind() != EntryKind::Directory {
+            return Err(Error::from(ErrorKind::InvalidFilename));
+        }
+
+        Ok((maybe_dir, filename.into()))
     }
 
-    fn exists(&mut self, path: &str) -> Result<bool> {
+    fn exists(&mut self, path: &Utf8Path) -> Result<bool> {
+        assert!(path.is_absolute());
         let entry = self.get_entry(path);
         match entry {
             Ok(_) => Ok(true),
@@ -114,86 +86,55 @@ impl FileSystemInner {
         }
     }
 
-    fn stat(&mut self, path: &str) -> Result<crate::Attr> {
+    fn stat(&mut self, path: &Utf8Path) -> Result<crate::Attr> {
         let entry = self.get_entry(path)?;
-        let raw_attr = self.fs_core.stat(entry).map_err(error::to_ioerror)?;
+        let raw_attr = self.fs_core.stat(entry)?;
         Ok(raw_attr.into())
     }
 
-    fn unlink(&mut self, path: &str) -> Result<()> {
+    fn unlink(&mut self, path: &Utf8Path) -> Result<()> {
         let entry = self.get_entry(path)?;
         if entry.kind() == EntryKind::File {
             // Need to truncate files first.
-            self.fs_core
-                .set_file_size(entry, 0)
-                .map_err(error::to_ioerror)?;
+            self.fs_core.set_file_size(entry, 0)?;
         }
-        self.fs_core.remove(entry).map_err(error::to_ioerror)?;
+        self.fs_core.remove(entry)?;
         self.pop_cache(path);
         Ok(())
     }
 
-    fn rename(&mut self, old: &str, new: &str) -> Result<()> {
+    fn rename(&mut self, old: &Utf8Path, new: &Utf8Path) -> Result<()> {
         log::debug!("rename: {old} -> {new}");
 
         let entry = self.get_entry(old)?;
-
-        let (_, old_child) = self.split_parent_child(old)?;
         let (new_parent, new_child) = self.split_parent_child(new)?;
-        let new_child = if new_child.is_empty() {
-            old_child
-        } else {
-            new_child
-        };
 
-        self.fs_core
-            .move_rename(entry, new_parent, new_child)
-            .map_err(error::to_ioerror)?;
+        self.fs_core.move_rename(entry, new_parent, new_child)?;
         self.pop_cache(old);
         self.cache.push(new.to_owned(), entry);
         Ok(())
     }
 
-    fn pop_cache(&mut self, path: &str) {
-        let path = if path.starts_with('/') {
-            path.strip_prefix('/').unwrap()
-        } else {
-            path
-        };
+    fn pop_cache(&mut self, path: &Utf8Path) {
         self.cache.pop(path);
     }
 
-    pub(crate) fn get_entry(&mut self, path: &str) -> Result<EntryId> {
-        let path = if path.starts_with('/') {
-            path.strip_prefix('/').unwrap()
-        } else {
-            path
-        };
+    pub(crate) fn get_entry(&mut self, path: &Utf8Path) -> Result<EntryId> {
+        if path.as_str() == "/" {
+            return Ok(ROOT_DIR_ID);
+        }
 
         if let Some(entry) = self.cache.get(path) {
             return Ok(*entry);
         }
 
-        let ancestors = path.split('/');
-        let mut curr_dir = srfs_core::SyncFileSystem::root_dir_id();
-        for ancestor in ancestors {
-            if ancestor.is_empty() {
-                continue;
-            }
-            let entry = self.fs_core.get_directory_entry_by_name(curr_dir, ancestor);
-            if let Err(err) = entry {
-                if err == FsError::NotFound {
-                    return Err(Error::from(ErrorKind::NotFound));
-                } else {
-                    return Err(error::to_ioerror(err));
-                }
-            }
-
-            curr_dir = entry.unwrap().id;
-        }
-
-        self.cache.push(path.to_owned(), curr_dir);
-        Ok(curr_dir)
+        let parent = path.parent().unwrap();
+        let parent_id = self.get_entry(parent)?; // Recursion.
+        let entry = self
+            .fs_core
+            .get_directory_entry_by_name(parent_id, path.file_name().unwrap().into())?;
+        self.cache.push(path.to_owned(), entry.id);
+        Ok(entry.id)
     }
 }
 
@@ -206,7 +147,7 @@ impl FileSystem {
 
     pub fn create_volume(path: &std::path::Path, num_blocks: u64) -> Result<()> {
         let mut bd = srfs_core::file_block_device::FileBlockDevice::create(path, num_blocks)?;
-        srfs_core::format(&mut bd).map_err(error::to_ioerror)
+        srfs_core::format(&mut bd)
     }
 
     pub fn open_volume(path: &std::path::Path) -> Result<Self> {
@@ -215,7 +156,7 @@ impl FileSystem {
     }
 
     pub fn open_device(block_device: Box<dyn srfs_core::SyncBlockDevice>) -> Result<Self> {
-        let fs = srfs_core::SyncFileSystem::open_fs(block_device).map_err(error::to_ioerror)?;
+        let fs = srfs_core::SyncFileSystem::open_fs(block_device)?;
 
         Ok(Self {
             inner: Rc::new(RefCell::new(FileSystemInner {
@@ -225,20 +166,20 @@ impl FileSystem {
         })
     }
 
-    pub fn create_dir(&mut self, path: &str) -> Result<()> {
+    pub fn create_dir(&mut self, path: &Utf8Path) -> Result<()> {
         self.inner.borrow_mut().create_dir(path)
     }
 
-    pub fn create_dir_all(&mut self, path: &str) -> Result<()> {
-        self.inner.borrow_mut().create_dir_all(path)
+    pub fn create_dir_all(&mut self, path: &Utf8Path) -> Result<()> {
+        self.inner.borrow_mut().create_dir_all(path).map(|_| ())
     }
 
-    pub fn create_file(&mut self, path: &str) -> Result<crate::File> {
+    pub fn create_file(&mut self, path: &Utf8Path) -> Result<crate::File> {
         let file_id = self.inner.borrow_mut().create_file(path)?;
         Ok(crate::File::from(file_id, self.inner.clone()))
     }
 
-    pub fn open_file(&mut self, path: &str) -> Result<crate::File> {
+    pub fn open_file(&mut self, path: &Utf8Path) -> Result<crate::File> {
         let file_id = self.inner.borrow_mut().get_entry(path)?;
         if file_id.kind() != EntryKind::File {
             assert_eq!(file_id.kind(), EntryKind::Directory);
@@ -248,23 +189,23 @@ impl FileSystem {
         Ok(crate::File::from(file_id, self.inner.clone()))
     }
 
-    pub fn exists(&mut self, path: &str) -> Result<bool> {
+    pub fn exists(&mut self, path: &Utf8Path) -> Result<bool> {
         self.inner.borrow_mut().exists(path)
     }
 
-    pub fn stat(&mut self, path: &str) -> Result<crate::Attr> {
+    pub fn stat(&mut self, path: &Utf8Path) -> Result<crate::Attr> {
         self.inner.borrow_mut().stat(path)
     }
 
-    pub fn read_dir(&mut self, path: &str) -> Result<crate::ReadDir> {
+    pub fn read_dir(&mut self, path: &Utf8Path) -> Result<crate::ReadDir> {
         crate::readdir::ReadDir::new(path, self.inner.clone())
     }
 
-    pub fn unlink(&mut self, path: &str) -> Result<()> {
+    pub fn unlink(&mut self, path: &Utf8Path) -> Result<()> {
         self.inner.borrow_mut().unlink(path)
     }
 
-    pub fn rename(&mut self, old: &str, new: &str) -> Result<()> {
+    pub fn rename(&mut self, old: &Utf8Path, new: &Utf8Path) -> Result<()> {
         self.inner.borrow_mut().rename(old, new)
     }
 }

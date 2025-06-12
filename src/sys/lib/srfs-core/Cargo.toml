@@ -1,20 +1,21 @@
 [package]
 name = "srfs-core"
-version = "0.1.2"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 description = "Simple Rust File System (Core)"
 repository = "https://github.com/moturus/srfs-core"
-keywords = ["filesystem", "no_std"]
-categories = ["filesystem", "no-std"]
+keywords = ["filesystem"]
+categories = ["filesystem"]
 license = "MIT OR Apache-2.0"
 
 [features]
-default = []
-std = []
 
 [dependencies]
+camino = "1.1.10"
 crc = "3.0"
 log = "0.4.20"
+plain = "0.2.3"
+async-fs = { path = "../async-fs" }
 
 [dev-dependencies]
 rand = "0.8"

@@ -23,6 +23,11 @@ pub fn init() {
 
 fn set_temp_dir() {
     let dir = std::env::temp_dir();
+    assert!(
+        dir.is_absolute(),
+        "Temp dir '{}' must be absolute.",
+        dir.as_path().to_str().unwrap()
+    );
     let dirname = dir.to_str().unwrap();
 
     if let Ok(_attr) = filesystem::fs().stat(dirname) {

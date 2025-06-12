@@ -1,12 +1,8 @@
-extern crate std;
+use async_fs::BLOCK_SIZE;
+use rand::RngCore;
+use std::io::ErrorKind;
 
-use alloc::boxed::Box;
-use std::println;
-use std::format;
-
-use rand::Rng;
-
-use crate::{file_block_device::FileBlockDevice, FsError, SyncFileSystem, BLOCK_SIZE};
+use crate::{SyncFileSystem, file_block_device::FileBlockDevice};
 
 #[test]
 fn basic() {
@@ -23,45 +19,55 @@ fn basic() {
     let root = SyncFileSystem::root_dir_id();
 
     assert_eq!(0, fs.get_num_entries(root).unwrap());
-    let first = fs.add_directory(root, "first").unwrap();
+    let first = fs.add_directory(root, "first".into()).unwrap();
     assert_eq!(1, fs.get_num_entries(root).unwrap());
     assert_eq!(0, fs.get_num_entries(first).unwrap());
     assert_eq!(NUM_BLOCKS - 3, fs.empty_blocks());
 
     assert_eq!(
-        fs.add_directory(first, "/").err().unwrap(),
-        FsError::InvalidArgument
+        fs.add_directory(first, "/".into()).err().unwrap().kind(),
+        ErrorKind::InvalidFilename
     );
     assert_eq!(
-        fs.add_directory(first, "/second").err().unwrap(),
-        FsError::InvalidArgument
+        fs.add_directory(first, "/second".into())
+            .err()
+            .unwrap()
+            .kind(),
+        ErrorKind::InvalidFilename
     );
-    let second = fs.add_directory(first, "second").unwrap();
+    let second = fs.add_directory(first, "second".into()).unwrap();
     assert_eq!(1, fs.get_num_entries(first).unwrap());
     assert_eq!(NUM_BLOCKS - 4, fs.empty_blocks());
 
-    assert_eq!(fs.get_directory_entry(first, 0).unwrap().name, "second");
     assert_eq!(
-        fs.get_directory_entry(first, 1).err().unwrap(),
-        FsError::NotFound
+        fs.get_directory_entry(first, 0)
+            .unwrap()
+            .get_name()
+            .unwrap()
+            .as_str(),
+        "second"
+    );
+    assert_eq!(
+        fs.get_directory_entry(first, 1).err().unwrap().kind(),
+        ErrorKind::NotFound
     );
 
-    fs.move_rename(first, root, "1st").unwrap();
+    fs.move_rename(first, root, "1st".into()).unwrap();
     let first_2 = fs.get_directory_entry(root, 0).unwrap();
     assert_eq!(first, first_2.id);
-    assert_eq!(first_2.name, "1st");
+    assert_eq!(first_2.get_name().unwrap().as_str(), "1st");
 
     assert_eq!(
-        fs.write(first, 0, "foo".as_bytes()).err().unwrap(),
-        FsError::InvalidArgument
+        fs.write(first, 0, "foo".as_bytes()).err().unwrap().kind(),
+        ErrorKind::InvalidInput
     ); // Writing is for files.
 
     // Add file.
     assert_eq!(
-        fs.add_file(first, "second").err().unwrap(),
-        FsError::AlreadyExists
+        fs.add_file(first, "second".into()).err().unwrap().kind(),
+        ErrorKind::AlreadyExists
     ); // "second" already exists.
-    let file = fs.add_file(first, "file_1").unwrap();
+    let file = fs.add_file(first, "file_1".into()).unwrap();
     assert_eq!(NUM_BLOCKS - 5, fs.empty_blocks());
     assert_eq!(0, fs.get_file_size(file).unwrap());
 
@@ -76,23 +82,35 @@ fn basic() {
     // Move.
     assert_eq!(first, fs.get_parent(file).unwrap().unwrap());
     assert_eq!("file_1", fs.get_name(file).unwrap().as_str());
-    fs.move_rename(file, second, "file_one").unwrap();
+    fs.move_rename(file, second, "file_one".into()).unwrap();
     assert_eq!("file_one", fs.get_name(file).unwrap().as_str());
     assert_eq!(second, fs.get_parent(file).unwrap().unwrap());
-    fs.move_rename(file, root, "foo2").unwrap();
-    fs.move_rename(file, second, "file_one").unwrap();
+    fs.move_rename(file, root, "foo2".into()).unwrap();
+    fs.move_rename(file, second, "file_one".into()).unwrap();
 
     // Remove stuff.
     assert_eq!(
-        fs.add_directory(first_2.id, "second").err().unwrap(),
-        FsError::AlreadyExists
+        fs.add_directory(first_2.id, "second".into())
+            .err()
+            .unwrap()
+            .kind(),
+        ErrorKind::AlreadyExists
     ); // "second" already exists.
-    assert_eq!(fs.remove(root).err().unwrap(), FsError::InvalidArgument);
+    assert_eq!(
+        fs.remove(root).err().unwrap().kind(),
+        ErrorKind::InvalidInput
+    );
     assert_eq!(NUM_BLOCKS - 5, fs.empty_blocks());
-    assert_eq!(fs.remove(first).err().unwrap(), FsError::TooLarge); // The directory is not empty.
+    assert_eq!(
+        fs.remove(first).err().unwrap().kind(),
+        ErrorKind::DirectoryNotEmpty
+    ); // The directory is not empty.
     assert_eq!(NUM_BLOCKS - 5, fs.empty_blocks());
-    assert_eq!(fs.remove(second).err().unwrap(), FsError::TooLarge);
-    fs.move_rename(file, root, "foo").unwrap();
+    assert_eq!(
+        fs.remove(second).err().unwrap().kind(),
+        ErrorKind::DirectoryNotEmpty
+    );
+    fs.move_rename(file, root, "foo".into()).unwrap();
     fs.remove(second).unwrap();
     fs.set_file_size(file, 0).unwrap();
     fs.remove(file).unwrap();
@@ -102,7 +120,7 @@ fn basic() {
     assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks());
 
     // Add file.
-    let file = fs.add_file(root, "file").unwrap();
+    let file = fs.add_file(root, "file".into()).unwrap();
     assert_eq!(0, fs.get_file_size(file).unwrap());
 
     // Write to file.
@@ -110,8 +128,8 @@ fn basic() {
         let buf =
             unsafe { core::slice::from_raw_parts(&idx as *const u64 as usize as *const u8, 8) };
         assert_eq!(
-            fs.write(file, idx * 8 + 2, buf).err().unwrap(),
-            FsError::InvalidArgument
+            fs.write(file, idx * 8 + 2, buf).err().unwrap().kind(),
+            ErrorKind::InvalidInput
         );
         assert_eq!(8, fs.write(file, idx * 8, buf).unwrap());
 
@@ -153,17 +171,17 @@ fn many_dirs() {
     assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks());
 
     let root = SyncFileSystem::root_dir_id();
-    let dir = fs.add_directory(root, "dir").unwrap();
+    let dir = fs.add_directory(root, "dir".into()).unwrap();
 
     println!("adding MAX_DIR_ENTRIES child dirs");
     for idx in 0..crate::MAX_DIR_ENTRIES {
         let name = format!("dir_{}", idx);
-        let result = fs.add_directory(dir, name.as_str());
+        let result = fs.add_directory(dir, name.as_str().into());
         if let Err(err) = result {
             panic!("add_directory failed at idx {} with {:?}", idx, err);
         }
         let id = result.unwrap();
-        let result = fs.get_directory_entry_by_name(dir, name.as_str());
+        let result = fs.get_directory_entry_by_name(dir, name.as_str().into());
         if let Err(err) = result {
             panic!(
                 "get_directory_entry_by_name failed at idx {} with {:?}",
@@ -177,11 +195,11 @@ fn many_dirs() {
             "idx: {} name: {} result name: {}",
             idx,
             name,
-            result.as_ref().unwrap().name
+            result.as_ref().unwrap().get_name().unwrap().as_str()
         );
         assert_eq!(
             name,
-            result.as_ref().unwrap().name,
+            result.as_ref().unwrap().get_name().unwrap().as_str(),
             "idx: {} name: {}",
             idx,
             name
@@ -189,10 +207,10 @@ fn many_dirs() {
     }
     println!("Finished adding MAX_DIR_ENTRIES dirs.");
 
-    let dir2 = fs.add_directory(root, "dir2").unwrap();
+    let dir2 = fs.add_directory(root, "dir2".into()).unwrap();
     assert_eq!(
-        fs.add_directory(dir, "foo").err().unwrap(),
-        FsError::TooLarge
+        fs.add_directory(dir, "foo".into()).err().unwrap().kind(),
+        ErrorKind::FileTooLarge
     ); // Cannot add more than the limit.
     assert_eq!(
         crate::MAX_DIR_ENTRIES,
@@ -202,18 +220,18 @@ fn many_dirs() {
     println!("Validating dirs.");
     for idx in 0..crate::MAX_DIR_ENTRIES {
         let entry = fs.get_directory_entry(dir, idx).unwrap();
-        assert_eq!(entry.name, format!("dir_{}", idx));
+        assert_eq!(entry.get_name().unwrap().as_str(), format!("dir_{}", idx));
     }
 
     let entry = fs.get_directory_entry(dir, 12345).unwrap();
-    assert_eq!(entry.name, "dir_12345");
+    assert_eq!(entry.get_name().unwrap().as_str(), "dir_12345");
     fs.remove(entry.id).unwrap();
     assert_eq!(
-        fs.remove(entry.id).err().unwrap(),
-        FsError::ValidationFailed
+        fs.remove(entry.id).err().unwrap().kind(),
+        ErrorKind::InvalidData
     );
     let entry = fs.get_directory_entry(dir, 12345).unwrap();
-    assert_eq!(entry.name, "dir_65535"); // When an entry is removed, the last one is put into its place.
+    assert_eq!(entry.get_name().unwrap().as_str(), "dir_65535"); // When an entry is removed, the last one is put into its place.
     assert_eq!(
         crate::MAX_DIR_ENTRIES - 1,
         fs.get_num_entries(dir).unwrap() as u64
@@ -233,10 +251,12 @@ fn many_dirs() {
         );
         let name1 = format!("dir_{}", idx);
         let name2 = format!("dir2_{}", idx);
-        let e = fs.get_directory_entry_by_name(dir, name1.as_str()).unwrap();
-        fs.move_rename(e.id, dir2, name2.as_str()).unwrap();
+        let e = fs
+            .get_directory_entry_by_name(dir, name1.as_str().into())
+            .unwrap();
+        fs.move_rename(e.id, dir2, name2.as_str().into()).unwrap();
         let e2 = fs
-            .get_directory_entry_by_name(dir2, name2.as_str())
+            .get_directory_entry_by_name(dir2, name2.as_str().into())
             .unwrap();
         assert_eq!(e.id, e2.id);
         assert_eq!(1, fs.get_num_entries(dir2).unwrap());
@@ -244,20 +264,20 @@ fn many_dirs() {
             crate::MAX_DIR_ENTRIES - 2,
             fs.get_num_entries(dir).unwrap() as u64
         );
-        let e3 = fs.get_directory_entry_by_name(dir, name1.as_str());
+        let e3 = fs.get_directory_entry_by_name(dir, name1.as_str().into());
         if let Ok(e3) = e3 {
             panic!(
                 "Something went wrong:\n\te1: {:?}\n\te2: {:?}\n\te3: {:?}",
                 e, e2, e3
             );
         }
-        fs.move_rename(e.id, dir, name1.as_str()).unwrap();
+        fs.move_rename(e.id, dir, name1.as_str().into()).unwrap();
     }
 
     println!("Removing dirs.");
     let mut num_entries = crate::MAX_DIR_ENTRIES - 1;
     for _idx in 0..(crate::MAX_DIR_ENTRIES - 1) {
-        let idx = rng.gen::<u64>() % num_entries;
+        let idx: u64 = rng.next_u64() % num_entries;
         let entry = fs.get_directory_entry(dir, idx).unwrap();
         fs.remove(entry.id)
             .expect(format!("remove() failed for dir {:?} at idx {}", entry, idx).as_str());
@@ -268,7 +288,7 @@ fn many_dirs() {
     assert_eq!(0, fs.get_num_entries(dir).unwrap());
 
     fs.remove(dir).unwrap();
-    let dir2 = fs.get_directory_entry_by_name(root, "dir2").unwrap();
+    let dir2 = fs.get_directory_entry_by_name(root, "dir2".into()).unwrap();
     fs.remove(dir2.id).unwrap();
     assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks());
 
@@ -281,7 +301,7 @@ fn many_dirs() {
 fn large_file() {
     const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 3;
     // const MAX_FILE_SIZE: u64 = 1024 * 1024 * 3;
-    const NUM_BLOCKS: u64 = 2 * (MAX_FILE_SIZE / BLOCK_SIZE) + 20;
+    const NUM_BLOCKS: u64 = 2 * (MAX_FILE_SIZE / (BLOCK_SIZE as u64)) + 20;
     let path = std::env::temp_dir().join("fs_dev_large_file");
     std::fs::remove_file(path.clone()).ok();
 
@@ -292,7 +312,7 @@ fn large_file() {
     assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks());
 
     let root = SyncFileSystem::root_dir_id();
-    let file = fs.add_file(root, "file").unwrap();
+    let file = fs.add_file(root, "file".into()).unwrap();
 
     println!("writing {} bytes", MAX_FILE_SIZE);
     let mut pos = 0_u64;
@@ -362,7 +382,10 @@ fn large_file() {
     }
 
     println!("cleaning up");
-    assert_eq!(fs.remove(file).err().unwrap(), FsError::TooLarge);
+    assert_eq!(
+        fs.remove(file).err().unwrap().kind(),
+        ErrorKind::DirectoryNotEmpty
+    );
 
     let validate_file = |fs: &mut SyncFileSystem| {
         let sz = fs.get_file_size(file).unwrap();

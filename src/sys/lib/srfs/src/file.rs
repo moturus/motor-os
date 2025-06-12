@@ -1,9 +1,7 @@
+use crate::FileSystemInner;
+use srfs_core::EntryId;
 use std::io::Result;
 use std::{cell::RefCell, rc::Rc};
-
-use srfs_core::EntryId;
-
-use crate::{error, FileSystemInner};
 
 pub struct File {
     curr_pos: u64,
@@ -21,11 +19,7 @@ impl File {
     }
 
     pub fn size(&mut self) -> Result<u64> {
-        self.fs
-            .borrow_mut()
-            .fs_core()
-            .get_file_size(self.id)
-            .map_err(error::to_ioerror)
+        self.fs.borrow_mut().fs_core().get_file_size(self.id)
     }
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
@@ -33,19 +27,13 @@ impl File {
             .fs
             .borrow_mut()
             .fs_core()
-            .write(self.id, self.curr_pos, buf)
-            .map_err(error::to_ioerror)?;
+            .write(self.id, self.curr_pos, buf)?;
         self.curr_pos += written as u64;
         Ok(written)
     }
 
     pub fn write_offset(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
-        let written = self
-            .fs
-            .borrow_mut()
-            .fs_core()
-            .write(self.id, offset, buf)
-            .map_err(error::to_ioerror)?;
+        let written = self.fs.borrow_mut().fs_core().write(self.id, offset, buf)?;
         Ok(written)
     }
 
@@ -54,18 +42,13 @@ impl File {
             .fs
             .borrow_mut()
             .fs_core()
-            .read(self.id, self.curr_pos, buf)
-            .map_err(error::to_ioerror)?;
+            .read(self.id, self.curr_pos, buf)?;
         self.curr_pos += read as u64;
         Ok(read)
     }
 
     pub fn read_offset(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        self.fs
-            .borrow_mut()
-            .fs_core()
-            .read(self.id, offset, buf)
-            .map_err(error::to_ioerror)
+        self.fs.borrow_mut().fs_core().read(self.id, offset, buf)
     }
 
     pub fn truncate(&mut self) -> Result<()> {

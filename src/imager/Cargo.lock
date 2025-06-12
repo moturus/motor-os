@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "async-fs"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "plain",
+]
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -28,6 +36,12 @@ dependencies = [
  "tap",
  "wyz",
 ]
+
+[[package]]
+name = "camino"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0da45bc31171d8d6960122e222a67740df867c1dd53b4d51caa297084c185cab"
 
 [[package]]
 name = "crc"
@@ -89,6 +103,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "plain"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -143,9 +163,10 @@ dependencies = [
 
 [[package]]
 name = "srfs"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "bitflags",
+ "camino",
  "log",
  "lru",
  "srfs-core",
@@ -153,12 +174,13 @@ dependencies = [
 
 [[package]]
 name = "srfs-core"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3b4fc4818ec9f7f0b8efe27862cb096b7a1867b99d02d1da9f38bd4c36e2a0"
+version = "0.2.0"
 dependencies = [
+ "async-fs",
+ "camino",
  "crc",
  "log",
+ "plain",
 ]
 
 [[package]]

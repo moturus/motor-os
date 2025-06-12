@@ -1,0 +1,15 @@
+[package]
+name = "async-fs"
+authors = ["The Moturus Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+file-dev = ["tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
+
+[dependencies]
+camino = "1.1.10"
+plain = "0.2.3"
+
+tokio = { version = "1.44.2", optional = true, default-features = false }

@@ -1,3 +1,7 @@
+use super::*;
+use async_fs::BLOCK_SIZE;
+use async_fs::Block;
+use camino::Utf8Path;
 /// Various data structures as they are on the permanent storage.
 ///
 /// EntryMetadata is the same for files and directories.
@@ -28,17 +32,9 @@
 ///   - file sizes above that are currently not supported, but it will be easy to continue with
 ///     the same approach.
 use core::ptr::copy_nonoverlapping;
-
-#[cfg(feature = "std")]
-extern crate std;
-
-use super::*;
-
-use alloc::borrow::ToOwned;
-use alloc::boxed::Box;
-use alloc::string::String;
-
 use crc::CRC_32_ISO_HDLC;
+use std::io::ErrorKind;
+use std::io::Result;
 
 const CRC32: crc::Crc<u32> = crc::Crc::<u32>::new(&CRC_32_ISO_HDLC);
 const CRC32_VERIFY: u32 = 0x2144DF1C;
@@ -49,52 +45,21 @@ pub(crate) fn crc32_hash(bytes: &[u8]) -> u32 {
     digest.finalize()
 }
 
-pub(crate) fn crc32_verify(bytes: &[u8]) -> Result<(), FsError> {
+pub(crate) fn crc32_verify(bytes: &[u8]) -> Result<()> {
     if CRC32_VERIFY == crc32_hash(bytes) {
         Ok(())
     } else {
-        Err(FsError::ValidationFailed)
+        Err(ErrorKind::InvalidData.into())
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryKind {
-    Directory,
-    File,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct EntryId {
-    /// The number of the block the Entry physically resides on.
-    /// Never changes, but can be re-used.
-    pub(crate) block_no: u64,
-    /// A unique number, to prevent ABA issues. Odd => dir, even => file.
-    /// Never changes and is never re-used.
-    pub(crate) generation: u64,
-}
+pub use async_fs::EntryId;
+pub use async_fs::EntryKind;
 
 pub const ROOT_DIR_ID: EntryId = EntryId {
     block_no: 1,
     generation: 1,
 };
-
-impl EntryId {
-    pub(crate) fn new(block_no: u64, generation: u64) -> Self {
-        Self {
-            block_no,
-            generation,
-        }
-    }
-
-    pub fn kind(&self) -> EntryKind {
-        if (self.generation & 1) == 1 {
-            EntryKind::Directory
-        } else {
-            EntryKind::File
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -107,20 +72,11 @@ pub struct Timestamp {
 impl Timestamp {
     pub fn now() -> Self {
         {
-            #![cfg(feature = "std")]
             let ts = std::time::UNIX_EPOCH.elapsed().unwrap();
 
             Self {
                 secs: ts.as_secs(),
                 ns: ts.subsec_nanos(),
-                _pad: 0,
-            }
-        }
-        {
-            #![cfg(not(feature = "std"))]
-            Self {
-                secs: 0,
-                ns: 0,
                 _pad: 0,
             }
         }
@@ -135,7 +91,6 @@ impl Timestamp {
     }
 }
 
-#[cfg(feature = "std")]
 impl From<Timestamp> for std::time::SystemTime {
     fn from(ts: Timestamp) -> Self {
         let dur = std::time::Duration::new(ts.secs, ts.ns);
@@ -146,38 +101,39 @@ impl From<Timestamp> for std::time::SystemTime {
 // An entry in a directory.
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub(crate) struct DirEntryInternal {
+pub struct DirEntry {
     pub id: EntryId,
     pub name: [u8; 255], // UTF-8.
     pub name_len: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<DirEntryInternal>() == 272);
+const _: () = assert!(core::mem::size_of::<DirEntry>() == 272);
 
-impl DirEntryInternal {
-    pub fn set_name(&mut self, name: &str) {
-        let bytes = name.as_bytes();
+unsafe impl plain::Plain for DirEntry {}
+
+impl std::fmt::Debug for DirEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirEntryInternal")
+            .field("id", &self.id)
+            .field("name", &self.get_name().unwrap().as_str())
+            .finish()
+    }
+}
+
+impl DirEntry {
+    pub fn set_name(&mut self, name: &Utf8Path) {
+        let bytes = name.as_str().as_bytes();
         assert!(bytes.len() <= 255);
 
         unsafe { copy_nonoverlapping(bytes.as_ptr(), self.name.as_mut_ptr(), bytes.len()) };
         self.name_len = bytes.len() as u8;
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub fn to_owned(&self) -> Result<DirEntry, FsError> {
-        Ok(DirEntry {
-            id: self.id,
-            name: core::str::from_utf8(&self.name[0..(self.name_len as usize)])
-                .map_err(|_| FsError::Utf8Error)?
-                .to_owned(),
-        })
+    pub fn get_name(&self) -> Result<&Utf8Path> {
+        let name_str = str::from_utf8(&self.name[0..(self.name_len as usize)])
+            .map_err(|_| std::io::Error::from(ErrorKind::InvalidData))?;
+        Ok(name_str.into())
     }
-}
-
-#[derive(Debug)]
-pub struct DirEntry {
-    pub id: EntryId,
-    pub name: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -194,17 +150,18 @@ pub(crate) struct EntryMetadata {
     pub crc32: u32, // CRC32 of this data structure.
 }
 
+unsafe impl plain::Plain for EntryMetadata {}
+
 const _: () = assert!(core::mem::size_of::<EntryMetadata>() == 128);
-const _: () = assert!(core::mem::size_of::<EntryMetadata>() < (BLOCK_SIZE as usize));
+const _: () = assert!(core::mem::size_of::<EntryMetadata>() < BLOCK_SIZE);
 
 // In the metadata block, we put dir entries at the same place as in data blocks, leaving
 // the space at the beginning of the block to be used by EntryMetadata.
-const _: () =
-    assert!(core::mem::size_of::<EntryMetadata>() <= core::mem::size_of::<DirEntryInternal>());
+const _: () = assert!(core::mem::size_of::<EntryMetadata>() <= core::mem::size_of::<DirEntry>());
 
 // Max entries in data block (leaf directory lists).
 pub(crate) const MAX_ENTRIES_IN_DATA_BLOCK: u64 =
-    BLOCK_SIZE / (core::mem::size_of::<DirEntryInternal>() as u64);
+    (BLOCK_SIZE / core::mem::size_of::<DirEntry>()) as u64;
 const _: () = assert!(MAX_ENTRIES_IN_DATA_BLOCK == 15);
 
 // Directories with entries <= MAX_ENTRIES_IN_SELF_BLOCK occupy a single block.
@@ -222,7 +179,7 @@ const _: () = assert!(MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST == 7680);
 
 // Files with size <= MAX_BYTES_IN_SELF_BLOCK occupy a single block.
 pub(crate) const MAX_BYTES_IN_META_BLOCK: u64 =
-    BLOCK_SIZE - (core::mem::size_of::<EntryMetadata>() as u64);
+    (BLOCK_SIZE - core::mem::size_of::<EntryMetadata>()) as u64;
 const _: () = assert!(MAX_BYTES_IN_META_BLOCK == 3968);
 
 // The max number of blocks referenced in the meta block of a file.
@@ -230,10 +187,10 @@ pub(crate) const MAX_LINKS_IN_META_BLOCK: u64 = MAX_BYTES_IN_META_BLOCK / 8;
 const _: () = assert!(MAX_LINKS_IN_META_BLOCK == 496);
 
 // The max size of a file without separate block list blocks.
-pub(crate) const MAX_BYTES_ONLY_DATA_BLOCKS: u64 = MAX_LINKS_IN_META_BLOCK * BLOCK_SIZE;
+pub(crate) const MAX_BYTES_ONLY_DATA_BLOCKS: u64 = MAX_LINKS_IN_META_BLOCK * (BLOCK_SIZE as u64);
 const _: () = assert!(MAX_BYTES_ONLY_DATA_BLOCKS == 2_031_616);
 
-pub(crate) const BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST: u64 = BLOCK_SIZE * BLOCK_SIZE / 8;
+pub(crate) const BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST: u64 = (BLOCK_SIZE * BLOCK_SIZE / 8) as u64;
 const _: () = assert!(BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST == 4096 * 512); // 2M.
 
 // The max size of a file without separate list-of-list blocks.
@@ -286,37 +243,36 @@ impl EntryMetadata {
         self.crc32 = crc32;
     }
 
-    fn validate_basic(&self, id: EntryId) -> Result<(), FsError> {
-        crc32_verify(self.as_bytes())?;
+    fn validate_basic(&self, id: EntryId) -> Result<()> {
         if self.id != id {
-            return Err(FsError::ValidationFailed);
+            return Err(ErrorKind::InvalidData.into());
         }
-        Ok(())
+        crc32_verify(self.as_bytes())
     }
 
-    pub fn validate(&self, id: EntryId) -> Result<(), FsError> {
+    pub fn validate(&self, id: EntryId) -> Result<()> {
         match id.kind() {
             EntryKind::Directory => self.validate_dir(id),
             EntryKind::File => self.validate_file(id),
         }
     }
 
-    pub fn validate_dir(&self, id: EntryId) -> Result<(), FsError> {
+    pub fn validate_dir(&self, id: EntryId) -> Result<()> {
         self.validate_basic(id)?;
         if self.id.kind() != EntryKind::Directory {
-            return Err(FsError::ValidationFailed);
+            return Err(ErrorKind::InvalidData.into());
         }
         if self.size > MAX_DIR_ENTRIES {
-            return Err(FsError::ValidationFailed);
+            return Err(ErrorKind::InvalidData.into());
         }
 
         Ok(())
     }
 
-    pub fn validate_file(&self, id: EntryId) -> Result<(), FsError> {
+    pub fn validate_file(&self, id: EntryId) -> Result<()> {
         self.validate_basic(id)?;
         if self.id.kind() != EntryKind::File {
-            return Err(FsError::ValidationFailed);
+            return Err(ErrorKind::InvalidData.into());
         }
 
         Ok(())
@@ -383,6 +339,8 @@ pub(crate) struct SuperblockHeader {
     pub crc32: u32,                   // CRC32 of this data structure.
 }
 
+unsafe impl plain::Plain for SuperblockHeader {}
+
 impl SuperblockHeader {
     pub fn as_bytes(&self) -> &[u8] {
         unsafe {
@@ -404,170 +362,23 @@ impl SuperblockHeader {
         self.crc32 = crc32;
     }
 
-    pub fn validate(&self) -> Result<(), FsError> {
+    pub fn validate(&self) -> Result<()> {
         crc32_verify(self.as_bytes())?;
         if self.version != 1 {
-            return Err(FsError::UnsupportedVersion);
+            return Err(ErrorKind::Unsupported.into());
         }
         if self.magic == MAGIC {
             Ok(())
         } else {
-            Err(FsError::ValidationFailed)
+            Err(ErrorKind::InvalidData.into())
         }
     }
 }
 
-#[derive(Clone, Copy)]
-#[repr(C, align(4096))]
-pub(crate) struct Block {
-    bytes: [u8; 4096],
-}
-
-const _: () = assert!(core::mem::size_of::<Block>() as u64 == BLOCK_SIZE);
-
-impl Block {
-    pub const fn new_zeroed() -> Self {
-        Self { bytes: [0; 4096] }
-    }
-
-    pub unsafe fn get<T>(&self) -> &T {
-        debug_assert!(core::mem::size_of::<T>() as u64 <= BLOCK_SIZE);
-
-        (self.bytes.as_ptr() as usize as *const T)
-            .as_ref()
-            .unwrap_unchecked()
-    }
-
-    pub unsafe fn get_mut<T>(&mut self) -> &mut T {
-        debug_assert!(core::mem::size_of::<T>() as u64 <= BLOCK_SIZE);
-
-        (self.bytes.as_ptr() as usize as *mut T)
-            .as_mut()
-            .unwrap_unchecked()
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn as_data_bytes_in_meta(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                (((self as *const _ as usize) + core::mem::size_of::<EntryMetadata>())
-                    as *const u8)
-                    .as_ref()
-                    .unwrap_unchecked(),
-                BLOCK_SIZE as usize - core::mem::size_of::<EntryMetadata>(),
-            )
-        }
-    }
-
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.bytes
-    }
-
-    pub fn as_data_bytes_in_meta_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                (((self as *mut _ as usize) + core::mem::size_of::<EntryMetadata>()) as *mut u8)
-                    .as_mut()
-                    .unwrap_unchecked(),
-                BLOCK_SIZE as usize - core::mem::size_of::<EntryMetadata>(),
-            )
-        }
-    }
-
-    pub fn set_dir_entry(&mut self, pos: usize, id: EntryId, name: &str) {
-        let entry = self.get_dir_entry_mut(pos);
-        entry.id = id;
-        entry.set_name(name);
-    }
-
-    pub fn get_dir_entry(&self, pos: usize) -> &DirEntryInternal {
-        assert!(pos as u64 <= MAX_ENTRIES_IN_DATA_BLOCK);
-        let offset = pos * core::mem::size_of::<DirEntryInternal>();
-        unsafe {
-            ((self.bytes.as_ptr() as usize + offset) as *const DirEntryInternal)
-                .as_ref()
-                .unwrap_unchecked()
-        }
-    }
-
-    pub fn get_dir_entry_mut(&mut self, pos: usize) -> &mut DirEntryInternal {
-        assert!(pos <= MAX_ENTRIES_IN_DATA_BLOCK as usize);
-        let offset = pos * core::mem::size_of::<DirEntryInternal>();
-        unsafe {
-            ((self.bytes.as_ptr() as usize + offset) as *mut DirEntryInternal)
-                .as_mut()
-                .unwrap_unchecked()
-        }
-    }
-
-    pub fn get_datablock_no_in_meta(&self, data_block_idx: u64) -> u64 {
-        assert!(data_block_idx <= MAX_LINKS_IN_META_BLOCK);
-        let offset = core::mem::size_of::<EntryMetadata>() + ((data_block_idx as usize) << 3);
-        debug_assert!(offset < BLOCK_SIZE as usize);
-        unsafe { *((self.bytes.as_ptr() as usize + offset) as *const u64) }
-    }
-
-    pub fn set_datablock_no_in_meta(&mut self, data_block_idx: u64, block_no: u64) {
-        assert!(data_block_idx <= MAX_LINKS_IN_META_BLOCK);
-        let offset = core::mem::size_of::<EntryMetadata>() + ((data_block_idx as usize) << 3);
-        assert!(offset < BLOCK_SIZE as usize);
-        unsafe {
-            *((self.bytes.as_ptr() as usize + offset) as *mut u64) = block_no;
-        }
-    }
-
-    pub fn get_datablock_no_in_link(&self, data_block_idx: u64) -> u64 {
-        assert!(data_block_idx < 512);
-        let offset = (data_block_idx as usize) << 3;
-        unsafe { *((self.bytes.as_ptr() as usize + offset) as *const u64) }
-    }
-
-    pub fn set_datablock_no_in_link(&mut self, data_block_idx: u64, block_no: u64) {
-        assert!(data_block_idx < 512);
-        let offset = (data_block_idx as usize) << 3;
-        unsafe {
-            *((self.bytes.as_ptr() as usize + offset) as *mut u64) = block_no;
-        }
-    }
-}
-
-pub(crate) struct Superblock {
-    block: Box<Block>,
-}
-
-impl Superblock {
-    pub fn from(block: Box<Block>) -> Result<Self, FsError> {
-        unsafe {
-            let fbh = block.get::<SuperblockHeader>();
-            fbh.validate()?;
-        }
-
-        Ok(Self { block })
-    }
-
-    pub fn header(&self) -> &SuperblockHeader {
-        unsafe { self.block.get::<SuperblockHeader>() }
-    }
-
-    pub fn header_mut(&mut self) -> &mut SuperblockHeader {
-        unsafe { self.block.get_mut::<SuperblockHeader>() }
-    }
-
-    pub fn ___as_bytes(&self) -> &[u8] {
-        self.block.as_bytes()
-    }
-
-    pub fn block(&self) -> &Block {
-        &self.block
-    }
-}
-
-pub(crate) fn validate_filename(name: &str) -> Result<(), FsError> {
+pub(crate) fn validate_filename(name: &Utf8Path) -> Result<()> {
+    let name = name.as_str();
     if name.len() > 255 || name.contains('/') || name == "." || name == ".." {
-        return Err(FsError::InvalidArgument);
+        return Err(ErrorKind::InvalidFilename.into());
     }
 
     Ok(())
@@ -576,4 +387,80 @@ pub(crate) fn validate_filename(name: &str) -> Result<(), FsError> {
 pub(crate) fn align_up(what: u64, how: u64) -> u64 {
     debug_assert!(how.is_power_of_two());
     (what + how - 1) & !(how - 1)
+}
+
+pub(crate) fn block_get_dir_entry(block: &Block, pos: usize) -> &DirEntry {
+    assert!(pos as u64 <= MAX_ENTRIES_IN_DATA_BLOCK);
+    let offset = pos * core::mem::size_of::<DirEntry>();
+    block.get_at_offset::<DirEntry>(offset)
+}
+
+pub(crate) fn block_set_dir_entry(block: &mut Block, pos: usize, id: EntryId, name: &Utf8Path) {
+    let entry = block_get_dir_entry_mut(block, pos);
+    entry.id = id;
+    entry.set_name(name);
+}
+
+pub(crate) fn block_get_dir_entry_mut(block: &mut Block, pos: usize) -> &mut DirEntry {
+    assert!(pos <= MAX_ENTRIES_IN_DATA_BLOCK as usize);
+    let offset = pos * core::mem::size_of::<DirEntry>();
+    block.get_mut_at_offset(offset)
+}
+
+pub(crate) fn block_set_datablock_no_in_meta(
+    block: &mut Block,
+    data_block_idx: u64,
+    block_no: u64,
+) {
+    assert!(data_block_idx <= MAX_LINKS_IN_META_BLOCK);
+    let offset = core::mem::size_of::<EntryMetadata>() + ((data_block_idx as usize) << 3);
+    assert!(offset < BLOCK_SIZE);
+    *block.get_mut_at_offset(offset) = block_no;
+}
+
+pub(crate) fn block_get_datablock_no_in_meta(block: &Block, data_block_idx: u64) -> u64 {
+    assert!(data_block_idx <= MAX_LINKS_IN_META_BLOCK);
+    let offset = core::mem::size_of::<EntryMetadata>() + ((data_block_idx as usize) << 3);
+    debug_assert!(offset < BLOCK_SIZE);
+    *block.get_at_offset(offset)
+}
+
+pub(crate) fn block_get_datablock_no_in_link(block: &Block, data_block_idx: u64) -> u64 {
+    assert!(data_block_idx < 512);
+    let offset = (data_block_idx as usize) << 3;
+    *block.get_at_offset(offset)
+}
+
+pub(crate) fn block_set_datablock_no_in_link(
+    block: &mut Block,
+    data_block_idx: u64,
+    block_no: u64,
+) {
+    assert!(data_block_idx < 512);
+    let offset = (data_block_idx as usize) << 3;
+    *block.get_mut_at_offset(offset) = block_no;
+}
+
+pub(crate) fn block_get_data_bytes_in_meta_mut(block: &mut Block) -> &mut [u8] {
+    const OFFSET: usize = core::mem::size_of::<EntryMetadata>();
+    const LEN: usize = BLOCK_SIZE - OFFSET;
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            (((block as *mut _ as usize) + OFFSET) as *mut u8)
+                .as_mut()
+                .unwrap_unchecked(),
+            LEN,
+        )
+    }
+}
+
+pub(crate) fn block_get_data_bytes_in_meta(block: &Block) -> &[u8] {
+    unsafe {
+        core::slice::from_raw_parts(
+            (((block as *const _ as usize) + core::mem::size_of::<EntryMetadata>()) as *const u8)
+                .as_ref()
+                .unwrap_unchecked(),
+            BLOCK_SIZE - core::mem::size_of::<EntryMetadata>(),
+        )
+    }
 }

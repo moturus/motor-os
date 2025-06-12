@@ -18,8 +18,8 @@ srfs             = { path = "../lib/srfs"             }
 timeq            = { path = "../lib/timeq"            }
 
 # External.
-elfloader    = { path = "../../third_party/elfloader" }
 crossbeam    = "0.8.4"
+elfloader    = { path = "../../third_party/elfloader" }
 ipnetwork    = "0.20.0"
 log          = "0.4.20"
 rand         = { version = "0.9.0", features = ["small_rng"], default-features = false }

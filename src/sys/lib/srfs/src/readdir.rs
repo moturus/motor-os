@@ -1,32 +1,27 @@
+use crate::FileSystemInner;
+use camino::{Utf8Path, Utf8PathBuf};
+use srfs_core::{EntryId, EntryKind};
 use std::io::{ErrorKind, Result};
 use std::{cell::RefCell, rc::Rc};
 
-use srfs_core::{EntryId, EntryKind};
-
-use crate::{error, FileSystemInner};
 pub struct DirEntry {
-    name: String, // The leaf name.
-    path: String, // The full path.
+    name: Utf8PathBuf, // The leaf name.
+    path: Utf8PathBuf, // The full path.
     id: EntryId,
     fs: Rc<RefCell<FileSystemInner>>,
 }
 
 impl DirEntry {
     pub fn stat(&self) -> Result<crate::Attr> {
-        let raw_attr = self
-            .fs
-            .borrow_mut()
-            .fs_core()
-            .stat(self.id)
-            .map_err(error::to_ioerror)?;
+        let raw_attr = self.fs.borrow_mut().fs_core().stat(self.id)?;
         Ok(raw_attr.into())
     }
 
-    pub fn file_name(&self) -> &str {
+    pub fn file_name(&self) -> &Utf8Path {
         &self.name
     }
 
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> &Utf8Path {
         &self.path
     }
 
@@ -36,7 +31,7 @@ impl DirEntry {
 }
 
 pub struct ReadDir {
-    path: String,
+    path: Utf8PathBuf,
     parent: EntryId,
     cur_pos: u64,
     num_entries: u64,
@@ -44,17 +39,13 @@ pub struct ReadDir {
 }
 
 impl ReadDir {
-    pub(crate) fn new(path: &str, fs: Rc<RefCell<FileSystemInner>>) -> Result<Self> {
+    pub(crate) fn new(path: &Utf8Path, fs: Rc<RefCell<FileSystemInner>>) -> Result<Self> {
         let parent = fs.borrow_mut().get_entry(path)?;
         if parent.kind() != EntryKind::Directory {
             return Err(ErrorKind::NotADirectory.into());
         }
 
-        let num_entries = fs
-            .borrow_mut()
-            .fs_core()
-            .get_num_entries(parent)
-            .map_err(error::to_ioerror)?;
+        let num_entries = fs.borrow_mut().fs_core().get_num_entries(parent)?;
 
         Ok(Self {
             path: path.to_owned(),
@@ -78,17 +69,15 @@ impl Iterator for ReadDir {
             .fs
             .borrow_mut()
             .fs_core()
-            .get_directory_entry(self.parent, self.cur_pos)
-            .map_err(error::to_ioerror);
+            .get_directory_entry(self.parent, self.cur_pos);
         self.cur_pos += 1;
 
         match entry {
             Ok(entry) => {
                 let mut path = self.path.clone();
-                path.push('/');
-                path.push_str(&entry.name);
+                path.push(entry.get_name().unwrap());
                 Some(Ok(DirEntry {
-                    name: entry.name.clone(),
+                    name: entry.get_name().unwrap().to_owned(),
                     path,
                     id: entry.id,
                     fs: self.fs.clone(),

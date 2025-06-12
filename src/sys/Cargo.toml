@@ -1,6 +1,7 @@
 [workspace]
 members = [
   # system libraries
+  "lib/async-fs",
   "lib/flatfs",
   "lib/frusa",
   "lib/rt.vdso",

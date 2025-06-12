@@ -21,33 +21,36 @@ const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
 static BIN_FULL: [&str; 15] = [
-    "bin/httpd",
-    "bin/httpd-axum",
-    "bin/kibim",
-    "bin/rush",
-    "bin/russhd",
-    "sys/mdbg",
-    "sys/sys-init",
-    "sys/sys-log",
-    "sys/sys-tty",
-    "sys/sysbox",
-    "sys/tests/rnetbench",
-    "sys/tests/systest",
-    "sys/tests/mio-test",
-    "sys/tests/tokio-tests",
-    "sys/tests/crossbench",
+    "/bin/httpd",
+    "/bin/httpd-axum",
+    "/bin/kibim",
+    "/bin/rush",
+    "/bin/russhd",
+    "/sys/mdbg",
+    "/sys/sys-init",
+    "/sys/sys-log",
+    "/sys/sys-tty",
+    "/sys/sysbox",
+    "/sys/tests/rnetbench",
+    "/sys/tests/systest",
+    "/sys/tests/mio-test",
+    "/sys/tests/tokio-tests",
+    "/sys/tests/crossbench",
 ];
 
 // For the "web" image.
-static BIN_WEB: [&str; 3] = ["bin/httpd-axum", "sys/sys-init", "sys/sys-tty"];
+static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
     const DATA_PARTITION_SZ: usize = 64 * MB;
 
     // println!("creating SRFS in {:?}", result_path);
-    srfs::FileSystem::create_volume(result_path, (DATA_PARTITION_SZ as u64) / srfs::BLOCK_SIZE)
-        .unwrap();
+    srfs::FileSystem::create_volume(
+        result_path,
+        (DATA_PARTITION_SZ as u64) / srfs::BLOCK_SIZE as u64,
+    )
+    .unwrap();
 
     let mut filesystem = srfs::FileSystem::open_volume(result_path).unwrap();
 
@@ -55,11 +58,11 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
         let target_path = Path::new(dst);
         // Create parent directories.
         let parent = target_path.parent().unwrap().to_str().unwrap();
-        if !filesystem.exists(parent).unwrap() {
-            filesystem.create_dir_all(parent).unwrap();
+        if !filesystem.exists(parent.into()).unwrap() {
+            filesystem.create_dir_all(parent.into()).unwrap();
         }
 
-        let mut new_file = filesystem.create_file(dst).unwrap();
+        let mut new_file = filesystem.create_file(dst.as_str().into()).unwrap();
 
         // println!("copying {:?} into {:?}", src, result_path);
         let source_file = File::open(src).unwrap();
