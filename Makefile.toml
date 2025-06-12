@@ -478,7 +478,7 @@ cp "${CARGO_TARGET_DIR}/x86_64-unknown-moturus/release/crossbench" "${MOTO_BIN}/
 cwd = "./src/imager"
 script = '''
 cargo clippy
-cargo run --release -- ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY} debug
+cargo run -- ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY} debug
 cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/src/vm_scripts/"* \
    "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/vm_images/debug/"
 '''
