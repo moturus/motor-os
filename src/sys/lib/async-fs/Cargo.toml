@@ -10,6 +10,7 @@ file-dev = ["tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
 
 [dependencies]
 camino = "1.1.10"
+lru = { version = "0.14.0", default-features = false }
 plain = "0.2.3"
 
 tokio = { version = "1.44.2", optional = true, default-features = false }

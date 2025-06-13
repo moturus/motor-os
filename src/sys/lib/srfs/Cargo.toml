@@ -12,5 +12,5 @@ license = "MIT OR Apache-2.0"
 camino = "1.1.10"
 bitflags = "2.4.*"
 log = "0.4.20"
-lru = { version = "0.13.0", default-features = false }
+lru = "0.14.0"
 srfs-core = { path = "../srfs-core" }

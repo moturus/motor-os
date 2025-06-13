@@ -8,8 +8,6 @@ use std::rc::Rc;
 
 use crate::*;
 
-extern crate std;
-
 pub struct SrFs<Dev: AsyncBlockDevice> {
     block_dev: Rc<RefCell<Dev>>,
     error: Result<()>,

@@ -1,23 +1,19 @@
 use async_fs::Block;
+use lru::LruCache;
 
 use crate::*;
-use core::pin::Pin;
 
 const CACHE_SIZE: usize = 128;
 
 #[derive(Clone)]
 pub(crate) struct CachedBlock {
-    block_no: u64,
-    dirty: bool,
-    block: Pin<Box<Block>>,
+    block: Box<Block>,
 }
 
 impl Default for CachedBlock {
     fn default() -> Self {
         Self {
-            block_no: u64::MAX,
-            dirty: false,
-            block: Box::pin(Block::new_zeroed()),
+            block: Box::new(Block::new_zeroed()),
         }
     }
 }
@@ -33,10 +29,8 @@ impl CachedBlock {
 }
 
 pub(crate) struct BlockCache {
-    blocks: Vec<CachedBlock>,
+    cache: LruCache<u64, CachedBlock>,
     block_device: Box<dyn SyncBlockDevice>,
-    block_reads: u64,
-    block_writes: u64,
     superblock: CachedBlock, // #0
 }
 
@@ -48,132 +42,68 @@ impl BlockCache {
             .read_block(0, superblock.block.as_bytes_mut())
             .unwrap();
 
-        let blocks = vec![CachedBlock::default(); CACHE_SIZE];
         Self {
-            blocks,
+            cache: LruCache::new(std::num::NonZero::new(CACHE_SIZE).unwrap()),
             block_device,
-            block_reads: 0,
-            block_writes: 0,
             superblock,
         }
     }
 
     pub(crate) fn read(&mut self, block_no: u64) -> Result<&CachedBlock> {
-        if block_no == 0 {
-            return Ok(&self.superblock);
-        }
-        for idx in 0..CACHE_SIZE {
-            if self.blocks[idx].block_no == block_no {
-                self.push_top(idx);
-                return Ok(&self.blocks[0]);
-            }
-        }
-
-        // Not found: read.
-        let block = unsafe { self.blocks.last_mut().unwrap_unchecked() };
-        assert!(!block.dirty);
-        block.block_no = block_no;
-
-        self.block_reads += 1;
-        self.block_device
-            .read_block(block_no, block.block.as_bytes_mut())?;
-        self.push_top(CACHE_SIZE - 1);
-        Ok(&self.blocks[0])
+        self.read_mut(block_no).map(|e| &*e)
     }
 
     pub(crate) fn read_mut(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
         if block_no == 0 {
             return Ok(&mut self.superblock);
         }
-        for idx in 0..CACHE_SIZE {
-            if self.blocks[idx].block_no == block_no {
-                self.push_top(idx);
-                self.blocks[0].dirty = true;
-                return Ok(&mut self.blocks[0]);
-            }
-        }
 
-        // Not found: read.
-        let block = unsafe { self.blocks.last_mut().unwrap_unchecked() };
-        assert!(!block.dirty);
-        block.block_no = block_no;
+        self.cache.try_get_or_insert_mut(block_no, || {
+            // Not found: read.
+            let mut block = CachedBlock::default();
+            self.block_device
+                .read_block(block_no, block.block.as_bytes_mut())?;
 
-        self.block_reads += 1;
-        self.block_device
-            .read_block(block_no, block.block.as_bytes_mut())?;
-        self.push_top(CACHE_SIZE - 1);
-        self.blocks[0].dirty = true;
-        Ok(&mut self.blocks[0])
+            Ok(block)
+        })
     }
 
     pub(crate) fn get(&mut self, block_no: u64) -> &CachedBlock {
         if block_no == 0 {
             return &self.superblock;
         }
-        for idx in 0..CACHE_SIZE {
-            if self.blocks[idx].block_no == block_no {
-                self.push_top(idx);
-                return &self.blocks[0];
-            }
-        }
 
-        panic!("block not found")
+        self.cache.get(&block_no).unwrap()
     }
 
     pub(crate) fn get_mut(&mut self, block_no: u64) -> &mut CachedBlock {
         if block_no == 0 {
             return &mut self.superblock;
         }
-        for idx in 0..CACHE_SIZE {
-            if self.blocks[idx].block_no == block_no {
-                self.push_top(idx);
-                self.blocks[0].dirty = true;
-                return &mut self.blocks[0];
-            }
-        }
 
-        panic!("block not found")
+        self.cache.get_mut(&block_no).unwrap()
     }
 
     pub(crate) fn get_block_uninit(&mut self, block_no: u64) -> &mut CachedBlock {
         assert_ne!(block_no, 0);
-        let block = unsafe { self.blocks.last_mut().unwrap_unchecked() };
-        block.block_no = block_no;
-        assert!(!block.dirty);
-        self.push_top(CACHE_SIZE - 1);
-        self.blocks[0].dirty = true;
-        &mut self.blocks[0]
+
+        self.cache
+            .try_get_or_insert_mut::<_, ()>(block_no, || Ok(CachedBlock::default()))
+            .unwrap()
     }
 
     pub(crate) fn write(&mut self, block_no: u64) -> Result<()> {
         if block_no == 0 {
-            self.block_writes += 1;
             self.block_device
                 .write_block(0, self.superblock.block.as_bytes())?;
-            self.superblock.dirty = false;
             return Ok(());
         }
-        for idx in 0..CACHE_SIZE {
-            if self.blocks[idx].block_no == block_no {
-                self.push_top(idx);
-                debug_assert!(self.blocks[0].dirty);
-                self.block_writes += 1;
-                self.block_device
-                    .write_block(block_no, self.blocks[0].block.as_bytes())?;
-                self.blocks[0].dirty = false;
-                return Ok(());
-            }
-        }
 
-        panic!("block not found")
-    }
+        let Some(block) = self.cache.get_mut(&block_no) else {
+            panic!("block not found")
+        };
 
-    fn push_top(&mut self, idx: usize) {
-        debug_assert!(idx < CACHE_SIZE);
-        let mut pos = idx;
-        while pos > 0 {
-            self.blocks.swap(pos - 1, pos);
-            pos -= 1;
-        }
+        self.block_device
+            .write_block(block_no, block.block.as_bytes())
     }
 }

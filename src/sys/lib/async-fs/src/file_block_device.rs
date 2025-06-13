@@ -5,8 +5,6 @@ use camino::Utf8Path;
 use std::io::ErrorKind;
 use std::io::Result;
 
-extern crate std;
-
 pub struct AsyncFileBlockDevice {
     file: tokio::fs::File,
     num_blocks: u64,
