@@ -3,8 +3,9 @@ use async_fs::Block;
 use crate::*;
 use core::pin::Pin;
 
-const CACHE_SIZE: usize = 16;
+const CACHE_SIZE: usize = 128;
 
+#[derive(Clone)]
 pub(crate) struct CachedBlock {
     block_no: u64,
     dirty: bool,
@@ -32,7 +33,7 @@ impl CachedBlock {
 }
 
 pub(crate) struct BlockCache {
-    blocks: [CachedBlock; CACHE_SIZE],
+    blocks: Vec<CachedBlock>,
     block_device: Box<dyn SyncBlockDevice>,
     block_reads: u64,
     block_writes: u64,
@@ -47,8 +48,9 @@ impl BlockCache {
             .read_block(0, superblock.block.as_bytes_mut())
             .unwrap();
 
+        let blocks = vec![CachedBlock::default(); CACHE_SIZE];
         Self {
-            blocks: Default::default(),
+            blocks,
             block_device,
             block_reads: 0,
             block_writes: 0,
