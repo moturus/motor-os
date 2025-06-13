@@ -31,21 +31,30 @@ impl CachedBlock {
 pub(crate) struct BlockCache {
     cache: LruCache<u64, CachedBlock>,
     block_device: Box<dyn SyncBlockDevice>,
-    superblock: CachedBlock, // #0
+    // We cache the superblock and the root block.
+    block_0: CachedBlock,
+    block_1: CachedBlock,
+    free_blocks: Vec<CachedBlock>,
 }
 
 impl BlockCache {
     pub(crate) fn new(mut block_device: Box<dyn SyncBlockDevice>) -> Self {
-        let mut superblock = CachedBlock::default();
-
+        let mut block_0 = CachedBlock::default();
         block_device
-            .read_block(0, superblock.block.as_bytes_mut())
+            .read_block(0, block_0.block.as_bytes_mut())
+            .unwrap();
+
+        let mut block_1 = CachedBlock::default();
+        block_device
+            .read_block(1, block_1.block.as_bytes_mut())
             .unwrap();
 
         Self {
             cache: LruCache::new(std::num::NonZero::new(CACHE_SIZE).unwrap()),
             block_device,
-            superblock,
+            block_0,
+            block_1,
+            free_blocks: Vec::new(),
         }
     }
 
@@ -55,22 +64,42 @@ impl BlockCache {
 
     pub(crate) fn read_mut(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
         if block_no == 0 {
-            return Ok(&mut self.superblock);
+            return Ok(&mut self.block_0);
+        } else if block_no == 1 {
+            return Ok(&mut self.block_1);
         }
 
-        self.cache.try_get_or_insert_mut(block_no, || {
-            // Not found: read.
-            let mut block = CachedBlock::default();
-            self.block_device
-                .read_block(block_no, block.block.as_bytes_mut())?;
+        {
+            if self.cache.contains(&block_no) {
+                return Ok(self.cache.get_mut(&block_no).unwrap());
+            }
+        }
 
-            Ok(block)
-        })
+        self.read_new_block(block_no)
+    }
+
+    fn read_new_block(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
+        let mut block = if let Some(block) = self.free_blocks.pop() {
+            block
+        } else {
+            CachedBlock::default()
+        };
+
+        self.block_device
+            .read_block(block_no, block.block.as_bytes_mut())?;
+
+        if let Some((_, prev)) = self.cache.push(block_no, block) {
+            self.free_blocks.push(prev);
+        }
+
+        Ok(self.cache.get_mut(&block_no).unwrap())
     }
 
     pub(crate) fn get(&mut self, block_no: u64) -> &CachedBlock {
         if block_no == 0 {
-            return &self.superblock;
+            return &self.block_0;
+        } else if block_no == 1 {
+            return &self.block_1;
         }
 
         self.cache.get(&block_no).unwrap()
@@ -78,7 +107,9 @@ impl BlockCache {
 
     pub(crate) fn get_mut(&mut self, block_no: u64) -> &mut CachedBlock {
         if block_no == 0 {
-            return &mut self.superblock;
+            return &mut self.block_0;
+        } else if block_no == 1 {
+            return &mut self.block_1;
         }
 
         self.cache.get_mut(&block_no).unwrap()
@@ -86,16 +117,39 @@ impl BlockCache {
 
     pub(crate) fn get_block_uninit(&mut self, block_no: u64) -> &mut CachedBlock {
         assert_ne!(block_no, 0);
+        assert_ne!(block_no, 1);
 
-        self.cache
-            .try_get_or_insert_mut::<_, ()>(block_no, || Ok(CachedBlock::default()))
-            .unwrap()
+        {
+            if self.cache.contains(&block_no) {
+                return self.cache.get_mut(&block_no).unwrap();
+            }
+        }
+
+        self.get_new_block(block_no)
+    }
+
+    fn get_new_block(&mut self, block_no: u64) -> &mut CachedBlock {
+        let block = if let Some(block) = self.free_blocks.pop() {
+            block
+        } else {
+            CachedBlock::default()
+        };
+
+        if let Some((_, prev)) = self.cache.push(block_no, block) {
+            self.free_blocks.push(prev);
+        }
+
+        self.cache.get_mut(&block_no).unwrap()
     }
 
     pub(crate) fn write(&mut self, block_no: u64) -> Result<()> {
         if block_no == 0 {
             self.block_device
-                .write_block(0, self.superblock.block.as_bytes())?;
+                .write_block(0, self.block_0.block.as_bytes())?;
+            return Ok(());
+        } else if block_no == 1 {
+            self.block_device
+                .write_block(1, self.block_1.block.as_bytes())?;
             return Ok(());
         }
 
