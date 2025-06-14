@@ -1,22 +1,20 @@
 use async_fs::AsyncBlockDevice;
 use async_fs::Block;
-use camino::Utf8Path;
-use core::cell::RefCell;
-use core::ops::DerefMut;
 use std::io::{ErrorKind, Result};
-use std::rc::Rc;
 
+use crate::layout::*;
 use crate::*;
 
+const CACHE_SIZE: usize = 512; // 2MB.
+
 pub struct SrFs<Dev: AsyncBlockDevice> {
-    block_dev: Rc<RefCell<Dev>>,
+    block_cache: async_fs::block_cache::BlockCache<Dev>,
     error: Result<()>,
 }
 
 impl<Dev: AsyncBlockDevice> SrFs<Dev> {
-    pub async fn format(block_dev: Rc<RefCell<Dev>>) -> Result<Self> {
-        let mut dev = block_dev.borrow_mut();
-        let num_blocks = dev.num_blocks();
+    pub async fn format(mut block_dev: Dev) -> Result<Self> {
+        let num_blocks = block_dev.num_blocks();
         if num_blocks < 2 {
             return Err(ErrorKind::InvalidData.into());
         }
@@ -34,30 +32,28 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
         fbh.generation = 1;
         fbh.empty_area_start = 2; // 0 => this; 1 => root dir.
         fbh.set_crc32();
-        fbh.validate().map_err(map_fs_error)?;
-        dev.write_block(0, &block).await?;
+        fbh.validate()?;
+        block_dev.write_block(0, &block).await?;
 
         // Write the root directory.
+        block.clear();
         let root_dir = block.get_mut_at_offset::<EntryMetadata>(0);
         *root_dir = EntryMetadata::new(ROOT_DIR_ID, ROOT_DIR_ID);
         root_dir.set_crc32();
-        dev.write_block(1, &block).await?;
+        block_dev.write_block(1, &block).await?;
 
-        core::mem::drop(dev);
         Ok(Self {
-            block_dev,
+            block_cache: async_fs::block_cache::BlockCache::new(block_dev, CACHE_SIZE).await?,
             error: Ok(()),
         })
     }
 
-    pub async fn open_fs(block_dev: Rc<RefCell<Dev>>) -> Result<Self> {
-        let mut dev = block_dev.borrow_mut();
-
-        let block = Block::from_dev(dev.deref_mut(), 0).await?;
+    pub async fn open_fs(mut block_dev: Dev) -> Result<Self> {
+        let block = Block::from_dev(&mut block_dev, 0).await?;
         let fbh = block.get_at_offset::<SuperblockHeader>(0);
 
         let num_blocks = fbh.num_blocks;
-        if num_blocks < 3 || num_blocks == u64::MAX || num_blocks > dev.num_blocks() {
+        if num_blocks < 3 || num_blocks == u64::MAX || num_blocks > block_dev.num_blocks() {
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -69,26 +65,39 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
             todo!("roll back or commit the TXN")
         }
 
-        core::mem::drop(dev);
         Ok(Self {
-            block_dev,
+            block_cache: async_fs::block_cache::BlockCache::new(block_dev, CACHE_SIZE).await?,
             error: Ok(()),
         })
+    }
+
+    fn check_error(&self) -> Result<()> {
+        if let Err(err) = &self.error {
+            Err(err.kind().into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn make_error(&mut self) -> Result<()> {
+        assert!(self.error.is_ok());
+        self.error = Err(ErrorKind::InvalidData.into());
+        self.check_error()
     }
 
     async fn find_entry_by_id(
         &mut self,
         parent_id: EntryId,
         entry_id: EntryId,
-    ) -> Result<(u64 /* block_no */, usize /* entry_pos */)> {
+    ) -> Result<(EntryId, usize /* entry_pos */)> {
         self.find_entry(parent_id, |e| e.id == entry_id).await
     }
 
     async fn find_entry_by_name(
         &mut self,
         parent_id: EntryId,
-        name: &Utf8Path,
-    ) -> Result<(u64 /* block_no */, usize /* entry_pos */)> {
+        name: &str,
+    ) -> Result<(EntryId, usize /* entry_pos */)> {
         self.find_entry(parent_id, |e| {
             if let Ok(s) = core::str::from_utf8(&e.name[0..(e.name_len as usize)]) {
                 s == name
@@ -103,30 +112,29 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
         &mut self,
         parent_id: EntryId,
         pred: F,
-    ) -> Result<(u64 /* block_no */, usize /* entry_pos */)>
+    ) -> Result<(EntryId, usize /* entry_pos */)>
     where
-        F: Fn(&DirEntryInternal) -> bool,
+        F: Fn(&DirEntry) -> bool,
     {
-        self.error?;
-        let mut dev = self.block_dev.borrow_mut();
+        self.check_error()?;
 
-        let parent_block = Block::from_dev(dev.deref_mut(), parent_id.block_no).await?;
-        let meta = unsafe { parent_block.block().get::<EntryMetadata>() };
+        let parent_block = self.block_cache.get_block(parent_id.block_no).await?;
+        let meta = parent_block.block().get_at_offset::<EntryMetadata>(0);
         let valid = meta.validate_dir(parent_id);
         if valid.is_err() {
-            let _ = self.make_error();
-            return Err(valid.err().unwrap());
+            self.make_error()?;
+            unreachable!()
         }
 
         let num_entries = meta.size;
         if num_entries <= MAX_ENTRIES_IN_META_BLOCK {
             for pos in 0..num_entries {
-                let entry = parent_block.block().get_dir_entry((pos + 1) as usize);
+                let entry = block_get_dir_entry(parent_block.block(), (pos + 1) as usize);
                 if pred(entry) {
-                    return Ok((parent_id.block_no, (pos + 1) as usize));
+                    return Ok((entry.id, (pos + 1) as usize));
                 }
             }
-            return Err(FsError::NotFound);
+            return Err(ErrorKind::NotFound.into());
         }
 
         if num_entries <= MAX_ENTRIES_ONLY_DATA_BLOCKS {
@@ -138,13 +146,13 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
 
             let mut curr_entry_idx = 0;
             for block_idx in 0..num_blocks {
-                let block_no = block_nos.get_datablock_no_in_meta(block_idx);
-                let block = self.blockcache.read(block_no)?;
+                let block_no = block_get_datablock_no_in_meta(&block_nos, block_idx);
+                let block = self.block_cache.get_block(block_no).await?;
 
                 for pos in 0..MAX_ENTRIES_IN_DATA_BLOCK {
-                    let entry = block.block().get_dir_entry(pos as usize);
+                    let entry = block_get_dir_entry(block.block(), pos as usize);
                     if pred(entry) {
-                        return Ok((block_no, pos as usize));
+                        return Ok((entry.id, pos as usize));
                     }
                     curr_entry_idx += 1;
                     if curr_entry_idx >= num_entries {
@@ -152,7 +160,7 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
                     }
                 }
             }
-            return Err(FsError::NotFound);
+            return Err(ErrorKind::NotFound.into());
         }
 
         let num_link_blocks = num_entries.div_ceil(MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST);
@@ -165,16 +173,16 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
         let mut curr_entry_idx = 0;
         let mut curr_block_idx = 0;
         for link_block_idx in 0..num_link_blocks {
-            let link_block_no = link_block_nos.get_datablock_no_in_meta(link_block_idx);
-            let link_block = self.blockcache.read(link_block_no)?;
+            let link_block_no = block_get_datablock_no_in_meta(&link_block_nos, link_block_idx);
+            let link_block = self.block_cache.get_block(link_block_no).await?;
             let data_block_nos = *link_block.block();
             for pos_block in 0..512 {
-                let data_block_no = data_block_nos.get_datablock_no_in_link(pos_block);
-                let block = self.blockcache.read(data_block_no)?;
+                let data_block_no = block_get_datablock_no_in_link(&data_block_nos, pos_block);
+                let block = self.block_cache.get_block(data_block_no).await?;
                 for pos in 0..MAX_ENTRIES_IN_DATA_BLOCK {
-                    let entry = block.block().get_dir_entry(pos as usize);
+                    let entry = block_get_dir_entry(block.block(), pos as usize);
                     if pred(entry) {
-                        return Ok((data_block_no, pos as usize));
+                        return Ok((entry.id, pos as usize));
                     }
                     curr_entry_idx += 1;
                     if curr_entry_idx >= num_entries {
@@ -187,20 +195,32 @@ impl<Dev: AsyncBlockDevice> SrFs<Dev> {
                 }
             }
         }
-        Err(FsError::NotFound)
+
+        Err(ErrorKind::NotFound.into())
     }
 }
 
 impl<Dev: AsyncBlockDevice> async_fs::FileSystem for SrFs<Dev> {
-    async fn stat(&mut self, full_path: &camino::Utf8Path) -> std::io::Result<async_fs::EntryId> {
-        todo!()
+    async fn stat(&mut self, parent: async_fs::EntryId, name: &str) -> std::io::Result<EntryId> {
+        self.check_error()?;
+
+        let parent_block = self.block_cache.get_block(parent.block_no).await?;
+        let meta = parent_block.block().get_at_offset::<EntryMetadata>(0);
+
+        if meta.validate(parent).is_err() {
+            self.make_error()?;
+            unreachable!()
+        }
+
+        let (entry, _) = self.find_entry_by_name(parent, name).await?;
+        Ok(entry)
     }
 
     async fn create_entry(
         &mut self,
         parent: async_fs::EntryId,
         kind: async_fs::EntryKind,
-        name: &camino::Utf8Path, // Leaf name.
+        name: &str, // Leaf name.
     ) -> std::io::Result<async_fs::EntryId> {
         todo!()
     }
@@ -218,22 +238,29 @@ impl<Dev: AsyncBlockDevice> async_fs::FileSystem for SrFs<Dev> {
         todo!()
     }
 
-    async fn name(&mut self, entry: async_fs::EntryId) -> std::io::Result<camino::Utf8PathBuf> {
+    async fn name(&mut self, entry: EntryId) -> std::io::Result<String> {
         if entry == ROOT_DIR_ID {
             return Ok("/".into());
         }
 
-        let mut dev = self.block_dev.borrow_mut();
-        let block = Block::from_dev(dev.deref_mut(), entry.block_no).await?;
-        let meta = block.get_at_offset::<EntryMetadata>(0);
+        let block = self.block_cache.get_block(entry.block_no).await?;
+        let meta = block.block().get_at_offset::<EntryMetadata>(0);
 
-        meta.validate(entry).map_err(map_fs_error)?;
+        if meta.validate(entry).is_err() {
+            self.make_error()?;
+            unreachable!()
+        }
 
         let parent_id = meta.parent_id;
-        let (block_no, entry_pos) = self.find_entry_by_id(parent_id, entry).await?;
-        let block = Block::from_dev(dev.deref_mut(), block_no).await?;
-        let dir_entry = block.block().get_dir_entry(entry_pos);
-        Ok(dir_entry.to_owned()?.name)
+        let (_, entry_pos) = self.find_entry_by_id(parent_id, entry).await?;
+        let parent_block = self.block_cache.get_block(parent_id.block_no).await?;
+        let dir_entry = block_get_dir_entry(parent_block.block(), entry_pos);
+
+        let Ok(name) = dir_entry.get_name() else {
+            self.make_error()?;
+            unreachable!()
+        };
+        Ok(name.to_owned())
     }
 
     async fn size(&mut self, entry: async_fs::EntryId) -> std::io::Result<usize> {
@@ -262,7 +289,7 @@ impl<Dev: AsyncBlockDevice> async_fs::FileSystem for SrFs<Dev> {
         &mut self,
         entry: async_fs::EntryId,
         new_parent: async_fs::EntryId,
-        new_name: &camino::Utf8Path,
+        new_name: &str,
     ) -> std::io::Result<async_fs::EntryId> {
         todo!()
     }

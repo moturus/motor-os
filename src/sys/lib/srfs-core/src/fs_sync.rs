@@ -7,7 +7,6 @@ use core::ptr::copy_nonoverlapping;
 use std::io::ErrorKind;
 
 use async_fs::{BLOCK_SIZE, Block};
-use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::block_cache::BlockCache;
 
@@ -108,12 +107,12 @@ impl SyncFileSystem {
     }
 
     /// Create a new file.
-    pub fn add_file(&mut self, parent_id: EntryId, name: &Utf8Path) -> Result<EntryId> {
+    pub fn add_file(&mut self, parent_id: EntryId, name: &str) -> Result<EntryId> {
         self.add_directory_entry(parent_id, name, true)
     }
 
     /// Create a new directory.
-    pub fn add_directory(&mut self, parent_id: EntryId, name: &Utf8Path) -> Result<EntryId> {
+    pub fn add_directory(&mut self, parent_id: EntryId, name: &str) -> Result<EntryId> {
         self.add_directory_entry(parent_id, name, false)
     }
 
@@ -125,14 +124,14 @@ impl SyncFileSystem {
         }
     }
 
-    fn validate_new_entry(&mut self, parent_id: EntryId, name: &Utf8Path) -> Result<()> {
+    fn validate_new_entry(&mut self, parent_id: EntryId, name: &str) -> Result<()> {
         self.check_error()?;
 
         validate_filename(name)?;
         if parent_id.block_no >= self.num_blocks || parent_id.block_no < 1 {
             return Err(ErrorKind::InvalidInput.into());
         }
-        if self.find_entry_by_name(parent_id, name.as_str()).is_ok() {
+        if self.find_entry_by_name(parent_id, name).is_ok() {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
@@ -151,7 +150,7 @@ impl SyncFileSystem {
         &mut self,
         parent_id: EntryId,
         child_id: EntryId,
-        child_name: &Utf8Path,
+        child_name: &str,
     ) -> Result<()> {
         // let sbh = self.superblock.header();
         // assert_ne!(TXN_TYPE_NONE, sbh.txn_type);
@@ -338,7 +337,7 @@ impl SyncFileSystem {
     fn add_directory_entry(
         &mut self,
         parent_id: EntryId,
-        name: &Utf8Path,
+        name: &str,
         is_file: bool,
     ) -> Result<EntryId> {
         self.check_error()?;
@@ -431,13 +430,9 @@ impl SyncFileSystem {
         ))
     }
 
-    pub fn get_directory_entry_by_name(
-        &mut self,
-        parent: EntryId,
-        name: &Utf8Path,
-    ) -> Result<DirEntry> {
+    pub fn get_directory_entry_by_name(&mut self, parent: EntryId, name: &str) -> Result<DirEntry> {
         self.check_error()?;
-        let (block_no, entry_pos) = self.find_entry_by_name(parent, name.as_str())?;
+        let (block_no, entry_pos) = self.find_entry_by_name(parent, name)?;
         let block = self.blockcache.read(block_no).unwrap();
         Ok(*block_get_dir_entry(block.block(), entry_pos))
     }
@@ -698,7 +693,7 @@ impl SyncFileSystem {
         Ok(Some(meta.parent_id))
     }
 
-    pub fn get_name(&mut self, entry_id: EntryId) -> Result<Utf8PathBuf> {
+    pub fn get_name(&mut self, entry_id: EntryId) -> Result<String> {
         if entry_id == ROOT_DIR_ID {
             return Ok("/".into());
         }
@@ -719,7 +714,7 @@ impl SyncFileSystem {
         &mut self,
         entry_id: EntryId,
         new_parent: EntryId,
-        new_name: &Utf8Path,
+        new_name: &str,
     ) -> Result<()> {
         self.check_error()?;
         #[cfg(debug_assertions)]

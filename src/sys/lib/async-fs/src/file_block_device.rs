@@ -81,6 +81,6 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        Ok(())
+        self.file.flush().await
     }
 }

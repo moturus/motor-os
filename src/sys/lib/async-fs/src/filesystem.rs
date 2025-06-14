@@ -1,4 +1,3 @@
-use camino::{Utf8Path, Utf8PathBuf};
 use std::io::Result;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,14 +43,14 @@ impl EntryId {
 /// Filesystem trait.
 pub trait FileSystem {
     /// Find a file or directory by its full path.
-    async fn stat(&mut self, full_path: &Utf8Path) -> Result<EntryId>;
+    async fn stat(&mut self, parent: EntryId, filename: &str) -> Result<EntryId>;
 
     /// Create a file or directory.
     async fn create_entry(
         &mut self,
         parent: EntryId,
         kind: EntryKind,
-        name: &Utf8Path, // Leaf name.
+        name: &str, // Leaf name.
     ) -> Result<EntryId>;
 
     /// Delete the file or directory.
@@ -66,7 +65,7 @@ pub trait FileSystem {
     ) -> Result<usize>;
 
     /// Filename of the entry, without parent directories.
-    async fn name(&mut self, entry: EntryId) -> Result<Utf8PathBuf>;
+    async fn name(&mut self, entry: EntryId) -> Result<String>;
 
     /// The size of the file in bytes, or the number of children in the directory.
     async fn size(&mut self, entry: EntryId) -> Result<usize>;
@@ -83,7 +82,7 @@ pub trait FileSystem {
         &mut self,
         entry: EntryId,
         new_parent: EntryId,
-        new_name: &Utf8Path,
+        new_name: &str,
     ) -> Result<EntryId>;
 
     /// Resize the file.

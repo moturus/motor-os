@@ -1,7 +1,6 @@
 use super::*;
 use async_fs::BLOCK_SIZE;
 use async_fs::Block;
-use camino::Utf8Path;
 /// Various data structures as they are on the permanent storage.
 ///
 /// EntryMetadata is the same for files and directories.
@@ -115,21 +114,21 @@ impl std::fmt::Debug for DirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DirEntryInternal")
             .field("id", &self.id)
-            .field("name", &self.get_name().unwrap().as_str())
+            .field("name", &self.get_name().unwrap())
             .finish()
     }
 }
 
 impl DirEntry {
-    pub fn set_name(&mut self, name: &Utf8Path) {
-        let bytes = name.as_str().as_bytes();
+    pub fn set_name(&mut self, name: &str) {
+        let bytes = name.as_bytes();
         assert!(bytes.len() <= 255);
 
         unsafe { copy_nonoverlapping(bytes.as_ptr(), self.name.as_mut_ptr(), bytes.len()) };
         self.name_len = bytes.len() as u8;
     }
 
-    pub fn get_name(&self) -> Result<&Utf8Path> {
+    pub fn get_name(&self) -> Result<&str> {
         let name_str = str::from_utf8(&self.name[0..(self.name_len as usize)])
             .map_err(|_| std::io::Error::from(ErrorKind::InvalidData))?;
         Ok(name_str.into())
@@ -375,8 +374,7 @@ impl SuperblockHeader {
     }
 }
 
-pub(crate) fn validate_filename(name: &Utf8Path) -> Result<()> {
-    let name = name.as_str();
+pub(crate) fn validate_filename(name: &str) -> Result<()> {
     if name.len() > 255 || name.contains('/') || name == "." || name == ".." {
         return Err(ErrorKind::InvalidFilename.into());
     }
@@ -395,7 +393,7 @@ pub(crate) fn block_get_dir_entry(block: &Block, pos: usize) -> &DirEntry {
     block.get_at_offset::<DirEntry>(offset)
 }
 
-pub(crate) fn block_set_dir_entry(block: &mut Block, pos: usize, id: EntryId, name: &Utf8Path) {
+pub(crate) fn block_set_dir_entry(block: &mut Block, pos: usize, id: EntryId, name: &str) {
     let entry = block_get_dir_entry_mut(block, pos);
     entry.id = id;
     entry.set_name(name);

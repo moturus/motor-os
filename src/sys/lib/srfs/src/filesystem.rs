@@ -17,7 +17,7 @@ impl FileSystemInner {
         &mut self.fs_core
     }
 
-    fn create_child_dir(&mut self, parent: EntryId, child: &Utf8Path) -> Result<EntryId> {
+    fn create_child_dir(&mut self, parent: EntryId, child: &str) -> Result<EntryId> {
         self.fs_core.add_directory(parent, child)
     }
 
@@ -52,7 +52,7 @@ impl FileSystemInner {
         self.fs_core.add_file(parent, child)
     }
 
-    fn split_parent_child<'b>(&mut self, path: &'b Utf8Path) -> Result<(EntryId, &'b Utf8Path)> {
+    fn split_parent_child<'b>(&mut self, path: &'b Utf8Path) -> Result<(EntryId, &'b str)> {
         let Some(filename) = path.file_name() else {
             return Err(Error::from(ErrorKind::InvalidFilename));
         };

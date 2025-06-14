@@ -6,11 +6,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-file-dev = ["tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
+file-dev = ["camino", "tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
 
 [dependencies]
-camino = "1.1.10"
-lru = { version = "0.14.0", default-features = false }
+lru = "0.14.0"
 plain = "0.2.3"
 
-tokio = { version = "1.44.2", optional = true, default-features = false }
+tokio  = { version = "1.44.2", optional = true, default-features = false }
+camino = { version = "1.1.10", optional = true }

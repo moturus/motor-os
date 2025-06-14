@@ -5,7 +5,7 @@ use std::io::{ErrorKind, Result};
 use std::{cell::RefCell, rc::Rc};
 
 pub struct DirEntry {
-    name: Utf8PathBuf, // The leaf name.
+    name: String,      // The leaf name.
     path: Utf8PathBuf, // The full path.
     id: EntryId,
     fs: Rc<RefCell<FileSystemInner>>,
@@ -17,7 +17,7 @@ impl DirEntry {
         Ok(raw_attr.into())
     }
 
-    pub fn file_name(&self) -> &Utf8Path {
+    pub fn file_name(&self) -> &str {
         &self.name
     }
 

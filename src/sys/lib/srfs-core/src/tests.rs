@@ -43,8 +43,7 @@ fn basic() {
         fs.get_directory_entry(first, 0)
             .unwrap()
             .get_name()
-            .unwrap()
-            .as_str(),
+            .unwrap(),
         "second"
     );
     assert_eq!(
@@ -55,7 +54,7 @@ fn basic() {
     fs.move_rename(first, root, "1st".into()).unwrap();
     let first_2 = fs.get_directory_entry(root, 0).unwrap();
     assert_eq!(first, first_2.id);
-    assert_eq!(first_2.get_name().unwrap().as_str(), "1st");
+    assert_eq!(first_2.get_name().unwrap(), "1st");
 
     assert_eq!(
         fs.write(first, 0, "foo".as_bytes()).err().unwrap().kind(),
@@ -195,11 +194,11 @@ fn many_dirs() {
             "idx: {} name: {} result name: {}",
             idx,
             name,
-            result.as_ref().unwrap().get_name().unwrap().as_str()
+            result.as_ref().unwrap().get_name().unwrap()
         );
         assert_eq!(
             name,
-            result.as_ref().unwrap().get_name().unwrap().as_str(),
+            result.as_ref().unwrap().get_name().unwrap(),
             "idx: {} name: {}",
             idx,
             name
@@ -220,18 +219,18 @@ fn many_dirs() {
     println!("Validating dirs.");
     for idx in 0..crate::MAX_DIR_ENTRIES {
         let entry = fs.get_directory_entry(dir, idx).unwrap();
-        assert_eq!(entry.get_name().unwrap().as_str(), format!("dir_{}", idx));
+        assert_eq!(entry.get_name().unwrap(), format!("dir_{}", idx));
     }
 
     let entry = fs.get_directory_entry(dir, 12345).unwrap();
-    assert_eq!(entry.get_name().unwrap().as_str(), "dir_12345");
+    assert_eq!(entry.get_name().unwrap(), "dir_12345");
     fs.remove(entry.id).unwrap();
     assert_eq!(
         fs.remove(entry.id).err().unwrap().kind(),
         ErrorKind::InvalidData
     );
     let entry = fs.get_directory_entry(dir, 12345).unwrap();
-    assert_eq!(entry.get_name().unwrap().as_str(), "dir_65535"); // When an entry is removed, the last one is put into its place.
+    assert_eq!(entry.get_name().unwrap(), "dir_65535"); // When an entry is removed, the last one is put into its place.
     assert_eq!(
         crate::MAX_DIR_ENTRIES - 1,
         fs.get_num_entries(dir).unwrap() as u64

@@ -44,7 +44,7 @@ impl super::filesystem::DirectoryEntry for DirectoryEntrySrFs {
     }
 
     fn filename(&self) -> &str {
-        self.inner.file_name().as_str()
+        self.inner.file_name()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

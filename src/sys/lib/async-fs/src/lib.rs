@@ -4,6 +4,7 @@
 #[cfg(feature = "file-dev")]
 pub mod file_block_device;
 
+pub mod block_cache;
 mod block_device;
 mod filesystem;
 
@@ -24,6 +25,10 @@ const _: () = assert!(core::mem::size_of::<Block>() == BLOCK_SIZE);
 impl Block {
     pub const fn new_zeroed() -> Self {
         Self { bytes: [0; 4096] }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new_zeroed()
     }
 
     pub async fn from_dev<Dev: AsyncBlockDevice>(
