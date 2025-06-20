@@ -6,39 +6,7 @@ pub enum EntryKind {
     File,
 }
 
-/// EntryId uniquely identifies a file or a directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct EntryId {
-    /// The number of the block the Entry physically resides on.
-    /// Never changes, but can be re-used.
-    pub block_no: u64,
-    /// A unique number, to prevent ABA issues. Odd => dir, even => file.
-    /// Never changes and is never re-used.
-    pub generation: u64,
-}
-
-pub const ROOT_DIR_ID: EntryId = EntryId {
-    block_no: 1,
-    generation: 1,
-};
-
-impl EntryId {
-    pub fn new(block_no: u64, generation: u64) -> Self {
-        Self {
-            block_no,
-            generation,
-        }
-    }
-
-    pub fn kind(&self) -> EntryKind {
-        if (self.generation & 1) == 1 {
-            EntryKind::Directory
-        } else {
-            EntryKind::File
-        }
-    }
-}
+pub type EntryId = u128;
 
 /// Filesystem trait.
 pub trait FileSystem {

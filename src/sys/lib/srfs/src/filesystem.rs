@@ -39,7 +39,7 @@ impl FileSystemInner {
 
         let parent = path.parent().unwrap();
         let parent_id = self.create_dir_all(parent)?; // Recursion.
-        let entry = self.create_child_dir(parent_id, path.file_name().unwrap().into())?;
+        let entry = self.create_child_dir(parent_id, path.file_name().unwrap())?;
 
         self.cache.push(path.to_owned(), entry);
         Ok(entry)
@@ -60,7 +60,7 @@ impl FileSystemInner {
         let dir = if let Some(dir) = path.parent() {
             dir
         } else {
-            return Ok((SyncFileSystem::root_dir_id(), filename.into()));
+            return Ok((SyncFileSystem::root_dir_id(), filename));
         };
 
         let maybe_dir = self.get_entry(dir)?;
@@ -68,7 +68,7 @@ impl FileSystemInner {
             return Err(Error::from(ErrorKind::InvalidFilename));
         }
 
-        Ok((maybe_dir, filename.into()))
+        Ok((maybe_dir, filename))
     }
 
     fn exists(&mut self, path: &Utf8Path) -> Result<bool> {
@@ -132,7 +132,7 @@ impl FileSystemInner {
         let parent_id = self.get_entry(parent)?; // Recursion.
         let entry = self
             .fs_core
-            .get_directory_entry_by_name(parent_id, path.file_name().unwrap().into())?;
+            .get_directory_entry_by_name(parent_id, path.file_name().unwrap())?;
         self.cache.push(path.to_owned(), entry.id);
         Ok(entry.id)
     }

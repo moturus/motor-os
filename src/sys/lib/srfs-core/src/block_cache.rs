@@ -79,11 +79,7 @@ impl BlockCache {
     }
 
     fn read_new_block(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
-        let mut block = if let Some(block) = self.free_blocks.pop() {
-            block
-        } else {
-            CachedBlock::default()
-        };
+        let mut block = self.free_blocks.pop().unwrap_or_default();
 
         self.block_device
             .read_block(block_no, block.block.as_bytes_mut())?;
@@ -129,11 +125,7 @@ impl BlockCache {
     }
 
     fn get_new_block(&mut self, block_no: u64) -> &mut CachedBlock {
-        let block = if let Some(block) = self.free_blocks.pop() {
-            block
-        } else {
-            CachedBlock::default()
-        };
+        let block = self.free_blocks.pop().unwrap_or_default();
 
         if let Some((_, prev)) = self.cache.push(block_no, block) {
             self.free_blocks.push(prev);

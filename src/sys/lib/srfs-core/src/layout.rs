@@ -52,13 +52,41 @@ pub(crate) fn crc32_verify(bytes: &[u8]) -> Result<()> {
     }
 }
 
-pub use async_fs::EntryId;
 pub use async_fs::EntryKind;
+
+/// EntryId uniquely identifies a file or a directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct EntryId {
+    /// The number of the block the Entry physically resides on.
+    /// Never changes, but can be re-used.
+    pub block_no: u64,
+    /// A unique number, to prevent ABA issues. Odd => dir, even => file.
+    /// Never changes and is never re-used.
+    pub generation: u64,
+}
 
 pub const ROOT_DIR_ID: EntryId = EntryId {
     block_no: 1,
     generation: 1,
 };
+
+impl EntryId {
+    pub fn new(block_no: u64, generation: u64) -> Self {
+        Self {
+            block_no,
+            generation,
+        }
+    }
+
+    pub fn kind(&self) -> EntryKind {
+        if (self.generation & 1) == 1 {
+            EntryKind::Directory
+        } else {
+            EntryKind::File
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -131,7 +159,7 @@ impl DirEntry {
     pub fn get_name(&self) -> Result<&str> {
         let name_str = str::from_utf8(&self.name[0..(self.name_len as usize)])
             .map_err(|_| std::io::Error::from(ErrorKind::InvalidData))?;
-        Ok(name_str.into())
+        Ok(name_str)
     }
 }
 
