@@ -9,6 +9,7 @@ edition = "2024"
 file-dev = ["camino", "tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
 
 [dependencies]
+log = "0.4.20"
 lru = "0.14.0"
 plain = "0.2.3"
 

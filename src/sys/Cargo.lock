@@ -87,6 +87,7 @@ name = "async-fs"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "log",
  "lru",
  "plain",
  "tokio",

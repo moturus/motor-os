@@ -81,6 +81,7 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
     }
 
     async fn flush(&mut self) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
         self.file.flush().await
     }
 }
