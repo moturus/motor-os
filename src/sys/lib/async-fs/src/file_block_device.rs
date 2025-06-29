@@ -1,6 +1,7 @@
 use crate::AsyncBlockDevice;
 use crate::BLOCK_SIZE;
 use crate::Block;
+use async_trait::async_trait;
 use camino::Utf8Path;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -43,6 +44,7 @@ impl AsyncFileBlockDevice {
     }
 }
 
+#[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
     fn num_blocks(&self) -> u64 {
         self.num_blocks

@@ -1,0 +1,21 @@
+[package]
+name = "motor-fs"
+version = "0.1.0"
+edition = "2024"
+keywords = ["filesystem"]
+categories = ["filesystem"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+crc = "3.0"
+log = "0.4.20"
+plain = "0.2.3"
+async-fs = { path = "../async-fs" }
+
+[dev-dependencies]
+async-fs = { path = "../async-fs", features = ["file-dev"] }
+camino = "1.1.10"
+env_logger = "0.11"
+rand = "0.8"
+tokio = { version = "1.44.2", default-features = false, features = ["rt"] }

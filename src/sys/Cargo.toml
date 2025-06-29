@@ -12,6 +12,7 @@ members = [
   "lib/moto-rt",
   "lib/moto-sys",
   "lib/moto-sys-io",
+  "lib/motor-fs",
   "lib/srfs",
   "lib/srfs-core",
   "lib/timeq",

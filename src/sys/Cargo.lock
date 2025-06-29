@@ -86,6 +86,7 @@ dependencies = [
 name = "async-fs"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "camino",
  "log",
  "lru",
@@ -109,6 +110,17 @@ name = "async-stream-impl"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.101",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.88"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e539d3fca749fcee5236ab05e93a52867dd549cc157c8cb7f99595f3cedffdb5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -861,6 +873,20 @@ dependencies = [
  "log",
  "moto-rt",
  "moto-sys",
+]
+
+[[package]]
+name = "motor-fs"
+version = "0.1.0"
+dependencies = [
+ "async-fs",
+ "camino",
+ "crc",
+ "env_logger",
+ "log",
+ "plain",
+ "rand 0.8.5",
+ "tokio",
 ]
 
 [[package]]

@@ -5,7 +5,13 @@ use lru::LruCache;
 use std::io::Result;
 use std::num::NonZero;
 
-#[derive(Clone)]
+/// Cached block. Internally keeps dirty (= modified) or clean state.
+/// Panics if dropped when dirty.
+///
+/// The only way to mark a dirty block as clean is to save it
+/// via BlockCache::write_block().
+///
+/// NOT clone/copy to make the dirty state tracking robust.
 pub struct CachedBlock {
     block: Box<Block>,
     block_no: u64,
@@ -31,10 +37,18 @@ impl CachedBlock {
         }
     }
 
+    pub fn block_no(&self) -> u64 {
+        self.block_no
+    }
+
+    /// Get a read-only reference to the underlying data. Does not
+    /// modify dirty/clean state.
     pub fn block(&self) -> &Block {
         &self.block
     }
 
+    /// Get a read/write reference to the underlying data. Marks
+    /// the block dirty.
     pub fn block_mut(&mut self) -> &mut Block {
         self.dirty = true;
         &mut self.block
@@ -44,68 +58,45 @@ impl CachedBlock {
         assert!(self.dirty);
         self.dirty = false;
     }
+
+    /// Dispose of the block even if it is dirty.
+    pub fn forget(mut self) {
+        self.dirty = false;
+    }
 }
 
-pub struct BlockCache<Dev: AsyncBlockDevice> {
-    block_dev: Dev,
-
+/// LRU-based block cache.
+pub struct BlockCache {
+    block_dev: Box<dyn AsyncBlockDevice>,
     cache: LruCache<u64, CachedBlock>,
-
-    // We always keep the first two blocks cached.
-    block_0: CachedBlock,
-    block_1: CachedBlock,
 
     free_blocks: Vec<CachedBlock>,
 }
 
-impl<Dev: AsyncBlockDevice> BlockCache<Dev> {
-    pub async fn new(mut block_dev: Dev, max_len: usize) -> Result<Self> {
-        let mut block_0 = CachedBlock::new_empty(0);
-        block_dev.read_block(0, &mut block_0.block).await?;
-
-        let mut block_1 = CachedBlock::new_empty(1);
-        block_dev.read_block(1, &mut block_1.block).await?;
-
+// TODO: add batch writes.
+impl BlockCache {
+    pub async fn new(block_dev: Box<dyn AsyncBlockDevice>, max_len: usize) -> Result<Self> {
         Ok(Self {
             cache: LruCache::new(NonZero::new(max_len).unwrap()),
             block_dev,
-            block_0,
-            block_1,
             free_blocks: Vec::new(),
         })
     }
 
+    /// Get a reference to a cached block.
     pub async fn get_block(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
-        if block_no == 0 {
-            return Ok(&mut self.block_0);
-        } else if block_no == 1 {
-            return Ok(&mut self.block_1);
-        }
-
-        {
-            // Unfortunately, the code below leads to a borrow checker error, even in 2024:
-            //
-            // if let Some(block) = self.cache.get_mut(&block_no) {
-            //     return Ok(block);
-            // }
-            //
-            // So we have to use the ugly workaround with contains + get_mut.
-            //
-            // TODO: fix this.
-            if self.cache.contains(&block_no) {
-                return Ok(self.cache.get_mut(&block_no).unwrap());
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        unsafe {
+            {
+                let this = self as *mut Self;
+                let this = this.as_mut().unwrap_unchecked();
+                if let Some(block) = this.cache.get_mut(&block_no) {
+                    return Ok(block);
+                }
             }
         }
 
-        self.internal_read_uncached_block(block_no).await
-    }
-
-    pub fn get_empty_block(&mut self, block_no: u64) -> &mut CachedBlock {
-        let block = self.internal_get_empty_block(block_no);
-        self.internal_push_block(block)
-    }
-
-    async fn internal_read_uncached_block(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
         let mut block = self.internal_get_empty_block(block_no);
 
         self.block_dev
@@ -115,10 +106,105 @@ impl<Dev: AsyncBlockDevice> BlockCache<Dev> {
         Ok(self.internal_push_block(block))
     }
 
+    /// Get an empty block. Use with caution: any previously stored
+    /// data in the block on the block device will be lost.
+    pub fn get_empty_block(&mut self, block_no: u64) -> &mut CachedBlock {
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        unsafe {
+            {
+                let this = self as *mut Self;
+                let this = this.as_mut().unwrap_unchecked();
+                if let Some(block) = this.cache.get_mut(&block_no) {
+                    assert!(!block.dirty);
+                    log::trace!("BlockCache::get_empty_block(): clearing cached block {block_no}");
+                    block.block.clear();
+                    return block;
+                }
+            }
+        }
+        let block = self.internal_get_empty_block(block_no);
+        self.internal_push_block(block)
+    }
+
+    pub async fn write_block(&mut self, block_no: u64) -> Result<()> {
+        let block = self.cache.get_mut(&block_no).expect("block not found");
+
+        self.block_dev.write_block(block_no, block.block()).await?;
+        block.mark_clean();
+        Ok(())
+    }
+
+    pub async fn write_block_if_dirty(&mut self, block_no: u64) -> Result<bool> {
+        let block = self.cache.get_mut(&block_no).expect("block not found");
+
+        if block.dirty {
+            self.block_dev.write_block(block_no, block.block()).await?;
+            block.mark_clean();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Get a cached block that is managed by the caller, in case the caller
+    /// needs to operate multiple cached blocks (borrow checker won't allow
+    /// working with multiple borrowed blocks).
+    ///
+    /// Dirty pinned blocks must be unpinned to be saved later.
+    /// Clean pinned blocks can be safely dropped.
+    pub async fn pin_block(&mut self, block_no: u64) -> Result<CachedBlock> {
+        if let Some(block) = self.cache.pop(&block_no) {
+            return Ok(block);
+        }
+
+        let mut block = self.internal_get_empty_block(block_no);
+        self.block_dev
+            .read_block(block_no, &mut block.block)
+            .await?;
+
+        Ok(block)
+    }
+
+    pub fn pin_empty_block(&mut self, block_no: u64) -> CachedBlock {
+        if let Some(mut block) = self.cache.pop(&block_no) {
+            assert!(!block.dirty);
+            block.block.clear();
+            return block;
+        }
+
+        self.internal_get_empty_block(block_no)
+    }
+
+    /// Put a pinned block back into the cache. Note that if the block is dirty,
+    /// it must be saved via write_block() later.
+    pub fn unpin_block(&mut self, block: CachedBlock) -> &mut CachedBlock {
+        self.internal_push_block(block)
+    }
+
+    pub async fn flush(&mut self) -> Result<()> {
+        // #[cfg(debug_assertions)]
+        {
+            for (block_no, block) in self.cache.iter() {
+                assert!(!block.dirty, "Block {block_no} is dirty.");
+            }
+        }
+
+        self.block_dev.flush().await
+    }
+
+    pub fn device_mut(&mut self) -> &mut dyn AsyncBlockDevice {
+        self.block_dev.as_mut()
+    }
+
+    pub fn device(&self) -> &dyn AsyncBlockDevice {
+        self.block_dev.as_ref()
+    }
+
     fn internal_get_empty_block(&mut self, block_no: u64) -> CachedBlock {
         if let Some(mut block) = self.free_blocks.pop() {
-            block.block.clear();
             assert!(!block.dirty);
+            block.block.clear();
             block.block_no = block_no;
             block
         } else {
@@ -135,36 +221,5 @@ impl<Dev: AsyncBlockDevice> BlockCache<Dev> {
         }
 
         self.cache.get_mut(&block_no).unwrap()
-    }
-
-    pub async fn write_block(&mut self, block_no: u64) -> Result<()> {
-        let block = if block_no == 0 {
-            &mut self.block_0
-        } else if block_no == 1 {
-            &mut self.block_1
-        } else {
-            self.cache.get_mut(&block_no).expect("block not found")
-        };
-
-        self.block_dev.write_block(block_no, block.block()).await?;
-        block.mark_clean();
-        Ok(())
-    }
-
-    pub async fn flush(&mut self) -> Result<()> {
-        // #[cfg(debug_assertions)]
-        {
-            assert!(!self.block_0.dirty);
-            assert!(!self.block_1.dirty);
-            for (block_no, block) in self.cache.iter() {
-                assert!(!block.dirty, "Block {block_no} is dirty.");
-            }
-        }
-
-        self.block_dev.flush().await
-    }
-
-    pub fn device(&mut self) -> &mut Dev {
-        &mut self.block_dev
     }
 }

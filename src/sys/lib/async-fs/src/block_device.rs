@@ -1,7 +1,9 @@
 use crate::Block;
+use async_trait::async_trait;
 use std::io::Result;
 
 /// Asynchronous Block Device.
+#[async_trait(?Send)]
 pub trait AsyncBlockDevice {
     /// The number of blocks in this device.
     fn num_blocks(&self) -> u64;

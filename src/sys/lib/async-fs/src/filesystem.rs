@@ -8,10 +8,74 @@ pub enum EntryKind {
 
 pub type EntryId = u128;
 
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(8))]
+pub struct Timestamp {
+    pub secs: u64,
+    pub ns: u32,
+    _pad: u32,
+}
+
+impl Timestamp {
+    pub fn now() -> Self {
+        {
+            let ts = std::time::UNIX_EPOCH.elapsed().unwrap();
+
+            Self {
+                secs: ts.as_secs(),
+                ns: ts.subsec_nanos(),
+                _pad: 0,
+            }
+        }
+    }
+
+    pub const fn zero() -> Self {
+        Self {
+            secs: 0,
+            ns: 0,
+            _pad: 0,
+        }
+    }
+}
+
+impl From<Timestamp> for std::time::SystemTime {
+    fn from(ts: Timestamp) -> Self {
+        let dur = std::time::Duration::new(ts.secs, ts.ns);
+        std::time::SystemTime::checked_add(&std::time::UNIX_EPOCH, dur).unwrap()
+    }
+}
+
+impl From<std::time::SystemTime> for Timestamp {
+    fn from(value: std::time::SystemTime) -> Self {
+        let dur = value
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO);
+
+        Timestamp {
+            secs: dur.as_secs(),
+            ns: dur.subsec_nanos(),
+            _pad: 0,
+        }
+    }
+}
+
+/// Directory Entry Metadata.
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(8))]
+pub struct Metadata {
+    pub created: Timestamp,
+    pub modified: Timestamp,
+    pub accessed: Timestamp,
+    pub size: u64,                 // File size or the number of directory entries.
+    pub user_extensions: [u8; 72], // Permissions, ACL, whatever.
+}
+
+const _: () = assert!(128 == core::mem::size_of::<Metadata>());
+
 /// Filesystem trait.
 pub trait FileSystem {
     /// Find a file or directory by its full path.
-    async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<EntryId>;
+    async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>>;
 
     /// Create a file or directory.
     async fn create_entry(
@@ -24,8 +88,11 @@ pub trait FileSystem {
     /// Delete the file or directory.
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()>;
 
-    /// Get a specific entry.
-    async fn get_entry_by_pos(&mut self, parent_id: EntryId, pos: usize) -> Result<EntryId>;
+    /// Get the first entry in a directory.
+    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>>;
+
+    /// Get the next entry in a directory.
+    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Get the parent of the entry.
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>>;
@@ -33,8 +100,8 @@ pub trait FileSystem {
     /// Filename of the entry, without parent directories.
     async fn name(&mut self, entry_id: EntryId) -> Result<String>;
 
-    /// The size of the file in bytes, or the number of children in the directory.
-    async fn size(&mut self, entry_id: EntryId) -> Result<u64>;
+    /// The metadata of the directory entry.
+    async fn metadata(&mut self, entry_id: EntryId) -> Result<Metadata>;
 
     /// Read bytes from a file.
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize>;
@@ -53,6 +120,9 @@ pub trait FileSystem {
 
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()>;
+
+    /// The total number of blocks in the FS.
+    fn num_blocks(&self) -> u64;
 
     async fn empty_blocks(&mut self) -> Result<u64>;
 
