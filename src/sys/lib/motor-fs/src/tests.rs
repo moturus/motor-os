@@ -1,4 +1,5 @@
 use async_fs::BLOCK_SIZE;
+use async_fs::EntryKind;
 use async_fs::FileSystem;
 use camino::Utf8PathBuf;
 use rand::RngCore;
@@ -68,6 +69,9 @@ async fn basic_test() -> Result<()> {
     let root_metadata = fs.metadata(root).await?;
     let first_metadata = fs.metadata(first).await?;
     let ts_now = SystemTime::now();
+
+    assert_eq!(root_metadata.kind, EntryKind::Directory);
+    assert_eq!(first_metadata.kind, EntryKind::Directory);
 
     assert!(ts_format <= root_metadata.created.into());
     assert!(ts_format <= root_metadata.modified.into());
@@ -261,6 +265,7 @@ async fn basic_test() -> Result<()> {
     std::fs::remove_file(path.clone()).unwrap();
     */
 
+    println!("basic_test PASS");
     Ok(())
 }
 

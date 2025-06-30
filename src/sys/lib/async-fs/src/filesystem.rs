@@ -1,19 +1,19 @@
 use std::io::Result;
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
-    Directory,
-    File,
+    Directory = 1,
+    File = 2,
 }
 
 pub type EntryId = u128;
 
 #[derive(Clone, Copy, Debug)]
-#[repr(C, align(8))]
+#[repr(C, align(4))]
 pub struct Timestamp {
-    pub secs: u64,
-    pub ns: u32,
-    _pad: u32,
+    secs: [u8; 8],  // le bytes u64
+    nanos: [u8; 4], // le bytes u32
 }
 
 impl Timestamp {
@@ -22,25 +22,24 @@ impl Timestamp {
             let ts = std::time::UNIX_EPOCH.elapsed().unwrap();
 
             Self {
-                secs: ts.as_secs(),
-                ns: ts.subsec_nanos(),
-                _pad: 0,
+                secs: ts.as_secs().to_le_bytes(),
+                nanos: ts.subsec_nanos().to_le_bytes(),
             }
         }
     }
 
     pub const fn zero() -> Self {
         Self {
-            secs: 0,
-            ns: 0,
-            _pad: 0,
+            secs: [0; 8],
+            nanos: [0; 4],
         }
     }
 }
 
 impl From<Timestamp> for std::time::SystemTime {
     fn from(ts: Timestamp) -> Self {
-        let dur = std::time::Duration::new(ts.secs, ts.ns);
+        let dur =
+            std::time::Duration::new(u64::from_le_bytes(ts.secs), u32::from_le_bytes(ts.nanos));
         std::time::SystemTime::checked_add(&std::time::UNIX_EPOCH, dur).unwrap()
     }
 }
@@ -52,9 +51,8 @@ impl From<std::time::SystemTime> for Timestamp {
             .unwrap_or(std::time::Duration::ZERO);
 
         Timestamp {
-            secs: dur.as_secs(),
-            ns: dur.subsec_nanos(),
-            _pad: 0,
+            secs: dur.as_secs().to_le_bytes(),
+            nanos: dur.subsec_nanos().to_le_bytes(),
         }
     }
 }
@@ -63,10 +61,12 @@ impl From<std::time::SystemTime> for Timestamp {
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(8))]
 pub struct Metadata {
+    pub size: u64, // File size or the number of directory entries.
     pub created: Timestamp,
     pub modified: Timestamp,
     pub accessed: Timestamp,
-    pub size: u64,                 // File size or the number of directory entries.
+    pub kind: EntryKind,
+    _reserved: [u8; 11],
     pub user_extensions: [u8; 72], // Permissions, ACL, whatever.
 }
 

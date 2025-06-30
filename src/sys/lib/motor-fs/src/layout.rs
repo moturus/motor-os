@@ -150,6 +150,7 @@ impl Superblock {
         let ts = Timestamp::now();
         root_dir.dir_entry_header.metadata.created = ts;
         root_dir.dir_entry_header.metadata.modified = ts;
+        root_dir.dir_entry_header.metadata.kind = EntryKind::Directory;
 
         root_dir
             .btree_root
@@ -501,6 +502,8 @@ impl DirEntryBlock {
 
         child.dir_entry_header.entry_id = child_entry_id;
         child.set_name(filename).unwrap();
+
+        child.dir_entry_header.metadata.kind = kind;
 
         if kind == EntryKind::Directory {
             child.hash_seed = std::random::random();
