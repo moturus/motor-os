@@ -70,8 +70,8 @@ async fn basic_test() -> Result<()> {
     let first_metadata = fs.metadata(first).await?;
     let ts_now = SystemTime::now();
 
-    assert_eq!(root_metadata.kind, EntryKind::Directory);
-    assert_eq!(first_metadata.kind, EntryKind::Directory);
+    assert_eq!(root_metadata.kind(), EntryKind::Directory);
+    assert_eq!(first_metadata.kind(), EntryKind::Directory);
 
     assert!(ts_format <= root_metadata.created.into());
     assert!(ts_format <= root_metadata.modified.into());

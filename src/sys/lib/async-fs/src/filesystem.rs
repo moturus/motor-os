@@ -7,6 +7,21 @@ pub enum EntryKind {
     File = 2,
 }
 
+impl TryFrom<u8> for EntryKind {
+    type Error = std::io::Error;
+
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            1 => Ok(EntryKind::Directory),
+            2 => Ok(EntryKind::File),
+            x => {
+                log::error!("Corrupted EntryKind: {x}.");
+                Err(std::io::ErrorKind::InvalidData.into())
+            }
+        }
+    }
+}
+
 pub type EntryId = u128;
 
 #[derive(Clone, Copy, Debug)]
@@ -65,12 +80,29 @@ pub struct Metadata {
     pub created: Timestamp,
     pub modified: Timestamp,
     pub accessed: Timestamp,
-    pub kind: EntryKind,
+    kind: u8, // Must use u8, as using EntryKind leads to ub if not properly initialized.
     _reserved: [u8; 11],
     pub user_extensions: [u8; 72], // Permissions, ACL, whatever.
 }
 
 const _: () = assert!(128 == core::mem::size_of::<Metadata>());
+
+impl Metadata {
+    pub fn kind(&self) -> EntryKind {
+        self.kind.try_into().unwrap()
+    }
+
+    pub fn set_kind(&mut self, kind: EntryKind) {
+        self.kind = match kind {
+            EntryKind::Directory => 1,
+            EntryKind::File => 2,
+        };
+    }
+
+    pub fn try_kind(&self) -> std::io::Result<EntryKind> {
+        self.kind.try_into()
+    }
+}
 
 /// Filesystem trait.
 pub trait FileSystem {
