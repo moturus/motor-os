@@ -26,17 +26,15 @@ impl Default for KV {
     }
 }
 
-/// B+ Tree node. Size: ORDER * 16 + 40.
+/// B+ Tree node. Size: ORDER * 16 + 24.
 #[repr(C)]
 pub(crate) struct Node<const ORDER: usize> {
     this: BlockNo,
 
     parent_node: BlockNo, // if parent.is_null(), this is root.
-    prev_node: BlockNo,
-    next_node: BlockNo,
-    num_keys: u16, // The number of keys in use.
+    num_keys: u8,         // The number of keys in use.
     is_leaf: u8,
-    _padding: [u8; 5],
+    _padding: [u8; 6],
     kv: [KV; ORDER],
 }
 
@@ -48,8 +46,6 @@ impl<const ORDER: usize> Node<ORDER> {
     pub fn init_new_root(&mut self, this: BlockNo, parent: BlockNo) {
         self.this = this;
         self.parent_node = parent;
-        self.prev_node = BlockNo::null();
-        self.next_node = BlockNo::null();
         self.num_keys = 0;
         self.is_leaf = 1;
     }
@@ -108,7 +104,7 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
-    // Inserts links `val` at `key`, returns the list of blocks to save.
+    // Inserts link `val` at `key`, returns the list of blocks to save.
     pub async fn insert_link(
         &mut self,
         ctx: &mut Ctx<'_>,
@@ -145,6 +141,16 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(result);
         }
 
+        todo!()
+    }
+
+    // Deletes link `val` at `key`, returns the list of blocks to save.
+    pub async fn delete_link(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        key: u64,
+        val: BlockNo,
+    ) -> Result<Vec<BlockNo>> {
         todo!()
     }
 }

@@ -81,14 +81,12 @@ impl FileSystem for MotorFs {
             let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
 
             let name = child.name()?;
+            assert_eq!(parent.hash(name), hash);
+
             if name == filename {
                 let result = child.entry_id_with_validation(child_block_no)?.into();
                 self.block_cache.unpin_block(parent_block);
                 return Ok(Some(result));
-            }
-
-            if parent.hash(name) != hash {
-                break;
             }
 
             child_block_no = if let Some(id) = child.next_entry_id() {
@@ -111,7 +109,7 @@ impl FileSystem for MotorFs {
         validate_filename(filename)?;
 
         let parent_id: EntryIdInternal = parent_id.into();
-        let mut parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
+        let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
         let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
         parent.validate_entry(parent_id)?;
 
@@ -133,13 +131,11 @@ impl FileSystem for MotorFs {
             let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
 
             let name = child.name()?;
+            assert_eq!(parent.hash(name), hash);
+
             if name == filename {
                 self.block_cache.unpin_block(parent_block);
                 return Err(ErrorKind::AlreadyExists.into());
-            }
-
-            if parent.hash(name) != hash {
-                todo!("add new entry after child")
             }
 
             child_block_no = if let Some(id) = child.next_entry_id() {
@@ -151,7 +147,23 @@ impl FileSystem for MotorFs {
     }
 
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
-        todo!()
+        let id: EntryIdInternal = entry_id.into();
+        let block = self.block_cache.get_block(id.block_no()).await?;
+        let entry = block.block().get_at_offset::<DirEntryBlock>(0);
+        if entry.metadata().size > 0 {
+            return match entry.kind() {
+                EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
+                EntryKind::File => Err(ErrorKind::FileTooLarge.into()),
+            };
+        }
+
+        let parent_id = entry.parent_id();
+        let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
+        let mut ctx = Ctx::new(self);
+
+        log::error!("delete entry: {id:?}; parent: {parent_id:?}");
+
+        DirEntryBlock::delete_entry(parent_block, &mut ctx, id).await
     }
 
     /// Get the first entry in a directory.
@@ -185,7 +197,7 @@ impl FileSystem for MotorFs {
         let entry = block.block().get_at_offset::<DirEntryBlock>(0);
         entry.validate_entry(id)?;
 
-        Ok(entry.next_entry_id().map(|e| e.into()))
+        todo!()
     }
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {

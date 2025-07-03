@@ -86,6 +86,16 @@ async fn basic_test() -> Result<()> {
     assert!(ts_now >= first_metadata.created.into());
     assert!(ts_now >= first_metadata.modified.into());
 
+    fs.delete_entry(first).await.unwrap();
+    assert_eq!(
+        ErrorKind::NotFound,
+        fs.delete_entry(first).await.err().unwrap().kind()
+    );
+    assert_eq!(
+        ErrorKind::InvalidInput,
+        fs.delete_entry(root).await.err().unwrap().kind()
+    );
+
     /*
     const NUM_BLOCKS: u64 = 256;
     let path = std::env::temp_dir().join("fs_async_basic");

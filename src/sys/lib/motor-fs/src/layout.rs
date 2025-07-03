@@ -135,25 +135,22 @@ impl Superblock {
         let mut block_1 = Block::new_zeroed();
         let root_dir = block_1.get_mut_at_offset::<DirEntryBlock>(0);
 
-        root_dir.dir_entry_header.block_header.block_type = BlockType::DirEntry;
-        root_dir.dir_entry_header.block_header.in_use = 1;
-        root_dir.dir_entry_header.block_header.blocks_in_use = 1;
+        root_dir.block_header.block_type = BlockType::DirEntry;
+        root_dir.block_header.in_use = 1;
+        root_dir.block_header.blocks_in_use = 1;
 
-        root_dir.dir_entry_header.entry_id = ROOT_DIR_ID;
+        root_dir.entry_id = ROOT_DIR_ID;
 
         // set_name() calls validate_name() which will fail on "/", so we do it manually.
-        root_dir.dir_entry_header.name_bytes[0] = b'/';
-        root_dir.dir_entry_header.name_len = 1;
+        root_dir.name_bytes[0] = b'/';
+        root_dir.name_len = 1;
 
         root_dir.hash_seed = std::random::random();
 
         let ts = Timestamp::now();
-        root_dir.dir_entry_header.metadata.created = ts;
-        root_dir.dir_entry_header.metadata.modified = ts;
-        root_dir
-            .dir_entry_header
-            .metadata
-            .set_kind(EntryKind::Directory);
+        root_dir.metadata.created = ts;
+        root_dir.metadata.modified = ts;
+        root_dir.metadata.set_kind(EntryKind::Directory);
 
         root_dir
             .btree_root
@@ -180,6 +177,10 @@ impl Superblock {
             ));
         }
 
+        todo!()
+    }
+
+    pub async fn free_block(&mut self, ctx: &mut Ctx<'_>, block_no: BlockNo) -> Result<()> {
         todo!()
     }
 }
@@ -214,47 +215,38 @@ const _: () = assert!(16 == core::mem::size_of::<BlockHeader>());
 unsafe impl plain::Plain for BlockHeader {}
 
 /// Directory Entry (file or directory) Header.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(crate) struct DirEntryHeader {
-    block_header: BlockHeader,
-    entry_id: EntryIdInternal, // offset 48.
-
-    metadata: Metadata,                 // offset 64.
-    name_bytes: [u8; MAX_FILENAME_LEN], // offset 192.
-    name_len: u8,                       // offset 447.
-
-    prev_entry: EntryIdInternal, // 0 means no prev block.
-    next_entry: EntryIdInternal, // 0 means no next block.
-    parent_entry: EntryIdInternal,
-    _padding: [u8; 16],
-}
-
-const _: () = assert!(480 == core::mem::size_of::<DirEntryHeader>());
-unsafe impl plain::Plain for DirEntryHeader {}
-
-pub(crate) const DIR_ENTRY_BTREE_ORDER: usize = 223;
-pub(crate) const BTREE_ROOT_OFFSET: usize = 488;
-
-#[repr(C)]
+#[repr(C, align(4096))]
 pub(crate) struct DirEntryBlock {
-    dir_entry_header: DirEntryHeader,
+    block_header: BlockHeader,
+    entry_id: EntryIdInternal,  // offset 16.
+    parent_id: EntryIdInternal, // offset 32.
+
+    // When several entries hash names to the same value, they form an SLL.
+    next_entry_id: EntryIdInternal, // offset 48.
+
+    metadata: Metadata, // offset 64.
+
+    name_bytes: [u8; MAX_FILENAME_LEN], // offset 192.
+    name_len: u8,
 
     // We use Cityhash64 to hash entry names; each directory has a random hash seed.
-    hash_seed: u64, // offset 448.
+    hash_seed: u64, // offset 432.
 
     btree_root: bplus_tree::Node<DIR_ENTRY_BTREE_ORDER>,
 }
 
+unsafe impl plain::Plain for DirEntryBlock {}
+
+pub(crate) const DIR_ENTRY_BTREE_ORDER: usize = 226;
+pub(crate) const BTREE_ROOT_OFFSET: usize = 456;
+
 const _: () = assert!(BLOCK_SIZE == core::mem::size_of::<DirEntryBlock>());
 const _: () = assert!(BTREE_ROOT_OFFSET == core::mem::offset_of!(DirEntryBlock, btree_root));
 
-unsafe impl plain::Plain for DirEntryBlock {}
-
-pub(crate) const BTREE_NODE_ORDER: usize = 252;
+pub(crate) const BTREE_NODE_ORDER: usize = 253;
 pub(crate) const BTREE_NODE_OFFSET: usize = 24;
 
-#[repr(C)]
+#[repr(C, align(4096))]
 pub(crate) struct TreeNodeBlock {
     block_header: BlockHeader, // 16 bytes
     _padding: [u8; 8],
@@ -268,44 +260,54 @@ const _: () = assert!(BTREE_NODE_OFFSET == core::mem::offset_of!(TreeNodeBlock, 
 unsafe impl plain::Plain for TreeNodeBlock {}
 
 impl DirEntryBlock {
+    pub fn from_block(block: &Block) -> &Self {
+        block.get_at_offset(0)
+    }
+
+    pub fn from_block_mut(block: &mut Block) -> &mut Self {
+        block.get_mut_at_offset(0)
+    }
+
     pub async fn format_root_dir(&mut self) {
         todo!()
     }
 
     pub fn kind(&self) -> EntryKind {
-        match self.dir_entry_header.block_header.block_type {
+        match self.block_header.block_type {
             BlockType::FileEntry => EntryKind::File,
             BlockType::DirEntry => EntryKind::Directory,
             _ => panic!("Dir entries must be pre-validated."),
         }
     }
 
+    pub fn next_entry_id(&self) -> Option<EntryIdInternal> {
+        if self.next_entry_id.block_no.is_null() {
+            None
+        } else {
+            Some(self.next_entry_id)
+        }
+    }
+
     pub fn in_use(&self) -> Result<bool> {
-        let in_use = self.dir_entry_header.block_header.in_use;
+        let in_use = self.block_header.in_use;
         match in_use {
             0 => Ok(false),
             1 => Ok(true),
             _ => {
-                log::error!(
-                    "Corrupt dir entry {:?}: in_use: {in_use}",
-                    self.dir_entry_header.entry_id
-                );
+                log::error!("Corrupt dir entry {:?}: in_use: {in_use}", self.entry_id);
                 Err(ErrorKind::InvalidData.into())
             }
         }
     }
 
     pub fn entry_id_with_validation(&self, block_no: BlockNo) -> Result<EntryIdInternal> {
-        let entry_id = self.dir_entry_header.entry_id;
+        let entry_id = self.entry_id;
         if entry_id.block_no != block_no {
             log::error!("Corrupt dir entry: block no {block_no:?} does not match {entry_id:?}.");
             return Err(ErrorKind::InvalidData.into());
         }
-        if self.dir_entry_header.block_header.in_use != 1 {
-            log::error!(
-                "Corrupt dir entry {:?}: not in use.",
-                self.dir_entry_header.entry_id
-            );
+        if self.block_header.in_use != 1 {
+            log::error!("Corrupt dir entry {:?}: not in use.", self.entry_id);
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -324,11 +326,8 @@ impl DirEntryBlock {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        if self.dir_entry_header.entry_id != entry_id {
-            log::error!(
-                "Corrupt dir entry: {:?} != {entry_id:?}",
-                self.dir_entry_header.entry_id
-            );
+        if self.entry_id != entry_id {
+            log::error!("Corrupt dir entry: {:?} != {entry_id:?}", self.entry_id);
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -336,23 +335,23 @@ impl DirEntryBlock {
             log::error!(
                 "Corrupt dir entry: BTree Root BlockNo {:?} != {:?}",
                 self.btree_root.this(),
-                self.dir_entry_header.entry_id.block_no
+                self.entry_id.block_no
             );
             return Err(ErrorKind::InvalidData.into());
         }
 
-        match self.dir_entry_header.block_header.block_type {
+        match self.block_header.block_type {
             BlockType::FileEntry | BlockType::DirEntry => {}
             block_type => {
                 log::error!(
                     "Corrupt dir entry {:?}: block_type: {block_type:?}",
-                    self.dir_entry_header.entry_id
+                    self.entry_id
                 );
                 return Err(ErrorKind::InvalidInput.into());
             }
         }
 
-        let _ = self.dir_entry_header.metadata.try_kind()?;
+        let _ = self.metadata.try_kind()?;
 
         Ok(())
     }
@@ -372,33 +371,22 @@ impl DirEntryBlock {
         self.btree_root.first_child_with_key(ctx, hash).await
     }
 
-    pub fn next_entry_id(&self) -> Option<EntryIdInternal> {
-        if self.dir_entry_header.next_entry.block_no.is_null() {
-            None
-        } else {
-            Some(self.dir_entry_header.next_entry)
-        }
-    }
-
     pub fn parent_id(&self) -> EntryIdInternal {
-        self.dir_entry_header.parent_entry
+        self.parent_id
     }
 
     pub fn name(&self) -> Result<&str> {
-        let name_len = self.dir_entry_header.name_len as usize;
-        if name_len > self.dir_entry_header.name_bytes.len() {
+        let name_len = self.name_len as usize;
+        if name_len > self.name_bytes.len() {
             log::error!(
                 "Corrupt dir entry {:?}: name_len: {name_len}",
-                self.dir_entry_header.entry_id
+                self.entry_id
             );
             return Err(ErrorKind::InvalidData.into());
         }
-        let name_slice = &self.dir_entry_header.name_bytes[0..name_len];
+        let name_slice = &self.name_bytes[0..name_len];
         str::from_utf8(name_slice).map_err(|e| {
-            log::error!(
-                "Corrupt dir entry {:?}: utf8 error: {e:?}",
-                self.dir_entry_header.entry_id
-            );
+            log::error!("Corrupt dir entry {:?}: utf8 error: {e:?}", self.entry_id);
             ErrorKind::InvalidData.into()
         })
     }
@@ -406,14 +394,14 @@ impl DirEntryBlock {
     pub fn set_name(&mut self, filename: &str) -> Result<()> {
         validate_filename(filename)?;
 
-        self.dir_entry_header.name_bytes[..filename.len()].clone_from_slice(filename.as_bytes());
-        self.dir_entry_header.name_len = filename.len() as u8;
+        self.name_bytes[..filename.len()].clone_from_slice(filename.as_bytes());
+        self.name_len = filename.len() as u8;
 
         Ok(())
     }
 
     pub fn metadata(&self) -> &Metadata {
-        &self.dir_entry_header.metadata
+        &self.metadata
     }
 
     pub async fn insert(
@@ -427,7 +415,7 @@ impl DirEntryBlock {
             .block_mut()
             .get_mut_at_offset::<DirEntryBlock>(0);
         assert_eq!(hash, parent.hash(filename));
-        let parent_id = parent.dir_entry_header.entry_id;
+        let parent_id = parent.entry_id;
         assert_eq!(parent.btree_root.this(), parent_id.block_no);
 
         // Step 1: allocate a block for the new child. Makes sb_block dirty.
@@ -447,8 +435,8 @@ impl DirEntryBlock {
             .await
             .inspect_err(|err| todo!())?;
 
-        parent.dir_entry_header.metadata.size += 1;
-        parent.dir_entry_header.metadata.modified = Timestamp::now();
+        parent.metadata.size += 1;
+        parent.metadata.modified = Timestamp::now();
 
         // Step 4: start txn.
         log::warn!("DirEntryBlock::insert(): implement txn.");
@@ -497,33 +485,111 @@ impl DirEntryBlock {
     ) -> &'a mut Self {
         let child = child_block.get_mut_at_offset::<DirEntryBlock>(0);
 
-        child.dir_entry_header.block_header.block_type = match kind {
+        child.block_header.block_type = match kind {
             EntryKind::Directory => BlockType::DirEntry,
             EntryKind::File => BlockType::FileEntry,
         };
 
-        child.dir_entry_header.block_header.in_use = 1;
-        child.dir_entry_header.block_header.blocks_in_use = 1;
+        child.block_header.in_use = 1;
+        child.block_header.blocks_in_use = 1;
 
-        child.dir_entry_header.entry_id = child_entry_id;
+        child.entry_id = child_entry_id;
         child.set_name(filename).unwrap();
 
-        child.dir_entry_header.metadata.set_kind(kind);
+        child.metadata.set_kind(kind);
+        child.parent_id = self.entry_id;
 
         if kind == EntryKind::Directory {
             child.hash_seed = std::random::random();
         }
 
         let ts = Timestamp::now();
-        child.dir_entry_header.metadata.created = ts;
-        child.dir_entry_header.metadata.modified = ts;
-
-        child.btree_root.init_new_root(
-            child_entry_id.block_no,
-            self.dir_entry_header.entry_id.block_no,
-        );
+        child.metadata.created = ts;
+        child.metadata.modified = ts;
 
         child
+            .btree_root
+            .init_new_root(child_entry_id.block_no, self.entry_id.block_no);
+
+        child
+    }
+
+    pub async fn delete_entry(
+        mut parent_block: CachedBlock,
+        ctx: &mut Ctx<'_>,
+        entry_id: EntryIdInternal,
+    ) -> Result<()> {
+        let parent = parent_block
+            .block_mut()
+            .get_mut_at_offset::<DirEntryBlock>(0);
+        let parent_id = parent.entry_id;
+        log::error!("delete entry: parent: {parent_id:?}");
+        assert_eq!(parent.btree_root.this(), parent_id.block_no);
+
+        // Get the entry hash, to give it to B+ tree.
+        let hash = {
+            // entry_block should be cached.
+            let entry_block = ctx
+                .block_cache()
+                .get_block(entry_id.block_no())
+                .await
+                .inspect_err(|err| todo!())?;
+            let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
+            let name = entry.name()?;
+            parent.hash(name)
+        };
+
+        // Step 1: delete the link.
+        let changed_tree_blocks = parent
+            .btree_root
+            .delete_link(ctx, hash, entry_id.block_no)
+            .await
+            .inspect_err(|err| todo!())?;
+
+        // Step 2: update the parent metadata.
+        parent.metadata.size -= 1;
+        parent.metadata.modified = Timestamp::now();
+
+        // Step 3: free the entry block. Makes sb_block dirty.
+        let mut sb_block = ctx
+            .block_cache()
+            .pin_block(0)
+            .await
+            .inspect_err(|err| todo!())?;
+        let sb = sb_block.block_mut().get_mut_at_offset::<Superblock>(0);
+        sb.free_block(ctx, entry_id.block_no)
+            .await
+            .inspect_err(|err| todo!())?;
+
+        // Step 4: Start txn.
+        log::warn!("DirEntryBlock::delete(): implement txn.");
+
+        // Step 5: save changes.
+        // TODO: batch write blocks when implemented.
+        for block_no in changed_tree_blocks {
+            if block_no == parent_id.block_no {
+                continue;
+            }
+            ctx.block_cache()
+                .write_block(block_no.as_u64())
+                .await
+                .inspect_err(|_err| todo!())?;
+        }
+        ctx.block_cache().unpin_block(parent_block);
+        ctx.block_cache()
+            .write_block(parent_id.block_no())
+            .await
+            .inspect_err(|_err| todo!())?;
+
+        ctx.block_cache().unpin_block(sb_block);
+        ctx.block_cache()
+            .write_block(0)
+            .await
+            .inspect_err(|_err| todo!())?;
+
+        // Step 6: commit txn.
+
+        Ok(())
     }
 }
 
