@@ -1,4 +1,8 @@
 //! Motor FS.
+//!
+//! Note: it is relatively easy to corrupt the FS by crafting file data blocks
+//!       to resemble dir entry or tree blocks, and then issue operations like
+//!       insert/delete. This should be fixed at a higher (OS?) level.
 
 use async_fs::block_cache::BlockCache;
 use async_fs::{AsyncBlockDevice, FileSystem};
@@ -147,13 +151,21 @@ impl FileSystem for MotorFs {
     }
 
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
-        let id: EntryIdInternal = entry_id.into();
-        let block = self.block_cache.get_block(id.block_no()).await?;
-        let entry = block.block().get_at_offset::<DirEntryBlock>(0);
+        let entry_id: EntryIdInternal = entry_id.into();
+        if entry_id == ROOT_DIR_ID {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        let block = self.block_cache.get_block(entry_id.block_no()).await?;
+        let entry: &DirEntryBlock = DirEntryBlock::from_block(block.block());
+        entry.validate_entry(entry_id)?;
         if entry.metadata().size > 0 {
             return match entry.kind() {
                 EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
-                EntryKind::File => Err(ErrorKind::FileTooLarge.into()),
+                EntryKind::File => {
+                    log::error!("TODO: implement deleting non-empty files.");
+                    Err(ErrorKind::FileTooLarge.into())
+                }
             };
         }
 
@@ -161,9 +173,7 @@ impl FileSystem for MotorFs {
         let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
         let mut ctx = Ctx::new(self);
 
-        log::error!("delete entry: {id:?}; parent: {parent_id:?}");
-
-        DirEntryBlock::delete_entry(parent_block, &mut ctx, id).await
+        DirEntryBlock::delete_entry(parent_block, &mut ctx, entry_id).await
     }
 
     /// Get the first entry in a directory.

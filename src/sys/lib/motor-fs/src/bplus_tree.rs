@@ -149,8 +149,36 @@ impl<const ORDER: usize> Node<ORDER> {
         &mut self,
         ctx: &mut Ctx<'_>,
         key: u64,
-        val: BlockNo,
+        block_no: BlockNo,
     ) -> Result<Vec<BlockNo>> {
+        let mut result = vec![];
+
+        if self.is_leaf == 1 {
+            let Ok(pos) =
+                self.kv[..(self.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+            else {
+                return Err(ErrorKind::NotFound.into());
+            };
+
+            if self.kv[pos].child_block_no != block_no {
+                log::error!(
+                    "Node::delete_link(): bad link: {} vs {}.",
+                    self.kv[pos].child_block_no.as_u64(),
+                    block_no.as_u64()
+                );
+                return Err(ErrorKind::InvalidData.into());
+            }
+
+            for idx in pos..((self.num_keys - 1) as usize) {
+                self.kv[idx] = self.kv[idx + 1];
+            }
+
+            self.num_keys -= 1;
+
+            result.push(self.this);
+            return Ok(result);
+        }
+
         todo!()
     }
 }

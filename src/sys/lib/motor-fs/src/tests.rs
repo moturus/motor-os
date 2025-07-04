@@ -88,7 +88,7 @@ async fn basic_test() -> Result<()> {
 
     fs.delete_entry(first).await.unwrap();
     assert_eq!(
-        ErrorKind::NotFound,
+        ErrorKind::InvalidInput,
         fs.delete_entry(first).await.err().unwrap().kind()
     );
     assert_eq!(
@@ -647,3 +647,14 @@ fn large_file() {
     std::fs::remove_file(path.clone()).unwrap();
 }
 */
+
+#[test]
+fn test_hash_debug() {
+    #[cfg(debug_assertions)]
+    {
+        assert_eq!(
+            crate::DirEntryBlock::hash_debug("012345678"),
+            crate::DirEntryBlock::hash_debug("0123456789")
+        );
+    }
+}

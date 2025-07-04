@@ -98,20 +98,21 @@ pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 /// Superblock (block #0).
 #[repr(C)]
 pub(crate) struct Superblock {
-    magic: u64,       // MAGIC.
-    version: u64,     // 1 at the moment.
-    num_blocks: u64,  // Num blocks (may be less than what the device has).
-    free_blocks: u64, // The number of unused blocks.
-    generation: u64,  // Auto-incrementing. Used in EntityId.
+    magic: u64,         // MAGIC.
+    version: u64,       // 1 at the moment.
+    num_blocks: u64,    // Num blocks (may be less than what the device has).
+    free_blocks: u64,   // The number of unused blocks.
+    generation: u64,    // Auto-incrementing. Used in EntityId.
     freelist_head: u64, // The head of the block freelist.
-                      // empty_area_start: u64,        // All blocks after this one are unused.
-                      // txn_meta_block: u64,          // A meta block currently being worked on.
-                      // txn_data_block: u64,          // A file data block currently being worked on.
-                      // txn_link_block: u64,          // A directory list block or file data block list.
-                      // txn_list_of_links_block: u64, // A file list-of-lists block currently being worked on.
-                      // txn_blocks_owner: u64,        // The "owner" of the txn blocks to check upon bootup.
-                      // txn_type: u32,                // TXN_TYPE_***.
-                      // crc32: u32, // CRC32 of this data structure.
+    empty_area_start: u64, // All blocks after this one are unused.
+
+                        // txn_meta_block: u64,          // A meta block currently being worked on.
+                        // txn_data_block: u64,          // A file data block currently being worked on.
+                        // txn_link_block: u64,          // A directory list block or file data block list.
+                        // txn_list_of_links_block: u64, // A file list-of-lists block currently being worked on.
+                        // txn_blocks_owner: u64,        // The "owner" of the txn blocks to check upon bootup.
+                        // txn_type: u32,                // TXN_TYPE_***.
+                        // crc32: u32, // CRC32 of this data structure.
 }
 const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
 unsafe impl plain::Plain for Superblock {}
@@ -128,6 +129,7 @@ impl Superblock {
             version: 1,
             num_blocks,
             free_blocks: num_blocks - 2,
+            empty_area_start: 2,
             generation: 1,
             freelist_head: 0,
         };
@@ -169,10 +171,20 @@ impl Superblock {
         }
 
         if self.freelist_head == 0 {
+            if self.empty_area_start != (self.num_blocks - self.free_blocks) {
+                log::error!(
+                    "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
+                    self.num_blocks,
+                    self.free_blocks,
+                    self.empty_area_start
+                );
+                return Err(ErrorKind::InvalidData.into());
+            }
             self.free_blocks -= 1;
+            self.empty_area_start += 1;
             self.generation += 1;
             return Ok(EntryIdInternal::new(
-                BlockNo(self.num_blocks - self.free_blocks - 1),
+                BlockNo(self.empty_area_start - 1),
                 self.generation,
             ));
         }
@@ -181,6 +193,12 @@ impl Superblock {
     }
 
     pub async fn free_block(&mut self, ctx: &mut Ctx<'_>, block_no: BlockNo) -> Result<()> {
+        if block_no.as_u64() == (self.empty_area_start - 1) {
+            self.free_blocks += 1;
+            self.empty_area_start -= 1;
+            return Ok(());
+        }
+
         todo!()
     }
 }
@@ -315,8 +333,25 @@ impl DirEntryBlock {
         Ok(entry_id)
     }
 
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn hash_debug(filename: &str) -> u64 {
+        // To test hash collisions, in debug tests we keep the first bytes as hash.
+        let mut hash = 0_u64;
+        for idx in 0..8.min(filename.len()) {
+            let byte = filename.as_bytes()[idx];
+            hash |= (byte as u64) << (idx * 8);
+        }
+
+        hash
+    }
+
     pub fn hash(&self, filename: &str) -> u64 {
         assert_eq!(self.kind(), EntryKind::Directory);
+
+        #[cfg(all(test, debug_assertions))]
+        return Self::hash_debug(filename);
+
+        #[cfg(not(all(test, debug_assertions)))]
         crate::city_hash::city_hash64_with_seed(filename.as_bytes(), self.hash_seed)
     }
 
@@ -523,7 +558,6 @@ impl DirEntryBlock {
             .block_mut()
             .get_mut_at_offset::<DirEntryBlock>(0);
         let parent_id = parent.entry_id;
-        log::error!("delete entry: parent: {parent_id:?}");
         assert_eq!(parent.btree_root.this(), parent_id.block_no);
 
         // Get the entry hash, to give it to B+ tree.
@@ -534,10 +568,24 @@ impl DirEntryBlock {
                 .get_block(entry_id.block_no())
                 .await
                 .inspect_err(|err| todo!())?;
-            let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
+            let entry = DirEntryBlock::from_block(entry_block.block());
+            assert_eq!(entry.parent_id, parent_id); // The caller must ensure this.
+            if entry.next_entry_id().is_some() {
+                todo!("delete the entry from the list.");
+            }
             let name = entry.name()?;
             parent.hash(name)
         };
+
+        let Some(list_head_block_no) = parent.first_child_with_hash(ctx, hash).await? else {
+            parent_block.forget();
+            log::error!("Invalid hash for entry {entry_id:?}.");
+            return Err(ErrorKind::InvalidData.into());
+        };
+
+        if list_head_block_no != entry_id.block_no {
+            todo!("delete the entry from the list.");
+        }
 
         // Step 1: delete the link.
         let changed_tree_blocks = parent
@@ -550,7 +598,13 @@ impl DirEntryBlock {
         parent.metadata.size -= 1;
         parent.metadata.modified = Timestamp::now();
 
-        // Step 3: free the entry block. Makes sb_block dirty.
+        // Step 3: mark the entry as deleted.
+        let mut entry_block = ctx.block_cache().pin_block(entry_id.block_no()).await?;
+        let entry = DirEntryBlock::from_block_mut(entry_block.block_mut());
+        assert_eq!(0, entry.metadata.size); // TODO: implement deleting non-empty files.
+        entry.block_header.in_use = 0;
+
+        // Step 4: free the entry block. Makes sb_block dirty.
         let mut sb_block = ctx
             .block_cache()
             .pin_block(0)
@@ -561,10 +615,10 @@ impl DirEntryBlock {
             .await
             .inspect_err(|err| todo!())?;
 
-        // Step 4: Start txn.
+        // Step 5: Start txn.
         log::warn!("DirEntryBlock::delete(): implement txn.");
 
-        // Step 5: save changes.
+        // Step 6: save changes.
         // TODO: batch write blocks when implemented.
         for block_no in changed_tree_blocks {
             if block_no == parent_id.block_no {
@@ -578,6 +632,12 @@ impl DirEntryBlock {
         ctx.block_cache().unpin_block(parent_block);
         ctx.block_cache()
             .write_block(parent_id.block_no())
+            .await
+            .inspect_err(|_err| todo!())?;
+
+        ctx.block_cache().unpin_block(entry_block);
+        ctx.block_cache()
+            .write_block(entry_id.block_no())
             .await
             .inspect_err(|_err| todo!())?;
 
