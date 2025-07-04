@@ -33,7 +33,7 @@ impl CachedBlock {
         Self {
             block: Box::new(Block::new_zeroed()),
             block_no,
-            dirty: false,
+            dirty: true, // Need to ensure it is stored to disk, as we don't overwrite blocks on deletion.
         }
     }
 
@@ -62,6 +62,10 @@ impl CachedBlock {
     /// Dispose of the block even if it is dirty.
     pub fn forget(mut self) {
         self.dirty = false;
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 }
 
@@ -119,6 +123,7 @@ impl BlockCache {
                     assert!(!block.dirty);
                     log::trace!("BlockCache::get_empty_block(): clearing cached block {block_no}");
                     block.block.clear();
+                    block.mark_dirty();
                     return block;
                 }
             }
@@ -170,6 +175,7 @@ impl BlockCache {
         if let Some(mut block) = self.cache.pop(&block_no) {
             assert!(!block.dirty);
             block.block.clear();
+            block.mark_dirty();
             return block;
         }
 
@@ -206,6 +212,7 @@ impl BlockCache {
             assert!(!block.dirty);
             block.block.clear();
             block.block_no = block_no;
+            block.mark_dirty();
             block
         } else {
             CachedBlock::new_empty(block_no)

@@ -136,9 +136,11 @@ pub trait FileSystem {
     async fn metadata(&mut self, entry_id: EntryId) -> Result<Metadata>;
 
     /// Read bytes from a file.
+    /// Note that cross-block reads may not be supported.
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize>;
 
     /// Write bytes to a file.
+    /// Note that cross-block writes may not be supported.
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
 
     /// Rename and/or move the file or directory.

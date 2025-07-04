@@ -39,6 +39,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks().await?);
 
     let root = crate::ROOT_DIR_ID.into();
+    assert!(fs.get_parent(root).await?.is_none());
 
     assert!(ts_format <= fs.metadata(root).await?.created.into());
     assert!(ts_format <= fs.metadata(root).await?.modified.into());
@@ -53,6 +54,7 @@ async fn basic_test() -> Result<()> {
         .await?;
     assert_eq!(1, fs.metadata(root).await?.size);
     assert_eq!(0, fs.metadata(first).await?.size);
+    assert_eq!(root, fs.get_parent(first).await?.unwrap());
 
     assert_eq!(
         fs.create_entry(first, async_fs::EntryKind::Directory, "/")
@@ -95,6 +97,39 @@ async fn basic_test() -> Result<()> {
         ErrorKind::InvalidInput,
         fs.delete_entry(root).await.err().unwrap().kind()
     );
+
+    assert_eq!(fs.empty_blocks().await.unwrap(), NUM_BLOCKS - 2);
+    let root_metadata = fs.metadata(root).await?;
+    assert!(ts_now <= root_metadata.modified.into());
+
+    let dir1 = fs.create_entry(root, EntryKind::Directory, "dir1").await?;
+    let dir2 = fs.create_entry(root, EntryKind::Directory, "dir2").await?;
+    let dir3 = fs.create_entry(root, EntryKind::Directory, "dir3").await?;
+    assert_eq!(3, fs.metadata(root).await?.size);
+
+    let dir22 = fs.create_entry(dir2, EntryKind::Directory, "dir22").await?;
+    assert_eq!(dir2, fs.get_parent(dir22).await?.unwrap());
+    let file2 = fs.create_entry(dir2, EntryKind::File, "file").await?;
+    assert_eq!(dir2, fs.get_parent(file2).await?.unwrap());
+    assert_eq!(2, fs.metadata(dir2).await?.size);
+
+    const BYTES: &[u8] = "once upon a time there was a tree upon a hill".as_bytes();
+    assert_eq!(BYTES.len(), fs.write(file2, 0, BYTES).await.unwrap());
+    assert_eq!(BYTES.len() as u64, fs.metadata(file2).await?.size);
+
+    let mut buf = [0_u8; 256];
+    assert_eq!(BYTES.len(), fs.read(file2, 0, &mut buf).await.unwrap());
+    for idx in 0..BYTES.len() {
+        assert_eq!(BYTES[idx], buf[idx]);
+    }
+
+    assert_eq!("dir22", fs.name(dir22).await?);
+    fs.move_rename(dir22, dir2, "dir22_new").await?;
+    assert_eq!("dir22_new", fs.name(dir22).await?);
+    fs.move_rename(dir22, root, "dir22").await?;
+    assert_eq!("dir22", fs.name(dir22).await?);
+    assert_eq!(4, fs.metadata(root).await?.size);
+    assert_eq!(root, fs.get_parent(dir22).await?.unwrap());
 
     /*
     const NUM_BLOCKS: u64 = 256;

@@ -406,6 +406,17 @@ impl DirEntryBlock {
         self.btree_root.first_child_with_key(ctx, hash).await
     }
 
+    pub async fn first_block_at_offset(
+        &self,
+        ctx: &mut Ctx<'_>,
+        block_offset: u64,
+    ) -> Result<Option<BlockNo>> {
+        assert_eq!(self.kind(), EntryKind::File);
+        self.btree_root
+            .first_child_with_key(ctx, block_offset)
+            .await
+    }
+
     pub fn parent_id(&self) -> EntryIdInternal {
         self.parent_id
     }
@@ -439,7 +450,7 @@ impl DirEntryBlock {
         &self.metadata
     }
 
-    pub async fn insert(
+    pub async fn insert_child_entry(
         mut parent_block: CachedBlock,
         ctx: &mut Ctx<'_>,
         kind: async_fs::EntryKind,
@@ -450,6 +461,7 @@ impl DirEntryBlock {
             .block_mut()
             .get_mut_at_offset::<DirEntryBlock>(0);
         assert_eq!(hash, parent.hash(filename));
+        assert_eq!(parent.kind(), EntryKind::Directory);
         let parent_id = parent.entry_id;
         assert_eq!(parent.btree_root.this(), parent_id.block_no);
 
@@ -509,6 +521,83 @@ impl DirEntryBlock {
         // Step 6: commit txn.
 
         Ok(entry_id)
+    }
+
+    pub async fn insert_data_block(
+        mut entry_block: CachedBlock,
+        ctx: &mut Ctx<'_>,
+        block_offset: u64,
+    ) -> Result<BlockNo> {
+        let entry = entry_block
+            .block_mut()
+            .get_mut_at_offset::<DirEntryBlock>(0);
+        assert_eq!(entry.kind(), EntryKind::File);
+        let entry_id = entry.entry_id;
+        assert_eq!(entry.btree_root.this(), entry_id.block_no);
+
+        // Step 1: allocate a new data block. Makes sb_block dirty.
+        let mut sb_block = ctx.block_cache().pin_block(0).await?;
+        let sb = sb_block.block_mut().get_mut_at_offset::<Superblock>(0);
+        let data_block_id = sb.allocate_block(ctx).await?;
+        log::debug!(
+            "Allocated new data block {}",
+            data_block_id.block_no.as_u64()
+        );
+
+        // Step 2: initialize the new data block.
+        let data_block = ctx.block_cache().pin_empty_block(data_block_id.block_no());
+
+        // Step 3: insert a link to the child block into self.btree_root.
+        //         Makes one or more tree nodes dirty (or even allocates new tree node blocks).
+        let changed_tree_blocks = entry
+            .btree_root
+            .insert_link(ctx, block_offset, data_block_id.block_no)
+            .await
+            .inspect_err(|err| todo!())?;
+
+        entry.metadata.modified = Timestamp::now();
+
+        // Step 4: start txn.
+        log::warn!("DirEntryBlock::insert_data_block(): implement txn.");
+
+        // Step 5: save changes.
+        // TODO: batch write blocks when implemented.
+        for block_no in changed_tree_blocks {
+            if block_no == entry_id.block_no {
+                continue;
+            }
+            ctx.block_cache()
+                .write_block(block_no.as_u64())
+                .await
+                .inspect_err(|_err| todo!())?;
+        }
+
+        ctx.block_cache().unpin_block(data_block);
+        ctx.block_cache()
+            .write_block(data_block_id.block_no())
+            .await
+            .inspect_err(|_err| todo!())?;
+
+        ctx.block_cache().unpin_block(entry_block);
+        ctx.block_cache()
+            .write_block(entry_id.block_no())
+            .await
+            .inspect_err(|_err| todo!())?;
+
+        ctx.block_cache().unpin_block(sb_block);
+        ctx.block_cache()
+            .write_block(0)
+            .await
+            .inspect_err(|_err| todo!())?;
+
+        // Step 6: commit txn.
+
+        Ok(data_block_id.block_no)
+    }
+
+    pub fn set_file_size(&mut self, new_size: u64) {
+        assert_eq!(self.kind(), EntryKind::File);
+        self.metadata.size = new_size;
     }
 
     pub fn init_child_entry<'a>(

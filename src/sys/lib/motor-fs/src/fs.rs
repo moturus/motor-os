@@ -5,7 +5,7 @@
 //!       insert/delete. This should be fixed at a higher (OS?) level.
 
 use async_fs::block_cache::BlockCache;
-use async_fs::{AsyncBlockDevice, FileSystem};
+use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
 use async_fs::{EntryId, EntryKind};
 use std::io::ErrorKind;
 use std::io::Result;
@@ -126,7 +126,9 @@ impl FileSystem for MotorFs {
         let mut ctx = Ctx::new(self);
 
         let Some(mut child_block_no) = parent.first_child_with_hash(&mut ctx, hash).await? else {
-            let result = DirEntryBlock::insert(parent_block, &mut ctx, kind, hash, filename).await;
+            let result =
+                DirEntryBlock::insert_child_entry(parent_block, &mut ctx, kind, hash, filename)
+                    .await;
             return result.map(|e| e.into());
         };
 
@@ -246,7 +248,90 @@ impl FileSystem for MotorFs {
     }
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+        // For now, cross-block writes are not supported.
+
+        // Block "hash" is the offset of the start of the block.
+        let block_start = offset & !(BLOCK_SIZE as u64 - 1);
+        if (offset + (buf.len() as u64)) > (block_start + (BLOCK_SIZE as u64)) {
+            log::debug!("MotorFs::write() error: cross-block writes are not supported (yet?).");
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        let entry_id: EntryIdInternal = file_id.into();
+        let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
+        let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
+        entry.validate_entry(entry_id)?;
+
+        let prev_file_size = entry.metadata().size;
+        let new_file_size = offset + (buf.len() as u64);
+
+        if entry.kind() != EntryKind::File {
+            return Err(ErrorKind::IsADirectory.into());
+        }
+
+        let mut ctx = Ctx::new(self);
+
+        // Step 1: find or allocate the data block.
+        let data_block_no = match entry.first_block_at_offset(&mut ctx, block_start).await? {
+            Some(block_no) => block_no,
+            None => DirEntryBlock::insert_data_block(entry_block, &mut ctx, block_start).await?,
+        };
+
+        // Step 2: update the data lock.
+        let data_block = self.block_cache.get_block(data_block_no.as_u64()).await?;
+        data_block.block_mut().as_bytes_mut()
+            [(offset - block_start) as usize..(new_file_size - block_start) as usize]
+            .copy_from_slice(buf);
+        self.block_cache.write_block(data_block_no.as_u64()).await?;
+
+        // Step 3: update the file size, if needed.
+        if prev_file_size < new_file_size {
+            let entry_block = self.block_cache.get_block(entry_id.block_no()).await?;
+            let entry = DirEntryBlock::from_block_mut(entry_block.block_mut());
+            entry.set_file_size(new_file_size);
+            self.block_cache.write_block(entry_id.block_no()).await?;
+        }
+
+        Ok(buf.len())
+        /*
+        let parent_id: EntryIdInternal = parent_id.into();
+        let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
+        let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
+        parent.validate_entry(parent_id)?;
+
+        if parent.kind() != EntryKind::Directory {
+            return Err(ErrorKind::NotADirectory.into());
+        }
+
+        let hash = parent.hash(filename);
+
+        let mut ctx = Ctx::new(self);
+
+        let Some(mut child_block_no) = parent.first_child_with_hash(&mut ctx, hash).await? else {
+            let result = DirEntryBlock::insert(parent_block, &mut ctx, kind, hash, filename).await;
+            return result.map(|e| e.into());
+        };
+
+        loop {
+            let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
+            let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
+
+            let name = child.name()?;
+            assert_eq!(parent.hash(name), hash);
+
+            if name == filename {
+                self.block_cache.unpin_block(parent_block);
+                return Err(ErrorKind::AlreadyExists.into());
+            }
+
+            child_block_no = if let Some(id) = child.next_entry_id() {
+                id.block_no
+            } else {
+                todo!("add new entry after child")
+            };
+        }
         todo!()
+        */
     }
 
     async fn move_rename(
