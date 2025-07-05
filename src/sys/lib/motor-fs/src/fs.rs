@@ -244,7 +244,51 @@ impl FileSystem for MotorFs {
     }
 
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        todo!()
+        let entry_id: EntryIdInternal = file_id.into();
+        let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
+        let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
+        entry.validate_entry(entry_id)?;
+
+        if entry.kind() != EntryKind::File {
+            return Err(ErrorKind::IsADirectory.into());
+        }
+
+        let file_size = entry.metadata().size;
+        if offset >= file_size {
+            return Ok(0);
+        }
+
+        let block_start = offset & !(BLOCK_SIZE as u64 - 1);
+        if (offset + (buf.len() as u64)) > (block_start + (BLOCK_SIZE as u64)) {
+            log::debug!("MotorFs::read() error: cross-block reads are not supported (yet?).");
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        assert!(buf.len() <= BLOCK_SIZE);
+
+        let to_read = if (file_size - offset) >= (BLOCK_SIZE as u64) {
+            buf.len()
+        } else {
+            buf.len().min((file_size - offset) as usize)
+        };
+
+        let mut ctx = Ctx::new(self);
+        let Some(data_block_no) = entry.first_block_at_offset(&mut ctx, block_start).await? else {
+            // No data block => "read" zeroes.
+            for byte in &mut buf[..to_read] {
+                *byte = 0;
+            }
+
+            return Ok(to_read);
+        };
+
+        let data_block = ctx.block_cache().get_block(data_block_no.as_u64()).await?;
+        let offset_within_block = (offset - block_start) as usize;
+        buf[..to_read].copy_from_slice(
+            &data_block.block().as_bytes()[offset_within_block..(offset_within_block + to_read)],
+        );
+
+        Ok(to_read)
     }
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
@@ -262,12 +306,12 @@ impl FileSystem for MotorFs {
         let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
         entry.validate_entry(entry_id)?;
 
-        let prev_file_size = entry.metadata().size;
-        let new_file_size = offset + (buf.len() as u64);
-
         if entry.kind() != EntryKind::File {
             return Err(ErrorKind::IsADirectory.into());
         }
+
+        let prev_file_size = entry.metadata().size;
+        let new_file_size = offset + (buf.len() as u64);
 
         let mut ctx = Ctx::new(self);
 
