@@ -337,45 +337,6 @@ impl FileSystem for MotorFs {
         }
 
         Ok(buf.len())
-        /*
-        let parent_id: EntryIdInternal = parent_id.into();
-        let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
-        let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
-        parent.validate_entry(parent_id)?;
-
-        if parent.kind() != EntryKind::Directory {
-            return Err(ErrorKind::NotADirectory.into());
-        }
-
-        let hash = parent.hash(filename);
-
-        let mut ctx = Ctx::new(self);
-
-        let Some(mut child_block_no) = parent.first_child_with_hash(&mut ctx, hash).await? else {
-            let result = DirEntryBlock::insert(parent_block, &mut ctx, kind, hash, filename).await;
-            return result.map(|e| e.into());
-        };
-
-        loop {
-            let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-            let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
-
-            let name = child.name()?;
-            assert_eq!(parent.hash(name), hash);
-
-            if name == filename {
-                self.block_cache.unpin_block(parent_block);
-                return Err(ErrorKind::AlreadyExists.into());
-            }
-
-            child_block_no = if let Some(id) = child.next_entry_id() {
-                id.block_no
-            } else {
-                todo!("add new entry after child")
-            };
-        }
-        todo!()
-        */
     }
 
     async fn move_rename(
