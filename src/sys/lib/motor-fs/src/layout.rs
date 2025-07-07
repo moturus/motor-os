@@ -25,8 +25,9 @@ use async_fs::Timestamp;
 use async_fs::block_cache::CachedBlock;
 use std::io::Result;
 
-use crate::Ctx;
+use crate::Txn;
 use crate::bplus_tree;
+use crate::bplus_tree::Node;
 
 pub const MAX_FILENAME_LEN: usize = 255;
 
@@ -165,34 +166,38 @@ impl Superblock {
         self.free_blocks
     }
 
-    pub async fn allocate_block(&mut self, ctx: &mut Ctx<'_>) -> Result<EntryIdInternal> {
-        if self.free_blocks == 0 {
+    pub async fn allocate_block<'a>(txn: &mut Txn<'a>) -> Result<EntryIdInternal> {
+        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let mut block_ref = sb_block.block_mut();
+        let this = block_ref.get_mut_at_offset::<Self>(0);
+
+        if this.free_blocks == 0 {
             return Err(ErrorKind::StorageFull.into());
         }
 
-        if self.freelist_head == 0 {
-            if self.empty_area_start != (self.num_blocks - self.free_blocks) {
+        if this.freelist_head == 0 {
+            if this.empty_area_start != (this.num_blocks - this.free_blocks) {
                 log::error!(
                     "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
-                    self.num_blocks,
-                    self.free_blocks,
-                    self.empty_area_start
+                    this.num_blocks,
+                    this.free_blocks,
+                    this.empty_area_start
                 );
                 return Err(ErrorKind::InvalidData.into());
             }
-            self.free_blocks -= 1;
-            self.empty_area_start += 1;
-            self.generation += 1;
+            this.free_blocks -= 1;
+            this.empty_area_start += 1;
+            this.generation += 1;
             return Ok(EntryIdInternal::new(
-                BlockNo(self.empty_area_start - 1),
-                self.generation,
+                BlockNo(this.empty_area_start - 1),
+                this.generation,
             ));
         }
 
         todo!()
     }
 
-    pub async fn free_block(&mut self, ctx: &mut Ctx<'_>, block_no: BlockNo) -> Result<()> {
+    pub async fn free_block(&mut self, ctx: &mut Txn<'_>, block_no: BlockNo) -> Result<()> {
         if block_no.as_u64() == (self.empty_area_start - 1) {
             self.free_blocks += 1;
             self.empty_area_start -= 1;
@@ -391,15 +396,32 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn first_child(&self, ctx: &mut Ctx<'_>) -> Result<Option<BlockNo>> {
+    pub async fn first_child(&self, ctx: &mut Txn<'_>) -> Result<Option<BlockNo>> {
+        /*
         assert_eq!(self.kind(), EntryKind::Directory);
 
+        if self.btree_root.num_keys as usize > DIR_ENTRY_BTREE_ORDER || self.btree_root.is_leaf > 1
+        {
+            log::error!("Bad B+ Tree Node {:?}(?).", self.this);
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        if self.num_keys == 0 {
+            return Ok(None);
+        }
+
+        let first_child_block_no = self.kv[0].child_block_no;
+        if self.is_leaf == 1 {
+            return Ok(Some(first_child_block_no));
+        }
         self.btree_root.first_child(ctx).await
+        */
+        todo!()
     }
 
     pub async fn first_child_with_hash(
         &self,
-        ctx: &mut Ctx<'_>,
+        ctx: &mut Txn<'_>,
         hash: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
@@ -408,12 +430,12 @@ impl DirEntryBlock {
 
     pub async fn first_block_at_offset(
         &self,
-        ctx: &mut Ctx<'_>,
+        txn: &mut Txn<'_>,
         block_offset: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::File);
         self.btree_root
-            .first_child_with_key(ctx, block_offset)
+            .first_child_with_key(txn, block_offset)
             .await
     }
 
@@ -450,9 +472,10 @@ impl DirEntryBlock {
         &self.metadata
     }
 
+    /*
     pub async fn insert_child_entry(
         mut parent_block: CachedBlock,
-        ctx: &mut Ctx<'_>,
+        ctx: &mut Txn<'_>,
         kind: async_fs::EntryKind,
         hash: u64,
         filename: &str,
@@ -525,7 +548,7 @@ impl DirEntryBlock {
 
     pub async fn insert_data_block(
         mut entry_block: CachedBlock,
-        ctx: &mut Ctx<'_>,
+        ctx: &mut Txn<'_>,
         block_offset: u64,
     ) -> Result<BlockNo> {
         let entry = entry_block
@@ -594,20 +617,23 @@ impl DirEntryBlock {
 
         Ok(data_block_id.block_no)
     }
+    */
 
     pub fn set_file_size(&mut self, new_size: u64) {
         assert_eq!(self.kind(), EntryKind::File);
         self.metadata.size = new_size;
     }
 
-    pub fn init_child_entry<'a>(
-        &self,
-        child_block: &'a mut Block,
-        child_entry_id: EntryIdInternal,
+    pub fn init_child_entry<'a, 'b>(
+        txn: &'b mut Txn<'a>,
+        parent_id: EntryIdInternal,
+        entry_id: EntryIdInternal,
         kind: async_fs::EntryKind,
         filename: &str,
-    ) -> &'a mut Self {
-        let child = child_block.get_mut_at_offset::<DirEntryBlock>(0);
+    ) {
+        let child_block = txn.get_empty_block_mut(entry_id.block_no);
+        let mut child_block_ref = child_block.block_mut();
+        let child = Self::from_block_mut(&mut *child_block_ref);
 
         child.block_header.block_type = match kind {
             EntryKind::Directory => BlockType::DirEntry,
@@ -617,11 +643,11 @@ impl DirEntryBlock {
         child.block_header.in_use = 1;
         child.block_header.blocks_in_use = 1;
 
-        child.entry_id = child_entry_id;
+        child.entry_id = entry_id;
         child.set_name(filename).unwrap();
 
         child.metadata.set_kind(kind);
-        child.parent_id = self.entry_id;
+        child.parent_id = parent_id;
 
         if kind == EntryKind::Directory {
             child.hash_seed = std::random::random();
@@ -633,16 +659,15 @@ impl DirEntryBlock {
 
         child
             .btree_root
-            .init_new_root(child_entry_id.block_no, self.entry_id.block_no);
-
-        child
+            .init_new_root(entry_id.block_no, parent_id.block_no);
     }
 
-    pub async fn delete_entry(
-        mut parent_block: CachedBlock,
-        ctx: &mut Ctx<'_>,
+    pub async fn delete_entry<'a, 'b>(
+        txn: &'b mut Txn<'a>,
+        parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
     ) -> Result<()> {
+        let parent_block = txn.get_txn_block(parent_id.block_no).await?;
         let parent = parent_block
             .block_mut()
             .get_mut_at_offset::<DirEntryBlock>(0);
@@ -740,6 +765,84 @@ impl DirEntryBlock {
 
         Ok(())
     }
+
+    /*
+
+    pub async fn move_entry(
+        mut entry_block: CachedBlock,
+        ctx: &mut Txn<'_>,
+        new_parent_id: EntryIdInternal,
+        new_name: &str,
+    ) -> Result<()> {
+        let entry = Self::from_block_mut(entry_block.block_mut());
+        let old_parent_id = entry.parent_id;
+        let mut old_parent_block = ctx
+            .block_cache()
+            .pin_block(old_parent_id.block_no())
+            .await?;
+        let old_parent = Self::from_block_mut(old_parent_block.block_mut());
+
+        log::warn!("DirEntryBlock::move_entry(): implement txn.");
+
+        let changed_blocks_1 = old_parent.unlink_entry(ctx, entry).await?;
+
+        entry.set_name(new_name).unwrap();
+
+        let changed_blocks_2 = if old_parent_id == new_parent_id {
+            old_parent.link_entry(ctx, entry).await?
+        } else {
+            let mut new_parent_block = ctx
+                .block_cache()
+                .pin_block(new_parent_id.block_no())
+                .await?;
+            let new_parent = Self::from_block_mut(new_parent_block.block_mut());
+            let changed_blocks = new_parent.link_entry(ctx, entry).await?;
+            new_parent_block.forget();
+
+            changed_blocks
+        };
+
+        todo!()
+    }
+    */
+
+    // Returns the list of changed blocks, excl. self and entry.
+    async fn unlink_entry(&mut self, ctx: &mut Txn<'_>, entry: &mut Self) -> Result<Vec<BlockNo>> {
+        todo!()
+    }
+
+    pub async fn link_child_block(
+        txn: &mut Txn<'_>,
+        parent_block_no: BlockNo,
+        child_block_no: BlockNo,
+        key: u64,
+    ) -> Result<()> {
+        let parent_block = txn.get_txn_block(parent_block_no).await?;
+        Self::from_block_mut(&mut *parent_block.block_mut())
+            .metadata
+            .modified = Timestamp::now();
+
+        log::warn!("link_child_block: if this is a dir, we may need to link into the SLL");
+        Node::<DIR_ENTRY_BTREE_ORDER>::insert_link(
+            txn,
+            parent_block_no,
+            BTREE_ROOT_OFFSET,
+            key,
+            child_block_no,
+        )
+        .await
+    }
+
+    pub async fn increment_dir_size(txn: &mut Txn<'_>, dir_id: EntryIdInternal) -> Result<()> {
+        let dir_block = txn.get_txn_block(dir_id.block_no).await?;
+        Self::from_block_mut(&mut *dir_block.block_mut())
+            .metadata
+            .size += 1;
+        Self::from_block_mut(&mut *dir_block.block_mut())
+            .metadata
+            .modified = Timestamp::now();
+        Ok(())
+    }
 }
 
 impl TreeNodeBlock {
@@ -747,19 +850,22 @@ impl TreeNodeBlock {
         self.block_header.block_type
     }
 
-    pub async fn first_child(&self, ctx: &mut Ctx<'_>) -> Result<Option<BlockNo>> {
-        assert_eq!(self.block_type(), BlockType::TreeNode);
+    pub fn from_block(block: &Block) -> &Self {
+        block.get_at_offset(0)
+    }
 
-        // Recursion in an async fn requires boxing: rustc --explain E0733.
-        Box::pin(self.btree_node.first_child(ctx)).await
+    pub async fn first_child<'a>(this: BlockNo, txn: &'a mut Txn<'a>) -> Result<Option<BlockNo>> {
+        todo!()
+        // let this_block = txn.get_block(this).await?;
+        // let node = Self::from_block(this_block.block());
+        // assert_eq!(node.block_type(), BlockType::TreeNode);
+
+        // // Recursion in an async fn requires boxing: rustc --explain E0733.
+        // Box::pin(node.btree_node.first_child(txn)).await
     }
 }
 
 pub fn validate_filename(filename: &str) -> Result<()> {
-    // if filename == "/" {
-    //     return Ok(());
-    // }
-
     if filename.len() > MAX_FILENAME_LEN || filename.contains('/') || filename.starts_with("..") {
         return Err(ErrorKind::InvalidFilename.into());
     }
@@ -770,3 +876,11 @@ pub fn validate_filename(filename: &str) -> Result<()> {
 
     Ok(())
 }
+
+macro_rules! dir_entry {
+    ($cached_block:ident) => {
+        crate::layout::DirEntryBlock::from_block(&*$cached_block.block())
+    };
+}
+
+pub(crate) use dir_entry;

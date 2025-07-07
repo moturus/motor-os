@@ -2,8 +2,8 @@
 use async_fs::block_cache::CachedBlock;
 
 use crate::BlockNo;
-use crate::Ctx;
 use crate::TreeNodeBlock;
+use crate::Txn;
 use std::io::ErrorKind;
 use std::io::Result;
 
@@ -38,6 +38,8 @@ pub(crate) struct Node<const ORDER: usize> {
     kv: [KV; ORDER],
 }
 
+unsafe impl<const ORDER: usize> plain::Plain for Node<ORDER> {}
+
 impl<const ORDER: usize> Node<ORDER> {
     pub fn this(&self) -> BlockNo {
         self.this
@@ -50,38 +52,29 @@ impl<const ORDER: usize> Node<ORDER> {
         self.is_leaf = 1;
     }
 
-    pub async fn first_child(&self, ctx: &mut Ctx<'_>) -> Result<Option<BlockNo>> {
-        if self.num_keys as usize > ORDER || self.is_leaf > 1 {
-            log::error!("Bad B+ Tree Node {:?}(?).", self.this);
-            return Err(ErrorKind::InvalidData.into());
-        }
+    pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
+        todo!()
+        // if self.num_keys as usize > ORDER || self.is_leaf > 1 {
+        //     log::error!("Bad B+ Tree Node {:?}(?).", self.this);
+        //     return Err(ErrorKind::InvalidData.into());
+        // }
 
-        if self.num_keys == 0 {
-            return Ok(None);
-        }
+        // if self.num_keys == 0 {
+        //     return Ok(None);
+        // }
 
-        let first_child_block_no = self.kv[0].child_block_no;
-        if self.is_leaf == 1 {
-            return Ok(Some(first_child_block_no));
-        }
+        // let first_child_block_no = self.kv[0].child_block_no;
+        // if self.is_leaf == 1 {
+        //     return Ok(Some(first_child_block_no));
+        // }
 
-        let child_block = ctx
-            .block_cache()
-            .pin_block(first_child_block_no.as_u64())
-            .await?;
-
-        let tree_node = child_block.block().get_at_offset::<TreeNodeBlock>(0);
-
-        // Recursion in an async fn requires boxing: rustc --explain E0733.
-        let result = Box::pin(tree_node.first_child(ctx)).await;
-        ctx.block_cache().unpin_block(child_block);
-
-        result
+        // // Recursion in an async fn requires boxing: rustc --explain E0733.
+        // Box::pin(TreeNodeBlock::first_child(first_child_block_no, txn)).await
     }
 
     pub async fn first_child_with_key(
         &self,
-        ctx: &mut Ctx<'_>,
+        _ctx: &mut Txn<'_>,
         key: u64,
     ) -> Result<Option<BlockNo>> {
         if self.num_keys as usize > ORDER || self.is_leaf > 1 {
@@ -106,39 +99,44 @@ impl<const ORDER: usize> Node<ORDER> {
 
     // Inserts link `val` at `key`, returns the list of blocks to save.
     pub async fn insert_link(
-        &mut self,
-        ctx: &mut Ctx<'_>,
+        txn: &mut Txn<'_>,
+        node_block_no: BlockNo,
+        node_offset_in_block: usize,
         key: u64,
         val: BlockNo,
-    ) -> Result<Vec<BlockNo>> {
-        let mut result = vec![];
+    ) -> Result<()> {
+        let node_block = txn.get_txn_block(node_block_no).await?;
+        let node_block_ref = node_block.block();
+        let node = node_block_ref.get_at_offset::<Self>(node_offset_in_block);
 
-        if self.is_leaf == 1 {
+        if node.is_leaf == 1 {
             // Insert a link unconditionally (if there is space).
-            if self.num_keys as usize == ORDER {
+            if node.num_keys as usize == ORDER {
                 // Have to split self.
                 todo!()
             }
 
             let Err(pos) =
-                self.kv[..(self.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+                node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             else {
                 return Err(ErrorKind::AlreadyExists.into());
             };
 
-            for idx in (pos..((self.num_keys + 1) as usize)).rev() {
-                self.kv[idx + 1] = self.kv[idx];
+            core::mem::drop(node_block_ref);
+
+            let mut node_ref_mut = node_block.block_mut();
+            let node_mut = node_ref_mut.get_mut_at_offset::<Self>(node_offset_in_block);
+            for idx in (pos..((node_mut.num_keys + 1) as usize)).rev() {
+                node_mut.kv[idx + 1] = node_mut.kv[idx];
             }
 
-            self.kv[pos] = KV {
+            node_mut.kv[pos] = KV {
                 key,
                 child_block_no: val,
             };
 
-            self.num_keys += 1;
-
-            result.push(self.this);
-            return Ok(result);
+            node_mut.num_keys += 1;
+            return Ok(());
         }
 
         todo!()
@@ -147,7 +145,7 @@ impl<const ORDER: usize> Node<ORDER> {
     // Deletes link `val` at `key`, returns the list of blocks to save.
     pub async fn delete_link(
         &mut self,
-        ctx: &mut Ctx<'_>,
+        ctx: &mut Txn<'_>,
         key: u64,
         block_no: BlockNo,
     ) -> Result<Vec<BlockNo>> {

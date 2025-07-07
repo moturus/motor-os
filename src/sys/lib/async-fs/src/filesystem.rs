@@ -144,13 +144,12 @@ pub trait FileSystem {
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
 
     /// Rename and/or move the file or directory.
-    /// Returns the new ID of the entry.
     async fn move_rename(
         &mut self,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
-    ) -> Result<EntryId>;
+    ) -> Result<()>;
 
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()>;

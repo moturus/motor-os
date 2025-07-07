@@ -765,6 +765,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
+name = "micromap"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18c087666f377f857b49564f8791b481260c67825d6b337e1e38ddf54a985a88"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -884,6 +890,7 @@ dependencies = [
  "crc",
  "env_logger",
  "log",
+ "micromap",
  "plain",
  "rand 0.8.5",
  "tokio",

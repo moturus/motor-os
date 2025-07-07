@@ -10,7 +10,7 @@ use async_fs::{EntryId, EntryKind};
 use std::io::ErrorKind;
 use std::io::Result;
 
-use crate::{Ctx, DirEntryBlock, EntryIdInternal, ROOT_DIR_ID, Superblock, validate_filename};
+use crate::{EntryIdInternal, ROOT_DIR_ID, Superblock, Txn, dir_entry, validate_filename};
 
 const CACHE_SIZE: usize = 512; // 2MB.
 
@@ -45,16 +45,6 @@ impl MotorFs {
     pub fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache {
         &mut self.block_cache
     }
-
-    pub(crate) async fn superblock(&mut self) -> Result<&Superblock> {
-        let block = self.block_cache.get_block(0).await?;
-        Ok(block.block().get_at_offset::<Superblock>(0))
-    }
-
-    pub(crate) async fn superblock_mut(&mut self) -> Result<&mut Superblock> {
-        let block = self.block_cache.get_block(0).await?;
-        Ok(block.block_mut().get_mut_at_offset::<Superblock>(0))
-    }
 }
 
 impl FileSystem for MotorFs {
@@ -63,44 +53,49 @@ impl FileSystem for MotorFs {
         validate_filename(filename)?;
 
         let id: EntryIdInternal = parent_id.into();
-        let parent_block = self.block_cache.pin_block(id.block_no()).await?;
-        let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
-        parent.validate_entry(id)?;
+        let parent_block = self.block_cache.get_block(id.block_no()).await?.clone();
+        assert!(!parent_block.is_dirty());
+        dir_entry!(parent_block).validate_entry(id)?;
 
-        if parent.kind() != EntryKind::Directory {
+        if dir_entry!(parent_block).kind() != EntryKind::Directory {
             return Err(ErrorKind::NotADirectory.into());
         }
 
-        let hash = parent.hash(filename);
+        let hash = dir_entry!(parent_block).hash(filename);
 
-        let mut ctx = Ctx::new(self);
+        let mut txn = Txn::new_readonly(self);
 
-        let Some(mut child_block_no) = parent.first_child_with_hash(&mut ctx, hash).await? else {
-            self.block_cache.unpin_block(parent_block);
+        assert!(!parent_block.is_dirty());
+        let Some(mut child_block_no) = dir_entry!(parent_block)
+            .first_child_with_hash(&mut txn, hash)
+            .await?
+        else {
+            assert!(!parent_block.is_dirty());
             return Ok(None);
         };
 
         loop {
             let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-            let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
 
-            let name = child.name()?;
-            assert_eq!(parent.hash(name), hash);
+            assert_eq!(
+                dir_entry!(parent_block).hash(dir_entry!(child_block).name()?),
+                hash
+            );
 
-            if name == filename {
-                let result = child.entry_id_with_validation(child_block_no)?.into();
-                self.block_cache.unpin_block(parent_block);
+            if dir_entry!(child_block).name()? == filename {
+                let result = dir_entry!(child_block)
+                    .entry_id_with_validation(child_block_no)?
+                    .into();
                 return Ok(Some(result));
             }
 
-            child_block_no = if let Some(id) = child.next_entry_id() {
+            child_block_no = if let Some(id) = dir_entry!(child_block).next_entry_id() {
                 id.block_no
             } else {
                 break;
             };
         }
 
-        self.block_cache.unpin_block(parent_block);
         Ok(None)
     }
 
@@ -110,76 +105,23 @@ impl FileSystem for MotorFs {
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
     ) -> Result<EntryId> {
-        validate_filename(filename)?;
-
-        let parent_id: EntryIdInternal = parent_id.into();
-        let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
-        let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
-        parent.validate_entry(parent_id)?;
-
-        if parent.kind() != EntryKind::Directory {
-            return Err(ErrorKind::NotADirectory.into());
+        if self.stat(parent_id, filename).await?.is_some() {
+            return Err(ErrorKind::AlreadyExists.into());
         }
 
-        let hash = parent.hash(filename);
-
-        let mut ctx = Ctx::new(self);
-
-        let Some(mut child_block_no) = parent.first_child_with_hash(&mut ctx, hash).await? else {
-            let result =
-                DirEntryBlock::insert_child_entry(parent_block, &mut ctx, kind, hash, filename)
-                    .await;
-            return result.map(|e| e.into());
-        };
-
-        loop {
-            let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-            let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
-
-            let name = child.name()?;
-            assert_eq!(parent.hash(name), hash);
-
-            if name == filename {
-                self.block_cache.unpin_block(parent_block);
-                return Err(ErrorKind::AlreadyExists.into());
-            }
-
-            child_block_no = if let Some(id) = child.next_entry_id() {
-                id.block_no
-            } else {
-                todo!("add new entry after child")
-            };
-        }
+        Txn::create_entry(self, parent_id.into(), kind, filename)
+            .await
+            .map(|e| e.into())
     }
 
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
-        let entry_id: EntryIdInternal = entry_id.into();
-        if entry_id == ROOT_DIR_ID {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        let block = self.block_cache.get_block(entry_id.block_no()).await?;
-        let entry: &DirEntryBlock = DirEntryBlock::from_block(block.block());
-        entry.validate_entry(entry_id)?;
-        if entry.metadata().size > 0 {
-            return match entry.kind() {
-                EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
-                EntryKind::File => {
-                    log::error!("TODO: implement deleting non-empty files.");
-                    Err(ErrorKind::FileTooLarge.into())
-                }
-            };
-        }
-
-        let parent_id = entry.parent_id();
-        let parent_block = self.block_cache.pin_block(parent_id.block_no()).await?;
-        let mut ctx = Ctx::new(self);
-
-        DirEntryBlock::delete_entry(parent_block, &mut ctx, entry_id).await
+        Txn::delete_entry(self, entry_id.into()).await
     }
 
     /// Get the first entry in a directory.
     async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+        todo!()
+        /*
         let id: EntryIdInternal = parent_id.into();
         let parent_block = self.block_cache.pin_block(id.block_no()).await?;
         let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
@@ -189,7 +131,7 @@ impl FileSystem for MotorFs {
             return Err(ErrorKind::NotADirectory.into());
         }
 
-        let mut ctx = Ctx::new(self);
+        let mut ctx = Txn::new_readonly(self);
 
         let Some(child_block_no) = parent.first_child(&mut ctx).await? else {
             self.block_cache.unpin_block(parent_block);
@@ -197,19 +139,26 @@ impl FileSystem for MotorFs {
         };
 
         self.block_cache.unpin_block(parent_block);
-        let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
+        let child_block = self
+            .block_cache
+            .get_block_mut(child_block_no.as_u64())
+            .await?;
         let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
         Ok(Some(child.entry_id_with_validation(child_block_no)?.into()))
+        */
     }
 
     /// Get the next entry in a directory.
     async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        todo!()
+        /*
         let id: EntryIdInternal = entry_id.into();
-        let block = self.block_cache.get_block(id.block_no()).await?;
+        let block = self.block_cache.get_block_mut(id.block_no()).await?;
         let entry = block.block().get_at_offset::<DirEntryBlock>(0);
         entry.validate_entry(id)?;
 
         todo!()
+        */
     }
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
@@ -219,31 +168,30 @@ impl FileSystem for MotorFs {
         }
 
         let block = self.block_cache.get_block(id.block_no()).await?;
-        let entry = block.block().get_at_offset::<DirEntryBlock>(0);
-        entry.validate_entry(id)?;
+        dir_entry!(block).validate_entry(id)?;
 
-        Ok(Some(entry.parent_id().into()))
+        Ok(Some(dir_entry!(block).parent_id().into()))
     }
 
     async fn name(&mut self, entry_id: EntryId) -> Result<String> {
         let id: EntryIdInternal = entry_id.into();
         let block = self.block_cache.get_block(id.block_no()).await?;
-        let entry = block.block().get_at_offset::<DirEntryBlock>(0);
-        entry.validate_entry(id)?;
+        dir_entry!(block).validate_entry(id)?;
 
-        entry.name().map(|s| s.to_owned())
+        dir_entry!(block).name().map(|s| s.to_owned())
     }
 
     async fn metadata(&mut self, entry_id: EntryId) -> Result<async_fs::Metadata> {
         let id: EntryIdInternal = entry_id.into();
         let block = self.block_cache.get_block(id.block_no()).await?;
-        let entry = block.block().get_at_offset::<DirEntryBlock>(0);
-        entry.validate_entry(id)?;
+        dir_entry!(block).validate_entry(id)?;
 
-        Ok(*entry.metadata())
+        Ok(*dir_entry!(block).metadata())
     }
 
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        todo!()
+        /*
         let entry_id: EntryIdInternal = file_id.into();
         let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
         let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
@@ -272,8 +220,8 @@ impl FileSystem for MotorFs {
             buf.len().min((file_size - offset) as usize)
         };
 
-        let mut ctx = Ctx::new(self);
-        let Some(data_block_no) = entry.first_block_at_offset(&mut ctx, block_start).await? else {
+        let mut txn = Txn::new_readonly(self);
+        let Some(data_block_no) = entry.first_block_at_offset(&mut txn, block_start).await? else {
             // No data block => "read" zeroes.
             for byte in &mut buf[..to_read] {
                 *byte = 0;
@@ -282,16 +230,19 @@ impl FileSystem for MotorFs {
             return Ok(to_read);
         };
 
-        let data_block = ctx.block_cache().get_block(data_block_no.as_u64()).await?;
+        let data_block = txn.get_block(data_block_no).await?;
         let offset_within_block = (offset - block_start) as usize;
         buf[..to_read].copy_from_slice(
             &data_block.block().as_bytes()[offset_within_block..(offset_within_block + to_read)],
         );
 
         Ok(to_read)
+        */
     }
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+        todo!()
+        /*
         // For now, cross-block writes are not supported.
 
         // Block "hash" is the offset of the start of the block.
@@ -313,7 +264,7 @@ impl FileSystem for MotorFs {
         let prev_file_size = entry.metadata().size;
         let new_file_size = offset + (buf.len() as u64);
 
-        let mut ctx = Ctx::new(self);
+        let mut ctx = Txn::new(self);
 
         // Step 1: find or allocate the data block.
         let data_block_no = match entry.first_block_at_offset(&mut ctx, block_start).await? {
@@ -322,7 +273,10 @@ impl FileSystem for MotorFs {
         };
 
         // Step 2: update the data lock.
-        let data_block = self.block_cache.get_block(data_block_no.as_u64()).await?;
+        let data_block = self
+            .block_cache
+            .get_block_mut(data_block_no.as_u64())
+            .await?;
         data_block.block_mut().as_bytes_mut()
             [(offset - block_start) as usize..(new_file_size - block_start) as usize]
             .copy_from_slice(buf);
@@ -330,13 +284,14 @@ impl FileSystem for MotorFs {
 
         // Step 3: update the file size, if needed.
         if prev_file_size < new_file_size {
-            let entry_block = self.block_cache.get_block(entry_id.block_no()).await?;
+            let entry_block = self.block_cache.get_block_mut(entry_id.block_no()).await?;
             let entry = DirEntryBlock::from_block_mut(entry_block.block_mut());
             entry.set_file_size(new_file_size);
             self.block_cache.write_block(entry_id.block_no()).await?;
         }
 
         Ok(buf.len())
+        */
     }
 
     async fn move_rename(
@@ -344,8 +299,53 @@ impl FileSystem for MotorFs {
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
-    ) -> Result<EntryId> {
+    ) -> Result<()> {
+        // Renaming is an atomic FS operation (both in Linux, Windows, and Rust).
+        // BUT because our FS "driver" (this code) is single-threaded
+        // (note `&mut self``), the atomicity is kinda built-in, modulo
+        // catastrofic failure. So for now we are somewhat less concerned
+        // with making rename truly atomic.
+
         todo!()
+        /*
+        let entry_id: EntryIdInternal = entry_id.into();
+        if entry_id == ROOT_DIR_ID {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        // Before we delete the target, we make sure the entry exists.
+        let entry_block = self.block_cache.get_block_mut(entry_id.block_no()).await?;
+        let entry = DirEntryBlock::from_block(entry_block.block());
+        entry.validate_entry(entry_id)?;
+
+        if let Some(target_id) = self.stat(new_parent_id, new_name).await? {
+            if target_id == entry_id.into() {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            // See https://doc.rust-lang.org/std/fs/fn.rename.html.
+            self.delete_entry(target_id).await?;
+        }
+
+        // Check that we are not moving an entry down to its own child,
+        // which will create a detached cycle.
+        if entry_id != new_parent_id.into() {
+            let mut parent_id = new_parent_id;
+            loop {
+                let Some(grandparent_id) = self.get_parent(parent_id).await? else {
+                    break;
+                };
+                if grandparent_id == entry_id.into() {
+                    log::debug!("MotorFS::move_rename: error: trying to move under its own child.");
+                    return Err(ErrorKind::InvalidInput.into());
+                }
+                parent_id = grandparent_id;
+            }
+        }
+
+        let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
+        let mut ctx = Txn::new(self);
+        DirEntryBlock::move_entry(entry_block, &mut ctx, new_parent_id.into(), new_name).await
+        */
     }
 
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
@@ -354,7 +354,8 @@ impl FileSystem for MotorFs {
 
     async fn empty_blocks(&mut self) -> Result<u64> {
         self.check_err()?;
-        Ok(self.superblock().await?.free_blocks())
+        let sb = self.block_cache.get_block(0).await?;
+        Ok(sb.block().get_at_offset::<Superblock>(0).free_blocks())
     }
 
     async fn flush(&mut self) -> Result<()> {

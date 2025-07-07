@@ -2,23 +2,18 @@
 
 use crate::{AsyncBlockDevice, Block};
 use lru::LruCache;
+use std::cell::RefCell;
 use std::io::Result;
 use std::num::NonZero;
+use std::rc::Rc;
 
-/// Cached block. Internally keeps dirty (= modified) or clean state.
-/// Panics if dropped when dirty.
-///
-/// The only way to mark a dirty block as clean is to save it
-/// via BlockCache::write_block().
-///
-/// NOT clone/copy to make the dirty state tracking robust.
-pub struct CachedBlock {
-    block: Box<Block>,
+struct InnerCachedBlock {
     block_no: u64,
     dirty: bool,
+    block: Block,
 }
 
-impl Drop for CachedBlock {
+impl Drop for InnerCachedBlock {
     fn drop(&mut self) {
         assert!(
             !self.dirty,
@@ -28,44 +23,52 @@ impl Drop for CachedBlock {
     }
 }
 
+/// Cached block. Internally keeps dirty (= modified) or clean state.
+/// Panics if dropped when dirty.
+#[derive(Clone)]
+pub struct CachedBlock {
+    block: Rc<RefCell<InnerCachedBlock>>, // (dirty, Block)
+}
+
 impl CachedBlock {
     fn new_empty(block_no: u64) -> Self {
         Self {
-            block: Box::new(Block::new_zeroed()),
-            block_no,
-            dirty: true, // Need to ensure it is stored to disk, as we don't overwrite blocks on deletion.
+            block: Rc::new(RefCell::new(InnerCachedBlock {
+                dirty: true,
+                block: Block::new_zeroed(),
+                block_no,
+            })),
         }
     }
 
     pub fn block_no(&self) -> u64 {
-        self.block_no
+        self.block.borrow().block_no
     }
 
     /// Get a read-only reference to the underlying data. Does not
     /// modify dirty/clean state.
-    pub fn block(&self) -> &Block {
-        &self.block
+    pub fn block(&self) -> std::cell::Ref<'_, Block> {
+        std::cell::Ref::map(self.block.borrow(), |inner| &inner.block)
     }
 
     /// Get a read/write reference to the underlying data. Marks
     /// the block dirty.
-    pub fn block_mut(&mut self) -> &mut Block {
-        self.dirty = true;
-        &mut self.block
+    pub fn block_mut(&mut self) -> std::cell::RefMut<'_, Block> {
+        let mut mut_ref = self.block.borrow_mut();
+        mut_ref.dirty = true;
+        std::cell::RefMut::map(mut_ref, |inner| &mut inner.block)
     }
 
     fn mark_clean(&mut self) {
-        assert!(self.dirty);
-        self.dirty = false;
+        self.block.borrow_mut().dirty = false;
     }
 
-    /// Dispose of the block even if it is dirty.
-    pub fn forget(mut self) {
-        self.dirty = false;
+    fn mark_dirty(&mut self) {
+        self.block.borrow_mut().dirty = true;
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+    pub fn is_dirty(&self) -> bool {
+        self.block.borrow().dirty
     }
 }
 
@@ -88,14 +91,14 @@ impl BlockCache {
     }
 
     /// Get a reference to a cached block.
-    pub async fn get_block(&mut self, block_no: u64) -> Result<&mut CachedBlock> {
+    pub async fn get_block(&mut self, block_no: u64) -> Result<&CachedBlock> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         unsafe {
             {
                 let this = self as *mut Self;
                 let this = this.as_mut().unwrap_unchecked();
-                if let Some(block) = this.cache.get_mut(&block_no) {
+                if let Some(block) = this.cache.get(&block_no) {
                     return Ok(block);
                 }
             }
@@ -104,15 +107,16 @@ impl BlockCache {
         let mut block = self.internal_get_empty_block(block_no);
 
         self.block_dev
-            .read_block(block_no, &mut block.block)
+            .read_block(block_no, &mut *block.block_mut())
             .await?;
+        block.mark_clean();
 
         Ok(self.internal_push_block(block))
     }
 
     /// Get an empty block. Use with caution: any previously stored
     /// data in the block on the block device will be lost.
-    pub fn get_empty_block(&mut self, block_no: u64) -> &mut CachedBlock {
+    pub fn get_empty_block(&mut self, block_no: u64) -> &CachedBlock {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         unsafe {
@@ -120,9 +124,8 @@ impl BlockCache {
                 let this = self as *mut Self;
                 let this = this.as_mut().unwrap_unchecked();
                 if let Some(block) = this.cache.get_mut(&block_no) {
-                    assert!(!block.dirty);
                     log::trace!("BlockCache::get_empty_block(): clearing cached block {block_no}");
-                    block.block.clear();
+                    block.block_mut().clear();
                     block.mark_dirty();
                     return block;
                 }
@@ -135,7 +138,9 @@ impl BlockCache {
     pub async fn write_block(&mut self, block_no: u64) -> Result<()> {
         let block = self.cache.get_mut(&block_no).expect("block not found");
 
-        self.block_dev.write_block(block_no, block.block()).await?;
+        self.block_dev
+            .write_block(block_no, &*block.block())
+            .await?;
         block.mark_clean();
         Ok(())
     }
@@ -143,8 +148,10 @@ impl BlockCache {
     pub async fn write_block_if_dirty(&mut self, block_no: u64) -> Result<bool> {
         let block = self.cache.get_mut(&block_no).expect("block not found");
 
-        if block.dirty {
-            self.block_dev.write_block(block_no, block.block()).await?;
+        if block.is_dirty() {
+            self.block_dev
+                .write_block(block_no, &*block.block())
+                .await?;
             block.mark_clean();
             Ok(true)
         } else {
@@ -152,47 +159,22 @@ impl BlockCache {
         }
     }
 
-    /// Get a cached block that is managed by the caller, in case the caller
-    /// needs to operate multiple cached blocks (borrow checker won't allow
-    /// working with multiple borrowed blocks).
-    ///
-    /// Dirty pinned blocks must be unpinned to be saved later.
-    /// Clean pinned blocks can be safely dropped.
-    pub async fn pin_block(&mut self, block_no: u64) -> Result<CachedBlock> {
-        if let Some(block) = self.cache.pop(&block_no) {
-            return Ok(block);
+    pub fn push(&mut self, block: CachedBlock) {
+        if let Some(existing) = self.cache.get(&block.block_no()) {
+            assert_eq!(
+                existing.block.as_ptr() as usize,
+                block.block.as_ptr() as usize
+            );
+        } else {
+            self.cache.push(block.block_no(), block);
         }
-
-        let mut block = self.internal_get_empty_block(block_no);
-        self.block_dev
-            .read_block(block_no, &mut block.block)
-            .await?;
-
-        Ok(block)
-    }
-
-    pub fn pin_empty_block(&mut self, block_no: u64) -> CachedBlock {
-        if let Some(mut block) = self.cache.pop(&block_no) {
-            assert!(!block.dirty);
-            block.block.clear();
-            block.mark_dirty();
-            return block;
-        }
-
-        self.internal_get_empty_block(block_no)
-    }
-
-    /// Put a pinned block back into the cache. Note that if the block is dirty,
-    /// it must be saved via write_block() later.
-    pub fn unpin_block(&mut self, block: CachedBlock) -> &mut CachedBlock {
-        self.internal_push_block(block)
     }
 
     pub async fn flush(&mut self) -> Result<()> {
         // #[cfg(debug_assertions)]
         {
             for (block_no, block) in self.cache.iter() {
-                assert!(!block.dirty, "Block {block_no} is dirty.");
+                assert!(!block.is_dirty(), "Block {block_no} is dirty.");
             }
         }
 
@@ -209,9 +191,9 @@ impl BlockCache {
 
     fn internal_get_empty_block(&mut self, block_no: u64) -> CachedBlock {
         if let Some(mut block) = self.free_blocks.pop() {
-            assert!(!block.dirty);
-            block.block.clear();
-            block.block_no = block_no;
+            assert!(!block.is_dirty());
+            block.block_mut().clear();
+            block.block.borrow_mut().block_no = block_no;
             block.mark_dirty();
             block
         } else {
@@ -219,14 +201,21 @@ impl BlockCache {
         }
     }
 
-    fn internal_push_block(&mut self, block: CachedBlock) -> &mut CachedBlock {
-        let block_no = block.block_no;
+    fn internal_push_block(&mut self, block: CachedBlock) -> &CachedBlock {
+        let block_no = block.block_no();
 
         if let Some((_, prev)) = self.cache.push(block_no, block) {
-            assert!(!prev.dirty, "Block {} is dirty.", prev.block_no);
+            assert!(!prev.is_dirty(), "Block {} is dirty.", prev.block_no());
             self.free_blocks.push(prev);
         }
 
-        self.cache.get_mut(&block_no).unwrap()
+        self.cache.get(&block_no).unwrap()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn debug_check_clean(&mut self) {
+        for (block_no, block) in self.cache.iter() {
+            assert!(!block.is_dirty(), "Block {block_no} is dirty.");
+        }
     }
 }
