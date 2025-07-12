@@ -197,10 +197,14 @@ impl Superblock {
         todo!()
     }
 
-    pub async fn free_block(&mut self, ctx: &mut Txn<'_>, block_no: BlockNo) -> Result<()> {
-        if block_no.as_u64() == (self.empty_area_start - 1) {
-            self.free_blocks += 1;
-            self.empty_area_start -= 1;
+    pub async fn free_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
+        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let mut block_ref = sb_block.block_mut();
+        let this = block_ref.get_mut_at_offset::<Self>(0);
+
+        if block_no.as_u64() == (this.empty_area_start - 1) {
+            this.free_blocks += 1;
+            this.empty_area_start -= 1;
             return Ok(());
         }
 
@@ -396,7 +400,7 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn first_child(&self, ctx: &mut Txn<'_>) -> Result<Option<BlockNo>> {
+    pub async fn first_child(&self, _txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
         /*
         assert_eq!(self.kind(), EntryKind::Directory);
 
@@ -421,11 +425,17 @@ impl DirEntryBlock {
 
     pub async fn first_child_with_hash(
         &self,
-        ctx: &mut Txn<'_>,
+        txn: &mut Txn<'_>,
         hash: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        self.btree_root.first_child_with_key(ctx, hash).await
+        Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
+            txn,
+            self.entry_id.block_no,
+            BTREE_ROOT_OFFSET,
+            hash,
+        )
+        .await
     }
 
     pub async fn first_block_at_offset(
@@ -434,9 +444,13 @@ impl DirEntryBlock {
         block_offset: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::File);
-        self.btree_root
-            .first_child_with_key(txn, block_offset)
-            .await
+        Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
+            txn,
+            self.entry_id.block_no,
+            BTREE_ROOT_OFFSET,
+            block_offset,
+        )
+        .await
     }
 
     pub fn parent_id(&self) -> EntryIdInternal {
@@ -667,32 +681,46 @@ impl DirEntryBlock {
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
     ) -> Result<()> {
-        let parent_block = txn.get_txn_block(parent_id.block_no).await?;
-        let parent = parent_block
-            .block_mut()
-            .get_mut_at_offset::<DirEntryBlock>(0);
-        let parent_id = parent.entry_id;
-        assert_eq!(parent.btree_root.this(), parent_id.block_no);
-
-        // Get the entry hash, to give it to B+ tree.
-        let hash = {
-            // entry_block should be cached.
-            let entry_block = ctx
-                .block_cache()
-                .get_block(entry_id.block_no())
-                .await
-                .inspect_err(|err| todo!())?;
-            let entry = DirEntryBlock::from_block(entry_block.block());
+        let (name_buf, name_len) = {
+            let entry_block = txn.get_txn_block(entry_id.block_no).await?;
+            let mut entry_ref = entry_block.block_mut();
+            let entry = DirEntryBlock::from_block_mut(&mut *entry_ref);
             assert_eq!(entry.parent_id, parent_id); // The caller must ensure this.
+            entry.block_header.in_use = 0;
             if entry.next_entry_id().is_some() {
                 todo!("delete the entry from the list.");
             }
             let name = entry.name()?;
-            parent.hash(name)
+            let mut name_buf = [0_u8; 256];
+            let name_len = name.len();
+            assert!(name_len <= name_buf.len());
+            name_buf[..name_len].copy_from_slice(name.as_bytes());
+
+            (name_buf, name_len)
         };
 
-        let Some(list_head_block_no) = parent.first_child_with_hash(ctx, hash).await? else {
-            parent_block.forget();
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
+
+        let hash = {
+            let parent_block = this_txn.get_txn_block(parent_id.block_no).await?;
+            let mut parent_ref = parent_block.block_mut();
+            let parent = DirEntryBlock::from_block_mut(&mut *parent_ref);
+            assert_eq!(parent.btree_root.this(), parent_id.block_no);
+            parent.metadata.size -= 1;
+            parent.metadata.modified = Timestamp::now();
+            parent.hash(unsafe { str::from_utf8_unchecked(&name_buf[..name_len]) })
+        };
+
+        let Some(list_head_block_no) = Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
+            txn,
+            parent_id.block_no,
+            BTREE_ROOT_OFFSET,
+            hash,
+        )
+        .await?
+        else {
             log::error!("Invalid hash for entry {entry_id:?}.");
             return Err(ErrorKind::InvalidData.into());
         };
@@ -702,66 +730,16 @@ impl DirEntryBlock {
         }
 
         // Step 1: delete the link.
-        let changed_tree_blocks = parent
-            .btree_root
-            .delete_link(ctx, hash, entry_id.block_no)
-            .await
-            .inspect_err(|err| todo!())?;
+        Node::<DIR_ENTRY_BTREE_ORDER>::delete_link(
+            txn,
+            parent_id.block_no,
+            BTREE_ROOT_OFFSET,
+            hash,
+            entry_id.block_no,
+        )
+        .await?;
 
-        // Step 2: update the parent metadata.
-        parent.metadata.size -= 1;
-        parent.metadata.modified = Timestamp::now();
-
-        // Step 3: mark the entry as deleted.
-        let mut entry_block = ctx.block_cache().pin_block(entry_id.block_no()).await?;
-        let entry = DirEntryBlock::from_block_mut(entry_block.block_mut());
-        assert_eq!(0, entry.metadata.size); // TODO: implement deleting non-empty files.
-        entry.block_header.in_use = 0;
-
-        // Step 4: free the entry block. Makes sb_block dirty.
-        let mut sb_block = ctx
-            .block_cache()
-            .pin_block(0)
-            .await
-            .inspect_err(|err| todo!())?;
-        let sb = sb_block.block_mut().get_mut_at_offset::<Superblock>(0);
-        sb.free_block(ctx, entry_id.block_no)
-            .await
-            .inspect_err(|err| todo!())?;
-
-        // Step 5: Start txn.
-        log::warn!("DirEntryBlock::delete(): implement txn.");
-
-        // Step 6: save changes.
-        // TODO: batch write blocks when implemented.
-        for block_no in changed_tree_blocks {
-            if block_no == parent_id.block_no {
-                continue;
-            }
-            ctx.block_cache()
-                .write_block(block_no.as_u64())
-                .await
-                .inspect_err(|_err| todo!())?;
-        }
-        ctx.block_cache().unpin_block(parent_block);
-        ctx.block_cache()
-            .write_block(parent_id.block_no())
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        ctx.block_cache().unpin_block(entry_block);
-        ctx.block_cache()
-            .write_block(entry_id.block_no())
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        ctx.block_cache().unpin_block(sb_block);
-        ctx.block_cache()
-            .write_block(0)
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        // Step 6: commit txn.
+        Superblock::free_block(txn, entry_id.block_no).await?;
 
         Ok(())
     }

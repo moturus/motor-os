@@ -72,24 +72,33 @@ impl<const ORDER: usize> Node<ORDER> {
         // Box::pin(TreeNodeBlock::first_child(first_child_block_no, txn)).await
     }
 
-    pub async fn first_child_with_key(
-        &self,
-        _ctx: &mut Txn<'_>,
+    pub async fn first_child_with_key<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        this_offset: usize,
         key: u64,
     ) -> Result<Option<BlockNo>> {
-        if self.num_keys as usize > ORDER || self.is_leaf > 1 {
-            log::error!("Bad B+ Tree Node {:?}(?).", self.this);
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
+
+        let block = this_txn.get_block(this_block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(this_offset);
+
+        if this.num_keys as usize > ORDER || this.is_leaf > 1 {
+            log::error!("Bad B+ Tree Node {:?}(?).", this.this);
             return Err(ErrorKind::InvalidData.into());
         }
 
-        if self.num_keys == 0 {
+        if this.num_keys == 0 {
             return Ok(None);
         }
 
-        if self.is_leaf == 1 {
-            return match self.kv[..(self.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+        if this.is_leaf == 1 {
+            return match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             {
-                Ok(pos) => Ok(Some(self.kv[pos].child_block_no)),
+                Ok(pos) => Ok(Some(this.kv[pos].child_block_no)),
                 Err(_) => Ok(None),
             };
         }
@@ -142,39 +151,50 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
-    // Deletes link `val` at `key`, returns the list of blocks to save.
-    pub async fn delete_link(
-        &mut self,
-        ctx: &mut Txn<'_>,
+    // Deletes link `val` at `key`.
+    pub async fn delete_link<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        this_offset: usize,
         key: u64,
         block_no: BlockNo,
-    ) -> Result<Vec<BlockNo>> {
-        let mut result = vec![];
+    ) -> Result<()> {
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
 
-        if self.is_leaf == 1 {
+        let block = this_txn.get_block(this_block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(this_offset);
+
+        if this.is_leaf == 1 {
             let Ok(pos) =
-                self.kv[..(self.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+                this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             else {
                 return Err(ErrorKind::NotFound.into());
             };
 
-            if self.kv[pos].child_block_no != block_no {
+            if this.kv[pos].child_block_no != block_no {
                 log::error!(
                     "Node::delete_link(): bad link: {} vs {}.",
-                    self.kv[pos].child_block_no.as_u64(),
+                    this.kv[pos].child_block_no.as_u64(),
                     block_no.as_u64()
                 );
                 return Err(ErrorKind::InvalidData.into());
             }
 
-            for idx in pos..((self.num_keys - 1) as usize) {
-                self.kv[idx] = self.kv[idx + 1];
+            core::mem::drop(block_ref);
+
+            let block = txn.get_txn_block(this_block_no).await?;
+            let mut block_ref = block.block_mut();
+            let this_mut = block_ref.get_mut_at_offset::<Self>(this_offset);
+            for idx in pos..((this_mut.num_keys - 1) as usize) {
+                this_mut.kv[idx] = this_mut.kv[idx + 1];
             }
 
-            self.num_keys -= 1;
+            this_mut.num_keys -= 1;
 
-            result.push(self.this);
-            return Ok(result);
+            return Ok(());
         }
 
         todo!()

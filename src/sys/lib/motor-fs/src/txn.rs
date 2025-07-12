@@ -192,7 +192,8 @@ impl<'a> Txn<'a> {
 
             dir_entry!(entry_block).parent_id()
         };
-        DirEntryBlock::delete_entry(&mut txn, parent_id, entry_id).await
+        DirEntryBlock::delete_entry(&mut txn, parent_id, entry_id).await?;
+        txn.commit().await
     }
 
     pub async fn get_block(&'a mut self, block_no: BlockNo) -> std::io::Result<&'a CachedBlock> {
@@ -204,10 +205,8 @@ impl<'a> Txn<'a> {
         };
 
         if let Some(txn_block) = match this {
-            Txn::CreateEntry(create_entry_txn) => {
-                create_entry_txn.txn_base.txn_cache.get(&block_no)
-            }
-            Txn::DeleteEntry(_txn) => todo!(),
+            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get(&block_no),
+            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.get(&block_no),
             Txn::MoveEntry(_txn) => todo!(),
             Txn::ReadOnly(_) => None,
         } {
@@ -236,7 +235,7 @@ impl<'a> Txn<'a> {
 
         if let Some(txn_block) = match this_1 {
             Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::DeleteEntry(_txn) => todo!(),
+            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
             Txn::MoveEntry(_txn) => todo!(),
             Txn::ReadOnly(_) => panic!(),
         } {
@@ -246,7 +245,8 @@ impl<'a> Txn<'a> {
         let block = self.block_cache().get_block(block_no.as_u64()).await?;
         match this_2 {
             Txn::CreateEntry(txn) => txn.txn_base.txn_cache.insert(block_no, block.clone()),
-            Txn::DeleteEntry(_txn) => todo!(),
+            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.insert(block_no, block.clone()),
+
             Txn::MoveEntry(_txn) => todo!(),
             Txn::ReadOnly(_) => panic!(),
         };
@@ -254,7 +254,7 @@ impl<'a> Txn<'a> {
         // Recursion.
         let Some(txn_block) = (match this_2 {
             Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::DeleteEntry(_txn) => todo!(),
+            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
             Txn::MoveEntry(_txn) => todo!(),
             Txn::ReadOnly(_) => panic!(),
         }) else {
@@ -267,7 +267,7 @@ impl<'a> Txn<'a> {
     fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
         match self {
             Txn::CreateEntry(txn) => txn.block_cache(),
-            Txn::DeleteEntry(_txn) => todo!(),
+            Txn::DeleteEntry(txn) => txn.block_cache(),
             Txn::MoveEntry(_txn) => todo!(),
             Txn::ReadOnly(txn) => txn.block_cache(),
         }
@@ -319,7 +319,7 @@ impl<'a> Txn<'a> {
     async fn commit(&mut self) -> Result<()> {
         match self {
             Txn::CreateEntry(txn) => txn.commit().await?,
-            Txn::DeleteEntry(_txn) => todo!(),
+            Txn::DeleteEntry(txn) => txn.commit().await?,
             Txn::MoveEntry(_txn) => todo!(),
             Txn::ReadOnly(_) => panic!(),
         }
