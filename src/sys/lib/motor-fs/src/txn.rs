@@ -6,129 +6,152 @@
 //! - move entry
 //! - write to file
 //! - set file size
-//!
-//! Non-mutating operaions have txn type None.
 
+use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, ROOT_DIR_ID, Superblock, dir_entry};
 use async_fs::{
     EntryKind,
     block_cache::{BlockCache, CachedBlock},
 };
-
-use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, ROOT_DIR_ID, Superblock, dir_entry};
-
 use std::io::{ErrorKind, Result};
 
-struct TxnBase<'a, const N: usize> {
+/// Max number of blocks a single transaction may touch.
+const TXN_CACHE_SIZE: usize = 12;
+
+/// The transaction object: accumulates "dirty" blocks, then either discards
+/// them on error (so no changes to the underlying FS happen) or applies them
+/// "atomically", i.e. either all or nothing.
+pub struct Txn<'a> {
     fs: &'a mut MotorFs,
-    txn_cache: micromap::Map<BlockNo, CachedBlock, N>,
-}
-
-pub struct ReadOnlyTxn<'a> {
-    txn_base: TxnBase<'a, 0>,
-}
-
-impl<'a> ReadOnlyTxn<'a> {
-    fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
-        self.txn_base.fs.block_cache()
-    }
-}
-
-pub(crate) struct CreateEntryTxn<'a> {
-    txn_base: TxnBase<'a, 8>,
-    parent_id: EntryIdInternal,
-    kind: EntryKind,
-    filename: &'a str,
-}
-
-impl<'a> CreateEntryTxn<'a> {
-    fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
-        self.txn_base.fs.block_cache()
-    }
-
-    async fn commit<'b>(&'b mut self) -> Result<()> {
-        log::warn!("{}:{} do a proper txn", file!(), line!());
-
-        let TxnBase { fs, txn_cache } = &mut self.txn_base;
-
-        // For now, just save all dirty blocks.
-        for (block_no, block) in txn_cache.drain() {
-            assert_eq!(block_no.as_u64(), block.block_no());
-            fs.block_cache().push(block);
-            fs.block_cache()
-                .write_block_if_dirty(block_no.as_u64())
-                .await?;
-        }
-
-        Ok(())
-    }
-}
-
-pub(crate) struct DeleteEntryTxn<'a> {
-    txn_base: TxnBase<'a, 8>,
-    entry_id: EntryIdInternal,
-}
-
-impl<'a> DeleteEntryTxn<'a> {
-    fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
-        self.txn_base.fs.block_cache()
-    }
-
-    async fn commit<'b>(&'b mut self) -> Result<()> {
-        log::warn!("{}:{} do a proper txn", file!(), line!());
-
-        let TxnBase { fs, txn_cache } = &mut self.txn_base;
-
-        // For now, just save all dirty blocks.
-        for (block_no, block) in txn_cache.drain() {
-            assert_eq!(block_no.as_u64(), block.block_no());
-            fs.block_cache().push(block);
-            fs.block_cache()
-                .write_block_if_dirty(block_no.as_u64())
-                .await?;
-        }
-
-        Ok(())
-    }
-}
-
-pub(crate) struct MoveEntryTxn<'a> {
-    entry_id: EntryIdInternal,
-    new_parent_id: EntryIdInternal,
-    new_name: &'a str,
-}
-
-pub(crate) enum Txn<'a> {
-    CreateEntry(CreateEntryTxn<'a>),
-    DeleteEntry(DeleteEntryTxn<'a>),
-    MoveEntry(MoveEntryTxn<'a>),
-    ReadOnly(ReadOnlyTxn<'a>),
+    txn_cache: micromap::Map<BlockNo, CachedBlock, TXN_CACHE_SIZE>,
+    read_only: bool,
 }
 
 impl<'a> Txn<'a> {
-    pub fn new_readonly(fs: &'a mut MotorFs) -> Self {
-        Self::ReadOnly(ReadOnlyTxn {
-            txn_base: TxnBase {
-                fs,
-                txn_cache: micromap::Map::new(),
-            },
-        })
+    fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
+        self.fs.block_cache()
     }
 
-    pub async fn create_entry(
+    async fn commit<'b>(&'b mut self) -> Result<()> {
+        log::warn!("{}:{} do a proper txn", file!(), line!());
+
+        let Txn {
+            fs,
+            txn_cache,
+            read_only: _,
+        } = self;
+
+        // For now, just save all dirty blocks.
+        for (block_no, block) in txn_cache.drain() {
+            assert_eq!(block_no.as_u64(), block.block_no());
+            fs.block_cache().push(block);
+            fs.block_cache()
+                .write_block_if_dirty(block_no.as_u64())
+                .await?;
+        }
+
+        #[cfg(debug_assertions)]
+        self.block_cache().debug_check_clean();
+
+        Ok(())
+    }
+
+    pub fn new_readonly(fs: &'a mut MotorFs) -> Self {
+        Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: true,
+        }
+    }
+    pub async fn get_block(&'a mut self, block_no: BlockNo) -> std::io::Result<&'a CachedBlock> {
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this = unsafe {
+            let this = self as *mut Self;
+            this.as_mut().unwrap_unchecked()
+        };
+
+        if let Some(txn_block) = this.txn_cache.get(&block_no) {
+            return Ok(txn_block);
+        }
+
+        self.block_cache().get_block(block_no.as_u64()).await
+    }
+
+    /// Unlike get_block() above, get_txn_block() ensures the block is part of the transaction,
+    /// i.e. will be saved in Txn::commit().
+    pub async fn get_txn_block<'b>(
+        &'b mut self,
+        block_no: BlockNo,
+    ) -> std::io::Result<&'b mut CachedBlock> {
+        assert!(!self.read_only);
+
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_1 = unsafe {
+            let this = self as *mut Self;
+            this.as_mut().unwrap_unchecked()
+        };
+        let this_2 = unsafe {
+            let this = self as *mut Self;
+            this.as_mut().unwrap_unchecked()
+        };
+
+        if let Some(txn_block) = this_1.txn_cache.get_mut(&block_no) {
+            return Ok(txn_block);
+        }
+
+        let block = self.block_cache().get_block(block_no.as_u64()).await?;
+        this_2.txn_cache.insert(block_no, block.clone());
+
+        // Recursion.
+        let Some(txn_block) = this_2.txn_cache.get_mut(&block_no) else {
+            panic!();
+        };
+
+        Ok(txn_block)
+    }
+
+    pub fn get_empty_block_mut<'b>(&'b mut self, block_no: BlockNo) -> &'b mut CachedBlock {
+        assert!(!self.read_only);
+
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_1 = unsafe {
+            let this = self as *mut Self;
+            this.as_mut().unwrap_unchecked()
+        };
+        let this_2 = unsafe {
+            let this = self as *mut Self;
+            this.as_mut().unwrap_unchecked()
+        };
+
+        if let Some(txn_block) = this_1.txn_cache.get_mut(&block_no) {
+            txn_block.block_mut().clear();
+            return txn_block;
+        }
+
+        let block = self.block_cache().get_empty_block(block_no.as_u64());
+        this_2.txn_cache.insert(block_no, block.clone());
+
+        // Recursion.
+        let Some(txn_block) = this_2.txn_cache.get_mut(&block_no) else {
+            panic!();
+        };
+
+        txn_block
+    }
+
+    pub async fn do_create_entry_txn(
         fs: &'a mut MotorFs,
         parent_id: EntryIdInternal,
         kind: EntryKind,
         filename: &'a str,
     ) -> Result<EntryIdInternal> {
-        let mut txn = Self::CreateEntry(CreateEntryTxn {
-            txn_base: TxnBase {
-                fs,
-                txn_cache: micromap::Map::new(),
-            },
-            parent_id,
-            kind,
-            filename,
-        });
+        let mut txn = Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
 
         let parent_id: EntryIdInternal = parent_id.into();
         let hash = {
@@ -157,14 +180,12 @@ impl<'a> Txn<'a> {
         Ok(entry_id)
     }
 
-    pub async fn delete_entry(fs: &'a mut MotorFs, entry_id: EntryIdInternal) -> Result<()> {
-        let mut txn = Self::DeleteEntry(DeleteEntryTxn {
-            txn_base: TxnBase {
-                fs,
-                txn_cache: micromap::Map::new(),
-            },
-            entry_id,
-        });
+    pub async fn do_delete_entry_txn(fs: &'a mut MotorFs, entry_id: EntryIdInternal) -> Result<()> {
+        let mut txn = Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
 
         let entry_id: EntryIdInternal = entry_id.into();
         if entry_id == ROOT_DIR_ID {
@@ -194,139 +215,5 @@ impl<'a> Txn<'a> {
         };
         DirEntryBlock::delete_entry(&mut txn, parent_id, entry_id).await?;
         txn.commit().await
-    }
-
-    pub async fn get_block(&'a mut self, block_no: BlockNo) -> std::io::Result<&'a CachedBlock> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-
-        if let Some(txn_block) = match this {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get(&block_no),
-            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.get(&block_no),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => None,
-        } {
-            return Ok(txn_block);
-        }
-
-        self.block_cache().get_block(block_no.as_u64()).await
-    }
-
-    /// Unlike get_block() above, get_txn_block() ensures the block is part of the transaction,
-    /// i.e. will be saved in Txn::commit().
-    pub async fn get_txn_block<'b>(
-        &'b mut self,
-        block_no: BlockNo,
-    ) -> std::io::Result<&'b mut CachedBlock> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_1 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-        let this_2 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-
-        if let Some(txn_block) = match this_1 {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        } {
-            return Ok(txn_block);
-        }
-
-        let block = self.block_cache().get_block(block_no.as_u64()).await?;
-        match this_2 {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.insert(block_no, block.clone()),
-            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.insert(block_no, block.clone()),
-
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        };
-
-        // Recursion.
-        let Some(txn_block) = (match this_2 {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::DeleteEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        }) else {
-            panic!();
-        };
-
-        Ok(txn_block)
-    }
-
-    fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
-        match self {
-            Txn::CreateEntry(txn) => txn.block_cache(),
-            Txn::DeleteEntry(txn) => txn.block_cache(),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(txn) => txn.block_cache(),
-        }
-    }
-
-    pub fn get_empty_block_mut<'b>(&'b mut self, block_no: BlockNo) -> &'b mut CachedBlock {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_1 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-        let this_2 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-
-        if let Some(txn_block) = match this_1 {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::DeleteEntry(_txn) => todo!(),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        } {
-            txn_block.block_mut().clear();
-            return txn_block;
-        }
-
-        let block = self.block_cache().get_empty_block(block_no.as_u64());
-        match this_2 {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.insert(block_no, block.clone()),
-            Txn::DeleteEntry(_txn) => todo!(),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        };
-
-        // Recursion.
-        let Some(txn_block) = (match this_2 {
-            Txn::CreateEntry(txn) => txn.txn_base.txn_cache.get_mut(&block_no),
-            Txn::DeleteEntry(_txn) => todo!(),
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        }) else {
-            panic!();
-        };
-
-        txn_block
-    }
-
-    async fn commit(&mut self) -> Result<()> {
-        match self {
-            Txn::CreateEntry(txn) => txn.commit().await?,
-            Txn::DeleteEntry(txn) => txn.commit().await?,
-            Txn::MoveEntry(_txn) => todo!(),
-            Txn::ReadOnly(_) => panic!(),
-        }
-
-        #[cfg(debug_assertions)]
-        self.block_cache().debug_check_clean();
-
-        Ok(())
     }
 }

@@ -109,13 +109,13 @@ impl FileSystem for MotorFs {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
-        Txn::create_entry(self, parent_id.into(), kind, filename)
+        Txn::do_create_entry_txn(self, parent_id.into(), kind, filename)
             .await
             .map(|e| e.into())
     }
 
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
-        Txn::delete_entry(self, entry_id.into()).await
+        Txn::do_delete_entry_txn(self, entry_id.into()).await
     }
 
     /// Get the first entry in a directory.
