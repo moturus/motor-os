@@ -1,4 +1,8 @@
 //! Block cache for async block devices.
+//!
+//! The interface could probably be made cleaner/simpler, but
+//! the overall design tries to ensure that modified blocks must
+//! be saved or have the modifications explicitly discarded.
 
 use crate::{AsyncBlockDevice, Block};
 use lru::LruCache;
@@ -7,11 +11,14 @@ use std::io::Result;
 use std::num::NonZero;
 use std::rc::Rc;
 
+// Panics if dropped when dirty.
 struct InnerCachedBlock {
     block_no: u64,
     dirty: bool,
-    block: Block,
+    block: Block, // Note: aligned at 4096.
 }
+
+const _: () = assert!(size_of::<InnerCachedBlock>() == 8192);
 
 impl Drop for InnerCachedBlock {
     fn drop(&mut self) {
@@ -24,16 +31,23 @@ impl Drop for InnerCachedBlock {
 }
 
 /// Cached block. Internally keeps dirty (= modified) or clean state.
-/// Panics if dropped when dirty.
+/// Cloneable, with the actual block ref-counted and ref-celled to keep
+/// the Rust's borrow-checker happy when we work with multiple modified
+/// cached blocks.
 #[derive(Clone)]
 pub struct CachedBlock {
-    block: Rc<RefCell<InnerCachedBlock>>, // (dirty, Block)
+    inner: Rc<RefCell<InnerCachedBlock>>, // (dirty, Block)
 }
+
+// Note: Although InnerCachedBlock is large (8k bytes), it is heap-allocated,
+// CachedBlock is a (ref-counted) pointer onto it, so can easily be moved around
+// or allocated on stack.
+const _: () = assert!(size_of::<CachedBlock>() <= 32);
 
 impl CachedBlock {
     fn new_empty(block_no: u64) -> Self {
         Self {
-            block: Rc::new(RefCell::new(InnerCachedBlock {
+            inner: Rc::new(RefCell::new(InnerCachedBlock {
                 dirty: true,
                 block: Block::new_zeroed(),
                 block_no,
@@ -42,33 +56,33 @@ impl CachedBlock {
     }
 
     pub fn block_no(&self) -> u64 {
-        self.block.borrow().block_no
+        self.inner.borrow().block_no
     }
 
     /// Get a read-only reference to the underlying data. Does not
     /// modify dirty/clean state.
     pub fn block(&self) -> std::cell::Ref<'_, Block> {
-        std::cell::Ref::map(self.block.borrow(), |inner| &inner.block)
+        std::cell::Ref::map(self.inner.borrow(), |inner| &inner.block)
     }
 
     /// Get a read/write reference to the underlying data. Marks
     /// the block dirty.
     pub fn block_mut(&mut self) -> std::cell::RefMut<'_, Block> {
-        let mut mut_ref = self.block.borrow_mut();
+        let mut mut_ref = self.inner.borrow_mut();
         mut_ref.dirty = true;
         std::cell::RefMut::map(mut_ref, |inner| &mut inner.block)
     }
 
-    fn mark_clean(&mut self) {
-        self.block.borrow_mut().dirty = false;
+    fn intenal_mark_clean(&mut self) {
+        self.inner.borrow_mut().dirty = false;
     }
 
-    fn mark_dirty(&mut self) {
-        self.block.borrow_mut().dirty = true;
+    fn internal_mark_dirty(&mut self) {
+        self.inner.borrow_mut().dirty = true;
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.block.borrow().dirty
+        self.inner.borrow().dirty
     }
 }
 
@@ -109,7 +123,7 @@ impl BlockCache {
         self.block_dev
             .read_block(block_no, &mut *block.block_mut())
             .await?;
-        block.mark_clean();
+        block.intenal_mark_clean();
 
         Ok(self.internal_push_block(block))
     }
@@ -126,7 +140,7 @@ impl BlockCache {
                 if let Some(block) = this.cache.get_mut(&block_no) {
                     log::trace!("BlockCache::get_empty_block(): clearing cached block {block_no}");
                     block.block_mut().clear();
-                    block.mark_dirty();
+                    block.internal_mark_dirty();
                     return block;
                 }
             }
@@ -141,7 +155,7 @@ impl BlockCache {
         self.block_dev
             .write_block(block_no, &*block.block())
             .await?;
-        block.mark_clean();
+        block.intenal_mark_clean();
         Ok(())
     }
 
@@ -152,7 +166,7 @@ impl BlockCache {
             self.block_dev
                 .write_block(block_no, &*block.block())
                 .await?;
-            block.mark_clean();
+            block.intenal_mark_clean();
             Ok(true)
         } else {
             Ok(false)
@@ -162,8 +176,8 @@ impl BlockCache {
     pub fn push(&mut self, block: CachedBlock) {
         if let Some(existing) = self.cache.get(&block.block_no()) {
             assert_eq!(
-                existing.block.as_ptr() as usize,
-                block.block.as_ptr() as usize
+                existing.inner.as_ptr() as usize,
+                block.inner.as_ptr() as usize
             );
         } else {
             self.cache.push(block.block_no(), block);
@@ -193,8 +207,8 @@ impl BlockCache {
         if let Some(mut block) = self.free_blocks.pop() {
             assert!(!block.is_dirty());
             block.block_mut().clear();
-            block.block.borrow_mut().block_no = block_no;
-            block.mark_dirty();
+            block.inner.borrow_mut().block_no = block_no;
+            block.internal_mark_dirty();
             block
         } else {
             CachedBlock::new_empty(block_no)
