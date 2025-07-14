@@ -10,7 +10,9 @@ use async_fs::{EntryId, EntryKind};
 use std::io::ErrorKind;
 use std::io::Result;
 
-use crate::{EntryIdInternal, ROOT_DIR_ID, Superblock, Txn, dir_entry, validate_filename};
+use crate::{
+    DirEntryBlock, EntryIdInternal, ROOT_DIR_ID, Superblock, Txn, dir_entry, validate_filename,
+};
 
 const CACHE_SIZE: usize = 512; // 2MB.
 
@@ -190,18 +192,15 @@ impl FileSystem for MotorFs {
     }
 
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        todo!()
-        /*
-        let entry_id: EntryIdInternal = file_id.into();
-        let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
-        let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
-        entry.validate_entry(entry_id)?;
+        let file_id: EntryIdInternal = file_id.into();
+        let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
+        dir_entry!(entry_block).validate_entry(file_id)?;
 
-        if entry.kind() != EntryKind::File {
+        if dir_entry!(entry_block).kind() != EntryKind::File {
             return Err(ErrorKind::IsADirectory.into());
         }
 
-        let file_size = entry.metadata().size;
+        let file_size = dir_entry!(entry_block).metadata().size;
         if offset >= file_size {
             return Ok(0);
         }
@@ -221,7 +220,9 @@ impl FileSystem for MotorFs {
         };
 
         let mut txn = Txn::new_readonly(self);
-        let Some(data_block_no) = entry.first_block_at_offset(&mut txn, block_start).await? else {
+        let Some(data_block_no) =
+            DirEntryBlock::first_data_block_at_offset(&mut txn, file_id, block_start).await?
+        else {
             // No data block => "read" zeroes.
             for byte in &mut buf[..to_read] {
                 *byte = 0;
@@ -237,61 +238,10 @@ impl FileSystem for MotorFs {
         );
 
         Ok(to_read)
-        */
     }
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
-        todo!()
-        /*
-        // For now, cross-block writes are not supported.
-
-        // Block "hash" is the offset of the start of the block.
-        let block_start = offset & !(BLOCK_SIZE as u64 - 1);
-        if (offset + (buf.len() as u64)) > (block_start + (BLOCK_SIZE as u64)) {
-            log::debug!("MotorFs::write() error: cross-block writes are not supported (yet?).");
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        let entry_id: EntryIdInternal = file_id.into();
-        let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
-        let entry = entry_block.block().get_at_offset::<DirEntryBlock>(0);
-        entry.validate_entry(entry_id)?;
-
-        if entry.kind() != EntryKind::File {
-            return Err(ErrorKind::IsADirectory.into());
-        }
-
-        let prev_file_size = entry.metadata().size;
-        let new_file_size = offset + (buf.len() as u64);
-
-        let mut ctx = Txn::new(self);
-
-        // Step 1: find or allocate the data block.
-        let data_block_no = match entry.first_block_at_offset(&mut ctx, block_start).await? {
-            Some(block_no) => block_no,
-            None => DirEntryBlock::insert_data_block(entry_block, &mut ctx, block_start).await?,
-        };
-
-        // Step 2: update the data lock.
-        let data_block = self
-            .block_cache
-            .get_block_mut(data_block_no.as_u64())
-            .await?;
-        data_block.block_mut().as_bytes_mut()
-            [(offset - block_start) as usize..(new_file_size - block_start) as usize]
-            .copy_from_slice(buf);
-        self.block_cache.write_block(data_block_no.as_u64()).await?;
-
-        // Step 3: update the file size, if needed.
-        if prev_file_size < new_file_size {
-            let entry_block = self.block_cache.get_block_mut(entry_id.block_no()).await?;
-            let entry = DirEntryBlock::from_block_mut(entry_block.block_mut());
-            entry.set_file_size(new_file_size);
-            self.block_cache.write_block(entry_id.block_no()).await?;
-        }
-
-        Ok(buf.len())
-        */
+        Txn::do_write_txn(self, file_id.into(), offset, buf).await
     }
 
     async fn move_rename(

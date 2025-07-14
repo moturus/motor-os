@@ -22,7 +22,6 @@ pub use async_fs::EntryId;
 pub use async_fs::EntryKind;
 use async_fs::Metadata;
 use async_fs::Timestamp;
-use async_fs::block_cache::CachedBlock;
 use std::io::Result;
 
 use crate::Txn;
@@ -438,17 +437,16 @@ impl DirEntryBlock {
         .await
     }
 
-    pub async fn first_block_at_offset(
-        &self,
+    pub async fn first_data_block_at_offset(
         txn: &mut Txn<'_>,
-        block_offset: u64,
+        file_id: EntryIdInternal,
+        block_start: u64,
     ) -> Result<Option<BlockNo>> {
-        assert_eq!(self.kind(), EntryKind::File);
         Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
             txn,
-            self.entry_id.block_no,
+            file_id.block_no,
             BTREE_ROOT_OFFSET,
-            block_offset,
+            block_start,
         )
         .await
     }
@@ -484,6 +482,10 @@ impl DirEntryBlock {
 
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    pub fn metadata_mut(&mut self) -> &mut Metadata {
+        &mut self.metadata
     }
 
     /*
@@ -560,78 +562,26 @@ impl DirEntryBlock {
         Ok(entry_id)
     }
 
+    */
     pub async fn insert_data_block(
-        mut entry_block: CachedBlock,
-        ctx: &mut Txn<'_>,
-        block_offset: u64,
+        txn: &mut Txn<'_>,
+        file_id: EntryIdInternal,
+        block_start: u64,
     ) -> Result<BlockNo> {
-        let entry = entry_block
-            .block_mut()
-            .get_mut_at_offset::<DirEntryBlock>(0);
-        assert_eq!(entry.kind(), EntryKind::File);
-        let entry_id = entry.entry_id;
-        assert_eq!(entry.btree_root.this(), entry_id.block_no);
+        let block = txn.get_txn_block(file_id.block_no).await?;
+        dir_entry!(block).validate_entry(file_id)?;
+        Self::from_block_mut(&mut *block.block_mut())
+            .metadata
+            .modified = Timestamp::now();
 
-        // Step 1: allocate a new data block. Makes sb_block dirty.
-        let mut sb_block = ctx.block_cache().pin_block(0).await?;
-        let sb = sb_block.block_mut().get_mut_at_offset::<Superblock>(0);
-        let data_block_id = sb.allocate_block(ctx).await?;
-        log::debug!(
-            "Allocated new data block {}",
-            data_block_id.block_no.as_u64()
-        );
+        let data_block_id = Superblock::allocate_block(txn).await?;
+        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_start).await?;
 
-        // Step 2: initialize the new data block.
-        let data_block = ctx.block_cache().pin_empty_block(data_block_id.block_no());
-
-        // Step 3: insert a link to the child block into self.btree_root.
-        //         Makes one or more tree nodes dirty (or even allocates new tree node blocks).
-        let changed_tree_blocks = entry
-            .btree_root
-            .insert_link(ctx, block_offset, data_block_id.block_no)
-            .await
-            .inspect_err(|err| todo!())?;
-
-        entry.metadata.modified = Timestamp::now();
-
-        // Step 4: start txn.
-        log::warn!("DirEntryBlock::insert_data_block(): implement txn.");
-
-        // Step 5: save changes.
-        // TODO: batch write blocks when implemented.
-        for block_no in changed_tree_blocks {
-            if block_no == entry_id.block_no {
-                continue;
-            }
-            ctx.block_cache()
-                .write_block(block_no.as_u64())
-                .await
-                .inspect_err(|_err| todo!())?;
-        }
-
-        ctx.block_cache().unpin_block(data_block);
-        ctx.block_cache()
-            .write_block(data_block_id.block_no())
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        ctx.block_cache().unpin_block(entry_block);
-        ctx.block_cache()
-            .write_block(entry_id.block_no())
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        ctx.block_cache().unpin_block(sb_block);
-        ctx.block_cache()
-            .write_block(0)
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        // Step 6: commit txn.
+        // We just allocated a new data block: need to zero it out.
+        let _ = txn.get_empty_block_mut(data_block_id.block_no);
 
         Ok(data_block_id.block_no)
     }
-    */
 
     pub fn set_file_size(&mut self, new_size: u64) {
         assert_eq!(self.kind(), EntryKind::File);
