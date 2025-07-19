@@ -366,6 +366,7 @@ impl DirEntryBlock {
     pub fn validate_entry(&self, entry_id: EntryIdInternal) -> Result<()> {
         if !self.in_use()? {
             // This can be a user error, so we don't log an error.
+            log::trace!("{}:{} {entry_id:?} not in use.", file!(), line!());
             return Err(ErrorKind::InvalidInput.into());
         }
 
@@ -455,6 +456,10 @@ impl DirEntryBlock {
         self.parent_id
     }
 
+    pub fn set_parent_id(&mut self, parent_id: EntryIdInternal) {
+        self.parent_id = parent_id;
+    }
+
     pub fn name(&self) -> Result<&str> {
         let name_len = self.name_len as usize;
         if name_len > self.name_bytes.len() {
@@ -486,6 +491,21 @@ impl DirEntryBlock {
 
     pub fn metadata_mut(&mut self) -> &mut Metadata {
         &mut self.metadata
+    }
+
+    pub async fn get_hash<'a, 'b: 'a>(
+        txn: &'b mut Txn<'a>,
+        parent_id: EntryIdInternal,
+        filename: &str,
+    ) -> Result<u64> {
+        let parent_block = txn.get_block(parent_id.block_no).await?;
+        dir_entry!(parent_block).validate_entry(parent_id)?;
+
+        if dir_entry!(parent_block).kind() != EntryKind::Directory {
+            return Err(ErrorKind::NotADirectory.into());
+        }
+
+        Ok(dir_entry!(parent_block).hash(filename))
     }
 
     /*
@@ -626,17 +646,20 @@ impl DirEntryBlock {
             .init_new_root(entry_id.block_no, parent_id.block_no);
     }
 
-    pub async fn delete_entry<'a, 'b>(
+    pub async fn unlink_entry<'a, 'b>(
         txn: &'b mut Txn<'a>,
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
+        mark_not_used: bool,
     ) -> Result<()> {
         let (name_buf, name_len) = {
             let entry_block = txn.get_txn_block(entry_id.block_no).await?;
             let mut entry_ref = entry_block.block_mut();
             let entry = DirEntryBlock::from_block_mut(&mut *entry_ref);
             assert_eq!(entry.parent_id, parent_id); // The caller must ensure this.
-            entry.block_header.in_use = 0;
+            if mark_not_used {
+                entry.block_header.in_use = 0;
+            }
             if entry.next_entry_id().is_some() {
                 todo!("delete the entry from the list.");
             }
@@ -652,16 +675,10 @@ impl DirEntryBlock {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
-
-        let hash = {
-            let parent_block = this_txn.get_txn_block(parent_id.block_no).await?;
-            let mut parent_ref = parent_block.block_mut();
-            let parent = DirEntryBlock::from_block_mut(&mut *parent_ref);
-            assert_eq!(parent.btree_root.this(), parent_id.block_no);
-            parent.metadata.size -= 1;
-            parent.metadata.modified = Timestamp::now();
-            parent.hash(unsafe { str::from_utf8_unchecked(&name_buf[..name_len]) })
-        };
+        let hash = Self::get_hash(this_txn, parent_id, unsafe {
+            str::from_utf8_unchecked(&name_buf[..name_len])
+        })
+        .await?;
 
         let Some(list_head_block_no) = Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
             txn,
@@ -679,7 +696,6 @@ impl DirEntryBlock {
             todo!("delete the entry from the list.");
         }
 
-        // Step 1: delete the link.
         Node::<DIR_ENTRY_BTREE_ORDER>::delete_link(
             txn,
             parent_id.block_no,
@@ -689,54 +705,15 @@ impl DirEntryBlock {
         )
         .await?;
 
-        Superblock::free_block(txn, entry_id.block_no).await?;
+        let parent_block = txn.get_txn_block(parent_id.block_no).await?;
+        Self::from_block_mut(&mut *parent_block.block_mut())
+            .metadata
+            .modified = Timestamp::now();
+        Self::from_block_mut(&mut *parent_block.block_mut())
+            .metadata
+            .size -= 1;
 
         Ok(())
-    }
-
-    /*
-
-    pub async fn move_entry(
-        mut entry_block: CachedBlock,
-        ctx: &mut Txn<'_>,
-        new_parent_id: EntryIdInternal,
-        new_name: &str,
-    ) -> Result<()> {
-        let entry = Self::from_block_mut(entry_block.block_mut());
-        let old_parent_id = entry.parent_id;
-        let mut old_parent_block = ctx
-            .block_cache()
-            .pin_block(old_parent_id.block_no())
-            .await?;
-        let old_parent = Self::from_block_mut(old_parent_block.block_mut());
-
-        log::warn!("DirEntryBlock::move_entry(): implement txn.");
-
-        let changed_blocks_1 = old_parent.unlink_entry(ctx, entry).await?;
-
-        entry.set_name(new_name).unwrap();
-
-        let changed_blocks_2 = if old_parent_id == new_parent_id {
-            old_parent.link_entry(ctx, entry).await?
-        } else {
-            let mut new_parent_block = ctx
-                .block_cache()
-                .pin_block(new_parent_id.block_no())
-                .await?;
-            let new_parent = Self::from_block_mut(new_parent_block.block_mut());
-            let changed_blocks = new_parent.link_entry(ctx, entry).await?;
-            new_parent_block.forget();
-
-            changed_blocks
-        };
-
-        todo!()
-    }
-    */
-
-    // Returns the list of changed blocks, excl. self and entry.
-    async fn unlink_entry(&mut self, ctx: &mut Txn<'_>, entry: &mut Self) -> Result<Vec<BlockNo>> {
-        todo!()
     }
 
     pub async fn link_child_block(

@@ -75,6 +75,7 @@ impl FileSystem for MotorFs {
             assert!(!parent_block.is_dirty());
             return Ok(None);
         };
+        drop(txn);
 
         loop {
             let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
@@ -120,8 +121,51 @@ impl FileSystem for MotorFs {
         Txn::do_delete_entry_txn(self, entry_id.into()).await
     }
 
+    async fn move_entry(
+        &mut self,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        if entry_id == ROOT_DIR_ID.into() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        if entry_id == new_parent_id {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        validate_filename(new_name)?;
+
+        // Check that we are not moving an entry down to its own child,
+        // which will create a detached cycle.
+        let mut ancestor_id = new_parent_id;
+        loop {
+            let Some(grandparent_id) = self.get_parent(ancestor_id).await? else {
+                assert_eq!(ancestor_id, ROOT_DIR_ID.into());
+                break;
+            };
+            if grandparent_id == entry_id.into() {
+                log::debug!("MotorFS::move_entry: cannot move an entry under its own child.");
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            ancestor_id = grandparent_id;
+        }
+
+        let old_parent_id = self.get_parent(entry_id).await?.unwrap();
+
+        Txn::do_move_entry_txn(
+            self,
+            entry_id.into(),
+            old_parent_id.into(),
+            new_parent_id.into(),
+            new_name,
+        )
+        .await
+    }
+
     /// Get the first entry in a directory.
-    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_first_entry(&mut self, _parent_id: EntryId) -> Result<Option<EntryId>> {
         todo!()
         /*
         let id: EntryIdInternal = parent_id.into();
@@ -151,7 +195,7 @@ impl FileSystem for MotorFs {
     }
 
     /// Get the next entry in a directory.
-    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_next_entry(&mut self, _entry_id: EntryId) -> Result<Option<EntryId>> {
         todo!()
         /*
         let id: EntryIdInternal = entry_id.into();
@@ -230,8 +274,9 @@ impl FileSystem for MotorFs {
 
             return Ok(to_read);
         };
+        drop(txn);
 
-        let data_block = txn.get_block(data_block_no).await?;
+        let data_block = self.block_cache.get_block(data_block_no.as_u64()).await?;
         let offset_within_block = (offset - block_start) as usize;
         buf[..to_read].copy_from_slice(
             &data_block.block().as_bytes()[offset_within_block..(offset_within_block + to_read)],
@@ -244,61 +289,7 @@ impl FileSystem for MotorFs {
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
     }
 
-    async fn move_rename(
-        &mut self,
-        entry_id: EntryId,
-        new_parent_id: EntryId,
-        new_name: &str,
-    ) -> Result<()> {
-        // Renaming is an atomic FS operation (both in Linux, Windows, and Rust).
-        // BUT because our FS "driver" (this code) is single-threaded
-        // (note `&mut self``), the atomicity is kinda built-in, modulo
-        // catastrofic failure. So for now we are somewhat less concerned
-        // with making rename truly atomic.
-
-        todo!()
-        /*
-        let entry_id: EntryIdInternal = entry_id.into();
-        if entry_id == ROOT_DIR_ID {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        // Before we delete the target, we make sure the entry exists.
-        let entry_block = self.block_cache.get_block_mut(entry_id.block_no()).await?;
-        let entry = DirEntryBlock::from_block(entry_block.block());
-        entry.validate_entry(entry_id)?;
-
-        if let Some(target_id) = self.stat(new_parent_id, new_name).await? {
-            if target_id == entry_id.into() {
-                return Err(ErrorKind::InvalidInput.into());
-            }
-            // See https://doc.rust-lang.org/std/fs/fn.rename.html.
-            self.delete_entry(target_id).await?;
-        }
-
-        // Check that we are not moving an entry down to its own child,
-        // which will create a detached cycle.
-        if entry_id != new_parent_id.into() {
-            let mut parent_id = new_parent_id;
-            loop {
-                let Some(grandparent_id) = self.get_parent(parent_id).await? else {
-                    break;
-                };
-                if grandparent_id == entry_id.into() {
-                    log::debug!("MotorFS::move_rename: error: trying to move under its own child.");
-                    return Err(ErrorKind::InvalidInput.into());
-                }
-                parent_id = grandparent_id;
-            }
-        }
-
-        let entry_block = self.block_cache.pin_block(entry_id.block_no()).await?;
-        let mut ctx = Txn::new(self);
-        DirEntryBlock::move_entry(entry_block, &mut ctx, new_parent_id.into(), new_name).await
-        */
-    }
-
-    async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
+    async fn resize(&mut self, _file_id: EntryId, _new_size: u64) -> Result<()> {
         todo!()
     }
 

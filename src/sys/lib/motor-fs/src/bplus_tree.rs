@@ -1,8 +1,5 @@
 //! B+ tree.
-use async_fs::block_cache::CachedBlock;
-
 use crate::BlockNo;
-use crate::TreeNodeBlock;
 use crate::Txn;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -52,6 +49,7 @@ impl<const ORDER: usize> Node<ORDER> {
         self.is_leaf = 1;
     }
 
+    /*
     pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
         todo!()
         // if self.num_keys as usize > ORDER || self.is_leaf > 1 {
@@ -71,6 +69,7 @@ impl<const ORDER: usize> Node<ORDER> {
         // // Recursion in an async fn requires boxing: rustc --explain E0733.
         // Box::pin(TreeNodeBlock::first_child(first_child_block_no, txn)).await
     }
+    */
 
     pub async fn first_child_with_key<'a>(
         txn: &mut Txn<'a>,

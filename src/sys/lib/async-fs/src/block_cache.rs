@@ -184,6 +184,17 @@ impl BlockCache {
         }
     }
 
+    pub fn discard(&mut self, mut block: CachedBlock) {
+        if let Some(existing) = self.cache.pop(&block.block_no()) {
+            assert_eq!(
+                existing.inner.as_ptr() as usize,
+                block.inner.as_ptr() as usize
+            );
+        }
+
+        block.intenal_mark_clean();
+    }
+
     pub async fn flush(&mut self) -> Result<()> {
         // #[cfg(debug_assertions)]
         {

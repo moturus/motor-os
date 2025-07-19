@@ -124,9 +124,9 @@ async fn basic_test() -> Result<()> {
     }
 
     assert_eq!("dir22", fs.name(dir22).await?);
-    fs.move_rename(dir22, dir2, "dir22_new").await?;
+    fs.move_entry(dir22, dir2, "dir22_new").await?;
     assert_eq!("dir22_new", fs.name(dir22).await?);
-    fs.move_rename(dir22, root, "dir22").await?;
+    fs.move_entry(dir22, root, "dir22").await?;
     assert_eq!("dir22", fs.name(dir22).await?);
     assert_eq!(4, fs.metadata(root).await?.size);
     assert_eq!(root, fs.get_parent(dir22).await?.unwrap());

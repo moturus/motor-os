@@ -9,7 +9,7 @@
 
 use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, ROOT_DIR_ID, Superblock, dir_entry};
 use async_fs::{
-    BLOCK_SIZE, EntryKind, Timestamp,
+    BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
 use std::io::{ErrorKind, Result};
@@ -26,6 +26,29 @@ pub struct Txn<'a> {
     read_only: bool,
 }
 
+impl<'a> Drop for Txn<'a> {
+    fn drop(&mut self) {
+        let Txn {
+            fs,
+            txn_cache,
+            read_only,
+        } = self;
+
+        if *read_only {
+            assert!(txn_cache.is_empty());
+            return;
+        }
+
+        for (block_no, block) in txn_cache.drain() {
+            assert_eq!(block_no.as_u64(), block.block_no());
+            fs.block_cache().discard(block);
+        }
+
+        #[cfg(debug_assertions)]
+        self.block_cache().debug_check_clean();
+    }
+}
+
 impl<'a> Txn<'a> {
     fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
         self.fs.block_cache()
@@ -37,8 +60,10 @@ impl<'a> Txn<'a> {
         let Txn {
             fs,
             txn_cache,
-            read_only: _,
+            read_only,
         } = self;
+
+        assert!(!*read_only);
 
         // For now, just save all dirty blocks.
         for (block_no, block) in txn_cache.drain() {
@@ -62,7 +87,11 @@ impl<'a> Txn<'a> {
             read_only: true,
         }
     }
-    pub async fn get_block(&'a mut self, block_no: BlockNo) -> std::io::Result<&'a CachedBlock> {
+
+    pub async fn get_block<'b: 'a>(
+        &'b mut self,
+        block_no: BlockNo,
+    ) -> std::io::Result<&'a CachedBlock> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this = unsafe {
@@ -147,29 +176,24 @@ impl<'a> Txn<'a> {
         kind: EntryKind,
         filename: &'a str,
     ) -> Result<EntryIdInternal> {
+        log::trace!(
+            "{}:{} - create entry: {parent_id:?} {kind:?} {filename}",
+            file!(),
+            line!()
+        );
         let mut txn = Self {
             fs,
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
 
-        let parent_id: EntryIdInternal = parent_id.into();
-        let hash = {
-            // TODO: remove unsafe when NLL Problem #3 is solved.
-            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-            let this_txn = unsafe {
-                let this = &mut txn as *mut Self;
-                this.as_mut().unwrap_unchecked()
-            };
-            let parent_block = this_txn.get_block(parent_id.block_no).await?;
-            dir_entry!(parent_block).validate_entry(parent_id)?;
-
-            if dir_entry!(parent_block).kind() != EntryKind::Directory {
-                return Err(ErrorKind::NotADirectory.into());
-            }
-
-            dir_entry!(parent_block).hash(filename)
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe {
+            let this = &mut txn as *mut Self;
+            this.as_mut().unwrap_unchecked()
         };
+        let hash = DirEntryBlock::get_hash(this_txn, parent_id, filename).await?;
 
         let entry_id = Superblock::allocate_block(&mut txn).await?;
         DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename);
@@ -181,7 +205,7 @@ impl<'a> Txn<'a> {
     }
 
     pub async fn do_delete_entry_txn(fs: &'a mut MotorFs, entry_id: EntryIdInternal) -> Result<()> {
-        let entry_id: EntryIdInternal = entry_id.into();
+        log::trace!("{}:{} - delete entry: {entry_id:?}", file!(), line!());
         if entry_id == ROOT_DIR_ID {
             return Err(ErrorKind::InvalidInput.into());
         }
@@ -213,7 +237,97 @@ impl<'a> Txn<'a> {
 
             dir_entry!(entry_block).parent_id()
         };
-        DirEntryBlock::delete_entry(&mut txn, parent_id, entry_id).await?;
+        DirEntryBlock::unlink_entry(&mut txn, parent_id, entry_id, true).await?;
+        Superblock::free_block(&mut txn, entry_id.block_no).await?;
+
+        txn.commit().await
+    }
+
+    pub async fn do_move_entry_txn(
+        fs: &'a mut MotorFs,
+        entry_id: EntryIdInternal,
+        old_parent_id: EntryIdInternal,
+        new_parent_id: EntryIdInternal,
+        new_name: &str,
+    ) -> Result<()> {
+        // Renaming is an atomic FS operation (both in Linux, Windows, and Rust).
+        // If the target exists, it is deleted.
+        log::trace!(
+            "{}:{} - move entry: {old_parent_id:?} {new_parent_id:?} {new_name}",
+            file!(),
+            line!()
+        );
+        let mut txn = Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        // Delete the target entry, if present (and not empty).
+        if let Some(target) = txn.fs.stat(new_parent_id.into(), new_name).await? {
+            let target_id: EntryIdInternal = target.into();
+            if target_id == entry_id {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            log::debug!("move_entry: deleting target {target_id:?}");
+
+            // TODO: remove unsafe when NLL Problem #3 is solved.
+            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+            let this_txn = unsafe {
+                let this = &mut txn as *mut Self;
+                this.as_mut().unwrap_unchecked()
+            };
+            let target_block = this_txn.get_block(target_id.block_no).await?;
+            dir_entry!(target_block).validate_entry(target_id)?;
+            if dir_entry!(target_block).metadata().size > 0 {
+                return match dir_entry!(target_block).kind() {
+                    EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
+                    EntryKind::File => {
+                        log::error!("TODO: implement deleting non-empty files.");
+                        Err(ErrorKind::FileTooLarge.into())
+                    }
+                };
+            }
+
+            DirEntryBlock::unlink_entry(&mut txn, new_parent_id, target_id, true).await?;
+            Superblock::free_block(&mut txn, target_id.block_no).await?;
+        }
+
+        // Unlink + re-link the entry record.
+        {
+            DirEntryBlock::unlink_entry(&mut txn, old_parent_id, entry_id, false).await?;
+            // TODO: remove unsafe when NLL Problem #3 is solved.
+            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+            let this_txn = unsafe {
+                let this = &mut txn as *mut Self;
+                this.as_mut().unwrap_unchecked()
+            };
+            let hash = DirEntryBlock::get_hash(this_txn, new_parent_id, new_name).await?;
+            DirEntryBlock::link_child_block(
+                &mut txn,
+                new_parent_id.block_no,
+                entry_id.block_no,
+                hash,
+            )
+            .await?;
+            DirEntryBlock::increment_dir_size(&mut txn, new_parent_id).await?;
+        }
+
+        // Finally, update the entry record itself.
+        {
+            let entry_block = txn.get_txn_block(entry_id.block_no).await?;
+            let entry_ref = &mut *entry_block.block_mut();
+
+            DirEntryBlock::from_block_mut(entry_ref)
+                .set_name(new_name)
+                .unwrap(); // new_name has been validated => unwrap().
+            DirEntryBlock::from_block_mut(entry_ref).set_parent_id(new_parent_id);
+            DirEntryBlock::from_block_mut(entry_ref).set_parent_id(new_parent_id);
+            DirEntryBlock::from_block_mut(entry_ref)
+                .metadata_mut()
+                .modified = Timestamp::now();
+        }
+
         txn.commit().await
     }
 

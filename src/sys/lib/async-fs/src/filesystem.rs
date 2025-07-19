@@ -120,6 +120,14 @@ pub trait FileSystem {
     /// Delete the file or directory.
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()>;
 
+    /// Rename and/or move the file or directory.
+    async fn move_entry(
+        &mut self,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()>;
+
     /// Get the first entry in a directory.
     async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>>;
 
@@ -142,14 +150,6 @@ pub trait FileSystem {
     /// Write bytes to a file.
     /// Note that cross-block writes may not be supported.
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
-
-    /// Rename and/or move the file or directory.
-    async fn move_rename(
-        &mut self,
-        entry_id: EntryId,
-        new_parent_id: EntryId,
-        new_name: &str,
-    ) -> Result<()>;
 
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()>;
