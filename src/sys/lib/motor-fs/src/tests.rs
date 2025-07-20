@@ -1,11 +1,8 @@
-use async_fs::BLOCK_SIZE;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
 use camino::Utf8PathBuf;
-use rand::RngCore;
 use std::io::ErrorKind;
 use std::io::Result;
-use std::time::Instant;
 use std::time::SystemTime;
 
 use crate::MotorFs;
@@ -109,206 +106,50 @@ async fn basic_test() -> Result<()> {
 
     let dir22 = fs.create_entry(dir2, EntryKind::Directory, "dir22").await?;
     assert_eq!(dir2, fs.get_parent(dir22).await?.unwrap());
-    let file2 = fs.create_entry(dir2, EntryKind::File, "file").await?;
-    assert_eq!(dir2, fs.get_parent(file2).await?.unwrap());
+
+    // File.
+    let file = fs.create_entry(dir2, EntryKind::File, "file").await?;
+    assert_eq!(dir2, fs.get_parent(file).await?.unwrap());
     assert_eq!(2, fs.metadata(dir2).await?.size);
 
     const BYTES: &[u8] = "once upon a time there was a tree upon a hill".as_bytes();
-    assert_eq!(BYTES.len(), fs.write(file2, 0, BYTES).await.unwrap());
-    assert_eq!(BYTES.len() as u64, fs.metadata(file2).await?.size);
-
-    let mut buf = [0_u8; 256];
-    assert_eq!(BYTES.len(), fs.read(file2, 0, &mut buf).await.unwrap());
-    for idx in 0..BYTES.len() {
-        assert_eq!(BYTES[idx], buf[idx]);
-    }
-
-    assert_eq!("dir22", fs.name(dir22).await?);
-    fs.move_entry(dir22, dir2, "dir22_new").await?;
-    assert_eq!("dir22_new", fs.name(dir22).await?);
-    fs.move_entry(dir22, root, "dir22").await?;
-    assert_eq!("dir22", fs.name(dir22).await?);
-    assert_eq!(4, fs.metadata(root).await?.size);
-    assert_eq!(root, fs.get_parent(dir22).await?.unwrap());
-
-    /*
-    const NUM_BLOCKS: u64 = 256;
-    let path = std::env::temp_dir().join("fs_async_basic");
-    let path = Utf8PathBuf::from_path_buf(path).unwrap();
-    std::fs::remove_file(path.clone()).ok();
-
-    // let mut bd = Box::new(FileBlockDevice::create(&path, NUM_BLOCKS).unwrap());
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?;
-    let mut fs = crate::fs_async::SrFs::format(bd).await.unwrap();
-    // let mut fs = SyncFileSystem::open_fs(bd).unwrap();
-    // assert_eq!(NUM_BLOCKS, fs.num_blocks());
-    assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks().await.unwrap());
-
-    let root = async_fs::ROOT_DIR_ID;
-
-    assert_eq!(0, fs.size(root).await.unwrap());
-    let first = fs
-        .create_entry(root, async_fs::EntryKind::Directory, "first")
-        .await
-        .unwrap();
-    assert_eq!(1, fs.size(root).await.unwrap());
-    assert_eq!(0, fs.size(first).await.unwrap());
-    // assert_eq!(NUM_BLOCKS - 3, fs.empty_blocks());
-
-    assert_eq!(
-        fs.create_entry(first, async_fs::EntryKind::Directory, "/")
-            .await
-            .err()
-            .unwrap()
-            .kind(),
-        ErrorKind::InvalidFilename
-    );
-    assert_eq!(
-        fs.create_entry(first, async_fs::EntryKind::Directory, "/second")
-            .await
-            .err()
-            .unwrap()
-            .kind(),
-        ErrorKind::InvalidFilename
-    );
-    let second = fs
-        .create_entry(first, async_fs::EntryKind::Directory, "second")
-        .await
-        .unwrap();
-    assert_eq!(1, fs.size(first).await.unwrap());
-    assert_eq!(NUM_BLOCKS - 4, fs.empty_blocks().await.unwrap());
-
-    assert_eq!(fs.get_entry_by_pos(first, 0).await.unwrap(), second);
-
-    assert_eq!(fs.name(second).await.unwrap(), "second");
-    assert_eq!(
-        fs.get_entry_by_pos(first, 1).await.err().unwrap().kind(),
-        ErrorKind::NotFound
-    );
-
-    fs.move_rename(first, root, "1st".into()).await.unwrap();
-    let first_2 = fs.get_entry_by_pos(root, 0).await.unwrap();
-    assert_eq!(first, first_2);
-    assert_eq!(fs.name(first_2).await.unwrap(), "1st");
-
-    assert_eq!(
-        fs.write(first, 0, "foo".as_bytes())
-            .await
-            .err()
-            .unwrap()
-            .kind(),
-        ErrorKind::InvalidInput
-    ); // Writing is for files.
-
-    // Add file.
-    assert_eq!(
-        fs.create_entry(first, async_fs::EntryKind::File, "second")
-            .await
-            .err()
-            .unwrap()
-            .kind(),
-        ErrorKind::AlreadyExists
-    ); // "second" already exists.
-    let file = fs
-        .create_entry(first, async_fs::EntryKind::File, "file_1")
-        .await
-        .unwrap();
-    assert_eq!(0, fs.size(file).await.unwrap());
-
-    const BYTES: &[u8] = "once upon a time there was a tree upon a hill".as_bytes();
     assert_eq!(BYTES.len(), fs.write(file, 0, BYTES).await.unwrap());
+    assert_eq!(BYTES.len() as u64, fs.metadata(file).await?.size);
+
     let mut buf = [0_u8; 256];
     assert_eq!(BYTES.len(), fs.read(file, 0, &mut buf).await.unwrap());
     for idx in 0..BYTES.len() {
         assert_eq!(BYTES[idx], buf[idx]);
     }
 
-    // Move.
-    assert_eq!(first, fs.get_parent(file).await.unwrap().unwrap());
-    assert_eq!("file_1", fs.name(file).await.unwrap().as_str());
-    assert_eq!(0, fs.size(second).await.unwrap());
-    assert_eq!(2, fs.size(first).await.unwrap());
-    println!("will move");
-    fs.move_rename(file, second, "file_one").await.unwrap();
-    println!("did move");
-    assert_eq!(1, fs.size(second).await.unwrap());
-    assert_eq!(1, fs.size(first).await.unwrap());
-    assert_eq!("file_one", fs.name(file).await.unwrap());
-    assert_eq!(second, fs.get_parent(file).await.unwrap().unwrap());
-    fs.move_rename(file, root, "foo2").await.unwrap();
-    assert_eq!(0, fs.size(second).await.unwrap());
-    assert_eq!(root, fs.get_parent(file).await.unwrap().unwrap());
-    assert_eq!("foo2", fs.name(file).await.unwrap());
-    fs.move_rename(file, second, "file_one").await.unwrap();
-    assert_eq!(1, fs.size(second).await.unwrap());
-    assert_eq!("file_one", fs.name(file).await.unwrap());
-
-    // Remove stuff.
-    assert_eq!(
-        fs.create_entry(first_2, async_fs::EntryKind::Directory, "second")
-            .await
-            .err()
-            .unwrap()
-            .kind(),
-        ErrorKind::AlreadyExists
-    ); // "second" already exists.
-    assert_eq!(
-        fs.delete_entry(root).await.err().unwrap().kind(),
-        ErrorKind::InvalidInput
-    );
-    assert_eq!(
-        fs.delete_entry(first).await.err().unwrap().kind(),
-        ErrorKind::DirectoryNotEmpty
-    ); // The directory is not empty.
-    assert_eq!(
-        fs.delete_entry(second).await.err().unwrap().kind(),
-        ErrorKind::DirectoryNotEmpty
-    );
-    fs.move_rename(file, root, "foo").await.unwrap();
-    fs.delete_entry(second).await.unwrap();
+    // Truncate.
     fs.resize(file, 0).await.unwrap();
+    assert_eq!(0, fs.read(file, 0, &mut buf).await.unwrap());
+
+    // Resize up: populate with zeroes.
+    fs.resize(file, BYTES.len() as u64).await.unwrap();
+    assert_eq!(BYTES.len(), fs.read(file, 0, &mut buf).await.unwrap());
+    for idx in 0..BYTES.len() {
+        assert_eq!(0, buf[idx]);
+    }
+
+    // Move.
+    assert_eq!("dir22", fs.name(dir22).await?);
+    fs.move_entry(dir22, dir2, "dir22_new").await?;
+    assert_eq!("dir22_new", fs.name(dir22).await?);
+    fs.move_entry(dir22, root, "dir22").await?;
+    assert_eq!("dir22", fs.name(dir22).await?);
+    assert_eq!(4, fs.metadata(root).await.unwrap().size);
+    assert_eq!(root, fs.get_parent(dir22).await?.unwrap());
+
+    // Clear out.
     fs.delete_entry(file).await.unwrap();
-    fs.delete_entry(first).await.unwrap();
-    assert_eq!(0, fs.size(root).await.unwrap());
-    assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks().await.unwrap());
-
-    // Add file.
-    let file = fs
-        .create_entry(root, async_fs::EntryKind::File, "file")
-        .await
-        .unwrap();
-    assert_eq!(0, fs.size(file).await.unwrap());
-
-    // Write to file.
-    for idx in 0..10000_u64 {
-        let buf =
-            unsafe { core::slice::from_raw_parts(&idx as *const u64 as usize as *const u8, 8) };
-        assert_eq!(
-            fs.write(file, idx * 8 + 2, buf).await.err().unwrap().kind(),
-            ErrorKind::InvalidInput
-        );
-        assert_eq!(8, fs.write(file, idx * 8, buf).await.unwrap());
-
-        // Read it back.
-        let mut out: u64 = 0;
-        let buf =
-            unsafe { core::slice::from_raw_parts_mut(&mut out as *mut u64 as usize as *mut u8, 8) };
-        assert_eq!(8, fs.read(file, idx * 8, buf).await.unwrap());
-        assert_eq!(idx, out);
-    }
-
-    // Read it back again.
-    for idx in 0..10000_u64 {
-        let mut out: u64 = 0;
-        let buf =
-            unsafe { core::slice::from_raw_parts_mut(&mut out as *mut u64 as usize as *mut u8, 8) };
-        assert_eq!(8, fs.read(file, idx * 8, buf).await.unwrap());
-        assert_eq!(idx, out);
-    }
-
-    drop(fs);
-    std::fs::remove_file(path.clone()).unwrap();
-    */
+    fs.delete_entry(dir1).await.unwrap();
+    fs.delete_entry(dir2).await.unwrap();
+    fs.delete_entry(dir3).await.unwrap();
+    fs.delete_entry(dir22).await.unwrap();
+    assert_eq!(0, fs.metadata(root).await.unwrap().size);
+    assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks().await?);
 
     println!("basic_test PASS");
     Ok(())

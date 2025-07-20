@@ -7,7 +7,7 @@
 //! - write to file
 //! - set file size
 
-use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, ROOT_DIR_ID, Superblock, dir_entry};
+use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, Superblock, dir_entry};
 use async_fs::{
     BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
     block_cache::{BlockCache, CachedBlock},
@@ -206,9 +206,6 @@ impl<'a> Txn<'a> {
 
     pub async fn do_delete_entry_txn(fs: &'a mut MotorFs, entry_id: EntryIdInternal) -> Result<()> {
         log::trace!("{}:{} - delete entry: {entry_id:?}", file!(), line!());
-        if entry_id == ROOT_DIR_ID {
-            return Err(ErrorKind::InvalidInput.into());
-        }
 
         let mut txn = Self {
             fs,
@@ -216,30 +213,7 @@ impl<'a> Txn<'a> {
             read_only: false,
         };
 
-        let parent_id = {
-            // TODO: remove unsafe when NLL Problem #3 is solved.
-            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-            let this_txn = unsafe {
-                let this = &mut txn as *mut Self;
-                this.as_mut().unwrap_unchecked()
-            };
-            let entry_block = this_txn.get_block(entry_id.block_no).await?;
-            dir_entry!(entry_block).validate_entry(entry_id)?;
-            if dir_entry!(entry_block).metadata().size > 0 {
-                return match dir_entry!(entry_block).kind() {
-                    EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
-                    EntryKind::File => {
-                        log::error!("TODO: implement deleting non-empty files.");
-                        Err(ErrorKind::FileTooLarge.into())
-                    }
-                };
-            }
-
-            dir_entry!(entry_block).parent_id()
-        };
-        DirEntryBlock::unlink_entry(&mut txn, parent_id, entry_id, true).await?;
-        Superblock::free_block(&mut txn, entry_id.block_no).await?;
-
+        DirEntryBlock::delete_entry(&mut txn, entry_id).await?;
         txn.commit().await
     }
 
@@ -270,27 +244,7 @@ impl<'a> Txn<'a> {
                 return Err(ErrorKind::InvalidInput.into());
             }
             log::debug!("move_entry: deleting target {target_id:?}");
-
-            // TODO: remove unsafe when NLL Problem #3 is solved.
-            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-            let this_txn = unsafe {
-                let this = &mut txn as *mut Self;
-                this.as_mut().unwrap_unchecked()
-            };
-            let target_block = this_txn.get_block(target_id.block_no).await?;
-            dir_entry!(target_block).validate_entry(target_id)?;
-            if dir_entry!(target_block).metadata().size > 0 {
-                return match dir_entry!(target_block).kind() {
-                    EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
-                    EntryKind::File => {
-                        log::error!("TODO: implement deleting non-empty files.");
-                        Err(ErrorKind::FileTooLarge.into())
-                    }
-                };
-            }
-
-            DirEntryBlock::unlink_entry(&mut txn, new_parent_id, target_id, true).await?;
-            Superblock::free_block(&mut txn, target_id.block_no).await?;
+            DirEntryBlock::delete_entry(&mut txn, target_id).await?;
         }
 
         // Unlink + re-link the entry record.

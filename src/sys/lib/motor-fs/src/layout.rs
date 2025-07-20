@@ -646,6 +646,35 @@ impl DirEntryBlock {
             .init_new_root(entry_id.block_no, parent_id.block_no);
     }
 
+    pub async fn delete_entry<'a, 'b>(
+        txn: &'b mut Txn<'a>,
+        entry_id: EntryIdInternal,
+    ) -> Result<()> {
+        let parent_id = {
+            // TODO: remove unsafe when NLL Problem #3 is solved.
+            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+            let this_txn = unsafe {
+                let this = txn as *mut Txn<'a>;
+                this.as_mut().unwrap_unchecked()
+            };
+            let entry_block = this_txn.get_block(entry_id.block_no).await?;
+            dir_entry!(entry_block).validate_entry(entry_id)?;
+            if dir_entry!(entry_block).metadata().size > 0 {
+                return match dir_entry!(entry_block).kind() {
+                    EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
+                    EntryKind::File => {
+                        todo!("implement deleting non-empty files.");
+                    }
+                };
+            }
+
+            dir_entry!(entry_block).parent_id()
+        };
+
+        DirEntryBlock::unlink_entry(txn, parent_id, entry_id, true).await?;
+        Superblock::free_block(txn, entry_id.block_no).await
+    }
+
     pub async fn unlink_entry<'a, 'b>(
         txn: &'b mut Txn<'a>,
         parent_id: EntryIdInternal,
