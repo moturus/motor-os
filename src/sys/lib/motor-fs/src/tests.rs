@@ -123,6 +123,12 @@ async fn basic_test() -> Result<()> {
     }
 
     // Truncate.
+    fs.resize(file, 3).await.unwrap();
+    assert_eq!(3, fs.read(file, 0, &mut buf).await.unwrap());
+    for idx in 0..3 {
+        assert_eq!(BYTES[idx], buf[idx]);
+    }
+
     fs.resize(file, 0).await.unwrap();
     assert_eq!(0, fs.read(file, 0, &mut buf).await.unwrap());
 

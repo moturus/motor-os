@@ -317,16 +317,11 @@ impl<'a> Txn<'a> {
         };
 
         // Step 1: find or insert the data block.
-        let data_block_no = match DirEntryBlock::first_data_block_at_offset(
-            &mut txn,
-            file_id,
-            block_start,
-        )
-        .await?
-        {
-            Some(block_no) => block_no,
-            None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_start).await?,
-        };
+        let data_block_no =
+            match DirEntryBlock::data_block_at_offset(&mut txn, file_id, block_start).await? {
+                Some(block_no) => block_no,
+                None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_start).await?,
+            };
 
         // Step 2: update the data lock.
         let data_block = txn.get_txn_block(data_block_no).await?;
@@ -335,19 +330,110 @@ impl<'a> Txn<'a> {
             .copy_from_slice(buf);
 
         // Step 3: update the file size & modified.
-        {
-            let entry_block = txn.get_txn_block(file_id.block_no).await?;
-            let mut entry_ref = entry_block.block_mut();
-            DirEntryBlock::from_block_mut(&mut *entry_ref)
-                .metadata_mut()
-                .modified = Timestamp::now();
-            if prev_file_size < new_file_size {
-                DirEntryBlock::from_block_mut(&mut *entry_ref).set_file_size(new_file_size);
-            }
-        }
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id, prev_file_size.max(new_file_size))
+            .await?;
 
         txn.commit().await?;
 
         Ok(buf.len())
+    }
+
+    pub async fn do_resize_txn(
+        fs: &'a mut MotorFs,
+        file_id: EntryIdInternal,
+        new_size: u64,
+    ) -> Result<()> {
+        let file_id: EntryIdInternal = file_id.into();
+        let block = fs
+            .block_cache()
+            .get_block(file_id.block_no())
+            .await?
+            .clone();
+        dir_entry!(block).validate_entry(file_id)?;
+        if dir_entry!(block).metadata().kind() != EntryKind::File {
+            return Err(ErrorKind::IsADirectory.into());
+        }
+
+        let prev_size = dir_entry!(block).metadata().size;
+        if new_size == prev_size {
+            return Ok(());
+        }
+
+        let mut txn = Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        // The trivial case: just bump the size var.
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id, new_size).await?;
+        if new_size > prev_size {
+            return txn.commit().await;
+        }
+
+        // Three cases:
+        // (a) truncation within the last data block, nothing to deallocate
+        //     - zero out the truncated bytes
+        // (b) a single (the last one) data block to deallocate
+        //     - deallocate the last block
+        //     - zero out truncated bytes on the new last block, if needed
+        // (c) many blocks to deallocate
+        //     - unlink the last data block
+        //     - convert the unlinked (last) block to a TreeNodeBlock
+        //     - transfer the remaining extra blocks from the file
+        //       to the new TreeNodeBlock
+        //     - zero out truncated bytes on the new last block, if needed
+
+        let last_block_start = prev_size & !(BLOCK_SIZE as u64 - 1);
+        if last_block_start < new_size {
+            // Case (a): no data blocks to drop.
+            let Some(data_block_no) =
+                DirEntryBlock::data_block_at_offset(&mut txn, file_id, last_block_start).await?
+            else {
+                // Nothing to see here.
+                return txn.commit().await;
+            };
+
+            // Zero out truncated bytes.
+            let new_end = (new_size - last_block_start) as usize;
+            let old_end = (prev_size - last_block_start) as usize;
+            let data_block = txn.get_txn_block(data_block_no).await?;
+            data_block.block_mut().as_bytes_mut()[new_end..old_end].fill(0);
+
+            return txn.commit().await;
+        }
+
+        if (new_size + (BLOCK_SIZE as u64)) > last_block_start {
+            // Case (b): only the last block needs dropping.
+            if let Some(data_block_no) =
+                DirEntryBlock::data_block_at_offset(&mut txn, file_id, last_block_start).await?
+            {
+                DirEntryBlock::unlink_child_block(
+                    &mut txn,
+                    file_id.block_no,
+                    data_block_no,
+                    last_block_start,
+                )
+                .await?;
+            };
+
+            // Zero out truncated bytes in the new last block.
+            let last_block_start = new_size & !(BLOCK_SIZE as u64 - 1);
+            let Some(data_block_no) =
+                DirEntryBlock::data_block_at_offset(&mut txn, file_id, last_block_start).await?
+            else {
+                // Nothing to see here.
+                return txn.commit().await;
+            };
+
+            // Zero out truncated bytes.
+            let new_end = (new_size - last_block_start) as usize;
+            let data_block = txn.get_txn_block(data_block_no).await?;
+            data_block.block_mut().as_bytes_mut()[new_end..].fill(0);
+
+            return txn.commit().await;
+        }
+
+        todo!("do the complicated dance");
     }
 }

@@ -438,7 +438,7 @@ impl DirEntryBlock {
         .await
     }
 
-    pub async fn first_data_block_at_offset(
+    pub async fn data_block_at_offset(
         txn: &mut Txn<'_>,
         file_id: EntryIdInternal,
         block_start: u64,
@@ -603,9 +603,20 @@ impl DirEntryBlock {
         Ok(data_block_id.block_no)
     }
 
-    pub fn set_file_size(&mut self, new_size: u64) {
-        assert_eq!(self.kind(), EntryKind::File);
-        self.metadata.size = new_size;
+    pub async fn set_file_size_in_entry(
+        txn: &mut Txn<'_>,
+        file_id: EntryIdInternal,
+        new_size: u64,
+    ) -> Result<()> {
+        let entry_block = txn.get_txn_block(file_id.block_no).await?;
+        let mut entry_ref = entry_block.block_mut();
+        let entry = DirEntryBlock::from_block_mut(&mut *entry_ref);
+        assert_eq!(entry.kind(), EntryKind::File);
+
+        entry.metadata.modified = Timestamp::now();
+        entry.metadata.size = new_size;
+
+        Ok(())
     }
 
     pub fn init_child_entry<'a, 'b>(
@@ -758,6 +769,27 @@ impl DirEntryBlock {
 
         log::warn!("link_child_block: if this is a dir, we may need to link into the SLL");
         Node::<DIR_ENTRY_BTREE_ORDER>::insert_link(
+            txn,
+            parent_block_no,
+            BTREE_ROOT_OFFSET,
+            key,
+            child_block_no,
+        )
+        .await
+    }
+
+    pub async fn unlink_child_block(
+        txn: &mut Txn<'_>,
+        parent_block_no: BlockNo,
+        child_block_no: BlockNo,
+        key: u64,
+    ) -> Result<()> {
+        let parent_block = txn.get_txn_block(parent_block_no).await?;
+        Self::from_block_mut(&mut *parent_block.block_mut())
+            .metadata
+            .modified = Timestamp::now();
+
+        Node::<DIR_ENTRY_BTREE_ORDER>::delete_link(
             txn,
             parent_block_no,
             BTREE_ROOT_OFFSET,

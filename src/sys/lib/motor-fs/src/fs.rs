@@ -296,7 +296,7 @@ impl FileSystem for MotorFs {
 
         let mut txn = Txn::new_readonly(self);
         let Some(data_block_no) =
-            DirEntryBlock::first_data_block_at_offset(&mut txn, file_id, block_start).await?
+            DirEntryBlock::data_block_at_offset(&mut txn, file_id, block_start).await?
         else {
             // No data block => "read" zeroes.
             for byte in &mut buf[..to_read] {
@@ -320,8 +320,8 @@ impl FileSystem for MotorFs {
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
     }
 
-    async fn resize(&mut self, _file_id: EntryId, _new_size: u64) -> Result<()> {
-        todo!()
+    async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
+        Txn::do_resize_txn(self, file_id.into(), new_size).await
     }
 
     async fn empty_blocks(&mut self) -> Result<u64> {
