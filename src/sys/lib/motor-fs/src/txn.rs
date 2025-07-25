@@ -415,6 +415,8 @@ impl<'a> Txn<'a> {
                     last_block_start,
                 )
                 .await?;
+
+                Superblock::free_single_block(&mut txn, data_block_no).await?;
             };
 
             // Zero out truncated bytes in the new last block.

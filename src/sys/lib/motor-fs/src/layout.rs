@@ -98,21 +98,21 @@ pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 /// Superblock (block #0).
 #[repr(C)]
 pub(crate) struct Superblock {
-    magic: u64,         // MAGIC.
-    version: u64,       // 1 at the moment.
-    num_blocks: u64,    // Num blocks (may be less than what the device has).
-    free_blocks: u64,   // The number of unused blocks.
-    generation: u64,    // Auto-incrementing. Used in EntityId.
-    freelist_head: u64, // The head of the block freelist.
-    empty_area_start: u64, // All blocks after this one are unused.
+    magic: u64,             // MAGIC.
+    version: u64,           // 1 at the moment.
+    num_blocks: u64,        // Num blocks (may be less than what the device has).
+    free_blocks: u64,       // The number of unused blocks.
+    generation: u64,        // Auto-incrementing. Used in EntityId.
+    freelist_head: BlockNo, // The head of the block freelist.
+    empty_area_start: u64,  // All blocks after this one are unused.
 
-                        // txn_meta_block: u64,          // A meta block currently being worked on.
-                        // txn_data_block: u64,          // A file data block currently being worked on.
-                        // txn_link_block: u64,          // A directory list block or file data block list.
-                        // txn_list_of_links_block: u64, // A file list-of-lists block currently being worked on.
-                        // txn_blocks_owner: u64,        // The "owner" of the txn blocks to check upon bootup.
-                        // txn_type: u32,                // TXN_TYPE_***.
-                        // crc32: u32, // CRC32 of this data structure.
+                            // txn_meta_block: u64,          // A meta block currently being worked on.
+                            // txn_data_block: u64,          // A file data block currently being worked on.
+                            // txn_link_block: u64,          // A directory list block or file data block list.
+                            // txn_list_of_links_block: u64, // A file list-of-lists block currently being worked on.
+                            // txn_blocks_owner: u64,        // The "owner" of the txn blocks to check upon bootup.
+                            // txn_type: u32,                // TXN_TYPE_***.
+                            // crc32: u32, // CRC32 of this data structure.
 }
 const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
 unsafe impl plain::Plain for Superblock {}
@@ -131,7 +131,7 @@ impl Superblock {
             free_blocks: num_blocks - 2,
             empty_area_start: 2,
             generation: 1,
-            freelist_head: 0,
+            freelist_head: BlockNo::null(),
         };
 
         let mut block_1 = Block::new_zeroed();
@@ -174,7 +174,7 @@ impl Superblock {
             return Err(ErrorKind::StorageFull.into());
         }
 
-        if this.freelist_head == 0 {
+        if this.freelist_head.is_null() {
             if this.empty_area_start != (this.num_blocks - this.free_blocks) {
                 log::error!(
                     "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
@@ -196,10 +196,11 @@ impl Superblock {
         todo!()
     }
 
-    pub async fn free_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
-        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
-        let mut block_ref = sb_block.block_mut();
-        let this = block_ref.get_mut_at_offset::<Self>(0);
+    // Free a single block without looking inside: could be a data block, or an empty file/directory.
+    pub async fn free_single_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
+        let mut sb_block = txn.get_txn_block(BlockNo(0)).await?.clone();
+        let mut sb_mut_ref = sb_block.block_mut();
+        let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
 
         if block_no.as_u64() == (this.empty_area_start - 1) {
             this.free_blocks += 1;
@@ -207,26 +208,68 @@ impl Superblock {
             return Ok(());
         }
 
-        todo!()
+        let mut target_block = txn.get_txn_block(block_no).await?.clone();
+        let mut target_mut_ref = target_block.block_mut();
+        let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
+        ebh.next_empty_block = this.freelist_head;
+        this.freelist_head = block_no;
+
+        log::error!("{}:{} - Do free blocks accounting.", file!(), line!());
+
+        Ok(())
+    }
+
+    pub async fn free_complex_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
+        let mut target_block = txn.get_txn_block(block_no).await?.clone();
+        let mut sb_block = txn.get_txn_block(BlockNo(0)).await?.clone();
+
+        let mut target_mut_ref = target_block.block_mut();
+
+        let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
+        match ebh.block_type {
+            BlockType::FileEntry => {}
+            BlockType::DirEntry => panic!("This is a bug."),
+            BlockType::TreeNode => todo!(),
+            BlockType::EmptyBlock => panic!("This is a bug."),
+        }
+
+        let mut sb_mut_ref = sb_block.block_mut();
+        let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
+        ebh.next_empty_block = this.freelist_head;
+        this.freelist_head = block_no;
+
+        log::error!("{}:{} - Do free blocks accounting.", file!(), line!());
+
+        Ok(())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum BlockType {
-    FileEntry = 1, // Also B+ tree root node.
-    DirEntry = 2,  // Also B+ tree root node.
-    TreeNode = 3,  // B+ tree node.
-    _FileDataBlock = 4,
+    FileEntry = 1,  // Also B+ tree root node.
+    DirEntry = 2,   // Also B+ tree root node.
+    TreeNode = 3,   // B+ tree node.
+    EmptyBlock = 4, // A standalone empty block.
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChildType {
-    TreeNode,
-    Entry,
+// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pub(crate) enum ChildType {
+//     TreeNode,
+//     Entry,
+// }
+
+#[repr(C)]
+pub(crate) struct EmptyBlockHeader {
+    block_type: BlockType, // Must be BlockType::EmptyBlock.
+    _padding: [u8; 7],
+    next_empty_block: BlockNo, // Null if this is the last empty block.
 }
 
-#[derive(Clone, Copy)]
+const _: () = assert!(16 == core::mem::size_of::<EmptyBlockHeader>());
+unsafe impl plain::Plain for EmptyBlockHeader {}
+
+// #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct BlockHeader {
     block_type: BlockType,
@@ -661,29 +704,34 @@ impl DirEntryBlock {
         txn: &'b mut Txn<'a>,
         entry_id: EntryIdInternal,
     ) -> Result<()> {
-        let parent_id = {
-            // TODO: remove unsafe when NLL Problem #3 is solved.
-            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-            let this_txn = unsafe {
-                let this = txn as *mut Txn<'a>;
-                this.as_mut().unwrap_unchecked()
-            };
-            let entry_block = this_txn.get_block(entry_id.block_no).await?;
-            dir_entry!(entry_block).validate_entry(entry_id)?;
-            if dir_entry!(entry_block).metadata().size > 0 {
-                return match dir_entry!(entry_block).kind() {
-                    EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
-                    EntryKind::File => {
-                        todo!("implement deleting non-empty files.");
-                    }
-                };
-            }
-
-            dir_entry!(entry_block).parent_id()
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe {
+            let this = txn as *mut Txn<'a>;
+            this.as_mut().unwrap_unchecked()
         };
+        let entry_block = this_txn.get_block(entry_id.block_no).await?.clone();
+        dir_entry!(entry_block).validate_entry(entry_id)?;
+        let parent_id = dir_entry!(entry_block).parent_id();
 
-        DirEntryBlock::unlink_entry(txn, parent_id, entry_id, true).await?;
-        Superblock::free_block(txn, entry_id.block_no).await
+        if dir_entry!(entry_block).metadata().size == 0 {
+            drop(entry_block);
+            // Unlink first, in case there is a hash collision and this entry has a next poiner set.
+            DirEntryBlock::unlink_entry(txn, parent_id, entry_id, true).await?;
+            return Superblock::free_single_block(txn, entry_id.block_no).await;
+        }
+
+        let entry_kind = dir_entry!(entry_block).kind();
+        drop(entry_block);
+
+        match entry_kind {
+            EntryKind::Directory => Err(ErrorKind::DirectoryNotEmpty.into()),
+            EntryKind::File => {
+                // Unlink first, in case there is a hash collision and this entry has a next poiner set.
+                DirEntryBlock::unlink_entry(txn, parent_id, entry_id, true).await?;
+                Superblock::free_complex_block(txn, entry_id.block_no).await
+            }
+        }
     }
 
     pub async fn unlink_entry<'a, 'b>(
