@@ -76,7 +76,7 @@ $ rustup toolchain link dev-x86_64-unknown-moturus \
 
 ```
 $ cd $MOTORH/motor-os
-$ make all BUILD=release -j
+$ make all BUILD=release -j$(nproc)
 ```
 
 ## Create a tap device that our VMs will use
