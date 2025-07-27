@@ -33,7 +33,6 @@ $ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 ```
 $ rustup default nightly-2025-05-26
 $ rustup component add rust-src --toolchain nightly-2025-05-26-x86_64-unknown-linux-gnu
-$ cargo install --force cargo-make
 ```
 
 (Note: we pin to a specific nightly version for better reproducibility.
@@ -77,7 +76,7 @@ $ rustup toolchain link dev-x86_64-unknown-moturus \
 
 ```
 $ cd $MOTORH/motor-os
-$ cargo make boot_img_release
+$ make all BUILD=release -j
 ```
 
 ## Create a tap device that our VMs will use
