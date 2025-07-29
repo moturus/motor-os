@@ -8,7 +8,14 @@ use std::time::SystemTime;
 use crate::MotorFs;
 use crate::RESERVED_BLOCKS;
 
-// use crate::{SyncFileSystem, file_block_device::FileBlockDevice};
+async fn create_fs(tag: &str, num_blocks: u64) -> Result<MotorFs> {
+    let path = std::env::temp_dir().join(tag);
+    let path = Utf8PathBuf::from_path_buf(path).unwrap();
+    std::fs::remove_file(path.clone()).ok();
+
+    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(&path, num_blocks).await?;
+    MotorFs::format(Box::new(bd)).await
+}
 
 #[test]
 fn basic() {
@@ -24,14 +31,8 @@ fn basic() {
 async fn basic_test() -> Result<()> {
     const NUM_BLOCKS: u64 = 256;
 
-    let path = std::env::temp_dir().join("motor_fs_basic_test");
-    let path = Utf8PathBuf::from_path_buf(path).unwrap();
-    std::fs::remove_file(path.clone()).ok();
-
     let ts_format = SystemTime::now();
-
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?;
-    let mut fs = MotorFs::format(Box::new(bd)).await?;
+    let mut fs = create_fs("motor_fs_basic_test", NUM_BLOCKS).await?;
 
     assert_eq!(NUM_BLOCKS, fs.num_blocks());
     assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
