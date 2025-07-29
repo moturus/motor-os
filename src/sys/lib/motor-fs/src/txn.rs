@@ -343,7 +343,6 @@ impl<'a> Txn<'a> {
         file_id: EntryIdInternal,
         new_size: u64,
     ) -> Result<()> {
-        let file_id: EntryIdInternal = file_id.into();
         let block = fs
             .block_cache()
             .get_block(file_id.block_no())
@@ -415,6 +414,8 @@ impl<'a> Txn<'a> {
                     last_block_start,
                 )
                 .await?;
+
+                DirEntryBlock::decrement_blocks_in_use(&mut txn, file_id).await?;
 
                 Superblock::free_single_block(&mut txn, data_block_no).await?;
             };

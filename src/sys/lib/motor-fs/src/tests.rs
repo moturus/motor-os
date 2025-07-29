@@ -6,6 +6,7 @@ use std::io::Result;
 use std::time::SystemTime;
 
 use crate::MotorFs;
+use crate::RESERVED_BLOCKS;
 
 // use crate::{SyncFileSystem, file_block_device::FileBlockDevice};
 
@@ -33,7 +34,7 @@ async fn basic_test() -> Result<()> {
     let mut fs = MotorFs::format(Box::new(bd)).await?;
 
     assert_eq!(NUM_BLOCKS, fs.num_blocks());
-    assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks().await?);
+    assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
 
     let root = crate::ROOT_DIR_ID.into();
     assert!(fs.get_parent(root).await?.is_none());
@@ -95,7 +96,10 @@ async fn basic_test() -> Result<()> {
         fs.delete_entry(root).await.err().unwrap().kind()
     );
 
-    assert_eq!(fs.empty_blocks().await.unwrap(), NUM_BLOCKS - 2);
+    assert_eq!(
+        fs.empty_blocks().await.unwrap(),
+        NUM_BLOCKS - RESERVED_BLOCKS
+    );
     let root_metadata = fs.metadata(root).await?;
     assert!(ts_now <= root_metadata.modified.into());
 
@@ -148,6 +152,14 @@ async fn basic_test() -> Result<()> {
     assert_eq!(4, fs.metadata(root).await.unwrap().size);
     assert_eq!(root, fs.get_parent(dir22).await?.unwrap());
 
+    // Add some bytes to the file before deleting it, so that it uses
+    // more than one block.
+    assert_eq!(BYTES.len(), fs.write(file, 0, BYTES).await.unwrap());
+    assert_eq!(
+        BYTES.len(),
+        fs.write(file, BYTES.len() as u64, BYTES).await.unwrap()
+    );
+
     // Clear out.
     fs.delete_entry(file).await.unwrap();
     fs.delete_entry(dir1).await.unwrap();
@@ -155,7 +167,7 @@ async fn basic_test() -> Result<()> {
     fs.delete_entry(dir3).await.unwrap();
     fs.delete_entry(dir22).await.unwrap();
     assert_eq!(0, fs.metadata(root).await.unwrap().size);
-    assert_eq!(NUM_BLOCKS - 2, fs.empty_blocks().await?);
+    assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
 
     println!("basic_test PASS");
     Ok(())

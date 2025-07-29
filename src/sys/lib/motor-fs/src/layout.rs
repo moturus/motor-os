@@ -13,6 +13,7 @@
 //! - block #1 is the root directory ("/").
 //! - only blocks that contain file data/bytes are purely data blocks,
 //!   all other blocks have BlockHeader.
+//! - last 14 blocks are reserved for transaction (txn) management.
 
 use std::io::ErrorKind;
 
@@ -29,6 +30,8 @@ use crate::bplus_tree;
 use crate::bplus_tree::Node;
 
 pub const MAX_FILENAME_LEN: usize = 255;
+pub(crate) const TXN_BLOCKS: u64 = 14;
+pub const RESERVED_BLOCKS: u64 = TXN_BLOCKS + 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BlockNo(u64);
@@ -120,7 +123,7 @@ unsafe impl plain::Plain for Superblock {}
 impl Superblock {
     /// Returns the superblock and the root dir.
     pub fn format(num_blocks: u64) -> (Block, Block) {
-        assert!(num_blocks > 2);
+        assert!(num_blocks >= RESERVED_BLOCKS);
 
         let mut block_0 = Block::new_zeroed();
         let sb = block_0.get_mut_at_offset::<Self>(0);
@@ -128,7 +131,7 @@ impl Superblock {
             magic: MAGIC,
             version: 1,
             num_blocks,
-            free_blocks: num_blocks - 2,
+            free_blocks: num_blocks - RESERVED_BLOCKS,
             empty_area_start: 2,
             generation: 1,
             freelist_head: BlockNo::null(),
@@ -175,7 +178,7 @@ impl Superblock {
         }
 
         if this.freelist_head.is_null() {
-            if this.empty_area_start != (this.num_blocks - this.free_blocks) {
+            if this.empty_area_start != (this.num_blocks - TXN_BLOCKS - this.free_blocks) {
                 log::error!(
                     "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
                     this.num_blocks,
@@ -198,9 +201,12 @@ impl Superblock {
 
     // Free a single block without looking inside: could be a data block, or an empty file/directory.
     pub async fn free_single_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
+        assert!(block_no.as_u64() > 1);
         let mut sb_block = txn.get_txn_block(BlockNo(0)).await?.clone();
         let mut sb_mut_ref = sb_block.block_mut();
         let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
+
+        assert!(block_no.as_u64() < (this.num_blocks - TXN_BLOCKS));
 
         if block_no.as_u64() == (this.empty_area_start - 1) {
             this.free_blocks += 1;
@@ -211,10 +217,10 @@ impl Superblock {
         let mut target_block = txn.get_txn_block(block_no).await?.clone();
         let mut target_mut_ref = target_block.block_mut();
         let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
+        ebh.block_type = BlockType::EmptyBlock;
         ebh.next_empty_block = this.freelist_head;
         this.freelist_head = block_no;
-
-        log::error!("{}:{} - Do free blocks accounting.", file!(), line!());
+        this.free_blocks += 1;
 
         Ok(())
     }
@@ -225,20 +231,20 @@ impl Superblock {
 
         let mut target_mut_ref = target_block.block_mut();
 
-        let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
-        match ebh.block_type {
-            BlockType::FileEntry => {}
+        let bh = target_mut_ref.get_mut_at_offset::<BlockHeader>(0);
+        let blocks_in_use = match bh.block_type {
+            BlockType::FileEntry => bh.blocks_in_use,
             BlockType::DirEntry => panic!("This is a bug."),
             BlockType::TreeNode => todo!(),
             BlockType::EmptyBlock => panic!("This is a bug."),
-        }
+        };
 
         let mut sb_mut_ref = sb_block.block_mut();
         let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
+        let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
         ebh.next_empty_block = this.freelist_head;
         this.freelist_head = block_no;
-
-        log::error!("{}:{} - Do free blocks accounting.", file!(), line!());
+        this.free_blocks += blocks_in_use;
 
         Ok(())
     }
@@ -277,6 +283,7 @@ pub(crate) struct BlockHeader {
     _padding_1: [u8; 6],
 
     // The number of blocks, including this block and tree nodes, the entity is using.
+    // Note that this field is overwritten in EmptyBlockHeader.
     blocks_in_use: u64,
 }
 
@@ -551,91 +558,12 @@ impl DirEntryBlock {
         Ok(dir_entry!(parent_block).hash(filename))
     }
 
-    /*
-    pub async fn insert_child_entry(
-        mut parent_block: CachedBlock,
-        ctx: &mut Txn<'_>,
-        kind: async_fs::EntryKind,
-        hash: u64,
-        filename: &str,
-    ) -> Result<EntryIdInternal> {
-        let parent = parent_block
-            .block_mut()
-            .get_mut_at_offset::<DirEntryBlock>(0);
-        assert_eq!(hash, parent.hash(filename));
-        assert_eq!(parent.kind(), EntryKind::Directory);
-        let parent_id = parent.entry_id;
-        assert_eq!(parent.btree_root.this(), parent_id.block_no);
-
-        // Step 1: allocate a block for the new child. Makes sb_block dirty.
-        let mut sb_block = ctx.block_cache().pin_block(0).await?;
-        let sb = sb_block.block_mut().get_mut_at_offset::<Superblock>(0);
-        let entry_id = sb.allocate_block(ctx).await?;
-
-        // Step 2: initialize the child entry block. Makes child_block dirty.
-        let mut child_block = ctx.block_cache().pin_empty_block(entry_id.block_no());
-        parent.init_child_entry(child_block.block_mut(), entry_id, kind, filename);
-
-        // Step 3: insert a link to the child block into self.btree_root.
-        //         Makes one or more tree nodes dirty (or even allocates new tree node blocks).
-        let changed_tree_blocks = parent
-            .btree_root
-            .insert_link(ctx, hash, entry_id.block_no)
-            .await
-            .inspect_err(|err| todo!())?;
-
-        parent.metadata.size += 1;
-        parent.metadata.modified = Timestamp::now();
-
-        // Step 4: start txn.
-        log::warn!("DirEntryBlock::insert(): implement txn.");
-
-        // Step 5: save changes.
-        // TODO: batch write blocks when implemented.
-        for block_no in changed_tree_blocks {
-            if block_no == parent_id.block_no {
-                continue;
-            }
-            ctx.block_cache()
-                .write_block(block_no.as_u64())
-                .await
-                .inspect_err(|_err| todo!())?;
-        }
-
-        ctx.block_cache().unpin_block(child_block);
-        ctx.block_cache()
-            .write_block(entry_id.block_no())
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        ctx.block_cache().unpin_block(parent_block);
-        ctx.block_cache()
-            .write_block(parent_id.block_no())
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        ctx.block_cache().unpin_block(sb_block);
-        ctx.block_cache()
-            .write_block(0)
-            .await
-            .inspect_err(|_err| todo!())?;
-
-        // Step 6: commit txn.
-
-        Ok(entry_id)
-    }
-
-    */
     pub async fn insert_data_block(
         txn: &mut Txn<'_>,
         file_id: EntryIdInternal,
         block_start: u64,
     ) -> Result<BlockNo> {
-        let block = txn.get_txn_block(file_id.block_no).await?;
-        dir_entry!(block).validate_entry(file_id)?;
-        Self::from_block_mut(&mut *block.block_mut())
-            .metadata
-            .modified = Timestamp::now();
+        Self::increment_blocks_in_use(txn, file_id).await?;
 
         let data_block_id = Superblock::allocate_block(txn).await?;
         Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_start).await?;
@@ -855,6 +783,31 @@ impl DirEntryBlock {
         Self::from_block_mut(&mut *dir_block.block_mut())
             .metadata
             .modified = Timestamp::now();
+        Ok(())
+    }
+
+    pub async fn increment_blocks_in_use(
+        txn: &mut Txn<'_>,
+        entry_id: EntryIdInternal,
+    ) -> Result<()> {
+        let entry_block = txn.get_txn_block(entry_id.block_no).await?;
+        Self::from_block_mut(&mut *entry_block.block_mut())
+            .block_header
+            .blocks_in_use += 1;
+        Self::from_block_mut(&mut *entry_block.block_mut())
+            .metadata
+            .modified = Timestamp::now();
+        Ok(())
+    }
+
+    pub async fn decrement_blocks_in_use(
+        txn: &mut Txn<'_>,
+        entry_id: EntryIdInternal,
+    ) -> Result<()> {
+        let entry_block = txn.get_txn_block(entry_id.block_no).await?;
+        Self::from_block_mut(&mut *entry_block.block_mut())
+            .block_header
+            .blocks_in_use -= 1;
         Ok(())
     }
 }

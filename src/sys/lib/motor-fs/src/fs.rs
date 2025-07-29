@@ -39,7 +39,8 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 use crate::{
-    DirEntryBlock, EntryIdInternal, ROOT_DIR_ID, Superblock, Txn, dir_entry, validate_filename,
+    DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID, Superblock, Txn, dir_entry,
+    validate_filename,
 };
 
 const CACHE_SIZE: usize = 512; // 2MB.
@@ -58,7 +59,7 @@ impl MotorFs {
     }
 
     pub async fn format(mut dev: Box<dyn AsyncBlockDevice>) -> Result<Self> {
-        if dev.num_blocks() <= 2 {
+        if dev.num_blocks() <= RESERVED_BLOCKS {
             return Err(ErrorKind::StorageFull.into());
         }
         let (superblock, root_dir) = Superblock::format(dev.num_blocks());
