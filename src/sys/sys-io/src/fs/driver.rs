@@ -1,4 +1,5 @@
-// FS driver.
+//! FS driver: basically, runs a thread that receives I/O requests from
+//! client processes and routes them to VirtioIO-BLK.
 
 use core::sync::atomic::*;
 use moto_ipc::sync::*;

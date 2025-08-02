@@ -1,3 +1,9 @@
+//! FS dispatcher: a singleton (per VM) at FS_URL that clients ask for
+//! driver URLs. Then they connect to the provided driver URL.
+//! At the moment there is a single FS driver, so this indirection
+//! dance is probably overengineering, but the idea is that in the
+//! future there could be multiple instances of FS drivers running
+//! (perhaps per mount point).
 use core::sync::atomic::*;
 use moto_ipc::sync::*;
 use moto_sys::SysHandle;
