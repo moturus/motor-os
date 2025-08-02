@@ -49,27 +49,34 @@ impl<const ORDER: usize> Node<ORDER> {
         self.is_leaf = 1;
     }
 
-    /*
-    pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
+    pub async fn first_child<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        this_offset: usize,
+    ) -> Result<Option<BlockNo>> {
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
+
+        let block = this_txn.get_block(this_block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(this_offset);
+
+        if this.num_keys as usize > ORDER || this.is_leaf > 1 {
+            log::error!("Bad B+ Tree Node {:?}(?).", this.this);
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        if this.num_keys == 0 {
+            return Ok(None);
+        }
+
+        if this.is_leaf == 1 {
+            return Ok(Some(this.kv[0].child_block_no));
+        }
+
         todo!()
-        // if self.num_keys as usize > ORDER || self.is_leaf > 1 {
-        //     log::error!("Bad B+ Tree Node {:?}(?).", self.this);
-        //     return Err(ErrorKind::InvalidData.into());
-        // }
-
-        // if self.num_keys == 0 {
-        //     return Ok(None);
-        // }
-
-        // let first_child_block_no = self.kv[0].child_block_no;
-        // if self.is_leaf == 1 {
-        //     return Ok(Some(first_child_block_no));
-        // }
-
-        // // Recursion in an async fn requires boxing: rustc --explain E0733.
-        // Box::pin(TreeNodeBlock::first_child(first_child_block_no, txn)).await
     }
-    */
 
     pub async fn first_child_with_key<'a>(
         txn: &mut Txn<'a>,
@@ -98,6 +105,46 @@ impl<const ORDER: usize> Node<ORDER> {
             return match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             {
                 Ok(pos) => Ok(Some(this.kv[pos].child_block_no)),
+                Err(_) => Ok(None),
+            };
+        }
+
+        todo!()
+    }
+
+    pub async fn next_child<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        this_offset: usize,
+        key: u64,
+    ) -> Result<Option<BlockNo>> {
+        // TODO: remove unsafe when NLL Problem #3 is solved.
+        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
+        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
+
+        let block = this_txn.get_block(this_block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(this_offset);
+
+        if this.num_keys as usize > ORDER || this.is_leaf > 1 {
+            log::error!("Bad B+ Tree Node {:?}(?).", this.this);
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        if this.num_keys == 0 {
+            return Ok(None);
+        }
+
+        if this.is_leaf == 1 {
+            return match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+            {
+                Ok(pos) => {
+                    if pos < ((this.num_keys as usize) - 1) {
+                        Ok(Some(this.kv[pos + 1].child_block_no))
+                    } else {
+                        Ok(None)
+                    }
+                }
                 Err(_) => Ok(None),
             };
         }

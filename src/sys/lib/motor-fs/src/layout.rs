@@ -344,10 +344,6 @@ impl DirEntryBlock {
         block.get_mut_at_offset(0)
     }
 
-    pub async fn format_root_dir(&mut self) {
-        todo!()
-    }
-
     pub fn kind(&self) -> EntryKind {
         match self.block_header.block_type {
             BlockType::FileEntry => EntryKind::File,
@@ -450,27 +446,21 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn first_child(&self, _txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
-        /*
+    pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
+        Node::<DIR_ENTRY_BTREE_ORDER>::first_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET)
+            .await
+    }
 
-        if self.btree_root.num_keys as usize > DIR_ENTRY_BTREE_ORDER || self.btree_root.is_leaf > 1
-        {
-            log::error!("Bad B+ Tree Node {:?}(?).", self.this);
-            return Err(ErrorKind::InvalidData.into());
-        }
-
-        if self.num_keys == 0 {
-            return Ok(None);
-        }
-
-        let first_child_block_no = self.kv[0].child_block_no;
-        if self.is_leaf == 1 {
-            return Ok(Some(first_child_block_no));
-        }
-        self.btree_root.first_child(ctx).await
-        */
-        todo!()
+    pub async fn next_child(&self, txn: &mut Txn<'_>, hash: u64) -> Result<Option<BlockNo>> {
+        assert_eq!(self.kind(), EntryKind::Directory);
+        Node::<DIR_ENTRY_BTREE_ORDER>::next_child(
+            txn,
+            self.entry_id.block_no,
+            BTREE_ROOT_OFFSET,
+            hash,
+        )
+        .await
     }
 
     pub async fn first_child_with_hash(

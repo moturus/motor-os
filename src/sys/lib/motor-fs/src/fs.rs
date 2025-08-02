@@ -197,46 +197,79 @@ impl FileSystem for MotorFs {
     }
 
     /// Get the first entry in a directory.
-    async fn get_first_entry(&mut self, _parent_id: EntryId) -> Result<Option<EntryId>> {
-        todo!()
-        /*
-        let id: EntryIdInternal = parent_id.into();
-        let parent_block = self.block_cache.pin_block(id.block_no()).await?;
-        let parent = parent_block.block().get_at_offset::<DirEntryBlock>(0);
-        parent.validate_entry(id)?;
+    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+        let parent_id: EntryIdInternal = parent_id.into();
+        let parent_block = self
+            .block_cache
+            .get_block(parent_id.block_no())
+            .await?
+            .clone();
+        dir_entry!(parent_block).validate_entry(parent_id)?;
 
-        if parent.kind() != EntryKind::Directory {
+        if dir_entry!(parent_block).kind() != EntryKind::Directory {
             return Err(ErrorKind::NotADirectory.into());
         }
 
-        let mut ctx = Txn::new_readonly(self);
-
-        let Some(child_block_no) = parent.first_child(&mut ctx).await? else {
-            self.block_cache.unpin_block(parent_block);
+        let mut txn = Txn::new_readonly(self);
+        let Some(child_block_no) = dir_entry!(parent_block).first_child(&mut txn).await? else {
             return Ok(None);
         };
+        drop(txn);
 
-        self.block_cache.unpin_block(parent_block);
-        let child_block = self
-            .block_cache
-            .get_block_mut(child_block_no.as_u64())
-            .await?;
-        let child = child_block.block().get_at_offset::<DirEntryBlock>(0);
-        Ok(Some(child.entry_id_with_validation(child_block_no)?.into()))
-        */
+        let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
+        Ok(Some(
+            dir_entry!(child_block)
+                .entry_id_with_validation(child_block_no)?
+                .into(),
+        ))
     }
 
     /// Get the next entry in a directory.
-    async fn get_next_entry(&mut self, _entry_id: EntryId) -> Result<Option<EntryId>> {
-        todo!()
-        /*
-        let id: EntryIdInternal = entry_id.into();
-        let block = self.block_cache.get_block_mut(id.block_no()).await?;
-        let entry = block.block().get_at_offset::<DirEntryBlock>(0);
-        entry.validate_entry(id)?;
+    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        if entry_id == ROOT_DIR_ID.into() {
+            return Ok(None);
+        }
 
-        todo!()
-        */
+        let entry_id: EntryIdInternal = entry_id.into();
+        let entry_block = self
+            .block_cache
+            .get_block(entry_id.block_no())
+            .await?
+            .clone();
+        dir_entry!(entry_block).validate_entry(entry_id)?;
+
+        if let Some(next_id) = dir_entry!(entry_block).next_entry_id() {
+            return Ok(Some(next_id.into()));
+        }
+
+        let parent_id = dir_entry!(entry_block).parent_id();
+        let parent_block = self
+            .block_cache
+            .get_block(parent_id.block_no())
+            .await?
+            .clone();
+        dir_entry!(parent_block).validate_entry(parent_id)?;
+
+        if dir_entry!(parent_block).kind() != EntryKind::Directory {
+            log::error!("Parent {parent_id:?} of {entry_id:?} is not a directory");
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        let hash = dir_entry!(parent_block).hash(dir_entry!(entry_block).name()?);
+
+        let mut txn = Txn::new_readonly(self);
+        let Some(child_block_no) = dir_entry!(parent_block).next_child(&mut txn, hash).await?
+        else {
+            return Ok(None);
+        };
+        drop(txn);
+
+        let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
+        Ok(Some(
+            dir_entry!(child_block)
+                .entry_id_with_validation(child_block_no)?
+                .into(),
+        ))
     }
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {

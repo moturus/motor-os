@@ -1,12 +1,21 @@
+use async_fs::EntryId;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
 use camino::Utf8PathBuf;
 use std::io::ErrorKind;
 use std::io::Result;
+use std::sync::Once;
 use std::time::SystemTime;
 
 use crate::MotorFs;
 use crate::RESERVED_BLOCKS;
+
+static LOGGER: Once = Once::new();
+fn init_logger() {
+    LOGGER.call_once(|| {
+        env_logger::init();
+    });
+}
 
 async fn create_fs(tag: &str, num_blocks: u64) -> Result<MotorFs> {
     let path = std::env::temp_dir().join(tag);
@@ -19,13 +28,22 @@ async fn create_fs(tag: &str, num_blocks: u64) -> Result<MotorFs> {
 
 #[test]
 fn basic() {
-    env_logger::init();
+    init_logger();
     let rt = tokio::runtime::Builder::new_current_thread()
-        // .thread_stack_size(1024 * 1024 * 256)
         .build()
         .unwrap();
 
     rt.block_on(basic_test()).unwrap();
+}
+
+#[test]
+fn readdir() {
+    init_logger();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(readdir_test()).unwrap();
 }
 
 async fn basic_test() -> Result<()> {
@@ -171,6 +189,58 @@ async fn basic_test() -> Result<()> {
     assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
 
     println!("basic_test PASS");
+    Ok(())
+}
+
+async fn readdir_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+
+    let mut fs = create_fs("motor_fs_readdir_test", NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID.into();
+    let parent_id = fs
+        .create_entry(root, EntryKind::Directory, "parent")
+        .await
+        .unwrap();
+
+    let mut entries = std::collections::HashMap::<EntryId, (EntryKind, String)>::new();
+
+    // Insert some dirs and files, while keeping track of them in entries.
+    for idx in 0..23 {
+        let name = format!("dir_{idx}");
+        entries.insert(
+            fs.create_entry(parent_id, EntryKind::Directory, name.as_str())
+                .await
+                .unwrap(),
+            (EntryKind::Directory, name),
+        );
+    }
+    for idx in 0..44 {
+        let name = format!("file_{idx}");
+        entries.insert(
+            fs.create_entry(parent_id, EntryKind::File, name.as_str())
+                .await
+                .unwrap(),
+            (EntryKind::File, name),
+        );
+    }
+
+    // Now "readdir" parent.
+    let mut entry_id = fs.get_first_entry(parent_id).await.unwrap().unwrap();
+    loop {
+        let stored_data = entries.remove(&entry_id).unwrap();
+        let metadata = fs.metadata(entry_id).await.unwrap();
+        assert_eq!(stored_data.0, metadata.kind());
+        assert_eq!(stored_data.1, fs.name(entry_id).await.unwrap());
+
+        if let Some(next_entry_id) = fs.get_next_entry(entry_id).await.unwrap() {
+            entry_id = next_entry_id;
+        } else {
+            break;
+        };
+    }
+
+    println!("readdir_test PASS");
     Ok(())
 }
 
