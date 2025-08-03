@@ -1,7 +1,12 @@
 #![allow(internal_features)]
 #![feature(addr_parse_ascii)]
+#![feature(async_iterator)]
 #![feature(core_intrinsics)]
 #![feature(io_error_more)]
+#![feature(local_waker)]
+
+#[cfg(debug_assertions)]
+mod async_runtime;
 
 mod fs;
 mod logger;
@@ -48,6 +53,9 @@ pub extern "C" fn moturus_runtime_start() {
 }
 
 fn main() {
+    #[cfg(debug_assertions)]
+    async_runtime::start();
+
     runtime::start();
 
     let mut cmd = std::process::Command::new("/sys/sys-init");
