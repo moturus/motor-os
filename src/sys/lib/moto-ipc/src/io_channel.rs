@@ -695,6 +695,15 @@ impl ServerConnection {
         Ok(sqe)
     }
 
+    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+        core::future::poll_fn(|_cx| match self.recv() {
+            Ok(msg) => core::task::Poll::Ready(Ok(msg)),
+            Err(moto_rt::E_NOT_READY) => core::task::Poll::Pending,
+            Err(err) => core::task::Poll::Ready(Err(err)),
+        })
+        .await
+    }
+
     // See enqueue() in mpmc.cc.
     pub fn send(&self, sqe: Msg) -> Result<(), ErrorCode> {
         if self.status != ServerStatus::Connected {
@@ -733,6 +742,15 @@ impl ServerConnection {
         slot.msg = sqe;
         slot.stamp.store(pos + 1, Ordering::Release);
         Ok(())
+    }
+
+    pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
+        core::future::poll_fn(|_cx| match self.send(msg) {
+            Ok(()) => core::task::Poll::Ready(Ok(())),
+            Err(moto_rt::E_NOT_READY) => core::task::Poll::Pending,
+            Err(err) => core::task::Poll::Ready(Err(err)),
+        })
+        .await
     }
 
     pub fn wait_handle(&self) -> SysHandle {
