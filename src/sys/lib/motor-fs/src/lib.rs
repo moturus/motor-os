@@ -21,6 +21,7 @@ pub(crate) use layout::*;
 pub(crate) use txn::*;
 
 pub use fs::*;
+pub use layout::ROOT_DIR_ID;
 
 #[cfg(test)]
 mod tests;

@@ -39,9 +39,11 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 use crate::{
-    DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID, Superblock, Txn, dir_entry,
-    validate_filename,
+    DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID_INTERNAL, Superblock, Txn,
+    dir_entry, validate_filename,
 };
+
+pub const PARTITION_ID: u8 = 0x2e;
 
 const CACHE_SIZE: usize = 512; // 2MB.
 
@@ -147,7 +149,7 @@ impl FileSystem for MotorFs {
     }
 
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
-        if entry_id == ROOT_DIR_ID.into() {
+        if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
         }
         Txn::do_delete_entry_txn(self, entry_id.into()).await
@@ -159,7 +161,7 @@ impl FileSystem for MotorFs {
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()> {
-        if entry_id == ROOT_DIR_ID.into() {
+        if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
         }
 
@@ -174,7 +176,7 @@ impl FileSystem for MotorFs {
         let mut ancestor_id = new_parent_id;
         loop {
             let Some(grandparent_id) = self.get_parent(ancestor_id).await? else {
-                assert_eq!(ancestor_id, ROOT_DIR_ID.into());
+                assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL.into());
                 break;
             };
             if grandparent_id == entry_id.into() {
@@ -226,7 +228,7 @@ impl FileSystem for MotorFs {
 
     /// Get the next entry in a directory.
     async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
-        if entry_id == ROOT_DIR_ID.into() {
+        if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Ok(None);
         }
 
@@ -274,7 +276,7 @@ impl FileSystem for MotorFs {
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
         let id: EntryIdInternal = entry_id.into();
-        if id == ROOT_DIR_ID {
+        if id == ROOT_DIR_ID_INTERNAL {
             return Ok(None);
         }
 

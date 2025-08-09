@@ -90,10 +90,12 @@ impl EntryIdInternal {
     }
 }
 
-pub const ROOT_DIR_ID: EntryIdInternal = EntryIdInternal {
+pub(crate) const ROOT_DIR_ID_INTERNAL: EntryIdInternal = EntryIdInternal {
     block_no: BlockNo(1),
     generation: 1,
 };
+
+pub const ROOT_DIR_ID: EntryId = unsafe { core::mem::transmute(ROOT_DIR_ID_INTERNAL) };
 
 /// Just a random number.
 pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
@@ -144,7 +146,7 @@ impl Superblock {
         root_dir.block_header.in_use = 1;
         root_dir.block_header.blocks_in_use = 1;
 
-        root_dir.entry_id = ROOT_DIR_ID;
+        root_dir.entry_id = ROOT_DIR_ID_INTERNAL;
 
         // set_name() calls validate_name() which will fail on "/", so we do it manually.
         root_dir.name_bytes[0] = b'/';
@@ -174,6 +176,7 @@ impl Superblock {
         let this = block_ref.get_mut_at_offset::<Self>(0);
 
         if this.free_blocks == 0 {
+            log::warn!("Storage full. Total blocks: {}.", this.num_blocks);
             return Err(ErrorKind::StorageFull.into());
         }
 
