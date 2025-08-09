@@ -181,7 +181,7 @@ impl<const ORDER: usize> Node<ORDER> {
 
             let mut node_ref_mut = node_block.block_mut();
             let node_mut = node_ref_mut.get_mut_at_offset::<Self>(node_offset_in_block);
-            for idx in (pos..((node_mut.num_keys + 1) as usize)).rev() {
+            for idx in (pos..(node_mut.num_keys as usize)).rev() {
                 node_mut.kv[idx + 1] = node_mut.kv[idx];
             }
 
