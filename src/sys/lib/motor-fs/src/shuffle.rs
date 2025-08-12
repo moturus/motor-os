@@ -28,7 +28,8 @@ fn generate_round_keys(seed: u64) -> [u32; ROUNDS] {
     keys
 }
 
-// The round function itself remains unchanged.
+// A simple, non-cryptographic round function.
+// A better implementation might use a more complex hash.
 fn round_function(val: u32, round_key: u32) -> u32 {
     val.wrapping_add(round_key).wrapping_mul(0xdeadbeef)
 }
