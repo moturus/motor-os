@@ -46,6 +46,16 @@ fn readdir() {
     rt.block_on(readdir_test()).unwrap();
 }
 
+#[test]
+fn midsize_file() {
+    init_logger();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(midsize_file_test()).unwrap();
+}
+
 async fn basic_test() -> Result<()> {
     const NUM_BLOCKS: u64 = 256;
 
@@ -55,7 +65,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(NUM_BLOCKS, fs.num_blocks());
     assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
 
-    let root = crate::ROOT_DIR_ID.into();
+    let root = crate::ROOT_DIR_ID;
     assert!(fs.get_parent(root).await?.is_none());
 
     assert!(ts_format <= fs.metadata(root).await?.created.into());
@@ -197,7 +207,7 @@ async fn readdir_test() -> Result<()> {
 
     let mut fs = create_fs("motor_fs_readdir_test", NUM_BLOCKS).await?;
 
-    let root = crate::ROOT_DIR_ID.into();
+    let root = crate::ROOT_DIR_ID;
     let parent_id = fs
         .create_entry(root, EntryKind::Directory, "parent")
         .await
@@ -241,6 +251,58 @@ async fn readdir_test() -> Result<()> {
     }
 
     println!("readdir_test PASS");
+    Ok(())
+}
+
+/// Create a ~9MB file on a 16MB partition. Should easily fit.
+async fn midsize_file_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+
+    let mut fs = create_fs("motor_fs_midsize_file_test", NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID;
+    let parent_id = fs
+        .create_entry(root, EntryKind::Directory, "parent dir")
+        .await
+        .unwrap();
+
+    let file_id = fs
+        .create_entry(parent_id, EntryKind::File, "foo")
+        .await
+        .unwrap();
+
+    let mut buf = [0_u8; 512];
+    for idx in 0..512 {
+        buf[idx] = (idx & 0xff) as u8;
+    }
+
+    // const FILE_SIZE: u64 = 1024 * 1024 * 9 + 65536 + 512;
+    const FILE_SIZE: u64 = 1024 * (512 + 256 + 128 + 8 + 0);
+
+    // Write.
+
+    let mut file_size = 0;
+    while file_size < FILE_SIZE {
+        let written = fs.write(file_id, file_size, buf.as_slice()).await.unwrap();
+        assert_eq!(written, buf.len());
+        file_size += written as u64;
+    }
+
+    assert_eq!(FILE_SIZE, fs.metadata(file_id).await.unwrap().size);
+
+    // Read.
+    let mut offset = 0;
+    while offset < FILE_SIZE {
+        let read = fs.read(file_id, offset, buf.as_mut_slice()).await.unwrap();
+        assert_eq!(read, buf.len());
+        offset += read as u64;
+
+        for idx in 0..buf.len() {
+            assert_eq!(buf[idx], (idx & 0xff) as u8);
+        }
+    }
+
+    println!("midsize_file_test PASS");
     Ok(())
 }
 

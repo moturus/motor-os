@@ -92,6 +92,19 @@ pub fn init() {
                                     pte.sectors as u64,
                                 ));
                             }
+                            super::mbr::PartitionType::MotorFs => {
+                                if fs.is_some() {
+                                    log::error!("Found more than one DATA partion.");
+                                    panic!();
+                                }
+
+                                todo!() /*
+                                        fs = Some(super::fs_srfs::init(
+                                            drive.clone(),
+                                            pte.lba as u64,
+                                            pte.sectors as u64,
+                                        )); */
+                            }
                             _ => continue,
                         }
                     }

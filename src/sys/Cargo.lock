@@ -1348,6 +1348,7 @@ dependencies = [
  "moto-sys",
  "moto-sys-io",
  "moto-virtio",
+ "motor-fs",
  "rand 0.9.1",
  "serde",
  "smoltcp",

@@ -159,9 +159,7 @@ impl Superblock {
         root_dir.metadata.modified = ts;
         root_dir.metadata.set_kind(EntryKind::Directory);
 
-        root_dir
-            .btree_root
-            .init_new_root(BlockNo(1), BlockNo::null());
+        root_dir.btree_root.init_new_root(BlockNo(1));
 
         (block_0, block_1)
     }
@@ -311,12 +309,12 @@ pub(crate) struct DirEntryBlock {
     // We use Cityhash64 to hash entry names; each directory has a random hash seed.
     hash_seed: u64, // offset 432.
 
-    btree_root: bplus_tree::Node<DIR_ENTRY_BTREE_ORDER>,
+    btree_root: bplus_tree::Node<BTREE_ROOT_ORDER>,
 }
 
 unsafe impl plain::Plain for DirEntryBlock {}
 
-pub(crate) const DIR_ENTRY_BTREE_ORDER: usize = 226;
+pub(crate) const BTREE_ROOT_ORDER: usize = 226;
 pub(crate) const BTREE_ROOT_OFFSET: usize = 456;
 
 const _: () = assert!(BLOCK_SIZE == core::mem::size_of::<DirEntryBlock>());
@@ -412,6 +410,13 @@ impl DirEntryBlock {
         crate::city_hash::city_hash64_with_seed(filename.as_bytes(), self.hash_seed)
     }
 
+    pub fn hash_u64(&self, val: u64) -> u64 {
+        assert_eq!(self.kind(), EntryKind::File);
+
+        // crate::city_hash::city_hash64_with_seed(val.to_ne_bytes().as_slice(), self.hash_seed)
+        crate::shuffle::shuffle_u64(val, self.hash_seed)
+    }
+
     pub fn validate_entry(&self, entry_id: EntryIdInternal) -> Result<()> {
         if !self.in_use()? {
             // This can be a user error, so we don't log an error.
@@ -451,19 +456,13 @@ impl DirEntryBlock {
 
     pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        Node::<DIR_ENTRY_BTREE_ORDER>::first_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET)
-            .await
+        Node::<BTREE_ROOT_ORDER>::first_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET).await
     }
 
     pub async fn next_child(&self, txn: &mut Txn<'_>, hash: u64) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        Node::<DIR_ENTRY_BTREE_ORDER>::next_child(
-            txn,
-            self.entry_id.block_no,
-            BTREE_ROOT_OFFSET,
-            hash,
-        )
-        .await
+        Node::<BTREE_ROOT_ORDER>::next_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET, hash)
+            .await
     }
 
     pub async fn first_child_with_hash(
@@ -472,7 +471,7 @@ impl DirEntryBlock {
         hash: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key(
             txn,
             self.entry_id.block_no,
             BTREE_ROOT_OFFSET,
@@ -481,16 +480,16 @@ impl DirEntryBlock {
         .await
     }
 
-    pub async fn data_block_at_offset(
+    pub async fn data_block_at_key(
         txn: &mut Txn<'_>,
         file_id: EntryIdInternal,
-        block_start: u64,
+        block_key: u64,
     ) -> Result<Option<BlockNo>> {
-        Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key(
             txn,
             file_id.block_no,
             BTREE_ROOT_OFFSET,
-            block_start,
+            block_key,
         )
         .await
     }
@@ -544,22 +543,29 @@ impl DirEntryBlock {
         let parent_block = txn.get_block(parent_id.block_no).await?;
         dir_entry!(parent_block).validate_entry(parent_id)?;
 
-        if dir_entry!(parent_block).kind() != EntryKind::Directory {
-            return Err(ErrorKind::NotADirectory.into());
-        }
-
         Ok(dir_entry!(parent_block).hash(filename))
+    }
+
+    pub async fn get_hash_u64(
+        txn: &mut Txn<'_>,
+        parent_id: EntryIdInternal,
+        val: u64,
+    ) -> Result<u64> {
+        let parent_block = txn.get_block(parent_id.block_no).await?;
+        dir_entry!(parent_block).validate_entry(parent_id)?;
+
+        Ok(dir_entry!(parent_block).hash_u64(val))
     }
 
     pub async fn insert_data_block(
         txn: &mut Txn<'_>,
         file_id: EntryIdInternal,
-        block_start: u64,
+        block_key: u64,
     ) -> Result<BlockNo> {
         Self::increment_blocks_in_use(txn, file_id).await?;
 
         let data_block_id = Superblock::allocate_block(txn).await?;
-        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_start).await?;
+        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
 
         // We just allocated a new data block: need to zero it out.
         let _ = txn.get_empty_block_mut(data_block_id.block_no);
@@ -608,17 +614,13 @@ impl DirEntryBlock {
         child.metadata.set_kind(kind);
         child.parent_id = parent_id;
 
-        if kind == EntryKind::Directory {
-            child.hash_seed = std::random::random();
-        }
+        child.hash_seed = std::random::random();
 
         let ts = Timestamp::now();
         child.metadata.created = ts;
         child.metadata.modified = ts;
 
-        child
-            .btree_root
-            .init_new_root(entry_id.block_no, parent_id.block_no);
+        child.btree_root.init_new_root(entry_id.block_no);
     }
 
     pub async fn delete_entry<'a, 'b>(
@@ -689,7 +691,7 @@ impl DirEntryBlock {
         })
         .await?;
 
-        let Some(list_head_block_no) = Node::<DIR_ENTRY_BTREE_ORDER>::first_child_with_key(
+        let Some(list_head_block_no) = Node::<BTREE_ROOT_ORDER>::first_child_with_key(
             txn,
             parent_id.block_no,
             BTREE_ROOT_OFFSET,
@@ -705,7 +707,7 @@ impl DirEntryBlock {
             todo!("delete the entry from the list.");
         }
 
-        Node::<DIR_ENTRY_BTREE_ORDER>::delete_link(
+        Node::<BTREE_ROOT_ORDER>::root_delete_link(
             txn,
             parent_id.block_no,
             BTREE_ROOT_OFFSET,
@@ -737,7 +739,7 @@ impl DirEntryBlock {
             .modified = Timestamp::now();
 
         log::warn!("link_child_block: if this is a dir, we may need to link into the SLL");
-        Node::<DIR_ENTRY_BTREE_ORDER>::insert_link(
+        Node::<BTREE_ROOT_ORDER>::node_insert_link(
             txn,
             parent_block_no,
             BTREE_ROOT_OFFSET,
@@ -758,7 +760,7 @@ impl DirEntryBlock {
             .metadata
             .modified = Timestamp::now();
 
-        Node::<DIR_ENTRY_BTREE_ORDER>::delete_link(
+        Node::<BTREE_ROOT_ORDER>::root_delete_link(
             txn,
             parent_block_no,
             BTREE_ROOT_OFFSET,

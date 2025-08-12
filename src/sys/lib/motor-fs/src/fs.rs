@@ -322,6 +322,8 @@ impl FileSystem for MotorFs {
             return Err(ErrorKind::InvalidInput.into());
         }
 
+        let block_key = dir_entry!(entry_block).hash_u64(block_start);
+
         assert!(buf.len() <= BLOCK_SIZE);
 
         let to_read = if (file_size - offset) >= (BLOCK_SIZE as u64) {
@@ -332,7 +334,7 @@ impl FileSystem for MotorFs {
 
         let mut txn = Txn::new_readonly(self);
         let Some(data_block_no) =
-            DirEntryBlock::data_block_at_offset(&mut txn, file_id, block_start).await?
+            DirEntryBlock::data_block_at_key(&mut txn, file_id, block_key).await?
         else {
             // No data block => "read" zeroes.
             for byte in &mut buf[..to_read] {

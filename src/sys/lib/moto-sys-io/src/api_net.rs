@@ -1,4 +1,4 @@
-// Spec for client-server Networking IPC.
+//! Spec for client-server Networking IPC.
 
 use core::net::IpAddr;
 use core::net::Ipv6Addr;

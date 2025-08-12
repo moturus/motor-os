@@ -88,10 +88,10 @@ impl<'a> Txn<'a> {
         }
     }
 
-    pub async fn get_block<'b: 'a>(
+    pub async fn get_block<'b>(
         &'b mut self,
         block_no: BlockNo,
-    ) -> std::io::Result<&'a CachedBlock> {
+    ) -> std::io::Result<&'b CachedBlock> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this = unsafe {
@@ -307,6 +307,8 @@ impl<'a> Txn<'a> {
             return Err(ErrorKind::IsADirectory.into());
         }
 
+        let block_key = dir_entry!(block).hash_u64(block_start);
+
         let prev_file_size = dir_entry!(block).metadata().size;
         let new_file_size = offset + (buf.len() as u64);
 
@@ -318,9 +320,9 @@ impl<'a> Txn<'a> {
 
         // Step 1: find or insert the data block.
         let data_block_no =
-            match DirEntryBlock::data_block_at_offset(&mut txn, file_id, block_start).await? {
+            match DirEntryBlock::data_block_at_key(&mut txn, file_id, block_key).await? {
                 Some(block_no) => block_no,
-                None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_start).await?,
+                None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_key).await?,
             };
 
         // Step 2: update the data lock.
@@ -357,6 +359,8 @@ impl<'a> Txn<'a> {
         if new_size == prev_size {
             return Ok(());
         }
+        let last_block_start = prev_size & !(BLOCK_SIZE as u64 - 1);
+        let last_block_key = dir_entry!(block).hash_u64(last_block_start);
 
         let mut txn = Self {
             fs,
@@ -383,11 +387,10 @@ impl<'a> Txn<'a> {
         //       to the new TreeNodeBlock
         //     - zero out truncated bytes on the new last block, if needed
 
-        let last_block_start = prev_size & !(BLOCK_SIZE as u64 - 1);
         if last_block_start < new_size {
             // Case (a): no data blocks to drop.
             let Some(data_block_no) =
-                DirEntryBlock::data_block_at_offset(&mut txn, file_id, last_block_start).await?
+                DirEntryBlock::data_block_at_key(&mut txn, file_id, last_block_key).await?
             else {
                 // Nothing to see here.
                 return txn.commit().await;
@@ -405,13 +408,13 @@ impl<'a> Txn<'a> {
         if (new_size + (BLOCK_SIZE as u64)) > last_block_start {
             // Case (b): only the last block needs dropping.
             if let Some(data_block_no) =
-                DirEntryBlock::data_block_at_offset(&mut txn, file_id, last_block_start).await?
+                DirEntryBlock::data_block_at_key(&mut txn, file_id, last_block_key).await?
             {
                 DirEntryBlock::unlink_child_block(
                     &mut txn,
                     file_id.block_no,
                     data_block_no,
-                    last_block_start,
+                    last_block_key,
                 )
                 .await?;
 
@@ -422,8 +425,10 @@ impl<'a> Txn<'a> {
 
             // Zero out truncated bytes in the new last block.
             let last_block_start = new_size & !(BLOCK_SIZE as u64 - 1);
+            let last_block_key =
+                DirEntryBlock::get_hash_u64(&mut txn, file_id, last_block_start).await?;
             let Some(data_block_no) =
-                DirEntryBlock::data_block_at_offset(&mut txn, file_id, last_block_start).await?
+                DirEntryBlock::data_block_at_key(&mut txn, file_id, last_block_key).await?
             else {
                 // Nothing to see here.
                 return txn.commit().await;

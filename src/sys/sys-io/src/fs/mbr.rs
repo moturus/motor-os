@@ -14,6 +14,7 @@ pub enum PartitionType {
     NtfsExfat(u8),
     FlatFs,
     SrFs,
+    MotorFs,
 }
 
 impl PartitionType {
@@ -28,6 +29,7 @@ impl PartitionType {
             0xaf => PartitionType::HfsPlus(tag),
             flatfs::PARTITION_ID => PartitionType::FlatFs, // 0x2c
             srfs::PARTITION_ID => PartitionType::SrFs,     // 0x2d
+            motor_fs::PARTITION_ID => PartitionType::MotorFs, // 0x2e
             _ => PartitionType::Unknown(tag),
         }
     }

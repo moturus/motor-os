@@ -17,6 +17,9 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use mbrman::BOOT_ACTIVE;
 use std::io::{self, Seek, SeekFrom};
+
+mod util;
+
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
@@ -80,6 +83,66 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
     }
 
     // println!("{:?} created (SRFS)", result_path);
+}
+
+async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+    use async_fs::FileSystem;
+
+    const MB: u64 = 1024 * 1024;
+    const DATA_PARTITION_SZ: u64 = 64 * MB;
+
+    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(
+        result_path.to_str().unwrap().into(),
+        DATA_PARTITION_SZ / 4096 as u64,
+    )
+    .await
+    .unwrap();
+    let mut fs = motor_fs::MotorFs::format(Box::new(bd)).await.unwrap();
+    println!("creating Motor FS in {:?}", result_path);
+
+    for (src, dst) in files {
+        let target_path = Path::new(dst);
+        let parent = target_path.parent().unwrap();
+        let filename = target_path.file_name().unwrap().to_str().unwrap();
+
+        let parent_id = util::motor_fs_create_dir_all(&mut fs, parent)
+            .await
+            .unwrap();
+        let new_file_id = fs
+            .create_entry(parent_id, srfs::EntryKind::File, filename)
+            .await
+            .unwrap();
+
+        let source_file = File::open(src).unwrap();
+        println!(
+            "creating file {dst} of size {}",
+            source_file.metadata().unwrap().len()
+        );
+
+        let mut buf_reader = BufReader::new(source_file);
+
+        let mut buf = [0_u8; 4096];
+        let mut offset = 0;
+        while let Ok(sz) = buf_reader.read(&mut buf) {
+            if sz == 0 {
+                break;
+            }
+
+            assert_eq!(
+                4096,
+                fs.write(new_file_id, offset, &buf[..sz]).await.unwrap()
+            );
+            offset += 4096;
+        }
+    }
+}
+
+fn create_motorfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(create_motorfs_partition_async(result_path, files));
 }
 
 fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
@@ -232,7 +295,8 @@ fn set_partition(
             Some("fat32") => 0xc,
             Some("flatfs") => flatfs::PARTITION_ID,
             Some("srfs") => srfs::PARTITION_ID,
-            Some(_) => panic!(),
+            Some("motor-fs") => motor_fs::PARTITION_ID,
+            Some(fs) => panic!("unknown partition '{fs}'"),
             None => 0x20,
         },
         first_chs: mbrman::CHS::empty(),
@@ -347,6 +411,8 @@ fn clear_dir_or_exit(dir: &PathBuf) {
 }
 
 fn main() {
+    env_logger::init();
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
         print_usage_and_exit();
@@ -441,6 +507,36 @@ fn main() {
         Some("flatfs"),
         &img_dir.join("moturus.web.img"),
     );
+
+    // ////////////////////////////////////////////////// The "web" partition with Motor FS.
+    // Prepare the filesystem.
+    /*
+    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
+
+    // Add compiled programs to the data partition.
+    for prog in BIN_WEB {
+        let filename = Path::new(prog).file_name().unwrap();
+        files.insert(bin_dir.join(filename), (*prog).to_owned());
+    }
+
+    // Add static files to the data partition.
+    add_static_dir(
+        &mut files,
+        motorh.join("img_files").join("web"),
+        Path::new("/"),
+    );
+
+    let fs_partition = tmp_img_dir.join("fs_part.web.motor-fs");
+    create_motorfs_partition(&fs_partition, &files);
+    create_mbr_disk(
+        &bin_dir.join("mbr.bin"),
+        &bin_dir.join("boot.bin"),
+        &initrd,
+        &fs_partition,
+        Some("motor-fs"),
+        &img_dir.join("moturus.web.motor-fs.img"),
+    );
+    */
 
     println!("Motūrus OS {deb_rel} image built successfully in {img_dir:?}");
 }

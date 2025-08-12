@@ -1,4 +1,52 @@
-// Spec for client-server filesystem IPC.
+//! Spec for client-server filesystem IPC.
+
+use moto_ipc::io_channel;
+
+pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX + 0x100; // 4608 == 0x1200
+const _: () = assert!(CMD_MIN > super::api_net::CMD_MAX);
+
+#[derive(Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum FsCmd {
+    // Read-only commands.
+    Stat = CMD_MIN,
+    ReadDir,
+    ReadDirNext,
+    CloseFd,
+    FileOpen,
+    FileRead,
+
+    // Mutating commands.
+    FileWrite,
+    Unlink,
+    Rename,
+    MkDir,
+
+    // Not a command.
+    FsCmdMax,
+}
+
+pub const CMD_MAX: u16 = FsCmd::FsCmdMax as u16;
+
+impl FsCmd {
+    pub const fn try_from(val: u16) -> Result<Self, u16> {
+        if val < CMD_MIN {
+            return Err(val);
+        }
+        if val >= CMD_MAX {
+            return Err(val);
+        }
+
+        Ok(unsafe { core::mem::transmute::<u16, Self>(val) })
+    }
+
+    pub const fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
+
+// -------------- SYNCHRONOUS (obsolete) API.
+
 //
 // We use hand-crafted (de)serialization instead of serde because
 // hand-crafted means the most efficient (in whatever sense we choose)

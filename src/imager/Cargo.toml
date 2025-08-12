@@ -6,7 +6,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-flatfs = { path = "../sys/lib/flatfs" }
-srfs   = { path = "../sys/lib/srfs"   }
-mbrman = "0.5.2"
+async-fs = { path = "../sys/lib/async-fs", features = ["file-dev"] }
+flatfs   = { path = "../sys/lib/flatfs"  }
+motor-fs = { path = "../sys/lib/motor-fs"}
+srfs     = { path = "../sys/lib/srfs"    }
 
+env_logger = "0.11"
+camino     = "1.1.10"
+mbrman     = "0.5.2"
+tokio      = { version = "1.44.2", default-features = false, features = ["rt"] }
