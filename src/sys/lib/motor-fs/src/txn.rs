@@ -55,7 +55,7 @@ impl<'a> Txn<'a> {
     }
 
     async fn commit<'b>(&'b mut self) -> Result<()> {
-        log::warn!("{}:{} do a proper txn", file!(), line!());
+        log::trace!("{}:{} do a proper txn", file!(), line!());
 
         let Txn {
             fs,
@@ -324,6 +324,12 @@ impl<'a> Txn<'a> {
                 Some(block_no) => block_no,
                 None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_key).await?,
             };
+
+        log::debug!(
+            "write({}, {offset}, ...) - block no: {} block key: {block_key}",
+            u128::from(file_id),
+            data_block_no.as_u64()
+        );
 
         // Step 2: update the data lock.
         let data_block = txn.get_txn_block(data_block_no).await?;

@@ -413,7 +413,6 @@ impl DirEntryBlock {
     pub fn hash_u64(&self, val: u64) -> u64 {
         assert_eq!(self.kind(), EntryKind::File);
 
-        // crate::city_hash::city_hash64_with_seed(val.to_ne_bytes().as_slice(), self.hash_seed)
         crate::shuffle::shuffle_u64(val, self.hash_seed)
     }
 
@@ -738,7 +737,7 @@ impl DirEntryBlock {
             .metadata
             .modified = Timestamp::now();
 
-        log::warn!("link_child_block: if this is a dir, we may need to link into the SLL");
+        log::trace!("link_child_block: if this is a dir, we may need to link into the SLL");
         Node::<BTREE_ROOT_ORDER>::node_insert_link(
             txn,
             parent_block_no,

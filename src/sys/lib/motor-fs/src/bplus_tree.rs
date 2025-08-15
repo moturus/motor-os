@@ -122,6 +122,11 @@ impl<const ORDER: usize> Node<ORDER> {
         let child_block_no = node.kv[pos].child_block_no;
         core::mem::drop(block_ref);
 
+        log::debug!(
+            "first_child_with_key() recursive: key: {key}, child_block: {}",
+            child_block_no.as_u64()
+        );
+
         // Recursive call (modulo ORDER).
         Box::pin(Node::<BTREE_NODE_ORDER>::first_child_with_key(
             txn,
@@ -196,6 +201,13 @@ impl<const ORDER: usize> Node<ORDER> {
         assert!(split_pos <= u8::MAX as usize);
         let right_key = root_entries[split_pos].key;
 
+        log::debug!(
+            "split_root(): root: {} key: {right_key} left: {} right: {}",
+            root_block_no.as_u64(),
+            left_block_no.as_u64(),
+            right_block_no.as_u64()
+        );
+
         // Update root.
         root.is_leaf = 0;
         root.num_keys = 2;
@@ -203,8 +215,6 @@ impl<const ORDER: usize> Node<ORDER> {
         root.kv[0].child_block_no = left_block_no;
         root.kv[1].key = right_key;
         root.kv[1].child_block_no = right_block_no;
-
-        log::trace!("Splitting the root node at key {right_key}.");
 
         core::mem::drop(root_block_ref);
 
@@ -230,9 +240,10 @@ impl<const ORDER: usize> Node<ORDER> {
 
         right_node.this = right_block_no;
         right_node.parent_node = root_block_no;
-        right_node.num_keys = (BTREE_NODE_ORDER - split_pos) as u8;
+        right_node.num_keys = (BTREE_ROOT_ORDER - split_pos) as u8;
         right_node.is_leaf = 1;
-        right_node.kv[split_pos..ORDER].clone_from_slice(&root_entries[split_pos..]);
+        right_node.kv[..(right_node.num_keys as usize)]
+            .clone_from_slice(&root_entries[split_pos..]);
 
         Ok(())
     }
