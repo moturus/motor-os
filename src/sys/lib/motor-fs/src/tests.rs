@@ -276,11 +276,9 @@ async fn midsize_file_test() -> Result<()> {
         buf[idx] = (idx & 0xff) as u8;
     }
 
-    const FILE_SIZE: u64 = 1024 * 1024 * 2 + 65536 + 512;
-    // const FILE_SIZE: u64 = 1024 * (512 + 256 + 128 + 8 + 1);
+    const FILE_SIZE: u64 = 1024 * 1024 * 8 + 65536 + 512;
 
     // Write.
-
     let mut file_size = 0;
     let mut bufno = 0;
     while file_size < FILE_SIZE {
@@ -299,9 +297,9 @@ async fn midsize_file_test() -> Result<()> {
     while offset < FILE_SIZE {
         let read = fs.read(file_id, offset, buf.as_mut_slice()).await.unwrap();
         assert_eq!(read, buf.len());
-        offset += read as u64;
 
         assert_eq!(buf[0], (bufno & 0xff) as u8);
+        offset += read as u64;
         bufno += 1;
         for idx in 1..buf.len() {
             assert_eq!(buf[idx], (idx & 0xff) as u8);

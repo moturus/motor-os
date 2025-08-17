@@ -336,6 +336,7 @@ impl FileSystem for MotorFs {
         let Some(data_block_no) =
             DirEntryBlock::data_block_at_key(&mut txn, file_id, block_key).await?
         else {
+            log::debug!("MotorFs::Read(): block not found: key {block_key} offset {offset}.");
             // No data block => "read" zeroes.
             for byte in &mut buf[..to_read] {
                 *byte = 0;

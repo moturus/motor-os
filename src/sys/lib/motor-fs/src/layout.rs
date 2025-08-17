@@ -159,7 +159,7 @@ impl Superblock {
         root_dir.metadata.modified = ts;
         root_dir.metadata.set_kind(EntryKind::Directory);
 
-        root_dir.btree_root.init_new_root(BlockNo(1));
+        root_dir.btree_root.init_new_root();
 
         (block_0, block_1)
     }
@@ -288,6 +288,12 @@ pub(crate) struct BlockHeader {
     blocks_in_use: u64,
 }
 
+impl BlockHeader {
+    pub fn set_block_type(&mut self, block_type: BlockType) {
+        self.block_type = block_type;
+    }
+}
+
 const _: () = assert!(16 == core::mem::size_of::<BlockHeader>());
 unsafe impl plain::Plain for BlockHeader {}
 
@@ -322,19 +328,6 @@ const _: () = assert!(BTREE_ROOT_OFFSET == core::mem::offset_of!(DirEntryBlock, 
 
 pub(crate) const BTREE_NODE_ORDER: usize = 253;
 pub(crate) const BTREE_NODE_OFFSET: usize = 24;
-
-#[repr(C, align(4096))]
-pub(crate) struct TreeNodeBlock {
-    block_header: BlockHeader, // 16 bytes
-    _padding: [u8; 8],
-
-    btree_node: bplus_tree::Node<BTREE_NODE_ORDER>, // offset BTREE_NODE_OFFSET.
-}
-
-const _: () = assert!(BLOCK_SIZE == core::mem::size_of::<TreeNodeBlock>());
-const _: () = assert!(BTREE_NODE_OFFSET == core::mem::offset_of!(TreeNodeBlock, btree_node));
-
-unsafe impl plain::Plain for TreeNodeBlock {}
 
 impl DirEntryBlock {
     pub fn from_block(block: &Block) -> &Self {
@@ -428,15 +421,6 @@ impl DirEntryBlock {
             return Err(ErrorKind::InvalidData.into());
         }
 
-        if self.btree_root.this() != entry_id.block_no {
-            log::error!(
-                "Corrupt dir entry: BTree Root BlockNo {:?} != {:?}",
-                self.btree_root.this(),
-                self.entry_id.block_no
-            );
-            return Err(ErrorKind::InvalidData.into());
-        }
-
         match self.block_header.block_type {
             BlockType::FileEntry | BlockType::DirEntry => {}
             block_type => {
@@ -470,13 +454,7 @@ impl DirEntryBlock {
         hash: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        Node::<BTREE_ROOT_ORDER>::first_child_with_key(
-            txn,
-            self.entry_id.block_no,
-            BTREE_ROOT_OFFSET,
-            hash,
-        )
-        .await
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, self.entry_id.block_no, hash).await
     }
 
     pub async fn data_block_at_key(
@@ -484,13 +462,7 @@ impl DirEntryBlock {
         file_id: EntryIdInternal,
         block_key: u64,
     ) -> Result<Option<BlockNo>> {
-        Node::<BTREE_ROOT_ORDER>::first_child_with_key(
-            txn,
-            file_id.block_no,
-            BTREE_ROOT_OFFSET,
-            block_key,
-        )
-        .await
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, file_id.block_no, block_key).await
     }
 
     pub fn parent_id(&self) -> EntryIdInternal {
@@ -619,7 +591,7 @@ impl DirEntryBlock {
         child.metadata.created = ts;
         child.metadata.modified = ts;
 
-        child.btree_root.init_new_root(entry_id.block_no);
+        child.btree_root.init_new_root();
     }
 
     pub async fn delete_entry<'a, 'b>(
@@ -690,13 +662,8 @@ impl DirEntryBlock {
         })
         .await?;
 
-        let Some(list_head_block_no) = Node::<BTREE_ROOT_ORDER>::first_child_with_key(
-            txn,
-            parent_id.block_no,
-            BTREE_ROOT_OFFSET,
-            hash,
-        )
-        .await?
+        let Some(list_head_block_no) =
+            Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, parent_id.block_no, hash).await?
         else {
             log::error!("Invalid hash for entry {entry_id:?}.");
             return Err(ErrorKind::InvalidData.into());
@@ -738,14 +705,27 @@ impl DirEntryBlock {
             .modified = Timestamp::now();
 
         log::trace!("link_child_block: if this is a dir, we may need to link into the SLL");
-        Node::<BTREE_ROOT_ORDER>::node_insert_link(
-            txn,
-            parent_block_no,
-            BTREE_ROOT_OFFSET,
-            key,
-            child_block_no,
-        )
-        .await
+
+        loop {
+            let result = Node::<BTREE_ROOT_ORDER>::node_insert_link(
+                txn,
+                parent_block_no,
+                key,
+                child_block_no,
+                BlockNo::null(),
+                0,
+            )
+            .await;
+
+            if let Err(err) = &result {
+                if err.kind() == ErrorKind::Interrupted {
+                    log::trace!("link_child_block: interrupted: retry");
+                    continue;
+                }
+            }
+
+            return result;
+        }
     }
 
     pub async fn unlink_child_block(
@@ -803,26 +783,6 @@ impl DirEntryBlock {
             .block_header
             .blocks_in_use -= 1;
         Ok(())
-    }
-}
-
-impl TreeNodeBlock {
-    pub fn block_type(&self) -> BlockType {
-        self.block_header.block_type
-    }
-
-    pub fn from_block(block: &Block) -> &Self {
-        block.get_at_offset(0)
-    }
-
-    pub async fn first_child<'a>(this: BlockNo, txn: &'a mut Txn<'a>) -> Result<Option<BlockNo>> {
-        todo!()
-        // let this_block = txn.get_block(this).await?;
-        // let node = Self::from_block(this_block.block());
-        // assert_eq!(node.block_type(), BlockType::TreeNode);
-
-        // // Recursion in an async fn requires boxing: rustc --explain E0733.
-        // Box::pin(node.btree_node.first_child(txn)).await
     }
 }
 

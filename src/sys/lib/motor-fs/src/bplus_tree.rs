@@ -1,7 +1,9 @@
 //! B+ tree.
 use crate::BTREE_NODE_OFFSET;
 use crate::BTREE_NODE_ORDER;
+use crate::BTREE_ROOT_OFFSET;
 use crate::BTREE_ROOT_ORDER;
+use crate::BlockHeader;
 use crate::BlockNo;
 use crate::Superblock;
 use crate::Txn;
@@ -9,7 +11,7 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub(crate) struct KV {
     /// Key is dir name hash for when children are dir entries,
     /// ond ffset for when children are file content bytes.
@@ -27,14 +29,11 @@ impl Default for KV {
     }
 }
 
-/// B+ Tree node. Size: ORDER * 16 + 24.
-#[repr(C)]
+/// B+ Tree node. Size: ORDER * 16 + 8.
+#[repr(C, align(8))]
 pub(crate) struct Node<const ORDER: usize> {
-    this: BlockNo,
-
-    parent_node: BlockNo, // if parent.is_null(), this is root.
-    num_keys: u8,         // The number of keys in use.
-    is_leaf: u8,
+    num_keys: u8, // The number of keys in use.
+    kind: u8,
     _padding: [u8; 6],
     kv: [KV; ORDER],
 }
@@ -42,15 +41,33 @@ pub(crate) struct Node<const ORDER: usize> {
 unsafe impl<const ORDER: usize> plain::Plain for Node<ORDER> {}
 
 impl<const ORDER: usize> Node<ORDER> {
-    pub fn this(&self) -> BlockNo {
-        self.this
+    const KIND_LEAF: u8 = 1;
+    const KIND_ROOT: u8 = 2;
+
+    pub fn init_new_root(&mut self) {
+        self.num_keys = 0;
+        self.kind = Self::KIND_ROOT | Self::KIND_LEAF;
     }
 
-    pub fn init_new_root(&mut self, this: BlockNo) {
-        self.this = this;
-        self.parent_node = BlockNo::null();
-        self.num_keys = 0;
-        self.is_leaf = 1;
+    fn offset_in_block() -> usize {
+        match ORDER {
+            BTREE_ROOT_ORDER => BTREE_ROOT_OFFSET,
+            BTREE_NODE_ORDER => BTREE_NODE_OFFSET,
+            val => panic!("Bad order {val}"),
+        }
+    }
+
+    #[allow(unused)]
+    fn is_root(&self) -> bool {
+        self.kind & Self::KIND_ROOT != 0
+    }
+
+    fn is_leaf(&self) -> bool {
+        self.kind & Self::KIND_LEAF != 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.num_keys == (ORDER as u8)
     }
 
     pub async fn first_child<'a>(
@@ -66,8 +83,8 @@ impl<const ORDER: usize> Node<ORDER> {
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(this_offset);
 
-        if this.num_keys as usize > ORDER || this.is_leaf > 1 {
-            log::error!("Bad B+ Tree Node {:?}(?).", this.this);
+        if this.num_keys as usize > ORDER {
+            log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -75,7 +92,7 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(None);
         }
 
-        if this.is_leaf == 1 {
+        if this.is_leaf() {
             return Ok(Some(this.kv[0].child_block_no));
         }
 
@@ -85,15 +102,14 @@ impl<const ORDER: usize> Node<ORDER> {
     pub async fn first_child_with_key(
         txn: &mut Txn<'_>,
         this_block_no: BlockNo,
-        this_offset: usize,
         key: u64,
     ) -> Result<Option<BlockNo>> {
         let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
-        let node = block_ref.get_at_offset::<Self>(this_offset);
+        let node = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if node.num_keys as usize > ORDER || node.is_leaf > 1 {
-            log::error!("Bad B+ Tree Node {:?}(?).", node.this);
+        if node.num_keys as usize > ORDER {
+            log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -101,7 +117,7 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(None);
         }
 
-        if node.is_leaf == 1 {
+        if node.is_leaf() {
             return match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             {
                 Ok(pos) => Ok(Some(node.kv[pos].child_block_no)),
@@ -131,7 +147,6 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(Node::<BTREE_NODE_ORDER>::first_child_with_key(
             txn,
             child_block_no,
-            BTREE_NODE_OFFSET,
             key,
         ))
         .await
@@ -151,8 +166,8 @@ impl<const ORDER: usize> Node<ORDER> {
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(this_offset);
 
-        if this.num_keys as usize > ORDER || this.is_leaf > 1 {
-            log::error!("Bad B+ Tree Node {:?}(?).", this.this);
+        if this.num_keys as usize > ORDER {
+            log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -160,7 +175,7 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(None);
         }
 
-        if this.is_leaf == 1 {
+        if this.is_leaf() {
             return match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             {
                 Ok(pos) => {
@@ -177,11 +192,7 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
-    async fn split_root(
-        txn: &mut Txn<'_>,
-        root_block_no: BlockNo,
-        root_offset_in_block: usize,
-    ) -> Result<()> {
+    async fn split_root(txn: &mut Txn<'_>, root_block_no: BlockNo) -> Result<()> {
         assert_eq!(ORDER, BTREE_ROOT_ORDER);
 
         // Allocate two new blocks.
@@ -191,15 +202,16 @@ impl<const ORDER: usize> Node<ORDER> {
         // Get the root block.
         let root_block = txn.get_txn_block(root_block_no).await?;
         let mut root_block_ref = root_block.block_mut();
-        let root = root_block_ref.get_mut_at_offset::<Self>(root_offset_in_block);
+        let root = root_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
         assert_eq!(root.num_keys as usize, ORDER);
 
-        // Save root values for later use.
+        // Save data to copy.
         let root_entries = root.kv;
         let left_key = u64::MIN;
         let split_pos = (ORDER >> 1) + 1;
         assert!(split_pos <= u8::MAX as usize);
         let right_key = root_entries[split_pos].key;
+        let leaf_flag = root.kind & Self::KIND_LEAF;
 
         log::debug!(
             "split_root(): root: {} key: {right_key} left: {} right: {}",
@@ -209,7 +221,7 @@ impl<const ORDER: usize> Node<ORDER> {
         );
 
         // Update root.
-        root.is_leaf = 0;
+        root.kind &= !Self::KIND_LEAF;
         root.num_keys = 2;
         root.kv[0].key = left_key;
         root.kv[0].child_block_no = left_block_no;
@@ -221,13 +233,15 @@ impl<const ORDER: usize> Node<ORDER> {
         // Update the left block.
         let left_block = txn.get_empty_block_mut(left_block_no);
         let mut left_block_ref = left_block.block_mut();
+
+        let bh = left_block_ref.get_mut_at_offset::<BlockHeader>(0);
+        bh.set_block_type(crate::BlockType::TreeNode);
+
         let left_node =
             left_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
 
-        left_node.this = left_block_no;
-        left_node.parent_node = root_block_no;
         left_node.num_keys = split_pos as u8;
-        left_node.is_leaf = 1;
+        left_node.kind = leaf_flag;
         left_node.kv[..split_pos].clone_from_slice(&root_entries[..split_pos]);
 
         core::mem::drop(left_block_ref);
@@ -238,71 +252,151 @@ impl<const ORDER: usize> Node<ORDER> {
         let right_node =
             right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
 
-        right_node.this = right_block_no;
-        right_node.parent_node = root_block_no;
         right_node.num_keys = (BTREE_ROOT_ORDER - split_pos) as u8;
-        right_node.is_leaf = 1;
+        right_node.kind = leaf_flag;
         right_node.kv[..(right_node.num_keys as usize)]
             .clone_from_slice(&root_entries[split_pos..]);
 
         Ok(())
     }
 
-    // Inserts link `val` at `key`, returns the list of blocks to save.
-    pub async fn node_insert_link(
+    async fn split_node(
         txn: &mut Txn<'_>,
         node_block_no: BlockNo,
-        node_offset_in_block: usize,
+        parent_node_block_no: BlockNo,
+        level: u8,
+    ) -> Result<()> {
+        let is_root = parent_node_block_no.is_null();
+
+        if is_root {
+            assert_eq!(ORDER, BTREE_ROOT_ORDER);
+            assert_eq!(level, 0);
+            return Self::split_root(txn, node_block_no).await;
+        } else {
+            assert_eq!(ORDER, BTREE_NODE_ORDER);
+            assert!(level > 0);
+        }
+
+        // Allocate a new block.
+        let right_block_no = Superblock::allocate_block(txn).await?.block_no;
+
+        // Get this block.
+        let this_block = txn.get_txn_block(node_block_no).await?;
+        let mut this_block_ref = this_block.block_mut();
+        let this = this_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
+        assert!(this.is_full());
+
+        // Save data to copy.
+        let split_pos = (ORDER >> 1) + 1;
+        assert!(split_pos <= u8::MAX as usize);
+
+        // TODO: we don't need to copy all KV below; but the Rust version in use
+        // as of 2025-08-15 won't allow to have `split_pos` as const and thus
+        // initialize kv on stack, so we have this little inefficiency.
+        let kv_entries = this.kv;
+        let right_key = kv_entries[split_pos].key;
+        let leaf_flag = this.kind & Self::KIND_LEAF;
+
+        log::debug!(
+            "split_node(): node: {} key: {right_key} right: {}",
+            node_block_no.as_u64(),
+            right_block_no.as_u64()
+        );
+
+        // Update this node.
+        this.num_keys = split_pos as u8;
+        core::mem::drop(this_block_ref);
+
+        // Update the right block.
+        // TODO: the code below is very similar to a piece in split_root().
+        let right_block = txn.get_empty_block_mut(right_block_no);
+        let mut right_block_ref = right_block.block_mut();
+        let right_node =
+            right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
+
+        right_node.num_keys = (ORDER - split_pos) as u8;
+        right_node.kind = leaf_flag;
+        right_node.kv[..(right_node.num_keys as usize)].clone_from_slice(&kv_entries[split_pos..]);
+        core::mem::drop(right_block_ref);
+
+        // Insert the link to the new node into the parent.
+        if level == 1 {
+            // The parent is root.
+            Node::<BTREE_ROOT_ORDER>::insert_kv(
+                txn,
+                parent_node_block_no,
+                right_key,
+                right_block_no,
+            )
+            .await
+        } else {
+            Node::<BTREE_NODE_ORDER>::insert_kv(
+                txn,
+                parent_node_block_no,
+                right_key,
+                right_block_no,
+            )
+            .await
+        }
+    }
+
+    pub async fn insert_kv(
+        txn: &mut Txn<'_>,
+        node_block_no: BlockNo,
         key: u64,
         val: BlockNo,
     ) -> Result<()> {
         let node_block = txn.get_txn_block(node_block_no).await?;
+        let mut node_ref_mut = node_block.block_mut();
+        let node_mut = node_ref_mut.get_mut_at_offset::<Self>(Self::offset_in_block());
+        assert!((node_mut.num_keys as usize) < ORDER);
+
+        let Err(pos) =
+            node_mut.kv[..(node_mut.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+        else {
+            return Err(ErrorKind::AlreadyExists.into());
+        };
+
+        for idx in (pos..(node_mut.num_keys as usize)).rev() {
+            node_mut.kv[idx + 1] = node_mut.kv[idx];
+        }
+
+        node_mut.kv[pos] = KV {
+            key,
+            child_block_no: val,
+        };
+
+        node_mut.num_keys += 1;
+        return Ok(());
+    }
+
+    // Inserts link `val` at `key`, returns the list of blocks to save.
+    // Note: we split full nodes "preemptively", so that there is no need to
+    // do cascading splits up the tree.
+    pub async fn node_insert_link(
+        txn: &mut Txn<'_>,
+        node_block_no: BlockNo,
+        key: u64,
+        val: BlockNo,
+        parent_node_block_no: BlockNo,
+        level: u8,
+    ) -> Result<()> {
+        let node_block = txn.get_txn_block(node_block_no).await?;
         let node_block_ref = node_block.block();
-        let node = node_block_ref.get_at_offset::<Self>(node_offset_in_block);
+        let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if node.is_leaf == 1 {
-            // Insert a link unconditionally (if there is space).
-            if node.num_keys as usize == ORDER {
-                if node.parent_node.is_null() {
-                    // This is root.
-                    core::mem::drop(node_block_ref);
-                    Self::split_root(txn, node_block_no, node_offset_in_block).await?;
-
-                    // Recursive call.
-                    return Box::pin(Self::node_insert_link(
-                        txn,
-                        node_block_no,
-                        node_offset_in_block,
-                        key,
-                        val,
-                    ))
-                    .await;
-                } else {
-                    todo!("Split a non-root node: key = {key}, order = {ORDER}.")
-                }
-            }
-
-            let Err(pos) =
-                node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-            else {
-                return Err(ErrorKind::AlreadyExists.into());
-            };
-
+        if node.is_full() {
             core::mem::drop(node_block_ref);
+            Self::split_node(txn, node_block_no, parent_node_block_no, level).await?;
 
-            let mut node_ref_mut = node_block.block_mut();
-            let node_mut = node_ref_mut.get_mut_at_offset::<Self>(node_offset_in_block);
-            for idx in (pos..(node_mut.num_keys as usize)).rev() {
-                node_mut.kv[idx + 1] = node_mut.kv[idx];
-            }
+            // Because the split may result in the inserted link going to the sibling
+            // node, we need to restart this op.
+            return Err(ErrorKind::Interrupted.into());
+        }
 
-            node_mut.kv[pos] = KV {
-                key,
-                child_block_no: val,
-            };
-
-            node_mut.num_keys += 1;
-            return Ok(());
+        if node.is_leaf() {
+            core::mem::drop(node_block_ref);
+            return Self::insert_kv(txn, node_block_no, key, val).await;
         }
 
         // This is not a leaf -> go one step down.
@@ -322,9 +416,10 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(Node::<BTREE_NODE_ORDER>::node_insert_link(
             txn,
             child_block_no,
-            BTREE_NODE_OFFSET,
             key,
             val,
+            node_block_no,
+            level + 1,
         ))
         .await
     }
@@ -345,7 +440,7 @@ impl<const ORDER: usize> Node<ORDER> {
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(this_offset);
 
-        if this.is_leaf == 1 {
+        if this.is_leaf() {
             let Ok(pos) =
                 this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
             else {
