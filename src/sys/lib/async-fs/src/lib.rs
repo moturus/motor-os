@@ -1,5 +1,6 @@
 //! AsyncBlockDevice and AsyncFs traits.
 #![allow(async_fn_in_trait)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "file-dev")]
 pub mod file_block_device;
@@ -10,6 +11,9 @@ mod filesystem;
 
 pub use block_device::*;
 pub use filesystem::*;
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
 pub const BLOCK_SIZE: usize = 4096;
 
@@ -31,15 +35,12 @@ impl Block {
         *self = Self::new_zeroed()
     }
 
-    pub async fn from_dev<Dev: AsyncBlockDevice>(
-        dev: &mut Dev,
-        block_no: u64,
-    ) -> std::io::Result<Self> {
+    pub async fn from_dev<Dev: AsyncBlockDevice>(dev: &mut Dev, block_no: u64) -> Result<Self> {
         // Safety: we never read from the uninit memory.
         unsafe {
             #[allow(invalid_value)]
             #[allow(clippy::uninit_assumed_init)]
-            let mut block = std::mem::MaybeUninit::<Block>::uninit().assume_init();
+            let mut block = core::mem::MaybeUninit::<Block>::uninit().assume_init();
             dev.read_block(block_no, &mut block).await?;
             Ok(block)
         }

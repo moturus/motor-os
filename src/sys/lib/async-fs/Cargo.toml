@@ -6,7 +6,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["std"]
 file-dev = ["camino", "tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
+std = []
 
 [dependencies]
 async-trait = "0.1.88"

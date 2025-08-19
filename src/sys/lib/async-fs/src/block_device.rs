@@ -1,6 +1,9 @@
 use crate::Block;
+use crate::Result;
 use async_trait::async_trait;
-use std::io::Result;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 
 /// Asynchronous Block Device.
 #[async_trait(?Send)]

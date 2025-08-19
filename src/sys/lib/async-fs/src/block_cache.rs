@@ -4,12 +4,23 @@
 //! the overall design tries to ensure that modified blocks must
 //! be saved or have the modifications explicitly discarded.
 
+use crate::Result;
 use crate::{AsyncBlockDevice, Block};
-use lru::LruCache;
-use std::cell::RefCell;
-use std::io::Result;
-use std::num::NonZero;
+
+#[cfg(feature = "std")]
 use std::rc::Rc;
+
+#[cfg(not(feature = "std"))]
+use alloc::rc::Rc;
+
+use core::cell::RefCell;
+use core::num::NonZero;
+use lru::LruCache;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 // Panics if dropped when dirty.
 struct InnerCachedBlock {
@@ -61,16 +72,16 @@ impl CachedBlock {
 
     /// Get a read-only reference to the underlying data. Does not
     /// modify dirty/clean state.
-    pub fn block(&self) -> std::cell::Ref<'_, Block> {
-        std::cell::Ref::map(self.inner.borrow(), |inner| &inner.block)
+    pub fn block(&self) -> core::cell::Ref<'_, Block> {
+        core::cell::Ref::map(self.inner.borrow(), |inner| &inner.block)
     }
 
     /// Get a read/write reference to the underlying data. Marks
     /// the block dirty.
-    pub fn block_mut(&mut self) -> std::cell::RefMut<'_, Block> {
+    pub fn block_mut(&mut self) -> core::cell::RefMut<'_, Block> {
         let mut mut_ref = self.inner.borrow_mut();
         mut_ref.dirty = true;
-        std::cell::RefMut::map(mut_ref, |inner| &mut inner.block)
+        core::cell::RefMut::map(mut_ref, |inner| &mut inner.block)
     }
 
     fn intenal_mark_clean(&mut self) {

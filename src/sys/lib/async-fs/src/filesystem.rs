@@ -1,4 +1,20 @@
-use std::io::Result;
+#[cfg(feature = "std")]
+pub type Result<T> = std::io::Result<T>;
+
+#[cfg(not(feature = "std"))]
+#[derive(Debug)]
+#[repr(u16)]
+pub enum FsError {
+    NoError = 0,
+    InvalidData = 1,
+    NotFound = 2,
+}
+
+#[cfg(not(feature = "std"))]
+pub type Result<T> = core::result::Result<T, FsError>;
+
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,15 +24,28 @@ pub enum EntryKind {
 }
 
 impl TryFrom<u8> for EntryKind {
+    #[cfg(feature = "std")]
     type Error = std::io::Error;
 
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+    #[cfg(not(feature = "std"))]
+    type Error = FsError; // moto_rt::Error.
+
+    fn try_from(value: u8) -> Result<Self> {
         match value {
             1 => Ok(EntryKind::Directory),
             2 => Ok(EntryKind::File),
             x => {
                 log::error!("Corrupted EntryKind: {x}.");
-                Err(std::io::ErrorKind::InvalidData.into())
+
+                #[cfg(feature = "std")]
+                {
+                    Err(std::io::ErrorKind::InvalidData.into())
+                }
+
+                #[cfg(not(feature = "std"))]
+                {
+                    Err(FsError::InvalidData)
+                }
             }
         }
     }
@@ -31,6 +60,7 @@ pub struct Timestamp {
     nanos: [u8; 4], // le bytes u32
 }
 
+#[cfg(feature = "std")]
 impl Timestamp {
     pub fn now() -> Self {
         {
@@ -51,6 +81,7 @@ impl Timestamp {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<Timestamp> for std::time::SystemTime {
     fn from(ts: Timestamp) -> Self {
         let dur =
@@ -59,6 +90,7 @@ impl From<Timestamp> for std::time::SystemTime {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<std::time::SystemTime> for Timestamp {
     fn from(value: std::time::SystemTime) -> Self {
         let dur = value
@@ -99,7 +131,7 @@ impl Metadata {
         };
     }
 
-    pub fn try_kind(&self) -> std::io::Result<EntryKind> {
+    pub fn try_kind(&self) -> Result<EntryKind> {
         self.kind.try_into()
     }
 }
