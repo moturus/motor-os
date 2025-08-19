@@ -128,11 +128,8 @@ async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<Pat
                 break;
             }
 
-            assert_eq!(
-                4096,
-                fs.write(new_file_id, offset, &buf[..sz]).await.unwrap()
-            );
-            offset += 4096;
+            assert_eq!(sz, fs.write(new_file_id, offset, &buf[..sz]).await.unwrap());
+            offset += sz as u64;
         }
     }
 }
