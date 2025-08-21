@@ -152,7 +152,7 @@ impl Superblock {
         root_dir.name_bytes[0] = b'/';
         root_dir.name_len = 1;
 
-        root_dir.hash_seed = std::random::random();
+        root_dir.hash_seed = std::random::random(..);
 
         let ts = Timestamp::now();
         root_dir.metadata.created = ts;
@@ -585,7 +585,7 @@ impl DirEntryBlock {
         child.metadata.set_kind(kind);
         child.parent_id = parent_id;
 
-        child.hash_seed = std::random::random();
+        child.hash_seed = std::random::random(..);
 
         let ts = Timestamp::now();
         child.metadata.created = ts;
