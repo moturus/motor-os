@@ -148,15 +148,15 @@ impl SystemTime {
         }
     }
 
-    pub fn as_u128(&self) -> u128 {
+    pub const fn as_u128(&self) -> u128 {
         self.nanos
     }
 
-    pub fn from_u128(val: u128) -> Self {
+    pub const fn from_u128(val: u128) -> Self {
         Self { nanos: val }
     }
 
-    pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
+    pub const fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
         if self.nanos >= other.nanos {
             let total_nanos = self.nanos - other.nanos;
             let secs = total_nanos / (NANOS_IN_SEC as u128);
@@ -170,16 +170,18 @@ impl SystemTime {
         }
     }
 
-    pub fn checked_add_duration(&self, other: &Duration) -> Option<SystemTime> {
-        self.nanos
-            .checked_add(other.as_nanos())
-            .map(|nanos| Self { nanos })
+    pub const fn checked_add_duration(&self, other: &Duration) -> Option<SystemTime> {
+        match self.nanos.checked_add(other.as_nanos()) {
+            Some(nanos) => Some(Self { nanos }),
+            None => None
+        }
     }
 
-    pub fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
-        self.nanos
-            .checked_sub(other.as_nanos())
-            .map(|nanos| Self { nanos })
+    pub const fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
+        match self.nanos.checked_sub(other.as_nanos()) {
+            Some(nanos) => Some(Self { nanos }),
+            None => None
+        }
     }
 }
 
