@@ -5,8 +5,8 @@
 #![feature(io_error_more)]
 #![feature(local_waker)]
 
-#[cfg(debug_assertions)]
-mod async_runtime;
+// #[cfg(debug_assertions)]
+// mod async_runtime;
 
 mod fs;
 mod logger;
@@ -53,8 +53,8 @@ pub extern "C" fn moturus_runtime_start() {
 }
 
 fn main() {
-    #[cfg(debug_assertions)]
-    async_runtime::start();
+    // #[cfg(debug_assertions)]
+    // async_runtime::start();
 
     runtime::start();
 
