@@ -128,10 +128,12 @@ impl IoRuntime {
 
         let mut wake_conn = false;
 
+        /*
         #[cfg(debug_assertions)]
         if unlikely(timeout_wakeup) {
             conn.dump_state();
         }
+        */
 
         loop {
             let msg = match conn.recv() {

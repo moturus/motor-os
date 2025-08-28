@@ -178,12 +178,14 @@ impl TcpSocket {
 
     #[allow(unused)]
     pub(super) fn dump_state(&self) {
-        log::warn!(
-            "socket: id {} conn 0x{:x} txq len: {}",
-            self.id.0,
-            self.conn.wait_handle().as_u64(),
-            self.tx_queue.len()
-        );
+        if self.tx_queue.len() > 0 {
+            log::warn!(
+                "socket: id {} conn 0x{:x} txq len: {}",
+                self.id.0,
+                self.conn.wait_handle().as_u64(),
+                self.tx_queue.len()
+            );
+        }
     }
 
     pub(super) fn add_deferred_action(
