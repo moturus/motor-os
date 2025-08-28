@@ -809,6 +809,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-async"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "log",
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
 name = "moto-io-internal"
 version = "0.1.0"
 dependencies = [
@@ -1395,6 +1405,7 @@ dependencies = [
  "crossbeam",
  "futures",
  "log",
+ "moto-async",
  "moto-ipc",
  "moto-log",
  "moto-mpmc",

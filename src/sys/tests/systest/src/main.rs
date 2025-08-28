@@ -4,6 +4,7 @@
 // mod channel_test;
 mod fs;
 mod logging;
+mod moto_async;
 mod mpmc;
 mod spawn_wait_kill;
 mod stdio;
@@ -402,6 +403,9 @@ fn main() {
     std::thread::spawn(input_listener);
 
     println!("Systest starting...");
+
+    moto_async::run_all_tests();
+    return;
 
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
