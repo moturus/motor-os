@@ -18,6 +18,7 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::{AcqRel, Release};
 
+#[derive(Default)]
 pub struct SpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,
