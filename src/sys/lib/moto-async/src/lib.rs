@@ -21,10 +21,11 @@
 //! will be enough).
 
 #![no_std]
+#![feature(box_as_ptr)]
 #![feature(local_waker)]
 
-pub mod local_executor;
+pub mod local_runtime;
 pub mod time;
 mod timeq;
 
-pub use local_executor::block_on;
+pub use local_runtime::LocalRuntime;

@@ -404,6 +404,8 @@ fn main() {
 
     println!("Systest starting...");
 
+    // Run the logging test first, as it sets the logger for everything.
+    logging::run_all_tests();
     moto_async::run_all_tests();
     return;
 
@@ -419,7 +421,6 @@ fn main() {
         moto_rt::E_NOT_ALLOWED
     );
 
-    logging::run_all_tests();
     test_thread_names();
     test_cpus();
     tls::test_tls();

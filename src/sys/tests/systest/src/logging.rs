@@ -1,4 +1,6 @@
 fn basic() {
+    let _ = std::fs::remove_file("/sys/logs/systest.log");
+
     moto_log::init("systest").unwrap();
     log::set_max_level(log::LevelFilter::Trace);
 
@@ -21,10 +23,10 @@ fn basic() {
 
     assert_eq!(5, lines.len());
     assert!(lines[0].ends_with(":I - started log for 'systest'"));
-    assert!(lines[1].ends_with(":I - systest::logging:12 - foo"));
-    assert!(lines[2].ends_with(":W - systest::logging:13 - bar"));
-    assert!(lines[3].ends_with(":D - systest::logging:14 - another debug string"));
-    assert!(lines[4].ends_with(":T - systest::logging:15 - baz"));
+    assert!(lines[1].ends_with(":I - systest::logging:14 - foo"));
+    assert!(lines[2].ends_with(":W - systest::logging:15 - bar"));
+    assert!(lines[3].ends_with(":D - systest::logging:16 - another debug string"));
+    assert!(lines[4].ends_with(":T - systest::logging:17 - baz"));
 
     println!("logging::basic test PASS");
 }
