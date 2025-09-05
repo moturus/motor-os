@@ -94,10 +94,29 @@ fn test_basic() {
     println!("----- moto_async::test_basic PASS");
 }
 
+fn test_spawn() {
+    moto_async::LocalRuntime::new().block_on(async {
+        let join_1 = moto_async::LocalRuntime::spawn(async {
+            moto_async::time::sleep(Duration::from_millis(20)).await;
+            42
+        });
+
+        let join_2 = moto_async::LocalRuntime::spawn(async {
+            moto_async::time::sleep(Duration::from_millis(40)).await;
+            "foobar"
+        });
+
+        assert_eq!("foobar", join_2.await);
+        assert_eq!(42, join_1.await);
+    });
+    println!("----- moto_async::test_spawn PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
     test_select();
+    test_spawn();
 
     println!("moto_async all PASS");
 }

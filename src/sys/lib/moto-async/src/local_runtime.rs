@@ -23,7 +23,6 @@ use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
-use alloc::sync::Weak;
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
@@ -82,12 +81,16 @@ fn clear_local_runtime_context() {
     unsafe { moto_rt::tls::set(get_runtime_tls_key(), core::ptr::null_mut()) }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TaskId(u64);
 
 impl TaskId {
     fn default_root() -> Self {
         Self(0)
+    }
+
+    fn is_root(&self) -> bool {
+        self.0 == 0
     }
 }
 
@@ -108,6 +111,7 @@ unsafe fn waker_wake(data: *const ()) {
     let waker = unsafe { (data as usize as *const MotoWaker).as_ref().unwrap() };
 
     if let Some(runqueue) = waker.runqueue.upgrade() {
+        log::trace!("Waking {:?}", waker.task_id);
         runqueue.lock().push_back(waker.task_id);
         if let Err(err) = moto_sys::SysCpu::wake(waker.wake_handle) {
             log::warn!("Error {err} while waking {}.", waker.wake_handle.as_u64());
@@ -131,18 +135,17 @@ const RAW_WAKER_VTABLE: RawWakerVTable =
 struct Task {
     id: TaskId,
     fut: LocalFutureObj<'static, ()>,
-    last_polled: u64, // generation
+    join_handle_waker: alloc::rc::Weak<RefCell<Option<Waker>>>,
 }
 
 struct LocalRuntimeInner {
-    timeq: crate::timeq::TimeQ<TaskId>,
+    timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
     global_runqueue: Arc<SpinLock<VecDeque<TaskId>>>,
     local_runqueue: VecDeque<TaskId>,
 
     tasks: RefCell<BTreeMap<TaskId, Task>>,
     incoming: VecDeque<Task>,
 
-    generation_counter: u64,
     next_task_id: u64,
 }
 
@@ -154,7 +157,6 @@ impl LocalRuntimeInner {
             local_runqueue: Default::default(),
             tasks: Default::default(),
             incoming: Default::default(),
-            generation_counter: 1,
             next_task_id: 1,
         }
     }
@@ -206,17 +208,15 @@ impl LocalRuntimeInner {
         self.local_runqueue.pop_front()
     }
 
-    fn poll_one(&self, cx: &mut Context<'_>) -> Poll<()> {
-        todo!()
-    }
-
     fn wait(&self, timeo: Option<Instant>) {
         let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
     }
 
     fn enqueue_expired_timers(&mut self) {
         let now = Instant::now();
-        while let Some(task_id) = self.timeq.pop_at(now) {
+        let mut timeq = self.timeq.borrow_mut();
+        while let Some(task_id) = timeq.pop_at(now) {
+            log::trace!("Timer expired for {task_id:?}.");
             self.local_runqueue.push_back(task_id)
         }
     }
@@ -265,13 +265,20 @@ impl LocalRuntime {
     pub(crate) fn add_timer(when: Instant, cx: &mut Context<'_>) {
         log::trace!("add_timer");
 
-        let local_waker = cx.local_waker().data() as usize as *const MotoWaker;
+        /*
+                let local_waker = cx.local_waker().data() as usize as *const MotoWaker;
+
+                log::error!("todo: validate cx/local_waker by comparing pointers");
+                let task_id = unsafe { local_waker.as_ref().unwrap().task_id };
+        */
+        let waker = cx.waker().data() as usize as *const MotoWaker;
 
         log::error!("todo: validate cx/local_waker by comparing pointers");
-        let task_id = unsafe { local_waker.as_ref().unwrap().task_id };
+        let task_id = unsafe { waker.as_ref().unwrap().task_id };
+        log::trace!("adding timer to task {task_id:?}");
 
         let inner = LocalRuntimeInner::current();
-        inner.borrow_mut().timeq.add_at(when, task_id);
+        inner.borrow().timeq.borrow_mut().add_at(when, task_id);
     }
 
     /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
@@ -289,21 +296,23 @@ impl LocalRuntime {
 
         let task_id = inner.next_task_id();
 
+        let waker = alloc::rc::Rc::new(RefCell::new(None));
+
         let task = Task {
             id: task_id,
-            fut: Box::pin(
-                (async move {
-                    let _ = tx.send(f.await);
-                }),
-            )
+            fut: Box::pin(async move {
+                let _ = tx.send(f.await);
+                log::trace!("Task {:?} almost ready.", task_id);
+            })
             .into(),
-            last_polled: 0,
+            join_handle_waker: alloc::rc::Rc::downgrade(&waker),
         };
 
         inner.local_runqueue.push_back(task_id);
         inner.incoming.push_back(task);
+        log::trace!("spawned task {task_id:?}");
 
-        JoinHandle { task_id, rx }
+        JoinHandle { task_id, rx, waker }
     }
 
     // See futures::local_pool::run_executor().
@@ -332,7 +341,8 @@ impl LocalRuntime {
                 return;
             }
 
-            let timeo = inner.borrow().timeq.next();
+            let timeo = inner.borrow().timeq.borrow().next();
+            inner.borrow().wait(timeo);
         }
     }
 
@@ -341,25 +351,29 @@ impl LocalRuntime {
         futures::pin_mut!(f);
         let _guard = self.enter();
         Self::run_executor(|cx| {
-            {
-                let result = f.as_mut().poll(cx);
-                if let Poll::Ready(output) = result {
-                    return Poll::Ready(output);
+            loop {
+                {
+                    log::trace!("Polling the root task/future.");
+                    let result = f.as_mut().poll(cx);
+                    if let Poll::Ready(output) = result {
+                        return Poll::Ready(output);
+                    }
+                }
+
+                if Self::poll_pool(cx).is_ready() {
+                    continue;
+                } else {
+                    return Poll::Pending; // Will sleep/wait.
                 }
             }
-
-            let _ = Self::poll_pool(cx);
-            Poll::Pending
         })
     }
 
     // Poll the runnable queue until there's nothing to do.
     // It is safe to sleep when poll_pool() returns.
     // Kinda like futures::LocalPool::poll_pool(), but much simpler.
-    fn poll_pool(cx: &mut Context<'_>) -> Poll<()> {
-        let mut poll_counter = 0_u64;
+    fn poll_pool(_cx: &mut Context<'_>) -> Poll<()> {
         loop {
-            poll_counter += 1;
             let inner = LocalRuntimeInner::current();
 
             inner.borrow_mut().merge_incoming();
@@ -369,7 +383,37 @@ impl LocalRuntime {
                 return Poll::Pending;
             };
 
-            todo!("poll next_runnable")
+            if next_runnable.is_root() {
+                log::trace!("root wakeup");
+                return Poll::Ready(());
+            }
+
+            let task_waker = LocalRuntimeInner::current()
+                .borrow_mut()
+                .new_waker(next_runnable);
+            let mut inner_cx = core::task::Context::from_waker(&task_waker);
+
+            let inner_ref = inner.borrow();
+            let mut tasks_ref = inner_ref.tasks.borrow_mut();
+            let task = tasks_ref.get_mut(&next_runnable).unwrap();
+            let pinned = Pin::new(&mut task.fut);
+
+            log::trace!("polling task {next_runnable:?}");
+            // This may call spawn, or add a timer, which borrows inner.
+            if let Poll::Pending = pinned.poll(&mut inner_cx) {
+                continue;
+            }
+
+            // The task has completed.
+            if let Some(waker_cell) = task.join_handle_waker.upgrade() {
+                if let Some(waker) = waker_cell.borrow_mut().take() {
+                    log::trace!("Waking the join handle for {:?}.", next_runnable);
+                    waker.wake();
+                }
+            }
+            core::mem::drop(tasks_ref);
+            core::mem::drop(inner_ref);
+            inner.borrow_mut().tasks.borrow_mut().remove(&next_runnable);
         }
 
         /*
@@ -396,15 +440,24 @@ impl LocalRuntime {
 pub struct JoinHandle<T> {
     task_id: TaskId,
     rx: oneshot::Receiver<T>,
+
+    waker: alloc::rc::Rc<RefCell<Option<Waker>>>,
 }
 
 impl<T> Future for JoinHandle<T> {
     type Output = T;
 
-    fn poll(mut self: core::pin::Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.rx.try_recv() {
-            Ok(Some(res)) => Poll::Ready(res),
-            Ok(None) => Poll::Pending,
+            Ok(Some(res)) => {
+                log::trace!("Task {:?} is ready.", self.task_id);
+                Poll::Ready(res)
+            }
+            Ok(None) => {
+                log::trace!("JoinHandle::Poll: Pending");
+                *self.waker.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
             Err(err) => panic!("{err:?}"),
         }
     }

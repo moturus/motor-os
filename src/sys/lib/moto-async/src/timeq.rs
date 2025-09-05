@@ -57,14 +57,6 @@ impl<T: Eq + Ord> TimeQ<T> {
         self.inner.push(core::cmp::Reverse(QueueEntry { at, what }))
     }
 
-    pub fn add_after(&mut self, after: core::time::Duration, what: T) {
-        self.add_at(Instant::now() + after, what)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
     pub fn next(&self) -> Option<Instant> {
         self.inner.peek().map(|e| e.0.at)
     }
