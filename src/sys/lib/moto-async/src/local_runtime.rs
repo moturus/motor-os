@@ -61,7 +61,7 @@ fn get_runtime_tls_key() -> moto_rt::tls::Key {
     }
 }
 
-fn get_local_runtime_context() -> *const RefCell<LocalRuntimeInner> {
+fn get_local_runtime_context() -> *const LocalRuntimeInner {
     // Safety: safe by construction.
     unsafe { moto_rt::tls::get(get_runtime_tls_key()) as usize as *const _ }
 }
@@ -138,32 +138,47 @@ struct Task {
     join_handle_waker: alloc::rc::Weak<RefCell<Option<Waker>>>,
 }
 
+// When a task is polled, it should be pinned, therefore borrowed.
+// So its container gets borrowed. So LocalRuntimeInner gets borrowed.
+//
+// While LocalRuntimeInner::tasks::<task> are pinned/borrowed,
+// the running code may add timers, spawn other tasks, etc., so
+// we need interior mutability at runtime (=> RefCell).
 struct LocalRuntimeInner {
+    // The main (local) runqueue. Runnable tasks live there.
+    runqueue: RefCell<VecDeque<TaskId>>,
+
+    // Timers. Can be added to at runtime.
     timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
-    global_runqueue: Arc<SpinLock<VecDeque<TaskId>>>,
-    local_runqueue: VecDeque<TaskId>,
 
+    // New tasks (from spawn()). As they are added "at runtime",
+    // when Self::tasks is borrowed, we need to temporarily
+    // store them into Self::incoming for later processing.
+    incoming: RefCell<VecDeque<Task>>,
+
+    // All tasks present in this runtime (at most one running).
     tasks: RefCell<BTreeMap<TaskId, Task>>,
-    incoming: VecDeque<Task>,
+    next_task_id: RefCell<u64>,
 
-    next_task_id: u64,
+    // Task IDs of wakes coming from other threads.
+    nonlocal_wakes: Arc<SpinLock<VecDeque<TaskId>>>,
 }
 
 impl LocalRuntimeInner {
     fn new() -> Self {
         Self {
             timeq: Default::default(),
-            global_runqueue: Default::default(),
-            local_runqueue: Default::default(),
+            nonlocal_wakes: Default::default(),
+            runqueue: Default::default(),
             tasks: Default::default(),
             incoming: Default::default(),
-            next_task_id: 1,
+            next_task_id: RefCell::new(1),
         }
     }
 
-    fn new_waker(&mut self, task_id: TaskId) -> Waker {
+    fn new_waker(&self, task_id: TaskId) -> Waker {
         let moto_waker = Arc::new(MotoWaker {
-            runqueue: Arc::downgrade(&self.global_runqueue),
+            runqueue: Arc::downgrade(&self.nonlocal_wakes),
             task_id,
             wake_handle: moto_sys::current_thread(),
         });
@@ -174,13 +189,14 @@ impl LocalRuntimeInner {
         unsafe { Waker::from_raw(RawWaker::new(waker_data, &RAW_WAKER_VTABLE)) }
     }
 
-    fn next_task_id(&mut self) -> TaskId {
-        let next_task_id = self.next_task_id;
-        self.next_task_id += 1;
-        TaskId(next_task_id)
+    fn next_task_id(&self) -> TaskId {
+        let mut id_ref = self.next_task_id.borrow_mut();
+        let result = *id_ref;
+        (*id_ref) += 1;
+        TaskId(result)
     }
 
-    fn current<'a>() -> &'a RefCell<Self> {
+    fn current<'a>() -> &'a Self {
         if let Some(this) = unsafe { get_local_runtime_context().as_ref() } {
             this
         } else {
@@ -188,15 +204,17 @@ impl LocalRuntimeInner {
         }
     }
 
-    fn merge_incoming(&mut self) {
-        let mut global_queue = VecDeque::new();
-        core::mem::swap(&mut global_queue, &mut *self.global_runqueue.lock());
-        for task_id in global_queue {
-            self.local_runqueue.push_back(task_id);
+    fn merge_incoming(&self) {
+        let mut incoming = VecDeque::new();
+        core::mem::swap(&mut incoming, &mut *self.nonlocal_wakes.lock());
+
+        let mut runqueue = self.runqueue.borrow_mut();
+        for task_id in incoming {
+            runqueue.push_back(task_id);
         }
 
         let mut incoming = VecDeque::new();
-        core::mem::swap(&mut incoming, &mut self.incoming);
+        core::mem::swap(&mut incoming, &mut self.incoming.borrow_mut());
 
         let mut tasks = self.tasks.borrow_mut();
         for task in incoming {
@@ -204,27 +222,31 @@ impl LocalRuntimeInner {
         }
     }
 
-    fn next_runnable(&mut self) -> Option<TaskId> {
-        self.local_runqueue.pop_front()
+    fn next_runnable(&self) -> Option<TaskId> {
+        self.runqueue.borrow_mut().pop_front()
     }
 
     fn wait(&self, timeo: Option<Instant>) {
         let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
     }
 
-    fn enqueue_expired_timers(&mut self) {
+    fn enqueue_expired_timers(&self) {
         let now = Instant::now();
         let mut timeq = self.timeq.borrow_mut();
+        let mut runqueue = self.runqueue.borrow_mut();
+
         while let Some(task_id) = timeq.pop_at(now) {
             log::trace!("Timer expired for {task_id:?}.");
-            self.local_runqueue.push_back(task_id)
+            runqueue.push_back(task_id)
         }
     }
 }
 
 /// Local-thread async runtime, similar to futures::LocalPool and tokio::Runtime, but simpler.
 pub struct LocalRuntime {
-    inner: Box<RefCell<LocalRuntimeInner>>,
+    // Need an indirection, to put a pointer to an "active" runtime into TLS,
+    // while keeping the "outer" runtime movable.
+    inner: Box<LocalRuntimeInner>,
 }
 
 pub struct LocalRuntimeContextGuard {
@@ -254,11 +276,11 @@ impl LocalRuntimeContextGuard {
 impl LocalRuntime {
     pub fn new() -> Self {
         Self {
-            inner: Box::new(RefCell::new(LocalRuntimeInner::new())),
+            inner: Box::new(LocalRuntimeInner::new()),
         }
     }
 
-    pub fn enter(&mut self) -> LocalRuntimeContextGuard {
+    fn enter(&mut self) -> LocalRuntimeContextGuard {
         LocalRuntimeContextGuard::new(self)
     }
 
@@ -277,8 +299,10 @@ impl LocalRuntime {
         let task_id = unsafe { waker.as_ref().unwrap().task_id };
         log::trace!("adding timer to task {task_id:?}");
 
-        let inner = LocalRuntimeInner::current();
-        inner.borrow().timeq.borrow_mut().add_at(when, task_id);
+        LocalRuntimeInner::current()
+            .timeq
+            .borrow_mut()
+            .add_at(when, task_id);
     }
 
     /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
@@ -290,10 +314,8 @@ impl LocalRuntime {
             panic!("spawn() must be called from within a runtime context.");
         }
 
-        // Safety: we just checked that ctx is not null.
-        let mut inner = unsafe { ctx.as_ref().unwrap().borrow_mut() };
+        let inner = LocalRuntimeInner::current();
         let (tx, rx) = oneshot::channel::<F::Output>();
-
         let task_id = inner.next_task_id();
 
         let waker = alloc::rc::Rc::new(RefCell::new(None));
@@ -308,8 +330,8 @@ impl LocalRuntime {
             join_handle_waker: alloc::rc::Rc::downgrade(&waker),
         };
 
-        inner.local_runqueue.push_back(task_id);
-        inner.incoming.push_back(task);
+        inner.runqueue.borrow_mut().push_back(task_id);
+        inner.incoming.borrow_mut().push_back(task);
         log::trace!("spawned task {task_id:?}");
 
         JoinHandle { task_id, rx, waker }
@@ -317,9 +339,7 @@ impl LocalRuntime {
 
     // See futures::local_pool::run_executor().
     fn run_executor<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(mut f: F) -> T {
-        let waker = LocalRuntimeInner::current()
-            .borrow_mut()
-            .new_waker(TaskId::default_root());
+        let waker = LocalRuntimeInner::current().new_waker(TaskId::default_root());
         let mut cx = core::task::Context::from_waker(&waker);
 
         loop {
@@ -336,13 +356,13 @@ impl LocalRuntime {
         let inner = LocalRuntimeInner::current();
 
         loop {
-            inner.borrow_mut().enqueue_expired_timers();
-            if !inner.borrow().local_runqueue.is_empty() {
+            inner.enqueue_expired_timers();
+            if !inner.runqueue.borrow().is_empty() {
                 return;
             }
 
-            let timeo = inner.borrow().timeq.borrow().next();
-            inner.borrow().wait(timeo);
+            let timeo = inner.timeq.borrow().next();
+            inner.wait(timeo);
         }
     }
 
@@ -376,8 +396,8 @@ impl LocalRuntime {
         loop {
             let inner = LocalRuntimeInner::current();
 
-            inner.borrow_mut().merge_incoming();
-            let next_runnable = inner.borrow_mut().next_runnable();
+            inner.merge_incoming();
+            let next_runnable = inner.next_runnable();
 
             let Some(next_runnable) = next_runnable else {
                 return Poll::Pending;
@@ -388,13 +408,10 @@ impl LocalRuntime {
                 return Poll::Ready(());
             }
 
-            let task_waker = LocalRuntimeInner::current()
-                .borrow_mut()
-                .new_waker(next_runnable);
+            let task_waker = inner.new_waker(next_runnable);
             let mut inner_cx = core::task::Context::from_waker(&task_waker);
 
-            let inner_ref = inner.borrow();
-            let mut tasks_ref = inner_ref.tasks.borrow_mut();
+            let mut tasks_ref = inner.tasks.borrow_mut();
             let task = tasks_ref.get_mut(&next_runnable).unwrap();
             let pinned = Pin::new(&mut task.fut);
 
@@ -411,29 +428,8 @@ impl LocalRuntime {
                     waker.wake();
                 }
             }
-            core::mem::drop(tasks_ref);
-            core::mem::drop(inner_ref);
-            inner.borrow_mut().tasks.borrow_mut().remove(&next_runnable);
+            tasks_ref.remove(&next_runnable);
         }
-
-        /*
-        loop {
-            self.drain_incoming();
-
-            let pool_ret = self.pool.poll_next_unpin(cx);
-
-            // We queued up some new tasks; add them and poll again.
-            if !self.incoming.borrow().is_empty() {
-                continue;
-            }
-
-            match pool_ret {
-                Poll::Ready(Some(())) => continue,
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-        */
     }
 }
 
