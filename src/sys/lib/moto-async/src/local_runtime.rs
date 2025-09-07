@@ -458,9 +458,3 @@ impl<T> Future for JoinHandle<T> {
         }
     }
 }
-
-impl<T> JoinHandle<T> {
-    pub fn join(self) -> T {
-        todo!()
-    }
-}
