@@ -21,8 +21,10 @@
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::collections::btree_set::BTreeSet;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
@@ -135,6 +137,7 @@ const RAW_WAKER_VTABLE: RawWakerVTable =
 struct Task {
     id: TaskId,
     fut: LocalFutureObj<'static, ()>,
+    event_stream_handle: SysHandle,
     join_handle_waker: alloc::rc::Weak<RefCell<Option<Waker>>>,
 }
 
@@ -148,6 +151,12 @@ struct LocalRuntimeInner {
     // The main (local) runqueue. Runnable tasks live there.
     runqueue: RefCell<VecDeque<TaskId>>,
 
+    // Tasks attached to wait handles.
+    attached_tasks: RefCell<BTreeMap<SysHandle, TaskId>>,
+
+    // Denormalized wait handles.
+    wait_handles: RefCell<Vec<SysHandle>>,
+
     // Timers. Can be added to at runtime.
     timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
 
@@ -160,6 +169,9 @@ struct LocalRuntimeInner {
     tasks: RefCell<BTreeMap<TaskId, Task>>,
     next_task_id: RefCell<u64>,
 
+    // Wakes from wait_handles are stored here.
+    sys_events: RefCell<BTreeSet<TaskId>>,
+
     // Task IDs of wakes coming from other threads.
     nonlocal_wakes: Arc<SpinLock<VecDeque<TaskId>>>,
 }
@@ -167,12 +179,15 @@ struct LocalRuntimeInner {
 impl LocalRuntimeInner {
     fn new() -> Self {
         Self {
-            timeq: Default::default(),
-            nonlocal_wakes: Default::default(),
             runqueue: Default::default(),
-            tasks: Default::default(),
+            attached_tasks: Default::default(),
+            wait_handles: Default::default(),
+            timeq: Default::default(),
             incoming: Default::default(),
+            tasks: Default::default(),
             next_task_id: RefCell::new(1),
+            sys_events: Default::default(),
+            nonlocal_wakes: Default::default(),
         }
     }
 
@@ -218,6 +233,16 @@ impl LocalRuntimeInner {
 
         let mut tasks = self.tasks.borrow_mut();
         for task in incoming {
+            let task_wait_handle = task.event_stream_handle;
+            if !task_wait_handle.is_none() {
+                assert!(
+                    self.attached_tasks
+                        .borrow_mut()
+                        .insert(task_wait_handle, task.id)
+                        .is_none()
+                );
+                self.wait_handles.borrow_mut().push(task_wait_handle);
+            }
             assert!(tasks.insert(task.id, task).is_none());
         }
     }
@@ -227,7 +252,42 @@ impl LocalRuntimeInner {
     }
 
     fn wait(&self, timeo: Option<Instant>) {
-        let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
+        let mut wait_handles = self.wait_handles.borrow().clone();
+        let result = moto_sys::SysCpu::wait(
+            wait_handles.as_mut_slice(),
+            SysHandle::NONE,
+            SysHandle::NONE,
+            timeo,
+        );
+
+        match result {
+            Ok(()) => {
+                for handle in wait_handles {
+                    if handle.is_none() {
+                        break;
+                    }
+                    let task_id = *self.attached_tasks.borrow().get(&handle).unwrap();
+                    self.runqueue.borrow_mut().push_back(task_id);
+                    self.sys_events.borrow_mut().insert(task_id);
+                }
+            }
+            Err(moto_rt::E_TIMED_OUT) => {}
+            Err(moto_rt::E_BAD_HANDLE) => {
+                for handle in wait_handles {
+                    if handle.is_none() {
+                        break;
+                    }
+                    let task_id = self.attached_tasks.borrow_mut().remove(&handle).unwrap();
+                    let task = self.tasks.borrow_mut().remove(&task_id).unwrap();
+                    assert_eq!(task.id, task_id);
+                    assert_eq!(handle, task.event_stream_handle);
+                    log::debug!("Task {task_id:?} with {handle:?} is gone.");
+                }
+
+                self.rebuild_wait_handles();
+            }
+            Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
+        }
     }
 
     fn enqueue_expired_timers(&self) {
@@ -238,6 +298,15 @@ impl LocalRuntimeInner {
         while let Some(task_id) = timeq.pop_at(now) {
             log::trace!("Timer expired for {task_id:?}.");
             runqueue.push_back(task_id)
+        }
+    }
+
+    fn rebuild_wait_handles(&self) {
+        let attached_tasks = self.attached_tasks.borrow();
+        let mut wait_handles = self.wait_handles.borrow_mut();
+        wait_handles.clear();
+        for h in attached_tasks.keys() {
+            wait_handles.push(*h);
         }
     }
 }
@@ -305,23 +374,94 @@ impl LocalRuntime {
             .add_at(when, task_id);
     }
 
-    /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
-    pub fn spawn<F: Future + 'static>(f: F) -> JoinHandle<F::Output> {
-        use futures::channel::oneshot;
-
+    fn next_task_id_for_spawn() -> TaskId {
         let ctx = get_local_runtime_context();
         if ctx.is_null() {
             panic!("spawn() must be called from within a runtime context.");
         }
 
         let inner = LocalRuntimeInner::current();
+        inner.next_task_id()
+    }
+
+    /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
+    pub fn spawn<F: Future + 'static>(f: F) -> JoinHandle<F::Output> {
+        Self::spawn_inner(Self::next_task_id_for_spawn(), SysHandle::NONE, f)
+    }
+
+    /// Spawn a new asynchronous task that can wait for events on the provided wait_handle.
+    /// Must be called within a LocalRuntime context.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// fn test_event_listener() {
+    ///     // Test a ping-pong across threads.
+    ///     const ITERS: u32 = 10;
+    ///     let (handle_here, handle_there) =
+    ///         moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    ///
+    ///     let channel_here = Arc::new(AtomicU32::new(0));
+    ///     let channel_there = channel_here.clone();
+    ///
+    ///     let runtime_thread = std::thread::spawn(move || {
+    ///         moto_async::LocalRuntime::new().block_on(async move {
+    ///             let _ = moto_async::LocalRuntime::spawn_event_listener(
+    ///                 handle_there,
+    ///                 async move |event_stream| {
+    ///                     for step in 0..ITERS {
+    ///                         assert_eq!(step * 2, channel_there.fetch_add(1, Ordering::AcqRel));
+    ///                         moto_sys::SysCpu::wake(handle_there).unwrap();
+    ///                         event_stream.next().await;
+    ///                     }
+    ///                 },
+    ///             )
+    ///             .await;
+    ///         });
+    ///     });
+    ///
+    ///     for step in 0..ITERS {
+    ///         let mut handles = [handle_here];
+    ///         moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).unwrap();
+    ///         assert_eq!(step * 2 + 1, channel_here.fetch_add(1, Ordering::AcqRel));
+    ///         moto_sys::SysCpu::wake(handle_here).unwrap();
+    ///     }
+    ///
+    ///     runtime_thread.join().unwrap();
+    ///     println!("PASS");
+    /// }
+    /// ```
+
+    pub fn spawn_event_listener<TaskFn, Fut, T>(
+        wait_handle: SysHandle,
+        task_fn: TaskFn,
+    ) -> JoinHandle<T>
+    where
+        TaskFn: FnOnce(EventStream) -> Fut + 'static,
+        Fut: Future<Output = T> + 'static,
+    {
+        let task_id = Self::next_task_id_for_spawn();
+
+        Self::spawn_inner(task_id, wait_handle, async move {
+            task_fn(EventStream { task_id }).await
+        })
+    }
+
+    fn spawn_inner<F: Future + 'static>(
+        task_id: TaskId,
+        wait_handle: SysHandle,
+        f: F,
+    ) -> JoinHandle<F::Output> {
+        use futures::channel::oneshot;
+
+        let inner = LocalRuntimeInner::current();
         let (tx, rx) = oneshot::channel::<F::Output>();
-        let task_id = inner.next_task_id();
 
         let waker = alloc::rc::Rc::new(RefCell::new(None));
 
         let task = Task {
             id: task_id,
+            event_stream_handle: wait_handle,
             fut: Box::pin(async move {
                 let _ = tx.send(f.await);
                 log::trace!("Task {:?} almost ready.", task_id);
@@ -335,20 +475,6 @@ impl LocalRuntime {
         log::trace!("spawned task {task_id:?}");
 
         JoinHandle { task_id, rx, waker }
-    }
-
-    // See futures::local_pool::run_executor().
-    fn run_executor<T, F: FnMut(&mut Context<'_>) -> Poll<T>>(mut f: F) -> T {
-        let waker = LocalRuntimeInner::current().new_waker(TaskId::default_root());
-        let mut cx = core::task::Context::from_waker(&waker);
-
-        loop {
-            if let Poll::Ready(t) = f(&mut cx) {
-                return t;
-            }
-
-            Self::wait();
-        }
     }
 
     // Wait until a wakeup or next timeout.
@@ -370,29 +496,32 @@ impl LocalRuntime {
     pub fn block_on<F: Future>(&mut self, f: F) -> F::Output {
         futures::pin_mut!(f);
         let _guard = self.enter();
-        Self::run_executor(|cx| {
-            loop {
-                {
-                    log::trace!("Polling the root task/future.");
-                    let result = f.as_mut().poll(cx);
-                    if let Poll::Ready(output) = result {
-                        return Poll::Ready(output);
-                    }
-                }
+        loop {
+            let waker = LocalRuntimeInner::current().new_waker(TaskId::default_root());
+            let mut cx = core::task::Context::from_waker(&waker);
 
-                if Self::poll_pool(cx).is_ready() {
-                    continue;
-                } else {
-                    return Poll::Pending; // Will sleep/wait.
+            {
+                log::trace!("Polling the root task/future.");
+                let result = f.as_mut().poll(&mut cx);
+                if let Poll::Ready(output) = result {
+                    return output;
                 }
             }
-        })
+
+            loop {
+                if Self::poll_pool().is_ready() {
+                    break;
+                } else {
+                    Self::wait();
+                }
+            }
+        }
     }
 
     // Poll the runnable queue until there's nothing to do.
     // It is safe to sleep when poll_pool() returns.
     // Kinda like futures::LocalPool::poll_pool(), but much simpler.
-    fn poll_pool(_cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_pool() -> Poll<()> {
         loop {
             let inner = LocalRuntimeInner::current();
 
@@ -415,7 +544,6 @@ impl LocalRuntime {
             let task = tasks_ref.get_mut(&next_runnable).unwrap();
             let pinned = Pin::new(&mut task.fut);
 
-            log::trace!("polling task {next_runnable:?}");
             // This may call spawn, or add a timer, which borrows inner.
             if let Poll::Pending = pinned.poll(&mut inner_cx) {
                 continue;
@@ -428,7 +556,19 @@ impl LocalRuntime {
                     waker.wake();
                 }
             }
-            tasks_ref.remove(&next_runnable);
+            let task = tasks_ref.remove(&next_runnable).unwrap();
+            assert_eq!(next_runnable, task.id);
+            if !task.event_stream_handle.is_none() {
+                assert_eq!(
+                    next_runnable,
+                    inner
+                        .attached_tasks
+                        .borrow_mut()
+                        .remove(&task.event_stream_handle)
+                        .unwrap()
+                );
+            }
+            inner.rebuild_wait_handles();
         }
     }
 }
@@ -455,6 +595,35 @@ impl<T> Future for JoinHandle<T> {
                 Poll::Pending
             }
             Err(err) => panic!("{err:?}"),
+        }
+    }
+}
+
+pub struct EventStream {
+    task_id: TaskId,
+}
+
+pub struct EventStreamWaiter {
+    task_id: TaskId,
+}
+
+impl EventStream {
+    pub fn next(&self) -> EventStreamWaiter {
+        EventStreamWaiter {
+            task_id: self.task_id,
+        }
+    }
+}
+
+impl Future for EventStreamWaiter {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = LocalRuntimeInner::current();
+        if inner.sys_events.borrow_mut().remove(&self.task_id) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
         }
     }
 }

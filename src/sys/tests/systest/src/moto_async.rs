@@ -9,6 +9,7 @@ use std::{
 
 use futures::FutureExt;
 use moto_rt::time::Instant;
+use moto_sys::SysHandle;
 
 fn test_basic() {
     assert_eq!(42, moto_async::LocalRuntime::new().block_on(async { 42 }));
@@ -174,6 +175,43 @@ fn test_nested_tasks() {
             "Value should be correctly propagated from child to parent"
         );
     });
+    println!("----- moto_async::test_nested_tasks PASS");
+}
+
+fn test_event_listener() {
+    // Test a ping-pong across threads.
+    const ITERS: u32 = 100;
+    let (handle_here, handle_there) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+
+    let channel_here = Arc::new(AtomicU32::new(0));
+    let channel_there = channel_here.clone();
+
+    let runtime_thread = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let _ = moto_async::LocalRuntime::spawn_event_listener(
+                handle_there,
+                async move |event_stream| {
+                    for step in 0..ITERS {
+                        assert_eq!(step * 2, channel_there.fetch_add(1, Ordering::AcqRel));
+                        moto_sys::SysCpu::wake(handle_there).unwrap();
+                        event_stream.next().await;
+                    }
+                },
+            )
+            .await;
+        });
+    });
+
+    for step in 0..ITERS {
+        let mut handles = [handle_here];
+        moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        assert_eq!(step * 2 + 1, channel_here.fetch_add(1, Ordering::AcqRel));
+        moto_sys::SysCpu::wake(handle_here).unwrap();
+    }
+
+    runtime_thread.join().unwrap();
+    println!("----- moto_async::test_event_listener PASS");
 }
 
 pub fn run_all_tests() {
@@ -183,6 +221,11 @@ pub fn run_all_tests() {
     test_spawn();
     test_interleaving();
     test_nested_tasks();
+    test_event_listener();
+
+    // test_cancelled_task();
+    // test_double_wake();
+    // test_sent_waker();
 
     println!("moto_async all PASS");
 }
