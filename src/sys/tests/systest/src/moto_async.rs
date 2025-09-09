@@ -214,6 +214,32 @@ fn test_event_listener() {
     println!("----- moto_async::test_event_listener PASS");
 }
 
+fn test_wake_exit_race() {
+    let (handle_here, handle_there) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+
+    let runtime_thread = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let _ = moto_async::LocalRuntime::spawn_event_listener(
+                handle_there,
+                async move |event_stream| {
+                    futures::select! {
+                        _ = event_stream.next().fuse() => (),
+                        _ = moto_async::time::sleep(Duration::from_millis(20)).fuse() => (),
+                    };
+                },
+            );
+        });
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+    moto_sys::SysCpu::wake(handle_here).unwrap();
+
+    runtime_thread.join().unwrap();
+
+    println!("----- moto_async::test_wake_exit_race PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -222,6 +248,7 @@ pub fn run_all_tests() {
     test_interleaving();
     test_nested_tasks();
     test_event_listener();
+    test_wake_exit_race();
 
     // test_cancelled_task();
     // test_double_wake();

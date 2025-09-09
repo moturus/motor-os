@@ -567,8 +567,8 @@ impl LocalRuntime {
                         .remove(&task.event_stream_handle)
                         .unwrap()
                 );
+                inner.rebuild_wait_handles();
             }
-            inner.rebuild_wait_handles();
         }
     }
 }

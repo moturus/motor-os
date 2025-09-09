@@ -407,7 +407,7 @@ fn main() {
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
     moto_async::run_all_tests();
-    // return;
+    return;
 
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
