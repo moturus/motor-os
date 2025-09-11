@@ -509,6 +509,32 @@ unsafe fn create_remote_env(
     create_remote_args(address_space, &Vec::new(), &flat_vec, false)
 }
 
+fn debug_name(exe_plus: &Vec<&[u8]>, args: &Vec<&[u8]>) -> String {
+    let mut res = String::new();
+    for s in exe_plus {
+        res.push_str(core::str::from_utf8(s).unwrap());
+        res.push(' ');
+    }
+
+    for s in args {
+        res.push_str(core::str::from_utf8(s).unwrap());
+        res.push(' ');
+    }
+
+    res = res.trim().to_owned();
+    const MAX_BYTES: usize = moto_sys::stats::ProcessStatsV1::MAX_DEBUG_NAME_BYTES;
+
+    if res.len() > MAX_BYTES {
+        let mut truncate_to = MAX_BYTES - 3; // The ellipsis character takes three bytes.
+        while !res.is_char_boundary(truncate_to) {
+            truncate_to -= 1;
+        }
+        alloc::format!("{}{}", &res[0..truncate_to], '\u{2026}') // Append the ellipsis character.
+    } else {
+        res
+    }
+}
+
 fn run_elf(
     exe: String,
     fd: moto_rt::RtFd, // Note: the caller closes fd.
@@ -550,11 +576,13 @@ fn run_elf(
 
     let args = unsafe { ProcessData::deserialize_vec(args_rt.args) };
 
-    let debug_name = match args.len() {
-        0 => exe.clone(),
-        1 => alloc::format!("{} {}", exe, core::str::from_utf8(args[0]).unwrap()),
-        _ => alloc::format!("{} {} ...", exe, core::str::from_utf8(args[0]).unwrap()),
-    };
+    let mut exe_plus = Vec::new();
+    exe_plus.push(exe.as_bytes());
+    if let Some(arg) = prepend_arg.as_ref() {
+        exe_plus.push(arg.as_bytes());
+    }
+
+    let debug_name = debug_name(&exe_plus, &args);
 
     // Create an address space for the new process.
     let full_url = alloc::format!(
@@ -616,15 +644,9 @@ fn run_elf(
         .unwrap();
     }
 
-    let mut args1 = Vec::new();
-    args1.push(exe.as_bytes());
-    if let Some(arg) = prepend_arg.as_ref() {
-        args1.push(arg.as_bytes());
-    }
-
     unsafe {
         let pd = remote_process_data.as_mut().unwrap();
-        pd.args = create_remote_args(address_space.syshandle(), &args1, &args, true)?;
+        pd.args = create_remote_args(address_space.syshandle(), &exe_plus, &args, true)?;
         pd.env = create_remote_env(address_space.syshandle(), env)?;
     }
 

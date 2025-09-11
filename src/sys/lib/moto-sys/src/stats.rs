@@ -11,6 +11,8 @@ pub const PID_SYSTEM: u64 = 0; // Used for aggregate (System) stats.
 pub const PID_KERNEL: u64 = 1;
 pub const PID_SYS_IO: u64 = 2;
 
+pub const MAX_DEBUG_NAME_BYTES: usize = 32;
+
 // Instead of having a version field and mutate the struct,
 // which is unsafe/brittle, we will just be adding new structs.
 #[repr(C)]
@@ -25,7 +27,7 @@ pub struct ProcessStatsV1 {
     pub active_threads: u64,  // Threads still running.
     pub active_children: u64, // Children still running.
     pub cpu_usage: u64,       // Total, in TSC.
-    pub debug_name_bytes: [u8; 32],
+    pub debug_name_bytes: [u8; MAX_DEBUG_NAME_BYTES],
     pub debug_name_len: u8,
     pub active: u8,         // 0 => zombie; 1 => active.
     pub system_process: u8, // 1 => system; 0 => normal.
@@ -33,6 +35,8 @@ pub struct ProcessStatsV1 {
 
 #[cfg(feature = "userspace")]
 impl ProcessStatsV1 {
+    pub const MAX_DEBUG_NAME_BYTES: usize = MAX_DEBUG_NAME_BYTES;
+
     // List processes, in PID order. Completed processes without running
     // descendants may not be listed. @start will be included, if present.
     pub fn list(start: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
