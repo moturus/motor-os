@@ -33,6 +33,10 @@ compile_error!("Little Endian is often assumed here.");
 const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
+
+// NOTE: VIRTIO_BLK_F_BLK_SIZE is read-only, i.e. the driver cannot set the block size to e.g. 4K.
+//       It is 512 if not negotiated, 512 by default, and hard to configure the VMM to make
+//       it something else. So we don't bother with anything other than 512.
 //const VIRTIO_BLK_F_BLK_SIZE : u64 = 1u64 << 6;
 
 pub(super) struct Blk {
