@@ -201,19 +201,15 @@ fn run_script(
 }
 
 fn read_all(fd: moto_rt::RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-    let size = moto_rt::fs::get_file_attr(fd)?.size;
-
-    if buf.len() < size as usize {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
-    }
     moto_rt::fs::seek(fd, 0, moto_rt::fs::SEEK_SET)?;
 
     let mut done = 0_usize;
-    while done < size as usize {
+    while done < buf.len() {
         let dst = &mut buf[done..];
         let sz = moto_rt::fs::read(fd, dst)?;
         if sz == 0 {
-            break;
+            crate::moto_log!("read_all EOF: {done} vs {}", buf.len());
+            return Err(moto_rt::E_UNEXPECTED_EOF);
         }
         done += sz;
     }
