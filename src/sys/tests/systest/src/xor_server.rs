@@ -37,6 +37,12 @@ fn thread_fn() {
             let resp = conn.resp::<XorResponse>();
             resp.data = data;
             resp.header.result = 0;
+
+            #[cfg(debug_assertions)]
+            std::thread::sleep(std::time::Duration::from_micros(
+                std::random::random::<u64>(..) % 100,
+            ));
+
             let _ = conn.finish_rpc();
             client = *waker;
         }
