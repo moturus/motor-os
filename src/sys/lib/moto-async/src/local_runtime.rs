@@ -395,8 +395,8 @@ impl LocalRuntime {
     /// # Example
     ///
     /// ```
-    /// fn test_event_listener() {
-    ///     // Test a ping-pong across threads.
+    /// fn test_event_stream() {
+    ///     // Test ping-pong across threads.
     ///     const ITERS: u32 = 10;
     ///     let (handle_here, handle_there) =
     ///         moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
@@ -406,7 +406,7 @@ impl LocalRuntime {
     ///
     ///     let runtime_thread = std::thread::spawn(move || {
     ///         moto_async::LocalRuntime::new().block_on(async move {
-    ///             let _ = moto_async::LocalRuntime::spawn_event_listener(
+    ///             let _ = moto_async::LocalRuntime::spawn_event_stream(
     ///                 handle_there,
     ///                 async move |event_stream| {
     ///                     for step in 0..ITERS {
@@ -432,7 +432,7 @@ impl LocalRuntime {
     /// }
     /// ```
 
-    pub fn spawn_event_listener<TaskFn, Fut, T>(
+    pub fn spawn_event_stream<TaskFn, Fut, T>(
         wait_handle: SysHandle,
         task_fn: TaskFn,
     ) -> JoinHandle<T>

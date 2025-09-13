@@ -24,8 +24,9 @@
 #![feature(box_as_ptr)]
 #![feature(local_waker)]
 
-pub mod local_runtime;
-pub mod time;
+mod local_runtime;
+mod time;
 mod timeq;
 
 pub use local_runtime::LocalRuntime;
+pub use time::{Instant, Sleep, sleep};

@@ -19,14 +19,14 @@ fn test_basic() {
 // A timeout future that returns the number of polls it got.
 struct TimeoutFuture {
     polls: u64,
-    inner: moto_async::time::Sleep,
+    inner: moto_async::Sleep,
 }
 
 impl TimeoutFuture {
     fn new(timo: std::time::Duration) -> Self {
         Self {
             polls: 0,
-            inner: moto_async::time::Sleep::new_timeout(Instant::now() + timo),
+            inner: moto_async::Sleep::new_timeout(Instant::now() + timo),
         }
     }
 }
@@ -74,13 +74,13 @@ fn test_select() {
     let c2 = counter.clone();
 
     let f1 = async move {
-        moto_async::time::sleep(Duration::from_millis(50)).await;
+        moto_async::sleep(Duration::from_millis(50)).await;
 
         c1.fetch_add(1, Ordering::AcqRel);
     };
 
     let f2 = async move {
-        moto_async::time::sleep(Duration::from_millis(150)).await;
+        moto_async::sleep(Duration::from_millis(150)).await;
 
         c2.fetch_add(2, Ordering::AcqRel);
     };
@@ -98,12 +98,12 @@ fn test_select() {
 fn test_spawn() {
     moto_async::LocalRuntime::new().block_on(async {
         let join_1 = moto_async::LocalRuntime::spawn(async {
-            moto_async::time::sleep(Duration::from_millis(20)).await;
+            moto_async::sleep(Duration::from_millis(20)).await;
             42
         });
 
         let join_2 = moto_async::LocalRuntime::spawn(async {
-            moto_async::time::sleep(Duration::from_millis(40)).await;
+            moto_async::sleep(Duration::from_millis(40)).await;
             "foobar"
         });
 
@@ -125,21 +125,21 @@ fn test_interleaving() {
         let log1 = log.clone();
         let h1 = moto_async::LocalRuntime::spawn(async move {
             log1.borrow_mut().push(1);
-            moto_async::time::sleep(Duration::from_millis(30)).await;
+            moto_async::sleep(Duration::from_millis(30)).await;
             log1.borrow_mut().push(6);
         });
 
         let log2 = log.clone();
         let h2 = moto_async::LocalRuntime::spawn(async move {
             log2.borrow_mut().push(2);
-            moto_async::time::sleep(Duration::from_millis(20)).await;
+            moto_async::sleep(Duration::from_millis(20)).await;
             log2.borrow_mut().push(5);
         });
 
         let log3 = log.clone();
         let h3 = moto_async::LocalRuntime::spawn(async move {
             log3.borrow_mut().push(3);
-            moto_async::time::sleep(Duration::from_millis(10)).await;
+            moto_async::sleep(Duration::from_millis(10)).await;
             log3.borrow_mut().push(4);
         });
 
@@ -162,7 +162,7 @@ fn test_nested_tasks() {
     moto_async::LocalRuntime::new().block_on(async {
         let handle_a = moto_async::LocalRuntime::spawn(async {
             let handle_b = moto_async::LocalRuntime::spawn(async {
-                moto_async::time::sleep(Duration::from_millis(10)).await;
+                moto_async::sleep(Duration::from_millis(10)).await;
                 1337
             });
             let value_from_b = handle_b.await;
@@ -178,8 +178,8 @@ fn test_nested_tasks() {
     println!("----- moto_async::test_nested_tasks PASS");
 }
 
-fn test_event_listener() {
-    // Test a ping-pong across threads.
+fn test_event_stream() {
+    // Test ping-pong across threads.
     const ITERS: u32 = 100;
     let (handle_here, handle_there) =
         moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
@@ -189,7 +189,7 @@ fn test_event_listener() {
 
     let runtime_thread = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
-            let _ = moto_async::LocalRuntime::spawn_event_listener(
+            let _ = moto_async::LocalRuntime::spawn_event_stream(
                 handle_there,
                 async move |event_stream| {
                     for step in 0..ITERS {
@@ -211,7 +211,7 @@ fn test_event_listener() {
     }
 
     runtime_thread.join().unwrap();
-    println!("----- moto_async::test_event_listener PASS");
+    println!("----- moto_async::test_event_stream PASS");
 }
 
 fn test_wake_exit_race() {
@@ -220,12 +220,12 @@ fn test_wake_exit_race() {
 
     let runtime_thread = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
-            let _ = moto_async::LocalRuntime::spawn_event_listener(
+            let _ = moto_async::LocalRuntime::spawn_event_stream(
                 handle_there,
                 async move |event_stream| {
                     futures::select! {
                         _ = event_stream.next().fuse() => (),
-                        _ = moto_async::time::sleep(Duration::from_millis(20)).fuse() => (),
+                        _ = moto_async::sleep(Duration::from_millis(20)).fuse() => (),
                     };
                 },
             );
@@ -247,12 +247,8 @@ pub fn run_all_tests() {
     test_spawn();
     test_interleaving();
     test_nested_tasks();
-    test_event_listener();
+    test_event_stream();
     test_wake_exit_race();
-
-    // test_cancelled_task();
-    // test_double_wake();
-    // test_sent_waker();
 
     println!("moto_async all PASS");
 }
