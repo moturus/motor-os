@@ -22,11 +22,14 @@
 
 #![no_std]
 #![feature(box_as_ptr)]
+#![feature(likely_unlikely)]
 #![feature(local_waker)]
 
 mod local_runtime;
+mod mutex;
 mod time;
 mod timeq;
 
 pub use local_runtime::LocalRuntime;
+pub use mutex::{LocalMutex, LocalMutexGuard};
 pub use time::{Instant, Sleep, sleep};
