@@ -167,7 +167,7 @@ fn update_globals() {
         if iters > 1_000_000 {
             panic!("PvClockWallClock update looping.");
         }
-        if iters % 10_000 == 0 {
+        if iters.is_multiple_of(10_000) {
             super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc as u64);
             if iters > 0 {
                 // If we don't trigger a VM exit, the host KVM sometimes

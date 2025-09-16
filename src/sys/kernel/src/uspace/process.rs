@@ -546,7 +546,7 @@ impl Process {
     }
 
     #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self) -> (&mut Self, LockGuard<ProcessStatus>) {
+    unsafe fn get_mut(&self) -> (&mut Self, LockGuard<'_, ProcessStatus>) {
         let lock = self.status.lock(line!());
         ((self as *const Self as *mut Self).as_mut().unwrap(), lock)
     }
@@ -1015,7 +1015,7 @@ impl Thread {
     }
 
     #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self) -> (&mut Self, LockGuard<ThreadStatus>) {
+    unsafe fn get_mut(&self) -> (&mut Self, LockGuard<'_, ThreadStatus>) {
         let lock = self.status.lock(line!());
         ((self as *const Self as *mut Self).as_mut().unwrap(), lock)
     }

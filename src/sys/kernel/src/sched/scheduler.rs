@@ -325,7 +325,7 @@ impl Scheduler {
             }
 
             // Round robit between queues.
-            if curr_iteration % 3 == 0 {
+            if curr_iteration.is_multiple_of(3) {
                 // Note: we cannot combine the two statements below into one, like this:
                 //     if let Some(job) = self.normal_queue.lock().pop_front() {
                 //         job.run();

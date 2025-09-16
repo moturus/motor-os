@@ -85,7 +85,7 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
     // println!("{:?} created (SRFS)", result_path);
 }
 
-async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+async fn _create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     use async_fs::FileSystem;
 
     const MB: u64 = 1024 * 1024;
@@ -105,7 +105,7 @@ async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<Pat
         let parent = target_path.parent().unwrap();
         let filename = target_path.file_name().unwrap().to_str().unwrap();
 
-        let parent_id = util::motor_fs_create_dir_all(&mut fs, parent)
+        let parent_id = util::_motor_fs_create_dir_all(&mut fs, parent)
             .await
             .unwrap();
         let new_file_id = fs
@@ -134,12 +134,12 @@ async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<Pat
     }
 }
 
-fn create_motorfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+fn _create_motorfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
-    rt.block_on(create_motorfs_partition_async(result_path, files));
+    rt.block_on(_create_motorfs_partition_async(result_path, files));
 }
 
 fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {

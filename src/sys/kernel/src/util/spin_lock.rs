@@ -52,7 +52,7 @@ impl<T> SpinLock<T> {
     }
 
     #[inline]
-    pub fn lock(&self, lockword: u32) -> LockGuard<T> {
+    pub fn lock(&self, lockword: u32) -> LockGuard<'_, T> {
         let mut iters = 0_u64;
         while self.locked.swap(true, AcqRel) {
             iters += 1;
