@@ -336,43 +336,6 @@ pub const SHT_HIPROC: u32 = 0x7fffffff;
 pub const SHT_LOUSER: u32 = 0x80000000;
 pub const SHT_HIUSER: u32 = 0xffffffff;
 
-#[derive(Copy, Clone)]
-pub struct CompressionType_(u32);
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum CompressionType {
-    Zlib,
-    OsSpecific(u32),
-    ProcessorSpecific(u32),
-}
-
-impl CompressionType_ {
-    fn as_compression_type(&self) -> Result<CompressionType, &'static str> {
-        match self.0 {
-            1 => Ok(CompressionType::Zlib),
-            ct if (COMPRESS_LOOS..=COMPRESS_HIOS).contains(&ct) => {
-                Ok(CompressionType::OsSpecific(ct))
-            }
-            ct if (COMPRESS_LOPROC..=COMPRESS_HIPROC).contains(&ct) => {
-                Ok(CompressionType::ProcessorSpecific(ct))
-            }
-            _ => Err("Invalid compression type"),
-        }
-    }
-}
-
-impl fmt::Debug for CompressionType_ {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.as_compression_type().fmt(f)
-    }
-}
-
-// Distinguished CompressionType values.
-pub const COMPRESS_LOOS: u32 = 0x60000000;
-pub const COMPRESS_HIOS: u32 = 0x6fffffff;
-pub const COMPRESS_LOPROC: u32 = 0x70000000;
-pub const COMPRESS_HIPROC: u32 = 0x7fffffff;
-
 #[derive(Debug)]
 #[repr(C)]
 pub struct Rela<P> {

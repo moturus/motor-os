@@ -40,7 +40,7 @@ impl<'a> ElfFile<'a> {
         program::parse_program_header(self.input, self.header, index)
     }
 
-    pub fn program_iter(&self) -> ProgramIter {
+    pub fn program_iter(&self) -> ProgramIter<'_, '_> {
         // impl Iterator<Item = ProgramHeader<'_>> {
         ProgramIter {
             file: self,

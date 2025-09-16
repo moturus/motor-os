@@ -97,7 +97,7 @@ impl<'s> ElfBinary<'s> {
     }
 
     /// Create a slice of the program headers.
-    pub fn program_headers(&self) -> ProgramIter {
+    pub fn program_headers(&self) -> ProgramIter<'_, '_> {
         self.file.program_iter()
     }
 
@@ -331,7 +331,7 @@ impl<'s> ElfBinary<'s> {
         Ok(())
     }
 
-    fn iter_loadable_headers(&self) -> LoadableHeaders {
+    fn iter_loadable_headers(&self) -> LoadableHeaders<'_, '_> {
         // Trying to determine loadeable headers
         fn select_load(pheader: &ProgramHeader) -> bool {
             match pheader {
