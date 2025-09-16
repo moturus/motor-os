@@ -491,7 +491,7 @@ impl LocalRuntime {
         inner.runqueue.borrow_mut().push_back(task_id);
         inner.incoming.borrow_mut().push_back(task);
 
-        JoinHandle { task_id, rx, waker }
+        JoinHandle { rx, waker }
     }
 
     // Wait until a wakeup or next timeout.
@@ -594,9 +594,7 @@ impl LocalRuntime {
 }
 
 pub struct JoinHandle<T> {
-    task_id: TaskId,
     rx: oneshot::Receiver<T>,
-
     waker: alloc::rc::Rc<RefCell<Option<Waker>>>,
 }
 
