@@ -1,24 +1,13 @@
 use crate::{
     platform::{
         interrupt::{
-            Apic,
-            InterruptModel,
-            InterruptSourceOverride,
-            IoApic,
-            LocalInterruptLine,
-            NmiLine,
-            NmiProcessor,
-            NmiSource,
-            Polarity,
-            TriggerMode,
+            Apic, InterruptModel, InterruptSourceOverride, IoApic, LocalInterruptLine, NmiLine,
+            NmiProcessor, NmiSource, Polarity, TriggerMode,
         },
-        Processor,
-        ProcessorInfo,
-        ProcessorState,
+        Processor, ProcessorInfo, ProcessorState,
     },
     sdt::SdtHeader,
-    AcpiError,
-    AcpiTable,
+    AcpiError, AcpiTable,
 };
 use alloc::vec::Vec;
 use bit_field::BitField;
@@ -55,7 +44,9 @@ impl AcpiTable for Madt {
 }
 
 impl Madt {
-    pub fn parse_interrupt_model(&self) -> Result<(InterruptModel, Option<ProcessorInfo>), AcpiError> {
+    pub fn parse_interrupt_model(
+        &self,
+    ) -> Result<(InterruptModel, Option<ProcessorInfo>), AcpiError> {
         /*
          * We first do a pass through the MADT to determine which interrupt model is being used.
          */
@@ -185,7 +176,9 @@ impl Madt {
 
                 MadtEntry::InterruptSourceOverride(entry) => {
                     if entry.bus != 0 {
-                        return Err(AcpiError::InvalidMadt(MadtError::InterruptOverrideEntryHasInvalidBus));
+                        return Err(AcpiError::InvalidMadt(
+                            MadtError::InterruptOverrideEntryHasInvalidBus,
+                        ));
                     }
 
                     let (polarity, trigger_mode) = parse_mps_inti_flags(entry.flags)?;
@@ -253,11 +246,14 @@ impl Madt {
                 nmi_sources,
                 also_has_legacy_pics: self.supports_8259(),
             }),
-            Some(ProcessorInfo { boot_processor: boot_processor.unwrap(), application_processors }),
+            Some(ProcessorInfo {
+                boot_processor: boot_processor.unwrap(),
+                application_processors,
+            }),
         ))
     }
 
-    pub fn entries(&self) -> MadtEntryIter {
+    pub fn entries(&self) -> MadtEntryIter<'_> {
         MadtEntryIter {
             pointer: unsafe { (self as *const Madt as *const u8).add(mem::size_of::<Madt>()) },
             remaining_length: self.header.length - mem::size_of::<Madt>() as u32,
