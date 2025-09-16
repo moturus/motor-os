@@ -173,14 +173,14 @@ impl SystemTime {
     pub const fn checked_add_duration(&self, other: &Duration) -> Option<SystemTime> {
         match self.nanos.checked_add(other.as_nanos()) {
             Some(nanos) => Some(Self { nanos }),
-            None => None
+            None => None,
         }
     }
 
     pub const fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
         match self.nanos.checked_sub(other.as_nanos()) {
             Some(nanos) => Some(Self { nanos }),
-            None => None
+            None => None,
         }
     }
 }
@@ -299,7 +299,7 @@ impl UtcDateTime {
         let mut year: u32 = 1970;
 
         fn leap_year(year: u32) -> bool {
-            (year % 400 == 0) || ((year % 4 == 0) && (year % 100 != 0))
+            year.is_multiple_of(400) || (year.is_multiple_of(4) && !year.is_multiple_of(100))
         }
 
         // Find the year.
