@@ -1,6 +1,6 @@
 # Motor OS
 
-[Motūrus](https://moturus.com) project (Motor OS) is a simple,
+Motūrus project (Motor OS) is a simple,
 fast, and secure operating system built for the cloud.
 Designed specifically for virtualized workloads such as web serving, serverless computing,
 and edge caching, it addresses inefficiencies found in traditional operating systems
