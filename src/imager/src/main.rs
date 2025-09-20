@@ -23,9 +23,9 @@ mod util;
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
-static BIN_FULL: [&str; 14] = [
+static BIN_FULL: [&str; 15] = [
     "/bin/httpd",
-//    "/bin/httpd-axum",
+    "/bin/httpd-axum",
     "/bin/russhd",
     "/bin/kibim",
     "/bin/rush",
@@ -42,8 +42,7 @@ static BIN_FULL: [&str; 14] = [
 ];
 
 // For the "web" image.
-// static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
-static BIN_WEB: [&str; 2] = ["/sys/sys-init", "/sys/sys-tty"];
+static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
