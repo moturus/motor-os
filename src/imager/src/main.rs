@@ -23,10 +23,10 @@ mod util;
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
-static BIN_FULL: [&str; 12] = [
+static BIN_FULL: [&str; 13] = [
 //    "/bin/httpd",
 //    "/bin/httpd-axum",
-//    "/bin/russhd",
+    "/bin/russhd",
     "/bin/kibim",
     "/bin/rush",
     "/sys/mdbg",

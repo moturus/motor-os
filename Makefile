@@ -27,16 +27,17 @@ boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys: sys-io sys-init sys-log sys-tty
 user: sysbox systest mio-test tokio-tests \
-	rush kibim mdbg rnetbench crossbench
-# russhd httpd httpd-axum
+	rush kibim mdbg rnetbench crossbench \
+	russhd
+# httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: sys-io sys-init sys-log sys-tty
 .PHONY: sysbox systest mio-test tokio-tests
-.PHONY: rush kibim
+.PHONY: rush kibim russhd
 .PHONY: mdbg rnetbench crossbench
-# .PHONY: russhd httpd httpd-axum
+# .PHONY: httpd httpd-axum
 .PHONY: clean clippy
 
 mbr.bin:
