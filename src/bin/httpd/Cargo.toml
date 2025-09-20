@@ -13,7 +13,7 @@ rustls-pemfile = "2"
 time = { version = "0.3.36", default-features = false, features = ["std"] }
 
 [patch.crates-io]
-ring = { git = "https://github.com/moturus/ring.git" }
+ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os_2025-09-20" }
 
 [profile.release]
 panic = "abort"
