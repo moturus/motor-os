@@ -16,52 +16,52 @@ pub unsafe fn close(fd: crate::RtFd) -> Result<(), crate::ErrorCode> {
 }
 
 // mem* functions below have been copied from rust compiler_builtins/mem.rs.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut i = 0;
     while i < n {
-        *dest.offset(i as isize) = *src.offset(i as isize);
+        unsafe { *dest.offset(i as isize) = *src.offset(i as isize); }
         i += 1;
     }
     dest
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if src < dest as *const u8 {
         // copy from end
         let mut i = n;
         while i != 0 {
             i -= 1;
-            *dest.offset(i as isize) = *src.offset(i as isize);
+            unsafe { *dest.offset(i as isize) = *src.offset(i as isize); }
         }
     } else {
         // copy from beginning
         let mut i = 0;
         while i < n {
-            *dest.offset(i as isize) = *src.offset(i as isize);
+            unsafe { *dest.offset(i as isize) = *src.offset(i as isize); }
             i += 1;
         }
     }
     dest
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn memset(s: *mut u8, c: i32, n: usize) -> *mut u8 {
     let mut i = 0;
     while i < n {
-        *s.offset(i as isize) = c as u8;
+        unsafe { *s.offset(i as isize) = c as u8; }
         i += 1;
     }
     s
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     let mut i = 0;
     while i < n {
-        let a = *s1.offset(i as isize);
-        let b = *s2.offset(i as isize);
+        let a = unsafe { *s1.offset(i as isize) };
+        let b = unsafe { *s2.offset(i as isize) };
         if a != b {
             return a as i32 - b as i32;
         }
@@ -71,14 +71,13 @@ pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
 }
 
 #[linkage = "weak"]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn __stack_chk_fail() -> ! {
     panic!("__stack_chk_fail")
 }
 
 #[linkage = "weak"]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn __assert_fail() -> ! {
-    // void __assert_fail(const char * assertion, const char * file, unsigned int line, const char * function);
     panic!("__assert_fail")
 }

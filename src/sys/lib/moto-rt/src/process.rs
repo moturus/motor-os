@@ -151,14 +151,14 @@ unsafe fn deserialize_vec(addr: u64) -> Vec<&'static [u8]> {
     let mut pos = addr as usize;
     assert_eq!(pos & 3, 0);
 
-    let num_args = *((pos as *const u32).as_ref().unwrap());
+    let num_args = unsafe { *((pos as *const u32).as_ref().unwrap()) };
     pos += 4;
 
     let mut result = Vec::new();
     for _i in 0..num_args {
-        let len = *((pos as *const u32).as_ref().unwrap());
+        let len = unsafe { *((pos as *const u32).as_ref().unwrap()) };
         pos += 4;
-        let bytes: &[u8] = core::slice::from_raw_parts(pos as *const u8, len as usize);
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(pos as *const u8, len as usize) };
         result.push(bytes);
         pos += len as usize;
         pos = (pos + 3) & !3; // Align up to 4 bytes.

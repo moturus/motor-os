@@ -108,7 +108,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-pub const RT_VERSION: u64 = 13;
+pub const RT_VERSION: u64 = 14;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -268,10 +268,10 @@ pub fn init() {
 
 #[cfg(not(feature = "base"))]
 #[linkage = "weak"]
-#[no_mangle]
-pub extern "C" fn moturus_runtime_start() {
+#[unsafe(no_mangle)]
+pub extern "C" fn motor_runtime_start() {
     // This function is a weak symbol because sys-io re-defines
-    // moturus_runtime_start(): sys-io is loaded by the kernel and has its
+    // motor_runtime_start(): sys-io is loaded by the kernel and has its
     // own runtime initialization dance that is different from all other
     // userspace processes.
     init();
@@ -280,9 +280,9 @@ pub extern "C" fn moturus_runtime_start() {
 #[cfg(not(feature = "base"))]
 #[doc(hidden)]
 pub fn start() {
-    // Called by Rust stdlib in moturus_start (sys/pal/moturus/mod.rs)
+    // Called by Rust stdlib in motor_start (sys/pal/motor/mod.rs)
     // before main is called.
-    moturus_runtime_start();
+    motor_runtime_start();
 }
 
 #[cfg(not(feature = "base"))]

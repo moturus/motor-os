@@ -1,13 +1,13 @@
 [package]
 name = "moto-rt"
-authors = ["The Moturus Project Developers"]
+authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
-keywords = ["moturus", "motor-os"]
+keywords = ["motor", "motor-os"]
 readme = "README.md"
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS Runtime."
-version = "0.13.3"
-edition = "2021"
+version = "0.14.0"
+edition = "2024"
 
 [lib]
 # The following magic line makes rust analyzer stop
@@ -17,7 +17,6 @@ test = false
 [dependencies]
 alloc             = { version = "1.0.0", package = "rustc-std-workspace-alloc", optional = true }
 core              = { version = "1.0.0", package = "rustc-std-workspace-core", optional = true }
-compiler_builtins = { version = "0.1", optional = true }
 
 [features]
 base = []
@@ -25,7 +24,6 @@ libc = []
 rustc-dep-of-std = [
     "alloc",
     "core",
-    "compiler_builtins",
 ]
 
 [lints.rust]

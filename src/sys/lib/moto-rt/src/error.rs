@@ -44,6 +44,7 @@ pub fn log_to_kernel(msg: &str) {
 macro_rules! moto_log {
     ($($arg:tt)*) => {
         {
+            #[allow(unused_extern_crates)]
             extern crate alloc;
             $crate::error::log_to_kernel(alloc::format!($($arg)*).as_str());
         }
