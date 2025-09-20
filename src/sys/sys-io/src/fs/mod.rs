@@ -6,7 +6,7 @@ mod fs_srfs;
 mod mbr;
 
 pub use filesystem::*;
-const DRIVER_URL: &str = "moturus-fs-driver";
+const DRIVER_URL: &str = "motor-fs-driver";
 
 pub static STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 

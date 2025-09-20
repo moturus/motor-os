@@ -1,3 +1,3 @@
 # Examples and recipes
 
-[Hello Motūrus](hello-moturus.md)
+[Hello Motor OS](hello-motor-os.md)

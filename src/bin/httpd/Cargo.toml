@@ -1,7 +1,7 @@
 [package]
 name = "httpd"
 description = "A simple HTTPd serving static content."
-authors = ["The Moturus Project Developers"]
+authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"

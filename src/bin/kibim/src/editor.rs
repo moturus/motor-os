@@ -594,7 +594,7 @@ impl Editor {
                 // Draw an empty row
                 self.draw_left_padding(buffer, '~')?;
                 if self.is_empty() && i == self.screen_rows / 3 {
-                    let welcome_message = "Kibi for Motūrus OS";
+                    let welcome_message = "Kibi for Motor OS";
                     write!(buffer, "{:^1$.1$}", welcome_message, self.screen_cols)?;
                 }
             }

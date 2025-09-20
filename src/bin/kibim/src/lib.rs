@@ -13,5 +13,5 @@ mod syntax;
 mod sys;
 mod terminal;
 
-#[cfg(not(target_os = "moturus"))]
-compile_error!("This crate is designed to be used on Motūrus OS only");
+#[cfg(not(target_os = "motor"))]
+compile_error!("This crate is designed to be used on Motor OS only");

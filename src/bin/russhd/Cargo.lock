@@ -933,7 +933,7 @@ dependencies = [
 name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
- "moto-rt 0.13.3",
+ "moto-rt 0.13.4",
  "moto-sys",
 ]
 
@@ -943,7 +943,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.13.3",
+ "moto-rt 0.13.4",
  "moto-sys",
 ]
 
@@ -955,13 +955,13 @@ checksum = "3c591d6b6a913681d43be52885b0bce841f69aff43dac1c5ef852d400a24783b"
 
 [[package]]
 name = "moto-rt"
-version = "0.13.3"
+version = "0.13.4"
 
 [[package]]
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.13.3",
+ "moto-rt 0.13.4",
 ]
 
 [[package]]

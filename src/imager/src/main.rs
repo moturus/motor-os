@@ -1,4 +1,4 @@
-// Motūrus OS image builder.
+// Motor OS image builder.
 //
 // Image: MBR
 // 0 - mbr: master boot record: loads the second stage from [boot]
@@ -23,12 +23,12 @@ mod util;
 const SECTOR_SIZE: u32 = 512;
 
 // For the "full" image.
-static BIN_FULL: [&str; 15] = [
-    "/bin/httpd",
-    "/bin/httpd-axum",
+static BIN_FULL: [&str; 12] = [
+//    "/bin/httpd",
+//    "/bin/httpd-axum",
+//    "/bin/russhd",
     "/bin/kibim",
     "/bin/rush",
-    "/bin/russhd",
     "/sys/mdbg",
     "/sys/sys-init",
     "/sys/sys-log",
@@ -42,7 +42,8 @@ static BIN_FULL: [&str; 15] = [
 ];
 
 // For the "web" image.
-static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
+// static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
+static BIN_WEB: [&str; 2] = ["/sys/sys-init", "/sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
@@ -381,7 +382,7 @@ fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, de
 fn print_usage_and_exit() -> ! {
     eprintln!(
         "
-Motūrus OS image builder usage:
+Motor OS image builder usage:
     imager $MOTORH debug|release
 "
     );
@@ -474,7 +475,7 @@ fn main() {
         &initrd,
         &fs_partition,
         Some("srfs"),
-        &img_dir.join("moturus.full.img"),
+        &img_dir.join("motor.full.img"),
     );
 
     // ////////////////////////////////////////////////// The "web" partition
@@ -502,7 +503,7 @@ fn main() {
         &initrd,
         &fs_partition,
         Some("flatfs"),
-        &img_dir.join("moturus.web.img"),
+        &img_dir.join("motor.web.img"),
     );
 
     // ////////////////////////////////////////////////// The "web" partition with Motor FS.
@@ -531,9 +532,9 @@ fn main() {
         &initrd,
         &fs_partition,
         Some("motor-fs"),
-        &img_dir.join("moturus.web.motor-fs.img"),
+        &img_dir.join("motor.web.motor-fs.img"),
     );
     */
 
-    println!("Motūrus OS {deb_rel} image built successfully in {img_dir:?}");
+    println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
 }

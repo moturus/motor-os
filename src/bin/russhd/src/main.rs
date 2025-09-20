@@ -1,6 +1,6 @@
 #![allow(unexpected_cfgs)]
 
-#[cfg(target_os = "moturus")]
+#[cfg(target_os = "motor")]
 use std::io::IsTerminal;
 
 use std::net::SocketAddr;
@@ -14,7 +14,7 @@ use russhd::config;
 use russhd::local_session::StdinTx;
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
-#[cfg(target_os = "moturus")]
+#[cfg(target_os = "motor")]
 fn input_listener() {
     use std::io::Read;
 
@@ -38,7 +38,7 @@ fn input_listener() {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    #[cfg(target_os = "moturus")]
+    #[cfg(target_os = "motor")]
     if std::io::stdin().is_terminal() {
         std::thread::spawn(input_listener);
 
@@ -128,9 +128,9 @@ impl ConnectionHandler {
     }
 
     async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
-        #[cfg(target_os = "moturus")]
+        #[cfg(target_os = "motor")]
         let cmd = "/bin/rush -i";
-        #[cfg(not(target_os = "moturus"))]
+        #[cfg(not(target_os = "motor"))]
         let cmd = "/bin/bash -i";
 
         let (channel, session) = self.channel.clone().unwrap();
@@ -139,9 +139,9 @@ impl ConnectionHandler {
             Some(russhd::local_session::spawn(cmd, channel, session, &self.config).await?);
 
         // Show a greeting.
-        #[cfg(target_os = "moturus")]
+        #[cfg(target_os = "motor")]
         let data = CryptoVec::from("\n\rHello! Welcome to Motor OS.\r\n\n\r");
-        #[cfg(not(target_os = "moturus"))]
+        #[cfg(not(target_os = "motor"))]
         let data = CryptoVec::from("Hello! Welcome to RUSSHD.\r\n\r\n");
 
         session_clone
@@ -153,7 +153,7 @@ impl ConnectionHandler {
     }
 
     async fn exec(&mut self, cmdline: &str) -> Result<(), russh::Error> {
-        #[cfg(target_os = "moturus")]
+        #[cfg(target_os = "motor")]
         if cmdline == "shutdown" {
             if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SHUTDOWN == 0 {
                 log::info!("`shutdown`: no CAP_SHUTDOWN.");

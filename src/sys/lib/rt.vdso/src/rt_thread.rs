@@ -84,7 +84,7 @@ pub extern "C" fn join(handle: u64) -> ErrorCode {
     // wait() below will properly succeed if it is called while the joinee is still running
     // and will fail if the joinee has exited. We need to be careful here:
     // stdlib will panic if this join() returns while the joinee is still running,
-    // but in moturus OS any thread can be woken unconditionally via SysCpu::wake(),
+    // but in Motor OS any thread can be woken unconditionally via SysCpu::wake(),
     // so we must make sure this thread is woken because the joinee has exited,
     // not otherwise.
     let handle = SysHandle::from_u64(handle);

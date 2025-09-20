@@ -367,10 +367,10 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
 // Note: we have an IO thread per net channel instead of a single IO thread:
 // - simpler/easier to code here: no need to "schedule" between channels
 // - will scale better in the future when the driver side is also multithreaded
-// - the usually assumed negatives are not necessarily as bad in Moturus OS
+// - the usually assumed negatives are not necessarily as bad in Motor OS
 //   as in e.g. Linux:
 //   - threads are "lighter", i.e. they consume less memory
-//   - thread scheduling is potentially better, as Moturus OS is designed
+//   - thread scheduling is potentially better, as Motor OS is designed
 //     for the cloud use case vs a general purpose thingy, whatever that is,
 //     that Linux targets.
 //

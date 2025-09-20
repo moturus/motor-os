@@ -331,7 +331,7 @@ cfg_if! {
     } else if #[cfg(all(target_arch = "x86_64", target_env = "sgx"))] {
         mod lazy;
         #[path = "rdrand.rs"] mod imp;
-    } else if #[cfg(target_os = "moturus")] {
+    } else if #[cfg(target_os = "motor")] {
         mod lazy;
         #[path = "rdrand.rs"] mod imp;
     } else if #[cfg(all(feature = "rdrand",

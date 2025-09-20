@@ -8,8 +8,8 @@
 [package]
 name = "kibim"
 version = "0.1.0"
-authors = ["Ilaï Deutel", "The Moturus Project Developers"]
-description = "Kibi for Motūrus OS"
+authors = ["Ilaï Deutel", "The Motor OS Project Developers"]
+description = "Kibi for Motor OS"
 license = "MIT OR Apache-2.0"
 edition = "2018"
 

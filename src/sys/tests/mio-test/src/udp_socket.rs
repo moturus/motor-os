@@ -634,7 +634,7 @@ fn test_connected_udp_socket_unconnected_methods() {
         target_os = "hurd",
         target_os = "linux",
         target_os = "windows",
-        target_os = "moturus"
+        target_os = "motor"
     )))]
     assert_error(socket1.send_to(DATA1, address2), "already connected");
     // Even if the address is the same.
@@ -643,7 +643,7 @@ fn test_connected_udp_socket_unconnected_methods() {
         target_os = "hurd",
         target_os = "linux",
         target_os = "windows",
-        target_os = "moturus"
+        target_os = "motor"
     )))]
     assert_error(socket1.send_to(DATA1, address3), "already connected");
 

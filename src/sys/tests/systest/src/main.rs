@@ -1,5 +1,5 @@
 #![feature(addr_parse_ascii)]
-#![feature(moturus_ext)]
+#![feature(motor_ext)]
 #![feature(random)]
 
 // mod channel_test;
@@ -413,7 +413,7 @@ fn main() {
     // Test that a userspace interrupt is handled correctly.
     unsafe { core::arch::asm!("int 3") }
 
-    std::env::set_var("foo", "bar");
+    unsafe { std::env::set_var("foo", "bar") };
     assert_eq!(std::env::var("foo").unwrap(), "bar");
 
     // We should never be allowed to shut down the sytem.

@@ -2,22 +2,22 @@
 mod windows;
 
 #[cfg(not(windows))]
-#[cfg(not(target_os = "moturus"))]
+#[cfg(not(target_os = "motor"))]
 #[cfg(not(target_arch = "wasm32"))]
 mod unix;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-#[cfg(target_os = "moturus")]
+#[cfg(target_os = "motor")]
 mod wasm;
 
-#[cfg(target_os = "moturus")]
+#[cfg(target_os = "motor")]
 pub use wasm::{memset, mlock, munlock};
 
 // Re-export functions based on the platform
 #[cfg(not(windows))]
-#[cfg(not(target_os = "moturus"))]
+#[cfg(not(target_os = "motor"))]
 #[cfg(not(target_arch = "wasm32"))]
 pub use unix::{memset, mlock, munlock};
 #[cfg(target_arch = "wasm32")]
@@ -26,7 +26,7 @@ pub use wasm::{memset, mlock, munlock};
 pub use windows::{memset, mlock, munlock};
 
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_os = "moturus"))]
+#[cfg(not(target_os = "motor"))]
 mod error {
     use std::error::Error;
     use std::fmt::Display;
@@ -64,7 +64,7 @@ mod error {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(target_os = "moturus"))]
+#[cfg(not(target_os = "motor"))]
 pub use error::MemoryLockError;
 
 #[cfg(test)]

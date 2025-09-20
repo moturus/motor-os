@@ -396,7 +396,7 @@ fn test_shutdown_both() {
     assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     #[cfg(windows)]
     assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
-    #[cfg(target_os = "moturus")]
+    #[cfg(target_os = "motor")]
     assert_eq!(err.kind(), io::ErrorKind::NotConnected);
 
     drop(stream);

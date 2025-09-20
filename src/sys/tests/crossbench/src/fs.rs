@@ -21,7 +21,7 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
     #[cfg(target_family = "unix")]
     let file = open_direct(file_path)?;
 
-    #[cfg(target_os = "moturus")]
+    #[cfg(target_os = "motor")]
     let mut file = open_direct(file_path)?;
 
     assert_eq!(TEST_FILE_SIZE as u64, file.metadata()?.len());
@@ -54,7 +54,7 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
         #[cfg(target_family = "unix")]
         let bytes_read = read_at(&file, buffer, aligned_offset)?;
 
-        #[cfg(target_os = "moturus")]
+        #[cfg(target_os = "motor")]
         let bytes_read = read_at(&mut file, buffer, aligned_offset)?;
 
         let duration = start.elapsed();
@@ -113,7 +113,7 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
         #[cfg(target_family = "unix")]
         let bytes_read = read_at(&file, buffer, offset as u64)?;
 
-        #[cfg(target_os = "moturus")]
+        #[cfg(target_os = "motor")]
         let bytes_read = read_at(&mut file, buffer, offset as u64)?;
 
         assert_eq!(bytes_read, BLOCK_SIZE);
@@ -179,12 +179,12 @@ fn read_at(file: &std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Res
     nix::sys::uio::pread(file, buffer, offset as i64).map_err(std::io::Error::from)
 }
 
-#[cfg(target_os = "moturus")]
+#[cfg(target_os = "motor")]
 fn open_direct(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 
-#[cfg(target_os = "moturus")]
+#[cfg(target_os = "motor")]
 fn read_at(file: &mut std::fs::File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
     use std::io::Read;
     use std::io::Seek;

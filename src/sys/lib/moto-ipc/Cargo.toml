@@ -1,9 +1,9 @@
 [package]
 name = "moto-ipc"
 version = "0.2.6"
-authors = ["The Moturus Project Developers"]
+authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
-keywords = ["moturus", "motor-os"]
+keywords = ["motor", "motor-os"]
 readme = "README.md"
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS IPC (nostd) crate."

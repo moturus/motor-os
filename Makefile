@@ -6,36 +6,37 @@ ifeq ($(BUILD), release)
 	CARGO_RELEASE := --release
 	BIN_DIR := $(CURDIR)/build/bin/release
 	OBJ_DIR := $(CURDIR)/build/obj/release
-	SUB_DIR := x86_64-unknown-moturus/release
+	SUB_DIR := x86_64-unknown-motor/release
 	IMG_CMD := release
 else
 	CARGO_RELEASE :=
 	BIN_DIR := $(CURDIR)/build/bin/debug
 	OBJ_DIR := $(CURDIR)/build/obj
-	SUB_DIR := x86_64-unknown-moturus/debug
+	SUB_DIR := x86_64-unknown-motor/debug
 	IMG_CMD := debug
 endif
 
 ROOT_DIR := $(CURDIR)
 
-DO_BUILD = cargo +dev-x86_64-unknown-moturus build --target x86_64-unknown-moturus $(CARGO_RELEASE)
+DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
-DO_CLIPPY = cargo +dev-x86_64-unknown-moturus clippy --target x86_64-unknown-moturus $(CARGO_RELEASE)
+DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 all: boot core sys user img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys: sys-io sys-init sys-log sys-tty
 user: sysbox systest mio-test tokio-tests \
-	rush russhd httpd httpd-axum kibim \
-	mdbg rnetbench crossbench
+	rush kibim mdbg rnetbench crossbench
+# russhd httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: sys-io sys-init sys-log sys-tty
 .PHONY: sysbox systest mio-test tokio-tests
-.PHONY: rush russhd httpd httpd-axum kibim
+.PHONY: rush kibim
 .PHONY: mdbg rnetbench crossbench
+# .PHONY: russhd httpd httpd-axum
 .PHONY: clean clippy
 
 mbr.bin:

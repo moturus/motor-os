@@ -1,12 +1,12 @@
 [package]
 name = "moto-mpmc"
-authors = ["The Moturus Project Developers", "crossbeam-channel Developers"]
+authors = ["The Motor OS Project Developers", "crossbeam-channel Developers"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.60"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/moturus/motor-os"
-keywords = ["moturus", "motor-os"]
+keywords = ["motor", "motor-os"]
 
 [dependencies]
 crossbeam-utils = { version = "0.8.18", default-features = false }

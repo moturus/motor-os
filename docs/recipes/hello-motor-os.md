@@ -181,8 +181,8 @@ This code is exactly the same as in Rust Book.
 Now build the web server for Motor OS:
 
 ```
-cargo +dev-x86_64-unknown-moturus build --release \
-  --target x86_64-unknown-moturus
+cargo +dev-x86_64-unknown-motor build --release \
+  --target x86_64-unknown-motor
 ```
 
 Now add the web server to the Motor OS image:
@@ -190,7 +190,7 @@ Now add the web server to the Motor OS image:
 ```
 mkdir $MOTORH/img_files/full/hello
 
-cp ./target/x86_64-unknown-moturus/release/hello \
+cp ./target/x86_64-unknown-motor/release/hello \
     $MOTORH/img_files/full/hello/
 
 ```

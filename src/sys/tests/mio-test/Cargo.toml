@@ -9,4 +9,4 @@ env_logger = "0.11.8"
 moto-rt = { path = "../../lib/moto-rt" }
 
 # NOTE: mio is patched in the workspace Cargo.toml
-mio = { version = "1.0.1", features = ["net", "os-poll"]}
+mio = { version = "1.0.4", features = ["net", "os-poll"]}

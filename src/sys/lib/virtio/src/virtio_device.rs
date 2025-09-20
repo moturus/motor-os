@@ -546,7 +546,7 @@ impl VirtioDevice {
         let irq_idx = virtqueue.queue_num;
 
         // Use the default APIC base (super::rdmsr(IA32_APIC_BASE) & MASK).
-        // Moturus kernel in irq.rs asserts that this is correct.
+        // Motor OS kernel in irq.rs asserts that this is correct.
         const APIC_BASE: u64 = 0xfee00000_u64;
 
         let (wait_handle, irq_num) = mapper().create_irq_wait_handle()?;

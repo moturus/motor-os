@@ -38,12 +38,12 @@ fn _log_to_cloud_hypervisor(c: u8) {
 }
 
 #[no_mangle]
-pub extern "C" fn moturus_has_proc_data() -> u8 {
+pub extern "C" fn motor_has_proc_data() -> u8 {
     0
 }
 
 #[no_mangle]
-pub extern "C" fn moturus_runtime_start() {
+pub extern "C" fn motor_runtime_start() {
     let _ = logger::init();
     rt_vdso::load();
     runtime::init();

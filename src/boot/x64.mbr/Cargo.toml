@@ -2,7 +2,7 @@
 name = "mbr"
 authors = [
   "Philipp Oppermann <dev@phil-opp.com>",
-  "The Moturus Project Developers",
+  "The Motor OS Project Developers",
   ]
 license = "MIT OR Apache-2.0"
 version = "0.1.0"

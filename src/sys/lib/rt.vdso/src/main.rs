@@ -37,11 +37,11 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
-const RT_VERSION: u64 = 13;
+const RT_VERSION: u64 = 14;
 
 // The entry point.
 #[unsafe(no_mangle)]
-pub extern "C" fn moturus_start(version: u64) {
+pub extern "C" fn motor_start(version: u64) {
     if version != RT_VERSION {
         // Doing an assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: unsupported version: {version}.");
@@ -49,7 +49,7 @@ pub extern "C" fn moturus_start(version: u64) {
     }
 
     let vtable = RtVdsoVtable::get();
-    let self_addr = moturus_start as *const () as usize as u64;
+    let self_addr = motor_start as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
     vtable.log_to_kernel.store(

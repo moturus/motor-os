@@ -26,7 +26,7 @@ pub async fn spawn(
         cmd.env("PATH", cfg.path());
     }
 
-    #[cfg(target_os = "moturus")]
+    #[cfg(target_os = "motor")]
     cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
 
     let mut child = cmd
