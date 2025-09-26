@@ -55,9 +55,8 @@ pub const RT_VDSO_BYTES_ADDR: u64 = RT_VDSO_START - (1_u64 << 32); // 4GB for RT
 #[doc(hidden)]
 pub const RT_VDSO_VTABLE_VADDR: u64 = RT_VDSO_START - MOTO_SYS_PAGE_SIZE_SMALL;
 
-// Rust's dependency on libc runs deep, without these many binaries
-// fail to link.
-#[cfg(any(feature = "libc", feature = "rustc-dep-of-std"))]
+// Rust's dependency on libc runs deep, without these many binaries fail to link.
+#[cfg(feature = "libc")]
 pub mod libc;
 
 #[cfg(not(feature = "base"))]
@@ -329,16 +328,4 @@ pub fn internal_helper(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
     };
 
     vdso_internal_helper(a0, a1, a2, a3, a4, a5)
-}
-
-#[cfg(not(test))]
-#[cfg(feature = "rustc-dep-of-std")]
-#[panic_handler]
-fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    error::log_panic(info);
-    // If the panic is logged to stderr, we should sleep a bit before exiting, as our stdio is async.
-    crate::thread::sleep_until(
-        crate::time::Instant::now() + core::time::Duration::from_micros(100),
-    );
-    process::exit(-1)
 }

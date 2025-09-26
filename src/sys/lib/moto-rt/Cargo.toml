@@ -6,7 +6,7 @@ keywords = ["motor", "motor-os"]
 readme = "README.md"
 repository = "https://github.com/moturus/motor-os"
 description = "Motor OS Runtime."
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 
 [lib]
@@ -24,6 +24,7 @@ libc = []
 rustc-dep-of-std = [
     "alloc",
     "core",
+    "libc",
 ]
 
 [lints.rust]
