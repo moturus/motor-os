@@ -44,8 +44,16 @@ pub extern "C" fn motor_has_proc_data() -> u8 {
 
 #[no_mangle]
 pub extern "C" fn motor_runtime_start() {
+    // Can't panic before vdso has been loaded.
     let _ = logger::init();
     rt_vdso::load();
+
+    // As we don't have stderr, install a custom panic hook to log to kernel.
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("{info}");
+        moto_sys::SysCpu::exit(u64::MAX)
+    }));
+
     runtime::init();
     virtio::init();
     // We need to initialize FS before Rust runtime is initialized (Rust runtime != sys-io runtime).

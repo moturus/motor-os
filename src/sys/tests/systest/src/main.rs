@@ -18,7 +18,7 @@ mod xor_server;
 
 use std::{
     io::{Read, Write},
-    sync::{atomic::*, Arc},
+    sync::{Arc, atomic::*},
     time::Duration,
 };
 
@@ -84,20 +84,22 @@ fn test_cpus() {
     let mut threads = vec![];
     for _idx in 0..num_threads {
         let cpus_clone = cpus.clone();
-        threads.push(std::thread::spawn(move || loop {
-            let cpu = moto_sys::current_cpu() as usize;
-            cpus_clone[cpu].store(true, Ordering::Relaxed);
+        threads.push(std::thread::spawn(move || {
+            loop {
+                let cpu = moto_sys::current_cpu() as usize;
+                cpus_clone[cpu].store(true, Ordering::Relaxed);
 
-            let mut count = 0;
-            for idx in 0..cpus_clone.len() {
-                let cpu = &cpus_clone[idx];
-                if cpu.load(Ordering::Relaxed) {
-                    count += 1;
+                let mut count = 0;
+                for idx in 0..cpus_clone.len() {
+                    let cpu = &cpus_clone[idx];
+                    if cpu.load(Ordering::Relaxed) {
+                        count += 1;
+                    }
                 }
-            }
 
-            if count == moto_sys::num_cpus() {
-                return;
+                if count == moto_sys::num_cpus() {
+                    return;
+                }
             }
         }));
     }
@@ -245,14 +247,16 @@ fn test_caps() {
         moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS
     );
 
-    assert!(std::process::Command::new(std::env::args().next().unwrap())
-        .arg("subcommand")
-        .env(
-            moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
-            format!("0x{:x}", moto_sys::caps::CAP_SYS),
-        )
-        .spawn()
-        .is_err());
+    assert!(
+        std::process::Command::new(std::env::args().next().unwrap())
+            .arg("subcommand")
+            .env(
+                moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
+                format!("0x{:x}", moto_sys::caps::CAP_SYS),
+            )
+            .spawn()
+            .is_err()
+    );
 
     println!("test_caps() PASS");
 }
@@ -323,12 +327,14 @@ fn test_liveness() {
     for _idx in 0..num_cpus {
         let cpus_clone = cpus.clone();
         let stop_clone = stop.clone();
-        threads.push(std::thread::spawn(move || loop {
-            let cpu = moto_sys::current_cpu() as usize;
-            cpus_clone[cpu].fetch_add(1, Ordering::Relaxed);
+        threads.push(std::thread::spawn(move || {
+            loop {
+                let cpu = moto_sys::current_cpu() as usize;
+                cpus_clone[cpu].fetch_add(1, Ordering::Relaxed);
 
-            if stop_clone.load(Ordering::Relaxed) {
-                break;
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
             }
         }));
     }

@@ -96,9 +96,10 @@ const _A2: () = assert!(io_subchannel_mask(1) == 0xFF00);
 const _A3: () = assert!(io_subchannel_mask(2) == 0xFF_0000);
 const _A4: () = assert!(io_subchannel_mask(7) == 0xFF00_0000_0000_0000);
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 #[repr(u32)]
 pub enum TcpState {
+    #[default]
     Closed = 0,
     Listening = 1,
     PendingAccept = 2,
@@ -107,12 +108,6 @@ pub enum TcpState {
     ReadOnly = 5,
     WriteOnly = 6,
     _Max = 7,
-}
-
-impl Default for TcpState {
-    fn default() -> Self {
-        Self::Closed
-    }
 }
 
 impl TryFrom<u32> for TcpState {

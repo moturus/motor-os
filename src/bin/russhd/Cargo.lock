@@ -917,7 +917,7 @@ version = "1.0.4"
 source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4#c330db1a93c0f7c94abb919be7e508ab72b820c1"
 dependencies = [
  "libc",
- "moto-rt 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt 0.14.0",
  "wasi",
  "windows-sys 0.60.2",
 ]
@@ -926,7 +926,7 @@ dependencies = [
 name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
- "moto-rt 0.14.0",
+ "moto-rt 0.14.1",
  "moto-sys",
 ]
 
@@ -936,19 +936,9 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt 0.14.1",
  "moto-sys",
 ]
-
-[[package]]
-name = "moto-rt"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c591d6b6a913681d43be52885b0bce841f69aff43dac1c5ef852d400a24783b"
-
-[[package]]
-name = "moto-rt"
-version = "0.14.0"
 
 [[package]]
 name = "moto-rt"
@@ -957,10 +947,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "14df6749ee6ccf4acd47bfc930932efbca78e49cc5d432b9b355628789a2f81e"
 
 [[package]]
+name = "moto-rt"
+version = "0.14.1"
+
+[[package]]
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.14.0",
+ "moto-rt 0.14.1",
 ]
 
 [[package]]
@@ -1453,7 +1447,7 @@ dependencies = [
  "hex",
  "log",
  "moto-log",
- "moto-rt 0.13.1",
+ "moto-rt 0.14.1",
  "moto-sys",
  "rand_core",
  "russh",
@@ -1718,13 +1712,13 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "1.47.1"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1#224e72b7bb4b85a4e6a79dba8dfe7fb004928296"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-09-25#f2abb01c7c4172ad608fa851010b6468b73b63fd"
 dependencies = [
  "backtrace",
  "bytes",
  "libc",
  "mio",
- "moto-rt 0.13.1",
+ "moto-rt 0.14.0",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -1735,7 +1729,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "2.5.0"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1#224e72b7bb4b85a4e6a79dba8dfe7fb004928296"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-09-25#f2abb01c7c4172ad608fa851010b6468b73b63fd"
 dependencies = [
  "proc-macro2",
  "quote",

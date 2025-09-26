@@ -16,7 +16,7 @@
   "position-independent-executables": true,
   "relro-level": "full",
   "static-position-independent-executables": true,
-  "target-pointer-width": "64",
+  "target-pointer-width": 64,
   "relocation-model": "pic",
   "pre-link-args": {
     "ld.lld": [

@@ -13,7 +13,7 @@ pub fn smoke_test() {
 
     use std::io::Read;
     use std::os::fd::FromRawFd;
-    use std::os::motor::ChildExt;
+    use std::os::motor::process::ChildExt;
 
     // Test "Child FD" feature.
     let handle = child.std_child().sys_handle();

@@ -693,7 +693,7 @@ dependencies = [
  "frusa",
  "intrusive-collections",
  "log",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
  "x86",
  "x86_64",
@@ -742,7 +742,7 @@ name = "mdbg"
 version = "0.1.0"
 dependencies = [
  "clap",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -780,7 +780,7 @@ source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4#c330db1
 dependencies = [
  "libc",
  "log",
- "moto-rt 0.14.0",
+ "moto-rt",
  "wasi",
  "windows-sys 0.60.2",
 ]
@@ -792,7 +792,7 @@ dependencies = [
  "env_logger",
  "log",
  "mio",
- "moto-rt 0.14.0",
+ "moto-rt",
 ]
 
 [[package]]
@@ -801,7 +801,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -810,7 +810,7 @@ name = "moto-io-internal"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys-io",
 ]
 
@@ -818,7 +818,7 @@ dependencies = [
 name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -828,7 +828,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -837,19 +837,13 @@ name = "moto-mpmc"
 version = "0.1.0"
 dependencies = [
  "crossbeam-utils",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
 [[package]]
 name = "moto-rt"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfa6bcaffb7fdcfb1dd5f113275f085a1976124593e8ba1ee27b13682aa0bcdc"
-
-[[package]]
-name = "moto-rt"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -859,7 +853,7 @@ dependencies = [
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.14.0",
+ "moto-rt",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
 ]
@@ -869,7 +863,7 @@ name = "moto-sys-io"
 version = "0.2.4"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
  "smoltcp",
 ]
@@ -879,7 +873,7 @@ name = "moto-virtio"
 version = "0.2.0"
 dependencies = [
  "log",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -1145,7 +1139,7 @@ dependencies = [
  "frusa",
  "moto-io-internal",
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
  "moto-sys-io",
 ]
@@ -1346,7 +1340,7 @@ dependencies = [
  "log",
  "moto-io-internal",
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
  "moto-sys-io",
  "moto-virtio",
@@ -1365,7 +1359,7 @@ version = "0.1.0"
 dependencies = [
  "moto-ipc",
  "moto-log",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -1374,7 +1368,7 @@ name = "sys-tty"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
  "x86_64",
 ]
@@ -1384,7 +1378,7 @@ name = "sysbox"
 version = "0.1.0"
 dependencies = [
  "moto-ipc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
  "moto-sys-io",
  "time",
@@ -1401,7 +1395,7 @@ dependencies = [
  "moto-ipc",
  "moto-log",
  "moto-mpmc",
- "moto-rt 0.14.0",
+ "moto-rt",
  "moto-sys",
 ]
 
@@ -1451,13 +1445,13 @@ version = "0.1.0"
 [[package]]
 name = "tokio"
 version = "1.47.1"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1#224e72b7bb4b85a4e6a79dba8dfe7fb004928296"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-09-25#f2abb01c7c4172ad608fa851010b6468b73b63fd"
 dependencies = [
  "backtrace",
  "bytes",
  "libc",
  "mio",
- "moto-rt 0.13.3",
+ "moto-rt",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -1468,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "2.5.0"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1#224e72b7bb4b85a4e6a79dba8dfe7fb004928296"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-09-25#f2abb01c7c4172ad608fa851010b6468b73b63fd"
 dependencies = [
  "proc-macro2",
  "quote",

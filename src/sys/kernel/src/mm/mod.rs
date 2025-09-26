@@ -240,18 +240,13 @@ impl MemorySegment {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum PageType {
+    #[default]
     Unknown = 0,
     SmallPage,
     MidPage,
     LargePage,
-}
-
-impl Default for PageType {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl PageType {

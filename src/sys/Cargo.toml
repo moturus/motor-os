@@ -50,7 +50,7 @@ srfs-core    = { path = "lib/srfs-core"       }
 srfs         = { path = "lib/srfs"            }
 
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4" }
-tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1" }
+tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-09-25" }
 
 getrandom    = { path = "../third_party/getrandom-0.2.16" }
 

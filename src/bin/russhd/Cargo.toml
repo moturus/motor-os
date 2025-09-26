@@ -15,10 +15,9 @@ shell-words  = "1.1"
 tokio        = { version = "=1.47.1", features = ["process", "rt", "sync"] }
 toml         = "0.8.10"
 
-moto-rt      = "0.13.0"
-
 [target.'cfg(target_os = "motor")'.dependencies]
 moto-log     = { path = "../../sys/lib/moto-log" }
+moto-rt      = { path = "../../sys/lib/moto-rt"  }
 moto-sys     = { path = "../../sys/lib/moto-sys" }
 
 [dev-dependencies]
@@ -26,7 +25,7 @@ ssh-encoding = "0.2.0"
 
 [patch.crates-io]
 mio   = { git = "https://github.com/moturus/mio.git"  , branch = "mio-motor-v1.0.4"   }
-tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1" }
+tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-09-25" }
 
 getrandom       = { path = "../../third_party/getrandom-0.2.16"       , features = ["rdrand"]}
 home            = { path = "../../third_party/home-0.5.11"            }
