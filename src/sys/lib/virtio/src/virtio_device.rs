@@ -3,12 +3,12 @@
 use core::sync::atomic::*;
 
 use super::pci;
-use super::pci::le16;
-use super::pci::le32;
-use super::pci::le64;
 use super::pci::PciBar;
 use super::pci::PciDevice;
 use super::pci::PciDeviceID;
+use super::pci::le16;
+use super::pci::le32;
+use super::pci::le64;
 use super::virtio_queue::Virtqueue;
 use core::mem::offset_of;
 
@@ -39,7 +39,7 @@ impl VirtioDeviceKind {
 // From virtio 1.1 spec.
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1; // Common configuration.
 const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2; // Notifications.
-                                         // const VIRTIO_PCI_CAP_ISR_CFG    : u8 = 3;  // ISR status.
+// const VIRTIO_PCI_CAP_ISR_CFG    : u8 = 3;  // ISR status.
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4; // Device specific configuration.
 #[allow(dead_code)]
 const VIRTIO_PCI_CAP_PCI_CFG: u8 = 5; // PCI configuration access.
@@ -710,9 +710,10 @@ pub(super) fn mapper() -> &'static dyn super::KernelAdapter {
 
 pub fn init_virtio_devices(mapper: &'static dyn super::KernelAdapter) {
     static ONCE: AtomicBool = AtomicBool::new(false);
-    assert!(ONCE
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok());
+    assert!(
+        ONCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    );
     log::debug!("initializing VirtIO");
 
     unsafe { MAPPER = Some(mapper) };
@@ -726,7 +727,7 @@ pub fn init_virtio_devices(mapper: &'static dyn super::KernelAdapter) {
 
             match device.kind {
                 VirtioDeviceKind::Block => {
-                    super::virtio_blk::Blk::init(device);
+                    super::virtio_blk::BlockDevice::init(device);
                 }
                 VirtioDeviceKind::Net => {
                     super::virtio_net::NetDev::init(device);

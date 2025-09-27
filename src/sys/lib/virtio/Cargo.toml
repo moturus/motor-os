@@ -2,10 +2,11 @@
 name = "moto-virtio"
 authors = ["The Motor OS Project Developers"]
 license = "MIT OR Apache-2.0"
-version = "0.2.0"
-edition = "2021"
+version = "0.3.0"
+edition = "2024"
 
 [dependencies]
-moto-rt = { path = "../moto-rt" }
-moto-sys = { path = "../moto-sys" }
+async-fs   = { path = "../async-fs" }
+moto-rt    = { path = "../moto-rt"  }
+moto-sys   = { path = "../moto-sys" }
 log = "0.4.20"

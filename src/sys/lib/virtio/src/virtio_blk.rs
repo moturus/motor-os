@@ -4,10 +4,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::*;
 use moto_rt::spinlock::SpinLock;
 
-use super::pci::PciBar;
-use super::virtio_device::VirtioDevice;
 use super::BLOCK_SIZE;
 use super::BLOCK_SIZE_LOG2;
+use super::pci::PciBar;
+use super::virtio_device::VirtioDevice;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Little Endian is often assumed here.");
@@ -39,13 +39,13 @@ const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
 //       it something else. So we don't bother with anything other than 512.
 //const VIRTIO_BLK_F_BLK_SIZE : u64 = 1u64 << 6;
 
-pub(super) struct Blk {
+pub(super) struct BlockDevice {
     dev: alloc::boxed::Box<VirtioDevice>,
     capacity: u64, // The number of sectors of BLOCK_SIZE.
     read_only: bool,
 }
 
-impl Blk {
+impl BlockDevice {
     fn self_init(&mut self) -> Result<(), ()> {
         self.dev.acknowledge_driver(); // Step 3
         self.negotiate_features()?; // Steps 4, 5, 6
@@ -60,7 +60,7 @@ impl Blk {
             return;
         }
 
-        let mut blk = Blk {
+        let mut blk = BlockDevice {
             dev,
             capacity: 0,
             read_only: true,
@@ -86,8 +86,11 @@ impl Blk {
         log::debug!("BLK devices features: 0x{features_available:x}");
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
-            log::warn!("Virtio BLK device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
-                self.dev.pci_device.id, features_available);
+            log::warn!(
+                "Virtio BLK device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
+                self.dev.pci_device.id,
+                features_available
+            );
             return Err(());
         }
 
@@ -365,7 +368,7 @@ impl Blk {
     }
 }
 
-static BLK: SpinLock<Vec<Blk>> = SpinLock::new(vec![]);
+static BLK: SpinLock<Vec<BlockDevice>> = SpinLock::new(vec![]);
 
 pub fn lsblk() -> Vec<Arc<dyn super::BlockDevice>> {
     let mut result: Vec<Arc<dyn super::BlockDevice>> = alloc::vec![];
@@ -457,3 +460,5 @@ impl super::BlockDevice for VirtioDrive {
         BLK.lock().get(self.blk_idx as usize).unwrap().capacity
     }
 }
+
+// impl async_fs::AsyncBlockDevice
