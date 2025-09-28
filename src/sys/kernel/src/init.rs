@@ -148,7 +148,7 @@ pub fn init_exited(init: &crate::uspace::Process) -> ! {
             if exit_code == 0 {
                 log::debug!("sys-io exited with status {exit_code}.");
             } else {
-                log::warn!("sys-io exited with status {exit_code}.");
+                log::warn!("sys-io exited with status 0x{exit_code:x}.");
             }
             crate::arch::kernel_exit();
         }
