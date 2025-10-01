@@ -426,6 +426,20 @@ impl ClientConnection {
             4096,
             (core::mem::size_of::<RawChannel>() >> 12) as u64,
         )?;
+
+        // Safety: safe because we just allocated the memory.
+        let raw_channel: &'static mut RawChannel =
+            unsafe { (addr as *mut RawChannel).as_mut().unwrap() };
+
+        for idx in 0..(QUEUE_SIZE) {
+            raw_channel.client_queue[idx as usize]
+                .stamp
+                .store(idx, Ordering::Relaxed);
+            raw_channel.server_queue[idx as usize]
+                .stamp
+                .store(idx, Ordering::Relaxed);
+        }
+
         let full_url = alloc::format!(
             "shared:url={};address={};page_type=small;page_num={}",
             moto_sys::url_encode(url),
@@ -440,34 +454,6 @@ impl ClientConnection {
             raw_channel: AtomicPtr::new(addr as usize as *mut RawChannel),
             server_handle,
         };
-
-        fence(Ordering::Acquire);
-        self_
-            .raw_channel()
-            .server_queue_head
-            .store(0, Ordering::Relaxed);
-        self_
-            .raw_channel()
-            .server_queue_tail
-            .store(0, Ordering::Relaxed);
-        self_
-            .raw_channel()
-            .client_queue_head
-            .store(0, Ordering::Relaxed);
-        self_
-            .raw_channel()
-            .client_queue_tail
-            .store(0, Ordering::Relaxed);
-
-        for idx in 0..(QUEUE_SIZE) {
-            self_.raw_channel().client_queue[idx as usize]
-                .stamp
-                .store(idx, Ordering::Relaxed);
-            self_.raw_channel().server_queue[idx as usize]
-                .stamp
-                .store(idx, Ordering::Relaxed);
-        }
-        fence(Ordering::Release);
 
         Ok(self_)
     }
