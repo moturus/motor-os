@@ -14,6 +14,7 @@ impl SysObj {
     pub const OP_CREATE: u8 = 3;
     pub const OP_QUERY_HANDLE: u8 = 4;
 
+    pub const F_QUERY_PEER: u32 = 2;
     pub const F_QUERY_PID: u32 = 4;
 
     // When connecting to ("getting") a shared URL, wake the counterpart.
@@ -171,6 +172,31 @@ impl SysObj {
             Ok(())
         } else {
             Err(result.error_code())
+        }
+    }
+
+    // Checks if the shared object/handle has a peer.
+    #[cfg(feature = "userspace")]
+    pub fn is_connected(handle: SysHandle) -> Result<bool, ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_OBJ, Self::OP_QUERY_HANDLE, Self::F_QUERY_PEER, 0),
+            handle.as_u64(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(true)
+        } else {
+            let err = result.error_code();
+            if err == moto_rt::E_NOT_CONNECTED {
+                Ok(false)
+            } else {
+                Err(err)
+            }
         }
     }
 

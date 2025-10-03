@@ -278,9 +278,11 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     }
 
     let handle = SysHandle::from_u64(args.args[0]);
-    let return_pid = match args.flags {
-        0 => false,
-        SysObj::F_QUERY_PID => true,
+
+    let (return_pid, query_peer) = match args.flags {
+        0 => (false, false),
+        SysObj::F_QUERY_PID => (true, false),
+        SysObj::F_QUERY_PEER => (false, true),
         _ => return ResultBuilder::invalid_argument(),
     };
 
@@ -290,25 +292,38 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     if let Some(obj) = obj {
         if obj.sys_object.sibling_dropped() {
             log::debug!(
-                "sys_wait: object {} has it's sibling dropped in pid {}.",
+                "sys_query_handle: object {} has it's sibling dropped in pid {}.",
                 handle.as_u64(),
                 process.pid().as_u64()
             );
             return ResultBuilder::bad_handle(handle);
         }
 
-        if return_pid {
-            if let Some(proc) = super::shared::peer_owner(thread.owner().pid(), &obj.sys_object) {
-                ResultBuilder::ok_1(proc.pid().as_u64())
-            } else {
-                ResultBuilder::result(moto_rt::E_NOT_FOUND)
+        if query_peer {
+            match super::shared::has_peer(&obj.sys_object) {
+                Ok(connected) => {
+                    if connected {
+                        return ResultBuilder::ok();
+                    } else {
+                        return ResultBuilder::result(moto_rt::E_NOT_CONNECTED);
+                    }
+                }
+                Err(err) => return ResultBuilder::result(err),
             }
-        } else {
-            ResultBuilder::ok()
         }
+
+        if !return_pid {
+            return ResultBuilder::ok();
+        }
+
+        let Some(proc) = super::shared::peer_owner(thread.owner().pid(), &obj.sys_object) else {
+            return ResultBuilder::result(moto_rt::E_NOT_FOUND);
+        };
+
+        ResultBuilder::ok_1(proc.pid().as_u64())
     } else {
         log::debug!(
-            "sys_wait: object not found in pid {} for handle {}.",
+            "sys_query_handle: object not found in pid {} for handle {}.",
             process.pid().as_u64(),
             handle.as_u64()
         );

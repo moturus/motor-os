@@ -232,6 +232,14 @@ pub(super) fn try_wake(
     }
 }
 
+pub(super) fn has_peer(maybe_shared: &Arc<SysObject>) -> Result<bool, moto_rt::ErrorCode> {
+    let Some(shared) = super::sysobject::object_from_sysobject::<Shared>(maybe_shared) else {
+        return Err(moto_rt::E_BAD_HANDLE);
+    };
+
+    Ok(shared.sharer.strong_count() > 0 && shared.sharee.lock(line!()).strong_count() > 0)
+}
+
 pub(super) fn peer_owner(
     this: super::process::ProcessId,
     maybe_shared: &Arc<SysObject>,
