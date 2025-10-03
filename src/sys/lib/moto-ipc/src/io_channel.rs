@@ -603,6 +603,8 @@ pub struct ServerConnection {
     status: ServerStatus,
 }
 
+unsafe impl Send for ServerConnection {}
+
 impl Drop for ServerConnection {
     fn drop(&mut self) {
         if !self.raw_channel.is_null() {
@@ -743,28 +745,31 @@ impl ServerConnection {
         self.wait_handle
     }
 
-    /// # Safety
-    ///
-    /// Unsafe because it assumes wait on wait_handle succeeded. Otherwise
-    /// raw_buf pointer could still be unmapped.
-    pub unsafe fn accept(&mut self) -> Result<(), ErrorCode> {
+    pub fn accept(&mut self) -> Result<(), ErrorCode> {
         assert_eq!(self.status, ServerStatus::Created);
+
+        if !moto_sys::SysObj::is_connected(self.wait_handle)? {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        };
 
         compiler_fence(Ordering::Acquire);
         fence(Ordering::Acquire);
 
-        if (*self.raw_channel)
-            .server_queue_head
-            .load(Ordering::Relaxed)
-            != 0
-            || (*self.raw_channel)
-                .server_queue_tail
+        // Safety: safe because we checked is_connected above.
+        unsafe {
+            if (*self.raw_channel)
+                .server_queue_head
                 .load(Ordering::Relaxed)
                 != 0
-        {
-            self.status = ServerStatus::Error(moto_rt::E_BAD_HANDLE);
-            self.clear();
-            return Err(moto_rt::E_BAD_HANDLE);
+                || (*self.raw_channel)
+                    .server_queue_tail
+                    .load(Ordering::Relaxed)
+                    != 0
+            {
+                self.status = ServerStatus::Error(moto_rt::E_BAD_HANDLE);
+                self.clear();
+                return Err(moto_rt::E_BAD_HANDLE);
+            }
         }
 
         self.status = ServerStatus::Connected;
