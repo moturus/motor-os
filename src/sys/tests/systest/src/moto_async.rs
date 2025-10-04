@@ -1,13 +1,14 @@
 use std::{
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
     task::Poll,
     time::Duration,
 };
 
 use futures::FutureExt;
+use moto_async::AsFuture;
 use moto_rt::time::Instant;
 use moto_sys::SysHandle;
 
@@ -189,18 +190,12 @@ fn test_event_stream() {
 
     let runtime_thread = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
-            let _ = moto_async::LocalRuntime::spawn_event_stream(
-                handle_there,
-                async move |event_stream| {
-                    for step in 0..ITERS {
-                        assert_eq!(step * 2, channel_there.fetch_add(1, Ordering::AcqRel));
-                        moto_sys::SysCpu::wake(handle_there).unwrap();
-                        event_stream.next().await;
-                    }
-                },
-            )
-            .await;
-        });
+            for step in 0..ITERS {
+                assert_eq!(step * 2, channel_there.fetch_add(1, Ordering::AcqRel));
+                moto_sys::SysCpu::wake(handle_there).unwrap();
+                handle_there.as_future().await.unwrap();
+            }
+        })
     });
 
     for step in 0..ITERS {
@@ -220,15 +215,10 @@ fn test_wake_exit_race() {
 
     let runtime_thread = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
-            let _ = moto_async::LocalRuntime::spawn_event_stream(
-                handle_there,
-                async move |event_stream| {
-                    futures::select! {
-                        _ = event_stream.next().fuse() => (),
-                        _ = moto_async::sleep(Duration::from_millis(20)).fuse() => (),
-                    };
-                },
-            );
+            futures::select! {
+                _ = handle_there.as_future().fuse() => (),
+                _ = moto_async::sleep(Duration::from_millis(20)).fuse() => (),
+            };
         });
     });
 

@@ -30,6 +30,6 @@ mod mutex;
 mod time;
 mod timeq;
 
-pub use local_runtime::LocalRuntime;
+pub use local_runtime::*;
 pub use mutex::{LocalMutex, LocalMutexGuard};
 pub use time::{Instant, Sleep, sleep};

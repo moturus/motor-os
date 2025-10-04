@@ -923,9 +923,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-async"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "log",
+ "moto-rt 0.14.1",
+ "moto-sys",
+]
+
+[[package]]
 name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
+ "moto-async",
  "moto-rt 0.14.1",
  "moto-sys",
 ]

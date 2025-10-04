@@ -1,0 +1,14 @@
+[package]
+name = "virtio-async"
+authors = ["The Motor OS Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-fs   = { path = "../async-fs" }
+moto-rt    = { path = "../moto-rt"  }
+moto-sys   = { path = "../moto-sys" }
+
+async-trait = "0.1.88"
+log         = "0.4.20"

@@ -5,9 +5,6 @@
 #![feature(io_error_more)]
 #![feature(local_waker)]
 
-// #[cfg(debug_assertions)]
-// mod async_runtime;
-
 mod fs;
 mod logger;
 mod net;
@@ -50,11 +47,24 @@ pub extern "C" fn motor_runtime_start() {
 
     // As we don't have stderr, install a custom panic hook to log to kernel.
     std::panic::set_hook(Box::new(|info| {
+        std::thread::sleep(std::time::Duration::from_millis(10));
         log::error!("{info}");
-        moto_sys::SysCpu::exit(u64::MAX)
+        moto_sys::SysCpu::exit(0xbadc0de)
     }));
 
-    runtime::init();
+    runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
+
+    // This block is for development/testing only, until ready.
+    /*
+    #[cfg(debug_assertions)]
+    {
+        runtime::spawn_async();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        panic!("let's not go there");
+    }
+    */
+
     virtio::init();
     // We need to initialize FS before Rust runtime is initialized (Rust runtime != sys-io runtime).
     fs::init();

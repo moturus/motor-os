@@ -4,6 +4,7 @@ mod filesystem;
 mod fs_flatfs;
 mod fs_srfs;
 mod mbr;
+mod runtime;
 
 pub use filesystem::*;
 const DRIVER_URL: &str = "motor-fs-driver";

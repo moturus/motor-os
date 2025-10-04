@@ -9,7 +9,7 @@ edition = "2024"
 moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }
 
-futures = "0.3"
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4.21"
 
 [features]

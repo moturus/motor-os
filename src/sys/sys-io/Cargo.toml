@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 # Internal.
 flatfs           = { path = "../lib/flatfs"           }
+moto-async       = { path = "../lib/moto-async"       }
 moto-io-internal = { path = "../lib/moto-io-internal" }
 moto-ipc         = { path = "../lib/moto-ipc"         }
 moto-rt          = { path = "../lib/moto-rt"          }
@@ -17,6 +18,7 @@ moto-virtio      = { path = "../lib/virtio"           }
 motor-fs         = { path = "../lib/motor-fs"         }
 srfs             = { path = "../lib/srfs"             }
 timeq            = { path = "../lib/timeq"            }
+virtio-async     = { path = "../lib/virtio-async"     }
 
 # External.
 crossbeam    = "0.8.4"

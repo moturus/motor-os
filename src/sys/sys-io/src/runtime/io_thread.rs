@@ -238,7 +238,7 @@ impl IoRuntime {
         if likely(!timeout_wakeup) {
             if let Some(mut listener) = self.listeners.remove(&handle) {
                 self.spawn_listeners_if_needed();
-                if unsafe { listener.accept() }.is_err() {
+                if listener.accept().is_err() {
                     #[cfg(debug_assertions)]
                     log::debug!("io_runtime: accept() failed.");
                     return;

@@ -62,10 +62,10 @@ impl<T: Eq + Ord> TimeQ<T> {
     }
 
     pub fn pop_at(&mut self, at: Instant) -> Option<T> {
-        if let Some(next_at) = self.next() {
-            if next_at > at {
-                return None;
-            }
+        if let Some(next_at) = self.next()
+            && next_at > at
+        {
+            return None;
         }
 
         self.inner.pop().map(|e| e.0.what)

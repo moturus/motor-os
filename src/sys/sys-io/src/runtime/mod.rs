@@ -1,4 +1,10 @@
-use std::sync::atomic::AtomicU64;
+#![allow(unused)]
+
+use std::{
+    collections::{BTreeMap, VecDeque},
+    rc::Rc,
+    sync::atomic::AtomicU64,
+};
 
 use moto_ipc::io_channel;
 use moto_sys::SysHandle;
@@ -89,5 +95,139 @@ fn conn_name(handle: SysHandle) -> String {
         format!("{}: `{}`", pid, stats[0].debug_name()).to_owned()
     } else {
         "<unknown>".to_owned()
+    }
+}
+
+// ----------------------- Async Runtime ---------------------------- //
+struct Mapper {
+    virt_to_phys_map: std::sync::Mutex<BTreeMap<u64, u64>>,
+    map_requests: AtomicU64,
+}
+static MAPPER: Mapper = Mapper {
+    virt_to_phys_map: std::sync::Mutex::new(BTreeMap::new()),
+    map_requests: AtomicU64::new(0),
+};
+
+impl virtio_async::KernelAdapter for Mapper {
+    fn virt_to_phys(&self, virt_addr: u64) -> Result<u64, ()> {
+        let page_addr = virt_addr & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
+        let offset = virt_addr & (moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
+        if let Some(phys_addr) = self.virt_to_phys_map.lock().unwrap().get(&page_addr) {
+            return Ok(offset + *phys_addr);
+        }
+
+        let requests = self
+            .map_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // We don't want to do the syscall too often. But We also don't want
+        // to force copying data all the time: our flatfs adapter (fs_flatfs.rs)
+        // reads its bytes into a buffer and doesn't do any copying, and this
+        // is a good thing: it is faster to call virt_to_phys() than to
+        // copy 512 bytes. So the number below should be not too small, not too
+        // large.
+        assert!(requests < 1_000_000);
+
+        let phys_addr = moto_sys::SysMem::virt_to_phys(page_addr).unwrap();
+        self.virt_to_phys_map
+            .lock()
+            .unwrap()
+            .insert(page_addr, phys_addr);
+
+        Ok(offset + phys_addr)
+    }
+
+    fn mmio_map(&self, phys_addr: u64, sz: u64) -> Result<u64, ()> {
+        Ok(moto_sys::SysMem::mmio_map(phys_addr, sz).unwrap())
+    }
+
+    fn alloc_contiguous_pages(&self, sz: u64) -> Result<u64, ()> {
+        let (_, addr) = crate::runtime::alloc_mmio_region(sz);
+        Ok(addr)
+    }
+
+    // Register a custom IRQ and an associated wait handle; the library will then use
+    // the wait handle with wait() below.
+    fn create_irq_wait_handle(&self) -> Result<(moto_virtio::WaitHandle, u8), ()> {
+        let handle = moto_sys::SysObj::get(SysHandle::KERNEL, 0, "irq_wait:64").unwrap();
+        Ok((handle.as_u64(), 64))
+    }
+}
+
+// ----------------------- Async Runtime ---------------------------- //
+enum RuntimeMsg {}
+
+static RUNTIME_QUEUE: std::sync::Mutex<VecDeque<RuntimeMsg>> =
+    std::sync::Mutex::new(VecDeque::new());
+static RUNTIME_IPC_HANDLE: AtomicU64 = AtomicU64::new(0);
+
+/// Spawn the async runtime.
+pub fn spawn_async() {
+    let (handle_here, handle_there) =
+        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    RUNTIME_IPC_HANDLE.store(handle_here.as_u64(), std::sync::atomic::Ordering::Release);
+
+    let _runtime_thread = std::thread::Builder::new()
+        .name("sys-io:runtime".to_owned())
+        .spawn(move || {
+            moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
+            moto_async::LocalRuntime::new().block_on(async move {
+                async_runtime(handle_there).await;
+            });
+        });
+}
+
+async fn async_runtime(q_handle: SysHandle) {
+    log::debug!("async runtime starting");
+    let queue_joiner = moto_async::LocalRuntime::spawn(global_queue_listener(q_handle));
+
+    let Ok(devices) = virtio_async::init_virtio_devices(&MAPPER) else {
+        panic!("VirtIO initialization failed.");
+    };
+
+    let mut block_device = None;
+
+    for device in devices {
+        match device {
+            virtio_async::Device::Block(bd) => {
+                assert!(
+                    block_device.is_none(),
+                    "Multiple block devices are not supported yet."
+                );
+                block_device = Some(Rc::new(moto_async::LocalMutex::new(bd)));
+            }
+        }
+    }
+
+    let Some(block_device) = block_device else {
+        panic!("No block devices found")
+    };
+
+    let bd = block_device.clone();
+    let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd));
+
+    queue_joiner.await; // Never actually returns.
+    unreachable!()
+}
+
+async fn global_queue_listener(queue_handle: SysHandle) {
+    use moto_async::AsFuture;
+
+    loop {
+        queue_handle.as_future().await.unwrap();
+        let Some(msg) = RUNTIME_QUEUE.lock().unwrap().pop_back() else {
+            continue;
+        };
+
+        match msg {}
+    }
+}
+
+async fn block_device_listener(bd: Rc<moto_async::LocalMutex<virtio_async::BlockDevice>>) {
+    use moto_async::AsFuture;
+
+    let wait_handle = bd.lock().await.wait_handle();
+    loop {
+        wait_handle.as_future().await.unwrap();
+        todo!("Block device interrupt!")
     }
 }

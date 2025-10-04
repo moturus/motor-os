@@ -8,16 +8,11 @@ use core::task::LocalWaker;
 
 extern crate alloc;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 enum State {
+    #[default]
     Unlocked,
     Locked,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State::Unlocked
-    }
 }
 
 #[derive(Default)]
@@ -47,7 +42,7 @@ impl<'a, T> Drop for LocalMutexWaiter<'a, T> {
             // the mutex (e.g. cancelled via select/timeout).
             assert!(self.mutex.waiters.borrow_mut().remove(&self.id).is_some());
 
-            let Some(next_waiter_id) = self.mutex.wait_queue.borrow().front().map(|e| *e) else {
+            let Some(next_waiter_id) = self.mutex.wait_queue.borrow().front().copied() else {
                 return;
             };
 
@@ -125,7 +120,7 @@ impl<T> LocalMutex<T> {
 
     fn wake_next_waiter(&self) {
         self.clear_gone_waiters();
-        let Some(waiter_id) = self.wait_queue.borrow().front().map(|e| *e) else {
+        let Some(waiter_id) = self.wait_queue.borrow().front().copied() else {
             return;
         };
         self.waiters
@@ -138,7 +133,7 @@ impl<T> LocalMutex<T> {
 
     fn clear_gone_waiters(&self) {
         loop {
-            let Some(waiter_id) = self.wait_queue.borrow().front().map(|e| *e) else {
+            let Some(waiter_id) = self.wait_queue.borrow().front().copied() else {
                 return;
             };
             if self.waiters.borrow().contains_key(&waiter_id) {

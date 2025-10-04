@@ -462,6 +462,10 @@ impl ClientConnection {
         self.server_handle
     }
 
+    pub fn wake_server(&self) -> Result<(), moto_rt::ErrorCode> {
+        moto_sys::SysCpu::wake(self.server_handle)
+    }
+
     fn clear(&mut self) {
         let addr = self.raw_channel.load(Ordering::Acquire) as usize;
         SysMem::free(addr as u64).unwrap();
@@ -541,6 +545,28 @@ impl ClientConnection {
         let cqe = slot.msg;
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
         Ok(cqe)
+    }
+
+    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+        use moto_async::AsFuture;
+
+        loop {
+            match self.recv() {
+                Err(moto_rt::E_NOT_READY) => self.server_handle.as_future().await?,
+                x => return x,
+            }
+        }
+    }
+
+    pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
+        use moto_async::AsFuture;
+
+        loop {
+            match self.send(msg) {
+                Err(moto_rt::E_NOT_READY) => self.server_handle.as_future().await?,
+                x => return x,
+            }
+        }
     }
 
     pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
@@ -683,15 +709,6 @@ impl ServerConnection {
         Ok(sqe)
     }
 
-    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
-        core::future::poll_fn(|_cx| match self.recv() {
-            Ok(msg) => core::task::Poll::Ready(Ok(msg)),
-            Err(moto_rt::E_NOT_READY) => core::task::Poll::Pending,
-            Err(err) => core::task::Poll::Ready(Err(err)),
-        })
-        .await
-    }
-
     // See enqueue() in mpmc.cc.
     pub fn send(&self, sqe: Msg) -> Result<(), ErrorCode> {
         if self.status != ServerStatus::Connected {
@@ -732,17 +749,34 @@ impl ServerConnection {
         Ok(())
     }
 
+    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+        use moto_async::AsFuture;
+
+        loop {
+            match self.recv() {
+                Err(moto_rt::E_NOT_READY) => self.wait_handle.as_future().await?,
+                x => return x,
+            }
+        }
+    }
+
     pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
-        core::future::poll_fn(|_cx| match self.send(msg) {
-            Ok(()) => core::task::Poll::Ready(Ok(())),
-            Err(moto_rt::E_NOT_READY) => core::task::Poll::Pending,
-            Err(err) => core::task::Poll::Ready(Err(err)),
-        })
-        .await
+        use moto_async::AsFuture;
+
+        loop {
+            match self.send(msg) {
+                Err(moto_rt::E_NOT_READY) => self.wait_handle.as_future().await?,
+                x => return x,
+            }
+        }
     }
 
     pub fn wait_handle(&self) -> SysHandle {
         self.wait_handle
+    }
+
+    pub fn wake_client(&self) -> Result<(), ErrorCode> {
+        moto_sys::SysCpu::wake(self.wait_handle)
     }
 
     pub fn accept(&mut self) -> Result<(), ErrorCode> {

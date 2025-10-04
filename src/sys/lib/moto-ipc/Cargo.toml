@@ -10,8 +10,9 @@ description = "Motor OS IPC (nostd) crate."
 edition = "2021"
 
 [dependencies]
-moto-rt  = { path = "../moto-rt"  }
-moto-sys = { path = "../moto-sys" }
+moto-async = { path = "../moto-async" }
+moto-rt    = { path = "../moto-rt"    }
+moto-sys   = { path = "../moto-sys"   }
 
 [features]
 stdio-pipe = []
