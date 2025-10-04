@@ -390,12 +390,9 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                 return ResultBuilder::invalid_argument();
             }
 
-            let url = match get_url(thread.owner().as_ref(), args.args[1], args.args[2]) {
-                Ok(url) => url,
-                Err(_) => {
-                    log::debug!("SysHandle::GET: failed to parse URL");
-                    return ResultBuilder::invalid_argument();
-                }
+            let Ok(url) = get_url(thread.owner().as_ref(), args.args[1], args.args[2]) else {
+                log::debug!("SysHandle::GET: failed to parse URL");
+                return ResultBuilder::invalid_argument();
             };
 
             match sys_handle_get(thread, parent, &url) {
@@ -409,7 +406,7 @@ pub(super) fn sys_ctl_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                             url
                         );
                         sys_handle_put(thread, SysHandle::SELF, handle, 0).unwrap();
-                        ResultBuilder::invalid_argument();
+                        return ResultBuilder::invalid_argument();
                     }
                     ResultBuilder::ok_1(handle.as_u64())
                 }
