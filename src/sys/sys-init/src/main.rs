@@ -155,6 +155,8 @@ fn process_service_line(cap_cmd: &str) -> (u64, String) {
 }
 
 fn spawn_service(caps: u64, cmd: &str) {
+    log::info!("Starting service '{cmd}'.");
+
     let Ok(words) = shell_words::split(cmd) else {
         let _ = SysRay::log(format!("sys-init: bad command'{cmd}'").as_str());
         std::process::exit(1);
