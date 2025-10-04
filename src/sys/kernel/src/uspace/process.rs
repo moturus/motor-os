@@ -1987,7 +1987,7 @@ impl Thread {
                         ThreadStatus::Live(LiveThreadStatus::Running) => {
                             *status = ThreadStatus::Killed(ThreadKilledReason::GPF)
                         }
-                        ThreadStatus::Killed(ThreadKilledReason::ProcessKilled) => {}
+                        ThreadStatus::Killed(_) => {}
                         _ => panic!("Unexpected thread status {:?}", *status),
                     }
                 }
