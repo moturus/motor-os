@@ -37,7 +37,7 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
-const RT_VERSION: u64 = 14;
+const RT_VERSION: u64 = 15;
 
 // The entry point.
 #[unsafe(no_mangle)]
@@ -51,29 +51,6 @@ pub extern "C" fn motor_start(version: u64) {
     let vtable = RtVdsoVtable::get();
     let self_addr = motor_start as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
-
-    vtable.log_to_kernel.store(
-        util::logging::log_to_kernel as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
-
-    vtable.log_backtrace.store(
-        util::logging::log_backtrace as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
-
-    vtable.fill_random_bytes.store(
-        fill_random_bytes as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
-    vtable.internal_helper.store(
-        vdso_internal_helper as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
-
-    vtable
-        .num_cpus
-        .store(num_cpus as *const () as usize as u64, Ordering::Relaxed);
 
     // Memory management.
     vtable.alloc.store(
@@ -406,6 +383,34 @@ pub extern "C" fn motor_start(version: u64) {
         rt_poll::wake as *const () as usize as u64,
         Ordering::Relaxed,
     );
+
+    // Misc.
+    vtable.log_to_kernel.store(
+        util::logging::log_to_kernel as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    vtable.log_backtrace.store(
+        util::logging::log_backtrace as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    vtable.fill_random_bytes.store(
+        fill_random_bytes as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.internal_helper.store(
+        vdso_internal_helper as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.current_exe.store(
+        rt_process::current_exe as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
+    vtable
+        .num_cpus
+        .store(num_cpus as *const () as usize as u64, Ordering::Relaxed);
 
     // The final fence.
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);

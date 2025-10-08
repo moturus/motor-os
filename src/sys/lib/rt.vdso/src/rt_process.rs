@@ -1028,3 +1028,27 @@ fn encode_args(args: Vec<String>) -> Result<u64, ErrorCode> {
 
     Ok(result_addr as u64)
 }
+
+pub extern "C" fn current_exe(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCode {
+    // For now, just return args[0].
+    let args: Vec<String> = unsafe {
+        ProcessData::get()
+            .args()
+            .into_iter()
+            .map(|bytes| core::str::from_utf8(bytes).unwrap().to_owned())
+            .collect()
+    };
+
+    if args.is_empty() {
+        return moto_rt::E_NOT_FOUND;
+    }
+
+    let out_bytes = args[0].as_bytes();
+    assert!(out_bytes.len() <= moto_rt::fs::MAX_PATH_LEN);
+    unsafe {
+        core::ptr::copy_nonoverlapping(out_bytes.as_ptr(), out_ptr, out_bytes.len());
+        *out_size = out_bytes.len();
+    }
+
+    moto_rt::E_OK
+}
