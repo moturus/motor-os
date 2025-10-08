@@ -914,10 +914,10 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.0.4"
-source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4#c330db1a93c0f7c94abb919be7e508ab72b820c1"
+source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4_2025-10-07#3a5acfa0c04d9ddf889891566a8088819e3578af"
 dependencies = [
  "libc",
- "moto-rt 0.14.0",
+ "moto-rt 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "wasi",
  "windows-sys 0.60.2",
 ]
@@ -928,7 +928,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
- "moto-rt 0.14.1",
+ "moto-rt 0.15.0",
  "moto-sys",
 ]
 
@@ -937,7 +937,7 @@ name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
  "moto-async",
- "moto-rt 0.14.1",
+ "moto-rt 0.15.0",
  "moto-sys",
 ]
 
@@ -947,25 +947,25 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.14.1",
+ "moto-rt 0.15.0",
  "moto-sys",
 ]
 
 [[package]]
 name = "moto-rt"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14df6749ee6ccf4acd47bfc930932efbca78e49cc5d432b9b355628789a2f81e"
+version = "0.15.0"
 
 [[package]]
 name = "moto-rt"
-version = "0.14.1"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "058a2807a30527bee4c30df7ababe971cdde94372d4dbd1ff145bb403381436c"
 
 [[package]]
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.14.1",
+ "moto-rt 0.15.0",
 ]
 
 [[package]]
@@ -1458,7 +1458,7 @@ dependencies = [
  "hex",
  "log",
  "moto-log",
- "moto-rt 0.14.1",
+ "moto-rt 0.15.0",
  "moto-sys",
  "rand_core",
  "russh",
@@ -1723,13 +1723,13 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "1.47.1"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-09-25#f2abb01c7c4172ad608fa851010b6468b73b63fd"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-10-07#7c1430fe90156d88e8750b0e2e4a6e2f77f80e1e"
 dependencies = [
  "backtrace",
  "bytes",
  "libc",
  "mio",
- "moto-rt 0.14.0",
+ "moto-rt 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -1740,7 +1740,7 @@ dependencies = [
 [[package]]
 name = "tokio-macros"
 version = "2.5.0"
-source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-09-25#f2abb01c7c4172ad608fa851010b6468b73b63fd"
+source = "git+https://github.com/moturus/tokio.git?branch=tokio-motor-1.47.1_2025-10-07#7c1430fe90156d88e8750b0e2e4a6e2f77f80e1e"
 dependencies = [
  "proc-macro2",
  "quote",

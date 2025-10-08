@@ -19,8 +19,8 @@ tokio = { version = "1.47.1", features = ["net", "rt", "rt-multi-thread", "macro
 
 [patch.crates-io]
 ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os_2025-09-20" }
-mio   = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4" }
-tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1" }
+mio   = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }
+tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
 
 [profile.release]
 panic = "abort"
