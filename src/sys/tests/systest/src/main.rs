@@ -412,6 +412,16 @@ fn main() {
 
     println!("Systest starting...");
 
+    assert!(!args.is_empty());
+    assert_eq!(
+        args[0],
+        std::env::current_exe()
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap()
+    );
+
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
     moto_async::run_all_tests();
