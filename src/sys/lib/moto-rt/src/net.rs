@@ -1,9 +1,8 @@
 use super::netc;
-use crate::ok_or_error;
-use crate::to_result;
 use crate::ErrorCode;
 use crate::RtFd;
 use crate::RtVdsoVtable;
+use crate::ok_or_error;
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 

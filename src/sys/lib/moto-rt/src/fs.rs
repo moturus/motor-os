@@ -8,11 +8,9 @@
 //! expose a flavor of POSIXy FS API, so we don't try to be too
 //! different here and expose a POSIXy FS API.
 
-use crate::error::*;
-use crate::ok_or_error;
-use crate::to_result;
 use crate::RtFd;
 use crate::RtVdsoVtable;
+use crate::error::*;
 use core::sync::atomic::Ordering;
 
 #[cfg(not(feature = "rustc-dep-of-std"))]

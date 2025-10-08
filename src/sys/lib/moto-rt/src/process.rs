@@ -445,3 +445,20 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
 
     (result_addr as u64, Some(layout))
 }
+
+pub fn current_exe() -> Result<alloc::string::String, crate::ErrorCode> {
+    let vdso_current_exe: extern "C" fn(*mut u8, *mut usize) -> crate::ErrorCode = unsafe {
+        core::mem::transmute(
+            RtVdsoVtable::get().current_exe.load(Ordering::Relaxed) as usize as *const (),
+        )
+    };
+
+    let mut bytes = [0_u8; crate::fs::MAX_PATH_LEN];
+    let mut len = 0_usize;
+
+    use alloc::borrow::ToOwned;
+    match vdso_current_exe(bytes.as_mut_ptr(), &mut len) {
+        crate::E_OK => Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned()),
+        err => Err(err),
+    }
+}

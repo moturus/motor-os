@@ -107,7 +107,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-pub const RT_VERSION: u64 = 14;
+pub const RT_VERSION: u64 = 15;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support
@@ -127,13 +127,6 @@ pub struct RtVdsoVtable {
     // The size of vdso bytes (the address is fixed at RT_VDSO_BYTES_ADDR).
     // Initialized by the loader/parent.
     pub vdso_bytes_sz: AtomicU64,
-
-    // Some utilities.
-    pub log_to_kernel: AtomicU64,
-    pub log_backtrace: AtomicU64,
-    pub fill_random_bytes: AtomicU64,
-    pub num_cpus: AtomicU64,
-    pub internal_helper: AtomicU64,
 
     // Memory management.
     pub alloc: AtomicU64,
@@ -234,6 +227,14 @@ pub struct RtVdsoVtable {
     pub poll_del: AtomicU64,
     pub poll_wait: AtomicU64,
     pub poll_wake: AtomicU64,
+
+    // Some utilities.
+    pub log_to_kernel: AtomicU64,
+    pub log_backtrace: AtomicU64,
+    pub fill_random_bytes: AtomicU64,
+    pub num_cpus: AtomicU64,
+    pub internal_helper: AtomicU64,
+    pub current_exe: AtomicU64,
 }
 
 #[cfg(not(feature = "base"))]
