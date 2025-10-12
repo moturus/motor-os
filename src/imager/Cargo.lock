@@ -356,6 +356,7 @@ name = "motor-fs"
 version = "0.1.0"
 dependencies = [
  "async-fs",
+ "async-trait",
  "crc",
  "log",
  "micromap",

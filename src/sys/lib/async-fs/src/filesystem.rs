@@ -1,3 +1,5 @@
+use async_trait::async_trait;
+
 #[cfg(feature = "std")]
 pub type Result<T> = std::io::Result<T>;
 
@@ -137,6 +139,7 @@ impl Metadata {
 }
 
 /// Filesystem trait.
+#[async_trait(?Send)]
 pub trait FileSystem {
     /// Find a file or directory by its full path.
     async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>>;

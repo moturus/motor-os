@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [dependencies]
+async-trait = "0.1.88"
 crc = "3.0"
 log = "0.4.20"
 plain = "0.2.3"

@@ -35,6 +35,7 @@
 use async_fs::block_cache::BlockCache;
 use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
 use async_fs::{EntryId, EntryKind};
+use async_trait::async_trait;
 use std::io::ErrorKind;
 use std::io::Result;
 
@@ -80,6 +81,7 @@ impl MotorFs {
     }
 }
 
+#[async_trait(?Send)]
 impl FileSystem for MotorFs {
     async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>> {
         // Note: parent is required here, so "/" is always invalid.

@@ -12,6 +12,7 @@ use std::{
 use moto_ipc::io_channel;
 use moto_sys::SysHandle;
 
+mod fs;
 pub mod internal_queue;
 pub mod io_stats;
 mod io_thread;
