@@ -3,7 +3,10 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
-    sync::atomic::AtomicU64,
+    sync::{
+        atomic::{AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use moto_ipc::io_channel;
@@ -160,23 +163,33 @@ static RUNTIME_QUEUE: std::sync::Mutex<VecDeque<RuntimeMsg>> =
     std::sync::Mutex::new(VecDeque::new());
 static RUNTIME_IPC_HANDLE: AtomicU64 = AtomicU64::new(0);
 
+const RUNTIME_STARTING: u32 = 0;
+const RUNTIME_STARTED: u32 = 1;
+
 /// Spawn the async runtime.
 pub fn spawn_async() {
     let (handle_here, handle_there) =
         moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
     RUNTIME_IPC_HANDLE.store(handle_here.as_u64(), std::sync::atomic::Ordering::Release);
 
+    let started_futex = Arc::new(AtomicU32::new(RUNTIME_STARTING));
+    let started_futex_clone = started_futex.clone();
+
     let _runtime_thread = std::thread::Builder::new()
         .name("sys-io:runtime".to_owned())
         .spawn(move || {
+            // I/O IRQs are affined to CPU 0.
             moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
             moto_async::LocalRuntime::new().block_on(async move {
-                async_runtime(handle_there).await;
+                async_runtime(handle_there, started_futex_clone).await;
             });
         });
+
+    use std::ops::Deref;
+    let _ = moto_rt::futex_wait(started_futex.deref(), RUNTIME_STARTING, None);
 }
 
-async fn async_runtime(q_handle: SysHandle) {
+async fn async_runtime(q_handle: SysHandle, started_futex: Arc<AtomicU32>) {
     log::debug!("async runtime starting");
     let queue_joiner = moto_async::LocalRuntime::spawn(global_queue_listener(q_handle));
 
@@ -203,7 +216,7 @@ async fn async_runtime(q_handle: SysHandle) {
     };
 
     let bd = block_device.clone();
-    let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd));
+    let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd, started_futex));
 
     queue_joiner.await; // Never actually returns.
     unreachable!()
@@ -222,10 +235,15 @@ async fn global_queue_listener(queue_handle: SysHandle) {
     }
 }
 
-async fn block_device_listener(bd: Rc<moto_async::LocalMutex<virtio_async::BlockDevice>>) {
+async fn block_device_listener(
+    bd: Rc<moto_async::LocalMutex<virtio_async::BlockDevice>>,
+    started_futex: Arc<AtomicU32>,
+) {
     use moto_async::AsFuture;
 
     let wait_handle = bd.lock().await.wait_handle();
+    started_futex.store(RUNTIME_STARTED, Ordering::Release);
+    let _ = moto_rt::futex_wake(std::ops::Deref::deref(&started_futex));
     loop {
         wait_handle.as_future().await.unwrap();
         todo!("Block device interrupt!")

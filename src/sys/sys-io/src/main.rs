@@ -51,7 +51,9 @@ pub extern "C" fn motor_runtime_start() {
         log::error!("{info}");
         moto_sys::SysCpu::exit(0xbadc0de)
     }));
+}
 
+fn main() {
     runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
 
     // This block is for development/testing only, until ready.
@@ -59,21 +61,13 @@ pub extern "C" fn motor_runtime_start() {
     #[cfg(debug_assertions)]
     {
         runtime::spawn_async();
-        std::thread::sleep(std::time::Duration::from_millis(100));
 
         panic!("let's not go there");
     }
     */
 
     virtio::init();
-    // We need to initialize FS before Rust runtime is initialized (Rust runtime != sys-io runtime).
     fs::init();
-}
-
-fn main() {
-    // #[cfg(debug_assertions)]
-    // async_runtime::start();
-
     runtime::start();
 
     let mut cmd = std::process::Command::new("/sys/sys-init");
