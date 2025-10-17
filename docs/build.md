@@ -42,7 +42,7 @@ See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
 
 Motor OS is a [Tier-3 target in Rust](https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html),
 which means it has to be compiled locally, as Rust does not provide
-pre-built toolchain for Tier-3 targets.
+pre-built toolchains for Tier-3 targets.
 
 Check out Rust sources:
 
@@ -52,9 +52,13 @@ $ git clone https://github.com/rust-lang/rust.git
 $ cd rust
 ```
 
-Create `bootstrap.toml` file $MOTORH/rust:
+Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
 
 ```
+# bootstrap.toml
+#
+# Place it in the root of rust-lang/rust repo.
+
 change-id = 146458
 
 profile = "library"
