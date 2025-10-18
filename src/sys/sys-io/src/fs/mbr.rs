@@ -81,11 +81,12 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
 }
 
 impl Mbr {
-    pub fn parse(bytes: &[u8]) -> Result<Mbr, &str> {
+    pub fn parse(bytes: &[u8]) -> std::io::Result<Mbr> {
         assert_eq!(bytes.len(), MBR_SIZE);
 
         if bytes[MBR_SIZE - MBR_SUFFIX.len()..MBR_SIZE] != MBR_SUFFIX[..] {
-            return Err("MBR suffix wrong.");
+            log::error!("MBR suffix wrong.");
+            return Err(std::io::ErrorKind::InvalidData.into());
         }
         let mut entries = [PartitionTableEntry::empty(); MAX_ENTRIES];
         #[allow(clippy::needless_range_loop)]

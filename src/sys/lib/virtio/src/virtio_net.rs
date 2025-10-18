@@ -22,6 +22,7 @@ struct VirtioNetConfig {
     mtu: le16,
 }
 
+// struct virtio_net_hdr in VirtIO spec.
 #[repr(C, packed)]
 #[derive(Debug, Default, Copy, Clone)]
 pub struct Header {
@@ -201,8 +202,11 @@ impl NetDev {
         log::debug!("NET features available: 0x{features_available:x}");
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
-            log::warn!("Virtio NET device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
-                self.dev.pci_device.id, features_available);
+            log::warn!(
+                "Virtio NET device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
+                self.dev.pci_device.id,
+                features_available
+            );
             return Err(());
         }
 

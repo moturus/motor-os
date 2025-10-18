@@ -1,10 +1,23 @@
-// VirtIO Queue.
-
-use crate::virtio_device::mapper;
-
+//! VirtIO Queue.
+//!
+//! Note: the VirtIO spec explicitly states that requests from the available queue
+//! may be processed in any order, and thus used request IDs can also appear in any
+//! order. It thus _may_ seem important to keep track of out-of-order used idxes
+//! coming in. But this will not help with throughput, only with latency under
+//! high load scenarios; and as such tracking complicates the code and adds CPU
+//! usage, it is not even clear that latency will be materially improved, so
+//! out virtqueues below only track next_available and last_used.
 use super::virtio_device::VirtioDevice;
-
 use super::{le16, le32, le64};
+use crate::pci::PciBar;
+use crate::virtio_device::mapper;
+use moto_async::AsFuture;
+use moto_sys::SysHandle;
+use std::cell::RefCell;
+use std::io::{ErrorKind, Result};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use zerocopy::FromZeros;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -19,8 +32,8 @@ struct VirtqDesc {
 
 // Updated by the driver (here, in this file).
 struct VirtqAvail {
-    _flags: &'static mut le16, // Ignored/never used.
-    idx: *mut le16,
+    _flags: &'static mut le16,     // Ignored/never used.
+    next_available_idx: *mut le16, // "idx" in VirtIO spec.
     ring: &'static mut [le16],
     used_event: *mut le16,
 }
@@ -45,7 +58,7 @@ impl VirtqAvail {
         unsafe {
             VirtqAvail {
                 _flags: &mut *(flags_addr as *mut le16),
-                idx: idx_addr as *mut le16,
+                next_available_idx: idx_addr as *mut le16,
                 ring,
                 used_event: used_event_addr as *mut le16,
             }
@@ -93,20 +106,95 @@ impl VirtqUsed {
     }
 }
 
+#[derive(FromZeros)]
+#[repr(C, align(8))]
+struct HeaderBuffer {
+    header: [u64; 2],
+    consumed: u32, // From the descriptor.
+    in_use_by_device: u8,
+    in_use_by_completion: u8,
+    _reserved: [u8; 2],
+}
+
+static _A: () = assert!(core::mem::size_of::<HeaderBuffer>() == 24);
+
+pub struct Completion<'a> {
+    chain_head: u16,
+    virtqueue: Rc<RefCell<Virtqueue>>,
+    _phantom_data: PhantomData<&'a ()>,
+}
+
+impl<'a> Future for Completion<'a> {
+    // Return consumed len/bytes in u32; the status in u8.
+    type Output = (u32, u8);
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        //        log::info!("poll");
+        loop {
+            let mut virtq = self.virtqueue.borrow_mut();
+            if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
+                // log::info!("ready! {}", self.chain_head);
+                return std::task::Poll::Ready(virtq.get_result(self.chain_head));
+            }
+
+            if let Some(_chain_head) = virtq.reclaim_used() {
+                // log::info!("got {_chain_head}");
+                continue;
+            }
+
+            let mut pinned = Box::pin(virtq.wait_handle.as_future());
+            core::mem::drop(virtq);
+
+            match pinned.as_mut().poll(cx) {
+                std::task::Poll::Ready(_) => continue,
+                std::task::Poll::Pending => {
+                    // log::info!("will notify: {}", self.chain_head);
+                    self.virtqueue.borrow().notify();
+                    return std::task::Poll::Pending;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Completion<'_> {
+    fn drop(&mut self) {
+        todo!("\n\n fix this \n\n");
+    }
+}
+
 pub(super) struct Virtqueue {
     pub virt_addr: u64,
     pub queue_size: u16,
     pub queue_num: u16,
-    pub queue_notify_off: u16,
+    pub queue_notify_off: u16, // This is the cfg value.
 
     descriptors: &'static mut [VirtqDesc],
     available_ring: VirtqAvail,
     used_ring: VirtqUsed,
 
     free_head_idx: u16,
-    last_used_idx: u16,
+    next_used_idx: u16,
 
-    wait_handles: Vec<crate::WaitHandle>,
+    wait_handle: SysHandle,
+
+    // Most (all?) requests placed into virtqueues have descriptors pointing to
+    // a header and a status. These are internal to VirtIO machinery; as our virtqueues
+    // operate asynchronously, these buffers (the header and the status) cannot live
+    // on stack; so we either need to allocate/deallocate them on each request, ask
+    // the user to provide the memory to us with each request, or pre-allocate them
+    // here. We preallocate them here.
+    header_buffers: &'static mut [HeaderBuffer],
+    header_buffers_phys_addr: u64,
+
+    // These are actual parameters to use in `fn notify()`.
+    notify_bar: *const PciBar,
+    notify_offset: u64,
+
+    queue_size_mask: u16, // queue_size - 1
 }
 
 impl Virtqueue {
@@ -114,15 +202,18 @@ impl Virtqueue {
         dev: &VirtioDevice,
         queue_num: u16,
         queue_size: u16,
-    ) -> Result<Self, ()> {
+    ) -> Result<Rc<RefCell<Self>>> {
         assert!(queue_size > 0);
+        // We don't do wrapping_add(), we `& queue_size_mask`.
+        assert!(queue_size < u16::MAX);
+
         if !queue_size.is_power_of_two() {
             log::error!(
                 "VirtQueue size for device {:?} is not a power of two: 0x{:x}",
                 dev.pci_device.id,
                 queue_size
             );
-            return Err(());
+            return Err(ErrorKind::InvalidInput.into());
         }
 
         // VirtIO 1.1 spec says that both split and packed virtqueues have at most 2^15 items.
@@ -132,7 +223,7 @@ impl Virtqueue {
                 dev.pci_device.id,
                 queue_size
             );
-            return Err(());
+            return Err(ErrorKind::InvalidInput.into());
         }
 
         let queue_sz = queue_size as u64;
@@ -151,12 +242,23 @@ impl Virtqueue {
         for idx in 0..(queue_size - 1) {
             descriptors[idx as usize].next = idx + 1;
         }
-        descriptors[queue_size as usize - 1].next = 0;
+        // descriptors[queue_size as usize - 1].next = 0;
 
         let available_ring = VirtqAvail::from_addr(virt_addr, queue_size);
         let used_ring = VirtqUsed::from_addr(virt_addr, queue_size);
 
-        Ok(Virtqueue {
+        let header_buffers_vaddr = super::mapper()
+            .alloc_contiguous_pages((core::mem::size_of::<HeaderBuffer>() as u64) * queue_sz)?;
+        let header_buffers = unsafe {
+            core::slice::from_raw_parts_mut(
+                header_buffers_vaddr as *mut HeaderBuffer,
+                queue_size as usize,
+            )
+        };
+
+        let header_buffers_phys_addr = super::mapper().virt_to_phys(header_buffers_vaddr)?;
+
+        Ok(Rc::new(RefCell::new(Virtqueue {
             virt_addr,
             queue_size,
             queue_num,
@@ -165,85 +267,149 @@ impl Virtqueue {
             available_ring,
             used_ring,
             free_head_idx: 0,
-            last_used_idx: 0,
-            wait_handles: vec![],
-        })
+            next_used_idx: 0,
+            wait_handle: SysHandle::NONE,
+            header_buffers,
+            header_buffers_phys_addr,
+            notify_bar: core::ptr::null(),
+            notify_offset: 0,
+            queue_size_mask: queue_size - 1,
+        })))
     }
 
-    pub fn add_wait_handle(&mut self, handle: crate::WaitHandle) {
-        self.wait_handles.push(handle);
+    pub fn queue_size(&self) -> u16 {
+        self.queue_size
     }
 
-    pub fn wait_deprecated(&self) -> Result<(), ()> {
-        if self.more_used_deprecated() {
-            return Ok(());
+    pub fn set_wait_handle(&mut self, handle: SysHandle) {
+        self.wait_handle = handle;
+    }
+
+    fn notify(&self) {
+        // Safety: safe by construction.
+        unsafe { (*self.notify_bar).write_u16(self.notify_offset, 0) };
+    }
+
+    pub fn set_notify_params(&mut self, notify_bar: *const PciBar, notify_offset: u64) {
+        self.notify_bar = notify_bar;
+        self.notify_offset = notify_offset;
+    }
+
+    pub fn wait_handle(&self) -> SysHandle {
+        self.wait_handle
+    }
+
+    fn update_and_increment_available_idx(&mut self, head: u16) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            let idx = *self.available_ring.next_available_idx;
+            ((&mut self.available_ring.ring[idx as usize]) as *mut u16).write_volatile(head);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            self.available_ring
+                .next_available_idx
+                .write_volatile((idx + 1) & self.queue_size_mask);
         }
-        if self.wait_handles.is_empty() {
-            return Err(()); // Nothing to wait on.
-        }
-        if self.wait_handles.len() > 2 {
-            log::warn!("too many wait handles: {}", self.wait_handles.len());
-        }
-        assert!(self.wait_handles.len() <= 2);
-        let mut handles = [0_u64; 2];
-
-        handles[..self.wait_handles.len()].copy_from_slice(&self.wait_handles);
-        todo!("wait")
-        // mapper().wait(&mut handles)
-    }
-
-    pub fn wait_handles(&self) -> &[crate::WaitHandle] {
-        &self.wait_handles
-    }
-
-    /*
-    fn _update_available(&mut self, head: u16) -> u16 {
-        let idx = *self.available_ring.idx % self.queue_size;
-        self.available_ring.ring[idx as usize] = head;
-        idx
-    }
-
-    fn _increment_available_idx(&mut self, cnt: u16) {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        let val = (*self.available_ring.idx).wrapping_add(cnt);
-        *self.available_ring.idx = val;
-
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
-    */
 
-    fn update_and_increment_available_idx(&mut self, head: u16) -> u16 {
-        unsafe {
-            let idx = *self.available_ring.idx;
-            let true_idx = idx % self.queue_size;
-            ((&mut self.available_ring.ring[true_idx as usize]) as *mut u16).write_volatile(head);
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            let next_idx = idx.wrapping_add(1);
-            self.available_ring.idx.write_volatile(next_idx);
+    pub fn alloc_descriptor_chain(&mut self, chain_len: u16) -> Option<u16> {
+        let chain_start = self.free_head_idx;
 
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        let mut curr = chain_start;
+        for idx in 0..chain_len {
+            if curr == self.queue_size {
+                break;
+            }
 
-            true_idx
+            let header_buffer = &mut self.header_buffers[curr as usize];
+            debug_assert_eq!(0, header_buffer.in_use_by_device);
+            debug_assert_eq!(0, header_buffer.in_use_by_completion);
+            header_buffer.in_use_by_device = 1;
+
+            let descriptor = self.get_descriptor_mut(curr);
+
+            if idx == (chain_len - 1) {
+                descriptor.flags = 0; // Clear VIRTQ_DESC_F_NEXT, if any.
+                self.free_head_idx = descriptor.next;
+                return Some(chain_start);
+            }
+            descriptor.flags = VIRTQ_DESC_F_NEXT;
+
+            curr = descriptor.next;
+        }
+
+        // Allocation failed: clear "in_use".
+        curr = chain_start;
+        while curr != self.queue_size {
+            self.header_buffers[curr as usize].in_use_by_device = 0;
+            curr = self.get_descriptor_mut(curr).next;
+        }
+
+        return None;
+    }
+
+    pub fn free_descriptor_chain(&mut self, first_idx: u16) {
+        let mut curr = first_idx;
+        let free_head_idx = self.free_head_idx;
+        loop {
+            debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_device);
+            debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_completion);
+
+            let descriptor = self.get_descriptor_mut(curr);
+            if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
+                curr = descriptor.next;
+                continue;
+            }
+
+            descriptor.next = free_head_idx;
+            self.free_head_idx = first_idx;
+            break;
         }
     }
 
-    fn get_descriptor(&mut self, idx: u16) -> &mut VirtqDesc {
+    /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
+    pub fn get_buffer<T>(&mut self, idx: u16) -> (&'static mut T, u16) {
+        assert!(idx < self.queue_size);
+        assert!(core::mem::size_of::<T>() <= 16);
+        let next = self.get_descriptor_mut(idx).next;
+        // Safety: checked above that the inded and the size are Ok.
+        unsafe {
+            let addr = (&mut self.header_buffers[idx as usize].header) as *mut _ as usize;
+            ((addr as *mut T).as_mut().unwrap(), next)
+        }
+    }
+
+    fn get_descriptor_mut(&mut self, idx: u16) -> &mut VirtqDesc {
         assert!(idx < self.queue_size);
 
         &mut self.descriptors[idx as usize]
     }
 
-    pub fn add_buf(&mut self, data: &[UserData], outgoing: u16, incoming: u16) -> u16 {
+    fn get_descriptor(&self, idx: u16) -> &VirtqDesc {
+        assert!(idx < self.queue_size);
+
+        &self.descriptors[idx as usize]
+    }
+
+    pub fn add_buffs<'a>(
+        this: Rc<RefCell<Self>>,
+        data: &[UserData],
+        outgoing: u16,
+        incoming: u16,
+        chain_head: u16,
+    ) -> Completion<'a> {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
-        let mut idx = self.free_head_idx;
-        let req_id = idx;
+        let mut curr = chain_head;
+        let mut this_mut = this.borrow_mut();
 
         let elements = outgoing + incoming;
-
         for el_idx in 0..elements {
-            let descriptor = self.get_descriptor(idx);
+            debug_assert_eq!(1, this_mut.header_buffers[curr as usize].in_use_by_device);
+            this_mut.header_buffers[curr as usize].in_use_by_completion = 1;
+
+            let descriptor = this_mut.get_descriptor_mut(curr);
             let el = data.get(el_idx as usize).unwrap();
             descriptor.addr = super::mapper().virt_to_phys(el.addr).unwrap();
             descriptor.len = el.len;
@@ -257,158 +423,70 @@ impl Virtqueue {
             }
             descriptor.flags = flags;
 
-            idx = descriptor.next;
+            curr = descriptor.next;
         }
 
-        self.update_and_increment_available_idx(self.free_head_idx);
-        self.free_head_idx = idx;
+        log::info!("submitted {chain_head}");
+        this_mut.update_and_increment_available_idx(chain_head);
+        // this_mut.notify();
+        core::mem::drop(this_mut);
 
-        req_id
+        Completion {
+            chain_head,
+            virtqueue: this,
+            _phantom_data: PhantomData,
+        }
     }
 
-    // Returns true if the host should be notified of the event.
-    pub fn add_rx_buf(&mut self, phys_addr: u64, len: u32, descriptor_idx: u16) -> bool {
-        let descriptor = self.get_descriptor(descriptor_idx);
-        descriptor.addr = phys_addr;
-        descriptor.len = len;
-        descriptor.flags = VIRTQ_DESC_F_WRITE;
-        let updated_idx = self.update_and_increment_available_idx(descriptor_idx);
-
-        let avail_event = unsafe { self.used_ring.avail_event.read_volatile() } % self.queue_size;
-        updated_idx <= avail_event || avail_event == 0
-    }
-
-    // Returns true if the host should be notified of the event.
-    pub fn add_tx_buf(&mut self, phys_addr: u64, descriptor_idx: u16, len: u32) -> bool {
-        let descriptor_idx = descriptor_idx << 1;
-
-        // Net header.
-        let descriptor = self.get_descriptor(descriptor_idx);
-        descriptor.addr = phys_addr;
-        descriptor.len = super::virtio_net::NET_HEADER_LEN as u32;
-        descriptor.flags = VIRTQ_DESC_F_NEXT;
-
-        // Net bytes.
-        let descriptor = self.get_descriptor(descriptor_idx + 1);
-        descriptor.addr = phys_addr + (super::virtio_net::NET_HEADER_LEN as u64);
-        descriptor.len = len;
-        descriptor.flags = 0;
-
-        let updated_idx = self.update_and_increment_available_idx(descriptor_idx);
-
-        let avail_event = unsafe { self.used_ring.avail_event.read_volatile() } % self.queue_size;
-        updated_idx <= avail_event || avail_event == 0
-    }
-
-    pub fn get_completed_rx_buf(&mut self) -> Option<(u16, u32)> {
-        if self.last_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
+    pub fn reclaim_used(&mut self) -> Option<u16> {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        if self.next_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
         }
 
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
+        //      log::info!("reclaim: got smth");
 
-        let head = self.last_used_idx % self.queue_size;
+        let head = self.next_used_idx;
         let elem = &self.used_ring.ring[head as usize];
 
-        let idx = elem.id as u16;
-        let consumed = elem.len;
+        let chain_head = elem.id as u16;
+        self.header_buffers[chain_head as usize].consumed = elem.len;
 
-        let val = self.last_used_idx.wrapping_add(1);
-        self.last_used_idx = val;
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        unsafe { self.available_ring.used_event.write_volatile(val) };
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-
-        Some((idx, consumed))
-    }
-
-    pub fn get_completed_tx_buf(&mut self) -> Option<u16> {
-        if self.last_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
-            return None;
-        }
-
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-
-        let head = self.last_used_idx % self.queue_size;
-        let elem = &self.used_ring.ring[head as usize];
-
-        let idx = elem.id as u16;
-        assert_eq!(0, idx & 1);
-
-        let val = self.last_used_idx.wrapping_add(1);
-        self.last_used_idx = val;
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        unsafe { self.available_ring.used_event.write_volatile(val) };
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-
-        Some(idx >> 1)
-    }
-
-    pub fn more_used_deprecated(&self) -> bool {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        self.last_used_idx != unsafe { self.used_ring.idx.read_volatile() }
-    }
-
-    pub fn reclaim_used_deprecated(&mut self) -> Option<u16> {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        if self.last_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
-            return None;
-        }
-
-        let head = self.last_used_idx % self.queue_size;
-        let elem = &self.used_ring.ring[head as usize];
-
-        let mut idx = elem.id as u16;
-        let req_id = idx;
+        let mut curr = chain_head;
         loop {
-            let descriptor = self.get_descriptor(idx);
+            self.header_buffers[curr as usize].in_use_by_device = 0;
+
+            let descriptor = self.get_descriptor_mut(curr);
             if (descriptor.flags & VIRTQ_DESC_F_NEXT) != 0 {
-                idx = descriptor.next;
+                curr = descriptor.next;
             } else {
-                assert!(descriptor.next == self.free_head_idx);
-                self.free_head_idx = idx;
                 break;
             }
         }
 
-        let val = self.last_used_idx.wrapping_add(1);
-        self.last_used_idx = val;
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-        Some(req_id)
+        self.next_used_idx = (self.next_used_idx + 1) & self.queue_size_mask;
+        // log::info!("reclaim done: {chain_head}!");
+        Some(chain_head)
     }
 
-    pub fn consume_used_deprecated(&mut self) -> u32 {
-        if !self.more_used_deprecated() {
-            return 0;
-        }
+    fn get_result(&self, chain_head: u16) -> (u32, u8) {
+        let consumed = self.header_buffers[chain_head as usize].consumed;
 
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        let head = self.last_used_idx % self.queue_size;
-        let elem = &self.used_ring.ring[head as usize];
-
-        let mut idx = elem.id as u16;
-        let consumed = elem.len;
-
+        let mut curr = chain_head;
         loop {
-            let descriptor = self.get_descriptor(idx);
-            if (descriptor.flags & VIRTQ_DESC_F_NEXT) != 0 {
-                // TODO: fix below.
-                #[allow(unused_assignments)]
-                {
-                    idx = descriptor.next;
-                }
-            } else {
-                assert!(descriptor.next == self.free_head_idx);
-                self.free_head_idx = idx;
-                break;
+            let header_buffer = &self.header_buffers[curr as usize];
+            debug_assert_eq!(0, header_buffer.in_use_by_device);
+            debug_assert_eq!(1, header_buffer.in_use_by_completion);
+
+            let descriptor = self.get_descriptor(curr);
+            if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
+                curr = descriptor.next;
+                continue;
             }
+
+            // This is the last descriptor, with status.
+            return (consumed, header_buffer.header[0] as u8);
         }
-
-        let val = self.last_used_idx.wrapping_add(1);
-        self.last_used_idx = val;
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-
-        consumed
     }
 }
 

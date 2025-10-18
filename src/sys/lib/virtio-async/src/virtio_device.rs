@@ -1,8 +1,9 @@
 // VirtIO Devices.
 
 use core::sync::atomic::*;
-
-use crate::virtio_blk::BlockDevice;
+use std::cell::RefCell;
+use std::io::ErrorKind;
+use std::rc::Rc;
 
 use super::pci;
 use super::pci::PciBar;
@@ -12,7 +13,9 @@ use super::pci::le16;
 use super::pci::le32;
 use super::pci::le64;
 use super::virtio_queue::Virtqueue;
+use crate::virtio_blk::BlockDevice;
 use core::mem::offset_of;
+use std::io::Result;
 
 #[derive(Debug)]
 pub enum VirtioDeviceKind {
@@ -142,7 +145,7 @@ pub(super) struct VirtioDevice {
 
     // Each virtqueue is protected by a mutex so that the guest does not
     // access them concurrently.
-    pub(super) virtqueues: Vec<Virtqueue>,
+    pub(super) virtqueues: Vec<Rc<RefCell<Virtqueue>>>,
 }
 
 impl VirtioDevice {
@@ -157,14 +160,14 @@ impl VirtioDevice {
     //   step 6 re-read dev status to ensure FEATURES_OK
     //   step 7 generic init of virtqueues
     //   step 8 confirm drive ok
-    fn parse(device_id: PciDeviceID) -> Result<Box<Self>, ()> {
+    fn parse(device_id: PciDeviceID) -> Result<Box<Self>> {
         // Step 0: init.
         if device_id.vendor_id() != 0x1af4 {
             log::debug!(
                 "Skipping non-VirtIO device_id with vendor 0x{:x}",
                 device_id.vendor_id()
             );
-            return Err(());
+            return Err(ErrorKind::Unsupported.into());
         }
 
         if device_id.header_type() & 0x7F != 0 {
@@ -172,27 +175,27 @@ impl VirtioDevice {
                 "Skipping VirtIO device_id with wrong header type {}",
                 device_id.header_type()
             );
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
 
         let kind = VirtioDeviceKind::from_device_id(device_id.device_id());
         if let VirtioDeviceKind::Unknown(x) = kind {
             log::warn!("Skipping VirtIO device_id with unknown device_id id 0x{x:x}");
-            return Err(());
+            return Err(ErrorKind::Unsupported.into());
         }
 
         let reg_1 = device_id.read_config_u32(0x04);
         let status = ((reg_1 >> 16) & 0xFFFF) as u16;
         if status & pci::PCI_STATUS_CAP_LIST == 0 {
             log::warn!("VirtIO device_id {device_id:?}: wrong status: {status:x}");
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
 
         let reg_2 = device_id.read_config_u32(0x08);
         let revision_id = (reg_2 & 0xff) as u8;
         if revision_id == 0 {
             log::warn!("VirtIO device_id {device_id:?}: legacy device_id (revision_id)");
-            return Err(());
+            return Err(ErrorKind::Unsupported.into());
         }
 
         let caps = device_id.find_capabilities(pci::PCI_CAP_VENDOR);
@@ -212,7 +215,7 @@ impl VirtioDevice {
 
         if common_cap.is_none() {
             log::warn!("VirtIO device_id {device_id:?}: VirtioPciCommonCfg not found.");
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
 
         let common_cfg = common_cap.unwrap();
@@ -221,7 +224,7 @@ impl VirtioDevice {
         let min_len = core::mem::size_of::<VirtioPciCommonCfgLayout>();
         if (common_cfg.length as usize) < min_len {
             log::warn!("VirtIO device_id {device_id:?}: VirtioPciCommonCfg: bad length.");
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
 
         let mut pci_device = PciDevice::new(device_id);
@@ -481,7 +484,7 @@ impl VirtioDevice {
     }
 
     // Steps 5 and 6
-    pub(super) fn confirm_features(&self) -> Result<(), ()> {
+    pub(super) fn confirm_features(&self) -> Result<()> {
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
@@ -496,7 +499,7 @@ impl VirtioDevice {
                 self.pci_device.id,
                 status
             );
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
         status |= FEATURES_OK_STATUS_BIT;
 
@@ -510,7 +513,7 @@ impl VirtioDevice {
                 self.pci_device.id,
                 status_back
             );
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
 
         Ok(())
@@ -521,7 +524,7 @@ impl VirtioDevice {
         cfg_bar: &PciBar,
         bar_offset: u64,
         virtqueue: &mut Virtqueue,
-    ) -> Result<(), ()> {
+    ) -> Result<()> {
         if self.msix.is_none() {
             return Ok(());
         }
@@ -534,7 +537,7 @@ impl VirtioDevice {
             // TODO: do we ever need to share IRQs between virtqueues?
             moto_sys::SysRay::log("Having more virtqueues than MSIX vectors is not supported.")
                 .ok();
-            return Err(());
+            return Err(ErrorKind::Unsupported.into());
         }
 
         let irq_idx = virtqueue.queue_num;
@@ -544,7 +547,7 @@ impl VirtioDevice {
         const APIC_BASE: u64 = 0xfee00000_u64;
 
         let (wait_handle, irq_num) = mapper().create_irq_wait_handle()?;
-        virtqueue.add_wait_handle(wait_handle);
+        virtqueue.set_wait_handle(wait_handle);
 
         let apic_id = 0_u64; // CPU: in motor os, most IRQs are affined to CPU 0.
         let msi_msg_addr = APIC_BASE & 0xFFF00000_u64 | (apic_id << 12);
@@ -567,7 +570,7 @@ impl VirtioDevice {
                 self.pci_device.id,
                 virtqueue.queue_num
             );
-            return Err(());
+            return Err(ErrorKind::InvalidData.into());
         }
 
         Ok(())
@@ -611,7 +614,7 @@ impl VirtioDevice {
         &mut self,
         min_virtqueues: u16,
         max_virtqueues: u16,
-    ) -> Result<(), ()> {
+    ) -> Result<()> {
         assert!(max_virtqueues <= 64);
         assert!(min_virtqueues <= max_virtqueues);
 
@@ -625,7 +628,7 @@ impl VirtioDevice {
 
         let mut queue_num = 0u16;
 
-        let mut virtqueues = Vec::<Virtqueue>::new();
+        let mut virtqueues = Vec::<Rc<RefCell<Virtqueue>>>::new();
 
         loop {
             cfg_bar.write_u16(bar_offset + queue_select_offset, queue_num);
@@ -641,15 +644,18 @@ impl VirtioDevice {
                 queue_size = cfg_bar.read_u16(bar_offset + queue_size_offset);
                 if queue_size > MAX_QUEUE_SIZE {
                     log::error!("VirtIO queue size too large: {queue_size}");
-                    return Err(());
+                    return Err(ErrorKind::InvalidData.into());
                 }
             }
 
             // Step 7.1: allocate virtqueues
-            let mut virtqueue = Virtqueue::allocate(self, queue_num, queue_size)?;
-            virtqueue.queue_notify_off = cfg_bar.read_u16(bar_offset + queue_notify_off_offset);
-            self.setup_queue_msix(cfg_bar, bar_offset, &mut virtqueue)?; // Step 7.2
-            self.setup_queue_data(cfg_bar, bar_offset, &virtqueue); // Step 7.3
+            let virtqueue = Virtqueue::allocate(self, queue_num, queue_size)?;
+            let mut virtq_borrowed = virtqueue.borrow_mut();
+
+            virtq_borrowed.queue_notify_off =
+                cfg_bar.read_u16(bar_offset + queue_notify_off_offset);
+            self.setup_queue_msix(cfg_bar, bar_offset, &mut *virtq_borrowed)?; // Step 7.2
+            self.setup_queue_data(cfg_bar, bar_offset, &*virtq_borrowed); // Step 7.3
 
             // Step 7.4
             cfg_bar.write_u16(
@@ -657,6 +663,7 @@ impl VirtioDevice {
                 1,
             );
 
+            core::mem::drop(virtq_borrowed);
             virtqueues.push(virtqueue);
             queue_num += 1;
             if queue_num == max_virtqueues {
@@ -665,7 +672,7 @@ impl VirtioDevice {
         }
 
         if queue_num < min_virtqueues {
-            Err(())
+            return Err(ErrorKind::InvalidData.into());
         } else {
             self.virtqueues = virtqueues;
             Ok(())

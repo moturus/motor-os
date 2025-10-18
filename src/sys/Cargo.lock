@@ -1376,6 +1376,7 @@ dependencies = [
  "timeq",
  "toml",
  "virtio-async",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1617,8 +1618,10 @@ dependencies = [
  "async-fs",
  "async-trait",
  "log",
+ "moto-async",
  "moto-rt",
  "moto-sys",
+ "zerocopy",
 ]
 
 [[package]]

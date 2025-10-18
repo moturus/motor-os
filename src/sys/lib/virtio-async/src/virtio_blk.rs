@@ -1,12 +1,21 @@
 use async_trait::async_trait;
 use core::sync::atomic::*;
 use moto_rt::spinlock::SpinLock;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::io::ErrorKind;
+use std::io::Result;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::Arc;
+use zerocopy::FromZeros;
 
 use super::BLOCK_SIZE;
 use super::BLOCK_SIZE_LOG2;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
+use crate::Completion;
+use crate::virtio_queue::Virtqueue;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Little Endian is often assumed here.");
@@ -33,6 +42,35 @@ const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
 
+#[derive(FromZeros)]
+#[repr(C, align(512))]
+pub struct VirtioBlock {
+    pub bytes: [u8; BLOCK_SIZE],
+}
+
+pub struct VirtioBlockRef<'a> {
+    pub bytes: *mut u8,
+    _marker: PhantomData<&'a mut ()>,
+}
+
+impl VirtioBlock {
+    pub fn as_mut<'a>(&'a mut self) -> VirtioBlockRef<'a> {
+        VirtioBlockRef {
+            bytes: self.bytes.as_mut_ptr(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+// See struct virtio_blk_req in VirtIO spec.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct BlkHeader {
+    type_: u32,
+    _reserved: u32,
+    sector: u64,
+}
+
 // NOTE: VIRTIO_BLK_F_BLK_SIZE is read-only, i.e. the driver cannot set the block size to e.g. 4K.
 //       It is 512 if not negotiated, 512 by default, and hard to configure the VMM to make
 //       it something else. So we don't bother with anything other than 512.
@@ -47,23 +85,34 @@ pub struct BlockDevice {
 impl BlockDevice {
     pub fn wait_handle(&self) -> moto_sys::SysHandle {
         assert_eq!(1, self.dev.virtqueues.len());
-        let handles = self.dev.virtqueues[0].wait_handles();
-        assert_eq!(1, handles.len());
-        handles[0].into()
+        self.dev.virtqueues[0].borrow().wait_handle()
     }
 
-    fn self_init(&mut self) -> Result<(), ()> {
+    fn self_init(&mut self) -> Result<()> {
         self.dev.acknowledge_driver(); // Step 3
         self.negotiate_features()?; // Steps 4, 5, 6
         self.dev.init_virtqueues(1, 1)?; // Step 7
         self.dev.driver_ok(); // Step 8
+
+        let notify_cap = self.dev.notify_cfg.unwrap();
+        let notify_bar = self.dev.pci_device.bars[notify_cap.bar as usize]
+            .as_ref()
+            .unwrap() as *const PciBar;
+        let notify_offset = notify_cap.offset as u64
+            + (notify_cap.notify_off_multiplier as u64
+                * self.dev.virtqueues[0].borrow().queue_notify_off as u64);
+
+        self.dev.virtqueues[0]
+            .borrow_mut()
+            .set_notify_params(notify_bar, notify_offset);
+
         Ok(())
     }
 
-    pub(super) fn init(dev: Box<VirtioDevice>) -> std::io::Result<BlockDevice> {
+    pub(super) fn init(dev: Box<VirtioDevice>) -> Result<BlockDevice> {
         if dev.device_cfg.is_none() {
             log::warn!("Skiping VirtioBlk device without device configuration.");
-            return Err(std::io::ErrorKind::Other.into());
+            return Err(ErrorKind::Other.into());
         }
 
         let mut blk = BlockDevice {
@@ -72,23 +121,26 @@ impl BlockDevice {
             read_only: true,
         };
 
-        if blk.self_init().is_ok() {
-            log::debug!(
-                "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
-                blk.dev.pci_device.id,
-                blk.capacity,
-                blk.read_only
-            );
-            Ok(blk)
-        } else {
-            log::error!("Failed to initialize VirtioBlk device.");
-            blk.dev.mark_failed();
-            Err(std::io::ErrorKind::Other.into())
+        match blk.self_init() {
+            Ok(()) => {
+                log::debug!(
+                    "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
+                    blk.dev.pci_device.id,
+                    blk.capacity,
+                    blk.read_only
+                );
+                Ok(blk)
+            }
+            Err(err) => {
+                log::error!("Failed to initialize VirtioBlk device.");
+                blk.dev.mark_failed();
+                Err(err)
+            }
         }
     }
 
     // Step 4
-    fn negotiate_features(&mut self) -> Result<(), ()> {
+    fn negotiate_features(&mut self) -> Result<()> {
         let features_available = self.dev.get_available_features();
         log::debug!("BLK devices features: 0x{features_available:x}");
 
@@ -98,11 +150,11 @@ impl BlockDevice {
                 self.dev.pci_device.id,
                 features_available
             );
-            return Err(());
+            return Err(ErrorKind::Other.into());
         }
 
         if (features_available & VIRTIO_BLK_F_FLUSH) == 0 {
-            return Err(());
+            return Err(ErrorKind::Other.into());
         }
 
         let features_acked = super::virtio_device::VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_FLUSH;
@@ -124,17 +176,22 @@ impl BlockDevice {
         Ok(())
     }
 
+    /// Returns the ID of the submitted request.
     #[inline(never)]
-    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), ()> {
-        assert_eq!(BLOCK_SIZE, buf.len());
+    pub fn post_read<'a>(
+        this: Rc<RefCell<Self>>,
+        sector: u64,
+        block_ref: VirtioBlockRef<'a>,
+    ) -> Option<Completion<'a>> {
+        let vq = this.borrow().dev.virtqueues[0].clone();
+        let mut virtqueue = vq.borrow_mut();
+        let Some(chain_head) = virtqueue.alloc_descriptor_chain(3) else {
+            return None;
+        };
 
-        #[repr(C, packed)]
-        struct Header {
-            type_: u32,
-            _reserved: u32,
-            sector: u64,
-        }
-        let header = Header {
+        let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
+
+        *header = BlkHeader {
             type_: 0, /* VIRTIO_BLK_T_IN */
             _reserved: 0,
             sector,
@@ -145,39 +202,31 @@ impl BlockDevice {
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
         // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
-        let mut status_64 = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
-        let status_addr = &mut status_64 as *mut _ as usize;
+        let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
+        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
 
         use super::virtio_queue::UserData;
         let buffs: [UserData; 3] = [
             UserData {
-                addr: &header as *const Header as usize as u64,
-                len: core::mem::size_of::<Header>() as u32,
+                addr: header as *mut _ as usize as u64,
+                len: core::mem::size_of::<BlkHeader>() as u32,
             },
             UserData {
-                addr: buf.as_mut_ptr() as usize as u64,
+                addr: block_ref.bytes as usize as u64,
                 len: BLOCK_SIZE as u32,
             },
             UserData {
-                addr: status_addr as u64,
+                addr: status as *mut _ as usize as u64,
                 len: 1,
             },
         ];
 
-        assert_eq!(self.dev.virtqueues.len(), 1);
-        let virtqueue = &mut self.dev.virtqueues[0];
-        virtqueue.add_buf(&buffs, 1, 2);
+        core::mem::drop(virtqueue);
+        let completion = Virtqueue::add_buffs(vq, &buffs, 1, 2, chain_head);
 
-        // Notify
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap();
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64 * virtqueue.queue_notify_off as u64);
+        Some(completion)
 
-        cfg_bar.write_u16(notify_offset, virtqueue.queue_num);
-
+        /*
         let mut wait_failed = false;
         while !virtqueue.more_used_deprecated() {
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -203,14 +252,16 @@ impl BlockDevice {
             Ok(())
         } else if status == VIRTIO_BLK_S_IOERR {
             log::error!("VirtioBlk read error");
-            Err(())
+            Err(ErrorKind::Other.into())
         } else {
             panic!("status: {}", status)
         }
+        */
     }
 
+    /*
     #[inline(never)]
-    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), ()> {
+    async fn write(&mut self, sector: u64, buf: &[u8]) -> Result<()> {
         assert_eq!(BLOCK_SIZE, buf.len());
         // assert!(!self.read_only);
 
@@ -293,14 +344,14 @@ impl BlockDevice {
             Ok(())
         } else if status == VIRTIO_BLK_S_IOERR {
             log::error!("VirtioBlk write error");
-            Err(())
+            Err(ErrorKind::Other.into())
         } else {
             panic!("status: {}", status)
         }
     }
 
     #[inline(never)]
-    fn flush(&mut self) -> Result<(), ()> {
+    async fn flush(&mut self) -> Result<()> {
         // assert!(!self.read_only);
 
         #[repr(C, packed)]
@@ -368,11 +419,12 @@ impl BlockDevice {
             Ok(())
         } else if status.load(Ordering::Acquire) == VIRTIO_BLK_S_IOERR {
             log::error!("VirtioBlk write error");
-            Err(())
+            Err(ErrorKind::Other.into())
         } else {
             panic!("status: {}", status.load(Ordering::Relaxed))
         }
     }
+    */
 }
 
 /*

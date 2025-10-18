@@ -1,16 +1,18 @@
 #![allow(unused)]
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
     rc::Rc,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
 };
 
 use moto_ipc::io_channel;
 use moto_sys::SysHandle;
+use std::io::Result as IoResult;
 
 mod fs;
 pub mod internal_queue;
@@ -106,14 +108,16 @@ fn conn_name(handle: SysHandle) -> String {
 struct Mapper {
     virt_to_phys_map: std::sync::Mutex<BTreeMap<u64, u64>>,
     map_requests: AtomicU64,
+    next_irq_num: AtomicU8,
 }
 static MAPPER: Mapper = Mapper {
     virt_to_phys_map: std::sync::Mutex::new(BTreeMap::new()),
     map_requests: AtomicU64::new(0),
+    next_irq_num: AtomicU8::new(64),
 };
 
 impl virtio_async::KernelAdapter for Mapper {
-    fn virt_to_phys(&self, virt_addr: u64) -> Result<u64, ()> {
+    fn virt_to_phys(&self, virt_addr: u64) -> IoResult<u64> {
         let page_addr = virt_addr & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
         let offset = virt_addr & (moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
         if let Some(phys_addr) = self.virt_to_phys_map.lock().unwrap().get(&page_addr) {
@@ -140,20 +144,28 @@ impl virtio_async::KernelAdapter for Mapper {
         Ok(offset + phys_addr)
     }
 
-    fn mmio_map(&self, phys_addr: u64, sz: u64) -> Result<u64, ()> {
+    fn mmio_map(&self, phys_addr: u64, sz: u64) -> IoResult<u64> {
         Ok(moto_sys::SysMem::mmio_map(phys_addr, sz).unwrap())
     }
 
-    fn alloc_contiguous_pages(&self, sz: u64) -> Result<u64, ()> {
+    fn alloc_contiguous_pages(&self, sz: u64) -> IoResult<u64> {
         let (_, addr) = crate::runtime::alloc_mmio_region(sz);
         Ok(addr)
     }
 
     // Register a custom IRQ and an associated wait handle; the library will then use
     // the wait handle with wait() below.
-    fn create_irq_wait_handle(&self) -> Result<(moto_virtio::WaitHandle, u8), ()> {
-        let handle = moto_sys::SysObj::get(SysHandle::KERNEL, 0, "irq_wait:64").unwrap();
-        Ok((handle.as_u64(), 64))
+    fn create_irq_wait_handle(&self) -> IoResult<(SysHandle, u8)> {
+        let next_irq_num = self.next_irq_num.fetch_add(1, Ordering::AcqRel);
+        assert!(next_irq_num < 70);
+
+        moto_sys::SysObj::get(
+            SysHandle::KERNEL,
+            0,
+            format!("irq_wait:{next_irq_num}").as_str(),
+        )
+        .map(|handle| (handle, next_irq_num))
+        .map_err(|code| std::io::Error::from_raw_os_error(code as i32))
     }
 }
 
@@ -207,7 +219,7 @@ async fn async_runtime(q_handle: SysHandle, started_futex: Arc<AtomicU32>) {
                     block_device.is_none(),
                     "Multiple block devices are not supported yet."
                 );
-                block_device = Some(Rc::new(moto_async::LocalMutex::new(bd)));
+                block_device = Some(Rc::new(RefCell::new(bd)));
             }
         }
     }
@@ -216,8 +228,11 @@ async fn async_runtime(q_handle: SysHandle, started_futex: Arc<AtomicU32>) {
         panic!("No block devices found")
     };
 
-    let bd = block_device.clone();
-    let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd, started_futex));
+    let Ok(filesystem) = fs::init(block_device).await else {
+        panic!("Cannot proceed without a filesystem.");
+    };
+    started_futex.store(RUNTIME_STARTED, Ordering::Release);
+    // let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd, started_futex));
 
     queue_joiner.await; // Never actually returns.
     unreachable!()
@@ -236,6 +251,7 @@ async fn global_queue_listener(queue_handle: SysHandle) {
     }
 }
 
+/*
 async fn block_device_listener(
     bd: Rc<moto_async::LocalMutex<virtio_async::BlockDevice>>,
     started_futex: Arc<AtomicU32>,
@@ -250,3 +266,4 @@ async fn block_device_listener(
         todo!("Block device interrupt!")
     }
 }
+*/

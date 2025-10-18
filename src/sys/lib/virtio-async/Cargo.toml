@@ -6,9 +6,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-fs   = { path = "../async-fs" }
-moto-rt    = { path = "../moto-rt"  }
-moto-sys   = { path = "../moto-sys" }
+async-fs   = { path = "../async-fs"   }
+moto-async = { path = "../moto-async" }
+moto-rt    = { path = "../moto-rt"    }
+moto-sys   = { path = "../moto-sys"   }
 
 async-trait = "0.1.88"
 log         = "0.4.20"
+zerocopy    = { version = "0.8", features = ["std", "derive"] }

@@ -278,6 +278,7 @@ impl LocalRuntimeInner {
         let sys_waiters = self.sys_waiters.borrow();
         if sys_waiters.is_empty() {
             core::mem::drop(sys_waiters);
+            log::info!("empty wait");
             let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
             return;
         }
@@ -289,6 +290,7 @@ impl LocalRuntimeInner {
         }
         core::mem::drop(sys_waiters);
 
+        log::info!("full wait");
         let result = moto_sys::SysCpu::wait(
             wait_handles.as_mut_slice(),
             SysHandle::NONE,

@@ -3,7 +3,7 @@ mod driver;
 mod filesystem;
 mod fs_flatfs;
 mod fs_srfs;
-mod mbr;
+pub mod mbr;
 mod runtime;
 
 pub use filesystem::*;
