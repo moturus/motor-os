@@ -31,12 +31,69 @@ $ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```
-$ rustup default nightly-2025-09-23
-$ rustup component add rust-src --toolchain nightly-2025-09-23-x86_64-unknown-linux-gnu
+$ rustup default nightly-2025-10-16
+$ rustup component add rust-src --toolchain nightly-2025-10-16-x86_64-unknown-linux-gnu
 ```
 
 (Note: we pin to a specific nightly version for better reproducibility.
 See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
+
+## Build Motor OS target/toolchain for Rust
+
+Motor OS is a [Tier-3 target in Rust](https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html),
+which means it has to be compiled locally, as Rust does not provide
+pre-built toolchains for Tier-3 targets.
+
+Check out Rust sources:
+
+```
+$ cd $MOTORH
+$ git clone https://github.com/rust-lang/rust.git
+$ cd rust
+```
+
+Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
+
+```
+# bootstrap.toml
+#
+# Place it in the root of rust-lang/rust repo.
+
+change-id = 146458
+
+profile = "library"
+
+[build]
+host = ["x86_64-unknown-linux-gnu"]
+target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
+
+[rust]
+deny-warnings = false
+incremental = true
+# debug = true
+# debuginfo-level = 2
+```
+
+Build Rust Motor OS target/toolchain:
+
+```
+$ cd $MOTORH/rust
+$ TARGET=x86_64-unknown-motor \
+    CARGO_CFG_TARGET_ARCH=x86_64 \
+    CARGO_CFG_TARGET_VENDOR=unknown \
+    CARGO_CFG_TARGET_OS=motor \
+    CARGO_CFG_TARGET_ENV="" \
+    ./x.py build --stage 2 clippy library
+```
+Note: Tier-3 target API is unstable, so the step above may fail. In this case
+please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
+
+Register the new toolchain:
+
+```
+$ rustup toolchain link dev-x86_64-unknown-motor \
+    $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
+```
 
 ## Clone the Motor OS repo:
 
@@ -49,33 +106,6 @@ $ cd motor-os
 $ git submodule update --init --recursive
 ```
 
-## Build Motor OS target for Rust
-
-Check out Rust sources with Motor target added:
-
-```
-$ cd $MOTORH
-$ git clone -b motor-os_stdlib_pr https://github.com/moturus/rust.git
-```
-
-Build Rust Motor target/toolchain:
-
-```
-$ cd $MOTORH/rust
-$ TARGET=x86_64-unknown-motor \
-    CARGO_CFG_TARGET_ARCH=x86_64 \
-    CARGO_CFG_TARGET_VENDOR=unknown \
-    CARGO_CFG_TARGET_OS=motor \
-    CARGO_CFG_TARGET_ENV="" \
-    ./x.py build --stage 2 clippy library
-```
-
-Register the new toolchain:
-
-```
-$ rustup toolchain link dev-x86_64-unknown-motor \
-    $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
-```
 
 ## Build Motor OS
 
@@ -83,6 +113,9 @@ $ rustup toolchain link dev-x86_64-unknown-motor \
 $ cd $MOTORH/motor-os
 $ make all BUILD=release -j$(nproc)
 ```
+
+Note: Tier-3 target API is unstable, so the step above may fail. In this case
+please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
 
 ## Create a tap device that our VMs will use
 

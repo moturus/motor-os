@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2025-10-17
+
+Motor OS is now a [Tier-3 target in Rust](https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html)!
+
 ## 2025-05-26
 
 * Tokio process feature works (async child, async stdio);
