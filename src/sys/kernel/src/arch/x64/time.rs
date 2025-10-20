@@ -1,4 +1,3 @@
-use core::mem::MaybeUninit;
 use core::sync::atomic::*;
 
 use core::arch::asm;
@@ -327,4 +326,4 @@ struct PvClockVcpuTimeInfo {
     pad: [u8; 2],
 }
 
-static GLOBALS: Globals = unsafe { MaybeUninit::<Globals>::zeroed().assume_init() };
+static GLOBALS: Globals = unsafe { core::mem::zeroed() };

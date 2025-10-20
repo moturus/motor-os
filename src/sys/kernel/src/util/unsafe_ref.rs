@@ -17,10 +17,7 @@ pub struct UnsafeRef<T> {
 
 impl<T> Default for UnsafeRef<T> {
     fn default() -> Self {
-        Self {
-            addr: 0,
-            foo_: PhantomData,
-        }
+        Self::const_default()
     }
 }
 
@@ -28,7 +25,7 @@ impl<T> UnsafeRef<T> {
     pub const fn const_default() -> Self {
         Self {
             addr: 0,
-            foo_: unsafe { core::mem::MaybeUninit::<PhantomData<T>>::zeroed().assume_init() },
+            foo_: PhantomData,
         }
     }
 
