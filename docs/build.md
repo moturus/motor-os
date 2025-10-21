@@ -1,9 +1,9 @@
 # Building Motor OS
 
-Motor OS is built on Linux. There are three steps:
+Motor OS is built (cross-compiled) on Linux. There are three steps:
 
 * install build tools on the host Linux (10-20 min)
-* build Motor OS target for Rust (30-60 min)
+* build Motor OS target for Rust (10-30 min)
 * build Motor OS (2-5 min)
 
 Time estimates above assume a fairly modern 8-core/16-thread x64 CPU

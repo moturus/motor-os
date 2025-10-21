@@ -95,7 +95,7 @@ but are slow (synchronous) and will have to be reimplemented using Motor OS asyn
 
 ## How can I build/run it?
 
-See [docs/build.md](docs/build.md).
+See [docs/build.md](docs/build.md) and [docs/tools.md](docs/tools.md).
 
 ## Examples and recipes
 
