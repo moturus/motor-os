@@ -15,9 +15,11 @@ and several useful scripts:
 - `run-qemu.sh` and `run-chv.sh` will run the "full" VM version in Qemu or Cloud Hypervisor;
 - `run-web-qemu.sh` and `run-web-chv.sh` will run the "web" VM versions.
 
-![top](top.png)
-
 ## Tools available inside the Motor OS VM
+
+This is how `top` looks like:
+
+![top](top.png)
 
 The "full" Motor OS VM will boot into a unix-like shell [rush](https://github.com/moturus/rush).
 The shell is somewhat barebones now (contributions are welcome!).
