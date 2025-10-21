@@ -4,6 +4,7 @@ use crate::{rt_process::ProcessData, rt_process::StdioData};
 use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
+use core::mem::MaybeUninit;
 use core::sync::atomic::*;
 use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
@@ -83,14 +84,18 @@ impl StdioImpl {
         }
     }
 
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn read(&mut self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         if !self.kind.is_reader() {
             return Err(E_INVALID_ARGUMENT);
         }
         let to_copy = buf.len().min(self.overflow.len());
         if to_copy > 0 {
             unsafe {
-                core::ptr::copy_nonoverlapping(self.overflow.as_ptr(), buf.as_mut_ptr(), to_copy);
+                core::ptr::copy_nonoverlapping(
+                    self.overflow.as_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    to_copy,
+                );
             }
             if to_copy < self.overflow.len() {
                 let mut remainder = Vec::new();
@@ -140,7 +145,7 @@ impl PosixFile for SelfStdio {
     fn kind(&self) -> PosixKind {
         PosixKind::SelfStdio
     }
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         self.inner.lock().read(buf)
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
@@ -204,7 +209,9 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
                 }
 
                 let timeout = moto_rt::time::Instant::now() + core::time::Duration::new(0, 1_000);
-                match stdin_lock.pipe.read_timeout(&mut buf, Some(timeout)) {
+                let mut buf_uninit =
+                    unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len()) };
+                match stdin_lock.pipe.read_timeout(buf_uninit, Some(timeout)) {
                     Ok(sz_read) => {
                         if sz_read > 0 {
                             match dest.write(&buf[0..sz_read]) {
@@ -239,7 +246,9 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
         } else {
             let mut dest = unsafe { StdioPipe::new_reader(to) };
             let mut buf = [0_u8; 80];
-            while let Ok(sz) = dest.read(&mut buf) {
+            let mut buf_uninit =
+                unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len()) };
+            while let Ok(sz) = dest.read(buf_uninit) {
                 if sz > 0 {
                     if from.get().inner.lock().pipe.write(&buf[0..sz]).is_err() {
                         break;
@@ -442,7 +451,7 @@ impl PosixFile for ChildStdio {
         PosixKind::ChildStdio
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         if self.event_source.is_closed() {
             return Ok(0);
         }

@@ -4,6 +4,7 @@ use crate::{posix::PosixFile, runtime::EventSourceManaged};
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
 use moto_io_internal::udp_queues::{PageAllocator, UdpDefragmentingQueue, UdpFragmentingQueue};
@@ -136,7 +137,7 @@ impl UdpSocket {
 
     pub fn recv_or_peek_from(
         &self,
-        buf: &mut [u8],
+        buf: &mut [MaybeUninit<u8>],
         peek: bool,
     ) -> Result<(usize, SocketAddr), ErrorCode> {
         if self.nonblocking.load(Ordering::Acquire) {
@@ -175,7 +176,7 @@ impl UdpSocket {
 
     fn recv_or_peek_from_nonblocking(
         &self,
-        buf: &mut [u8],
+        buf: &mut [MaybeUninit<u8>],
         peek: bool,
     ) -> Result<(usize, SocketAddr), ErrorCode> {
         if peek {
@@ -185,7 +186,10 @@ impl UdpSocket {
         }
     }
 
-    fn recv_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
+    fn recv_from_nonblocking(
+        &self,
+        buf: &mut [MaybeUninit<u8>],
+    ) -> Result<(usize, SocketAddr), ErrorCode> {
         let datagram = loop {
             let Some(datagram) = self.rx_queue.lock().next_datagram().unwrap() else {
                 return Err(E_NOT_READY);
@@ -202,12 +206,15 @@ impl UdpSocket {
 
         let bytes = datagram.slice();
         let sz = bytes.len().min(buf.len());
-        buf[0..sz].clone_from_slice(&bytes[0..sz]);
+        buf[0..sz].write_copy_of_slice(&bytes[0..sz]);
 
         Ok((sz, datagram.addr))
     }
 
-    fn peek_from_nonblocking(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), ErrorCode> {
+    fn peek_from_nonblocking(
+        &self,
+        buf: &mut [MaybeUninit<u8>],
+    ) -> Result<(usize, SocketAddr), ErrorCode> {
         let mut rx_queue = self.rx_queue.lock();
         let datagram = loop {
             let Some(datagram) = rx_queue.peek_datagram().unwrap() else {
@@ -227,7 +234,7 @@ impl UdpSocket {
 
         let bytes = datagram.slice();
         let sz = bytes.len().min(buf.len());
-        buf[0..sz].clone_from_slice(&bytes[0..sz]);
+        buf[0..sz].write_copy_of_slice(&bytes[0..sz]);
 
         Ok((sz, datagram.addr))
     }
@@ -335,7 +342,7 @@ impl UdpSocket {
         }
     }
 
-    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn peek(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         self.recv_or_peek_from(buf, true).map(|(sz, _)| sz)
     }
 
@@ -460,7 +467,7 @@ impl PosixFile for UdpSocket {
         self.send_to(buf, &addr)
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         self.recv_or_peek_from(buf, false).map(|(sz, _)| sz)
     }
 
