@@ -78,12 +78,7 @@ Build Rust Motor OS target/toolchain:
 
 ```
 $ cd $MOTORH/rust
-$ TARGET=x86_64-unknown-motor \
-    CARGO_CFG_TARGET_ARCH=x86_64 \
-    CARGO_CFG_TARGET_VENDOR=unknown \
-    CARGO_CFG_TARGET_OS=motor \
-    CARGO_CFG_TARGET_ENV="" \
-    ./x.py build --stage 2 clippy library
+$ ./x.py build --stage 2 clippy library
 ```
 Note: Tier-3 target API is unstable, so the step above may fail. In this case
 please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
