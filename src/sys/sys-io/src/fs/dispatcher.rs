@@ -14,8 +14,6 @@ struct Dispatcher {
 }
 
 impl Dispatcher {
-    /// access the static dispatcher to kick-off its processing loop
-    /// and return whether initialization went fine
     fn start() -> Result<JoinHandle<Result<(), ErrorCode>>, ErrorCode> {
         Ok(thread::spawn(|| {
             let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)?;
@@ -69,9 +67,13 @@ impl Dispatcher {
     }
 }
 
-/// spawn dispatcher and the driver
+/// Spawn the dispatcher and the driver.
+///
 /// # Return
-/// (a) initialization error code or a pair of dispatcher and driver join handlers respectively
+/// Err: **initialization** error code
+/// Ok: a pair of dispatcher and driver join handlers respectively
+///
+/// In turn, JoinHandler's report running results.
 pub fn start() -> DispatcherInitResult {
     Ok((Dispatcher::start()?, super::driver::Driver::start()?))
 }
