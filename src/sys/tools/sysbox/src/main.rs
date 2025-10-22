@@ -14,6 +14,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox ls");
     println!("\tsysbox mkdir");
     println!("\tsysbox mv");
+    println!("\tsysbox printenv");
     println!("\tsysbox ps");
     println!("\tsysbox pwd");
     println!("\tsysbox rm");
@@ -65,6 +66,7 @@ fn main() {
         "ls" => commands::ls::do_command(&args[1..]),
         "mkdir" => commands::mkdir::do_command(&args[1..]),
         "mv" => commands::mv::do_command(&args[1..]),
+        "printenv" => commands::printenv::do_command(&args[1..]),
         "ps" => commands::ps::do_command(&args[1..]),
         "pwd" => commands::pwd::do_command(&args[1..]),
         "rm" => commands::rm::do_command(&args[1..]),
