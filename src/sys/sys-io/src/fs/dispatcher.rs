@@ -4,44 +4,31 @@
 //! dance is probably overengineering, but the idea is that in the
 //! future there could be multiple instances of FS drivers running
 //! (perhaps per mount point).
-use core::sync::atomic::*;
 use moto_ipc::sync::*;
 use moto_sys::SysHandle;
 use moto_sys_io::api_fs::*;
+use std::thread::{self, JoinHandle};
 
 struct Dispatcher {
     ipc_server: LocalServer,
 }
 
-static DISPATCHER_ADDRESS: AtomicUsize = AtomicUsize::new(0);
-
 impl Dispatcher {
-    fn start() -> Result<(), u16> {
-        let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)?;
-        let dispatcher = Box::leak(Box::new(Dispatcher { ipc_server }));
-
-        let addr = dispatcher as *mut _ as usize;
-        let prev = DISPATCHER_ADDRESS.swap(addr, Ordering::Relaxed);
-        assert_eq!(prev, 0);
-
-        std::thread::spawn(Self::run);
-        Ok(())
+    /// access the static dispatcher to kick-off its processing loop
+    /// and return whether initialization went fine
+    fn start() -> Result<JoinHandle<Result<(), ErrorCode>>, ErrorCode> {
+        Ok(thread::spawn(|| {
+            let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)?;
+            let mut dispatcher = Box::new(Dispatcher { ipc_server });
+            dispatcher.run()
+        }))
     }
 
-    fn get() -> &'static mut Dispatcher {
-        unsafe {
-            let addr = DISPATCHER_ADDRESS.load(Ordering::Relaxed);
-            assert_ne!(addr, 0);
-            (addr as *mut Dispatcher).as_mut().unwrap_unchecked()
-        }
-    }
-
-    fn run() {
-        let self_ = Self::get();
+    fn run(&mut self) -> Result<(), ErrorCode> {
         loop {
-            if let Ok(wakers) = self_.ipc_server.wait(SysHandle::NONE, &[]) {
+            if let Ok(wakers) = self.ipc_server.wait(SysHandle::NONE, &[]) {
                 for waker in &wakers {
-                    self_.process_ipc(waker);
+                    self.process_ipc(waker);
                 }
             } // else: somebody disconnected.
         }
@@ -82,7 +69,17 @@ impl Dispatcher {
     }
 }
 
-pub fn start() -> Result<(), ErrorCode> {
-    Dispatcher::start()?;
-    super::driver::start()
+/// spawn dispatcher and the driver
+/// # Return
+/// (a) initialization error code or a pair of dispatcher and driver join handlers respectively
+pub fn start() -> DispatcherInitResult {
+    Ok((Dispatcher::start()?, super::driver::Driver::start()?))
 }
+
+type DispatcherInitResult = Result<
+    (
+        JoinHandle<Result<(), ErrorCode>>,
+        JoinHandle<Result<(), ErrorCode>>,
+    ),
+    ErrorCode,
+>;
