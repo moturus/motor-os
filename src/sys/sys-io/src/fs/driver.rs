@@ -3,9 +3,10 @@
 
 use core::sync::atomic::*;
 use moto_ipc::sync::*;
-use moto_rt::E_NOT_FOUND;
+use moto_rt::{Error, E_NOT_FOUND};
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_fs::*;
+use std::thread::JoinHandle;
 
 use super::filesystem::fs;
 
@@ -55,51 +56,37 @@ impl PerConnectionData {
     }
 }
 
-struct Driver {
+pub struct Driver {
     ipc_server: LocalServer,
 }
 
-static DRIVER_ADDRESS: AtomicUsize = AtomicUsize::new(0);
-
 impl Driver {
-    fn start() -> Result<(), ErrorCode> {
-        let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)?;
-        let driver = Box::leak(Box::new(Driver { ipc_server }));
-
-        let addr = driver as *mut _ as usize;
-        let prev = DRIVER_ADDRESS.swap(addr, Ordering::Relaxed);
-        assert_eq!(prev, 0);
-
+    pub fn start() -> Result<JoinHandle<Result<(), ErrorCode>>, ErrorCode> {
         std::thread::Builder::new()
             .stack_size(4096 * 256)
-            .spawn(Self::run)
-            .unwrap();
-        Ok(())
+            .spawn(|| {
+                let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)?;
+                let mut driver = Box::new(Driver { ipc_server });
+
+                driver.run()
+            })
+            .map_err(|_e| Error::InternalError.into()) // TODO: don't ignore the io::Error, report details
     }
 
-    fn get() -> &'static mut Driver {
-        unsafe {
-            let addr = DRIVER_ADDRESS.load(Ordering::Relaxed);
-            assert_ne!(addr, 0);
-            (addr as *mut Driver).as_mut().unwrap_unchecked()
-        }
-    }
-
-    fn run() -> ! {
+    fn run(&mut self) -> Result<(), ErrorCode> {
         // VirtIO interrupts are affined to CPU 0.
         moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
 
         super::STARTED.store(1, Ordering::Release);
         moto_rt::futex::futex_wake(&super::STARTED);
 
-        let self_ = Self::get();
         loop {
-            let Ok(wakers) = self_.ipc_server.wait(SysHandle::NONE, &[]) else {
+            let Ok(wakers) = self.ipc_server.wait(SysHandle::NONE, &[]) else {
                 continue;
             };
 
             for waker in &wakers {
-                let conn = self_.ipc_server.get_connection(*waker);
+                let conn = self.ipc_server.get_connection(*waker);
                 if conn.is_none() {
                     continue;
                 }
@@ -569,8 +556,4 @@ impl Driver {
 
         Ok(())
     }
-}
-
-pub fn start() -> Result<(), ErrorCode> {
-    Driver::start()
 }
