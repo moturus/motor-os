@@ -17,26 +17,37 @@ running Ubuntu 22.04. This will also work with Ubuntu 22.04 under WSL2.
 
 (1) Install the following packages:
 
-```
-$ sudo apt update
-$ sudo apt upgrade
-$ sudo apt install git
-$ sudo apt install build-essential
-$ sudo apt install nasm
-$ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
+```sh
+sudo apt update
+sudo apt upgrade
+sudo apt install git
+sudo apt install build-essential
+sudo apt install nasm
+sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 ```
 
 (2) [Install Rust](https://www.rust-lang.org/tools/install).
 
 (3) Add the following Rust magic:
 
-```
-$ rustup default nightly-2025-10-16
-$ rustup component add rust-src --toolchain nightly-2025-10-16-x86_64-unknown-linux-gnu
+```sh
+rustup default nightly-2025-10-16
+rustup component add rust-src --toolchain nightly-2025-10-16-x86_64-unknown-linux-gnu
 ```
 
 (Note: we pin to a specific nightly version for better reproducibility.
 See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
+
+## Clone the Motor OS repo
+
+```sh
+export MOTORH=$HOME/motorh
+mkdir $MOTORH
+cd $MOTORH
+git clone git@github.com:moturus/motor-os.git
+cd motor-os
+git submodule update --init --recursive
+```
 
 ## Build Motor OS target/toolchain for Rust
 
@@ -46,15 +57,16 @@ pre-built toolchains for Tier-3 targets.
 
 Check out Rust sources:
 
-```
-$ cd $MOTORH
-$ git clone https://github.com/rust-lang/rust.git
-$ cd rust
+```sh
+cd $MOTORH
+git clone git@github.com:rust-lang/rust.git
+cd rust
 ```
 
 Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
 
-```
+```sh
+echo '
 # bootstrap.toml
 #
 # Place it in the root of rust-lang/rust repo.
@@ -72,41 +84,31 @@ deny-warnings = false
 incremental = true
 # debug = true
 # debuginfo-level = 2
+' > $MOTORH/rust/bootstrap.toml
 ```
 
 Build Rust Motor OS target/toolchain:
 
-```
+```sh
 $ cd $MOTORH/rust
 $ ./x.py build --stage 2 clippy library
 ```
+
 Note: Tier-3 target API is unstable, so the step above may fail. In this case
 please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
 
 Register the new toolchain:
 
+```sh
+rustup toolchain link dev-x86_64-unknown-motor \
+  $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
 ```
-$ rustup toolchain link dev-x86_64-unknown-motor \
-    $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
-```
-
-## Clone the Motor OS repo:
-
-```
-$ export MOTORH=$HOME/motorh
-$ mkdir $MOTORH
-$ cd $MOTORH
-$ git clone https://github.com/moturus/motor-os.git
-$ cd motor-os
-$ git submodule update --init --recursive
-```
-
 
 ## Build Motor OS
 
-```
-$ cd $MOTORH/motor-os
-$ make all BUILD=release -j$(nproc)
+```sh
+cd $MOTORH/motor-os
+make all BUILD=release -j$(nproc)
 ```
 
 Note: Tier-3 target API is unstable, so the step above may fail. In this case
@@ -114,21 +116,17 @@ please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
 
 ## Create a tap device that our VMs will use
 
-```
-$ sudo ip tuntap add mode tap moto-tap
-$ sudo ip addr add 192.168.4.1/24 dev moto-tap
-$ sudo ip link set moto-tap up
-```
+`$MOTORH/motor-os/vm_images/release/run-web-qemu.sh`
 
 ## Run Motor OS
 
 If all of the above completed successfully, you can now do
 
-```
-$ sudo apt install qemu-system
-$ sudo chmod a+rw /dev/kvm
-$ cd $MOTORH/motor-os/vm_images/release
-$ ./run-qemu-web.sh
+```sh
+sudo apt install qemu-system
+sudo chmod a+rw /dev/kvm
+cd $MOTORH/motor-os/vm_images/release
+./run-qemu-web.sh
 ```
 
 to run the minimal image with a web server, which you can access from the host at http://192.168.4.2. To run the full image

@@ -2,7 +2,7 @@
 
 ## VM running helpers
 
-After successfully [building Motor OS image](https://github.com/moturus/motor-os/tree/main/docs),
+After successfully [building Motor OS image](./build.md),
 `$MOTORH/motor-os/vm_images/[debug|release]` directory will contain several data files
 and several useful scripts:
 
