@@ -7,26 +7,21 @@
 use moto_ipc::sync::*;
 use moto_sys::SysHandle;
 use moto_sys_io::api_fs::*;
-use std::thread::{self, JoinHandle};
+use std::thread;
 
 struct Dispatcher {
     ipc_server: LocalServer,
 }
 
 impl Dispatcher {
-    fn start() -> Result<JoinHandle<Result<(), ErrorCode>>, ErrorCode> {
-        Ok(thread::spawn(|| {
-            let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)?;
-            let mut dispatcher = Box::new(Dispatcher { ipc_server });
-            dispatcher.run()
-        }))
-    }
+    fn run() -> Result<(), ErrorCode> {
+        let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)?;
+        let mut dispatcher = Dispatcher { ipc_server };
 
-    fn run(&mut self) -> Result<(), ErrorCode> {
         loop {
-            if let Ok(wakers) = self.ipc_server.wait(SysHandle::NONE, &[]) {
+            if let Ok(wakers) = dispatcher.ipc_server.wait(SysHandle::NONE, &[]) {
                 for waker in &wakers {
-                    self.process_ipc(waker);
+                    dispatcher.process_ipc(waker);
                 }
             } // else: somebody disconnected.
         }
@@ -68,20 +63,7 @@ impl Dispatcher {
 }
 
 /// Spawn the dispatcher and the driver.
-///
-/// # Return
-/// Err: **initialization** error code
-/// Ok: a pair of dispatcher and driver join handlers respectively
-///
-/// In turn, JoinHandler's report running results.
-pub fn start() -> DispatcherInitResult {
-    Ok((Dispatcher::start()?, super::driver::Driver::start()?))
+pub fn start() -> () {
+    thread::spawn(Dispatcher::run);
+    super::driver::start();
 }
-
-type DispatcherInitResult = Result<
-    (
-        JoinHandle<Result<(), ErrorCode>>,
-        JoinHandle<Result<(), ErrorCode>>,
-    ),
-    ErrorCode,
->;

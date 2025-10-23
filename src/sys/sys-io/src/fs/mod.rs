@@ -14,7 +14,7 @@ pub static STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 pub fn init() {
     filesystem::init();
     set_temp_dir();
-    dispatcher::start().expect("Error dispatcher / driver initialization");
+    dispatcher::start();
     while STARTED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         moto_rt::futex::futex_wait(&STARTED, 0, None);
     }
