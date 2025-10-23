@@ -106,10 +106,6 @@ pub unsafe extern "C" fn posix_read_vectored(rt_fd: i32, packed: *const usize, n
         return -(E_BAD_HANDLE as i64);
     };
 
-    if num & 1 != 0 {
-        return -(E_BAD_HANDLE as i64);
-    }
-
     let packed = core::slice::from_raw_parts(packed, num * 2);
     let mut bufs = Vec::with_capacity(num);
     for idx in 0..num {
