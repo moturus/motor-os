@@ -44,7 +44,7 @@ See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
 export MOTORH=$HOME/motorh
 mkdir $MOTORH
 cd $MOTORH
-git clone git@github.com:moturus/motor-os.git
+git clone https://github.com/moturus/motor-os.git
 cd motor-os
 git submodule update --init --recursive
 ```
@@ -59,18 +59,14 @@ Check out Rust sources:
 
 ```sh
 cd $MOTORH
-git clone git@github.com:rust-lang/rust.git
+git clone https://github.com/rust-lang/rust.git
 cd rust
 ```
 
 Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
 
 ```sh
-echo '
-# bootstrap.toml
-#
-# Place it in the root of rust-lang/rust repo.
-
+cat > $MOTORH/rust/bootstrap.toml << EOF
 change-id = 146458
 
 profile = "library"
@@ -84,7 +80,7 @@ deny-warnings = false
 incremental = true
 # debug = true
 # debuginfo-level = 2
-' > $MOTORH/rust/bootstrap.toml
+EOF
 ```
 
 Build Rust Motor OS target/toolchain:
@@ -116,7 +112,7 @@ please open an issue in [Motor OS repo](https://github.com/moturus/motor-os).
 
 ## Create a tap device that our VMs will use
 
-`$MOTORH/motor-os/vm_images/release/run-web-qemu.sh`
+`$MOTORH/motor-os/vm_images/release/create-tap.sh`
 
 ## Run Motor OS
 
