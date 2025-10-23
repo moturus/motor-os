@@ -3,10 +3,9 @@
 
 use core::sync::atomic::*;
 use moto_ipc::sync::*;
-use moto_rt::{Error, E_NOT_FOUND};
+use moto_rt::E_NOT_FOUND;
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_fs::*;
-use std::thread::JoinHandle;
 
 use super::filesystem::fs;
 
@@ -56,24 +55,15 @@ impl PerConnectionData {
     }
 }
 
-pub struct Driver {
+struct Driver {
     ipc_server: LocalServer,
 }
 
 impl Driver {
-    pub fn start() -> Result<JoinHandle<Result<(), ErrorCode>>, ErrorCode> {
-        std::thread::Builder::new()
-            .stack_size(4096 * 256)
-            .spawn(|| {
-                let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)?;
-                let mut driver = Box::new(Driver { ipc_server });
+    fn run() -> Result<(), ErrorCode> {
+        let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)?;
+        let mut driver = Driver { ipc_server };
 
-                driver.run()
-            })
-            .map_err(|_e| Error::InternalError.into()) // TODO: don't ignore the io::Error, report details
-    }
-
-    fn run(&mut self) -> Result<(), ErrorCode> {
         // VirtIO interrupts are affined to CPU 0.
         moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
 
@@ -81,12 +71,12 @@ impl Driver {
         moto_rt::futex::futex_wake(&super::STARTED);
 
         loop {
-            let Ok(wakers) = self.ipc_server.wait(SysHandle::NONE, &[]) else {
+            let Ok(wakers) = driver.ipc_server.wait(SysHandle::NONE, &[]) else {
                 continue;
             };
 
             for waker in &wakers {
-                let conn = self.ipc_server.get_connection(*waker);
+                let conn = driver.ipc_server.get_connection(*waker);
                 if conn.is_none() {
                     continue;
                 }
@@ -556,4 +546,11 @@ impl Driver {
 
         Ok(())
     }
+}
+
+pub fn start() -> () {
+    std::thread::Builder::new()
+        .stack_size(4096 * 256)
+        .spawn(Driver::run)
+        .expect("Error on spawning driver thread");
 }
