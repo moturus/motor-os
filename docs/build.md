@@ -46,7 +46,6 @@ mkdir $MOTORH
 cd $MOTORH
 git clone https://github.com/moturus/motor-os.git
 cd motor-os
-git submodule update --init --recursive
 ```
 
 ## Build Motor OS target/toolchain for Rust
