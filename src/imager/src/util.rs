@@ -18,14 +18,13 @@ pub async fn _motor_fs_create_dir_all(fs: &mut MotorFs, path: &Path) -> std::io:
         }
 
         let entry_id = fs.stat(parent_id, filename).await.unwrap();
-        if let Some(entry_id) = entry_id {
-            parent_id = entry_id;
+        parent_id = if let Some(entry_id) = entry_id {
+            entry_id
         } else {
-            parent_id = fs
-                .create_entry(parent_id, srfs::EntryKind::Directory, filename)
+            fs.create_entry(parent_id, srfs::EntryKind::Directory, filename)
                 .await
-                .unwrap();
-        }
+                .unwrap()
+        };
     }
 
     Ok(parent_id)

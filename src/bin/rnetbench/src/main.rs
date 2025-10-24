@@ -99,9 +99,8 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
                 break;
             }
         }
-        let bytes_read = match stream.read(&mut buffer) {
-            Ok(n) => n,
-            Err(_) => break,
+        let Ok(bytes_read) = stream.read(&mut buffer) else {
+            break;
         };
         if bytes_read == 0 {
             break;
