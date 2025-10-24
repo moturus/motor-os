@@ -14,8 +14,9 @@ struct Dispatcher {
 }
 
 impl Dispatcher {
-    fn run() -> Result<(), ErrorCode> {
-        let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)?;
+    fn run() -> ! {
+        let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)
+            .expect("Failed to start listening on {FS_URL}.");
         let mut dispatcher = Dispatcher { ipc_server };
 
         loop {
@@ -63,7 +64,7 @@ impl Dispatcher {
 }
 
 /// Spawn the dispatcher and the driver.
-pub fn start() -> () {
+pub fn start() {
     thread::spawn(Dispatcher::run);
     super::driver::start();
 }

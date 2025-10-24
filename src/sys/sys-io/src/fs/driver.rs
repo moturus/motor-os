@@ -60,8 +60,9 @@ struct Driver {
 }
 
 impl Driver {
-    fn run() -> Result<(), ErrorCode> {
-        let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)?;
+    fn run() -> ! {
+        let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)
+            .expect(format!("Failed to start listening on {}.", super::DRIVER_URL).as_str());
         let mut driver = Driver { ipc_server };
 
         // VirtIO interrupts are affined to CPU 0.
@@ -548,9 +549,9 @@ impl Driver {
     }
 }
 
-pub fn start() -> () {
+pub fn start() {
     std::thread::Builder::new()
         .stack_size(4096 * 256)
         .spawn(Driver::run)
-        .expect("Error on spawning driver thread");
+        .unwrap();
 }
