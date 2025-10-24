@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
 use core::time::Duration;
@@ -586,11 +587,14 @@ impl PosixFile for TcpStream {
         PosixKind::TcpStream
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         self.read_or_peek(&mut [buf], false)
     }
 
-    unsafe fn read_vectored(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
+    unsafe fn read_vectored(
+        &self,
+        bufs: &mut [&mut [MaybeUninit<u8>]],
+    ) -> Result<usize, ErrorCode> {
         self.read_or_peek(bufs, false)
     }
 
@@ -1033,7 +1037,7 @@ impl TcpStream {
         self.tx_timeout_ns.load(Ordering::Relaxed)
     }
 
-    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn peek(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         self.read_or_peek(&mut [buf], true)
     }
 
@@ -1093,7 +1097,7 @@ impl TcpStream {
         }
     }
 
-    fn poll_rx(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
+    fn poll_rx(&self, bufs: &mut [&mut [MaybeUninit<u8>]], peek: bool) -> Result<usize, ErrorCode> {
         let mut recv_q = self.recv_queue.lock();
 
         if let Some(bytes) = recv_q.loose_bytes() {
@@ -1167,11 +1171,11 @@ impl TcpStream {
         self.poll_rx(bufs, peek)
     }
 
-    unsafe fn rx_copy(mut src: &[u8], dst: &mut [&mut [u8]]) -> usize {
+    unsafe fn rx_copy(mut src: &[u8], dst: &mut [&mut [MaybeUninit<u8>]]) -> usize {
         let mut copied_bytes = 0;
         for buf in dst {
             let to_copy = buf.len().min(src.len());
-            core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), to_copy);
+            core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr().cast(), to_copy);
 
             copied_bytes += to_copy;
             src = &src[to_copy..];
@@ -1183,7 +1187,11 @@ impl TcpStream {
         copied_bytes
     }
 
-    fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
+    fn read_or_peek(
+        &self,
+        bufs: &mut [&mut [MaybeUninit<u8>]],
+        peek: bool,
+    ) -> Result<usize, ErrorCode> {
         match self.poll_rx(bufs, peek) {
             Ok(sz) => return Ok(sz),
             Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),

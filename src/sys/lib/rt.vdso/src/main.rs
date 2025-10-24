@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![allow(unused)]
+#![feature(maybe_uninit_write_slice)]
 #![feature(str_from_raw_parts)]
 
 mod load;

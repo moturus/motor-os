@@ -133,7 +133,7 @@ impl Default for Msg {
 
 impl Msg {
     pub fn new() -> Self {
-        let mut result: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+        let mut result: Self = unsafe { core::mem::zeroed() };
         result.status = moto_rt::E_NOT_READY;
         result
     }

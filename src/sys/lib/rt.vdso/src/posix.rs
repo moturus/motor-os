@@ -6,6 +6,7 @@
 //! of FDs.
 
 use core::any::Any;
+use core::mem::MaybeUninit;
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -36,10 +37,13 @@ pub enum PosixKind {
 pub trait PosixFile: Any + Send + Sync {
     fn kind(&self) -> PosixKind;
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
-    unsafe fn read_vectored(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
+    unsafe fn read_vectored(
+        &self,
+        bufs: &mut [&mut [MaybeUninit<u8>]],
+    ) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
@@ -92,7 +96,7 @@ pub extern "C" fn posix_read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf.cast(), buf_sz) };
     match posix_file.read(buf) {
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
@@ -115,7 +119,7 @@ pub unsafe extern "C" fn posix_read_vectored(rt_fd: i32, packed: *const usize, n
     for idx in 0..num {
         let addr = packed[2 * idx];
         let len = packed[2 * idx + 1];
-        let buf = core::slice::from_raw_parts_mut(addr as *mut u8, len);
+        let buf = core::slice::from_raw_parts_mut(addr as *mut MaybeUninit<u8>, len);
         bufs.push(buf);
     }
 
@@ -203,7 +207,7 @@ impl PosixFile for Placeholder {
         PosixKind::Placeholder
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         Err(E_BAD_HANDLE)
     }
 
