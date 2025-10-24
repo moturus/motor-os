@@ -61,11 +61,7 @@ fn get_txt_file(pb: PathBuf) -> Option<String> {
     // Try cache hit.
     {
         let mut cache = TXT_FILE_CACHE.lock().unwrap();
-        if cache.is_none() {
-            *cache = Some(HashMap::new());
-        }
-
-        let map = cache.as_mut().unwrap();
+        let map = cache.get_or_insert_default();
         if let Some(s) = map.get(&pb) {
             return Some(s.clone());
         }
@@ -110,11 +106,7 @@ fn get_img_file(pb: PathBuf) -> Option<Vec<u8>> {
     // Try cache hit.
     {
         let mut cache = IMG_FILE_CACHE.lock().unwrap();
-        if cache.is_none() {
-            *cache = Some(HashMap::new());
-        }
-
-        let map = cache.as_mut().unwrap();
+        let map = cache.get_or_insert_default();
         if let Some(v) = map.get(&pb) {
             return Some(v.clone());
         }
@@ -463,7 +455,6 @@ impl std::io::Read for ClientConnection {
                     Err(err) => {
                         if err.kind() == std::io::ErrorKind::WouldBlock {
                             tls_conn.complete_io(tcp_stream)?;
-                            continue;
                         }
                     }
                 }

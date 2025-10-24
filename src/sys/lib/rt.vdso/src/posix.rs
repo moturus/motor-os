@@ -86,9 +86,7 @@ pub trait PosixFile: Any + Send + Sync {
 }
 
 pub extern "C" fn posix_read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
-    let posix_file = if let Some(fd) = get_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = get_file(rt_fd) else {
         return -(E_BAD_HANDLE as i64);
     };
 
@@ -100,9 +98,7 @@ pub extern "C" fn posix_read(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
 }
 
 pub unsafe extern "C" fn posix_read_vectored(rt_fd: i32, packed: *const usize, num: usize) -> i64 {
-    let posix_file = if let Some(fd) = get_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = get_file(rt_fd) else {
         return -(E_BAD_HANDLE as i64);
     };
 
@@ -122,9 +118,7 @@ pub unsafe extern "C" fn posix_read_vectored(rt_fd: i32, packed: *const usize, n
 }
 
 pub extern "C" fn posix_write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 {
-    let posix_file = if let Some(fd) = get_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = get_file(rt_fd) else {
         return -(E_BAD_HANDLE as i64);
     };
 
@@ -136,9 +130,7 @@ pub extern "C" fn posix_write(rt_fd: i32, buf: *const u8, buf_sz: usize) -> i64 
 }
 
 pub unsafe extern "C" fn posix_write_vectored(rt_fd: i32, packed: *const usize, num: usize) -> i64 {
-    let posix_file = if let Some(fd) = get_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = get_file(rt_fd) else {
         return -(E_BAD_HANDLE as i64);
     };
 
@@ -158,9 +150,7 @@ pub unsafe extern "C" fn posix_write_vectored(rt_fd: i32, packed: *const usize, 
 }
 
 pub extern "C" fn posix_flush(rt_fd: i32) -> ErrorCode {
-    let posix_file = if let Some(fd) = get_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
 
@@ -171,9 +161,7 @@ pub extern "C" fn posix_flush(rt_fd: i32) -> ErrorCode {
 }
 
 pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
-    let posix_file = if let Some(fd) = pop_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = pop_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
 
@@ -184,9 +172,7 @@ pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
 }
 
 pub extern "C" fn posix_duplicate(rt_fd: RtFd) -> RtFd {
-    let posix_file = if let Some(fd) = get_file(rt_fd) {
-        fd
-    } else {
+    let Some(posix_file) = get_file(rt_fd) else {
         return -(E_BAD_HANDLE as RtFd);
     };
 
