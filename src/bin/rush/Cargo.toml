@@ -1,0 +1,26 @@
+[package]
+name = "moto-rush"
+description = "A posixy shell implemented in Rust with minimal external dependencies."
+version = "0.1.0"
+edition = "2021"
+authors = ["U. Lasiotus"]
+keywords = ["shell"]
+categories = ["shell"]
+repository = "https://github.com/moturus/rush"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "rush"
+path = "src/main.rs"
+
+[dependencies]
+# glob = "0.3.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
