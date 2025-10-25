@@ -4,17 +4,13 @@ use std::sync::Mutex;
 
 use exec::run_script;
 
-mod client_relay;
 mod exec;
 mod line_parser;
-mod listener;
 mod redirect;
 mod term;
 
 #[cfg(unix)]
 mod term_impl_unix;
-
-const RUSH_HANDSHAKE: &str = "RUSH_001";
 
 struct Cleanup {}
 impl Drop for Cleanup {
@@ -29,8 +25,6 @@ enum Mode {
     Script, // Run a script and exit.
     Terminal,
     Piped, // Internal/hidden mode.
-    Listener(u16),
-    ClientRelay(String),
 }
 
 static MODE: Mutex<Mode> = Mutex::new(Mode::Script);
@@ -40,8 +34,6 @@ fn print_usage_and_exit(code: i32) -> ! {
     eprintln!("    -h: print this message");
     eprintln!("    -c: read commands from the command string (stdin is ignored)");
     eprintln!("    -i: terminal mode + init script");
-    eprintln!("    -r $HOST:$PORT: connect to a remote listener");
-    eprintln!("    -l $PORT: listen on a local port");
     std::process::exit(code);
 }
 
@@ -71,24 +63,6 @@ fn main() {
             if arg.as_str() == "-c" {
                 *MODE.lock().unwrap() = Mode::Command;
                 continue;
-            }
-            if arg.as_str() == "-r" {
-                if args_raw.len() != 3 {
-                    print_usage_and_exit(1);
-                }
-                *MODE.lock().unwrap() = Mode::ClientRelay(args_raw[2].clone());
-                break;
-            }
-            if arg.as_str() == "-l" {
-                if args_raw.len() != 3 {
-                    print_usage_and_exit(1);
-                }
-                if let Ok(port) = args_raw[2].parse::<u16>() {
-                    *MODE.lock().unwrap() = Mode::Listener(port);
-                    break;
-                } else {
-                    print_usage_and_exit(1);
-                }
             }
             if arg.as_str() == "-h" {
                 print_usage_and_exit(0);
@@ -147,19 +121,6 @@ fn main() {
                     exec::run(commands, false, &args).ok(); // Ignore results in the interactive mode.
                 }
             }
-            // unreachable
-        }
-        Mode::Listener(port) => {
-            assert!(script.is_none());
-            listener::run(port)
-            // unreachable
-        }
-        Mode::ClientRelay(host_port) => {
-            assert_terminal();
-            assert!(script.is_none());
-            let _cleanup = Cleanup {}; // On panic, restore the terminal state.
-            term::init(false);
-            client_relay::connect_to(host_port.as_str()).run()
             // unreachable
         }
     }

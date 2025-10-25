@@ -709,12 +709,3 @@ pub fn on_exit() {
         term.term_impl.on_exit();
     }
 }
-
-pub fn make_raw() {
-    match &mut *TERM.try_lock().unwrap() {
-        None => panic!(),
-        Some(term) => {
-            term.term_impl.make_raw();
-        }
-    }
-}
