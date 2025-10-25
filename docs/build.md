@@ -121,8 +121,23 @@ If all of the above completed successfully, you can now do
 sudo apt install qemu-system
 sudo chmod a+rw /dev/kvm
 cd $MOTORH/motor-os/vm_images/release
-./run-qemu-web.sh
+./run-qemu.sh
 ```
 
-to run the minimal image with a web server, which you can access from the host at http://192.168.4.2. To run the full image
-with serial console, use ```./run-qemu-full.sh```
+to run Motor OS in qemu.
+
+While Motor OS is running, you can ssh into it using
+`ssh-into-motor-os-vm.sh` script, or via
+
+```sh
+ssh -p 2222 -o IdentitiesOnly=yes -i test.key motor@192.168.4.2
+```
+
+## Test
+
+A test script is available:
+
+```sh
+cd $MOTORH/motor-os/vm_images/release
+./full-test.sh
+```

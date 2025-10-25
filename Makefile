@@ -153,6 +153,7 @@ img: boot core sys user
 		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD)
 	cp "$(ROOT_DIR)/src/vm_scripts/"* \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
+	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
 	@echo "built Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
 clippy: vdso
