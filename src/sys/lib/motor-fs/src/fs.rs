@@ -79,6 +79,27 @@ impl MotorFs {
     pub fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache {
         &mut self.block_cache
     }
+
+    pub async fn open(dev: Box<dyn AsyncBlockDevice>) -> Result<Self> {
+        if dev.num_blocks() <= RESERVED_BLOCKS {
+            return Err(ErrorKind::StorageFull.into());
+        }
+
+        // TODO: do we need to do any kind of (superficial) validation?
+        // On the one hand, it could be useful; on the other, it will
+        // slow down the bootup, which is a priority. So for now
+        // no explicit validation other than the num blocks check above.
+
+        log::debug!(
+            "Opening a Motor FS partition: {} MB.",
+            dev.num_blocks() / 256
+        );
+
+        Ok(Self {
+            block_cache: BlockCache::new(dev, CACHE_SIZE).await?,
+            error: Ok(()),
+        })
+    }
 }
 
 #[async_trait(?Send)]

@@ -22,6 +22,7 @@ timeq            = { path = "../lib/timeq"            }
 virtio-async     = { path = "../lib/virtio-async"     }
 
 # External.
+async-trait  = "0.1.88"
 crossbeam    = "0.8.4"
 elfloader    = { path = "../../third_party/elfloader" }
 ipnetwork    = "0.20.0"

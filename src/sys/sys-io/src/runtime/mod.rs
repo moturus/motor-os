@@ -232,6 +232,9 @@ async fn async_runtime(q_handle: SysHandle, started_futex: Arc<AtomicU32>) {
         panic!("Cannot proceed without a filesystem.");
     };
     started_futex.store(RUNTIME_STARTED, Ordering::Release);
+
+    log::debug!("Runtime initialized.");
+    let _ = moto_rt::futex_wake(&started_futex);
     // let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd, started_futex));
 
     queue_joiner.await; // Never actually returns.
