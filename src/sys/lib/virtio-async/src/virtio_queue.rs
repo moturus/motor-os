@@ -162,7 +162,32 @@ impl<'a> Future for Completion<'a> {
 
 impl Drop for Completion<'_> {
     fn drop(&mut self) {
-        todo!("\n\n fix this \n\n");
+        let mut virtqueue = self.virtqueue.borrow_mut();
+        let mut curr = self.chain_head;
+        let mut chain_in_use = true;
+        loop {
+            virtqueue.header_buffers[curr as usize].in_use_by_completion = 0;
+            if curr == self.chain_head {
+                chain_in_use = virtqueue.header_buffers[curr as usize].in_use_by_device == 1;
+            } else {
+                debug_assert_eq!(
+                    chain_in_use,
+                    virtqueue.header_buffers[curr as usize].in_use_by_device == 1
+                );
+            }
+
+            let descriptor = virtqueue.get_descriptor(curr);
+            if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
+                curr = descriptor.next;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if !chain_in_use {
+            virtqueue.free_descriptor_chain(self.chain_head);
+        }
     }
 }
 
@@ -331,6 +356,8 @@ impl Virtqueue {
             if idx == (chain_len - 1) {
                 descriptor.flags = 0; // Clear VIRTQ_DESC_F_NEXT, if any.
                 self.free_head_idx = descriptor.next;
+
+                log::debug!("allocated chain {chain_start}");
                 return Some(chain_start);
             }
             descriptor.flags = VIRTQ_DESC_F_NEXT;
@@ -348,8 +375,8 @@ impl Virtqueue {
         return None;
     }
 
-    pub fn free_descriptor_chain(&mut self, first_idx: u16) {
-        let mut curr = first_idx;
+    fn free_descriptor_chain(&mut self, chain_head: u16) {
+        let mut curr = chain_head;
         let free_head_idx = self.free_head_idx;
         loop {
             debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_device);
@@ -362,9 +389,10 @@ impl Virtqueue {
             }
 
             descriptor.next = free_head_idx;
-            self.free_head_idx = first_idx;
+            self.free_head_idx = chain_head;
             break;
         }
+        log::info!("freed chain {chain_head}");
     }
 
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
@@ -426,7 +454,7 @@ impl Virtqueue {
             curr = descriptor.next;
         }
 
-        log::info!("submitted {chain_head}");
+        log::info!("submitted chain {chain_head}");
         this_mut.update_and_increment_available_idx(chain_head);
         // this_mut.notify();
         core::mem::drop(this_mut);
@@ -444,8 +472,6 @@ impl Virtqueue {
             return None;
         }
 
-        //      log::info!("reclaim: got smth");
-
         let head = self.next_used_idx;
         let elem = &self.used_ring.ring[head as usize];
 
@@ -453,8 +479,17 @@ impl Virtqueue {
         self.header_buffers[chain_head as usize].consumed = elem.len;
 
         let mut curr = chain_head;
+        let mut chain_in_use = true;
         loop {
             self.header_buffers[curr as usize].in_use_by_device = 0;
+            if curr == chain_head {
+                chain_in_use = self.header_buffers[curr as usize].in_use_by_completion == 1;
+            } else {
+                debug_assert_eq!(
+                    chain_in_use,
+                    self.header_buffers[curr as usize].in_use_by_completion == 1
+                );
+            }
 
             let descriptor = self.get_descriptor_mut(curr);
             if (descriptor.flags & VIRTQ_DESC_F_NEXT) != 0 {
@@ -462,6 +497,10 @@ impl Virtqueue {
             } else {
                 break;
             }
+        }
+
+        if !chain_in_use {
+            self.free_descriptor_chain(chain_head);
         }
 
         self.next_used_idx = (self.next_used_idx + 1) & self.queue_size_mask;
