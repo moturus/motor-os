@@ -35,17 +35,6 @@ pub fn nop() {
 pub const VIRTIO_BLOCK_SIZE: usize = 512;
 pub const VIRTIO_BLOCK_SIZE_LOG2: usize = 9;
 
-/*
-// This is the block device interface exposed by the library: see crate::lsblk().
-#[allow(clippy::result_unit_err)]
-pub trait BlockDevice {
-    // buf must be aligned at BLOCK_SIZE.
-    fn read(&self, buf: &mut [u8], address: u64, number_of_blocks: usize) -> Result<(), ()>;
-    fn write(&self, buf: &[u8], address: u64, number_of_blocks: usize) -> Result<(), ()>;
-    fn capacity(&self) -> u64; // In blocks.
-}
-*/
-
 // This is the kernel/syscall interface consumed by the library:
 // see crate::init_virtio_devices().
 #[allow(clippy::result_unit_err)]
