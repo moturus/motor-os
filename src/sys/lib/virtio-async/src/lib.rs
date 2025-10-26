@@ -32,8 +32,8 @@ pub fn nop() {
     }
 }
 
-pub const BLOCK_SIZE: usize = 512;
-pub const BLOCK_SIZE_LOG2: usize = 9;
+pub const VIRTIO_BLOCK_SIZE: usize = 512;
+pub const VIRTIO_BLOCK_SIZE_LOG2: usize = 9;
 
 /*
 // This is the block device interface exposed by the library: see crate::lsblk().

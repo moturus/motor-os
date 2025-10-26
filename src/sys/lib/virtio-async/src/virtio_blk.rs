@@ -10,8 +10,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use zerocopy::FromZeros;
 
-use super::BLOCK_SIZE;
-use super::BLOCK_SIZE_LOG2;
+use super::VIRTIO_BLOCK_SIZE;
+use super::VIRTIO_BLOCK_SIZE_LOG2;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use crate::Completion;
@@ -45,7 +45,7 @@ const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
 #[derive(FromZeros)]
 #[repr(C, align(512))]
 pub struct VirtioBlock {
-    pub bytes: [u8; BLOCK_SIZE],
+    pub bytes: [u8; VIRTIO_BLOCK_SIZE],
 }
 
 pub struct VirtioBlockRef<'a> {
@@ -83,6 +83,11 @@ pub struct BlockDevice {
 }
 
 impl BlockDevice {
+    /// The number of sectors (512 bytes) the device has.
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
     pub fn wait_handle(&self) -> moto_sys::SysHandle {
         assert_eq!(1, self.dev.virtqueues.len());
         self.dev.virtqueues[0].borrow().wait_handle()
@@ -213,7 +218,7 @@ impl BlockDevice {
             },
             UserData {
                 addr: block_ref.bytes as usize as u64,
-                len: BLOCK_SIZE as u32,
+                len: VIRTIO_BLOCK_SIZE as u32,
             },
             UserData {
                 addr: status as *mut _ as usize as u64,
