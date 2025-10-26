@@ -4,6 +4,7 @@ use crate::{rt_process::ProcessData, rt_process::StdioData};
 use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
+use core::mem::MaybeUninit;
 use core::sync::atomic::*;
 use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
@@ -58,7 +59,7 @@ impl PosixFile for ChildFd {
         PosixKind::ChildProcess
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         if buf.len() != 8 {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -70,8 +71,8 @@ impl PosixFile for ChildFd {
 
         unsafe {
             core::ptr::copy_nonoverlapping(
-                &status as *const u64 as usize as *const u8,
-                buf.as_mut_ptr(),
+                &status as *const u64 as *const u8,
+                buf.as_mut_ptr().cast(),
                 8,
             );
         }

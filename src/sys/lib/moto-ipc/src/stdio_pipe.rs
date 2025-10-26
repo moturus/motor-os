@@ -6,6 +6,7 @@
 //!
 //! DO NOT USE outside of rt.vdso.
 
+use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use moto_rt::{spinlock::SpinLock, E_INVALID_ARGUMENT};
@@ -126,7 +127,7 @@ impl PipeBuffer {
         to_write
     }
 
-    fn read(&mut self, dst: &mut [u8]) -> usize {
+    fn read(&mut self, dst: &mut [MaybeUninit<u8>]) -> usize {
         let writer_counter = self.writer_counter().load(Ordering::SeqCst);
         let reader_counter = self.reader_counter().load(Ordering::SeqCst);
 
@@ -143,17 +144,17 @@ impl PipeBuffer {
         let reader_offset = reader_counter & (self.work_buf_len - 1);
         if (reader_offset + to_read) <= self.work_buf_len {
             (&mut *dst)[0..to_read]
-                .copy_from_slice(&self.work_buf[reader_offset..(reader_offset + to_read)]);
+                .write_copy_of_slice(&self.work_buf[reader_offset..(reader_offset + to_read)]);
             self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
             return to_read;
         }
 
         let first_read = self.work_buf_len - reader_offset;
         (&mut *dst)[0..first_read]
-            .copy_from_slice(&self.work_buf[reader_offset..self.work_buf_len]);
+            .write_copy_of_slice(&self.work_buf[reader_offset..self.work_buf_len]);
 
         let second_read = to_read - first_read;
-        (&mut *dst)[first_read..to_read].copy_from_slice(&self.work_buf[0..second_read]);
+        (&mut *dst)[first_read..to_read].write_copy_of_slice(&self.work_buf[0..second_read]);
 
         self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
         to_read
@@ -260,13 +261,13 @@ impl StdioPipe {
         }
     }
 
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         self.read_timeout(buf, None)
     }
 
     pub fn read_timeout(
         &self,
-        buf: &mut [u8],
+        buf: &mut [MaybeUninit<u8>],
         timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         if !self.is_reader {
@@ -280,7 +281,7 @@ impl StdioPipe {
         }
     }
 
-    pub fn nonblocking_read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    pub fn nonblocking_read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         let Some(buffer) = self.buffer.as_ref() else {
             return Err(E_INVALID_ARGUMENT);
         };
@@ -440,7 +441,7 @@ impl StdioPipe {
 
     fn read_timeout_impl(
         buffer: &mut PipeBuffer,
-        buf: &mut [u8],
+        buf: &mut [MaybeUninit<u8>],
         timeout: Option<moto_rt::time::Instant>,
     ) -> Result<usize, ErrorCode> {
         buffer.assert_invariants();

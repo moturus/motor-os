@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(maybe_uninit_write_slice)]
 
 extern crate alloc;
 

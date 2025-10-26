@@ -1,4 +1,5 @@
 use core::any::Any;
+use core::mem::MaybeUninit;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
@@ -325,7 +326,7 @@ impl PosixFile for File {
         PosixKind::File
     }
 
-    fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         FsClient::read(self, buf)
     }
 
@@ -684,7 +685,7 @@ impl FsClient {
         }
     }
 
-    fn read(file: &File, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(file: &File, buf: &mut [MaybeUninit<u8>]) -> Result<usize, ErrorCode> {
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
         unsafe {
@@ -714,7 +715,7 @@ impl FsClient {
 
         unsafe {
             let bytes = raw_channel.get_bytes(resp.data.as_ptr(), result_sz)?;
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr(), result_sz);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr().cast(), result_sz);
             file.pos.fetch_add(result_sz as u64, Ordering::Relaxed);
             Ok(result_sz)
         }

@@ -195,7 +195,7 @@ pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf.cast(), buf_sz) };
 
     if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
         match tcp_stream.peek(buf) {
@@ -303,7 +303,7 @@ unsafe fn udp_recv_or_peek_from(
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = core::slice::from_raw_parts_mut(buf, buf_sz);
+    let buf = core::slice::from_raw_parts_mut(buf.cast(), buf_sz);
     match udp_socket.recv_or_peek_from(buf, peek) {
         Ok((sz, from)) => {
             *addr = from.into();

@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 use moto_ipc::stdio_pipe::StdioPipe;
 
 fn test_stdio_pipe_basic() {
@@ -13,7 +15,9 @@ fn test_stdio_pipe_basic() {
         loop {
             let mut buf: Vec<u8> = vec![0; step % 8176 + 17];
 
-            let read = reader.read(buf.as_mut_slice()).unwrap();
+            let buf_uninit =
+                unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), buf.len()) };
+            let read = reader.read(buf_uninit).unwrap();
             assert!(read > 0);
             if buf[read - 1] == 0 {
                 break;
@@ -324,7 +328,7 @@ fn test_stdio_pipe_flush() {
 
     // Wait a bit.
     receiver.recv().unwrap();
-    let mut buf = [0; 64];
+    let mut buf = [MaybeUninit::uninit(); 64];
     let _ = reader.read(&mut buf).unwrap();
     writer_thread.join().unwrap();
 
@@ -355,7 +359,7 @@ fn test_stdio_reader_wake_on_writer_drop() {
     let writer = unsafe { StdioPipe::new_writer(d2) };
 
     let reader_thread = std::thread::spawn(move || loop {
-        let mut buf = [0; 64];
+        let mut buf = [MaybeUninit::uninit(); 64];
 
         let Ok(read) = reader.read(&mut buf) else {
             break;
@@ -396,7 +400,7 @@ fn test_stdio_writer_wake_on_reader_drop() {
         }
     });
 
-    let mut buf = [0; 64];
+    let mut buf = [MaybeUninit::uninit(); 64];
     let _ = reader.read(&mut buf).unwrap();
 
     // Sleep a bit to let the writer go into wait().
