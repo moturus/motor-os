@@ -92,12 +92,8 @@ impl IoRuntime {
 
     fn spawn_listeners_if_needed(&mut self) {
         while self.listeners.len() < Self::MIN_LISTENERS {
-            let listener = match io_channel::ServerConnection::create("sys-io") {
-                Ok(server) => server,
-                Err(err) => {
-                    panic!("Failed to spawn a sys-io listener: {err:?}");
-                }
-            };
+            let listener = io_channel::ServerConnection::create("sys-io")
+                .expect("Failed to spawn a sys-io listener: {err:?}");
 
             self.all_handles.push(listener.wait_handle());
             #[cfg(debug_assertions)]
