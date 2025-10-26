@@ -68,8 +68,8 @@ pub fn unshuffle_u64(n: u64, seed: u64) -> u64 {
 #[test]
 fn shuffle() {
     for _ in 0..1_000 {
-        let original: u64 = std::random::random();
-        let seed: u64 = std::random::random();
+        let original: u64 = std::random::random(..);
+        let seed: u64 = std::random::random(..);
         let shuffled = shuffle_u64(original, seed);
         let unshuffled = unshuffle_u64(shuffled, seed);
 
