@@ -81,11 +81,9 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
                 .expect("Failed to add a file to img.");
         }
     }
-
-    // println!("{:?} created (SRFS)", result_path);
 }
 
-async fn _create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     use async_fs::FileSystem;
 
     const MB: u64 = 1024 * 1024;
@@ -134,21 +132,18 @@ async fn _create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<Pa
     }
 }
 
-fn _create_motorfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+fn create_motorfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
-    rt.block_on(_create_motorfs_partition_async(result_path, files));
+    rt.block_on(create_motorfs_partition_async(result_path, files));
 }
 
 fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
-    // println!("creating flatfs in {:?}", result);
-
     let mut writer = flatfs::Writer::new();
 
     for (src, dst) in files {
-        // println!("copying {:?} into {:?}", src, result);
         let mut source_file = File::open(src).unwrap();
         let mut bytes: Vec<u8> = Vec::new();
         source_file.read_to_end(&mut bytes).unwrap();
@@ -449,7 +444,7 @@ fn main() {
 
     std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
 
-    // ////////////////////////////////////////////////// The full partition
+    // ////////////////////////////////////////////////// The full image.
     // Prepare the filesystem.
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
@@ -477,7 +472,7 @@ fn main() {
         &img_dir.join("motor.full.img"),
     );
 
-    // ////////////////////////////////////////////////// The "web" partition
+    // ////////////////////////////////////////////////// The "web" image.
     // Prepare the filesystem.
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
@@ -505,13 +500,12 @@ fn main() {
         &img_dir.join("motor.web.img"),
     );
 
-    // ////////////////////////////////////////////////// The "web" partition with Motor FS.
+    // ////////////////////////////////////////////////// The "full" image with Motor FS.
     // Prepare the filesystem.
-    /*
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     // Add compiled programs to the data partition.
-    for prog in BIN_WEB {
+    for prog in BIN_FULL {
         let filename = Path::new(prog).file_name().unwrap();
         files.insert(bin_dir.join(filename), (*prog).to_owned());
     }
@@ -519,7 +513,7 @@ fn main() {
     // Add static files to the data partition.
     add_static_dir(
         &mut files,
-        motorh.join("img_files").join("web"),
+        motorh.join("img_files").join("full"),
         Path::new("/"),
     );
 
@@ -531,9 +525,8 @@ fn main() {
         &initrd,
         &fs_partition,
         Some("motor-fs"),
-        &img_dir.join("motor.web.motor-fs.img"),
+        &img_dir.join("motor-fs.img"),
     );
-    */
 
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
 }
