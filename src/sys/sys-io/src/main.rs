@@ -34,12 +34,12 @@ fn _log_to_cloud_hypervisor(c: u8) {
     };
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn motor_has_proc_data() -> u8 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn motor_runtime_start() {
     // Can't panic before vdso has been loaded.
     let _ = logger::init();
@@ -61,6 +61,9 @@ fn main() {
     #[cfg(debug_assertions)]
     {
         runtime::spawn_async();
+        std::fs::write("/foo", "bar").expect("async write failed");
+        let bytes = std::fs::read("/too").expect("async read failed");
+        assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
         panic!("let's not go there");
     }

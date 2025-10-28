@@ -491,6 +491,8 @@ impl FsClient {
             let mut initialized = FS_CLIENT_INITIALIZED.lock();
             if !*initialized {
                 let driver_url = get_fileserver_url()?;
+                // let driver_url = get_fileserver_url()
+                //     .inspect_err(|e| log::warn!("Error getting FS driver URL: {err}"))?;
                 FsClient::create(driver_url)?;
                 *initialized = true;
             }

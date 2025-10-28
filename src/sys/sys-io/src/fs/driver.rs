@@ -133,19 +133,20 @@ impl Driver {
     }
 
     unsafe fn on_mkdir(raw_channel: RawChannel) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<MkdirRequest>();
+        let req = unsafe { raw_channel.get::<MkdirRequest>() };
         assert_eq!(req.header.cmd, CMD_MKDIR);
 
         if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return Err(moto_rt::E_INVALID_FILENAME);
-            }
-        };
+        let fname_bytes =
+            match unsafe { raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) } {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Err(moto_rt::E_INVALID_FILENAME);
+                }
+            };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
@@ -156,25 +157,26 @@ impl Driver {
 
         super::filesystem::fs().mkdir(fname)?;
 
-        let resp = raw_channel.get_mut::<CloseFdResponse>();
+        let resp = unsafe { raw_channel.get_mut::<CloseFdResponse>() };
         resp.header.result = 0;
         Ok(())
     }
 
     unsafe fn on_unlink(raw_channel: RawChannel) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<UnlinkRequest>();
+        let req = unsafe { raw_channel.get::<UnlinkRequest>() };
         assert_eq!(req.header.cmd, CMD_UNLINK);
 
         if (req.header.ver != 0) || (req.parent_fd != 0) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return Err(moto_rt::E_INVALID_FILENAME);
-            }
-        };
+        let fname_bytes =
+            match unsafe { raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) } {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Err(moto_rt::E_INVALID_FILENAME);
+                }
+            };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
@@ -190,26 +192,26 @@ impl Driver {
             _ => return Err(moto_rt::E_INVALID_ARGUMENT),
         }
 
-        let resp = raw_channel.get_mut::<UnlinkResponse>();
+        let resp = unsafe { raw_channel.get_mut::<UnlinkResponse>() };
         resp.header.result = 0;
         Ok(())
     }
 
     unsafe fn on_rename(raw_channel: RawChannel) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<RenameRequest>();
+        let req = unsafe { raw_channel.get::<RenameRequest>() };
         assert_eq!(req.header.cmd, CMD_RENAME);
 
         if (req.header.ver != 0) || (req.parent_fd != 0) || (req.header.flags != 0) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
-        let old = req.old(&raw_channel)?;
-        let new = req.new(&raw_channel)?;
+        let old = unsafe { req.old(&raw_channel) }?;
+        let new = unsafe { req.new(&raw_channel) }?;
 
         log::debug!("driver: rename: {old} -> {new}");
 
         super::filesystem::fs().rename(old, new)?;
-        let resp = raw_channel.get_mut::<RenameResponse>();
+        let resp = unsafe { raw_channel.get_mut::<RenameResponse>() };
         resp.header.result = 0;
         Ok(())
     }
@@ -218,19 +220,20 @@ impl Driver {
         conn: &mut LocalServerConnection,
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<ReadDirRequest>();
+        let req = unsafe { raw_channel.get::<ReadDirRequest>() };
         assert_eq!(req.header.cmd, CMD_READDIR);
 
         if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return Err(moto_rt::E_INVALID_FILENAME);
-            }
-        };
+        let fname_bytes =
+            match unsafe { raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) } {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return Err(moto_rt::E_INVALID_FILENAME);
+                }
+            };
 
         let fname = match core::str::from_utf8(fname_bytes) {
             Ok(fname) => fname,
@@ -253,7 +256,7 @@ impl Driver {
 
         let readdir_fd = pcon.add_readdir(iter);
 
-        let resp = raw_channel.get_mut::<ReadDirResponse>();
+        let resp = unsafe { raw_channel.get_mut::<ReadDirResponse>() };
         resp.header.result = 0;
         resp.header.ver = 0;
         resp.fd = readdir_fd;
@@ -265,18 +268,15 @@ impl Driver {
         conn: &mut LocalServerConnection,
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<ReadDirNextRequest>();
+        let req = unsafe { raw_channel.get::<ReadDirNextRequest>() };
         assert_eq!(req.header.cmd, CMD_READDIR_NEXT);
 
         if req.header.ver != 0 {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let pcon = {
-            match conn.extension_mut::<PerConnectionData>() {
-                Some(pcon) => pcon,
-                None => return Err(moto_rt::E_INTERNAL_ERROR),
-            }
+        let Some(pcon) = conn.extension_mut::<PerConnectionData>() else {
+            return Err(moto_rt::E_INTERNAL_ERROR);
         };
 
         let iter = pcon.get_readdir(req.readdir_fd);
@@ -287,15 +287,14 @@ impl Driver {
 
         let item = iter.next();
 
-        let resp = raw_channel.get_mut::<ReadDirNextResponse>();
+        let resp = unsafe { raw_channel.get_mut::<ReadDirNextResponse>() };
         resp.header.result = 0;
         resp.header.ver = 0;
 
-        if item.is_none() {
+        let Some(item) = item else {
             return Err(E_NOT_FOUND);
-        }
+        };
 
-        let item = item.unwrap_unchecked();
         let (file_type, size) = {
             if item.is_directory() {
                 (moto_rt::fs::FILETYPE_DIRECTORY, 0)
@@ -314,13 +313,13 @@ impl Driver {
             modified: 0,
         };
 
-        let dir_entry = &mut raw_channel.get_at_mut(&mut resp.dir_entry, 1)?[0];
+        let dir_entry = &mut unsafe { raw_channel.get_at_mut(&mut resp.dir_entry, 1) }?[0];
         dir_entry.version = 0;
         dir_entry._reserved = 0;
         dir_entry.attr = attr;
         dir_entry.fname_size = item.filename().len() as u16;
         assert!((dir_entry.fname_size as usize) <= moto_rt::fs::MAX_FILENAME_LEN);
-        raw_channel.put_bytes(item.filename().as_bytes(), dir_entry.fname.as_mut_ptr())?;
+        unsafe { raw_channel.put_bytes(item.filename().as_bytes(), dir_entry.fname.as_mut_ptr()) }?;
 
         Ok(())
     }
@@ -329,18 +328,17 @@ impl Driver {
         conn: &mut LocalServerConnection,
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<FileOpenRequest>();
+        let req = unsafe { raw_channel.get::<FileOpenRequest>() };
         assert_eq!(req.header.cmd, CMD_FILE_OPEN);
 
         if (req.header.ver != 0) || (req.parent_fd != 0) {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return Err(moto_rt::E_INVALID_FILENAME);
-            }
+        let Ok(fname_bytes) =
+            (unsafe { raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) })
+        else {
+            return Err(moto_rt::E_INVALID_FILENAME);
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
@@ -393,7 +391,7 @@ impl Driver {
         let file_sz = file.size()?;
         let fd = pcon.add_file(file);
 
-        let resp = raw_channel.get_mut::<FileOpenResponse>();
+        let resp = unsafe { raw_channel.get_mut::<FileOpenResponse>() };
         resp.header.result = 0;
         resp.size = file_sz;
         resp.fd = fd;
@@ -405,7 +403,7 @@ impl Driver {
         conn: &mut LocalServerConnection,
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<FileReadRequest>();
+        let req = unsafe { raw_channel.get::<FileReadRequest>() };
         assert_eq!(req.header.cmd, CMD_FILE_READ);
 
         if req.header.ver != 0 {
@@ -420,13 +418,13 @@ impl Driver {
         };
 
         if let Some(file) = pcon.get_file(req.fd) {
-            let resp = raw_channel.get_mut::<FileReadResponse>();
+            let resp = unsafe { raw_channel.get_mut::<FileReadResponse>() };
             resp.header.result = 0;
 
             let buf_size = (req.max_bytes as usize)
                 .min(raw_channel.size() - core::mem::size_of::<FileReadResponse>());
 
-            let buf = raw_channel.get_bytes_mut(resp.data.as_mut_ptr(), buf_size)?;
+            let buf = unsafe { raw_channel.get_bytes_mut(resp.data.as_mut_ptr(), buf_size) }?;
             let bytes_read = file.read_offset(req.offset, buf)?;
 
             resp.size = bytes_read as u32;
@@ -441,7 +439,7 @@ impl Driver {
         conn: &mut LocalServerConnection,
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<FileWriteRequest>();
+        let req = unsafe { raw_channel.get::<FileWriteRequest>() };
         assert_eq!(req.header.cmd, CMD_FILE_WRITE);
 
         if req.header.ver != 0 {
@@ -468,7 +466,7 @@ impl Driver {
         let buf = unsafe { core::slice::from_raw_parts(&req.data as *const u8, req.size as usize) };
         let written = file.write_offset(req.offset, buf)?;
 
-        let resp = raw_channel.get_mut::<FileWriteResponse>();
+        let resp = unsafe { raw_channel.get_mut::<FileWriteResponse>() };
         resp.header.result = 0;
         resp.written = written as u32;
 
@@ -479,7 +477,7 @@ impl Driver {
         conn: &mut LocalServerConnection,
         raw_channel: RawChannel,
     ) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<CloseFdRequest>();
+        let req = unsafe { raw_channel.get::<CloseFdRequest>() };
         assert_eq!(req.header.cmd, CMD_CLOSE_FD);
 
         if req.header.ver != 0 {
@@ -511,24 +509,23 @@ impl Driver {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let resp = raw_channel.get_mut::<CloseFdResponse>();
+        let resp = unsafe { raw_channel.get_mut::<CloseFdResponse>() };
         resp.header.result = 0;
         Ok(())
     }
 
     unsafe fn on_stat(raw_channel: RawChannel) -> Result<(), ErrorCode> {
-        let req = raw_channel.get::<StatRequest>();
+        let req = unsafe { raw_channel.get::<StatRequest>() };
         assert_eq!(req.header.cmd, CMD_STAT);
 
         if (req.header.ver != 0) || (req.header.flags != 0) || (req.parent_fd != 0) {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        let fname_bytes = match raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                return Err(moto_rt::E_INVALID_FILENAME);
-            }
+        let Ok(fname_bytes) =
+            (unsafe { raw_channel.get_bytes(req.fname.as_ptr(), req.fname_size as usize) })
+        else {
+            return Err(moto_rt::E_INVALID_FILENAME);
         };
 
         let fname = match core::str::from_utf8(fname_bytes) {
@@ -540,7 +537,7 @@ impl Driver {
 
         let attr = fs().stat(fname)?;
 
-        let resp = raw_channel.get_mut::<StatResponse>();
+        let resp = unsafe { raw_channel.get_mut::<StatResponse>() };
         resp.header.result = 0; // Ok.
         resp.fd = 0;
         resp.attr = attr;

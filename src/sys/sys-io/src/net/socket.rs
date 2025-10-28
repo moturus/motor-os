@@ -290,21 +290,21 @@ static SOCKET_WAKER_VTABLE: RawWakerVTable =
     RawWakerVTable::new(clone_waker, wake_waker, wake_by_ref_waker, drop_waker);
 
 unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
-    let waker = &*(ptr as *const SocketWaker);
+    let waker = unsafe { &*(ptr as *const SocketWaker) };
     waker.clone().into_raw_waker()
 }
 
 unsafe fn wake_waker(ptr: *const ()) {
-    let waker = &*(ptr as *const SocketWaker);
+    let waker = unsafe { &*(ptr as *const SocketWaker) };
     waker.wake();
-    drop(Box::from_raw(ptr as *mut SocketWaker));
+    drop(unsafe { Box::from_raw(ptr as *mut SocketWaker) });
 }
 
 unsafe fn wake_by_ref_waker(ptr: *const ()) {
-    let waker = &*(ptr as *const SocketWaker);
+    let waker = unsafe { &*(ptr as *const SocketWaker) };
     waker.wake();
 }
 
 unsafe fn drop_waker(ptr: *const ()) {
-    drop(Box::from_raw(ptr as *mut SocketWaker));
+    drop(unsafe { Box::from_raw(ptr as *mut SocketWaker) });
 }
