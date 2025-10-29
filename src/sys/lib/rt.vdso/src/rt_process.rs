@@ -121,10 +121,10 @@ pub extern "C" fn exit(code: i32) -> ! {
 }
 
 fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
-    if let Ok(attr) = moto_rt::fs::stat(exe) {
-        if attr.file_type == moto_rt::fs::FILETYPE_FILE {
-            return Ok(exe.to_owned());
-        }
+    if let Ok(attr) = moto_rt::fs::stat(exe)
+        && attr.file_type == moto_rt::fs::FILETYPE_FILE
+    {
+        return Ok(exe.to_owned());
     }
 
     // Only "naked" filenames are resolved with $PATH.

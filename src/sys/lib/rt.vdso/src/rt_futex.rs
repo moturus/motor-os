@@ -1,6 +1,6 @@
+use alloc::collections::BTreeMap;
 use alloc::collections::btree_set::BTreeSet;
 use alloc::collections::vec_deque::VecDeque;
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
@@ -145,11 +145,11 @@ fn futex_wait_impl(
         return true;
     }
 
-    if let Some(timo) = timeout {
-        if timo <= moto_rt::time::Instant::now() {
-            remove_waiter_from_queue(key, queue);
-            return false;
-        }
+    if let Some(timo) = timeout
+        && timo <= moto_rt::time::Instant::now()
+    {
+        remove_waiter_from_queue(key, queue);
+        return false;
     }
 
     let timedout = queue.wait(&timeout);
@@ -190,11 +190,7 @@ pub extern "C" fn futex_wait(futex: *const AtomicU32, expected: u32, timeout: u6
 }
 
 pub extern "C" fn futex_wake(futex: *const AtomicU32) -> u32 {
-    if futex_wake_impl(futex) {
-        1
-    } else {
-        0
-    }
+    if futex_wake_impl(futex) { 1 } else { 0 }
 }
 
 pub extern "C" fn futex_wake_all(futex: *const AtomicU32) {

@@ -668,10 +668,10 @@ impl NetChannel {
                         // the accept converting into a stream...
                         let mut tcp_listeners = self.tcp_listeners.lock();
                         for listener in tcp_listeners.values() {
-                            if let Some(listener) = listener.upgrade() {
-                                if listener.add_to_pending_queue(msg) {
-                                    continue;
-                                }
+                            if let Some(listener) = listener.upgrade()
+                                && listener.add_to_pending_queue(msg)
+                            {
+                                continue;
                             }
                         }
                         None

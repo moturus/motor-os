@@ -13,6 +13,7 @@ use core::sync::atomic::*;
 use core::time::Duration;
 use crossbeam::utils::CachePadded;
 use moto_ipc::io_channel;
+use moto_rt::RtFd;
 use moto_rt::error::*;
 use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
@@ -20,12 +21,11 @@ use moto_rt::netc;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::time::Instant;
-use moto_rt::RtFd;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
-use moto_sys_io::api_net::TcpState;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
+use moto_sys_io::api_net::TcpState;
 
 use super::rt_net::ChannelReservation;
 use super::rt_net::NetChannel;
@@ -155,11 +155,12 @@ impl ResponseHandler for TcpListener {
         // otherwise racing accept may miss the queue).
         if wake_handle != SysHandle::NONE {
             // The accept was blocking; a thread is waiting.
-            assert!(self
-                .sync_accepts
-                .lock()
-                .insert(req.req.id, PendingAccept { req, resp })
-                .is_none());
+            assert!(
+                self.sync_accepts
+                    .lock()
+                    .insert(req.req.id, PendingAccept { req, resp })
+                    .is_none()
+            );
             let _ = moto_sys::SysCpu::wake(wake_handle);
             return;
         }
@@ -349,11 +350,12 @@ impl TcpListener {
 
         new_stream.channel().tcp_stream_created(&new_stream);
         // Now we can remove the queue.
-        assert!(self
-            .pending_accept_queues
-            .lock()
-            .remove(&pending_accept.resp.handle)
-            .is_some());
+        assert!(
+            self.pending_accept_queues
+                .lock()
+                .remove(&pending_accept.resp.handle)
+                .is_some()
+        );
 
         new_stream.ack_rx();
         new_stream.on_accepted();
@@ -393,11 +395,12 @@ impl TcpListener {
             req,
         };
 
-        assert!(self
-            .accept_requests
-            .lock()
-            .insert(req.id, accept_request)
-            .is_none());
+        assert!(
+            self.accept_requests
+                .lock()
+                .insert(req.id, accept_request)
+                .is_none()
+        );
 
         channel
             .post_msg_with_response_waiter(req, self.me.clone())
@@ -411,7 +414,7 @@ impl TcpListener {
         match option {
             moto_rt::net::SO_NONBLOCKING => {
                 assert_eq!(len, 1);
-                let nonblocking = *(ptr as *const u8);
+                let nonblocking = unsafe { *(ptr as *const u8) };
                 if nonblocking > 1 {
                     return E_INVALID_ARGUMENT;
                 }
@@ -419,7 +422,7 @@ impl TcpListener {
             }
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
-                let ttl = *(ptr as *const u32);
+                let ttl = unsafe { *(ptr as *const u32) };
                 self.set_ttl(ttl)
             }
             _ => panic!("unrecognized option {option}"),
@@ -432,7 +435,7 @@ impl TcpListener {
                 assert_eq!(len, 4);
                 match self.ttl() {
                     Ok(ttl) => {
-                        *(ptr as *mut u32) = ttl;
+                        unsafe { *(ptr as *mut u32) = ttl };
                         moto_rt::E_OK
                     }
                     Err(err) => err,
@@ -441,7 +444,7 @@ impl TcpListener {
             moto_rt::net::SO_ERROR => {
                 assert_eq!(len, 2);
                 let err = self.take_error();
-                *(ptr as *mut u16) = err;
+                unsafe { *(ptr as *mut u16) = err };
                 moto_rt::E_OK
             }
             _ => panic!("unrecognized option {option}"),
@@ -931,89 +934,93 @@ impl TcpStream {
     }
 
     pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_NONBLOCKING => {
-                assert_eq!(len, 1);
-                let nonblocking = *(ptr as *const u8);
-                if nonblocking > 1 {
-                    return E_INVALID_ARGUMENT;
+        unsafe {
+            match option {
+                moto_rt::net::SO_NONBLOCKING => {
+                    assert_eq!(len, 1);
+                    let nonblocking = *(ptr as *const u8);
+                    if nonblocking > 1 {
+                        return E_INVALID_ARGUMENT;
+                    }
+                    self.set_nonblocking(nonblocking == 1)
                 }
-                self.set_nonblocking(nonblocking == 1)
+                moto_rt::net::SO_RCVTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = *(ptr as *const u64);
+                    self.set_read_timeout(timeout);
+                    moto_rt::E_OK
+                }
+                moto_rt::net::SO_SNDTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = *(ptr as *const u64);
+                    self.set_write_timeout(timeout);
+                    moto_rt::E_OK
+                }
+                moto_rt::net::SO_SHUTDOWN => {
+                    assert_eq!(len, 1);
+                    let val = *(ptr as *const u8);
+                    let read = val & moto_rt::net::SHUTDOWN_READ != 0;
+                    let write = val & moto_rt::net::SHUTDOWN_WRITE != 0;
+                    self.shutdown(read, write)
+                }
+                moto_rt::net::SO_NODELAY => {
+                    assert_eq!(len, 1);
+                    let nodelay = *(ptr as *const u8);
+                    self.set_nodelay(nodelay)
+                }
+                moto_rt::net::SO_TTL => {
+                    assert_eq!(len, 4);
+                    let ttl = *(ptr as *const u32);
+                    self.set_ttl(ttl)
+                }
+                _ => panic!("unrecognized option {option}"),
             }
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = *(ptr as *const u64);
-                self.set_read_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = *(ptr as *const u64);
-                self.set_write_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SHUTDOWN => {
-                assert_eq!(len, 1);
-                let val = *(ptr as *const u8);
-                let read = val & moto_rt::net::SHUTDOWN_READ != 0;
-                let write = val & moto_rt::net::SHUTDOWN_WRITE != 0;
-                self.shutdown(read, write)
-            }
-            moto_rt::net::SO_NODELAY => {
-                assert_eq!(len, 1);
-                let nodelay = *(ptr as *const u8);
-                self.set_nodelay(nodelay)
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                let ttl = *(ptr as *const u32);
-                self.set_ttl(ttl)
-            }
-            _ => panic!("unrecognized option {option}"),
         }
     }
 
     pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.read_timeout();
-                *(ptr as *mut u64) = timeout;
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.write_timeout();
-                *(ptr as *mut u64) = timeout;
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_NODELAY => {
-                assert_eq!(len, 1);
-                match self.nodelay() {
-                    Ok(nodelay) => {
-                        *(ptr as *mut u8) = nodelay;
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
+        unsafe {
+            match option {
+                moto_rt::net::SO_RCVTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = self.read_timeout();
+                    *(ptr as *mut u64) = timeout;
+                    moto_rt::E_OK
                 }
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                match self.ttl() {
-                    Ok(ttl) => {
-                        *(ptr as *mut u32) = ttl;
-                        moto_rt::E_OK
-                    }
-                    Err(err) => err,
+                moto_rt::net::SO_SNDTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = self.write_timeout();
+                    *(ptr as *mut u64) = timeout;
+                    moto_rt::E_OK
                 }
+                moto_rt::net::SO_NODELAY => {
+                    assert_eq!(len, 1);
+                    match self.nodelay() {
+                        Ok(nodelay) => {
+                            *(ptr as *mut u8) = nodelay;
+                            moto_rt::E_OK
+                        }
+                        Err(err) => err,
+                    }
+                }
+                moto_rt::net::SO_TTL => {
+                    assert_eq!(len, 4);
+                    match self.ttl() {
+                        Ok(ttl) => {
+                            *(ptr as *mut u32) = ttl;
+                            moto_rt::E_OK
+                        }
+                        Err(err) => err,
+                    }
+                }
+                moto_rt::net::SO_ERROR => {
+                    assert_eq!(len, 2);
+                    let err = self.take_error();
+                    *(ptr as *mut u16) = err;
+                    moto_rt::E_OK
+                }
+                _ => panic!("unrecognized option {option}"),
             }
-            moto_rt::net::SO_ERROR => {
-                assert_eq!(len, 2);
-                let err = self.take_error();
-                *(ptr as *mut u16) = err;
-                moto_rt::E_OK
-            }
-            _ => panic!("unrecognized option {option}"),
         }
     }
 
@@ -1171,7 +1178,7 @@ impl TcpStream {
         let mut copied_bytes = 0;
         for buf in dst {
             let to_copy = buf.len().min(src.len());
-            core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), to_copy);
+            unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), to_copy) };
 
             copied_bytes += to_copy;
             src = &src[to_copy..];
@@ -1201,10 +1208,10 @@ impl TcpStream {
         };
 
         loop {
-            if let Some(timeout) = rx_timeout {
-                if Instant::now() >= timeout {
-                    return Err(moto_rt::E_TIMED_OUT);
-                }
+            if let Some(timeout) = rx_timeout
+                && Instant::now() >= timeout
+            {
+                return Err(moto_rt::E_TIMED_OUT);
             }
 
             match self.poll_rx(bufs, peek) {
@@ -1281,11 +1288,11 @@ impl TcpStream {
     fn have_write_buffer_space(&self) -> bool {
         {
             let mut tx_lock = self.tx_msg.lock();
-            if let Some((msg, write_sz)) = tx_lock.take() {
-                if let Err(msg) = self.try_tx(msg, write_sz) {
-                    *tx_lock = Some((msg, write_sz));
-                    return false;
-                }
+            if let Some((msg, write_sz)) = tx_lock.take()
+                && let Err(msg) = self.try_tx(msg, write_sz)
+            {
+                *tx_lock = Some((msg, write_sz));
+                return false;
             }
         }
 
@@ -1319,10 +1326,10 @@ impl TcpStream {
         let mut spin_loop_counter: u64 = 0;
         let mut yield_counter: u64 = 0;
         let io_page = loop {
-            if let Some(timo) = abs_timeout {
-                if Instant::now() >= timo {
-                    return Err(moto_rt::E_TIMED_OUT);
-                }
+            if let Some(timo) = abs_timeout
+                && Instant::now() >= timo
+            {
+                return Err(moto_rt::E_TIMED_OUT);
             }
 
             match self.channel().alloc_page(self.subchannel_mask) {
@@ -1343,10 +1350,10 @@ impl TcpStream {
                     }
 
                     let mut sleep_timo = Instant::now() + Duration::from_micros(sleep_timo_usec);
-                    if let Some(timo) = abs_timeout {
-                        if timo < sleep_timo {
-                            sleep_timo = timo;
-                        }
+                    if let Some(timo) = abs_timeout
+                        && timo < sleep_timo
+                    {
+                        sleep_timo = timo;
                     }
                     sleep_timo_usec *= 2;
                     if sleep_timo_usec > 3_000_000 {
@@ -1381,7 +1388,7 @@ impl TcpStream {
         let mut written = 0;
         for buf in src {
             let to_write = buf.len().min(dst.len());
-            core::ptr::copy_nonoverlapping(buf.as_ptr(), dst.as_mut_ptr(), to_write);
+            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), dst.as_mut_ptr(), to_write) };
             written += to_write;
             dst = &mut dst[to_write..];
 
@@ -1399,12 +1406,12 @@ impl TcpStream {
 
         // Serialize writes (= keep tx_lock), as we have only one self.tx_msg to store into.
         let mut tx_lock = self.tx_msg.lock();
-        if let Some((msg, write_sz)) = tx_lock.take() {
-            if let Err(msg) = self.try_tx(msg, write_sz) {
-                *tx_lock = Some((msg, write_sz));
-                self.channel().add_write_waiter(self);
-                return Err(moto_rt::E_NOT_READY);
-            }
+        if let Some((msg, write_sz)) = tx_lock.take()
+            && let Err(msg) = self.try_tx(msg, write_sz)
+        {
+            *tx_lock = Some((msg, write_sz));
+            self.channel().add_write_waiter(self);
+            return Err(moto_rt::E_NOT_READY);
         }
 
         let Ok(io_page) = self.channel().alloc_page(self.subchannel_mask) else {
@@ -1479,10 +1486,10 @@ impl TcpStream {
     }
 
     fn set_linger(&self, dur: Option<Duration>) -> Result<(), ErrorCode> {
-        if let Some(dur) = dur {
-            if dur == Duration::ZERO {
-                return Ok(());
-            }
+        if let Some(dur) = dur
+            && dur == Duration::ZERO
+        {
+            return Ok(());
         }
 
         // At the moment, socket shutdown or drop drops all unsent bytes, which

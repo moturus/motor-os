@@ -10,8 +10,8 @@ use moto_io_internal::udp_queues::{PageAllocator, UdpDefragmentingQueue, UdpFrag
 use moto_ipc::io_channel;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
-use moto_rt::{mutex::Mutex, ErrorCode};
-use moto_rt::{RtFd, E_NOT_READY, E_TIMED_OUT};
+use moto_rt::{E_NOT_READY, E_TIMED_OUT, RtFd};
+use moto_rt::{ErrorCode, mutex::Mutex};
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
@@ -162,10 +162,10 @@ impl UdpSocket {
                 }
             }
 
-            if let Some(deadline) = deadline {
-                if deadline <= moto_rt::time::Instant::now() {
-                    return Err(E_TIMED_OUT);
-                }
+            if let Some(deadline) = deadline
+                && deadline <= moto_rt::time::Instant::now()
+            {
+                return Err(E_TIMED_OUT);
             }
 
             self.event_source
@@ -191,10 +191,10 @@ impl UdpSocket {
                 return Err(E_NOT_READY);
             };
 
-            if let Some(peer_addr) = self.peer_addr() {
-                if peer_addr != datagram.addr {
-                    continue;
-                }
+            if let Some(peer_addr) = self.peer_addr()
+                && peer_addr != datagram.addr
+            {
+                continue;
             }
 
             break datagram;
@@ -214,12 +214,12 @@ impl UdpSocket {
                 return Err(E_NOT_READY);
             };
 
-            if let Some(peer_addr) = self.peer_addr() {
-                if peer_addr != datagram.addr {
-                    // Need to remove the datagram from the queue.
-                    let _ = rx_queue.next_datagram();
-                    continue;
-                }
+            if let Some(peer_addr) = self.peer_addr()
+                && peer_addr != datagram.addr
+            {
+                // Need to remove the datagram from the queue.
+                let _ = rx_queue.next_datagram();
+                continue;
             }
 
             break datagram;
@@ -260,10 +260,10 @@ impl UdpSocket {
                 }
             }
 
-            if let Some(deadline) = deadline {
-                if deadline <= moto_rt::time::Instant::now() {
-                    return Err(E_TIMED_OUT);
-                }
+            if let Some(deadline) = deadline
+                && deadline <= moto_rt::time::Instant::now()
+            {
+                return Err(E_TIMED_OUT);
             }
 
             self.event_source
@@ -344,71 +344,75 @@ impl UdpSocket {
     }
 
     pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_NONBLOCKING => {
-                assert_eq!(len, 1);
-                let nonblocking = *(ptr as *const u8);
-                if nonblocking > 1 {
-                    return moto_rt::E_INVALID_ARGUMENT;
+        unsafe {
+            match option {
+                moto_rt::net::SO_NONBLOCKING => {
+                    assert_eq!(len, 1);
+                    let nonblocking = *(ptr as *const u8);
+                    if nonblocking > 1 {
+                        return moto_rt::E_INVALID_ARGUMENT;
+                    }
+                    self.set_nonblocking(nonblocking == 1);
+                    moto_rt::E_OK
                 }
-                self.set_nonblocking(nonblocking == 1);
-                moto_rt::E_OK
+                moto_rt::net::SO_RCVTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = *(ptr as *const u64);
+                    self.set_read_timeout(timeout);
+                    moto_rt::E_OK
+                }
+                moto_rt::net::SO_SNDTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = *(ptr as *const u64);
+                    self.set_write_timeout(timeout);
+                    moto_rt::E_OK
+                }
+                moto_rt::net::SO_TTL => {
+                    assert_eq!(len, 4);
+                    let _ttl = *(ptr as *const u32);
+                    // self.set_ttl(ttl)
+                    panic!("UDP: set_ttl() not implemented")
+                }
+                _ => panic!("unrecognized option {option}"),
             }
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = *(ptr as *const u64);
-                self.set_read_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = *(ptr as *const u64);
-                self.set_write_timeout(timeout);
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                let _ttl = *(ptr as *const u32);
-                // self.set_ttl(ttl)
-                panic!("UDP: set_ttl() not implemented")
-            }
-            _ => panic!("unrecognized option {option}"),
         }
     }
 
     pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        match option {
-            moto_rt::net::SO_RCVTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.read_timeout();
-                *(ptr as *mut u64) = timeout;
-                moto_rt::E_OK
+        unsafe {
+            match option {
+                moto_rt::net::SO_RCVTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = self.read_timeout();
+                    *(ptr as *mut u64) = timeout;
+                    moto_rt::E_OK
+                }
+                moto_rt::net::SO_SNDTIMEO => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let timeout = self.write_timeout();
+                    *(ptr as *mut u64) = timeout;
+                    moto_rt::E_OK
+                }
+                moto_rt::net::SO_TTL => {
+                    assert_eq!(len, 4);
+                    panic!("UDP: ttl() not implemented")
+                    // match self.ttl() {
+                    //     Ok(ttl) => {
+                    //         *(ptr as *mut u32) = ttl;
+                    //         moto_rt::E_OK
+                    //     }
+                    //     Err(err) => err,
+                    // }
+                }
+                moto_rt::net::SO_ERROR => {
+                    assert_eq!(len, 2);
+                    // let err = self.take_error();
+                    // *(ptr as *mut u16) = err;
+                    *(ptr as *mut u16) = moto_rt::E_OK;
+                    moto_rt::E_OK
+                }
+                _ => panic!("unrecognized option {option}"),
             }
-            moto_rt::net::SO_SNDTIMEO => {
-                assert_eq!(len, core::mem::size_of::<u64>());
-                let timeout = self.write_timeout();
-                *(ptr as *mut u64) = timeout;
-                moto_rt::E_OK
-            }
-            moto_rt::net::SO_TTL => {
-                assert_eq!(len, 4);
-                panic!("UDP: ttl() not implemented")
-                // match self.ttl() {
-                //     Ok(ttl) => {
-                //         *(ptr as *mut u32) = ttl;
-                //         moto_rt::E_OK
-                //     }
-                //     Err(err) => err,
-                // }
-            }
-            moto_rt::net::SO_ERROR => {
-                assert_eq!(len, 2);
-                // let err = self.take_error();
-                // *(ptr as *mut u16) = err;
-                *(ptr as *mut u16) = moto_rt::E_OK;
-                moto_rt::E_OK
-            }
-            _ => panic!("unrecognized option {option}"),
         }
     }
 
