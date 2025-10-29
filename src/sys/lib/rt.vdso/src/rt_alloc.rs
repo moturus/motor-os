@@ -35,13 +35,18 @@ pub unsafe extern "C" fn alloc(size: u64, align: u64) -> u64 {
     if align == 0 {
         sys_alloc(size as usize) as usize as u64
     } else {
-        FRUSA.alloc(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize as u64
+        unsafe {
+            FRUSA.alloc(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
+                as u64
+        }
     }
 }
 
 pub unsafe extern "C" fn alloc_zeroed(size: u64, align: u64) -> u64 {
-    FRUSA.alloc_zeroed(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
-        as u64
+    unsafe {
+        FRUSA.alloc_zeroed(Layout::from_size_align(size as usize, align as usize).unwrap()) as usize
+            as u64
+    }
 }
 
 pub unsafe extern "C" fn dealloc(ptr: u64, size: u64, align: u64) {
@@ -49,18 +54,22 @@ pub unsafe extern "C" fn dealloc(ptr: u64, size: u64, align: u64) {
         moto_sys::SysMem::free(ptr).unwrap();
         return;
     }
-    FRUSA.dealloc(
-        ptr as usize as *mut u8,
-        Layout::from_size_align(size as usize, align as usize).unwrap(),
-    )
+    unsafe {
+        FRUSA.dealloc(
+            ptr as usize as *mut u8,
+            Layout::from_size_align(size as usize, align as usize).unwrap(),
+        )
+    }
 }
 
 pub unsafe extern "C" fn realloc(ptr: u64, size: u64, align: u64, new_size: u64) -> u64 {
-    FRUSA.realloc(
-        ptr as usize as *mut u8,
-        Layout::from_size_align(size as usize, align as usize).unwrap(),
-        new_size as usize,
-    ) as usize as u64
+    unsafe {
+        FRUSA.realloc(
+            ptr as usize as *mut u8,
+            Layout::from_size_align(size as usize, align as usize).unwrap(),
+            new_size as usize,
+        ) as usize as u64
+    }
 }
 
 pub extern "C" fn release_handle(handle: u64) -> moto_rt::ErrorCode {

@@ -10,14 +10,14 @@ use core::any::Any;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use moto_rt::poll::Interests;
-use moto_rt::poll::Token;
-use moto_rt::spinlock::SpinLock;
-use moto_rt::ErrorCode;
-use moto_rt::RtFd;
 use moto_rt::E_BAD_HANDLE;
 use moto_rt::E_INVALID_ARGUMENT;
 use moto_rt::E_OK;
+use moto_rt::ErrorCode;
+use moto_rt::RtFd;
+use moto_rt::poll::Interests;
+use moto_rt::poll::Token;
+use moto_rt::spinlock::SpinLock;
 
 #[derive(Debug)]
 pub enum PosixKind {
@@ -102,16 +102,16 @@ pub unsafe extern "C" fn posix_read_vectored(rt_fd: i32, packed: *const usize, n
         return -(E_BAD_HANDLE as i64);
     };
 
-    let packed = core::slice::from_raw_parts(packed, num * 2);
+    let packed = unsafe { core::slice::from_raw_parts(packed, num * 2) };
     let mut bufs = Vec::with_capacity(num);
     for idx in 0..num {
         let addr = packed[2 * idx];
         let len = packed[2 * idx + 1];
-        let buf = core::slice::from_raw_parts_mut(addr as *mut u8, len);
+        let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) };
         bufs.push(buf);
     }
 
-    match posix_file.read_vectored(bufs.as_mut_slice()) {
+    match unsafe { posix_file.read_vectored(bufs.as_mut_slice()) } {
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
     }
@@ -134,16 +134,16 @@ pub unsafe extern "C" fn posix_write_vectored(rt_fd: i32, packed: *const usize, 
         return -(E_BAD_HANDLE as i64);
     };
 
-    let packed = core::slice::from_raw_parts(packed, num * 2);
+    let packed = unsafe { core::slice::from_raw_parts(packed, num * 2) };
     let mut bufs = Vec::with_capacity(num);
     for idx in 0..num {
         let addr = packed[2 * idx];
         let len = packed[2 * idx + 1];
-        let buf = core::slice::from_raw_parts(addr as *const u8, len);
+        let buf = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
         bufs.push(buf);
     }
 
-    match posix_file.write_vectored(bufs.as_slice()) {
+    match unsafe { posix_file.write_vectored(bufs.as_slice()) } {
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
     }
@@ -277,9 +277,11 @@ impl Descriptors {
         core::mem::swap(&mut val, entry);
 
         #[cfg(debug_assertions)]
-        assert!((val.as_ref() as &dyn Any)
-            .downcast_ref::<Placeholder>()
-            .is_some());
+        assert!(
+            (val.as_ref() as &dyn Any)
+                .downcast_ref::<Placeholder>()
+                .is_some()
+        );
 
         fd
     }

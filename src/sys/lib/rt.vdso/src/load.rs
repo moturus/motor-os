@@ -2,7 +2,7 @@ use core::sync::atomic::Ordering;
 
 use alloc::collections::btree_map::BTreeMap;
 use elfloader::ElfBinary;
-use moto_sys::{sys_mem, ErrorCode, SysHandle, SysMem};
+use moto_sys::{ErrorCode, SysHandle, SysMem, sys_mem};
 
 pub fn load_vdso(address_space: u64) -> ErrorCode {
     let address_space = SysHandle::from_u64(address_space);
@@ -128,7 +128,7 @@ impl RemoteLoader {
         let mut region: Option<(u64, u64, u64)> = None;
         for entry in &self.mapped_regions {
             if *entry.0 <= dst {
-                region = Some((*entry.0, entry.1 .0, entry.1 .1));
+                region = Some((*entry.0, entry.1.0, entry.1.1));
             } else {
                 break;
             }
@@ -145,11 +145,13 @@ impl RemoteLoader {
 
         let offset = dst - remote_region_start;
 
-        core::ptr::copy_nonoverlapping(
-            src,
-            (local_region_start + offset) as usize as *mut u8,
-            sz as usize,
-        );
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src,
+                (local_region_start + offset) as usize as *mut u8,
+                sz as usize,
+            )
+        };
     }
 }
 
@@ -216,8 +218,8 @@ impl elfloader::ElfLoader for RemoteLoader {
         &mut self,
         entry: elfloader::RelocationEntry,
     ) -> Result<(), elfloader::ElfLoaderErr> {
-        use elfloader::arch::x86_64::RelocationTypes::*;
         use elfloader::RelocationType::x86_64;
+        use elfloader::arch::x86_64::RelocationTypes::*;
 
         let remote_addr: u64 = entry.offset;
 
