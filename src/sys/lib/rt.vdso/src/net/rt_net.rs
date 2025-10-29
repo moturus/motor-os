@@ -12,6 +12,7 @@ use core::sync::atomic::*;
 use core::time::Duration;
 use crossbeam::utils::CachePadded;
 use moto_ipc::io_channel;
+use moto_rt::RtFd;
 use moto_rt::error::*;
 use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
@@ -19,12 +20,11 @@ use moto_rt::netc;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::time::Instant;
-use moto_rt::RtFd;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 use moto_sys_io::api_net;
-use moto_sys_io::api_net::TcpState;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
+use moto_sys_io::api_net::TcpState;
 
 use super::rt_tcp::TcpListener;
 use super::rt_tcp::TcpStream;
@@ -42,25 +42,27 @@ pub unsafe extern "C" fn dns_lookup(
     use core::str::FromStr;
     use moto_rt::netc;
 
-    let host: &str = core::str::from_raw_parts(host_bytes, host_bytes_sz);
+    unsafe {
+        let host: &str = core::str::from_raw_parts(host_bytes, host_bytes_sz);
 
-    let addr = if host == "localhost" {
-        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port)
-    } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
-        SocketAddrV4::new(addr_v4, port)
-    } else {
-        crate::moto_log!("dns_lookup: {}:{}: not implemented", host, port);
-        return E_NOT_IMPLEMENTED;
-    };
+        let addr = if host == "localhost" {
+            SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port)
+        } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
+            SocketAddrV4::new(addr_v4, port)
+        } else {
+            crate::moto_log!("dns_lookup: {}:{}: not implemented", host, port);
+            return E_NOT_IMPLEMENTED;
+        };
 
-    let res_addr = crate::rt_alloc::alloc(core::mem::size_of::<netc::sockaddr>() as u64, 16);
-    let result: &mut [netc::sockaddr] =
-        core::slice::from_raw_parts_mut(res_addr as usize as *mut netc::sockaddr, 1);
+        let res_addr = crate::rt_alloc::alloc(core::mem::size_of::<netc::sockaddr>() as u64, 16);
+        let result: &mut [netc::sockaddr] =
+            core::slice::from_raw_parts_mut(res_addr as usize as *mut netc::sockaddr, 1);
 
-    let addr = netc::sockaddr { v4: addr.into() };
-    result[0] = addr;
-    *result_addr = res_addr as usize;
-    *result_len = 1;
+        let addr = netc::sockaddr { v4: addr.into() };
+        result[0] = addr;
+        *result_addr = res_addr as usize;
+        *result_len = 1;
+    }
     E_OK
 }
 
@@ -144,29 +146,31 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         return E_BAD_HANDLE;
     };
 
-    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-        tcp_stream.setsockopt(option, ptr, len)
-    } else if let Some(tcp_listener) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
-    {
-        tcp_listener.setsockopt(option, ptr, len)
-    } else if let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
-    {
-        udp_socket.setsockopt(option, ptr, len)
-    } else if option == moto_rt::net::SO_NONBLOCKING {
-        assert_eq!(len, 1);
-        let nonblocking = *(ptr as *const u8);
-        if nonblocking > 1 {
-            return moto_rt::E_INVALID_ARGUMENT;
-        }
+    unsafe {
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+            tcp_stream.setsockopt(option, ptr, len)
+        } else if let Some(tcp_listener) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+        {
+            tcp_listener.setsockopt(option, ptr, len)
+        } else if let Some(udp_socket) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        {
+            udp_socket.setsockopt(option, ptr, len)
+        } else if option == moto_rt::net::SO_NONBLOCKING {
+            assert_eq!(len, 1);
+            let nonblocking = *(ptr as *const u8);
+            if nonblocking > 1 {
+                return moto_rt::E_INVALID_ARGUMENT;
+            }
 
-        match posix_file.set_nonblocking(nonblocking == 1) {
-            Ok(_) => E_OK,
-            Err(err) => err,
+            match posix_file.set_nonblocking(nonblocking == 1) {
+                Ok(_) => E_OK,
+                Err(err) => err,
+            }
+        } else {
+            E_BAD_HANDLE
         }
-    } else {
-        E_BAD_HANDLE
     }
 }
 
@@ -175,18 +179,20 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         return E_BAD_HANDLE;
     };
 
-    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-        tcp_stream.getsockopt(option, ptr, len)
-    } else if let Some(tcp_listener) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
-    {
-        tcp_listener.getsockopt(option, ptr, len)
-    } else if let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
-    {
-        udp_socket.getsockopt(option, ptr, len)
-    } else {
-        E_BAD_HANDLE
+    unsafe {
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+            tcp_stream.getsockopt(option, ptr, len)
+        } else if let Some(tcp_listener) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+        {
+            tcp_listener.getsockopt(option, ptr, len)
+        } else if let Some(udp_socket) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        {
+            udp_socket.getsockopt(option, ptr, len)
+        } else {
+            E_BAD_HANDLE
+        }
     }
 }
 
@@ -218,25 +224,28 @@ pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> 
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-        if let Some(socket_addr) = tcp_stream.socket_addr() {
-            *addr = (socket_addr).into();
+
+    unsafe {
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+            if let Some(socket_addr) = tcp_stream.socket_addr() {
+                *addr = (socket_addr).into();
+                return E_OK;
+            }
+            return E_INVALID_ARGUMENT;
+        };
+        if let Some(udp_socket) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        {
+            *addr = (*udp_socket.local_addr()).into();
             return E_OK;
-        }
-        return E_INVALID_ARGUMENT;
-    };
-    if let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
-    {
-        *addr = (*udp_socket.local_addr()).into();
-        return E_OK;
-    };
-    if let Some(tcp_listener) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
-    {
-        *addr = (*tcp_listener.socket_addr()).into();
-        return E_OK;
-    };
+        };
+        if let Some(tcp_listener) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+        {
+            *addr = (*tcp_listener.socket_addr()).into();
+            return E_OK;
+        };
+    }
 
     E_BAD_HANDLE
 }
@@ -245,26 +254,29 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-        match tcp_stream.peer_addr() {
-            Ok(peer_addr) => {
-                *addr = peer_addr.into();
-                return E_OK;
+
+    unsafe {
+        if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
+            match tcp_stream.peer_addr() {
+                Ok(peer_addr) => {
+                    *addr = peer_addr.into();
+                    return E_OK;
+                }
+                Err(err) => return err,
             }
-            Err(err) => return err,
         }
+        if let Some(udp_socket) =
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        {
+            match udp_socket.peer_addr() {
+                Some(peer_addr) => {
+                    *addr = peer_addr.into();
+                    return E_OK;
+                }
+                None => return moto_rt::E_NOT_CONNECTED,
+            }
+        };
     }
-    if let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
-    {
-        match udp_socket.peer_addr() {
-            Some(peer_addr) => {
-                *addr = peer_addr.into();
-                return E_OK;
-            }
-            None => return moto_rt::E_NOT_CONNECTED,
-        }
-    };
 
     E_BAD_HANDLE
 }
@@ -275,7 +287,7 @@ pub unsafe extern "C" fn udp_recv_from(
     buf_sz: usize,
     addr: *mut netc::sockaddr,
 ) -> i64 {
-    udp_recv_or_peek_from(rt_fd, buf, buf_sz, addr, false)
+    unsafe { udp_recv_or_peek_from(rt_fd, buf, buf_sz, addr, false) }
 }
 
 pub unsafe extern "C" fn udp_peek_from(
@@ -284,7 +296,7 @@ pub unsafe extern "C" fn udp_peek_from(
     buf_sz: usize,
     addr: *mut netc::sockaddr,
 ) -> i64 {
-    udp_recv_or_peek_from(rt_fd, buf, buf_sz, addr, true)
+    unsafe { udp_recv_or_peek_from(rt_fd, buf, buf_sz, addr, true) }
 }
 
 unsafe fn udp_recv_or_peek_from(
@@ -303,10 +315,10 @@ unsafe fn udp_recv_or_peek_from(
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = core::slice::from_raw_parts_mut(buf, buf_sz);
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
     match udp_socket.recv_or_peek_from(buf, peek) {
         Ok((sz, from)) => {
-            *addr = from.into();
+            unsafe { *addr = from.into() };
             sz as i64
         }
         Err(err) => -(err as i64),
@@ -329,7 +341,7 @@ pub unsafe extern "C" fn udp_send_to(
         return -(E_BAD_HANDLE as i64);
     };
 
-    let buf = core::slice::from_raw_parts(buf, buf_sz);
+    let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
     match udp_socket.send_to(buf, &addr) {
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
@@ -852,19 +864,21 @@ impl NetChannel {
     }
 
     pub fn tcp_stream_created(&self, stream: &TcpStream) {
-        assert!(self
-            .tcp_streams
-            .lock()
-            .insert(stream.handle(), stream.weak())
-            .is_none());
+        assert!(
+            self.tcp_streams
+                .lock()
+                .insert(stream.handle(), stream.weak())
+                .is_none()
+        );
     }
 
     pub fn udp_socket_created(&self, socket: &UdpSocket) {
-        assert!(self
-            .udp_sockets
-            .lock()
-            .insert(socket.handle(), socket.weak())
-            .is_none());
+        assert!(
+            self.udp_sockets
+                .lock()
+                .insert(socket.handle(), socket.weak())
+                .is_none()
+        );
     }
 
     pub fn tcp_stream_dropped(&self, handle: u64) {
@@ -960,11 +974,12 @@ impl NetChannel {
 
         // Add to response handlers before sending the message, otherwise the response may
         // arive too quickly and the receiving code will panic due to a missing waiter.
-        assert!(self
-            .response_handlers
-            .lock()
-            .insert(req.id, handler)
-            .is_none());
+        assert!(
+            self.response_handlers
+                .lock()
+                .insert(req.id, handler)
+                .is_none()
+        );
 
         if self.send_queue.push(req).is_ok() {
             self.maybe_wake_io_thread();

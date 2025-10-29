@@ -17,7 +17,8 @@ pub unsafe extern "C" fn create(dtor: u64) -> Key {
         KEYS.lock().insert(key, None);
     } else {
         #[allow(clippy::missing_transmute_annotations)]
-        KEYS.lock().insert(key, Some(core::mem::transmute(dtor)));
+        KEYS.lock()
+            .insert(key, Some(unsafe { core::mem::transmute(dtor) }));
     }
     key
 }
@@ -47,7 +48,7 @@ pub unsafe extern "C" fn set(key: Key, value: *mut u8) {
     };
 
     if let Some(prev_value) = prev_value {
-        run_dtor(key, prev_value);
+        unsafe { run_dtor(key, prev_value) };
     }
 }
 
@@ -95,7 +96,7 @@ unsafe fn run_dtor(key: Key, value: usize) {
     };
 
     if let Some(dtor) = dtor {
-        dtor(value as *mut u8);
+        unsafe { dtor(value as *mut u8) };
     }
 }
 
@@ -105,7 +106,7 @@ unsafe fn run_one_dtor(map: &mut PerThreadMap) -> bool {
         if pval == 0 {
             return true;
         }
-        run_dtor(key, pval);
+        unsafe { run_dtor(key, pval) };
         true
     } else {
         false
@@ -123,12 +124,12 @@ pub(super) unsafe fn on_thread_exiting() {
         }
 
         let ptr = tcb.tls as *mut PerThreadMap;
-        let map = &mut *ptr;
+        let map = unsafe { &mut *ptr };
         tcb.tls = 0;
 
-        while run_one_dtor(map) {}
+        while unsafe { run_one_dtor(map) } {}
 
         // Drop the map.
-        core::mem::drop(alloc::boxed::Box::from_raw(ptr));
+        core::mem::drop(unsafe { alloc::boxed::Box::from_raw(ptr) });
     }
 }

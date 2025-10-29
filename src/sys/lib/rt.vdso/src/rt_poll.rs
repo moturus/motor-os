@@ -62,7 +62,7 @@ pub unsafe extern "C" fn wait(
         return -(E_BAD_HANDLE as i32);
     };
 
-    let events = core::slice::from_raw_parts_mut(events_ptr, events_num);
+    let events = unsafe { core::slice::from_raw_parts_mut(events_ptr, events_num) };
     let deadline = if timeout == u64::MAX {
         None
     } else {

@@ -104,7 +104,9 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
     match moto_sys::SysRay::process_status(handle.into()) {
         Ok(s) => match s {
             Some(s) => {
-                *status = s;
+                unsafe {
+                    *status = s;
+                }
                 moto_rt::E_OK
             }
             None => moto_rt::E_NOT_READY,
@@ -231,7 +233,7 @@ impl Loader {
         let mut region: Option<(u64, u64, u64)> = None;
         for entry in &self.mapped_regions {
             if *entry.0 <= dst {
-                region = Some((*entry.0, entry.1 .0, entry.1 .1));
+                region = Some((*entry.0, entry.1.0, entry.1.1));
             } else {
                 break;
             }
@@ -248,11 +250,13 @@ impl Loader {
 
         let offset = dst - remote_region_start;
 
-        core::ptr::copy_nonoverlapping(
-            src,
-            (local_region_start + offset) as usize as *mut u8,
-            sz as usize,
-        );
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src,
+                (local_region_start + offset) as usize as *mut u8,
+                sz as usize,
+            )
+        };
     }
 }
 
@@ -325,8 +329,8 @@ impl elfloader::ElfLoader for Loader {
         &mut self,
         entry: elfloader::RelocationEntry,
     ) -> Result<(), elfloader::ElfLoaderErr> {
-        use elfloader::arch::x86_64::RelocationTypes::*;
         use elfloader::RelocationType::x86_64;
+        use elfloader::arch::x86_64::RelocationTypes::*;
 
         let remote_addr: u64 = entry.offset;
 
@@ -460,14 +464,14 @@ unsafe fn create_remote_args(
     )?;
 
     let mut pos = local as usize;
-    *((pos as *mut u32).as_mut().unwrap()) = num_args;
+    unsafe { *((pos as *mut u32).as_mut().unwrap()) = num_args };
     pos += 4;
 
     let mut write_arg = |arg: &[u8]| {
-        *((pos as *mut u32).as_mut().unwrap()) = arg.len() as u32;
+        unsafe { *((pos as *mut u32).as_mut().unwrap()) = arg.len() as u32 };
         pos += 4;
 
-        core::ptr::copy_nonoverlapping(arg.as_ptr(), pos as *mut u8, arg.len());
+        unsafe { core::ptr::copy_nonoverlapping(arg.as_ptr(), pos as *mut u8, arg.len()) };
         pos += (arg.len() + 3) & !3_usize;
     };
 
@@ -502,7 +506,7 @@ unsafe fn create_remote_env(
         flat_vec.push(v);
     }
 
-    create_remote_args(address_space, &Vec::new(), &flat_vec, false)
+    unsafe { create_remote_args(address_space, &Vec::new(), &flat_vec, false) }
 }
 
 fn debug_name(exe_plus: &Vec<&[u8]>, args: &Vec<&[u8]>) -> String {
@@ -671,10 +675,12 @@ unsafe fn spawn_impl(
     result_rt: &mut moto_rt::process::SpawnResult,
 ) -> Result<(), ErrorCode> {
     // Open the file.
-    let program_name = core::slice::from_raw_parts(
-        args_rt.prog_name_addr as usize as *const u8,
-        args_rt.prog_name_size as usize,
-    );
+    let program_name = unsafe {
+        core::slice::from_raw_parts(
+            args_rt.prog_name_addr as usize as *const u8,
+            args_rt.prog_name_size as usize,
+        )
+    };
     let program_name =
         core::str::from_utf8(program_name).map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
     let exe = resolve_exe(program_name)?;
@@ -727,7 +733,7 @@ pub unsafe extern "C" fn spawn(
     args_rt: *const moto_rt::process::SpawnArgsRt,
     result_rt: *mut moto_rt::process::SpawnResult,
 ) -> moto_rt::ErrorCode {
-    match spawn_impl(args_rt.as_ref().unwrap(), result_rt.as_mut().unwrap()) {
+    match unsafe { spawn_impl(args_rt.as_ref().unwrap(), result_rt.as_mut().unwrap()) } {
         Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
@@ -772,14 +778,15 @@ impl ProcessData {
         let mut pos = addr as usize;
         assert_eq!(pos & 3, 0);
 
-        let num_args = *((pos as *const u32).as_ref().unwrap());
+        let num_args = unsafe { *((pos as *const u32).as_ref().unwrap()) };
         pos += 4;
 
         let mut result = Vec::new();
         for _i in 0..num_args {
-            let len = *((pos as *const u32).as_ref().unwrap());
+            let len = unsafe { *((pos as *const u32).as_ref().unwrap()) };
             pos += 4;
-            let bytes: &[u8] = core::slice::from_raw_parts(pos as *const u8, len as usize);
+            let bytes: &[u8] =
+                unsafe { core::slice::from_raw_parts(pos as *const u8, len as usize) };
             result.push(bytes);
             pos += len as usize;
             pos = (pos + 3) & !3; // Align up to 4 bytes.
@@ -794,7 +801,7 @@ impl ProcessData {
             return alloc::vec![b"sys-io"];
         }
 
-        Self::deserialize_vec(self.args)
+        unsafe { Self::deserialize_vec(self.args) }
     }
 
     pub unsafe fn binary() -> &'static str {
@@ -804,7 +811,7 @@ impl ProcessData {
             return "sys-io";
         }
 
-        let pdata = ptr.as_ref().unwrap();
+        let pdata = unsafe { ptr.as_ref().unwrap() };
         if pdata.args == 0 {
             // Only sys-io has no args; every other process has them.
             return "sys-io";
@@ -818,9 +825,9 @@ impl ProcessData {
         assert_eq!(pos & 3, 0);
         pos += 4;
 
-        let len = *((pos as *const u32).as_ref().unwrap());
+        let len = unsafe { *((pos as *const u32).as_ref().unwrap()) };
         pos += 4;
-        let bytes: &[u8] = core::slice::from_raw_parts(pos as *const u8, len as usize);
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(pos as *const u8, len as usize) };
         core::str::from_utf8(bytes).unwrap()
     }
 
@@ -829,7 +836,7 @@ impl ProcessData {
             return Vec::new();
         }
 
-        let raw_vec = Self::deserialize_vec(self.env);
+        let raw_vec = unsafe { Self::deserialize_vec(self.env) };
         assert_eq!(0, raw_vec.len() & 1);
 
         let mut result = Vec::new();
