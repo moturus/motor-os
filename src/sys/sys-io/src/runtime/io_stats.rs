@@ -26,6 +26,8 @@ fn stats_service_thread() -> ! {
         }
     };
 
+    log::info!("{}:{} IO stats service started.", file!(), line!());
+
     loop {
         match service.wait(moto_sys::SysHandle::NONE, &[]) {
             Ok(wakers) => {
@@ -33,7 +35,8 @@ fn stats_service_thread() -> ! {
                     process_ipc(&mut service, *waker);
                 }
             }
-            Err(wakers) => assert_eq!(wakers.len(), 0),
+            // the service doesn't track connections => ignore bad wakers
+            Err(_wakers) => continue,
         }
     }
 }
