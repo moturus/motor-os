@@ -13,7 +13,7 @@ or better, and a fast SSD drive.
 
 Motor OS requires Linux host, as it depends on KVM. While any
 Linux will probably do, the instructions below assume you are
-running Ubuntu 22.04. This will also work with Ubuntu 22.04 under WSL2.
+running Ubuntu 24.04. This will also work with Ubuntu 24.04 under WSL2.
 
 (1) Install the following packages:
 
