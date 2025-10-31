@@ -588,18 +588,15 @@ impl LocalServer {
             waiters.push(*k);
         }
 
-        let mut bad_connections = Vec::new();
-        for k in self.active_conns.keys() {
-            let conn = self.active_conns.get(k).unwrap();
-            if !conn.connected() {
-                bad_connections.push(*k);
+        // cleanup active connections, register waiters
+        self.active_conns.retain(|handle, conn| {
+            if conn.connected() {
+                waiters.push(*handle);
+                true
             } else {
-                waiters.push(*k);
+                false // remove inactive connections from the list
             }
-        }
-        for k in bad_connections {
-            self.active_conns.remove(&k);
-        }
+        });
 
         for k in extra_waiters {
             waiters.push(*k);
@@ -628,11 +625,10 @@ impl LocalServer {
         })?;
 
         let mut wakers = Vec::with_capacity(waiters.len());
-        for h in &waiters {
-            if *h == SysHandle::NONE {
+        for handle in waiters {
+            if handle == SysHandle::NONE {
                 break;
             }
-            let handle = *h;
             if let Some(mut conn) = self.listeners.remove(&handle) {
                 assert_eq!(conn.status, LocalServerConnectionStatus::Listening);
                 conn.status = LocalServerConnectionStatus::Connected;
