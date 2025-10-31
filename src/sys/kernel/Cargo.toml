@@ -19,7 +19,7 @@ intrusive-collections = { path = "../../third_party/intrusive-rs" }
 x86                   = { path = "../../third_party/x86"          }
 x86_64                = { path = "../../third_party/x86_64"       }
 
-log = "0.4.21"
+log = "0.4.28"
 xsave = "2.0.2"
 
 [features]

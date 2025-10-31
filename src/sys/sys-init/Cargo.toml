@@ -9,5 +9,5 @@ edition = "2021"
 moto-sys     = { path = "../lib/moto-sys"    }
 moto-log     = { path = "../lib/moto-log"    }
 
-log = "=0.4.27"
+log = "=0.4.28"
 shell-words = "1.1"

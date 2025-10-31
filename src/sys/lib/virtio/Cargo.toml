@@ -9,4 +9,4 @@ edition = "2024"
 async-fs   = { path = "../async-fs" }
 moto-rt    = { path = "../moto-rt"  }
 moto-sys   = { path = "../moto-sys" }
-log = "0.4.20"
+log = "0.4.28"

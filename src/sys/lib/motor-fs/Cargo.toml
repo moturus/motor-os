@@ -10,7 +10,7 @@ readme = "README.md"
 [dependencies]
 async-trait = "0.1.88"
 crc = "3.0"
-log = "0.4.20"
+log = "0.4.28"
 plain = "0.2.3"
 async-fs = { path = "../async-fs" }
 micromap = "0.1.0"

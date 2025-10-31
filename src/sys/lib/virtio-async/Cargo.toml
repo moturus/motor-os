@@ -12,5 +12,5 @@ moto-rt    = { path = "../moto-rt"    }
 moto-sys   = { path = "../moto-sys"   }
 
 async-trait = "0.1.88"
-log         = "0.4.20"
+log         = "0.4.28"
 zerocopy    = { version = "0.8", features = ["std", "derive"] }

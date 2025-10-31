@@ -16,4 +16,4 @@ moto-mpmc    = { path = "../../lib/moto-mpmc"   }
 
 crossbeam = "0.8.4"
 futures = "0.3"
-log = "0.4.21"
+log = "0.4.28"

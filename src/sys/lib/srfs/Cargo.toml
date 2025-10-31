@@ -11,6 +11,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 camino = "1.1.10"
 bitflags = "2.4.*"
-log = "0.4.20"
+log = "0.4.28"
 lru = "0.14.0"
 srfs-core = { path = "../srfs-core" }

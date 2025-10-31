@@ -12,7 +12,7 @@ std = []
 
 [dependencies]
 async-trait = "0.1.88"
-log = "0.4.20"
+log = "0.4.28"
 lru = "0.14.0"
 plain = "0.2.3"
 

@@ -29,7 +29,7 @@ moto-sys-io      = { path = "../moto-sys-io"      }
 # external dependencies
 crossbeam = { version = "0.8.4", default-features = false }
 crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
-# log = "0.4.21"
+log = "0.4.28"
 
 [features]
 # If enabled, extra runtime checks/assertions are performed.

@@ -10,6 +10,6 @@ moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }
 
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
-log = "0.4.21"
+log = "0.4.28"
 
 [features]
