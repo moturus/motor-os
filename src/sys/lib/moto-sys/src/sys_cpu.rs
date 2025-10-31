@@ -235,11 +235,11 @@ impl SysCpu {
         // If the condition below is false, the kernel has properly put data in @handles.
         if result.result & SyscallResult::F_HANDLE_ARRAY == 0 {
             // Clippy suggests ```for (idx, <item>) in handles.iter_mut().enumerate()```,
-            // which is much less easy to read that this.
+            // which is much less easy to read than this.
             #[allow(clippy::needless_range_loop)]
             for idx in 0..handles.len() {
                 if idx < 6 {
-                    handles[idx] = SysHandle::from_u64(result.data[idx]);
+                    handles[idx] = SysHandle::from(result.data[idx]);
                 } else {
                     handles[idx] = SysHandle::NONE;
                 }
