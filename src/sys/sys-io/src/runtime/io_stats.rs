@@ -26,8 +26,6 @@ fn stats_service_thread() -> ! {
         }
     };
 
-    log::info!("{}:{} IO stats service started.", file!(), line!());
-
     loop {
         match service.wait(moto_sys::SysHandle::NONE, &[]) {
             Ok(wakers) => {
