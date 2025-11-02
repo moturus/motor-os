@@ -9,10 +9,10 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
+use moto_rt::RtFd;
 use moto_rt::error::*;
 use moto_rt::fs::*;
 use moto_rt::mutex::Mutex;
-use moto_rt::RtFd;
 use moto_sys_io::api_fs::*;
 
 pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
@@ -490,9 +490,8 @@ impl FsClient {
         if addr == 0 {
             let mut initialized = FS_CLIENT_INITIALIZED.lock();
             if !*initialized {
-                let driver_url = get_fileserver_url()?;
-                // let driver_url = get_fileserver_url()
-                //     .inspect_err(|e| log::warn!("Error getting FS driver URL: {err}"))?;
+                let driver_url = get_fileserver_url()
+                    .inspect_err(|err| log::warn!("Error getting FS driver URL: {err}"))?;
                 FsClient::create(driver_url)?;
                 *initialized = true;
             }
