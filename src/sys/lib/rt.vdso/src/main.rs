@@ -7,7 +7,7 @@ mod load;
 mod posix;
 mod proc_fd;
 mod rt_alloc;
-mod rt_fs;
+mod rt_fs_legacy;
 mod rt_futex;
 mod rt_poll;
 mod rt_process;
@@ -188,29 +188,31 @@ pub extern "C" fn motor_start(version: u64) {
 
     // Filesystem.
     vtable.fs_is_terminal.store(
-        rt_fs::is_terminal as *const () as usize as u64,
+        rt_fs_legacy::is_terminal as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_open
-        .store(rt_fs::open as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_open.store(
+        rt_fs_legacy::open as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_close.store(
         posix::posix_close as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_get_file_attr.store(
-        rt_fs::get_file_attr as *const () as usize as u64,
+        rt_fs_legacy::get_file_attr as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_fsync
-        .store(rt_fs::fsync as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_fsync.store(
+        rt_fs_legacy::fsync as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_datasync.store(
-        rt_fs::datasync as *const () as usize as u64,
+        rt_fs_legacy::datasync as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_truncate.store(
-        rt_fs::truncate as *const () as usize as u64,
+        rt_fs_legacy::truncate as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_read.store(
@@ -233,64 +235,70 @@ pub extern "C" fn motor_start(version: u64) {
         posix::posix_flush as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_seek
-        .store(rt_fs::seek as *const () as usize as u64, Ordering::Relaxed);
-    vtable
-        .fs_mkdir
-        .store(rt_fs::mkdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_seek.store(
+        rt_fs_legacy::seek as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+    vtable.fs_mkdir.store(
+        rt_fs_legacy::mkdir as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_unlink.store(
-        rt_fs::unlink as *const () as usize as u64,
+        rt_fs_legacy::unlink as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_rename.store(
-        rt_fs::rename as *const () as usize as u64,
+        rt_fs_legacy::rename as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_rmdir
-        .store(rt_fs::rmdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_rmdir.store(
+        rt_fs_legacy::rmdir as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_rmdir_all.store(
-        rt_fs::rmdir_all as *const () as usize as u64,
+        rt_fs_legacy::rmdir_all as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_set_perm.store(
-        rt_fs::set_perm as *const () as usize as u64,
+        rt_fs_legacy::set_perm as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_set_file_perm.store(
-        rt_fs::set_file_perm as *const () as usize as u64,
+        rt_fs_legacy::set_file_perm as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_stat
-        .store(rt_fs::stat as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_stat.store(
+        rt_fs_legacy::stat as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_canonicalize.store(
-        rt_fs::canonicalize as *const () as usize as u64,
+        rt_fs_legacy::canonicalize as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_copy
-        .store(rt_fs::copy as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_copy.store(
+        rt_fs_legacy::copy as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_opendir.store(
-        rt_fs::opendir as *const () as usize as u64,
+        rt_fs_legacy::opendir as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_closedir.store(
-        rt_fs::closedir as *const () as usize as u64,
+        rt_fs_legacy::closedir as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_readdir.store(
-        rt_fs::readdir as *const () as usize as u64,
+        rt_fs_legacy::readdir as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_getcwd.store(
-        rt_fs::getcwd as *const () as usize as u64,
+        rt_fs_legacy::getcwd as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable
-        .fs_chdir
-        .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
+    vtable.fs_chdir.store(
+        rt_fs_legacy::chdir as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
     vtable.fs_duplicate.store(
         posix::posix_duplicate as *const () as usize as u64,
         Ordering::Relaxed,

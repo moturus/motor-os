@@ -1,5 +1,6 @@
 use async_fs::FileSystem;
 use moto_async::{AsFuture, LocalMutex};
+use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;
@@ -63,7 +64,7 @@ fn spawn_fs_listeners(fs: Box<dyn FileSystem>) {
 }
 
 fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
-    let listener = moto_ipc::io_channel::ServerConnection::create("sys-io-fs")
+    let listener = moto_ipc::io_channel::ServerConnection::create(FS_URL)
         .expect("Failed to spawn a sys-io-fs listener: {err:?}");
 
     moto_async::LocalRuntime::spawn(async move {

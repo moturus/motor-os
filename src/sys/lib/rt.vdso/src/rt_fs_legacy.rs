@@ -70,7 +70,7 @@ pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyFile>() else {
         return E_BAD_HANDLE;
     };
 
@@ -99,7 +99,7 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return -(E_BAD_HANDLE as i64);
     };
-    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyFile>() else {
         return -(E_BAD_HANDLE as i64);
     };
 
@@ -234,7 +234,7 @@ pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
+    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyReadDir>() else {
         return E_BAD_HANDLE;
     };
 
@@ -248,7 +248,7 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
+    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyReadDir>() else {
         return E_BAD_HANDLE;
     };
 
@@ -287,24 +287,24 @@ pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
 
 // ---------------------- implementation details below ------------------------ //
 
-pub struct ReadDir {
+pub struct LegacyReadDir {
     path: String,
     fd: u64,
 }
 
-impl PosixFile for ReadDir {
+impl PosixFile for LegacyReadDir {
     fn kind(&self) -> PosixKind {
         PosixKind::ReadDir
     }
 }
 
-impl ReadDir {
-    fn from(path: String, resp: &ReadDirResponse) -> Result<ReadDir, ErrorCode> {
-        Ok(ReadDir { path, fd: resp.fd })
+impl LegacyReadDir {
+    fn from(path: String, resp: &ReadDirResponse) -> Result<LegacyReadDir, ErrorCode> {
+        Ok(LegacyReadDir { path, fd: resp.fd })
     }
 }
 
-pub struct File {
+pub struct LegacyFile {
     // We save the file's abs path because sys-io does not provide a way to
     // query file attributes by fd, only by path.
     // TODO: implement get_file_attr by fd, remove abs_path.
@@ -314,13 +314,13 @@ pub struct File {
     pos: AtomicU64, // Atomic because read operations take &File, but change pos.
 }
 
-impl Drop for File {
+impl Drop for LegacyFile {
     fn drop(&mut self) {
         let _ = FsClient::close_fd(self.fd, CloseFdRequest::F_FILE);
     }
 }
 
-impl PosixFile for File {
+impl PosixFile for LegacyFile {
     fn kind(&self) -> PosixKind {
         PosixKind::File
     }
@@ -485,14 +485,22 @@ impl FsClient {
         Ok(())
     }
 
+    fn create_async() -> Result<(), ErrorCode> {
+        todo!()
+    }
+
     fn get() -> Result<&'static FsClient, ErrorCode> {
         let mut addr = FS_CLIENT.load(Ordering::Relaxed);
         if addr == 0 {
             let mut initialized = FS_CLIENT_INITIALIZED.lock();
             if !*initialized {
-                let driver_url = get_fileserver_url()
-                    .inspect_err(|err| log::warn!("Error getting FS driver URL: {err}"))?;
-                FsClient::create(driver_url)?;
+                match get_fileserver_url() {
+                    Ok(driver_url) => FsClient::create(driver_url)?,
+                    Err(err) => {
+                        log::warn!("Error getting FS driver URL: {err}. Will try async FS client.");
+                        FsClient::create_async()?;
+                    }
+                }
                 *initialized = true;
             }
             addr = FS_CLIENT.load(Ordering::SeqCst);
@@ -593,7 +601,7 @@ impl FsClient {
         Ok(())
     }
 
-    fn file_open(path: &str, opts: u32) -> Result<File, ErrorCode> {
+    fn file_open(path: &str, opts: u32) -> Result<LegacyFile, ErrorCode> {
         let c_path = CanonicalPath::parse(path)?;
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
@@ -620,14 +628,14 @@ impl FsClient {
             return Err(moto_rt::E_INTERNAL_ERROR);
         }
 
-        Ok(File {
+        Ok(LegacyFile {
             abs_path: c_path.abs_path,
             fd: resp.fd,
             pos: AtomicU64::new(0),
         })
     }
 
-    fn seek(file: &File, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
+    fn seek(file: &LegacyFile, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
         let file_size = {
             let attr = Self::stat(&file.abs_path)?;
             attr.size
@@ -685,7 +693,7 @@ impl FsClient {
         }
     }
 
-    fn read(file: &File, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+    fn read(file: &LegacyFile, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
         unsafe {
@@ -721,7 +729,7 @@ impl FsClient {
         }
     }
 
-    fn write(file: &File, buf: &[u8]) -> Result<usize, ErrorCode> {
+    fn write(file: &LegacyFile, buf: &[u8]) -> Result<usize, ErrorCode> {
         if buf.is_empty() {
             moto_sys::SysRay::log("FS: write request with empty buf").ok();
             return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -757,7 +765,7 @@ impl FsClient {
         Ok(resp.written as usize)
     }
 
-    fn readdir(path: &str) -> Result<ReadDir, ErrorCode> {
+    fn readdir(path: &str) -> Result<LegacyReadDir, ErrorCode> {
         let c_path = CanonicalPath::parse(path)?;
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
@@ -779,10 +787,10 @@ impl FsClient {
             return Err(resp.header.result);
         }
 
-        ReadDir::from(c_path.abs_path, resp)
+        LegacyReadDir::from(c_path.abs_path, resp)
     }
 
-    fn readdir_next(readdir: &ReadDir) -> Result<DirEntry, ErrorCode> {
+    fn readdir_next(readdir: &LegacyReadDir) -> Result<DirEntry, ErrorCode> {
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
         unsafe {
@@ -879,7 +887,7 @@ impl FsClient {
 
 fn get_fileserver_url() -> Result<String, ErrorCode> {
     let mut conn = moto_ipc::sync::ClientConnection::new(moto_ipc::sync::ChannelSize::Small)?;
-    conn.connect(FS_URL)?;
+    conn.connect(FS_URL_LEGACY)?;
 
     let req = conn.req::<GetServerUrlRequest>();
     req.header.cmd = 1;

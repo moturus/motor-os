@@ -73,7 +73,8 @@ pub const F_UNLINK_FILE: u32 = 1;
 pub const F_UNLINK_DIR: u32 = 2;
 pub const F_UNLINK_DIR_ALL: u32 = 3;
 
-pub const FS_URL: &str = "motor-os-fs";
+pub const FS_URL_LEGACY: &str = "motor-os-fs";
+pub const FS_URL: &str = "sys-io-fs";
 
 // The first request the client makes to FS_URL, which then
 // provides a url of an actual driver to send all other requests to.

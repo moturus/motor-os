@@ -15,7 +15,7 @@ struct Dispatcher {
 
 impl Dispatcher {
     fn run() -> ! {
-        let ipc_server = LocalServer::new(FS_URL, ChannelSize::Small, 10, 10)
+        let ipc_server = LocalServer::new(FS_URL_LEGACY, ChannelSize::Small, 10, 10)
             .expect("Failed to start listening on {FS_URL}.");
         let mut dispatcher = Dispatcher { ipc_server };
 
