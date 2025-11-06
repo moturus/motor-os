@@ -293,8 +293,8 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
         if obj.sys_object.sibling_dropped() {
             log::debug!(
                 "sys_query_handle: object {} has it's sibling dropped in pid {}.",
-                handle.as_u64(),
-                process.pid().as_u64()
+                handle,
+                process.pid()
             );
             return ResultBuilder::bad_handle(handle);
         }
@@ -320,12 +320,12 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
             return ResultBuilder::result(moto_rt::E_NOT_FOUND);
         };
 
-        ResultBuilder::ok_1(proc.pid().as_u64())
+        ResultBuilder::ok_1(proc.pid().into())
     } else {
         log::debug!(
             "sys_query_handle: object not found in pid {} for handle {}.",
-            process.pid().as_u64(),
-            handle.as_u64()
+            process.pid(),
+            handle
         );
         ResultBuilder::bad_handle(handle)
     }

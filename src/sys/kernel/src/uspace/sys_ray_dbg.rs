@@ -23,8 +23,8 @@ impl core::fmt::Debug for DebugSession {
         f.write_fmt(format_args!(
             "DebugSession: {}:{}->{}",
             self.id,
-            self.debugger.pid().as_u64(),
-            self.debuggee.pid().as_u64()
+            self.debugger.pid(),
+            self.debuggee.pid()
         ))
     }
 }
@@ -54,8 +54,8 @@ impl DebugSession {
         let sys_object = SysObject::new_owned(
             Arc::new(alloc::format!(
                 "debug session {} -> {}",
-                debugger.pid().as_u64(),
-                debuggee.pid().as_u64()
+                debugger.pid(),
+                debuggee.pid()
             )),
             session,
             Arc::downgrade(&debugger),
@@ -83,13 +83,13 @@ fn sys_dbg_attach(thread: &crate::uspace::process::Thread, args: &SyscallArgs) -
     }
 
     // Cannot debug self, or ancestors, e.g. because of stdio dependencies.
-    let mut stats = crate::xray::stats::stats_from_pid(thread.owner().pid().as_u64());
+    let mut stats = crate::xray::stats::stats_from_pid(thread.owner().pid().into());
     while let Some(parent) = stats {
-        if parent.pid().as_u64() == pid {
+        if parent.pid() == pid {
             #[cfg(debug_assertions)]
             log::info!(
                 "sys_dbg_attach: not allowed: parent: {}, target: {pid}",
-                parent.pid().as_u64()
+                parent.pid()
             );
             return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
@@ -139,7 +139,7 @@ fn sys_dbg_pause_process(
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let session = match get_session(&debugger, dbg_handle) {
         Ok(s) => s,
         Err(err) => return ResultBuilder::result(err),
@@ -165,13 +165,13 @@ fn sys_dbg_list_threads(
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let session = match get_session(&debugger, dbg_handle) {
         Ok(s) => s,
         Err(err) => return ResultBuilder::result(err),
     };
 
-    let start_tid = super::process::ThreadId::from_u64(args.args[1]);
+    let start_tid = super::process::ThreadId::from(args.args[1]);
     let buf_start = args.args[2];
     let buf_len = args.args[3];
 
@@ -216,7 +216,7 @@ fn sys_dbg_get_thread_data(
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let debuggee = {
         if dbg_handle == SysHandle::SELF {
             debugger.clone()
@@ -261,7 +261,7 @@ fn sys_dbg_resume_process(
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let session = match get_session(&debugger, dbg_handle) {
         Ok(s) => s,
         Err(err) => return ResultBuilder::result(err),
@@ -287,7 +287,7 @@ fn sys_dbg_resume_thread(
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let session = match get_session(&debugger, dbg_handle) {
         Ok(s) => s,
         Err(err) => return ResultBuilder::result(err),
@@ -297,7 +297,7 @@ fn sys_dbg_resume_thread(
 
     match session
         .debuggee
-        .dbg_resume_thread(super::process::ThreadId::from_u64(tid))
+        .dbg_resume_thread(super::process::ThreadId::from(tid))
     {
         Ok(()) => ResultBuilder::ok(),
         Err(err) => ResultBuilder::result(err),
@@ -315,7 +315,7 @@ fn sys_dbg_detach(debugger: Arc<super::process::Process>, args: &SyscallArgs) ->
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let session = match get_session(&debugger, dbg_handle) {
         Ok(s) => s,
         Err(err) => return ResultBuilder::result(err),
@@ -338,7 +338,7 @@ fn sys_dbg_get_mem(debugger: Arc<super::process::Process>, args: &SyscallArgs) -
         return ResultBuilder::invalid_argument();
     }
 
-    let dbg_handle = SysHandle::from_u64(args.args[0]);
+    let dbg_handle = SysHandle::from(args.args[0]);
     let session = match get_session(&debugger, dbg_handle) {
         Ok(s) => s,
         Err(err) => return ResultBuilder::result(err),

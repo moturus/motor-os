@@ -85,8 +85,8 @@ fn process_wait_handles(
             if obj.sys_object.sibling_dropped() {
                 log::debug!(
                     "sys_wait: object {} has it's sibling dropped in pid {}.",
-                    handle.as_u64(),
-                    process.pid().as_u64()
+                    handle,
+                    process.pid()
                 );
                 return ResultBuilder::bad_handle(*handle);
             }
@@ -94,8 +94,8 @@ fn process_wait_handles(
         } else {
             log::debug!(
                 "sys_wait: object not found in pid {} for handle {}.",
-                process.pid().as_u64(),
-                handle.as_u64()
+                process.pid(),
+                handle
             );
             return ResultBuilder::bad_handle(*handle);
         }

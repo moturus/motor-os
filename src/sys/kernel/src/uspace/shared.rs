@@ -9,7 +9,7 @@ use alloc::{
     string::String,
     sync::{Arc, Weak},
 };
-use moto_sys::{ErrorCode, SysHandle};
+use moto_sys::{process::ProcessId, ErrorCode, SysHandle};
 
 use super::{sysobject::SysObject, Process};
 
@@ -96,7 +96,7 @@ pub(super) fn create(
     page_num: u16,
 ) -> Result<Arc<SysObject>, ErrorCode> {
     // Only sys-io can create "sys-io" listeners.
-    if url == "sys-io" && owner.pid() != super::process::SYS_IO_PID {
+    if url == "sys-io" && owner.pid() != ProcessId::SysIO {
         return Err(moto_rt::E_NOT_ALLOWED);
     }
 
@@ -240,10 +240,7 @@ pub(super) fn has_peer(maybe_shared: &Arc<SysObject>) -> Result<bool, moto_rt::E
     Ok(shared.sharer.strong_count() > 0 && shared.sharee.lock(line!()).strong_count() > 0)
 }
 
-pub(super) fn peer_owner(
-    this: super::process::ProcessId,
-    maybe_shared: &Arc<SysObject>,
-) -> Option<Arc<Process>> {
+pub(super) fn peer_owner(this: ProcessId, maybe_shared: &Arc<SysObject>) -> Option<Arc<Process>> {
     if let Some(shared) = super::sysobject::object_from_sysobject::<Shared>(maybe_shared) {
         let sharer = shared
             .sharer
@@ -323,9 +320,9 @@ pub(super) fn create_ipc_pair(
 
     log::debug!(
         "created ipc pair: {}:{}-{}:{}",
-        process1.pid().as_u64(),
+        process1.pid(),
         obj1.id(),
-        process2.pid().as_u64(),
+        process2.pid(),
         obj2.id()
     );
 

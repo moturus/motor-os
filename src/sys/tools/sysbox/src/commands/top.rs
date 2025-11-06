@@ -1,4 +1,5 @@
 use moto_rt::time::Instant;
+use moto_sys::process::ProcessId;
 use moto_sys::stats::{CpuStatsV1, ProcessStatsV1};
 use std::{
     collections::HashMap,
@@ -119,15 +120,9 @@ fn tsc_to_sec(tsc: u64) -> f64 {
     (tsc as f64) / tsc_in_sec
 }
 
-fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: u64) -> String {
-    if pid == moto_sys::stats::PID_SYSTEM {
-        return "(idle)".to_owned();
-    }
-    if pid == moto_sys::stats::PID_KERNEL {
-        return "kernel".to_owned();
-    }
-    if pid == moto_sys::stats::PID_SYS_IO {
-        return "sys-io".to_owned();
+fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: ProcessId) -> String {
+    if pid.is_system() {
+        return format!("{pid}");
     }
 
     fn update_cache(cmd_cache: &mut HashMap<u64, String>, pid: u64) {
@@ -144,15 +139,15 @@ fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: u64) -> String {
     }
 
     if cmd_cache.is_empty() {
-        update_cache(cmd_cache, moto_sys::stats::PID_SYSTEM);
+        update_cache(cmd_cache, ProcessId::System.into());
     }
 
-    if let Some(cmd) = cmd_cache.get(&pid) {
+    if let Some(cmd) = cmd_cache.get(&pid.into()) {
         return cmd.clone();
     }
 
-    update_cache(cmd_cache, pid);
-    if let Some(cmd) = cmd_cache.get(&pid) {
+    update_cache(cmd_cache, pid.into());
+    if let Some(cmd) = cmd_cache.get(&pid.into()) {
         return cmd.clone();
     }
 
@@ -366,7 +361,9 @@ fn tick(ctx: &mut Context) {
     for idx in 0..num_entries {
         let entry_now = ctx.stats_now.entry(idx as usize);
 
-        let mut line_k = format!("{:>w$}  k ", entry_now.pid, w = pid_width);
+        let pid = ProcessId::from(entry_now.pid);
+
+        let mut line_k = format!("{:>w$}  k ", pid, w = pid_width);
 
         let line = values.get(&entry_now.pid).unwrap();
 
@@ -374,14 +371,11 @@ fn tick(ctx: &mut Context) {
             line_k += &format!(" {:>w$}", line[cpu as usize].0, w = num_width);
         }
 
-        line_k += &format!("  {}", get_cmd_string(&mut ctx.cmd_cache, entry_now.pid));
+        line_k += &format!("  {}", get_cmd_string(&mut ctx.cmd_cache, pid));
         row += 1;
         write_line(row, line_k.as_str());
 
-        if entry_now.pid == moto_sys::stats::PID_SYSTEM {
-            continue;
-        }
-        if entry_now.pid == moto_sys::stats::PID_KERNEL {
+        if pid.is_system() {
             continue;
         }
 

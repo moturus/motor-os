@@ -1,4 +1,6 @@
-use moto_sys::{stats::ProcessStatsV1, syscalls::SyscallResult, SysHandle, SysRay};
+use moto_sys::{
+    process::ProcessId, stats::ProcessStatsV1, syscalls::SyscallResult, SysHandle, SysRay,
+};
 
 use crate::xray::stats::KProcessStats;
 
@@ -15,7 +17,7 @@ fn sys_query_process_status(thread: &super::process::Thread, args: &SyscallArgs)
 
     match super::sysobject::object_from_handle::<super::process::Process>(
         &thread.owner(),
-        SysHandle::from_u64(args.args[0]),
+        SysHandle::from(args.args[0]),
     ) {
         Some(proc) => match proc.status() {
             super::process::ProcessStatus::Created
@@ -45,7 +47,7 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
         _ => return ResultBuilder::invalid_argument(),
     };
 
-    let pid = super::process::ProcessId::from_u64(args.args[0]);
+    let pid = ProcessId::from(args.args[0]);
     let dest_addr = args.args[1] as usize;
     let dest_num = args.args[2] as usize; // Number of structs, not number of bytes.
     if dest_num < 1 {

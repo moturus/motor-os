@@ -1,4 +1,4 @@
-use moto_sys::stats::ProcessStatsV1;
+use moto_sys::{process::ProcessId, stats::ProcessStatsV1};
 
 use crate::subcommand;
 
@@ -56,7 +56,7 @@ pub fn test_pid_kill() {
         processes.push(ProcessStatsV1::default());
     }
 
-    let cnt = match ProcessStatsV1::list(moto_sys::stats::PID_SYSTEM, &mut processes[..]) {
+    let cnt = match ProcessStatsV1::list(ProcessId::System.into(), &mut processes[..]) {
         Ok(cnt) => cnt,
         Err(err) => {
             eprintln!("PS failed.");

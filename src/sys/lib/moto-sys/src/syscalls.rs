@@ -13,6 +13,7 @@ pub const SYS_OBJ: u8 = 3;
 pub const SYS_RAY: u8 = 4;
 
 use crate::ErrorCode;
+use core::fmt::{self, Display, Formatter};
 
 // SyscallResult is passed on registers; x64, arm64, and risc-v all have
 // enough argument/scratch registers to pass data back this way.
@@ -96,6 +97,12 @@ impl From<SysHandle> for u64 {
 impl From<&SysHandle> for u64 {
     fn from(value: &SysHandle) -> u64 {
         value.0
+    }
+}
+
+impl Display for SysHandle {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

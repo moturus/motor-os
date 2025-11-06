@@ -1,3 +1,5 @@
+use moto_sys::process::ProcessId;
+
 use crate::config::uCpus;
 use crate::mm::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use core::sync::atomic::*;
@@ -384,7 +386,7 @@ pub fn start_userspace_processes() {
     )
     .unwrap();
 
-    assert_eq!(process.pid().as_u64(), moto_sys::stats::PID_SYS_IO);
+    assert_eq!(process.pid(), ProcessId::SysIO);
 
     // crate::xray::tracing::start();
     // #[cfg(debug_assertions)]

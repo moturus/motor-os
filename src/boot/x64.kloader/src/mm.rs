@@ -77,8 +77,10 @@ impl PTE {
     const fn empty() -> Self {
         Self { entry: 0 }
     }
+}
 
-    fn from_u64(val: u64) -> Self {
+impl From<u64> for PTE {
+    fn from(val: u64) -> Self {
         Self { entry: val }
     }
 }
@@ -184,7 +186,7 @@ pub fn init(pvh: &'static PvhStartInfo) {
 
         pte |= PTE::PRESENT | PTE::WRITABLE;
         #[allow(static_mut_refs)]
-        L4_TABLE.set(idx_l4, PTE::from_u64(pte));
+        L4_TABLE.set(idx_l4, PTE::from(pte));
 
         // validate.
         let l4_addr = core::ptr::addr_of!(L4_TABLE) as usize;
@@ -230,7 +232,7 @@ fn set_l3_table_for_direct_map(start: u64, max_addr: u64, l3_table: &mut HwPageT
         assert_eq!(0, pte & ((1 << 12) - 1));
         pte |= PTE::PRESENT | PTE::WRITABLE | PTE::HUGE;
 
-        l3_table.set(idx_l3, PTE::from_u64(pte));
+        l3_table.set(idx_l3, PTE::from(pte));
         start += 1_u64 << 30;
     }
 }

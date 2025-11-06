@@ -21,35 +21,14 @@ use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::assert_matches::assert_matches;
 use core::sync::atomic::*;
+use moto_sys::process::ProcessId;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 use moto_sys::UserThreadControlBlock;
 
-// Process ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ProcessId(u64);
-
-pub const KERNEL_PID: ProcessId = ProcessId(moto_sys::stats::PID_KERNEL);
-pub const SYS_IO_PID: ProcessId = ProcessId(moto_sys::stats::PID_SYS_IO);
-
 pub enum UserError {
     InvalidSyscallReturnPointer,
     ShutdownRequested,
-}
-
-impl ProcessId {
-    fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(KERNEL_PID.as_u64() + 1);
-        ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    pub const fn as_u64(&self) -> u64 {
-        self.0
-    }
-
-    pub const fn from_u64(pid: u64) -> Self {
-        Self(pid)
-    }
 }
 
 // Globally unique Thread ID. Used in SysObject.
@@ -65,9 +44,17 @@ impl ThreadId {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+}
 
-    pub const fn from_u64(tid: u64) -> Self {
-        Self(tid)
+impl From<u64> for ThreadId {
+    fn from(val: u64) -> Self {
+        Self(val)
+    }
+}
+
+impl Into<u64> for ThreadId {
+    fn into(self) -> u64 {
+        self.0
     }
 }
 
@@ -184,6 +171,11 @@ impl Process {
         let user_mem_stats = address_space.user_mem_stats().clone();
         let kernel_mem_stats = address_space.kernel_mem_stats().clone();
 
+        let pid = match &debug_name[..] {
+            "sys-io" => ProcessId::SysIO,
+            _ => ProcessId::new(),
+        };
+
         let self_ = Arc::new_cyclic(|me| Process {
             address_space,
             entry_point,
@@ -197,7 +189,7 @@ impl Process {
             self_object: None,
             stats: KProcessStats::new(
                 parent,
-                ProcessId::new(),
+                pid,
                 debug_name,
                 user_mem_stats,
                 kernel_mem_stats,
@@ -217,7 +209,7 @@ impl Process {
         };
 
         let process_page = self_mut.address_space.process_static_page_mut();
-        process_page.pid = self_mut.pid().as_u64();
+        process_page.pid = self_mut.pid().into();
         process_page.capabilities = capabilities;
 
         self_mut.main_thread = Some(Thread::new(self_.clone(), user_stack, self_mut.entry_point));
@@ -226,7 +218,7 @@ impl Process {
         self_mut.threads.insert(thread.tid, thread.clone());
 
         self_mut.self_object = Some(SysObject::new_owned(
-            Arc::new(alloc::format!("process:{}", self_mut.stats.pid().as_u64())),
+            Arc::new(alloc::format!("process:{}", self_mut.stats.pid())),
             self_.clone(),
             Arc::downgrade(&self_),
         ));
@@ -411,7 +403,7 @@ impl Process {
     pub(super) fn get_thread_data(&self, tid: u64) -> Option<moto_sys::stats::ThreadDataV1> {
         let thread: Arc<Thread> = {
             let _ = self.status.lock(line!());
-            self.threads.get(&ThreadId::from_u64(tid))?.clone()
+            self.threads.get(&ThreadId::from(tid))?.clone()
         };
 
         Some(thread.get_thread_data())
@@ -557,7 +549,7 @@ impl Process {
             ProcessStatus::Created => {
                 log::debug!(
                     "started process {}: '{}'",
-                    self.pid().as_u64(),
+                    self.pid(),
                     self.debug_name() // This is process debug name, does not acquire a lock.
                 );
                 *status = ProcessStatus::Running;
@@ -579,7 +571,7 @@ impl Process {
         #[cfg(debug_assertions)]
         log::debug!(
             "on_thread_exited: pid: {} tid: {}",
-            self.pid().as_u64(),
+            self.pid(),
             tid.as_u64()
         );
         let mut exited = false;
@@ -603,7 +595,7 @@ impl Process {
                 #[cfg(debug_assertions)]
                 log::debug!(
                     "process {} '{}' exiting: no threads left.",
-                    self.pid().as_u64(),
+                    self.pid(),
                     self.debug_name() // Process debug name, not locking.
                 );
                 // Although it would have been nice to set the process status
@@ -625,7 +617,7 @@ impl Process {
                 #[cfg(debug_assertions)]
                 log::debug!(
                     "process {} '{}' exiting: main thread exited.",
-                    self.pid().as_u64(),
+                    self.pid(),
                     self.debug_name() // Process debug name, not locking.
                 );
                 for thread in self_mut.threads.values() {
@@ -642,7 +634,7 @@ impl Process {
                         #[cfg(debug_assertions)]
                         log::debug!(
                             "process {} '{}' killed: thread {} exited with status {}.",
-                            self.pid().as_u64(),
+                            self.pid(),
                             self.debug_name(), // Process debug name, not locking.
                             tid.as_u64(),
                             val
@@ -658,7 +650,7 @@ impl Process {
                         #[cfg(debug_assertions)]
                         log::debug!(
                             "process {} '{}' killed: thread {} killed.",
-                            self.pid().as_u64(),
+                            self.pid(),
                             self.debug_name(), // Process debug name, not locking.
                             tid.as_u64()
                         );
@@ -696,7 +688,7 @@ impl Process {
                 #[cfg(debug_assertions)]
                 log::debug!(
                     "Process {}: '{}' exited with status {:?}.",
-                    self.pid().as_u64(),
+                    self.pid(),
                     self.debug_name(), // Process debug name, not locking.
                     *status_lock
                 );
@@ -709,7 +701,7 @@ impl Process {
 
             self.wait_objects.lock(line!()).clear();
 
-            if self.pid().as_u64() == moto_sys::stats::PID_SYS_IO {
+            if self.pid() == ProcessId::SysIO {
                 crate::init::init_exited(self);
             }
         }
@@ -895,7 +887,7 @@ impl Thread {
             let self_object = SysObject::new_owned(
                 Arc::new(alloc::format!(
                     "thread:{}:{}",
-                    owner.pid().as_u64(),
+                    owner.pid(),
                     self_mut.tid.as_u64()
                 )),
                 self_.clone(),
@@ -908,7 +900,7 @@ impl Thread {
             let join_object = SysObject::new_owned(
                 Arc::new(alloc::format!(
                     "thread_joiner:{}:{}",
-                    owner.pid().as_u64(),
+                    owner.pid(),
                     self_mut.tid.as_u64()
                 )),
                 self_.clone(),
@@ -962,7 +954,7 @@ impl Thread {
         } else {
             log::info!(
                 "UTCB guard check failed: {}:{}",
-                self.owner().pid().as_u64(),
+                self.owner().pid(),
                 self.tid.as_u64()
             );
             Err(())
@@ -1024,9 +1016,9 @@ impl Thread {
     pub fn debug_name(&self) -> String {
         let parent = self.owner.upgrade().unwrap();
         alloc::format!(
-            "{} 0x{:x}:0x{:x} - '{}'",
+            "{} 0x{}:0x{:x} - '{}'",
             parent.debug_name(), // Process debug name, not locking.
-            parent.pid().as_u64(),
+            parent.pid(),
             self.tid.as_u64(),
             self.get_thread_data().thread_name()
         )
@@ -1297,7 +1289,7 @@ impl Thread {
                 Err(err) => {
                     log::error!(
                         "Process {}: '{}' OOMed when allocating kernel stack.",
-                        process_mut.pid().as_u64(),
+                        process_mut.pid(),
                         process_mut.debug_name()
                     );
                     *process_status = ProcessStatus::Error(err);
