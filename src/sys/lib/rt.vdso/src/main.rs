@@ -2,11 +2,13 @@
 #![no_main]
 #![allow(unused)]
 #![feature(str_from_raw_parts)]
+#![feature(ptr_as_ref_unchecked)]
 
 mod load;
 mod posix;
 mod proc_fd;
 mod rt_alloc;
+mod rt_fs;
 mod rt_fs_legacy;
 mod rt_futex;
 mod rt_poll;

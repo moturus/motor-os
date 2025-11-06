@@ -34,6 +34,10 @@ pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
 }
 
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
+    if crate::rt_fs::ok() {
+        return crate::rt_fs::open(path_ptr, path_size, opts);
+    }
+
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     if (path_bytes.len() > HANDLE_URL_PREFIX.len())
         && (&path_bytes[0..HANDLE_URL_PREFIX.len()] == HANDLE_URL_PREFIX.as_bytes())
@@ -486,7 +490,12 @@ impl FsClient {
     }
 
     fn create_async() -> Result<(), ErrorCode> {
-        todo!()
+        if crate::rt_fs::ok() {
+            Ok(())
+        } else {
+            log::warn!("Legacy Init: failed to intialize the async FS client.");
+            Err(moto_rt::E_INTERNAL_ERROR)
+        }
     }
 
     fn get() -> Result<&'static FsClient, ErrorCode> {
