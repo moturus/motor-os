@@ -17,5 +17,6 @@ moto-rt = { path = "../moto-rt", optional = true }
 [features]
 base = ["moto-rt/base"]
 default = ["userspace"]
-rustc-dep-of-std = [ "alloc", "core", "userspace" ]
+rustc-dep-of-std = ["alloc", "core", "userspace"]
 userspace = ["moto-rt"]
+kernel = ["base"]

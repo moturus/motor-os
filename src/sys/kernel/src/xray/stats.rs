@@ -9,7 +9,6 @@ use crate::arch::current_cpu;
 use crate::arch::num_cpus;
 use crate::config::uCpus;
 use crate::mm::PAGE_SIZE_SMALL_LOG2;
-use crate::uspace::process::ProcessId;
 use crate::util::SpinLock;
 use crate::util::StaticRef;
 use alloc::borrow::ToOwned;
@@ -17,6 +16,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
+use moto_sys::process::ProcessId;
 
 use moto_sys::stats::*;
 
@@ -242,10 +242,10 @@ impl KProcessStats {
                 parent.total_children.fetch_add(1, Ordering::Relaxed);
                 parent.active_children.fetch_add(1, Ordering::Relaxed);
             }
-            None => assert_eq!(self_.pid.as_u64(), PID_SYSTEM),
+            None => assert_eq!(self_.pid, ProcessId::System),
         }
 
-        if self_.pid.as_u64() > PID_KERNEL {
+        if matches!(self_.pid, ProcessId::Userspace { .. }) {
             // This is a userspace process.
             assert!(SYSTEM_STATS
                 .children
@@ -281,7 +281,7 @@ impl KProcessStats {
         // are tracked.
         let children = self.children.lock(line!());
         for pid in children.keys() {
-            crate::uspace::process::post_kill_by_pid(pid.as_u64());
+            crate::uspace::process::post_kill_by_pid(pid.into());
         }
     }
 
@@ -313,9 +313,10 @@ impl KProcessStats {
         SYSTEM_STATS.active_threads.fetch_sub(1, Ordering::Relaxed);
     }
 
+    // TODO: proper into impl
     pub fn into_v1(&self, dest: &mut ProcessStatsV1, now: u64) {
-        dest.pid = self.pid.as_u64();
-        dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.pid.as_u64());
+        dest.pid = self.pid.into();
+        dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.pid.into());
         dest.total_threads = self.total_threads.load(Ordering::Relaxed);
         dest.total_children = self.total_children.load(Ordering::Relaxed);
         dest.active_threads = self.active_threads.load(Ordering::Relaxed);
@@ -357,7 +358,7 @@ impl KProcessStats {
         F: FnMut(&Self) -> bool,
     {
         if flat {
-            if start.as_u64() == PID_SYSTEM && !func(SYSTEM_STATS.as_ref()) {
+            if start == ProcessId::System && !func(SYSTEM_STATS.as_ref()) {
                 return;
             }
             let child_lock = SYSTEM_STATS.children.lock(line!());
@@ -495,7 +496,7 @@ pub fn init() {
     use alloc::boxed::Box;
     SYSTEM_STATS.set(Box::leak(Box::new(KProcessStats::new_impl(
         None,
-        ProcessId::from_u64(PID_SYSTEM),
+        ProcessId::System.into(),
         "(total)".to_owned(),
         Arc::new(MemStats::new_user()),
         Arc::new(MemStats::new_kernel()),
@@ -504,7 +505,7 @@ pub fn init() {
 
     KERNEL_STATS.set(Box::leak(Box::new(KProcessStats::new_impl(
         Some(system_stats()),
-        ProcessId::from_u64(PID_KERNEL),
+        ProcessId::System.into(),
         "kernel".to_owned(),
         Arc::new(MemStats::new_user()),
         crate::mm::virt::kernel_mem_stats(),
@@ -547,7 +548,7 @@ pub fn stats_from_pid(pid: u64) -> Option<Arc<KProcessStats>> {
     SYSTEM_STATS
         .children
         .lock(line!())
-        .get(&ProcessId::from_u64(pid))
+        .get(&ProcessId::from(pid))
         .map(|w| w.upgrade())?
 }
 
@@ -572,7 +573,8 @@ pub fn fill_percpu_stats_entry(
         if (addr_offset + entry_sz) > crate::mm::PAGE_SIZE_SMALL as usize {
             return false;
         }
-        *((page_addr + addr_offset) as *mut u64) = stats.pid.as_u64();
+        // TODO: use struct repl(C) to fill
+        *((page_addr + addr_offset) as *mut u64) = stats.pid.into();
         let percpu_entries = core::slice::from_raw_parts_mut(
             (page_addr + addr_offset + 8) as *mut moto_sys::stats::CpuStatsPerCpuEntryV1,
             num_cpus,

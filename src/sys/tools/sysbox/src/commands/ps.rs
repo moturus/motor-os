@@ -1,4 +1,4 @@
-use moto_sys::stats::{ProcessStatsV1, PID_KERNEL, PID_SYSTEM};
+use moto_sys::{process::ProcessId, stats::ProcessStatsV1};
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("Report some process stats.");
@@ -36,7 +36,7 @@ pub fn do_command(args: &[String]) {
         processes.push(ProcessStatsV1::default());
     }
 
-    let cnt = match ProcessStatsV1::list(PID_SYSTEM, &mut processes[..]) {
+    let cnt = match ProcessStatsV1::list(ProcessId::System.into(), &mut processes[..]) {
         Ok(cnt) => cnt,
         Err(err) => {
             eprintln!("PS failed.");
@@ -127,13 +127,13 @@ fn print_tree(processes: &[ProcessStatsV1], col_width: usize, cpu_width: usize) 
     // the inefficient thing below.
 
     // Assertions below are not part of the API, but for now they work.
-    assert_eq!(processes[0].pid, PID_SYSTEM);
-    assert_eq!(processes[1].pid, PID_KERNEL);
+    assert_eq!(processes[0].pid, ProcessId::System.into());
+    assert_eq!(processes[1].pid, ProcessId::Kernel.into());
 
     print_line(&processes[0], col_width, cpu_width, 0);
     print_line(&processes[1], col_width, cpu_width, 0);
 
-    print_subtree(processes, PID_KERNEL, col_width, cpu_width, 1);
+    print_subtree(processes, ProcessId::Kernel.into(), col_width, cpu_width, 1);
 }
 
 fn print_subtree(

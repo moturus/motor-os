@@ -73,10 +73,6 @@ impl PTE {
         Self { entry: 0 }
     }
 
-    fn from_u64(val: u64) -> Self {
-        Self { entry: val }
-    }
-
     fn is_empty(&self) -> bool {
         self.entry == 0
     }
@@ -92,6 +88,12 @@ impl PTE {
     #[inline]
     fn get_addr(&self) -> u64 {
         self.entry & 0x_000f_ffff_ffff_f000
+    }
+}
+
+impl From<u64> for PTE {
+    fn from(val: u64) -> Self {
+        Self { entry: val }
     }
 }
 
@@ -162,7 +164,7 @@ impl HwPageTable {
         let frame = phys_allocate_frameless(PageType::SmallPage).unwrap();
         zero_page(frame + PAGING_DIRECT_MAP_OFFSET, PageType::SmallPage);
 
-        let pte = PTE::from_u64(frame | pde_flags);
+        let pte = PTE::from(frame | pde_flags);
         self.entries[idx as usize] = pte;
 
         Self::from_pte(pte)
@@ -171,7 +173,7 @@ impl HwPageTable {
     fn alloc() -> Result<&'static mut Self, ErrorCode> {
         let frame = phys_allocate_frameless(PageType::SmallPage)?;
         zero_page(frame + PAGING_DIRECT_MAP_OFFSET, PageType::SmallPage);
-        Ok(Self::from_pte(PTE::from_u64(frame)))
+        Ok(Self::from_pte(PTE::from(frame)))
     }
 
     fn dealloc(&self) {
@@ -283,7 +285,7 @@ impl PageTableImpl {
         let idx_l3 = PageTableImpl::idx_l3(virt_addr);
         if kind == PageType::LargePage {
             assert!(table_l3.get(idx_l3).is_empty());
-            let pte = PTE::from_u64(phys_addr | pte_flags);
+            let pte = PTE::from(phys_addr | pte_flags);
             table_l3.set(idx_l3, pte);
             return;
         }
@@ -293,7 +295,7 @@ impl PageTableImpl {
         let idx_l2 = PageTableImpl::idx_l2(virt_addr);
         if kind == PageType::MidPage {
             assert!(table_l2.get(idx_l2).is_empty());
-            let pte = PTE::from_u64(phys_addr | pte_flags);
+            let pte = PTE::from(phys_addr | pte_flags);
             table_l2.set(idx_l2, pte);
             return;
         }
@@ -310,7 +312,7 @@ impl PageTableImpl {
             }
         }
         assert!(table_l1.get(idx_l1).is_empty());
-        let pte = PTE::from_u64(phys_addr | pte_flags);
+        let pte = PTE::from(phys_addr | pte_flags);
         table_l1.set(idx_l1, pte);
     }
 
