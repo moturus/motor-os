@@ -1,0 +1,12 @@
+img_files: web
+binaries:
+  - "/bin/httpd-axum"
+  - "/sys/sys-init"
+  - "/sys/sys-tty"
+filesystem:
+  type: "flatfs"
+  filename: "motor.web.img"
+  partition_name: "fs_part.web"
+constants:
+  img_out_dir: "vm_images"
+  static_files_dir: "img_files"

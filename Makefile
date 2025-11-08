@@ -150,7 +150,7 @@ rnetbench:
 
 img: boot core sys user
 	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD)
+		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) full.config.yaml web.config.yaml motor.full.config.yaml 
 	cp "$(ROOT_DIR)/src/vm_scripts/"* \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
 	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"

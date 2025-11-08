@@ -1,0 +1,24 @@
+img_files: full
+binaries:
+  - "/bin/httpd"
+  - "/bin/httpd-axum"
+  - "/bin/russhd"
+  - "/bin/kibim"
+  - "/bin/rush"
+  - "/sys/mdbg"
+  - "/sys/sys-init"
+  - "/sys/sys-log"
+  - "/sys/sys-tty"
+  - "/sys/sysbox"
+  - "/sys/tests/rnetbench"
+  - "/sys/tests/systest"
+  - "/sys/tests/mio-test"
+  - "/sys/tests/tokio-tests"
+  - "/sys/tests/crossbench"
+filesystem:
+  type: "motor-fs"
+  filename: "motor-fs"
+  partition_name: "fs_part.web.motor-fs"
+constants:
+  img_out_dir: "vm_images"
+  static_files_dir: "img_files"
