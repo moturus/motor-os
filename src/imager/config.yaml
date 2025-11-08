@@ -1,0 +1,26 @@
+# Binaries for the "full" image
+bin_full:
+  - "/bin/httpd"
+  - "/bin/httpd-axum"
+  - "/bin/russhd"
+  - "/bin/kibim"
+  - "/bin/rush"
+  - "/sys/mdbg"
+  - "/sys/sys-init"
+  - "/sys/sys-log"
+  - "/sys/sys-tty"
+  - "/sys/sysbox"
+  - "/sys/tests/rnetbench"
+  - "/sys/tests/systest"
+  - "/sys/tests/mio-test"
+  - "/sys/tests/tokio-tests"
+  - "/sys/tests/crossbench"
+# Binaries for the "web" image
+bin_web:
+  - "/bin/httpd"
+  - "/sys/sys-init"
+  - "/sys/sys-tty"
+# Where to output the generated VM images
+img_out_dir: "vm_images"
+# Directory containing static image files to include
+img_files_dir: "img_files"

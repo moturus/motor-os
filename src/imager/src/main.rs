@@ -20,29 +20,12 @@ use std::io::{self, Seek, SeekFrom};
 
 mod util;
 
+mod build_consts{
+    // Binary paths included from build.rs script. Derives from bin.yaml.
+    include!(concat!(env!("OUT_DIR"), "/imagerconsts.rs"));
+}
+
 const SECTOR_SIZE: u32 = 512;
-
-// For the "full" image.
-static BIN_FULL: [&str; 15] = [
-    "/bin/httpd",
-    "/bin/httpd-axum",
-    "/bin/russhd",
-    "/bin/kibim",
-    "/bin/rush",
-    "/sys/mdbg",
-    "/sys/sys-init",
-    "/sys/sys-log",
-    "/sys/sys-tty",
-    "/sys/sysbox",
-    "/sys/tests/rnetbench",
-    "/sys/tests/systest",
-    "/sys/tests/mio-test",
-    "/sys/tests/tokio-tests",
-    "/sys/tests/crossbench",
-];
-
-// For the "web" image.
-static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
@@ -428,10 +411,10 @@ fn main() {
     }
 
     // $MOTORH/vm_images/debug|release
-    let img_dir = motorh.join("vm_images").join(deb_rel);
+    let img_dir = motorh.join(build_consts::IMG_OUT_DIR).join(deb_rel);
     clear_dir_or_exit(&img_dir);
 
-    let tmp_img_dir = motorh.join("build").join("vm_images").join(deb_rel);
+    let tmp_img_dir = motorh.join("build").join(build_consts::IMG_OUT_DIR).join(deb_rel);
     clear_dir_or_exit(&tmp_img_dir);
 
     let initrd = img_dir.join("initrd");
@@ -449,7 +432,7 @@ fn main() {
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     // Add compiled programs to the data partition.
-    for prog in BIN_FULL {
+    for prog in build_consts::BIN_FULL {
         let filename = Path::new(prog).file_name().unwrap();
         files.insert(bin_dir.join(filename), (*prog).to_owned());
     }
@@ -457,7 +440,7 @@ fn main() {
     // Add static files to the data partition.
     add_static_dir(
         &mut files,
-        motorh.join("img_files").join("full"),
+        motorh.join(build_consts::IMG_FILES_DIR).join("full"),
         Path::new("/"),
     );
 
@@ -477,7 +460,7 @@ fn main() {
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     // Add compiled programs to the data partition.
-    for prog in BIN_WEB {
+    for prog in build_consts::BIN_WEB {
         let filename = Path::new(prog).file_name().unwrap();
         files.insert(bin_dir.join(filename), (*prog).to_owned());
     }
@@ -485,7 +468,7 @@ fn main() {
     // Add static files to the data partition.
     add_static_dir(
         &mut files,
-        motorh.join("img_files").join("web"),
+        motorh.join(build_consts::IMG_FILES_DIR).join("web"),
         Path::new("/"),
     );
 
@@ -505,7 +488,7 @@ fn main() {
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     // Add compiled programs to the data partition.
-    for prog in BIN_FULL {
+    for prog in build_consts::BIN_FULL {
         let filename = Path::new(prog).file_name().unwrap();
         files.insert(bin_dir.join(filename), (*prog).to_owned());
     }
@@ -513,7 +496,7 @@ fn main() {
     // Add static files to the data partition.
     add_static_dir(
         &mut files,
-        motorh.join("img_files").join("full"),
+        motorh.join(build_consts::IMG_FILES_DIR).join("full"),
         Path::new("/"),
     );
 
