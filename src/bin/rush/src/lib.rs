@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+mod autocomplete;
 mod exec;
 mod line_parser;
 mod redirect;
