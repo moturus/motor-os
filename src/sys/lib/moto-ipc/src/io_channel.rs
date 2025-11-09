@@ -5,6 +5,8 @@
 //! between the kernel and a userspace process.
 //!
 //! Also simpler than io_uring. More specifically, SQE and CQE have the same layout.
+//!
+//! Async: ServerConnection uses local wakers, ClientConnection uses cross-thread wakers.
 use core::{fmt::Debug, sync::atomic::*};
 
 use moto_sys::*;
@@ -178,6 +180,14 @@ struct RawIoPage {
     s_type: SubChannelType,
 }
 
+#[repr(u64)]
+enum WaitType {
+    _NoWait = 0,
+    WaitingToSend = 1,
+    WaitingToRecv = 2,
+    // WAITING_TO_ALLOC = 4,
+}
+
 #[repr(C, align(4096))]
 struct RawChannel {
     // First 4 cache lines.
@@ -190,16 +200,19 @@ struct RawChannel {
     server_queue_tail: AtomicU64,
     _pad4: [u64; 7],
 
+    // Next 8 cache lines.
     client_pages_in_use: AtomicU64,
     _pad5: [u64; 7],
     server_pages_in_use: AtomicU64,
     _pad6: [u64; 7],
 
-    // Pad to BLOCK_SIZE (512 bytes).
-    _pad7: [u8; 128],
+    client_waits: AtomicU64,
+    _pad7: [u64; 7],
+    server_waits: AtomicU64,
+    _pad8: [u64; 7],
 
     // Pad to PAGE_SIZE
-    _pad8: [u8; 3584],
+    _pad9: [u8; 3584],
 
     // offset: 4096 = 1 page; client=>server queue.
     client_queue: [MsgSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
@@ -326,6 +339,22 @@ impl RawChannel {
         }
     }
 
+    fn client_queue_full(&self) -> bool {
+        let pos = self.client_queue_head.load(Ordering::Relaxed);
+        let slot = &self.client_queue[(pos & QUEUE_MASK) as usize];
+        let stamp = slot.stamp.load(Ordering::Acquire);
+
+        stamp < pos
+    }
+
+    fn server_queue_full(&self) -> bool {
+        let pos = self.server_queue_head.load(Ordering::Relaxed);
+        let slot = &self.server_queue[(pos & QUEUE_MASK) as usize];
+        let stamp = slot.stamp.load(Ordering::Acquire);
+
+        stamp < pos
+    }
+
     fn dump_state(&self) {
         crate::moto_log!(
             "RawChannel: sqh: {} sqt: {} cqh: {} cqt: {} client pages: 0x{:x} server pages: 0x{:x}",
@@ -337,8 +366,35 @@ impl RawChannel {
             self.server_pages_in_use.load(Ordering::Relaxed),
         );
     }
-}
 
+    fn set_server_waiting(&self, wait_type: WaitType) {
+        self.server_waits
+            .fetch_or(wait_type as u64, Ordering::AcqRel);
+    }
+
+    fn is_server_waiting(&self, wait_type: WaitType) -> bool {
+        (self.server_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
+    }
+
+    fn clear_server_waiting(&self, wait_type: WaitType) {
+        self.server_waits
+            .fetch_and(!(wait_type as u64), Ordering::AcqRel);
+    }
+
+    fn set_client_waiting(&self, wait_type: WaitType) {
+        self.client_waits
+            .fetch_or(wait_type as u64, Ordering::AcqRel);
+    }
+
+    fn is_client_waiting(&self, wait_type: WaitType) -> bool {
+        (self.client_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
+    }
+
+    fn clear_client_waiting(&self, wait_type: WaitType) {
+        self.client_waits
+            .fetch_and(!(wait_type as u64), Ordering::AcqRel);
+    }
+}
 pub struct IoPage {
     raw_page: RawIoPage,
     raw_channel: &'static RawChannel,
@@ -547,13 +603,40 @@ impl ClientConnection {
         Ok(cqe)
     }
 
-    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+    pub async fn recv_async(&mut self) -> Result<Msg, ErrorCode> {
         use moto_async::AsFuture;
 
+        debug_assert!(!self
+            .raw_channel()
+            .is_client_waiting(WaitType::WaitingToRecv));
+
+        let mut wait_flag_set = false;
         loop {
             match self.recv() {
-                Err(moto_rt::E_NOT_READY) => self.server_handle.as_future().await?,
-                x => return x,
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.server_handle.as_future().await?
+                    } else {
+                        self.raw_channel()
+                            .set_client_waiting(WaitType::WaitingToRecv);
+                        wait_flag_set = true;
+                        // Do one more recv() before waiting.
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(msg) => {
+                    if wait_flag_set {
+                        self.raw_channel()
+                            .clear_client_waiting(WaitType::WaitingToRecv);
+                    }
+                    if self
+                        .raw_channel()
+                        .is_server_waiting(WaitType::WaitingToSend)
+                    {
+                        self.wake_server()?;
+                    }
+                    return Ok(msg);
+                }
             }
         }
     }
@@ -561,10 +644,37 @@ impl ClientConnection {
     pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
         use moto_async::AsFuture;
 
+        debug_assert!(!self
+            .raw_channel()
+            .is_client_waiting(WaitType::WaitingToSend));
+
+        let mut wait_flag_set = false;
         loop {
             match self.send(msg) {
-                Err(moto_rt::E_NOT_READY) => self.server_handle.as_future().await?,
-                x => return x,
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.server_handle.as_future().await?;
+                    } else {
+                        self.raw_channel()
+                            .set_client_waiting(WaitType::WaitingToSend);
+                        wait_flag_set = true;
+                        // Do one more send() before waiting.
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(()) => {
+                    if wait_flag_set {
+                        self.raw_channel()
+                            .clear_client_waiting(WaitType::WaitingToSend);
+                    }
+                    if self
+                        .raw_channel()
+                        .is_server_waiting(WaitType::WaitingToRecv)
+                    {
+                        self.wake_server()?;
+                    }
+                    return Ok(());
+                }
             }
         }
     }
@@ -613,6 +723,14 @@ impl ClientConnection {
 
     pub fn dump_state(&self) {
         self.raw_channel().dump_state()
+    }
+
+    pub fn client_queue_full(&self) -> bool {
+        self.raw_channel().client_queue_full()
+    }
+
+    pub fn server_queue_full(&self) -> bool {
+        self.raw_channel().server_queue_full()
     }
 }
 
@@ -749,24 +867,78 @@ impl ServerConnection {
         Ok(())
     }
 
-    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+    pub async fn recv_async(&mut self) -> Result<Msg, ErrorCode> {
         use moto_async::AsFuture;
 
+        debug_assert!(!self
+            .raw_channel()
+            .is_server_waiting(WaitType::WaitingToRecv));
+
+        let mut wait_flag_set = false;
         loop {
             match self.recv() {
-                Err(moto_rt::E_NOT_READY) => self.wait_handle.as_future().await?,
-                x => return x,
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.wait_handle.as_future().await?;
+                    } else {
+                        self.raw_channel()
+                            .set_server_waiting(WaitType::WaitingToRecv);
+                        wait_flag_set = true;
+                        // Do one more recv().
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(msg) => {
+                    if wait_flag_set {
+                        self.raw_channel()
+                            .clear_server_waiting(WaitType::WaitingToRecv);
+                    }
+                    if self
+                        .raw_channel()
+                        .is_client_waiting(WaitType::WaitingToSend)
+                    {
+                        self.wake_client()?;
+                    }
+
+                    return Ok(msg);
+                }
             }
         }
     }
 
-    pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
+    pub async fn send_async(&mut self, msg: Msg) -> Result<(), ErrorCode> {
         use moto_async::AsFuture;
 
+        debug_assert!(!self
+            .raw_channel()
+            .is_server_waiting(WaitType::WaitingToSend));
+
+        let mut wait_flag_set = false;
         loop {
             match self.send(msg) {
-                Err(moto_rt::E_NOT_READY) => self.wait_handle.as_future().await?,
-                x => return x,
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.wait_handle.as_future().await?;
+                    } else {
+                        self.raw_channel()
+                            .set_server_waiting(WaitType::WaitingToSend);
+                        wait_flag_set = true;
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(()) => {
+                    if wait_flag_set {
+                        self.raw_channel()
+                            .clear_server_waiting(WaitType::WaitingToSend);
+                    }
+                    if self
+                        .raw_channel()
+                        .is_client_waiting(WaitType::WaitingToRecv)
+                    {
+                        self.wake_client()?;
+                    }
+                    return Ok(());
+                }
             }
         }
     }
@@ -859,5 +1031,13 @@ impl ServerConnection {
 
     pub fn dump_state(&self) {
         self.raw_channel().dump_state()
+    }
+
+    pub fn client_queue_full(&self) -> bool {
+        self.raw_channel().client_queue_full()
+    }
+
+    pub fn server_queue_full(&self) -> bool {
+        self.raw_channel().server_queue_full()
     }
 }

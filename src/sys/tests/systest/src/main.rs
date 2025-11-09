@@ -4,7 +4,7 @@
 
 // mod channel_test;
 mod fs;
-mod io_channel_test;
+mod io_channel;
 mod logging;
 mod moto_async;
 mod mpmc;
@@ -426,7 +426,7 @@ fn main() {
     logging::run_all_tests();
     moto_async::run_all_tests();
 
-    io_channel_test::run_all_tests();
+    io_channel::run_all_tests();
     // return;
 
     // Test that a userspace interrupt is handled correctly.

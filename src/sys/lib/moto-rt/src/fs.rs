@@ -46,6 +46,7 @@ pub const O_APPEND: u32 = 1 << 2;
 pub const O_TRUNCATE: u32 = 1 << 3;
 pub const O_CREATE: u32 = 1 << 4;
 pub const O_CREATE_NEW: u32 = 1 << 5;
+pub const O_NONBLOCK: u32 = 1 << 6;
 
 // When "opening a handle".
 pub const O_HANDLE_CHILD: u32 = 1;
