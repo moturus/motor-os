@@ -611,11 +611,18 @@ impl ClientConnection {
             .is_client_waiting(WaitType::WaitingToRecv));
 
         let mut wait_flag_set = false;
+        let mut wait_error = moto_rt::E_OK;
         loop {
             match self.recv() {
                 Err(moto_rt::E_NOT_READY) => {
+                    if wait_error != moto_rt::E_OK {
+                        return Err(wait_error);
+                    }
                     if wait_flag_set {
-                        self.server_handle.as_future().await?
+                        if let Err(err) = self.server_handle.as_future().await {
+                            wait_error = err;
+                            // Do one more recv() before returning.
+                        }
                     } else {
                         self.raw_channel()
                             .set_client_waiting(WaitType::WaitingToRecv);
@@ -633,7 +640,8 @@ impl ClientConnection {
                         .raw_channel()
                         .is_server_waiting(WaitType::WaitingToSend)
                     {
-                        self.wake_server()?;
+                        // Ignore errors on recv.
+                        let _ = self.wake_server();
                     }
                     return Ok(msg);
                 }
@@ -875,11 +883,18 @@ impl ServerConnection {
             .is_server_waiting(WaitType::WaitingToRecv));
 
         let mut wait_flag_set = false;
+        let mut wait_error = moto_rt::E_OK;
         loop {
             match self.recv() {
                 Err(moto_rt::E_NOT_READY) => {
+                    if wait_error != moto_rt::E_OK {
+                        return Err(wait_error);
+                    }
                     if wait_flag_set {
-                        self.wait_handle.as_future().await?;
+                        if let Err(err) = self.wait_handle.as_future().await {
+                            wait_error = err;
+                            // Do one more recv().
+                        }
                     } else {
                         self.raw_channel()
                             .set_server_waiting(WaitType::WaitingToRecv);
@@ -897,7 +912,8 @@ impl ServerConnection {
                         .raw_channel()
                         .is_client_waiting(WaitType::WaitingToSend)
                     {
-                        self.wake_client()?;
+                        // Ignore errors on recv.
+                        let _ = self.wake_client();
                     }
 
                     return Ok(msg);
