@@ -439,9 +439,20 @@ impl Term {
                     }
                     EscapesIn::Tab => {
                         // TODO: store string right away
-                        let completed_line = autocomplete::try_complete(&self.line[..]);
-                        if let Some(completed_line) = completed_line {
-                            self.line = completed_line.into();
+                        match autocomplete::try_complete(&self.line[..]) {
+                            Some(mut complete_options) => {
+                                self.typed_line = self.line.clone();
+                                // TODO: measure distance ?
+                                self.line = if let Some(fo) = complete_options.pop() {
+                                    fo
+                                } else {
+                                    self.beep();
+                                    continue;
+                                };
+                                self.current_pos = self.line.len() as u32;
+                                self.redraw_line();
+                            }
+                            None => self.beep(),
                         }
                     }
                     EscapesIn::CtrlC => {
