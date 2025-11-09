@@ -179,6 +179,11 @@ pub(super) fn get(
                 let Some(proc) = listener.owner.upgrade() else {
                     continue;
                 };
+
+                if listener.sharer.strong_count() == 0 {
+                    continue;
+                }
+
                 if list.is_empty() {
                     listeners.remove(&url);
                 }
