@@ -309,7 +309,7 @@ pub(super) fn do_wake(
         Ok(())
     } else {
         log::debug!(
-            "{}: wakee 0x{:x} not found",
+            "{}: waker 0x{:x} not found",
             waker.debug_name(),
             wake_target.as_u64()
         );
