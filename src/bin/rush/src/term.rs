@@ -108,59 +108,23 @@ impl Term {
     }
 
     fn next_char(&mut self) -> char {
-        if !self.incoming.is_empty() {
-            // TODO: don't assume stdin().read() reads whole characters
-            let mut buf = vec![];
-            while let Some(b) = self.incoming.pop_front() {
-                buf.push(b);
-                match std::str::from_utf8(&buf) {
-                    Ok(str) => {
-                        // we're sure there's only 1 character, as we grow the buffer
-                        return str.chars().next().unwrap();
-                    }
-                    Err(error) => {
-                        if let Some(idx) = error.error_len() {
-                            eprintln!("stdin(): invalid UTF-8 sequence at {idx}");
-                            self.term_impl.make_raw();
-                            std::process::exit(1);
-                        }
-                    }
+        if self.incoming.is_empty() {
+            self.read_new_bytes();
+        }
+        let mut buf = vec![];
+        while let Some(b) = self.incoming.pop_front() {
+            buf.push(b);
+            match std::str::from_utf8(&buf) {
+                Ok(str) => {
+                    // we're sure there's only 1 character, as we grow the buffer
+                    let char = str.chars().next().unwrap();
+                    return char;
                 }
-            }
-        } else {
-            let mut buf = [0_u8; 16];
-            let sz = match std::io::stdin().read(&mut buf) {
-                Ok(sz) => sz,
-                Err(err) => {
-                    eprintln!("stdin() read failed with: {err:?}");
-                    self.term_impl.make_raw();
-                    std::process::exit(1);
-                }
-            };
-            if sz == 0 {
-                // stdlib sometimes converts stdio errors into zero reads
-                eprintln!("stdin() EOF");
-                self.term_impl.make_raw();
-                std::process::exit(1);
-            }
-            assert!(sz > 0);
-
-            // making a character
-            for len in 1..=sz {
-                match std::str::from_utf8(&buf[0..len]) {
-                    Ok(str) => {
-                        for b in &buf[len..sz] {
-                            self.incoming.push_back(*b);
-                        }
-                        // we're sure there's only 1 character, as we grow the buffer
-                        return str.chars().next().unwrap();
-                    }
-                    Err(error) => {
-                        if let Some(idx) = error.error_len() {
-                            eprintln!("stdin(): invalid UTF-8 sequence at {idx}");
-                            self.term_impl.make_raw();
-                            std::process::exit(1);
-                        }
+                Err(error) => {
+                    if let Some(idx) = error.error_len() {
+                        eprintln!("stdin(): invalid UTF-8 sequence at {idx}");
+                        self.term_impl.make_raw();
+                        std::process::exit(1);
                     }
                 }
             }
@@ -169,6 +133,27 @@ impl Term {
         eprintln!("stdin() EOF");
         self.term_impl.make_raw();
         std::process::exit(1);
+    }
+
+    /// obtain new bytes from stdin to the buffer
+    fn read_new_bytes(&mut self) {
+        let mut buf = [0_u8; 16];
+        let sz = match std::io::stdin().read(&mut buf) {
+            Ok(sz) => sz,
+            Err(err) => {
+                eprintln!("stdin() read failed with: {err:?}");
+                self.term_impl.make_raw();
+                std::process::exit(1);
+            }
+        };
+        if sz == 0 {
+            // stdlib sometimes converts stdio errors into zero reads
+            eprintln!("stdin() EOF");
+            self.term_impl.make_raw();
+            std::process::exit(1);
+        }
+        assert!(sz > 0);
+        self.incoming.extend(&buf[0..sz]);
     }
 
     fn process_next_char(&mut self, c: char) -> ProcessedChar {
@@ -280,15 +265,12 @@ impl Term {
                             self.show_cursor();
                         }
                     }
-                    assert!(self.current_pos <= (self.line.len() as u32));
-                    if self.current_pos == (self.line.len() as u32) {
-                        // Add to end.
+                    assert!(self.current_pos <= (self.line.chars().count() as u32));
+                    if self.current_pos == (self.line.chars().count() as u32) {
                         self.line.push(c);
-                        let mut buf = [0u8; 4];
-                        let s = c.encode_utf8(&mut buf);
-                        self.write(s.as_bytes());
+                        let mut buf = [0_u8;4];
+                        self.write(c.encode_utf8(&mut buf).as_bytes());
                     } else {
-                        // Insert.
                         self.line.insert(self.current_pos as usize, c);
                         self.redraw_line();
                         self.write(&[0x1b, b'[', b'1', b'C']); // Move right.
@@ -332,7 +314,7 @@ impl Term {
                                 }
                                 self.typed_line = self.line.clone();
                                 self.line = prev;
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             } else {
                                 self.beep();
@@ -345,7 +327,7 @@ impl Term {
                             if idx > 0 {
                                 self.mode = ProcessingMode::History(idx - 1);
                                 self.line = self.history[idx - 1].clone();
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             } else {
                                 self.beep();
@@ -367,7 +349,7 @@ impl Term {
                                 } else {
                                     self.line = self.history[idx + 1].clone();
                                 }
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             }
                         }
@@ -382,7 +364,7 @@ impl Term {
                         continue;
                     }
                     EscapesIn::RightArrow => {
-                        if self.current_pos >= (self.line.len() as u32) {
+                        if self.current_pos >= (self.line.chars().count() as u32) {
                             self.beep();
                             continue;
                         }
@@ -416,7 +398,7 @@ impl Term {
                                 self.show_cursor();
                             }
                         }
-                        if self.current_pos < (self.line.len() as u32) {
+                        if self.current_pos < (self.line.chars().count() as u32) {
                             self.line.remove(self.current_pos as usize);
                             self.redraw_line();
                         } else {
@@ -431,8 +413,8 @@ impl Term {
                         }
                     }
                     EscapesIn::End => {
-                        if self.current_pos < (self.line.len() as u32) {
-                            self.current_pos = self.line.len() as u32;
+                        if self.current_pos < (self.line.chars().count() as u32) {
+                            self.current_pos = self.line.chars().count() as u32;
                             let (row, _) = self.get_cursor_pos();
                             self.move_cursor(row, self.line_start + self.current_pos);
                         }
@@ -442,7 +424,7 @@ impl Term {
                             Some(suggestion) => {
                                 self.typed_line = self.line.clone();
                                 self.line = suggestion;
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             }
                             None => self.beep(),
