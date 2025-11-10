@@ -1,4 +1,47 @@
-use std::{path::Path, process::Stdio};
+use std::{fmt::Display, path::Path, process::Stdio};
+
+// TODO: auto-update the list
+pub static ALL_BUILTINS: [BuiltInCommand; 3] = [
+    BuiltInCommand::Cd,
+    BuiltInCommand::Quit,
+    BuiltInCommand::Exit,
+];
+
+#[derive(Debug, Clone)]
+pub enum BuiltInCommand {
+    Cd,
+    Exit,
+    Quit,
+}
+
+/// Just a mapping - source of truth for the enum values
+impl Into<&str> for &BuiltInCommand {
+    fn into(self) -> &'static str {
+        match self {
+            BuiltInCommand::Cd => "cd",
+            BuiltInCommand::Exit => "exit",
+            BuiltInCommand::Quit => "quit",
+        }
+    }
+}
+
+impl TryFrom<String> for BuiltInCommand {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        for bic in &ALL_BUILTINS {
+            if <&BuiltInCommand as Into<&'static str>>::into(bic) == value {
+                return Ok(bic.clone());
+            }
+        }
+        Err(value)
+    }
+}
+
+impl Display for BuiltInCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", <&BuiltInCommand as Into<&'static str>>::into(self))
+    }
+}
 
 fn is_var(token: &str) -> bool {
     if token.is_empty() || token.len() != token.trim().len() {
@@ -67,7 +110,7 @@ fn process_vars(tokens: &[String], _env: &[(&str, &str)], args: &[String]) -> Ve
 
 pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<(), i32> {
     let mut prev_child = None;
-    let mut cmd = None;
+    let mut last_command = None;
 
     if commands.len() > 1 {
         todo!("piping needs better stdio treatment");
@@ -104,10 +147,11 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
             continue;
         }
 
-        cmd = Some(command[0].clone());
+        let cmd = BuiltInCommand::try_from(command[0].clone());
+        last_command = Some(cmd.clone());
         let args = &command[1..];
-        match cmd.as_ref().unwrap().as_str() {
-            "cd" => {
+        match cmd {
+            Ok(BuiltInCommand::Cd) => {
                 if args.len() != 1 {
                     println!("cd: must have a single argument.");
                     prev_child = None;
@@ -121,9 +165,9 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
 
                 prev_child = None;
             }
-            "quit" => crate::exit(0),
-            "exit" => process_exit(args),
-            command => {
+            Ok(BuiltInCommand::Quit) => crate::exit(0),
+            Ok(BuiltInCommand::Exit) => process_exit(args),
+            Err(binary_name) => {
                 let stdin = prev_child.map_or(Stdio::inherit(), |output: std::process::Child| {
                     Stdio::from(output.stdout.unwrap())
                 });
@@ -147,7 +191,7 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
                     Stdio::inherit()
                 };
 
-                let child = std::process::Command::new(command)
+                let child = std::process::Command::new(&binary_name)
                     .args(args)
                     .stdin(stdin)
                     .stdout(stdout)
@@ -166,11 +210,11 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
                     }
                     Err(e) => match e.kind() {
                         std::io::ErrorKind::InvalidFilename => {
-                            println!("{}: command not found.", cmd.unwrap());
+                            println!("{}: command not found.", binary_name);
                             return Err(-1);
                         }
                         _ => {
-                            println!("Command [{command}] failed with error: [{e}].");
+                            println!("Command [{binary_name}] failed with error: [{e}].");
                             return Err(-1);
                         }
                     },
@@ -184,7 +228,11 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
             Ok(status) => {
                 if !status.success() {
                     if let Some(code) = status.code() {
-                        println!("[{}] exited with status {:?}", cmd.unwrap(), code);
+                        println!(
+                            "[{}] exited with status {:?}",
+                            last_command.unwrap().map(|bc| bc.to_string()).unwrap(),
+                            code
+                        );
                         Err(code)
                     } else {
                         Err(-1)

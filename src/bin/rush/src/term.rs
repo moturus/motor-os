@@ -438,17 +438,10 @@ impl Term {
                         }
                     }
                     EscapesIn::Tab => {
-                        // TODO: store string right away
                         match autocomplete::try_complete(&self.line[..]) {
-                            Some(mut complete_options) => {
+                            Some(suggestion) => {
                                 self.typed_line = self.line.clone();
-                                // TODO: measure distance ?
-                                self.line = if let Some(fo) = complete_options.pop() {
-                                    fo
-                                } else {
-                                    self.beep();
-                                    continue;
-                                };
+                                self.line = suggestion;
                                 self.current_pos = self.line.len() as u32;
                                 self.redraw_line();
                             }

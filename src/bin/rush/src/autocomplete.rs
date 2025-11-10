@@ -1,53 +1,95 @@
 //! Autocompletion logic
-//! TODO: update the desc
-//! It gets engaged when you press Tab after entering partial command and does the following:
-//! - if there're no spaces in the line - lookup respective binary
-//! - if there're spaces - extract first argument as a binary and call a helper for the command
-//!
+//! It gets engaged when you press Tab after entering partial command.
+//! Right now it completes the last token using pre-defined prefix tree of known builtin commands.
 
-use std::{collections::HashMap, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    iter::{Cycle, Peekable},
+    sync::{LazyLock, Mutex},
+};
 
-use crate::line_parser;
+use crate::{exec, line_parser};
 
-static COMMANDS: LazyLock<Trie> = LazyLock::new(|| {
+static BUILTIN_COMMANDS: LazyLock<Trie> = LazyLock::new(|| {
     let mut t = Trie::new();
-    // TODO:  fill the list from the OG source
-    for command in ["cd", "ps", "pwd", "ls"] {
-        t.insert(command);
+    for command in &exec::ALL_BUILTINS {
+        t.insert(command.to_string());
     }
+
     t
 });
 
+/// Store last suggestions to propose new options on 2nd tab press
+static LAST_SUGGESTION: LazyLock<Mutex<Option<SuggestionState>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+struct SuggestionState {
+    suggestions: Peekable<Cycle<std::vec::IntoIter<String>>>,
+}
+
+impl SuggestionState {
+    /// advance the state if the `cmdline` matches the previous suggestion
+    fn next_if_mine(&mut self, cmdline: &str) -> Option<String> {
+        // use peek() as previous suggestion
+        if self.suggestions.peek().unwrap() == cmdline {
+            self.next()
+        } else {
+            None
+        }
+    }
+
+    /// provide next suggestion
+    fn next(&mut self) -> Option<String> {
+        self.suggestions.next();
+        self.suggestions.peek().map(|s| s.clone())
+    }
+}
+
 /// tries to complete last token of the command line
 /// # Returns
-/// None if there's nothing that could be completed
-/// Some(all possible lines) if there're options
-pub fn try_complete(partial_cmdline: &str) -> Option<Vec<String>> {
+/// None if there're no suggestions
+/// Some(next suggestion) if there're options
+/// It stores state globally to provide all the options in cycle, see [LAST_SUGGESTION]
+pub fn try_complete(partial_cmdline: &str) -> Option<String> {
     if partial_cmdline.is_empty() {
-        return None; // nothing to complete
+        return None;
     }
 
     // this code should always reuse common parser,
-    // would be good for the parser to just return the last token with some context
+    // would be good for the parser to just return the last token and its context
     let mut parser = line_parser::LineParser::new();
     let mut commands = parser.parse_line(partial_cmdline)?;
     let last_command_token = commands.pop()?.pop()?;
 
-    let match_tail = COMMANDS.contains(&last_command_token)?;
+    let match_tail = BUILTIN_COMMANDS.contains(&last_command_token)?;
 
-    Some(
-        match_tail
-            .all_words()
-            .into_iter()
-            .map(|mut tail| {
-                if !partial_cmdline.ends_with(' ') {
-                    tail.push(' ');
-                }
-                tail
-            })
-            .map(|tail| format!("{partial_cmdline}{tail}"))
-            .collect(),
-    )
+    // try to use the current state
+    let mut last_suggestion = LAST_SUGGESTION.lock().unwrap();
+    if let Some(state) = last_suggestion.as_mut() {
+        let maybe_next_suggestion = state.next_if_mine(partial_cmdline);
+        if maybe_next_suggestion.is_some() {
+            return maybe_next_suggestion;
+        }
+    }
+
+    // build a new suggestion state
+    let suggestions = match_tail
+        .all_words()
+        .into_iter()
+        .map(|mut tail| {
+            if !partial_cmdline.ends_with(' ') {
+                tail.push(' ');
+            }
+            tail
+        })
+        .map(|tail| format!("{partial_cmdline}{tail}"))
+        .collect::<Vec<String>>()
+        .into_iter()
+        .cycle()
+        .peekable();
+
+    *last_suggestion = Some(SuggestionState { suggestions });
+    last_suggestion.as_mut().and_then(|s| s.next())
 }
 
 #[derive(Debug, Default)]
@@ -95,7 +137,7 @@ impl Trie {
         }
     }
 
-    fn insert(&mut self, word: &str) {
+    fn insert(&mut self, word: String) {
         let mut current_node = &mut self.root;
 
         for c in word.chars() {
@@ -106,10 +148,10 @@ impl Trie {
 
     /// None - doesn't contain
     /// Some(node) - the very last node
-    fn contains(&self, word: &str) -> Option<&TrieNode> {
+    fn contains(&self, partial_word: &str) -> Option<&TrieNode> {
         let mut current_node = &self.root;
 
-        for c in word.chars() {
+        for c in partial_word.chars() {
             match current_node.children.get(&c) {
                 Some(node) => current_node = node,
                 None => return None,
