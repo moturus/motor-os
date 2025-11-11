@@ -109,7 +109,7 @@ struct Scheduler {
     queue_length: AtomicU32,
     idle: AtomicBool,
 
-    normal_queue: SpinLock<VecDeque<Job>>,
+    local_queue: SpinLock<VecDeque<Job>>,
 
     timers: Timers,
 
@@ -136,7 +136,7 @@ impl Scheduler {
             wake: AtomicBool::new(false),
             queue_length: AtomicU32::new(0),
             idle: AtomicBool::new(false),
-            normal_queue: SpinLock::new(VecDeque::with_capacity(INITIAL_QUEUE_SIZE)),
+            local_queue: SpinLock::new(VecDeque::with_capacity(INITIAL_QUEUE_SIZE)),
             timers: Timers::new(),
 
             load_tick: Instant::now(),
@@ -333,7 +333,7 @@ impl Scheduler {
                 //     }
                 // because job.run() will be called with the lock held, leading
                 // to a deadlock.
-                let maybe_job = self.normal_queue.lock(line!()).pop_front();
+                let maybe_job = self.local_queue.lock(line!()).pop_front();
                 if let Some(job) = maybe_job {
                     job.run();
                     self.queue_length.fetch_sub(1, Ordering::Relaxed);
@@ -495,7 +495,7 @@ pub fn post(job: Job) {
     } else {
         assert!(job.cpu < crate::arch::num_cpus());
         let scheduler = PERCPU_SCHEDULERS.get_for_cpu(job.cpu);
-        scheduler.normal_queue.lock(line!()).push_back(job);
+        scheduler.local_queue.lock(line!()).push_back(job);
         scheduler.queue_length.fetch_add(1, Ordering::Relaxed);
         scheduler.wake();
     }
