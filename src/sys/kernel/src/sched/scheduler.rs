@@ -393,13 +393,21 @@ impl Scheduler {
                 if self.wake.load(Ordering::Acquire) {
                     interrupts::enable();
                 } else {
-                    crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
-                    crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
                     self.idle.store(true, Ordering::Release);
-                    interrupts::enable_and_hlt();
-                    self.idle.store(false, Ordering::Release);
-                    crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
-                    crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
+
+                    // Check again.
+                    if self.wake.load(Ordering::Acquire) {
+                        interrupts::enable();
+                        self.idle.store(false, Ordering::Release);
+                    } else {
+                        // Go to sleep.
+                        crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
+                        crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
+                        interrupts::enable_and_hlt();
+                        self.idle.store(false, Ordering::Release);
+                        crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
+                        crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
+                    }
                 }
             }
             self.idle_stop();
