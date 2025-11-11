@@ -58,7 +58,7 @@ fn test_accept_fail() {
 }
 
 fn test_ping_pong() {
-    const ITERS: u64 = 200;
+    const ITERS: u64 = 20000;
 
     let mut server = ServerConnection::create("systest_foo").unwrap();
     let mut client = ClientConnection::connect("systest_foo").unwrap();
@@ -93,10 +93,6 @@ fn test_ping_pong() {
                 // Receive pong.
                 msg = client.recv_async().await.unwrap();
                 assert_eq!(msg.id, idx * 2 + 1);
-
-                if idx % 50 == 49 {
-                    println!("completed {} iters", idx + 1);
-                }
             }
         }); // block_on
 

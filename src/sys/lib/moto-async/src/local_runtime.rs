@@ -290,7 +290,6 @@ impl LocalRuntimeInner {
         }
         core::mem::drop(sys_waiters);
 
-        log::info!("full wait");
         let result = moto_sys::SysCpu::wait(
             wait_handles.as_mut_slice(),
             SysHandle::NONE,

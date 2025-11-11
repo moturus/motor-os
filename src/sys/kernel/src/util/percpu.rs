@@ -61,6 +61,7 @@ impl<T> StaticPerCpu<T> {
         unsafe { &*(addr as *const T) }
     }
 
+    /// Call `f()` for each cpu. Break the loop if `f()` returns true.
     pub fn for_each_cpu<F: FnMut(uCpus, &T) -> bool>(&self, f: &mut F) {
         for cpu in 0..MAX_CPUS {
             let addr: usize = self.data[cpu as usize].load(Ordering::Acquire);
