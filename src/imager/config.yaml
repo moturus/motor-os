@@ -1,26 +1,37 @@
-# Binaries for the "full" image
-bin_full:
-  - "/bin/httpd"
-  - "/bin/httpd-axum"
-  - "/bin/russhd"
-  - "/bin/kibim"
-  - "/bin/rush"
-  - "/sys/mdbg"
-  - "/sys/sys-init"
-  - "/sys/sys-log"
-  - "/sys/sys-tty"
-  - "/sys/sysbox"
-  - "/sys/tests/rnetbench"
-  - "/sys/tests/systest"
-  - "/sys/tests/mio-test"
-  - "/sys/tests/tokio-tests"
-  - "/sys/tests/crossbench"
-# Binaries for the "web" image
-bin_web:
-  - "/bin/httpd"
-  - "/sys/sys-init"
-  - "/sys/sys-tty"
-# Where to output the generated VM images
-img_out_dir: "vm_images"
-# Directory containing static image files to include
-img_files_dir: "img_files"
+image_sets:
+  full:
+    binaries:
+      - "/bin/httpd"
+      - "/bin/httpd-axum"
+      - "/bin/russhd"
+      - "/bin/kibim"
+      - "/bin/rush"
+      - "/sys/mdbg"
+      - "/sys/sys-init"
+      - "/sys/sys-log"
+      - "/sys/sys-tty"
+      - "/sys/sysbox"
+      - "/sys/tests/rnetbench"
+      - "/sys/tests/systest"
+      - "/sys/tests/mio-test"
+      - "/sys/tests/tokio-tests"
+      - "/sys/tests/crossbench"
+    images:
+      - name: "motor-fs"
+        fs_partition_name: "fs_part.web.motor-fs"
+        part3_fs: "motor-fs"
+      - name: "motor.full.img"
+        fs_partition_name: "fs_part.full"
+        part3_fs: "srfs"
+  web:
+    binaries:
+      - "/bin/httpd"
+      - "/sys/sys-init"
+      - "/sys/sys-tty"
+    images:
+      - name: "motor.web.img"
+        fs_partition_name: "fs_part.web"
+        part3_fs: "flatfs"
+paths:
+  img_out_dir: "vm_images"
+  static_files_dir: "img_files"
