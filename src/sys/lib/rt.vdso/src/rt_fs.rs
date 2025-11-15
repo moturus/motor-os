@@ -221,7 +221,7 @@ impl AsyncFsClient {
         let thread_handle = moto_sys::SysCpu::spawn(
             SysHandle::SELF,
             4096 * 16,
-            Self::runtime_thread as usize as u64,
+            Self::runtime_thread as *const () as usize as u64,
             addr as u64,
         )
         .expect("Error spawning the runtime thread (FS).");

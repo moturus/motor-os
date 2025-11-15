@@ -200,25 +200,36 @@ pub fn init() {
     let idt = IDT.set_per_cpu(Box::leak(Box::new(InterruptDescriptorTable::new())));
     unsafe {
         // If a stack is not set explicitly below, it is the default stack (at index zero).
-        idt.divide_error
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_0 as usize as u64));
-        idt.debug
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_1 as usize as u64));
+        idt.divide_error.set_handler_addr(x86_64::VirtAddr::new(
+            irq_handler_0 as *const () as usize as u64,
+        ));
+        idt.debug.set_handler_addr(x86_64::VirtAddr::new(
+            irq_handler_1 as *const () as usize as u64,
+        ));
         idt.non_maskable_interrupt
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_2 as usize as u64));
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_2 as *const () as usize as u64,
+            ));
         idt.breakpoint
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_3 as usize as u64))
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_3 as *const () as usize as u64,
+            ))
             .set_stack_index(super::gdt::BREAKPOINT_IST_INDEX)
             .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
 
-        idt.overflow
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_4 as usize as u64));
+        idt.overflow.set_handler_addr(x86_64::VirtAddr::new(
+            irq_handler_4 as *const () as usize as u64,
+        ));
         idt.bound_range_exceeded
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_5 as usize as u64));
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_5 as *const () as usize as u64,
+            ));
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler); // IRQ 6
 
         idt.device_not_available
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_7 as usize as u64));
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_7 as *const () as usize as u64,
+            ));
         idt.double_fault
             .set_handler_fn(double_fault_handler)
             .set_stack_index(super::gdt::FATAL_FAULT_IST_INDEX); // IRQ 8
@@ -238,7 +249,7 @@ pub fn init() {
             .set_stack_index(super::gdt::PAGE_FAULT_IST_INDEX); // IRQ 13
         idt.page_fault
             .set_handler_addr(x86_64::VirtAddr::new(
-                page_fault_handler_asm as usize as u64,
+                page_fault_handler_asm as *const () as usize as u64,
             ))
             .set_stack_index(super::gdt::PAGE_FAULT_IST_INDEX); // IRQ 14
     } // unsafe
@@ -259,7 +270,9 @@ pub fn init() {
         crate::uspace::serial_console::init();
         unsafe {
             idt[IRQ_SERIAL as usize]
-                .set_handler_addr(x86_64::VirtAddr::new(irq_handler_36 as usize as u64))
+                .set_handler_addr(x86_64::VirtAddr::new(
+                    irq_handler_36 as *const () as usize as u64,
+                ))
                 .set_stack_index(super::gdt::SERIAL_CONSOLE_IST_INDEX);
         }
 
@@ -268,22 +281,54 @@ pub fn init() {
             assert_eq!(IRQ_CUSTOM_START, 64);
             assert_eq!(16, crate::config::get().custom_irqs);
 
-            idt[64].set_handler_addr(x86_64::VirtAddr::new(irq_handler_64 as usize as u64));
-            idt[65].set_handler_addr(x86_64::VirtAddr::new(irq_handler_65 as usize as u64));
-            idt[66].set_handler_addr(x86_64::VirtAddr::new(irq_handler_66 as usize as u64));
-            idt[67].set_handler_addr(x86_64::VirtAddr::new(irq_handler_67 as usize as u64));
-            idt[68].set_handler_addr(x86_64::VirtAddr::new(irq_handler_68 as usize as u64));
-            idt[69].set_handler_addr(x86_64::VirtAddr::new(irq_handler_69 as usize as u64));
-            idt[70].set_handler_addr(x86_64::VirtAddr::new(irq_handler_70 as usize as u64));
-            idt[71].set_handler_addr(x86_64::VirtAddr::new(irq_handler_71 as usize as u64));
-            idt[72].set_handler_addr(x86_64::VirtAddr::new(irq_handler_72 as usize as u64));
-            idt[73].set_handler_addr(x86_64::VirtAddr::new(irq_handler_73 as usize as u64));
-            idt[74].set_handler_addr(x86_64::VirtAddr::new(irq_handler_74 as usize as u64));
-            idt[75].set_handler_addr(x86_64::VirtAddr::new(irq_handler_75 as usize as u64));
-            idt[76].set_handler_addr(x86_64::VirtAddr::new(irq_handler_76 as usize as u64));
-            idt[77].set_handler_addr(x86_64::VirtAddr::new(irq_handler_77 as usize as u64));
-            idt[78].set_handler_addr(x86_64::VirtAddr::new(irq_handler_78 as usize as u64));
-            idt[79].set_handler_addr(x86_64::VirtAddr::new(irq_handler_79 as usize as u64));
+            idt[64].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_64 as *const () as usize as u64,
+            ));
+            idt[65].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_65 as *const () as usize as u64,
+            ));
+            idt[66].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_66 as *const () as usize as u64,
+            ));
+            idt[67].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_67 as *const () as usize as u64,
+            ));
+            idt[68].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_68 as *const () as usize as u64,
+            ));
+            idt[69].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_69 as *const () as usize as u64,
+            ));
+            idt[70].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_70 as *const () as usize as u64,
+            ));
+            idt[71].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_71 as *const () as usize as u64,
+            ));
+            idt[72].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_72 as *const () as usize as u64,
+            ));
+            idt[73].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_73 as *const () as usize as u64,
+            ));
+            idt[74].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_74 as *const () as usize as u64,
+            ));
+            idt[75].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_75 as *const () as usize as u64,
+            ));
+            idt[76].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_76 as *const () as usize as u64,
+            ));
+            idt[77].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_77 as *const () as usize as u64,
+            ));
+            idt[78].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_78 as *const () as usize as u64,
+            ));
+            idt[79].set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_79 as *const () as usize as u64,
+            ));
 
             for irq in 64..80 {
                 let entry = &mut idt[irq];
@@ -297,13 +342,19 @@ pub fn init() {
     unsafe {
         // timer handler
         idt[IRQ_APIC_TIMER as usize]
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_192 as usize as u64))
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_192 as *const () as usize as u64,
+            ))
             .set_stack_index(super::gdt::TIMER_IST_INDEX);
         idt[IRQ_WAKEUP as usize]
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_193 as usize as u64))
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_193 as *const () as usize as u64,
+            ))
             .set_stack_index(super::gdt::TIMER_IST_INDEX);
         idt[IRQ_TLB_SHOOTDOWN as usize]
-            .set_handler_addr(x86_64::VirtAddr::new(irq_handler_194 as usize as u64))
+            .set_handler_addr(x86_64::VirtAddr::new(
+                irq_handler_194 as *const () as usize as u64,
+            ))
             .set_stack_index(super::gdt::TIMER_IST_INDEX);
     }
     idt.load();

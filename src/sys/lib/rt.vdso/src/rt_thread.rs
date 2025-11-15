@@ -34,7 +34,7 @@ pub extern "C" fn spawn(
     match moto_sys::SysCpu::spawn(
         SysHandle::SELF,
         stack_size as u64,
-        __rt_thread_fn as usize as u64,
+        __rt_thread_fn as *const () as usize as u64,
         rt_args as *const _ as usize as u64,
     ) {
         Ok(sys_handle) => {

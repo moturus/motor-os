@@ -89,7 +89,7 @@ pub use push_scratch_registers;
 use super::irq::IrqStack;
 
 pub fn init() {
-    let syscall_handler_addr = syscall_handler_asm as usize as u64;
+    let syscall_handler_addr = syscall_handler_asm as *const () as usize as u64;
     let syscall_handler_addr_lo = syscall_handler_addr & 0xff_ff_ff_ff;
     let syscall_handler_addr_hi = syscall_handler_addr >> 32;
 

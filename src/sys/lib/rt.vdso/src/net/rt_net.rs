@@ -832,7 +832,7 @@ impl NetChannel {
         let thread_handle = moto_sys::SysCpu::spawn(
             SysHandle::SELF,
             4096 * 16,
-            Self::io_thread_init as usize as u64,
+            Self::io_thread_init as *const () as usize as u64,
             self_ptr as usize as u64,
         )
         .unwrap();

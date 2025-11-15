@@ -9,7 +9,7 @@ use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
-use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
+use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
 use moto_sys::SysHandle;
 
 #[derive(Debug, PartialEq)]
@@ -263,7 +263,7 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
     moto_sys::SysCpu::spawn(
         SysHandle::SELF,
         RELAY_THREAD_STACK_SIZE as u64,
-        relay_thread_fn as usize as u64,
+        relay_thread_fn as *const () as usize as u64,
         thread_arg,
     )
     .inspect_err(|_| unsafe {

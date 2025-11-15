@@ -31,8 +31,8 @@ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```sh
-rustup default nightly-2025-11-07
-rustup component add rust-src --toolchain nightly-2025-11-07-x86_64-unknown-linux-gnu
+rustup default nightly-2025-11-13
+rustup component add rust-src --toolchain nightly-2025-11-13-x86_64-unknown-linux-gnu
 ```
 
 (Note: we pin to a specific nightly version for better reproducibility.
