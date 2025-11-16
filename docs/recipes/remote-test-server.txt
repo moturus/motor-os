@@ -1,0 +1,26 @@
+# Some unstructured notes on Rust's remote-test-server,
+# to be converted later to .md.
+
+# Build in Rust:
+
+time ./x.py build --stage 2 clippy library src/tools/remote-test-server
+
+# Copy:
+
+cp ./build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/remote-test-server ../motor-os/main/img_files/full/bin/
+
+
+# Run in Motor OS:
+
+bin/remote-test-server --verbose --bind 0.0.0.0:12345
+
+# Run tests (doesn't work yet)
+
+export TEST_DEVICE_ADDR="192.168.4.2:12345"
+
+./x.py test --stage 2 compiler/rustc_data_structures/ --test-args thin_vec --target x86_64-unknown-motor
+./x.py test --stage 2 library/std --target x86_64-unknown-motor
+
+nc 192.168.4.2:12345
+# type ping
+
