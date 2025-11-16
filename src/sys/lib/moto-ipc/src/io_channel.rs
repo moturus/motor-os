@@ -116,8 +116,11 @@ const _MSG_SIZE: () = assert!(core::mem::size_of::<Msg>() == 56);
 #[repr(C, align(64))]
 struct MsgSlot {
     pub stamp: AtomicU64, // IN/OUT: same as stamp in crossbeam ArrayQueue, or sequence_ in Dmitry Vyukov's mpmc.
-    pub msg: Msg,
+    pub msg: core::cell::UnsafeCell<Msg>,
 }
+
+// Safety: we carefully control acess to slots via stamps. See send/recv below.
+unsafe impl Sync for MsgSlot {}
 
 const _SLOT_SIZE: () = assert!(core::mem::size_of::<MsgSlot>() == 64);
 
@@ -154,7 +157,7 @@ const QUEUE_MASK: u64 = QUEUE_SIZE - 1;
 pub const CHANNEL_PAGE_COUNT: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
-pub enum SubChannelType {
+enum EndpointType {
     Client,
     Server,
 }
@@ -165,11 +168,11 @@ enum SubChannel {
     Server(u64),
 }
 
-impl From<SubChannel> for SubChannelType {
-    fn from(val: SubChannel) -> SubChannelType {
+impl From<SubChannel> for EndpointType {
+    fn from(val: SubChannel) -> EndpointType {
         match val {
-            SubChannel::Client(_) => SubChannelType::Client,
-            SubChannel::Server(_) => SubChannelType::Server,
+            SubChannel::Client(_) => EndpointType::Client,
+            SubChannel::Server(_) => EndpointType::Server,
         }
     }
 }
@@ -177,7 +180,7 @@ impl From<SubChannel> for SubChannelType {
 #[derive(Clone, Copy, Debug)]
 struct RawIoPage {
     page_idx: u16,
-    s_type: SubChannelType,
+    s_type: EndpointType,
 }
 
 #[repr(u64)]
@@ -185,7 +188,7 @@ enum WaitType {
     _NoWait = 0,
     WaitingToSend = 1,
     WaitingToRecv = 2,
-    // WAITING_TO_ALLOC = 4,
+    WaitingToAlloc = 4,
 }
 
 #[repr(C, align(4096))]
@@ -260,10 +263,10 @@ impl RawChannel {
 
         unsafe {
             let addr = match raw_page.s_type {
-                SubChannelType::Server => {
+                EndpointType::Server => {
                     &self.server_pages[raw_page.page_idx as usize] as *const _ as usize
                 }
-                SubChannelType::Client => {
+                EndpointType::Client => {
                     &self.client_pages[raw_page.page_idx as usize] as *const _ as usize
                 }
             };
@@ -322,8 +325,8 @@ impl RawChannel {
         }
 
         let bitmap = match raw_page.s_type {
-            SubChannelType::Client => &self.client_pages_in_use,
-            SubChannelType::Server => &self.server_pages_in_use,
+            EndpointType::Client => &self.client_pages_in_use,
+            EndpointType::Server => &self.server_pages_in_use,
         };
 
         let bit = 1u64 << raw_page.page_idx;
@@ -404,6 +407,7 @@ impl Drop for IoPage {
     fn drop(&mut self) {
         if self.raw_page.page_idx != u16::MAX {
             self.raw_channel.free_page(self.raw_page).unwrap();
+            // todo!("wake waiting peer, if needed")
         }
     }
 }
@@ -427,8 +431,8 @@ impl IoPage {
     ///
     pub fn into_u16(mut val: Self) -> u16 {
         let res = match val.raw_page.s_type {
-            SubChannelType::Client => val.raw_page.page_idx,
-            SubChannelType::Server => val.raw_page.page_idx | Self::SERVER_FLAG,
+            EndpointType::Client => val.raw_page.page_idx,
+            EndpointType::Server => val.raw_page.page_idx | Self::SERVER_FLAG,
         };
         val.raw_page.page_idx = u16::MAX;
         res
@@ -445,14 +449,14 @@ impl IoPage {
             0 => Self {
                 raw_page: RawIoPage {
                     page_idx: val,
-                    s_type: SubChannelType::Client,
+                    s_type: EndpointType::Client,
                 },
                 raw_channel,
             },
             Self::SERVER_FLAG => Self {
                 raw_page: RawIoPage {
                     page_idx: val & !Self::SERVER_FLAG,
-                    s_type: SubChannelType::Server,
+                    s_type: EndpointType::Server,
                 },
                 raw_channel,
             },
@@ -535,10 +539,10 @@ impl ClientConnection {
     pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut MsgSlot;
+        let mut slot: &MsgSlot;
         let mut pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
         loop {
-            slot = &mut raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
+            slot = &raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             match stamp.cmp(&pos) {
@@ -562,7 +566,9 @@ impl ClientConnection {
             }
         }
 
-        slot.msg = msg;
+        // Safety: the loop above guarantees that this thread accesses
+        // the slot exclusively.
+        unsafe { *slot.msg.get() = msg };
         slot.stamp.store(pos + 1, Ordering::Release);
         Ok(())
     }
@@ -571,11 +577,11 @@ impl ClientConnection {
     pub fn recv(&self) -> Result<Msg, ErrorCode> {
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut MsgSlot;
+        let mut slot: &MsgSlot;
         let mut pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
 
         loop {
-            slot = &mut raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
+            slot = &raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             match stamp.cmp(&(pos + 1)) {
@@ -598,9 +604,10 @@ impl ClientConnection {
             }
         }
 
-        let cqe = slot.msg;
+        // Safety: the loop above ensures that only this thread access the slot.
+        let msg = unsafe { *slot.msg.get() };
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
-        Ok(cqe)
+        Ok(msg)
     }
 
     pub async fn recv_async(&mut self) -> Result<Msg, ErrorCode> {
@@ -701,6 +708,38 @@ impl ClientConnection {
         }
     }
 
+    pub async fn alloc_page_async(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+        use moto_async::AsFuture;
+
+        debug_assert!(!self
+            .raw_channel()
+            .is_client_waiting(WaitType::WaitingToAlloc));
+
+        let mut wait_flag_set = false;
+        loop {
+            match self.alloc_page(subchannel_mask) {
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.server_handle.as_future().await?;
+                    } else {
+                        self.raw_channel()
+                            .set_client_waiting(WaitType::WaitingToAlloc);
+                        wait_flag_set = true;
+                        // Try one more alloc() before waiting.
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(page) => {
+                    if wait_flag_set {
+                        self.raw_channel()
+                            .clear_client_waiting(WaitType::WaitingToAlloc);
+                    }
+                    return Ok(page);
+                }
+            }
+        }
+    }
+
     pub fn may_alloc_page(&self, subchannel_mask: u64) -> bool {
         self.raw_channel()
             .may_alloc_page(SubChannel::Client(subchannel_mask))
@@ -714,10 +753,17 @@ impl ClientConnection {
         }
     }
 
-    fn raw_channel(&self) -> &'static mut RawChannel {
+    fn raw_channel(&self) -> &'static RawChannel {
+        #[cfg(debug_assertions)]
         unsafe {
             let ptr = self.raw_channel.load(Ordering::Relaxed);
-            ptr.as_mut().unwrap()
+            ptr.as_ref().unwrap()
+        }
+
+        #[cfg(not(debug_assertions))]
+        unsafe {
+            let ptr = self.raw_channel.load(Ordering::Relaxed);
+            ptr.as_ref().unwrap_unchecked()
         }
     }
 
@@ -804,10 +850,10 @@ impl ServerConnection {
 
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut MsgSlot;
+        let mut slot: &MsgSlot;
         let mut pos = raw_channel.client_queue_tail.load(Ordering::Relaxed);
         loop {
-            slot = &mut raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
+            slot = &raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             pos = match stamp.cmp(&(pos + 1)) {
@@ -830,24 +876,25 @@ impl ServerConnection {
             }
         }
 
-        let sqe = slot.msg;
+        // Safety: the loop above ensures that only this thread access the slot.
+        let msg = unsafe { *slot.msg.get() };
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
-        Ok(sqe)
+        Ok(msg)
     }
 
     // See enqueue() in mpmc.cc.
-    pub fn send(&self, sqe: Msg) -> Result<(), ErrorCode> {
+    pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
         if self.status != ServerStatus::Connected {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         let raw_channel = self.raw_channel();
 
-        let mut slot: &mut MsgSlot;
+        let mut slot: &MsgSlot;
         let mut pos = raw_channel.server_queue_head.load(Ordering::Relaxed);
 
         loop {
-            slot = &mut raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
+            slot = &raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             pos = match stamp.cmp(&pos) {
@@ -870,7 +917,9 @@ impl ServerConnection {
             };
         }
 
-        slot.msg = sqe;
+        // Safety: the loop above guarantees that this thread accesses
+        // the slot exclusively.
+        unsafe { *slot.msg.get() = msg };
         slot.stamp.store(pos + 1, Ordering::Release);
         Ok(())
     }
@@ -1020,6 +1069,38 @@ impl ServerConnection {
         }
     }
 
+    pub async fn alloc_page_async(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+        use moto_async::AsFuture;
+
+        debug_assert!(!self
+            .raw_channel()
+            .is_server_waiting(WaitType::WaitingToAlloc));
+
+        let mut wait_flag_set = false;
+        loop {
+            match self.alloc_page(subchannel_mask) {
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.wait_handle.as_future().await?;
+                    } else {
+                        self.raw_channel()
+                            .set_server_waiting(WaitType::WaitingToAlloc);
+                        wait_flag_set = true;
+                        // Try one more alloc() before waiting.
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(page) => {
+                    if wait_flag_set {
+                        self.raw_channel()
+                            .clear_server_waiting(WaitType::WaitingToAlloc);
+                    }
+                    return Ok(page);
+                }
+            }
+        }
+    }
+
     pub fn may_alloc_page(&self, subchannel_mask: u64) -> bool {
         self.raw_channel()
             .may_alloc_page(SubChannel::Server(subchannel_mask))
@@ -1033,15 +1114,15 @@ impl ServerConnection {
         }
     }
 
-    fn raw_channel(&self) -> &'static mut RawChannel {
+    fn raw_channel(&self) -> &'static RawChannel {
         #[cfg(debug_assertions)]
         unsafe {
-            self.raw_channel.as_mut().unwrap()
+            self.raw_channel.as_ref().unwrap()
         }
 
         #[cfg(not(debug_assertions))]
         unsafe {
-            self.raw_channel.as_mut().unwrap_unchecked()
+            self.raw_channel.as_ref().unwrap_unchecked()
         }
     }
 
@@ -1055,5 +1136,123 @@ impl ServerConnection {
 
     pub fn server_queue_full(&self) -> bool {
         self.raw_channel().server_queue_full()
+    }
+}
+
+pub struct Sender {
+    raw_channel: AtomicPtr<RawChannel>,
+    remote_handle: SysHandle,
+    endpoint_type: EndpointType,
+}
+
+impl !Sync for Sender {}
+
+impl Sender {
+    fn raw_channel(&self) -> &RawChannel {
+        unsafe {
+            let ptr = self.raw_channel.load(Ordering::Relaxed);
+            ptr.as_ref().unwrap()
+        }
+    }
+
+    // See enqueue() in mpmc.cc.
+    pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
+        let raw_channel = self.raw_channel();
+
+        let (queue_head, queue) = match self.endpoint_type {
+            EndpointType::Client => (&raw_channel.client_queue_head, &raw_channel.client_queue),
+            EndpointType::Server => (&raw_channel.server_queue_head, &raw_channel.server_queue),
+        };
+
+        let mut slot: &MsgSlot;
+        let mut pos = queue_head.load(Ordering::Relaxed);
+        loop {
+            slot = &queue[(pos & QUEUE_MASK) as usize];
+            let stamp = slot.stamp.load(Ordering::Acquire);
+
+            match stamp.cmp(&pos) {
+                core::cmp::Ordering::Equal => {
+                    match queue_head.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(head) => pos = head, // continue
+                    }
+                }
+                // The queue is full.
+                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY),
+                // We lost the race - continue.
+                core::cmp::Ordering::Greater => pos = queue_head.load(Ordering::Relaxed),
+            }
+        }
+
+        // Safety: the loop above ensures that this thread has exclusive access to the slot.
+        unsafe { *slot.msg.get() = msg };
+        slot.stamp.store(pos + 1, Ordering::Release);
+        Ok(())
+    }
+
+    pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
+        use moto_async::AsFuture;
+
+        #[cfg(debug_assertions)]
+        match self.endpoint_type {
+            EndpointType::Client => debug_assert!(!self
+                .raw_channel()
+                .is_client_waiting(WaitType::WaitingToSend)),
+            EndpointType::Server => debug_assert!(!self
+                .raw_channel()
+                .is_server_waiting(WaitType::WaitingToSend)),
+        }
+
+        let mut wait_flag_set = false;
+        loop {
+            match self.send(msg) {
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_flag_set {
+                        self.remote_handle.as_future().await?;
+                    } else {
+                        match self.endpoint_type {
+                            EndpointType::Client => self
+                                .raw_channel()
+                                .set_client_waiting(WaitType::WaitingToSend),
+                            EndpointType::Server => self
+                                .raw_channel()
+                                .set_server_waiting(WaitType::WaitingToSend),
+                        }
+                        wait_flag_set = true;
+                        // Do one more send() before waiting.
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(()) => {
+                    if wait_flag_set {
+                        match self.endpoint_type {
+                            EndpointType::Client => self
+                                .raw_channel()
+                                .clear_client_waiting(WaitType::WaitingToSend),
+
+                            EndpointType::Server => self
+                                .raw_channel()
+                                .clear_server_waiting(WaitType::WaitingToSend),
+                        }
+                    }
+                    if match self.endpoint_type {
+                        EndpointType::Client => self
+                            .raw_channel()
+                            .is_server_waiting(WaitType::WaitingToRecv),
+                        EndpointType::Server => self
+                            .raw_channel()
+                            .is_client_waiting(WaitType::WaitingToRecv),
+                    } {
+                        moto_sys::SysCpu::wake(self.remote_handle)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
     }
 }

@@ -1,3 +1,4 @@
+#![feature(negative_impls)]
 #![no_std]
 
 extern crate alloc;

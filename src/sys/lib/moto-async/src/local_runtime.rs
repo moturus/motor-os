@@ -247,7 +247,13 @@ impl LocalRuntimeInner {
     }
 
     fn add_sys_waiter(&self, handle: SysHandle, task_id: TaskId) {
-        self.sys_waiters.borrow_mut().insert(handle, task_id);
+        // Only a single task may wait per handle.
+        assert!(
+            self.sys_waiters
+                .borrow_mut()
+                .insert(handle, task_id)
+                .is_none()
+        );
     }
 
     fn merge_incoming(&self) {
