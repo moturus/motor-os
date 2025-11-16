@@ -1116,6 +1116,10 @@ pub fn clear_rx_queue(
             let _ = channel.conn.get_page(msg.payload.shared_pages()[0]);
         }
     }
+
+    if let Some(bytes_len) = rxq.loose_bytes().map(|bytes| bytes.len()) {
+        rxq.consume_bytes(bytes_len);
+    }
 }
 
 pub fn reserve_channel() -> ChannelReservation {

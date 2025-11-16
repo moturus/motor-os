@@ -568,6 +568,7 @@ impl Drop for TcpStream {
 
         // Clear RX queue: basically, free up server-allocated pages.
         super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());
+        assert!(self.recv_queue.lock().is_empty());
 
         // Clear TX queue (of length 0 or 1).
         let tx_msg = self.tx_msg.lock().take();
