@@ -18,7 +18,10 @@ echo ""
 
 ./run-qemu.sh &> /tmp/full-test.log &
 
-sleep 1
+# It takes some time to start sshd, especially with a debug build, so we
+# have a large timeout and several retries. And the first "test" is just an empty echo.
+
+ssh -p 2222 -o IdentitiesOnly=yes -o ConnectTimeout=30 -o ConnectionAttempts=10 -i test.key motor@192.168.4.2 /bin/echo " "
 
 ssh -p 2222 -o IdentitiesOnly=yes -i test.key motor@192.168.4.2 sys/tests/systest
 
