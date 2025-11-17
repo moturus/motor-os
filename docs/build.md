@@ -124,7 +124,11 @@ cd $MOTORH/motor-os/vm_images/release
 ./run-qemu.sh
 ```
 
-to run Motor OS in qemu.
+to run Motor OS in qemu. This launches the full image by default. To use the `web` image, run
+
+```sh
+./run-qemu.sh --img=motor.web.img
+```
 
 While Motor OS is running, you can ssh into it using
 `ssh-into-motor-os-vm.sh` script, or via
