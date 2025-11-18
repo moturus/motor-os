@@ -31,8 +31,8 @@ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```sh
-rustup default nightly-2025-11-13
-rustup component add rust-src --toolchain nightly-2025-11-13-x86_64-unknown-linux-gnu
+rustup default nightly-2025-11-17
+rustup component add rust-src --toolchain nightly-2025-11-17-x86_64-unknown-linux-gnu
 ```
 
 (Note: we pin to a specific nightly version for better reproducibility.
@@ -85,8 +85,8 @@ EOF
 Build Rust Motor OS target/toolchain:
 
 ```sh
-$ cd $MOTORH/rust
-$ ./x.py build --stage 2 clippy library
+cd $MOTORH/rust
+./x.py build --stage 2 clippy library src/tools/remote-test-server
 ```
 
 Note: Tier-3 target API is unstable, so the step above may fail. In this case
