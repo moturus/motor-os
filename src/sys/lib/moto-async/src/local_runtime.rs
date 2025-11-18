@@ -21,6 +21,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
+use alloc::collections::btree_set::BTreeSet;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -183,7 +184,7 @@ struct LocalRuntimeInner {
     runqueue: RefCell<VecDeque<TaskId>>,
 
     // Tasks waiting on specific sys handles.
-    sys_waiters: RefCell<BTreeMap<SysHandle, TaskId>>,
+    sys_waiters: RefCell<BTreeMap<SysHandle, BTreeSet<TaskId>>>,
 
     // Timers. Can be added to at runtime.
     timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
@@ -247,13 +248,15 @@ impl LocalRuntimeInner {
     }
 
     fn add_sys_waiter(&self, handle: SysHandle, task_id: TaskId) {
-        // Only a single task may wait per handle.
-        assert!(
-            self.sys_waiters
-                .borrow_mut()
-                .insert(handle, task_id)
-                .is_none()
-        );
+        let mut sys_waiters = self.sys_waiters.borrow_mut();
+
+        if let Some(entry) = sys_waiters.get_mut(&handle) {
+            entry.insert(task_id);
+        } else {
+            let mut entry = BTreeSet::new();
+            entry.insert(task_id);
+            sys_waiters.insert(handle, entry);
+        }
     }
 
     fn merge_incoming(&self) {
@@ -309,8 +312,11 @@ impl LocalRuntimeInner {
                     if handle.is_none() {
                         break;
                     }
-                    let task_id = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
-                    self.runqueue.borrow_mut().push_back(task_id);
+                    let tasks = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
+                    let mut runqueue = self.runqueue.borrow_mut();
+                    for task_id in tasks {
+                        runqueue.push_back(task_id);
+                    }
                     self.sys_wakes.borrow_mut().insert(handle, moto_rt::E_OK);
                 }
             }
@@ -321,8 +327,11 @@ impl LocalRuntimeInner {
                         break;
                     }
 
-                    let task_id = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
-                    self.runqueue.borrow_mut().push_back(task_id);
+                    let tasks = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
+                    let mut runqueue = self.runqueue.borrow_mut();
+                    for task_id in tasks {
+                        runqueue.push_back(task_id);
+                    }
                     self.sys_wakes
                         .borrow_mut()
                         .insert(handle, moto_rt::E_BAD_HANDLE);
