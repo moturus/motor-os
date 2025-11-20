@@ -425,7 +425,6 @@ fn main() {
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
     moto_async::run_all_tests();
-
     io_channel::run_all_tests();
     // return;
 

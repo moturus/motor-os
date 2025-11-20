@@ -9,6 +9,8 @@
 //! Async: ServerConnection uses local wakers, ClientConnection uses cross-thread wakers.
 use core::{fmt::Debug, sync::atomic::*};
 
+use alloc::sync::Arc;
+use moto_async::AsFuture;
 use moto_sys::*;
 
 // Although client+server can use any value in QueueEntry::command, it is recommended
@@ -1139,27 +1141,50 @@ impl ServerConnection {
     }
 }
 
-pub struct Sender {
+struct IoChannelImpl {
     raw_channel: AtomicPtr<RawChannel>,
     remote_handle: SysHandle,
     endpoint_type: EndpointType,
 }
 
-impl !Sync for Sender {}
+impl Drop for IoChannelImpl {
+    fn drop(&mut self) {
+        let addr = self.raw_channel.load(Ordering::Acquire) as usize;
+        SysMem::free(addr as u64).unwrap();
+        SysObj::put(self.remote_handle).unwrap();
+    }
+}
 
-impl Sender {
+impl IoChannelImpl {
+    #[inline]
     fn raw_channel(&self) -> &RawChannel {
         unsafe {
             let ptr = self.raw_channel.load(Ordering::Relaxed);
             ptr.as_ref().unwrap()
         }
     }
+}
+
+#[derive(Clone)]
+pub struct Sender {
+    inner: Arc<IoChannelImpl>,
+}
+
+// Note: having multiple senders in different threads is fishy: not
+// tested and maybe suboptimal (they will have to wait on the same remote handle).
+unsafe impl Sync for Sender {}
+
+impl Sender {
+    #[inline]
+    fn raw_channel(&self) -> &RawChannel {
+        self.inner.raw_channel()
+    }
 
     // See enqueue() in mpmc.cc.
     pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
         let raw_channel = self.raw_channel();
 
-        let (queue_head, queue) = match self.endpoint_type {
+        let (queue_head, queue) = match self.inner.endpoint_type {
             EndpointType::Client => (&raw_channel.client_queue_head, &raw_channel.client_queue),
             EndpointType::Server => (&raw_channel.server_queue_head, &raw_channel.server_queue),
         };
@@ -1199,7 +1224,7 @@ impl Sender {
         use moto_async::AsFuture;
 
         #[cfg(debug_assertions)]
-        match self.endpoint_type {
+        match self.inner.endpoint_type {
             EndpointType::Client => debug_assert!(!self
                 .raw_channel()
                 .is_client_waiting(WaitType::WaitingToSend)),
@@ -1213,9 +1238,9 @@ impl Sender {
             match self.send(msg) {
                 Err(moto_rt::E_NOT_READY) => {
                     if wait_flag_set {
-                        self.remote_handle.as_future().await?;
+                        self.inner.remote_handle.as_future().await?;
                     } else {
-                        match self.endpoint_type {
+                        match self.inner.endpoint_type {
                             EndpointType::Client => self
                                 .raw_channel()
                                 .set_client_waiting(WaitType::WaitingToSend),
@@ -1230,7 +1255,7 @@ impl Sender {
                 Err(err) => return Err(err),
                 Ok(()) => {
                     if wait_flag_set {
-                        match self.endpoint_type {
+                        match self.inner.endpoint_type {
                             EndpointType::Client => self
                                 .raw_channel()
                                 .clear_client_waiting(WaitType::WaitingToSend),
@@ -1240,7 +1265,7 @@ impl Sender {
                                 .clear_server_waiting(WaitType::WaitingToSend),
                         }
                     }
-                    if match self.endpoint_type {
+                    if match self.inner.endpoint_type {
                         EndpointType::Client => self
                             .raw_channel()
                             .is_server_waiting(WaitType::WaitingToRecv),
@@ -1248,11 +1273,235 @@ impl Sender {
                             .raw_channel()
                             .is_client_waiting(WaitType::WaitingToRecv),
                     } {
-                        moto_sys::SysCpu::wake(self.remote_handle)?;
+                        moto_sys::SysCpu::wake(self.inner.remote_handle)?;
                     }
                     return Ok(());
                 }
             }
         }
     }
+}
+
+pub struct Receiver {
+    inner: Arc<IoChannelImpl>,
+}
+
+unsafe impl Sync for Receiver {}
+
+impl Receiver {
+    #[inline]
+    fn raw_channel(&self) -> &RawChannel {
+        self.inner.raw_channel()
+    }
+    // See dequeue() in mpmc.cc.
+    pub fn recv(&self) -> Result<Msg, ErrorCode> {
+        let raw_channel = self.raw_channel();
+
+        let mut slot: &MsgSlot;
+        let (queue_tail, queue) = match self.inner.endpoint_type {
+            EndpointType::Client => (&raw_channel.server_queue_tail, &raw_channel.server_queue),
+            EndpointType::Server => (&raw_channel.client_queue_tail, &raw_channel.client_queue),
+        };
+
+        let mut pos = queue_tail.load(Ordering::Relaxed);
+
+        loop {
+            slot = &queue[(pos & QUEUE_MASK) as usize];
+            let stamp = slot.stamp.load(Ordering::Acquire);
+
+            match stamp.cmp(&(pos + 1)) {
+                core::cmp::Ordering::Equal => {
+                    match queue_tail.compare_exchange_weak(
+                        pos,
+                        pos + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(tail) => pos = tail, // continue
+                    }
+                }
+                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is empty.
+                core::cmp::Ordering::Greater => {
+                    // We lost the race - continue.
+                    pos = queue_tail.load(Ordering::Relaxed)
+                }
+            }
+        }
+
+        // Safety: the loop above ensures that only this thread access the slot.
+        let msg = unsafe { *slot.msg.get() };
+        slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
+        Ok(msg)
+    }
+
+    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+        use moto_async::AsFuture;
+
+        #[cfg(debug_assertions)]
+        match self.inner.endpoint_type {
+            EndpointType::Client => debug_assert!(!self
+                .raw_channel()
+                .is_client_waiting(WaitType::WaitingToRecv)),
+            EndpointType::Server => debug_assert!(!self
+                .raw_channel()
+                .is_server_waiting(WaitType::WaitingToRecv)),
+        }
+
+        let mut wait_flag_set = false;
+        let mut wait_error = moto_rt::E_OK;
+        loop {
+            match self.recv() {
+                Err(moto_rt::E_NOT_READY) => {
+                    if wait_error != moto_rt::E_OK {
+                        return Err(wait_error);
+                    }
+                    if wait_flag_set {
+                        if let Err(err) = self.inner.remote_handle.as_future().await {
+                            wait_error = err;
+                            // Do one more recv() before returning.
+                        }
+                    } else {
+                        match self.inner.endpoint_type {
+                            EndpointType::Client => self
+                                .raw_channel()
+                                .set_client_waiting(WaitType::WaitingToRecv),
+                            EndpointType::Server => self
+                                .raw_channel()
+                                .set_server_waiting(WaitType::WaitingToRecv),
+                        }
+                        wait_flag_set = true;
+                        // Do one more recv() before waiting.
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(msg) => {
+                    if wait_flag_set {
+                        match self.inner.endpoint_type {
+                            EndpointType::Client => self
+                                .raw_channel()
+                                .clear_client_waiting(WaitType::WaitingToRecv),
+                            EndpointType::Server => self
+                                .raw_channel()
+                                .clear_server_waiting(WaitType::WaitingToRecv),
+                        }
+                    }
+                    if match self.inner.endpoint_type {
+                        EndpointType::Client => self
+                            .raw_channel()
+                            .is_server_waiting(WaitType::WaitingToSend),
+
+                        EndpointType::Server => self
+                            .raw_channel()
+                            .is_client_waiting(WaitType::WaitingToSend),
+                    } {
+                        // Ignore errors on recv.
+                        let _ = moto_sys::SysCpu::wake(self.inner.remote_handle);
+                    }
+                    return Ok(msg);
+                }
+            }
+        }
+    }
+}
+
+pub fn connect(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE,
+        u64::MAX,
+        u64::MAX,
+        4096,
+        (core::mem::size_of::<RawChannel>() >> 12) as u64,
+    )?;
+
+    // Safety: safe because we just allocated the memory.
+    let raw_channel: &'static mut RawChannel =
+        unsafe { (addr as *mut RawChannel).as_mut().unwrap() };
+
+    for idx in 0..(QUEUE_SIZE) {
+        raw_channel.client_queue[idx as usize]
+            .stamp
+            .store(idx, Ordering::Relaxed);
+        raw_channel.server_queue[idx as usize]
+            .stamp
+            .store(idx, Ordering::Relaxed);
+    }
+
+    let full_url = alloc::format!(
+        "shared:url={};address={};page_type=small;page_num={}",
+        moto_sys::url_encode(url),
+        addr,
+        64
+    );
+
+    let remote_handle = SysObj::get(SysHandle::SELF, SysObj::F_WAKE_PEER, &full_url)
+        .inspect_err(|_| SysMem::free(addr).unwrap())?;
+
+    let raw_channel = AtomicPtr::new(addr as usize as *mut RawChannel);
+    let sender = Sender {
+        inner: Arc::new(IoChannelImpl {
+            raw_channel,
+            remote_handle,
+            endpoint_type: EndpointType::Client,
+        }),
+    };
+    let receiver = Receiver {
+        inner: sender.inner.clone(),
+    };
+
+    Ok((sender, receiver))
+}
+
+pub async fn listen(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        0, // not mapped
+        u64::MAX,
+        u64::MAX,
+        4096,
+        (core::mem::size_of::<RawChannel>() >> 12) as u64,
+    )?;
+    let full_url = alloc::format!(
+        "shared:url={};address={};page_type=small;page_num={}",
+        moto_sys::url_encode(url),
+        addr,
+        64
+    );
+
+    let remote_handle = SysObj::create(SysHandle::SELF, 0, &full_url)
+        .inspect_err(|_| SysMem::free(addr).unwrap())?;
+
+    remote_handle.as_future().await?;
+
+    if !moto_sys::SysObj::is_connected(remote_handle)? {
+        return Err(moto_rt::E_NOT_CONNECTED);
+    };
+
+    compiler_fence(Ordering::Acquire);
+    fence(Ordering::Acquire);
+
+    // Safety: safe because we checked is_connected above.
+    unsafe {
+        let raw_channel = addr as usize as *mut RawChannel;
+        if (*raw_channel).server_queue_head.load(Ordering::Relaxed) != 0
+            || (*raw_channel).server_queue_tail.load(Ordering::Relaxed) != 0
+        {
+            return Err(moto_rt::E_BAD_HANDLE);
+        }
+    }
+
+    let raw_channel = AtomicPtr::new(addr as usize as *mut RawChannel);
+    let sender = Sender {
+        inner: Arc::new(IoChannelImpl {
+            raw_channel,
+            remote_handle,
+            endpoint_type: EndpointType::Server,
+        }),
+    };
+    let receiver = Receiver {
+        inner: sender.inner.clone(),
+    };
+
+    Ok((sender, receiver))
 }

@@ -124,9 +124,9 @@ impl CanonicalPath {
 }
 
 pub struct AsyncFsClient {
-    // This will be locked/unlocked one. Is there a better way
-    // to do it safely?
-    driver_connection: moto_rt::spinlock::SpinLock<moto_ipc::io_channel::ClientConnection>,
+    io_sender: moto_ipc::io_channel::Sender,
+    io_receiver: moto_ipc::io_channel::Receiver,
+
     client_handle: SysHandle,
     runtime_handle: SysHandle,
 
@@ -199,42 +199,46 @@ impl AsyncFsClient {
     }
 
     fn create() -> Result<&'static Self> {
-        let conn = moto_ipc::io_channel::ClientConnection::connect(moto_sys_io::api_fs::FS_URL)?;
-        let (client_handle, runtime_handle) =
-            moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+        moto_async::LocalRuntime::new().block_on(async move {
+            let (io_sender, io_receiver) =
+                moto_ipc::io_channel::connect(moto_sys_io::api_fs::FS_URL)?;
+            let (client_handle, runtime_handle) =
+                moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
 
-        let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
-            driver_connection: moto_rt::spinlock::SpinLock::new(conn),
-            client_handle,
-            runtime_handle,
-            cwd: moto_rt::mutex::Mutex::new(
-                if let Some(cwd) = super::rt_process::EnvRt::get("PWD") {
-                    cwd
-                } else {
-                    "/".to_owned()
-                },
-            ),
-        }));
+            let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
+                io_sender,
+                io_receiver,
+                client_handle,
+                runtime_handle,
+                cwd: moto_rt::mutex::Mutex::new(
+                    if let Some(cwd) = super::rt_process::EnvRt::get("PWD") {
+                        cwd
+                    } else {
+                        "/".to_owned()
+                    },
+                ),
+            }));
 
-        let addr = this as *mut _ as usize;
+            let addr = this as *mut _ as usize;
 
-        let thread_handle = moto_sys::SysCpu::spawn(
-            SysHandle::SELF,
-            4096 * 16,
-            Self::runtime_thread as *const () as usize as u64,
-            addr as u64,
-        )
-        .expect("Error spawning the runtime thread (FS).");
+            let thread_handle = moto_sys::SysCpu::spawn(
+                SysHandle::SELF,
+                4096 * 16,
+                Self::runtime_thread as *const () as usize as u64,
+                addr as u64,
+            )
+            .expect("Error spawning the runtime thread (FS).");
 
-        assert!(
-            ASYNC_CLIENT
-                .compare_exchange(CLIENT_PENDING, addr, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-        );
+            assert!(
+                ASYNC_CLIENT
+                    .compare_exchange(CLIENT_PENDING, addr, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+            );
 
-        log::debug!("AsyncFsClient created.");
+            log::debug!("AsyncFsClient created.");
 
-        unsafe { Ok((addr as *const Self).as_ref_unchecked()) }
+            unsafe { Ok((addr as *const Self).as_ref_unchecked()) }
+        })
     }
 
     fn getcwd() -> Result<String> {
@@ -286,7 +290,7 @@ impl AsyncFsClient {
         let mut msg = io_channel::Msg::new();
         msg.command = api_fs::CMD_FILE_OPEN;
 
-        let mut conn = Self::get()?.driver_connection.lock();
+        // let mut conn = Self::get()?.driver_connection.lock();
 
         // how do we do O_NONBLOCK? Can we use Rust async?
 
