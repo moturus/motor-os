@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
+use crate::autocomplete;
+
 pub trait TermImpl: Send + Sync {
     fn make_raw(&mut self) {}
     fn make_cooked(&mut self) {}
@@ -29,7 +31,7 @@ impl TermImpl for PipedTerminal {}
 #[derive(Clone, PartialEq, Eq)]
 enum ProcessingMode {
     Normal,
-    Escape(Vec<u8>),
+    Escape(Vec<char>),
     History(usize),
 }
 
@@ -43,55 +45,54 @@ enum EscapesIn {
     Delete,
     Home,
     End,
+    Tab,
     CtrlC,
+    CtrlD,
 }
 
-enum ProcessByteResult {
-    Byte(u8), // Normal byte to add;
-    Newline,  // Newline: finish processing the line;
-    Continue, // Continue processing input;
-    Clear,    // Clear current input (e.g. an escape sequence not recognized);
+enum ProcessedChar {
+    Regular(char), // Normal character to add;
+    Newline,       // Newline: finish processing the line;
+    Continue,      // Continue processing input;
+    Clear,         // Clear current input (e.g. an escape sequence not recognized);
     Escape(EscapesIn),
 }
 
 struct Term {
-    history: Vec<Vec<u8>>,
+    history: Vec<String>,
     mode: ProcessingMode,
     prev_mode: ProcessingMode,
-    line: Vec<u8>,
-    prev_line: Vec<u8>, // What was typed before an Up arrow was hit.
+    line: String,
+    typed_line: String, // What was typed before an Up arrow was hit.
     line_start: u32,    // Where the input starts after the prompt.
     current_pos: u32,   // Relative to line start.
 
     incoming: VecDeque<u8>,
 
     term_impl: Box<dyn TermImpl>,
-    escapes_in: std::collections::BTreeMap<&'static [u8], EscapesIn>,
+    escapes_in: std::collections::BTreeMap<&'static [char], EscapesIn>,
     debug: bool,
 }
 
 impl Term {
     fn new(piped: bool) -> Self {
-        let mut escapes_in: std::collections::BTreeMap<&'static [u8], EscapesIn> =
+        let mut escapes_in: std::collections::BTreeMap<&'static [char], EscapesIn> =
             std::collections::BTreeMap::new();
 
-        escapes_in.insert(&[0x1b, b'[', b'A'], EscapesIn::UpArrow);
-        escapes_in.insert(&[0x1b, b'[', b'B'], EscapesIn::DownArrow);
-        escapes_in.insert(&[0x1b, b'[', b'C'], EscapesIn::RightArrow);
-        escapes_in.insert(&[0x1b, b'[', b'D'], EscapesIn::LeftArrow);
-        escapes_in.insert("\x1b[3~".as_bytes(), EscapesIn::Delete);
-        escapes_in.insert("\x1b[1~".as_bytes(), EscapesIn::Home);
-        escapes_in.insert("\x1b[7~".as_bytes(), EscapesIn::Home);
-        escapes_in.insert("\x1b[H".as_bytes(), EscapesIn::Home);
-        escapes_in.insert("\x1b[4~".as_bytes(), EscapesIn::End);
-        escapes_in.insert("\x1b[8~".as_bytes(), EscapesIn::End);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{41}'], EscapesIn::UpArrow);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{42}'], EscapesIn::DownArrow);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{43}'], EscapesIn::RightArrow);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{44}'], EscapesIn::LeftArrow);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{33}', '\u{7E}'], EscapesIn::Delete);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{48}'], EscapesIn::Home);
+        escapes_in.insert(&['\u{1B}', '\u{5B}', '\u{46}'], EscapesIn::End);
 
         Self {
             history: vec![],
             mode: ProcessingMode::Normal,
             prev_mode: ProcessingMode::Normal,
-            line: vec![],
-            prev_line: vec![],
+            line: String::new(),
+            typed_line: String::new(),
             term_impl: if piped {
                 Box::new(PipedTerminal::new())
             } else {
@@ -106,69 +107,89 @@ impl Term {
         }
     }
 
-    fn next_byte(&mut self) -> u8 {
-        if let Some(c) = self.incoming.pop_front() {
-            c
-        } else {
-            let mut buf = [0_u8; 16];
-            let sz = match std::io::stdin().read(&mut buf) {
-                Ok(sz) => sz,
-                Err(err) => {
-                    eprintln!("stdin() read failed with: {err:?}");
-                    self.term_impl.make_raw();
-                    std::process::exit(1);
+    fn next_char(&mut self) -> char {
+        if self.incoming.is_empty() {
+            self.read_new_bytes();
+        }
+        let mut buf = vec![];
+        while let Some(b) = self.incoming.pop_front() {
+            buf.push(b);
+            match std::str::from_utf8(&buf) {
+                Ok(str) => {
+                    // we're sure there's only 1 character, as we grow the buffer
+                    let char = str.chars().next().unwrap();
+                    return char;
                 }
-            };
-            if sz == 0 {
-                // stdlib sometimes converts stdio errors into zero reads
-                eprintln!("stdin() EOF");
+                Err(error) => {
+                    if let Some(idx) = error.error_len() {
+                        eprintln!("stdin(): invalid UTF-8 sequence at {idx}");
+                        self.term_impl.make_raw();
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
+        eprintln!("stdin() EOF");
+        self.term_impl.make_raw();
+        std::process::exit(1);
+    }
+
+    /// obtain new bytes from stdin to the buffer
+    fn read_new_bytes(&mut self) {
+        let mut buf = [0_u8; 16];
+        let sz = match std::io::stdin().read(&mut buf) {
+            Ok(sz) => sz,
+            Err(err) => {
+                eprintln!("stdin() read failed with: {err:?}");
                 self.term_impl.make_raw();
                 std::process::exit(1);
             }
-            assert!(sz > 0);
-            let c = buf[0];
-            for b in &buf[1..sz] {
-                self.incoming.push_back(*b);
-            }
-            c
+        };
+        if sz == 0 {
+            // stdlib sometimes converts stdio errors into zero reads
+            eprintln!("stdin() EOF");
+            self.term_impl.make_raw();
+            std::process::exit(1);
         }
+        assert!(sz > 0);
+        self.incoming.extend(&buf[0..sz]);
     }
 
-    fn process_next_byte(&mut self, c: u8) -> ProcessByteResult {
+    fn process_next_char(&mut self, c: char) -> ProcessedChar {
         match &self.mode {
             ProcessingMode::Normal | ProcessingMode::History(_) => {
                 match c {
-                    32..=126 => {
-                        ProcessByteResult::Byte(c)
-                    }
-                    128.. => {
-                        // Ignore non-ascii bytes for now.
-                        ProcessByteResult::Continue
-                    }
-                    3 => {
-                        ProcessByteResult::Escape(EscapesIn::CtrlC)
-                    }
-                    8 | 127 /* BS */ => {
-                        ProcessByteResult::Escape(EscapesIn::Backspace)
+                    '\u{3}' => ProcessedChar::Escape(EscapesIn::CtrlC),
+                    '\u{4}' => 
+                        ProcessedChar::Escape(EscapesIn::CtrlD),
+                    '\u{8}' | '\u{7F}' /* BS */ => {
+                        ProcessedChar::Escape(EscapesIn::Backspace)
                     },
-                    13 /* 13 | 10 */ /* CR/NL */ => {
-                        ProcessByteResult::Newline
+                    '\u{D}' /* 13 | 10 */ /* CR/NL */ => {
+                        ProcessedChar::Newline
                     }
-                    10 => ProcessByteResult::Continue, // Avoid double newlines
-                    0x1b /* ESC */ => {
+                    '\u{9}' /* TAB */ => {
+                        ProcessedChar::Escape(EscapesIn::Tab)
+                    }
+                    '\u{10}' => ProcessedChar::Continue, // Avoid double newlines
+                    '\u{1B}' /* ESC */ => {
                         self.prev_mode = self.mode.clone();
-                        self.mode = ProcessingMode::Escape(vec![0x1b]);
-                        ProcessByteResult::Continue
-                    }
-                    9 /* TAB */ => {
-                        self.debug_log("TAB");
-                        ProcessByteResult::Continue
+                        self.mode = ProcessingMode::Escape(vec!['\u{1B}']);
+                        ProcessedChar::Continue
                     }
                     _ => {
-                        self.debug_log(format!("unrecognized char: 0x{c:x}").as_str());
-                        self.write(&[7_u8]);  // Beep.
-                        ProcessByteResult::Continue
+                        ProcessedChar::Regular(c)
                     }
+                    // 128.. => {
+                    //     // Ignore non-ascii bytes for now.
+                    //     ProcessedChar::Continue
+                    // }
+                    // _ => {
+                    //     self.debug_log(format!("unrecognized char: 0x{c:x}").as_str());
+                    //     self.write(&[7_u8]);  // Beep.
+                    //     ProcessedChar::Continue
+                    // }
                 }
             }
             ProcessingMode::Escape(v) => {
@@ -177,9 +198,9 @@ impl Term {
 
                 if v.len() == 1 {
                     match c {
-                        b'[' => {
+                        '[' => {
                             self.mode = ProcessingMode::Escape(candidate_key);
-                            return ProcessByteResult::Continue;
+                            return ProcessedChar::Continue;
                         }
                         _ => {
                             // There are no recognized keys that start with anything other than "\x1b[".
@@ -188,16 +209,16 @@ impl Term {
                                     .as_str(),
                             );
                             self.mode = self.prev_mode.clone();
-                            return ProcessByteResult::Clear;
+                            return ProcessedChar::Clear;
                         }
                     }
                 }
 
                 match c {
-                    b'0'..=b'9' | b';' => {
+                    '0'..='9' | ';' => {
                         // Continue on numbers and ';'.
                         self.mode = ProcessingMode::Escape(candidate_key);
-                        return ProcessByteResult::Continue;
+                        return ProcessedChar::Continue;
                     }
                     _ => {
                         // Break otherwise.
@@ -207,7 +228,7 @@ impl Term {
                 match self.escapes_in.get(&candidate_key[0..]) {
                     Some(val) => {
                         self.mode = self.prev_mode.clone();
-                        ProcessByteResult::Escape(*val)
+                        ProcessedChar::Escape(*val)
                     }
                     None => {
                         // Not found.
@@ -216,7 +237,7 @@ impl Term {
                                 .as_str(),
                         );
                         self.mode = self.prev_mode.clone();
-                        ProcessByteResult::Clear
+                        ProcessedChar::Clear
                     }
                 }
             }
@@ -228,17 +249,15 @@ impl Term {
         self.start_line();
 
         if !self.history.is_empty() {
-            let msg = format!(
-                "cmd: {}",
-                std::str::from_utf8(self.history.last().as_ref().unwrap()).unwrap()
-            );
+            let msg = format!("cmd: {}", self.history.last().as_ref().unwrap());
             self.debug_log(msg.as_str());
         }
 
         loop {
-            let byte = self.next_byte();
-            match self.process_next_byte(byte) {
-                ProcessByteResult::Byte(c) => {
+            let char = self.next_char();
+            // println!("got char U+{:04X}", char as u32);
+            match self.process_next_char(char) {
+                ProcessedChar::Regular(c) => {
                     match self.mode {
                         ProcessingMode::Normal => {}
                         ProcessingMode::Escape(_) | ProcessingMode::History(_) => {
@@ -246,13 +265,12 @@ impl Term {
                             self.show_cursor();
                         }
                     }
-                    assert!(self.current_pos <= (self.line.len() as u32));
-                    if self.current_pos == (self.line.len() as u32) {
-                        // Add to end.
+                    assert!(self.current_pos <= (self.line.chars().count() as u32));
+                    if self.current_pos == (self.line.chars().count() as u32) {
                         self.line.push(c);
-                        self.write(&[c]);
+                        let mut buf = [0_u8;4];
+                        self.write(c.encode_utf8(&mut buf).as_bytes());
                     } else {
-                        // Insert.
                         self.line.insert(self.current_pos as usize, c);
                         self.redraw_line();
                         self.write(&[0x1b, b'[', b'1', b'C']); // Move right.
@@ -260,7 +278,7 @@ impl Term {
                     self.current_pos += 1;
                     self.debug_log(format!("got c {c}").as_str());
                 }
-                ProcessByteResult::Newline => {
+                ProcessedChar::Newline => {
                     match self.mode {
                         ProcessingMode::Normal => {}
                         ProcessingMode::Escape(_) | ProcessingMode::History(_) => {
@@ -268,14 +286,7 @@ impl Term {
                             self.show_cursor();
                         }
                     }
-                    let cmd = match std::str::from_utf8(&self.line[..]) {
-                        Ok(s) => s.trim(),
-                        Err(err) => {
-                            eprintln!("\nError: non-utf8 input: {err:?}.");
-                            crate::exit(1);
-                        }
-                    }
-                    .to_owned();
+                    let cmd = self.line.trim().to_owned();
                     if cmd.is_empty() {
                         self.write("\r\n".as_bytes());
                         self.start_line();
@@ -290,8 +301,8 @@ impl Term {
                         return Some(cmd);
                     }
                 }
-                ProcessByteResult::Continue => {}
-                ProcessByteResult::Escape(e) => match e {
+                ProcessedChar::Continue => {}
+                ProcessedChar::Escape(e) => match e {
                     EscapesIn::UpArrow => match self.mode {
                         ProcessingMode::Normal => {
                             if !self.history.is_empty() {
@@ -301,9 +312,9 @@ impl Term {
                                 if self.line == prev {
                                     continue;
                                 }
-                                self.prev_line = self.line.clone();
+                                self.typed_line = self.line.clone();
                                 self.line = prev;
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             } else {
                                 self.beep();
@@ -316,7 +327,7 @@ impl Term {
                             if idx > 0 {
                                 self.mode = ProcessingMode::History(idx - 1);
                                 self.line = self.history[idx - 1].clone();
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             } else {
                                 self.beep();
@@ -330,15 +341,15 @@ impl Term {
                         }
                         ProcessingMode::History(idx) => {
                             if idx == self.history.len() {
-                                self.beep(); // prev_line
+                                self.beep(); // typed_line
                             } else {
                                 self.mode = ProcessingMode::History(idx + 1);
                                 if idx == (self.history.len() - 1) {
-                                    self.line = self.prev_line.clone();
+                                    self.line = self.typed_line.clone();
                                 } else {
                                     self.line = self.history[idx + 1].clone();
                                 }
-                                self.current_pos = self.line.len() as u32;
+                                self.current_pos = self.line.chars().count() as u32;
                                 self.redraw_line();
                             }
                         }
@@ -353,7 +364,7 @@ impl Term {
                         continue;
                     }
                     EscapesIn::RightArrow => {
-                        if self.current_pos >= (self.line.len() as u32) {
+                        if self.current_pos >= (self.line.chars().count() as u32) {
                             self.beep();
                             continue;
                         }
@@ -387,7 +398,7 @@ impl Term {
                                 self.show_cursor();
                             }
                         }
-                        if self.current_pos < (self.line.len() as u32) {
+                        if self.current_pos < (self.line.chars().count() as u32) {
                             self.line.remove(self.current_pos as usize);
                             self.redraw_line();
                         } else {
@@ -402,10 +413,21 @@ impl Term {
                         }
                     }
                     EscapesIn::End => {
-                        if self.current_pos < (self.line.len() as u32) {
-                            self.current_pos = self.line.len() as u32;
+                        if self.current_pos < (self.line.chars().count() as u32) {
+                            self.current_pos = self.line.chars().count() as u32;
                             let (row, _) = self.get_cursor_pos();
                             self.move_cursor(row, self.line_start + self.current_pos);
+                        }
+                    }
+                    EscapesIn::Tab => {
+                        match autocomplete::try_complete(&self.line[..]) {
+                            Some(suggestion) => {
+                                self.typed_line = self.line.clone();
+                                self.line = suggestion;
+                                self.current_pos = self.line.chars().count() as u32;
+                                self.redraw_line();
+                            }
+                            None => self.beep(),
                         }
                     }
                     EscapesIn::CtrlC => {
@@ -419,8 +441,12 @@ impl Term {
                         self.write("^C\n\r".as_bytes());
                         self.start_line();
                     }
+                    EscapesIn::CtrlD => {
+                        self.term_impl.make_raw();
+                        std::process::exit(0);
+                    }
                 },
-                ProcessByteResult::Clear => {
+                ProcessedChar::Clear => {
                     self.beep();
                     break;
                 }
@@ -443,7 +469,7 @@ impl Term {
     fn start_line(&mut self) {
         let col = prompt();
         self.line.clear();
-        self.prev_line.clear();
+        self.typed_line.clear();
         self.line_start = col as u32;
         self.current_pos = 0;
         self.mode = ProcessingMode::Normal;
@@ -513,7 +539,7 @@ impl Term {
         self.write("\x1b[K".as_bytes());
 
         // Write to stdout instead of self.write() to avoid borrow checker complaints.
-        stdout_lock.write_all(&self.line[0..]).unwrap();
+        stdout_lock.write_all(self.line.as_bytes()).unwrap();
         stdout_lock.flush().unwrap();
 
         self.move_cursor(row, self.line_start + self.current_pos);
@@ -629,8 +655,8 @@ impl Term {
     }
 
     fn maybe_add_to_history(&mut self, cmd: &str) {
-        if self.history.is_empty() || *self.history.last().unwrap() != cmd.as_bytes() {
-            self.history.push(Vec::from(cmd.as_bytes()));
+        if self.history.is_empty() || *self.history.last().unwrap() != cmd {
+            self.history.push(cmd.to_string());
         }
     }
 
@@ -653,7 +679,7 @@ impl Term {
                 stdout_lock.write_all("\r\n".as_bytes()).unwrap();
 
                 for line in &self.history {
-                    let written = stdout_lock.write(line).unwrap();
+                    let written = stdout_lock.write(line.as_bytes()).unwrap();
                     assert_eq!(written, line.len());
                     stdout_lock.write_all("\r\n".as_bytes()).unwrap();
                 }
