@@ -19,7 +19,8 @@ test = false
 
 # internal dependencies
 elfloader        = { path = "../../../third_party/elfloader" }
-frusa            = { path = "../frusa"            }
+# frusa          = { path = "../frusa"            }
+frusa            = "0.1.3"
 moto-async       = { path = "../moto-async"       }
 moto-io-internal = { path = "../moto-io-internal" }
 moto-ipc         = { path = "../moto-ipc"         , features = ["stdio-pipe"] }
