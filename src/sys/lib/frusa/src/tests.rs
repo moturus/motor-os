@@ -13,11 +13,11 @@ unsafe impl Sync for BackEndAllocator {}
 
 unsafe impl GlobalAlloc for BackEndAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        std::alloc::System.alloc(layout)
+        unsafe { std::alloc::System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        std::alloc::System.dealloc(ptr, layout)
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
     }
 }
 
@@ -34,16 +34,16 @@ unsafe impl GlobalAlloc for FlakyBackEndAllocator {
             use rand::Rng;
             let mut rng = rand::thread_rng();
 
-            let random = rng.gen::<u8>();
+            let random = rng.r#gen::<u8>();
             if random < 50 {
                 return core::ptr::null_mut();
             }
         }
-        std::alloc::System.alloc(layout)
+        unsafe { std::alloc::System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        std::alloc::System.dealloc(ptr, layout)
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
     }
 }
 
@@ -156,7 +156,7 @@ fn reclaim_test() {
 
     let mut ptrs: std::vec::Vec<(*mut u8, Layout)> = std::vec::Vec::with_capacity(ALLOCS);
     for _ in 0..ALLOCS {
-        let alloc_bucket: usize = 4 + (rng.gen::<u16>() % 8) as usize;
+        let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 8) as usize;
         let sz = 1 << alloc_bucket;
         let layout = Layout::from_size_align(sz, 8).unwrap();
 
@@ -200,7 +200,7 @@ fn stress_test() {
         let mut rng = rand::thread_rng();
 
         for step in 0..STEPS {
-            let alloc_bucket: usize = 4 + (rng.gen::<u16>() % 20) as usize;
+            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 20) as usize;
             let sz = 1 << alloc_bucket;
 
             if step == 50 {
@@ -247,7 +247,7 @@ fn stress_test() {
         let mut ptrs: std::vec::Vec<(*mut u8, Layout)> = std::vec::Vec::with_capacity(ALLOCS);
 
         for _ in 0..ALLOCS {
-            let alloc_bucket: usize = 4 + (rng.gen::<u16>() % 10) as usize;
+            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 10) as usize;
             let sz = 1 << alloc_bucket;
             let layout = Layout::from_size_align(sz, 8).unwrap();
 
@@ -285,7 +285,7 @@ fn single_threaded_speed_test(bench: &mut Bencher) {
     let bench_fn = || {
         // Allocate at most 2048 bytes, as anything higher goes
         // to the back end.
-        let sz: usize = (rng.gen::<u16>() % 2048) as usize;
+        let sz: usize = (rng.r#gen::<u16>() % 2048) as usize;
 
         let layout = Layout::from_size_align(sz, 8).unwrap();
         let ptr = unsafe { frusa.alloc(layout) };
@@ -330,7 +330,7 @@ fn concurrent_speed_test_impl(use_alloc: UseAlloc, num_threads: usize) {
             //
             // Also randomize across buckets rather than linearly,
             // otherwise the largest bucket gets half of all allocations.
-            let alloc_bucket: usize = 4 + (rng.gen::<u16>() % 8) as usize;
+            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 8) as usize;
             let sz = 1 << alloc_bucket;
             let layout = Layout::from_size_align(sz, 8).unwrap();
 

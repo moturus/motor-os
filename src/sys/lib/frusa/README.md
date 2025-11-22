@@ -34,7 +34,7 @@ none of the allocators I could find on crates.io matched the requirements.
 ## A simple benchmark
 
 ```
-$ cargo test --release concurrent_speed_test -- --nocapture
+$ cargo test --release -- concurrent_speed_test --nocapture
 
 [...]
 

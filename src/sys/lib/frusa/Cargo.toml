@@ -1,7 +1,7 @@
 [package]
 name = "frusa"
-version = "0.1.2"
-edition = "2021"
+version = "0.1.3"
+edition = "2024"
 description = "A system allocator with reclaim."
 repository = "https://github.com/moturus/motor-os"
 keywords = ["allocator", "no_std", "global_allocator"]

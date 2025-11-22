@@ -41,11 +41,11 @@ unsafe impl Sync for Frusa4K {}
 
 unsafe impl GlobalAlloc for Frusa4K {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.inner.alloc(layout)
+        unsafe { self.inner.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.inner.dealloc(ptr, layout)
+        unsafe { self.inner.dealloc(ptr, layout) }
     }
 }
 
@@ -76,11 +76,11 @@ unsafe impl Sync for Frusa2M {}
 
 unsafe impl GlobalAlloc for Frusa2M {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.inner.alloc(layout)
+        unsafe { self.inner.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.inner.dealloc(ptr, layout)
+        unsafe { self.inner.dealloc(ptr, layout) }
     }
 }
 
@@ -201,14 +201,14 @@ impl Slab {
         };
 
         while !pblock.is_null() {
-            let maybe_alloc = (*pblock).alloc();
+            let maybe_alloc = unsafe { (*pblock).alloc() };
             if !maybe_alloc.is_null() {
                 self.bytes_in_use
                     .fetch_add(1 << self.entry_sz_log2, Ordering::Relaxed);
                 return maybe_alloc;
             }
 
-            pblock = (*pblock).next.load(Ordering::Acquire);
+            pblock = unsafe { (*pblock).next.load(Ordering::Acquire) };
         }
 
         core::ptr::null_mut()
@@ -224,13 +224,13 @@ impl Slab {
         };
 
         while !pblock.is_null() {
-            if (*pblock).dealloc(ptr).is_ok() {
+            if unsafe { (*pblock).dealloc(ptr) }.is_ok() {
                 self.bytes_in_use
                     .fetch_sub(1 << self.entry_sz_log2, Ordering::Relaxed);
                 return;
             }
 
-            pblock = (*pblock).next.load(Ordering::Acquire);
+            pblock = unsafe { (*pblock).next.load(Ordering::Acquire) };
         }
 
         panic!("FRUSA: bad ptr for dealloc.");
@@ -446,7 +446,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     unsafe fn alloc_metadata(&self) -> *mut u8 {
         loop {
-            let maybe_alloc = self.metadata_slab.alloc();
+            let maybe_alloc = unsafe { self.metadata_slab.alloc() };
             if !maybe_alloc.is_null() {
                 return maybe_alloc;
             }
@@ -496,17 +496,13 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     fn sz_from_layout(layout: &Layout) -> Option<usize> {
         let sz = layout.size().next_power_of_two().max(layout.align());
-        if sz <= Self::MAX_SIZE {
-            Some(sz)
-        } else {
-            None
-        }
+        if sz <= Self::MAX_SIZE { Some(sz) } else { None }
     }
 
     unsafe fn alloc_from_slab(&self, slab: &Slab) -> *mut u8 {
         rwlock::read_lock(&slab.reclaim_lock);
         loop {
-            let ptr = slab.alloc();
+            let ptr = unsafe { slab.alloc() };
             if !ptr.is_null() {
                 rwlock::read_unlock(&slab.reclaim_lock);
                 return ptr;
@@ -514,7 +510,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
             // The slab is full. Add blocks to it.
             if let Some(head) = slab.try_lock() {
-                if self.add_blocks_to_locked_slab(slab, head).is_err() {
+                if unsafe { self.add_blocks_to_locked_slab(slab, head) }.is_err() {
                     slab.unlock(head);
                     rwlock::read_unlock(&slab.reclaim_lock);
                     return core::ptr::null_mut();
@@ -554,7 +550,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
         };
 
         let layout = Layout::from_size_align(alloc_sz, alloc_align).unwrap();
-        let block_data = self.fallback_allocator.alloc(layout);
+        let block_data = unsafe { self.fallback_allocator.alloc(layout) };
         if block_data.is_null() {
             return Err(());
         }
@@ -567,19 +563,19 @@ impl<const SLABS: usize> Frusa<SLABS> {
         let mut blocks: *mut Block = core::ptr::null_mut();
         let mut curr_block_data = block_data;
         for idx in 0..num_blocks {
-            let pblock: *mut Block = self.alloc_metadata() as *mut Block;
+            let pblock: *mut Block = unsafe { self.alloc_metadata() as *mut Block };
             if pblock.is_null() {
                 // Free and return Err.
                 for _ in 0..idx {
-                    let next = (*blocks).next.load(Ordering::Acquire);
-                    self.metadata_slab.dealloc(blocks as *mut u8);
+                    let next = unsafe { (*blocks).next.load(Ordering::Acquire) };
+                    unsafe { self.metadata_slab.dealloc(blocks as *mut u8) };
                     blocks = next;
                 }
-                self.fallback_allocator.dealloc(block_data, layout);
+                unsafe { self.fallback_allocator.dealloc(block_data, layout) };
                 return Err(());
             }
 
-            let block = &mut *pblock;
+            let block = unsafe { &mut *pblock };
 
             block.init(
                 slab.entry_sz_log2,
@@ -588,7 +584,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 curr_block_data,
             );
 
-            if let Some(block) = prev_block.as_mut() {
+            if let Some(block) = unsafe { prev_block.as_mut() } {
                 block.next.store(pblock, Ordering::Release);
             }
             prev_block = pblock;
@@ -596,10 +592,10 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 blocks = pblock;
             }
 
-            curr_block_data = curr_block_data.add(block_sz);
+            curr_block_data = unsafe { curr_block_data.add(block_sz) };
         }
 
-        (*prev_block).next.store(prev_head, Ordering::Release);
+        unsafe { (*prev_block).next.store(prev_head, Ordering::Release) };
 
         slab.add_blocks(blocks, num_blocks);
         Ok(())
@@ -607,7 +603,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     unsafe fn dealloc_to_slab(&self, slab: &Slab, ptr: *mut u8) {
         rwlock::read_lock(&slab.reclaim_lock);
-        slab.dealloc(ptr);
+        unsafe { slab.dealloc(ptr) };
         rwlock::read_unlock(&slab.reclaim_lock);
     }
 
@@ -637,7 +633,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             rwlock::write_unlock(&slab.reclaim_lock);
             return;
         }
-        let mut head = maybe_head.unwrap_unchecked();
+        let mut head = unsafe { maybe_head.unwrap_unchecked() };
 
         if head.is_null() {
             slab.unlock(head);
@@ -654,9 +650,10 @@ impl<const SLABS: usize> Frusa<SLABS> {
         let mut batch_start = head;
         while !batch_start.is_null() {
             assert!(
-                prev_block.is_null() || (*prev_block).next.load(Ordering::Relaxed) == batch_start
+                prev_block.is_null()
+                    || unsafe { (*prev_block).next.load(Ordering::Relaxed) } == batch_start
             );
-            let (freed, batch_end_or_next) = self.maybe_free_batch(batch_start);
+            let (freed, batch_end_or_next) = unsafe { self.maybe_free_batch(batch_start) };
 
             if freed > 0 {
                 slab.bytes_total.fetch_sub(freed, Ordering::Relaxed);
@@ -664,15 +661,17 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 if prev_block.is_null() {
                     head = batch_end_or_next;
                 } else {
-                    (*prev_block)
-                        .next
-                        .store(batch_end_or_next, Ordering::Release);
+                    unsafe {
+                        (*prev_block)
+                            .next
+                            .store(batch_end_or_next, Ordering::Release)
+                    };
                 }
                 batch_start = batch_end_or_next;
             } else {
                 // batch_end_or_next is batch_end.
                 prev_block = batch_end_or_next;
-                batch_start = (*batch_end_or_next).next.load(Ordering::Acquire);
+                batch_start = unsafe { (*batch_end_or_next).next.load(Ordering::Acquire) };
             }
         }
 
@@ -682,15 +681,15 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
     // If freed, returns (bytes_freed, next_batch), otherwise (0, batch_end).
     unsafe fn maybe_free_batch(&self, batch_start: *mut Block) -> (usize, *mut Block) {
-        assert_eq!((*batch_start).batch_pos, 0);
-        let batch_sz = (*batch_start).batch_sz;
+        assert_eq!(unsafe { (*batch_start).batch_pos }, 0);
+        let batch_sz = unsafe { (*batch_start).batch_sz };
         assert!(batch_sz > 0);
 
         let mut next = batch_start;
         let mut prev: *mut Block = core::ptr::null_mut();
         let mut in_use = false;
         for pos in 0..batch_sz {
-            let block = &*next;
+            let block = unsafe { &*next };
             assert_eq!(pos, block.batch_pos);
             prev = next;
 
@@ -711,12 +710,14 @@ impl<const SLABS: usize> Frusa<SLABS> {
                 // Unmark marked blocks.
                 let mut marked_block = batch_start;
                 for marked_pos in 0..pos {
-                    let block = &*marked_block;
+                    let block = unsafe { &*marked_block };
                     assert_eq!(marked_pos, block.batch_pos);
-                    assert!(block
-                        .used_bitmap
-                        .compare_exchange(u64::MAX, 0, Ordering::AcqRel, Ordering::Relaxed)
-                        .is_ok());
+                    assert!(
+                        block
+                            .used_bitmap
+                            .compare_exchange(u64::MAX, 0, Ordering::AcqRel, Ordering::Relaxed)
+                            .is_ok()
+                    );
                     marked_block = block.next.load(Ordering::Acquire);
                 }
                 next = block.next.load(Ordering::Acquire);
@@ -730,7 +731,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
         }
 
         // Now free.
-        let block = &*batch_start;
+        let block = unsafe { &*batch_start };
         let alloc_sz = (block.batch_sz as usize) * block.block_size();
         let alloc_align = if alloc_sz < Self::PAGE_2M {
             Self::PAGE_4K
@@ -741,7 +742,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
         next = batch_start;
         let data: *mut u8 = block.data;
         for pos in 0..batch_sz {
-            let block = &*next;
+            let block = unsafe { &*next };
             assert_eq!(pos, block.batch_pos);
             assert_eq!(
                 block.data as usize,
@@ -750,11 +751,11 @@ impl<const SLABS: usize> Frusa<SLABS> {
 
             let curr = next;
             next = block.next.load(Ordering::Acquire);
-            self.metadata_slab.dealloc(curr as *mut u8);
+            unsafe { self.metadata_slab.dealloc(curr as *mut u8) };
         }
 
         let layout = Layout::from_size_align(alloc_sz, alloc_align).unwrap();
-        self.fallback_allocator.dealloc(data, layout);
+        unsafe { self.fallback_allocator.dealloc(data, layout) };
 
         (alloc_sz, next)
     }
@@ -763,15 +764,15 @@ impl<const SLABS: usize> Frusa<SLABS> {
 unsafe impl<const SLABS: usize> GlobalAlloc for Frusa<SLABS> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match Self::sz_from_layout(&layout) {
-            Some(sz) => self.alloc_from_slab(self.slab_for_sz(sz)),
-            None => self.fallback_allocator.alloc(layout),
+            Some(sz) => unsafe { self.alloc_from_slab(self.slab_for_sz(sz)) },
+            None => unsafe { self.fallback_allocator.alloc(layout) },
         }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         match Self::sz_from_layout(&layout) {
-            Some(sz) => self.dealloc_to_slab(self.slab_for_sz(sz), ptr),
-            None => self.fallback_allocator.dealloc(ptr, layout),
+            Some(sz) => unsafe { self.dealloc_to_slab(self.slab_for_sz(sz), ptr) },
+            None => unsafe { self.fallback_allocator.dealloc(ptr, layout) },
         }
     }
 }
