@@ -187,10 +187,9 @@ struct RawIoPage {
 
 #[repr(u64)]
 enum WaitType {
-    _NoWait = 0,
+    NoWait = 0,
     WaitingToSend = 1,
     WaitingToRecv = 2,
-    WaitingToAlloc = 4,
 }
 
 #[repr(C, align(4096))]
@@ -215,9 +214,12 @@ struct RawChannel {
     _pad7: [u64; 7],
     server_waits: AtomicU64,
     _pad8: [u64; 7],
+    client_page_waits: AtomicU64,
+    _pad9: [u64; 7],
+    server_page_waits: AtomicU64,
 
     // Pad to PAGE_SIZE
-    _pad9: [u8; 3584],
+    _pad10: [u8; 3512],
 
     // offset: 4096 = 1 page; client=>server queue.
     client_queue: [MsgSlot; QUEUE_SIZE as usize], // 4096 bytes = 8 blocks
@@ -229,7 +231,7 @@ struct RawChannel {
     server_pages: [Page; CHANNEL_PAGE_COUNT],
 }
 
-pub const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == ((128 + 3) * 4096));
+const _RAW_CHANNEL_SIZE: () = assert!(core::mem::size_of::<RawChannel>() == ((128 + 3) * 4096));
 
 impl RawChannel {
     fn is_empty(&self) -> bool {
@@ -381,9 +383,16 @@ impl RawChannel {
         (self.server_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
     }
 
-    fn clear_server_waiting(&self, wait_type: WaitType) {
+    fn set_server_page_wait(&self, subchannel_mask: u64) {
+        self.server_page_waits
+            .fetch_or(subchannel_mask, Ordering::AcqRel);
+    }
+
+    // We clear all waits upon wakeup. Can we do better?
+    fn clear_server_waiting(&self) {
         self.server_waits
-            .fetch_and(!(wait_type as u64), Ordering::AcqRel);
+            .store(WaitType::NoWait as u64, Ordering::Release);
+        self.server_page_waits.store(0, Ordering::Release);
     }
 
     fn set_client_waiting(&self, wait_type: WaitType) {
@@ -394,22 +403,50 @@ impl RawChannel {
     fn is_client_waiting(&self, wait_type: WaitType) -> bool {
         (self.client_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
     }
+    fn set_client_page_wait(&self, subchannel_mask: u64) {
+        self.client_page_waits
+            .fetch_or(subchannel_mask, Ordering::AcqRel);
+    }
 
-    fn clear_client_waiting(&self, wait_type: WaitType) {
+    // We clear all waits upon wakeup. Can we do better?
+    fn clear_client_waiting(&self) {
         self.client_waits
-            .fetch_and(!(wait_type as u64), Ordering::AcqRel);
+            .store(WaitType::NoWait as u64, Ordering::Release);
+        self.client_page_waits.store(0, Ordering::Release);
     }
 }
+
 pub struct IoPage {
     raw_page: RawIoPage,
     raw_channel: &'static RawChannel,
+    remote_handle: SysHandle,
 }
 
 impl Drop for IoPage {
     fn drop(&mut self) {
         if self.raw_page.page_idx != u16::MAX {
             self.raw_channel.free_page(self.raw_page).unwrap();
-            // todo!("wake waiting peer, if needed")
+            if self.remote_handle != SysHandle::NONE {
+                assert!(self.raw_page.page_idx < 64);
+                let page_mask = 1_u64 << (self.raw_page.page_idx as u64);
+
+                match self.raw_page.s_type {
+                    EndpointType::Client => {
+                        if self.raw_channel.client_page_waits.load(Ordering::Acquire) & page_mask
+                            != 0
+                        {
+                            let _ = moto_sys::SysCpu::wake(self.remote_handle);
+                        }
+                    }
+                    EndpointType::Server => {
+                        if self.raw_channel.server_page_waits.load(Ordering::Acquire) & page_mask
+                            != 0
+                        {
+                            let _ = moto_sys::SysCpu::wake(self.remote_handle);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -445,7 +482,7 @@ impl IoPage {
     /// The number must have been previously returned by a call to
     /// [`IoPage::into_u16`][into_u16].
     ///
-    fn from_u16(val: u16, raw_channel: &'static RawChannel) -> Self {
+    fn from_u16(val: u16, raw_channel: &'static RawChannel, remote_handle: SysHandle) -> Self {
         debug_assert!(((val & !Self::SERVER_FLAG) as usize) < CHANNEL_PAGE_COUNT);
         match val & Self::SERVER_FLAG {
             0 => Self {
@@ -454,6 +491,7 @@ impl IoPage {
                     s_type: EndpointType::Client,
                 },
                 raw_channel,
+                remote_handle,
             },
             Self::SERVER_FLAG => Self {
                 raw_page: RawIoPage {
@@ -461,6 +499,7 @@ impl IoPage {
                     s_type: EndpointType::Server,
                 },
                 raw_channel,
+                remote_handle,
             },
             _ => unreachable!(),
         }
@@ -612,90 +651,6 @@ impl ClientConnection {
         Ok(msg)
     }
 
-    pub async fn recv_async(&mut self) -> Result<Msg, ErrorCode> {
-        use moto_async::AsFuture;
-
-        debug_assert!(!self
-            .raw_channel()
-            .is_client_waiting(WaitType::WaitingToRecv));
-
-        let mut wait_flag_set = false;
-        let mut wait_error = moto_rt::E_OK;
-        loop {
-            match self.recv() {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_error != moto_rt::E_OK {
-                        return Err(wait_error);
-                    }
-                    if wait_flag_set {
-                        if let Err(err) = self.server_handle.as_future().await {
-                            wait_error = err;
-                            // Do one more recv() before returning.
-                        }
-                    } else {
-                        self.raw_channel()
-                            .set_client_waiting(WaitType::WaitingToRecv);
-                        wait_flag_set = true;
-                        // Do one more recv() before waiting.
-                    }
-                }
-                Err(err) => return Err(err),
-                Ok(msg) => {
-                    if wait_flag_set {
-                        self.raw_channel()
-                            .clear_client_waiting(WaitType::WaitingToRecv);
-                    }
-                    if self
-                        .raw_channel()
-                        .is_server_waiting(WaitType::WaitingToSend)
-                    {
-                        // Ignore errors on recv.
-                        let _ = self.wake_server();
-                    }
-                    return Ok(msg);
-                }
-            }
-        }
-    }
-
-    pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
-        use moto_async::AsFuture;
-
-        debug_assert!(!self
-            .raw_channel()
-            .is_client_waiting(WaitType::WaitingToSend));
-
-        let mut wait_flag_set = false;
-        loop {
-            match self.send(msg) {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_flag_set {
-                        self.server_handle.as_future().await?;
-                    } else {
-                        self.raw_channel()
-                            .set_client_waiting(WaitType::WaitingToSend);
-                        wait_flag_set = true;
-                        // Do one more send() before waiting.
-                    }
-                }
-                Err(err) => return Err(err),
-                Ok(()) => {
-                    if wait_flag_set {
-                        self.raw_channel()
-                            .clear_client_waiting(WaitType::WaitingToSend);
-                    }
-                    if self
-                        .raw_channel()
-                        .is_server_waiting(WaitType::WaitingToRecv)
-                    {
-                        self.wake_server()?;
-                    }
-                    return Ok(());
-                }
-            }
-        }
-    }
-
     pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
         if let Ok(raw_page) = self
             .raw_channel()
@@ -704,41 +659,10 @@ impl ClientConnection {
             Ok(IoPage {
                 raw_page,
                 raw_channel: self.raw_channel(),
+                remote_handle: SysHandle::NONE,
             })
         } else {
             Err(moto_rt::E_NOT_READY)
-        }
-    }
-
-    pub async fn alloc_page_async(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
-        use moto_async::AsFuture;
-
-        debug_assert!(!self
-            .raw_channel()
-            .is_client_waiting(WaitType::WaitingToAlloc));
-
-        let mut wait_flag_set = false;
-        loop {
-            match self.alloc_page(subchannel_mask) {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_flag_set {
-                        self.server_handle.as_future().await?;
-                    } else {
-                        self.raw_channel()
-                            .set_client_waiting(WaitType::WaitingToAlloc);
-                        wait_flag_set = true;
-                        // Try one more alloc() before waiting.
-                    }
-                }
-                Err(err) => return Err(err),
-                Ok(page) => {
-                    if wait_flag_set {
-                        self.raw_channel()
-                            .clear_client_waiting(WaitType::WaitingToAlloc);
-                    }
-                    return Ok(page);
-                }
-            }
         }
     }
 
@@ -751,7 +675,11 @@ impl ClientConnection {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
             Err(moto_rt::E_INVALID_ARGUMENT)
         } else {
-            Ok(IoPage::from_u16(page_idx, self.raw_channel()))
+            Ok(IoPage::from_u16(
+                page_idx,
+                self.raw_channel(),
+                SysHandle::NONE,
+            ))
         }
     }
 
@@ -926,90 +854,6 @@ impl ServerConnection {
         Ok(())
     }
 
-    pub async fn recv_async(&mut self) -> Result<Msg, ErrorCode> {
-        use moto_async::AsFuture;
-
-        debug_assert!(!self
-            .raw_channel()
-            .is_server_waiting(WaitType::WaitingToRecv));
-
-        let mut wait_flag_set = false;
-        let mut wait_error = moto_rt::E_OK;
-        loop {
-            match self.recv() {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_error != moto_rt::E_OK {
-                        return Err(wait_error);
-                    }
-                    if wait_flag_set {
-                        if let Err(err) = self.wait_handle.as_future().await {
-                            wait_error = err;
-                            // Do one more recv().
-                        }
-                    } else {
-                        self.raw_channel()
-                            .set_server_waiting(WaitType::WaitingToRecv);
-                        wait_flag_set = true;
-                        // Do one more recv().
-                    }
-                }
-                Err(err) => return Err(err),
-                Ok(msg) => {
-                    if wait_flag_set {
-                        self.raw_channel()
-                            .clear_server_waiting(WaitType::WaitingToRecv);
-                    }
-                    if self
-                        .raw_channel()
-                        .is_client_waiting(WaitType::WaitingToSend)
-                    {
-                        // Ignore errors on recv.
-                        let _ = self.wake_client();
-                    }
-
-                    return Ok(msg);
-                }
-            }
-        }
-    }
-
-    pub async fn send_async(&mut self, msg: Msg) -> Result<(), ErrorCode> {
-        use moto_async::AsFuture;
-
-        debug_assert!(!self
-            .raw_channel()
-            .is_server_waiting(WaitType::WaitingToSend));
-
-        let mut wait_flag_set = false;
-        loop {
-            match self.send(msg) {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_flag_set {
-                        self.wait_handle.as_future().await?;
-                    } else {
-                        self.raw_channel()
-                            .set_server_waiting(WaitType::WaitingToSend);
-                        wait_flag_set = true;
-                    }
-                }
-                Err(err) => return Err(err),
-                Ok(()) => {
-                    if wait_flag_set {
-                        self.raw_channel()
-                            .clear_server_waiting(WaitType::WaitingToSend);
-                    }
-                    if self
-                        .raw_channel()
-                        .is_client_waiting(WaitType::WaitingToRecv)
-                    {
-                        self.wake_client()?;
-                    }
-                    return Ok(());
-                }
-            }
-        }
-    }
-
     pub fn wait_handle(&self) -> SysHandle {
         self.wait_handle
     }
@@ -1065,41 +909,10 @@ impl ServerConnection {
             Ok(IoPage {
                 raw_page,
                 raw_channel: self.raw_channel(),
+                remote_handle: SysHandle::NONE,
             })
         } else {
             Err(moto_rt::E_NOT_READY)
-        }
-    }
-
-    pub async fn alloc_page_async(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
-        use moto_async::AsFuture;
-
-        debug_assert!(!self
-            .raw_channel()
-            .is_server_waiting(WaitType::WaitingToAlloc));
-
-        let mut wait_flag_set = false;
-        loop {
-            match self.alloc_page(subchannel_mask) {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_flag_set {
-                        self.wait_handle.as_future().await?;
-                    } else {
-                        self.raw_channel()
-                            .set_server_waiting(WaitType::WaitingToAlloc);
-                        wait_flag_set = true;
-                        // Try one more alloc() before waiting.
-                    }
-                }
-                Err(err) => return Err(err),
-                Ok(page) => {
-                    if wait_flag_set {
-                        self.raw_channel()
-                            .clear_server_waiting(WaitType::WaitingToAlloc);
-                    }
-                    return Ok(page);
-                }
-            }
         }
     }
 
@@ -1112,7 +925,11 @@ impl ServerConnection {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
             Err(moto_rt::E_INVALID_ARGUMENT)
         } else {
-            Ok(IoPage::from_u16(page_idx, self.raw_channel()))
+            Ok(IoPage::from_u16(
+                page_idx,
+                self.raw_channel(),
+                SysHandle::NONE,
+            ))
         }
     }
 
@@ -1157,7 +974,7 @@ impl Drop for IoChannelImpl {
 
 impl IoChannelImpl {
     #[inline]
-    fn raw_channel(&self) -> &RawChannel {
+    fn raw_channel(&self) -> &'static RawChannel {
         unsafe {
             let ptr = self.raw_channel.load(Ordering::Relaxed);
             ptr.as_ref().unwrap()
@@ -1172,16 +989,16 @@ pub struct Sender {
 
 // Note: having multiple senders in different threads is fishy: not
 // tested and maybe suboptimal (they will have to wait on the same remote handle).
-unsafe impl Sync for Sender {}
+impl !Sync for Sender {}
 
 impl Sender {
     #[inline]
-    fn raw_channel(&self) -> &RawChannel {
+    fn raw_channel(&self) -> &'static RawChannel {
         self.inner.raw_channel()
     }
 
     // See enqueue() in mpmc.cc.
-    pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
+    fn try_send(&self, msg: Msg) -> Result<(), ErrorCode> {
         let raw_channel = self.raw_channel();
 
         let (queue_head, queue) = match self.inner.endpoint_type {
@@ -1220,26 +1037,14 @@ impl Sender {
         Ok(())
     }
 
-    pub async fn send_async(&self, msg: Msg) -> Result<(), ErrorCode> {
+    pub async fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
         use moto_async::AsFuture;
-
-        #[cfg(debug_assertions)]
-        match self.inner.endpoint_type {
-            EndpointType::Client => debug_assert!(!self
-                .raw_channel()
-                .is_client_waiting(WaitType::WaitingToSend)),
-            EndpointType::Server => debug_assert!(!self
-                .raw_channel()
-                .is_server_waiting(WaitType::WaitingToSend)),
-        }
 
         let mut wait_flag_set = false;
         loop {
-            match self.send(msg) {
+            match self.try_send(msg) {
                 Err(moto_rt::E_NOT_READY) => {
-                    if wait_flag_set {
-                        self.inner.remote_handle.as_future().await?;
-                    } else {
+                    if !wait_flag_set {
                         match self.inner.endpoint_type {
                             EndpointType::Client => self
                                 .raw_channel()
@@ -1248,23 +1053,21 @@ impl Sender {
                                 .raw_channel()
                                 .set_server_waiting(WaitType::WaitingToSend),
                         }
+
                         wait_flag_set = true;
-                        // Do one more send() before waiting.
+                        continue; // Need to try send() once more.
                     }
+
+                    self.inner.remote_handle.as_future().await?;
+                    // We clear all wait flags on wakeup. Can we do better?
+                    match self.inner.endpoint_type {
+                        EndpointType::Client => self.raw_channel().clear_client_waiting(),
+                        EndpointType::Server => self.raw_channel().clear_server_waiting(),
+                    }
+                    wait_flag_set = false;
                 }
                 Err(err) => return Err(err),
                 Ok(()) => {
-                    if wait_flag_set {
-                        match self.inner.endpoint_type {
-                            EndpointType::Client => self
-                                .raw_channel()
-                                .clear_client_waiting(WaitType::WaitingToSend),
-
-                            EndpointType::Server => self
-                                .raw_channel()
-                                .clear_server_waiting(WaitType::WaitingToSend),
-                        }
-                    }
                     if match self.inner.endpoint_type {
                         EndpointType::Client => self
                             .raw_channel()
@@ -1280,21 +1083,75 @@ impl Sender {
             }
         }
     }
+
+    fn try_alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+        if let Ok(raw_page) = self
+            .raw_channel()
+            .alloc_page(match self.inner.endpoint_type {
+                EndpointType::Client => SubChannel::Client(subchannel_mask),
+                EndpointType::Server => SubChannel::Server(subchannel_mask),
+            })
+        {
+            Ok(IoPage {
+                raw_page,
+                raw_channel: self.raw_channel(),
+                remote_handle: self.inner.remote_handle,
+            })
+        } else {
+            Err(moto_rt::E_NOT_READY)
+        }
+    }
+
+    pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+        use moto_async::AsFuture;
+
+        let mut wait_flag_set = false;
+        loop {
+            match self.try_alloc_page(subchannel_mask) {
+                Err(moto_rt::E_NOT_READY) => {
+                    if !wait_flag_set {
+                        match self.inner.endpoint_type {
+                            EndpointType::Client => {
+                                self.raw_channel().set_client_page_wait(subchannel_mask)
+                            }
+                            EndpointType::Server => {
+                                self.raw_channel().set_server_page_wait(subchannel_mask)
+                            }
+                        }
+
+                        wait_flag_set = true;
+                        continue; // Try one more alloc() before waiting.
+                    } else {
+                        self.inner.remote_handle.as_future().await?;
+                        // We clear all wait flags on wakeup. Can we do better?
+                        match self.inner.endpoint_type {
+                            EndpointType::Client => self.raw_channel().clear_client_waiting(),
+                            EndpointType::Server => self.raw_channel().clear_server_waiting(),
+                        }
+                        wait_flag_set = false;
+                    }
+                }
+                Err(err) => return Err(err),
+                Ok(page) => return Ok(page),
+            }
+        }
+    }
 }
 
 pub struct Receiver {
     inner: Arc<IoChannelImpl>,
 }
 
-unsafe impl Sync for Receiver {}
+impl !Sync for Receiver {}
 
 impl Receiver {
     #[inline]
-    fn raw_channel(&self) -> &RawChannel {
+    fn raw_channel(&self) -> &'static RawChannel {
         self.inner.raw_channel()
     }
+
     // See dequeue() in mpmc.cc.
-    pub fn recv(&self) -> Result<Msg, ErrorCode> {
+    fn try_recv(&self) -> Result<Msg, ErrorCode> {
         let raw_channel = self.raw_channel();
 
         let mut slot: &MsgSlot;
@@ -1335,33 +1192,18 @@ impl Receiver {
         Ok(msg)
     }
 
-    pub async fn recv_async(&self) -> Result<Msg, ErrorCode> {
+    pub async fn recv(&self) -> Result<Msg, ErrorCode> {
         use moto_async::AsFuture;
-
-        #[cfg(debug_assertions)]
-        match self.inner.endpoint_type {
-            EndpointType::Client => debug_assert!(!self
-                .raw_channel()
-                .is_client_waiting(WaitType::WaitingToRecv)),
-            EndpointType::Server => debug_assert!(!self
-                .raw_channel()
-                .is_server_waiting(WaitType::WaitingToRecv)),
-        }
 
         let mut wait_flag_set = false;
         let mut wait_error = moto_rt::E_OK;
         loop {
-            match self.recv() {
+            match self.try_recv() {
                 Err(moto_rt::E_NOT_READY) => {
                     if wait_error != moto_rt::E_OK {
                         return Err(wait_error);
                     }
-                    if wait_flag_set {
-                        if let Err(err) = self.inner.remote_handle.as_future().await {
-                            wait_error = err;
-                            // Do one more recv() before returning.
-                        }
-                    } else {
+                    if !wait_flag_set {
                         match self.inner.endpoint_type {
                             EndpointType::Client => self
                                 .raw_channel()
@@ -1371,21 +1213,22 @@ impl Receiver {
                                 .set_server_waiting(WaitType::WaitingToRecv),
                         }
                         wait_flag_set = true;
-                        // Do one more recv() before waiting.
+                        continue; // Do one more recv() before waiting.
+                    } else {
+                        if let Err(err) = self.inner.remote_handle.as_future().await {
+                            wait_error = err;
+                            continue; // Do one more recv() before returning.
+                        }
+                        // We clear all wait flags on wakeup. Can we do better?
+                        match self.inner.endpoint_type {
+                            EndpointType::Client => self.raw_channel().clear_client_waiting(),
+                            EndpointType::Server => self.raw_channel().clear_server_waiting(),
+                        }
+                        wait_flag_set = false;
                     }
                 }
                 Err(err) => return Err(err),
                 Ok(msg) => {
-                    if wait_flag_set {
-                        match self.inner.endpoint_type {
-                            EndpointType::Client => self
-                                .raw_channel()
-                                .clear_client_waiting(WaitType::WaitingToRecv),
-                            EndpointType::Server => self
-                                .raw_channel()
-                                .clear_server_waiting(WaitType::WaitingToRecv),
-                        }
-                    }
                     if match self.inner.endpoint_type {
                         EndpointType::Client => self
                             .raw_channel()
@@ -1401,6 +1244,18 @@ impl Receiver {
                     return Ok(msg);
                 }
             }
+        }
+    }
+
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+        if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        } else {
+            Ok(IoPage::from_u16(
+                page_idx,
+                self.raw_channel(),
+                self.inner.remote_handle,
+            ))
         }
     }
 }

@@ -162,6 +162,7 @@ fn spawn_service(caps: u64, cmd: &str) {
         std::process::exit(1);
     };
 
+    log::info!("Starting service '{cmd}' 100.");
     let mut command = std::process::Command::new(&words[0]);
     command.args(&words[1..]);
 
@@ -169,6 +170,7 @@ fn spawn_service(caps: u64, cmd: &str) {
         command.env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, format!("0x{caps:x}"));
     }
 
+    log::info!("Starting service '{cmd}' 200.");
     let _child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
