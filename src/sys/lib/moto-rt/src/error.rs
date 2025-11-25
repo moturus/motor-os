@@ -24,10 +24,9 @@ pub enum Error {
     NotADirectory = 16,
     BadHandle = 17,
     FileTooLarge = 18,
-    BufferFull = 19,
-    NotConnected = 20,
-    StorageFull = 21,
-    InvalidData = 22,
+    NotConnected = 19,
+    StorageFull = 20,
+    InvalidData = 21,
 
     // Keep this value as the last one.
     Max,
@@ -75,7 +74,6 @@ pub const E_INVALID_FILENAME: u16 = Error::InvalidFilename as u16;
 pub const E_NOT_A_DIRECTORY: u16 = Error::NotADirectory as u16;
 pub const E_BAD_HANDLE: u16 = Error::BadHandle as u16;
 pub const E_FILE_TOO_LARGE: u16 = Error::FileTooLarge as u16;
-pub const E_BUFFER_FULL: u16 = Error::BufferFull as u16;
 pub const E_NOT_CONNECTED: u16 = Error::NotConnected as u16;
 pub const E_STORAGE_FULL: u16 = Error::StorageFull as u16;
 pub const E_INVALID_DATA: u16 = Error::InvalidData as u16;
@@ -141,7 +139,11 @@ pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
 
 #[cfg(not(feature = "base"))]
 pub fn ok_or_error(val: ErrorCode) -> Result<(), ErrorCode> {
-    if val == E_OK { Ok(()) } else { Err(val) }
+    if val == E_OK {
+        Ok(())
+    } else {
+        Err(val)
+    }
 }
 
 #[cfg(not(feature = "base"))]
