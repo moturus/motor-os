@@ -27,6 +27,7 @@ pub enum Error {
     BufferFull = 19,
     NotConnected = 20,
     StorageFull = 21,
+    InvalidData = 22,
 
     // Keep this value as the last one.
     Max,
@@ -76,6 +77,8 @@ pub const E_BAD_HANDLE: u16 = Error::BadHandle as u16;
 pub const E_FILE_TOO_LARGE: u16 = Error::FileTooLarge as u16;
 pub const E_BUFFER_FULL: u16 = Error::BufferFull as u16;
 pub const E_NOT_CONNECTED: u16 = Error::NotConnected as u16;
+pub const E_STORAGE_FULL: u16 = Error::StorageFull as u16;
+pub const E_INVALID_DATA: u16 = Error::InvalidData as u16;
 
 pub const E_MAX: u16 = u16::MAX;
 
