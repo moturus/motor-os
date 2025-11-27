@@ -4,6 +4,8 @@
 
 // Syscalls.
 pub mod caps;
+/// structures related to processes
+pub mod process;
 pub mod stats;
 pub mod sys_cpu;
 pub mod sys_mem;

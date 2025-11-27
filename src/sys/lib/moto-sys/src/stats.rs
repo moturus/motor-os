@@ -7,10 +7,6 @@ use crate::ErrorCode;
 #[cfg(feature = "userspace")]
 use crate::SysMem;
 
-pub const PID_SYSTEM: u64 = 0; // Used for aggregate (System) stats.
-pub const PID_KERNEL: u64 = 1;
-pub const PID_SYS_IO: u64 = 2;
-
 pub const MAX_DEBUG_NAME_BYTES: usize = 32;
 
 // Instead of having a version field and mutate the struct,

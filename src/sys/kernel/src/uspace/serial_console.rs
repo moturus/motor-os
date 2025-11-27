@@ -1,7 +1,7 @@
 use super::sysobject::SysObject;
 use alloc::{borrow::ToOwned, sync::Arc};
 use core::sync::atomic::*;
-use moto_sys::ErrorCode;
+use moto_sys::{process::ProcessId, ErrorCode};
 
 struct SerialConsole {
     owner_pid: AtomicU64,
@@ -14,7 +14,7 @@ pub fn init() {
     use alloc::boxed::Box;
 
     CONSOLE.set(Box::leak(Box::new(SerialConsole {
-        owner_pid: AtomicU64::new(super::process::KERNEL_PID.as_u64()),
+        owner_pid: AtomicU64::new(ProcessId::Kernel.into()),
         this_object: SysObject::new(Arc::new("serial_console".to_owned())),
     })));
 }
@@ -22,7 +22,7 @@ pub fn init() {
 pub(super) fn get_for_process(
     process: &super::process::Process,
 ) -> Result<Arc<SysObject>, ErrorCode> {
-    if CONSOLE.owner_pid.load(Ordering::Acquire) != super::process::KERNEL_PID.as_u64() {
+    if CONSOLE.owner_pid.load(Ordering::Acquire) != ProcessId::Kernel.into() {
         // We do not support transferring console ownership for now.
         log::warn!("Console transfer not allowed.");
         return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -34,12 +34,12 @@ pub(super) fn get_for_process(
 
     CONSOLE
         .owner_pid
-        .store(process.pid().as_u64(), Ordering::Relaxed);
+        .store(process.pid().into(), Ordering::Relaxed);
     Ok(CONSOLE.this_object.clone())
 }
 
 pub fn on_irq() {
-    if CONSOLE.owner_pid.load(Ordering::Acquire) == super::process::KERNEL_PID.as_u64() {
+    if CONSOLE.owner_pid.load(Ordering::Acquire) == ProcessId::Kernel.into() {
         crate::raw_log!("\nserial_console interrupt: bye\n");
         crate::arch::kernel_exit();
     }
