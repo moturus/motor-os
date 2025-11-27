@@ -40,8 +40,8 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 use crate::{
-    DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID_INTERNAL, Superblock, Txn,
-    dir_entry, validate_filename,
+    DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID, ROOT_DIR_ID_INTERNAL, Superblock,
+    Txn, dir_entry, validate_filename,
 };
 
 pub const PARTITION_ID: u8 = 0x2e;
@@ -108,6 +108,12 @@ impl FileSystem for MotorFs {
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
 
+        let parent_id = if parent_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            parent_id
+        };
+
         let id: EntryIdInternal = parent_id.into();
         let parent_block = self.block_cache.get_block(id.block_no()).await?.clone();
         assert!(!parent_block.is_dirty());
@@ -162,6 +168,12 @@ impl FileSystem for MotorFs {
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
     ) -> Result<EntryId> {
+        let parent_id = if parent_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            parent_id
+        };
+
         if self.stat(parent_id, filename).await?.is_some() {
             return Err(ErrorKind::AlreadyExists.into());
         }
@@ -184,7 +196,13 @@ impl FileSystem for MotorFs {
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()> {
-        if entry_id == ROOT_DIR_ID_INTERNAL.into() {
+        let new_parent_id = if new_parent_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            new_parent_id
+        };
+
+        if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Err(ErrorKind::InvalidInput.into());
         }
 
@@ -223,6 +241,11 @@ impl FileSystem for MotorFs {
 
     /// Get the first entry in a directory.
     async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+        let parent_id = if parent_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            parent_id
+        };
         let parent_id: EntryIdInternal = parent_id.into();
         let parent_block = self
             .block_cache
@@ -251,7 +274,7 @@ impl FileSystem for MotorFs {
 
     /// Get the next entry in a directory.
     async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
-        if entry_id == ROOT_DIR_ID_INTERNAL.into() {
+        if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Ok(None);
         }
 
@@ -299,7 +322,7 @@ impl FileSystem for MotorFs {
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
         let id: EntryIdInternal = entry_id.into();
-        if id == ROOT_DIR_ID_INTERNAL {
+        if id == ROOT_DIR_ID_INTERNAL || id == async_fs::ROOT_ID.into() {
             return Ok(None);
         }
 
@@ -310,6 +333,11 @@ impl FileSystem for MotorFs {
     }
 
     async fn name(&mut self, entry_id: EntryId) -> Result<String> {
+        let entry_id = if entry_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            entry_id
+        };
         let id: EntryIdInternal = entry_id.into();
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
@@ -318,6 +346,11 @@ impl FileSystem for MotorFs {
     }
 
     async fn metadata(&mut self, entry_id: EntryId) -> Result<async_fs::Metadata> {
+        let entry_id = if entry_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            entry_id
+        };
         let id: EntryIdInternal = entry_id.into();
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;

@@ -93,6 +93,7 @@ async fn basic_test() -> Result<()> {
     );
 
     assert_eq!(first, fs.stat(root, "first").await?.unwrap());
+    assert_eq!(first, fs.stat(async_fs::ROOT_ID, "first").await?.unwrap());
 
     // Check timestamps.
     let root_metadata = fs.metadata(root).await?;

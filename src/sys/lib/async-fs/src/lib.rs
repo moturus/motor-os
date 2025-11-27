@@ -15,6 +15,9 @@ pub use filesystem::*;
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+#[cfg(all(not(feature = "std"), not(feature = "moto-rt")))]
+compile_error!("async-fs must have either 'std' or 'moto-rt' feature.");
+
 pub const BLOCK_SIZE: usize = 4096;
 
 /// A block of bytes.

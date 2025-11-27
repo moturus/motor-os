@@ -4,19 +4,13 @@ use async_trait::async_trait;
 pub type Result<T> = std::io::Result<T>;
 
 #[cfg(not(feature = "std"))]
-#[derive(Debug)]
-#[repr(u16)]
-pub enum FsError {
-    NoError = 0,
-    InvalidData = 1,
-    NotFound = 2,
-}
-
-#[cfg(not(feature = "std"))]
-pub type Result<T> = core::result::Result<T, FsError>;
+pub type Result<T> = core::result::Result<T, moto_rt::Error>;
 
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +24,7 @@ impl TryFrom<u8> for EntryKind {
     type Error = std::io::Error;
 
     #[cfg(not(feature = "std"))]
-    type Error = FsError; // moto_rt::Error.
+    type Error = moto_rt::Error;
 
     fn try_from(value: u8) -> Result<Self> {
         match value {
@@ -46,7 +40,7 @@ impl TryFrom<u8> for EntryKind {
 
                 #[cfg(not(feature = "std"))]
                 {
-                    Err(FsError::InvalidData)
+                    Err(moto_rt::Error::InvalidData)
                 }
             }
         }
@@ -54,6 +48,7 @@ impl TryFrom<u8> for EntryKind {
 }
 
 pub type EntryId = u128;
+pub const ROOT_ID: EntryId = 0;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(4))]
