@@ -306,6 +306,31 @@ fn test_mutex_cancel_safety() {
     println!("----- moto_async::test_mutex_cancel_safety PASS");
 }
 
+pub fn test_oneshot() {
+    let (sender_ping, receiver_ping) = moto_async::oneshot();
+    let (sender_pong, receiver_pong) = moto_async::oneshot();
+
+    let runtime_thread = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let val = receiver_ping.await.unwrap();
+            assert_eq!(val, 42);
+            sender_pong.send(43_u32).unwrap();
+        });
+    });
+
+    std::thread::sleep(Duration::from_millis(10));
+    sender_ping.send(42_u32).unwrap();
+
+    moto_async::LocalRuntime::new().block_on(async move {
+        let val = receiver_pong.await.unwrap();
+        assert_eq!(val, 43);
+    });
+
+    let _ = runtime_thread.join();
+
+    println!("----- moto_async::test_oneshot PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -317,6 +342,7 @@ pub fn run_all_tests() {
     test_wake_exit_race();
     test_mutex();
     test_mutex_cancel_safety();
+    test_oneshot();
 
     println!("moto_async all PASS");
 }

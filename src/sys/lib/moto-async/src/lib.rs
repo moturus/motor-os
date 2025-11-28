@@ -27,9 +27,11 @@
 
 mod local_runtime;
 mod mutex;
+pub mod oneshot;
 mod time;
 mod timeq;
 
 pub use local_runtime::*;
 pub use mutex::{LocalMutex, LocalMutexGuard};
+pub use oneshot::oneshot;
 pub use time::{Instant, Sleep, sleep};

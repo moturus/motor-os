@@ -917,7 +917,7 @@ version = "1.0.4"
 source = "git+https://github.com/moturus/mio.git?branch=mio-motor-v1.0.4_2025-10-07#3a5acfa0c04d9ddf889891566a8088819e3578af"
 dependencies = [
  "libc",
- "moto-rt 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt 0.15.0",
  "wasi",
  "windows-sys 0.60.2",
 ]
@@ -928,7 +928,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
- "moto-rt 0.15.0",
+ "moto-rt 0.15.2",
  "moto-sys",
 ]
 
@@ -937,7 +937,7 @@ name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
  "moto-async",
- "moto-rt 0.15.0",
+ "moto-rt 0.15.2",
  "moto-sys",
 ]
 
@@ -947,13 +947,9 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
- "moto-rt 0.15.0",
+ "moto-rt 0.15.2",
  "moto-sys",
 ]
-
-[[package]]
-name = "moto-rt"
-version = "0.15.0"
 
 [[package]]
 name = "moto-rt"
@@ -962,10 +958,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "058a2807a30527bee4c30df7ababe971cdde94372d4dbd1ff145bb403381436c"
 
 [[package]]
+name = "moto-rt"
+version = "0.15.2"
+
+[[package]]
 name = "moto-sys"
 version = "0.2.4"
 dependencies = [
- "moto-rt 0.15.0",
+ "moto-rt 0.15.2",
 ]
 
 [[package]]
@@ -1458,7 +1458,7 @@ dependencies = [
  "hex",
  "log",
  "moto-log",
- "moto-rt 0.15.0",
+ "moto-rt 0.15.2",
  "moto-sys",
  "rand_core",
  "russh",
@@ -1729,7 +1729,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "moto-rt 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moto-rt 0.15.0",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

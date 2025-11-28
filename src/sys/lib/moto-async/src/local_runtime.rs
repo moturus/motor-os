@@ -287,7 +287,6 @@ impl LocalRuntimeInner {
         let sys_waiters = self.sys_waiters.borrow();
         if sys_waiters.is_empty() {
             core::mem::drop(sys_waiters);
-            log::info!("empty wait");
             let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
             return;
         }
@@ -440,6 +439,7 @@ impl LocalRuntime {
 
         loop {
             inner.enqueue_expired_timers();
+            inner.merge_incoming();
             if !inner.runqueue.borrow().is_empty() {
                 return;
             }
