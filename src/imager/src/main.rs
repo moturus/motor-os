@@ -10,6 +10,7 @@
 //     - sys-io: FS, NET drivers in the userspace
 // 3 - data: filesystem accessible to the userspace
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
@@ -18,31 +19,12 @@ use std::{collections::BTreeMap, fs, path::Path};
 use mbrman::BOOT_ACTIVE;
 use std::io::{self, Seek, SeekFrom};
 
+use crate::config::ImagerConfig;
+
 mod util;
+mod config;
 
 const SECTOR_SIZE: u32 = 512;
-
-// For the "full" image.
-static BIN_FULL: [&str; 15] = [
-    "/bin/httpd",
-    "/bin/httpd-axum",
-    "/bin/russhd",
-    "/bin/kibim",
-    "/bin/rush",
-    "/sys/mdbg",
-    "/sys/sys-init",
-    "/sys/sys-log",
-    "/sys/sys-tty",
-    "/sys/sysbox",
-    "/sys/tests/rnetbench",
-    "/sys/tests/systest",
-    "/sys/tests/mio-test",
-    "/sys/tests/tokio-tests",
-    "/sys/tests/crossbench",
-];
-
-// For the "web" image.
-static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
 
 fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
     const MB: usize = 1024 * 1024;
@@ -377,7 +359,7 @@ fn print_usage_and_exit() -> ! {
     eprintln!(
         "
 Motor OS image builder usage:
-    imager $MOTORH debug|release
+    imager $MOTORH debug|release <optional: config_path 0> <optional: config_path 1> ... <optional: config_path n>
 "
     );
     std::process::exit(1);
@@ -402,131 +384,147 @@ fn clear_dir_or_exit(dir: &PathBuf) {
     }
 }
 
-fn main() {
-    env_logger::init();
+fn create_image(
+    bin_dir: &PathBuf,
+    motorh: &PathBuf,
+    tmp_img_dir: &PathBuf,
+    img_dir: &PathBuf,
+    initrd: &PathBuf,
+    part3_fs: Option<&str>,
+    binaries: &Vec<String>,
+    img_files: &String,
+    fs_partition_name: &str,
+    result_name: &str,
+    conf: &ImagerConfig,
+) {
+    // Prepare the filesystem.
+    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
+    // Add compiled programs to the data partition.
+    for prog in binaries {
+        let filename = Path::new(prog).file_name().unwrap();
+        files.insert(bin_dir.join(filename), (*prog).to_owned());
+    }
+
+    // Add static files to the data partition.
+    add_static_dir(
+        &mut files,
+        motorh.join(conf.static_files_dir()).join(img_files),
+        Path::new("/"),
+    );
+
+    let fs_partition = tmp_img_dir.join(fs_partition_name);
+    match part3_fs {
+        Some("flatfs") => create_flatfs_partition(&fs_partition, &files),
+        Some("srfs") => create_srfs_partition(&fs_partition, &files),
+        Some("motor-fs") => create_motorfs_partition(&fs_partition, &files),
+        Some(fs) => panic!("unknown filesystem '{fs}'"),
+        None => panic!("no filesystem specified for partition 3"),
+    }
+    create_mbr_disk(
+        &bin_dir.join("mbr.bin"),
+        &bin_dir.join("boot.bin"),
+        &initrd,
+        &fs_partition,
+        part3_fs,
+        &img_dir.join(result_name),
+    );
+}
+
+fn parse_args() -> (PathBuf, PathBuf, String, Vec<ImagerConfig>) {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
+
+    if args.len() < 3 {
         print_usage_and_exit();
+    }
+    let motorh = Path::new(args[1].as_str());
+    if !motorh.is_dir() {
+        eprintln!("'{}': not a directory.\n", args[1].as_str());
+        print_usage_and_exit()
     }
     let deb_rel = match args[2].as_str() {
         "debug" => "debug",
         "release" => "release",
         _ => print_usage_and_exit(),
     };
-
-    let motorh = Path::new(args[1].as_str());
-    if !motorh.is_dir() {
-        eprintln!("'{}': not a directory.\n", args[1].as_str());
-        print_usage_and_exit()
-    }
-
     let bin_dir = motorh.join("build").join("bin").join(deb_rel);
     if !bin_dir.is_dir() {
         eprintln!("'{bin_dir:?}': not a directory.\n");
         print_usage_and_exit()
     }
+    let configs: Vec::<ImagerConfig> = if args.len() >= 4 {
+        let paths = args[3..].to_vec();
+        paths.iter().map(|p: &String| {
+            let config_path = Path::new(p.as_str());
+            match ImagerConfig::load(&config_path.to_path_buf()) {
+                Some(conf) => conf,
+                None => {
+                    eprintln!("Failed to load config from '{config_path:?}'");
+                    print_usage_and_exit()
+                }
+            }
+        }).collect()
+    } else {
+        vec![ImagerConfig::default()]
+    };
 
-    // $MOTORH/vm_images/debug|release
-    let img_dir = motorh.join("vm_images").join(deb_rel);
-    clear_dir_or_exit(&img_dir);
+    (motorh.to_path_buf(), bin_dir.to_path_buf(), deb_rel.to_owned(), configs)
+}
 
-    let tmp_img_dir = motorh.join("build").join("vm_images").join(deb_rel);
-    clear_dir_or_exit(&tmp_img_dir);
+fn main() {
+    env_logger::init();
 
-    let initrd = img_dir.join("initrd");
-    create_initrd(
-        &initrd,
-        &bin_dir.join("kloader.bin"),
-        &bin_dir.join("kernel"),
-        &bin_dir.join("sys-io"),
-    );
+    let (motorh, bin_dir, deb_rel, confs) = parse_args();
 
-    std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
+    let unique_img_dirs = confs
+        .iter()
+        .map(|c| c.img_out_dir().clone())
+        .collect::<HashSet<_>>();
 
-    // ////////////////////////////////////////////////// The full image.
-    // Prepare the filesystem.
-    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
+    // cleanup $MOTORH/vm_images/debug|release
+    // and allow any paths in configs
+    for img_out_dir in unique_img_dirs {
+        let img_dir = motorh.join(&img_out_dir).join(&deb_rel);
+        clear_dir_or_exit(&img_dir);
 
-    // Add compiled programs to the data partition.
-    for prog in BIN_FULL {
-        let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).to_owned());
+        let tmp_img_dir = motorh.join("build").join(&img_out_dir).join(&deb_rel);
+        clear_dir_or_exit(&tmp_img_dir);
+    }
+    
+    for conf in &confs {
+        let img_out_dir = conf.img_out_dir();
+        let tmp_img_dir = motorh.join("build").join(&img_out_dir).join(&deb_rel);
+        let img_dir = motorh.join(&img_out_dir).join(&deb_rel);
+
+        let initrd = img_dir.join("initrd");
+        if !std::fs::exists(&initrd).expect("Failed to check initrd existence") {        
+            create_initrd(
+                &initrd,
+                &bin_dir.join("kloader.bin"),
+                &bin_dir.join("kernel"),
+                &bin_dir.join("sys-io"),
+            );
+        }
+        if !std::fs::exists(img_dir.join("kloader")).expect("Failed to check kloader existence") {    
+            std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
+        }
+
+        let image_conf = conf.image();
+
+        create_image(
+            &bin_dir,
+            &motorh,
+            &tmp_img_dir,
+            &img_dir,
+            &initrd,
+            Some(&image_conf.fs_type),
+            &image_conf.binaries,
+            &image_conf.img_files,
+            &image_conf.fs_partition_name,
+            &image_conf.filename,
+            &conf,
+        );
+        println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
     }
 
-    // Add static files to the data partition.
-    add_static_dir(
-        &mut files,
-        motorh.join("img_files").join("full"),
-        Path::new("/"),
-    );
-
-    let fs_partition = tmp_img_dir.join("fs_part.full");
-    create_srfs_partition(&fs_partition, &files);
-    create_mbr_disk(
-        &bin_dir.join("mbr.bin"),
-        &bin_dir.join("boot.bin"),
-        &initrd,
-        &fs_partition,
-        Some("srfs"),
-        &img_dir.join("motor.full.img"),
-    );
-
-    // ////////////////////////////////////////////////// The "web" image.
-    // Prepare the filesystem.
-    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
-
-    // Add compiled programs to the data partition.
-    for prog in BIN_WEB {
-        let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).to_owned());
-    }
-
-    // Add static files to the data partition.
-    add_static_dir(
-        &mut files,
-        motorh.join("img_files").join("web"),
-        Path::new("/"),
-    );
-
-    let fs_partition = tmp_img_dir.join("fs_part.web");
-    create_flatfs_partition(&fs_partition, &files);
-    create_mbr_disk(
-        &bin_dir.join("mbr.bin"),
-        &bin_dir.join("boot.bin"),
-        &initrd,
-        &fs_partition,
-        Some("flatfs"),
-        &img_dir.join("motor.web.img"),
-    );
-
-    // ////////////////////////////////////////////////// The "full" image with Motor FS.
-    // Prepare the filesystem.
-    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
-
-    // Add compiled programs to the data partition.
-    for prog in BIN_FULL {
-        let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).to_owned());
-    }
-
-    // Add static files to the data partition.
-    add_static_dir(
-        &mut files,
-        motorh.join("img_files").join("full"),
-        Path::new("/"),
-    );
-
-    let fs_partition = tmp_img_dir.join("fs_part.web.motor-fs");
-    create_motorfs_partition(&fs_partition, &files);
-    create_mbr_disk(
-        &bin_dir.join("mbr.bin"),
-        &bin_dir.join("boot.bin"),
-        &initrd,
-        &fs_partition,
-        Some("motor-fs"),
-        &img_dir.join("motor-fs.img"),
-    );
-
-    println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
 }
