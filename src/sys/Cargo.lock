@@ -814,6 +814,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
+ "moto-mpmc",
  "moto-rt",
  "moto-sys",
 ]

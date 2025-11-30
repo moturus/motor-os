@@ -331,6 +331,144 @@ pub fn test_oneshot() {
     println!("----- moto_async::test_oneshot PASS");
 }
 
+fn test_channel_basic() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let (tx, mut rx) = moto_async::channel::<usize>(2);
+
+        assert!(tx.send(1).await.is_ok());
+        assert!(tx.send(2).await.is_ok());
+
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(rx.recv().await, Some(2));
+
+        moto_async::LocalRuntime::spawn(async move {
+            tx.send(99).await.unwrap();
+        });
+
+        assert_eq!(rx.recv().await, Some(99));
+    });
+
+    println!("----- moto_async::test_channel_basic PASS");
+}
+
+const SENDERS: u32 = 2;
+#[cfg(debug_assertions)]
+const ITERS: u32 = 10_000;
+#[cfg(not(debug_assertions))]
+const ITERS: u32 = 100_000;
+const CHANNEL_CAPACITY: usize = 32;
+
+fn test_moto_channel_multithreaded() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let (tx, mut rx) = moto_async::channel::<u32>(CHANNEL_CAPACITY);
+
+        let start = std::time::Instant::now();
+        // Spawn sender threads.
+        for sender in 0..SENDERS {
+            let tx_clone = tx.clone();
+            std::thread::spawn(move || {
+                moto_async::LocalRuntime::new().block_on(async move {
+                    for iter in 0..ITERS {
+                        tx_clone
+                            .send(sender * ITERS + iter)
+                            .await
+                            .expect("Send failed.");
+                    }
+                });
+            });
+        }
+
+        // Drop tx so the receiver knows when to stop.
+        drop(tx);
+
+        let mut received_count = 0;
+
+        // The receiver Loop.
+        while let Some(_val) = rx.recv().await {
+            received_count += 1;
+        }
+
+        let elapsed = start.elapsed();
+        let cpu_usage = crate::mpmc::get_cpu_usage();
+
+        assert_eq!(
+            received_count,
+            SENDERS * ITERS,
+            "Did not receive all messages"
+        );
+
+        println!(
+            "      Moto channel: {SENDERS}x{ITERS} messages in {elapsed:.2?}: {:.2} msg/usec.",
+            ((SENDERS * ITERS) as f64) / (elapsed.as_nanos() as f64 * 0.001)
+        );
+
+        print!("\tcpu usage: ");
+        for n in &cpu_usage {
+            print!("{: >5.1}% ", (*n) * 100.0);
+        }
+        println!();
+    });
+
+    println!("----- moto_async::test_moto_channel_multithreaded PASS");
+}
+
+fn test_futures_channel_multithreaded() {
+    futures::executor::block_on(async move {
+        use futures::sink::SinkExt;
+        use futures::stream::StreamExt;
+
+        let (tx, mut rx) = futures::channel::mpsc::channel::<u32>(CHANNEL_CAPACITY);
+
+        let start = std::time::Instant::now();
+        // Spawn sender threads.
+        for sender in 0..SENDERS {
+            let mut tx_clone = tx.clone();
+            std::thread::spawn(move || {
+                futures::executor::block_on(async move {
+                    for iter in 0..ITERS {
+                        tx_clone
+                            .send(sender * ITERS + iter)
+                            .await
+                            .expect("Send failed.");
+                    }
+                });
+            });
+        }
+
+        // Drop tx so the receiver knows when to stop.
+        drop(tx);
+
+        let mut received_count = 0;
+
+        // The receiver Loop.
+        while let Some(_val) = rx.next().await {
+            received_count += 1;
+        }
+
+        let elapsed = start.elapsed();
+        let cpu_usage = crate::mpmc::get_cpu_usage();
+
+        assert_eq!(
+            received_count,
+            SENDERS * ITERS,
+            "Did not receive all messages"
+        );
+
+        println!(
+            "      Futures channel: {SENDERS}x{ITERS} messages in {elapsed:.2?}: {:.2} msg/usec.",
+            ((SENDERS * ITERS) as f64) / (elapsed.as_nanos() as f64 * 0.001)
+        );
+
+        print!("\tcpu usage: ");
+        for n in &cpu_usage {
+            print!("{: >5.1}% ", (*n) * 100.0);
+        }
+        println!();
+    });
+
+    println!("----- moto_async::test_futures_channel_multithreaded PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -343,6 +481,9 @@ pub fn run_all_tests() {
     test_mutex();
     test_mutex_cancel_safety();
     test_oneshot();
+    test_channel_basic();
+    test_moto_channel_multithreaded();
+    test_futures_channel_multithreaded();
 
     println!("moto_async all PASS");
 }

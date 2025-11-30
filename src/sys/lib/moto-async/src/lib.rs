@@ -25,12 +25,14 @@
 #![feature(likely_unlikely)]
 #![feature(local_waker)]
 
+pub mod channel;
 mod local_runtime;
 mod mutex;
 pub mod oneshot;
 mod time;
 mod timeq;
 
+pub use channel::channel;
 pub use local_runtime::*;
 pub use mutex::{LocalMutex, LocalMutexGuard};
 pub use oneshot::oneshot;

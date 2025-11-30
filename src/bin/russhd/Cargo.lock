@@ -345,6 +345,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -928,6 +934,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "log",
+ "moto-mpmc",
  "moto-rt 0.15.2",
  "moto-sys",
 ]
@@ -947,6 +954,15 @@ version = "0.1.0"
 dependencies = [
  "log",
  "moto-ipc",
+ "moto-rt 0.15.2",
+ "moto-sys",
+]
+
+[[package]]
+name = "moto-mpmc"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-utils",
  "moto-rt 0.15.2",
  "moto-sys",
 ]

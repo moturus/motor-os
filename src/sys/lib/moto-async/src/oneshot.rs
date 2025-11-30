@@ -1,4 +1,6 @@
-//! Async one-shot channel. Created with input from Gemini 3.
+//! Async one-shot channel.
+//!
+//! Created with input from Gemini 3.
 extern crate alloc;
 
 use alloc::sync::Arc;

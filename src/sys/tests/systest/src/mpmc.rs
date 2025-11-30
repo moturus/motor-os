@@ -36,7 +36,7 @@ fn recv_t(receiver: Receiver<Msg>) {
 }
 
 pub fn test_mpmc() {
-    use crossbeam_channel::bounded;
+    use moto_mpmc::bounded;
     use std::thread;
 
     let (s1, r1) = bounded(64);
@@ -75,7 +75,7 @@ pub fn test_mpmc() {
     let cpu_usage = get_cpu_usage();
 
     println!(
-        "test_mpmc: {:.3} MIOPS",
+        "test_mpmc (moto-mpmc): {:.3} MIOPS",
         ((ITERS * 3) as f64) / elapsed.as_secs_f64() / (1000.0 * 1000.0)
     );
     print!("\tcpu usage: ");
@@ -88,7 +88,7 @@ pub fn test_mpmc() {
 pub fn test_array_queue() {
     use crossbeam::queue::ArrayQueue;
 
-    let queue = std::sync::Arc::new(ArrayQueue::<Msg>::new(128));
+    let queue = std::sync::Arc::new(ArrayQueue::<Msg>::new(32));
     let queue_2 = queue.clone();
     let queue_3 = queue.clone();
 
@@ -151,7 +151,7 @@ pub fn test_array_queue() {
     let cpu_usage = get_cpu_usage();
 
     println!(
-        "test_array_queue: {:.3} MIOPS",
+        "test_array_queue (crossbeam): {:.3} MIOPS",
         ((2 * ITERS) as f64) / elapsed.as_secs_f64() / (1000.0 * 1000.0)
     );
     print!("\tcpu usage: ");
@@ -161,7 +161,7 @@ pub fn test_array_queue() {
     println!();
 }
 
-fn get_cpu_usage() -> Vec<f32> {
+pub fn get_cpu_usage() -> Vec<f32> {
     let num_cpus = moto_sys::KernelStaticPage::get().num_cpus;
     let mut cpu_usage = vec![0.0; num_cpus as usize];
 

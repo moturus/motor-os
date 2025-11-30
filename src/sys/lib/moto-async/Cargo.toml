@@ -6,8 +6,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moto-rt  = { path = "../moto-rt"  }
-moto-sys = { path = "../moto-sys" }
+moto-mpmc = { path = "../moto-mpmc" }
+moto-rt   = { path = "../moto-rt"   }
+moto-sys  = { path = "../moto-sys"  }
 
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4.28"
