@@ -353,7 +353,7 @@ fn test_channel_basic() {
 
 const SENDERS: u32 = 2;
 #[cfg(debug_assertions)]
-const ITERS: u32 = 10_000;
+const ITERS: u32 = 100_000;
 #[cfg(not(debug_assertions))]
 const ITERS: u32 = 100_000;
 const CHANNEL_CAPACITY: usize = 32;
