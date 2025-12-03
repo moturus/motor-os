@@ -21,7 +21,7 @@ pub extern "C" fn abs_ticks_to_nanos(ticks: u64, out_hi_ptr: *mut u64, out_lo_pt
     fence(Ordering::Acquire);
 
     let page = KernelStaticPage::get();
-    let mut time = ticks - page.tsc_ts;
+    let mut time = ticks.saturating_sub(page.tsc_ts);
     let tsc_shift = page.tsc_shift;
     if tsc_shift >= 0 {
         time <<= tsc_shift;
