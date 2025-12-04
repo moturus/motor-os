@@ -14,4 +14,6 @@ srfs     = { path = "../sys/lib/srfs"    }
 env_logger = "0.11"
 camino     = "1.1.10"
 mbrman     = "0.5.2"
+serde      = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
 tokio      = { version = "1.44.2", default-features = false, features = ["rt"] }

@@ -1,0 +1,8 @@
+input_files:
+  - "/bin/httpd-axum"
+  - "/sys/sys-init"
+  - "/sys/sys-tty"
+static_dirs:
+  - "img_files/web"
+filesystem: "flatfs"
+data_partition_size_mb: 0 # FlatFS does not use a data partition size in the same way

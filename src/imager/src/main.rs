@@ -10,6 +10,7 @@
 //     - sys-io: FS, NET drivers in the userspace
 // 3 - data: filesystem accessible to the userspace
 
+use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
@@ -22,38 +23,22 @@ mod util;
 
 const SECTOR_SIZE: u32 = 512;
 
-// For the "full" image.
-static BIN_FULL: [&str; 15] = [
-    "/bin/httpd",
-    "/bin/httpd-axum",
-    "/bin/russhd",
-    "/bin/kibim",
-    "/bin/rush",
-    "/sys/mdbg",
-    "/sys/sys-init",
-    "/sys/sys-log",
-    "/sys/sys-tty",
-    "/sys/sysbox",
-    "/sys/tests/rnetbench",
-    "/sys/tests/systest",
-    "/sys/tests/mio-test",
-    "/sys/tests/tokio-tests",
-    "/sys/tests/crossbench",
-];
+#[derive(Debug, Deserialize)]
+struct Config {
+    input_files: Vec<String>,
+    static_dirs: Vec<String>,
+    filesystem: String,
+    data_partition_size_mb: u64,
+}
 
-// For the "web" image.
-static BIN_WEB: [&str; 3] = ["/bin/httpd-axum", "/sys/sys-init", "/sys/sys-tty"];
-
-fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
-    const MB: usize = 1024 * 1024;
-    const DATA_PARTITION_SZ: usize = 64 * MB;
-
-    // println!("creating SRFS in {:?}", result_path);
-    srfs::FileSystem::create_volume(
-        result_path,
-        (DATA_PARTITION_SZ as u64) / srfs::BLOCK_SIZE as u64,
-    )
-    .unwrap();
+fn create_srfs_partition(
+    result_path: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    data_partition_size_mb: u64,
+) {
+    let data_partition_size = data_partition_size_mb * 1024 * 1024;
+    srfs::FileSystem::create_volume(result_path, data_partition_size / srfs::BLOCK_SIZE as u64)
+        .unwrap();
 
     let mut filesystem = srfs::FileSystem::open_volume(result_path).unwrap();
 
@@ -67,7 +52,6 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
 
         let mut new_file = filesystem.create_file(dst.as_str().into()).unwrap();
 
-        // println!("copying {:?} into {:?}", src, result_path);
         let source_file = File::open(src).unwrap();
         let mut buf_reader = BufReader::new(source_file);
 
@@ -83,15 +67,18 @@ fn create_srfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) 
     }
 }
 
-async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+async fn create_motorfs_partition_async(
+    result_path: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    data_partition_size_mb: u64,
+) {
     use async_fs::FileSystem;
 
-    const MB: u64 = 1024 * 1024;
-    const DATA_PARTITION_SZ: u64 = 64 * MB;
+    let data_partition_size = data_partition_size_mb * 1024 * 1024;
 
     let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(
         result_path.to_str().unwrap().into(),
-        DATA_PARTITION_SZ / 4096 as u64,
+        data_partition_size / 4096,
     )
     .await
     .unwrap();
@@ -132,12 +119,20 @@ async fn create_motorfs_partition_async(result_path: &Path, files: &BTreeMap<Pat
     }
 }
 
-fn create_motorfs_partition(result_path: &Path, files: &BTreeMap<PathBuf, String>) {
+fn create_motorfs_partition(
+    result_path: &Path,
+    files: &BTreeMap<PathBuf, String>,
+    data_partition_size_mb: u64,
+) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
 
-    rt.block_on(create_motorfs_partition_async(result_path, files));
+    rt.block_on(create_motorfs_partition_async(
+        result_path,
+        files,
+        data_partition_size_mb,
+    ));
 }
 
 fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
@@ -160,8 +155,6 @@ fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
         .unwrap();
     o_file.write_all(&o_bytes).unwrap();
     o_file.flush().unwrap();
-
-    // println!("{:?} created (flatfs)", result);
 }
 
 #[repr(C)]
@@ -208,20 +201,11 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
     // Align kernel at 512 bytes.
     header.kernel_start = (header.kloader_end + 511) & !511;
     header.kernel_end = header.kernel_start + f_kernel.metadata().unwrap().len() as u32;
-    /*
-    println!(
-        "kernel start: {} end: {} size: {}",
-        header.kernel_start,
-        header.kernel_end,
-        header.kernel_end - header.kernel_start
-    );
-    */
 
     // Align sys-io at 4K.
     header.sys_io_start = (header.kernel_end + 4095) & !4095;
     header.sys_io_end = header.sys_io_start + f_sys_io.metadata().unwrap().len() as u32;
 
-    // println!("header: {:#?}", header);
     // Write the header.
     let header_bytes =
         unsafe { core::slice::from_raw_parts(initrd_header.as_ptr() as *const u8, 512) };
@@ -231,8 +215,6 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
         header.kloader_start,
         initrd.stream_position().unwrap() as u32
     );
-
-    // println!("INITRD: {:x?}", header);
 
     // Write kloader.
     io::copy(&mut f_kloader, &mut initrd).unwrap();
@@ -311,7 +293,6 @@ fn write_partition(mbr: &mbrman::MBR, idx: usize, partition: &Path, disk: &mut F
     for _ in 0..tail {
         assert_eq!(1, disk.write(&[0]).unwrap());
     }
-    // println!("written {written} bytes from {:?}", partition);
 }
 
 fn create_mbr_disk(
@@ -322,7 +303,6 @@ fn create_mbr_disk(
     part3_fs: Option<&str>,
     result: &Path,
 ) {
-    // println!("creating {:?}", result);
     let mut boot_sector = File::open(mbr).unwrap();
     let mut mbr = mbrman::MBR::read_from(&mut boot_sector, SECTOR_SIZE).unwrap();
 
@@ -350,8 +330,6 @@ fn create_mbr_disk(
     write_partition(&mbr, 1, part1, &mut disk);
     write_partition(&mbr, 2, part2, &mut disk);
     write_partition(&mbr, 3, part3, &mut disk);
-
-    // println!("{:?} created", result);
 }
 
 fn add_static_dir(files: &mut BTreeMap<PathBuf, String>, dir_to_add: PathBuf, dest_path: &Path) {
@@ -377,7 +355,7 @@ fn print_usage_and_exit() -> ! {
     eprintln!(
         "
 Motor OS image builder usage:
-    imager $MOTORH debug|release
+    imager $MOTORH debug|release <config.yaml>
 "
     );
     std::process::exit(1);
@@ -406,14 +384,9 @@ fn main() {
     env_logger::init();
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
+    if args.len() != 4 {
         print_usage_and_exit();
     }
-    let deb_rel = match args[2].as_str() {
-        "debug" => "debug",
-        "release" => "release",
-        _ => print_usage_and_exit(),
-    };
 
     let motorh = Path::new(args[1].as_str());
     if !motorh.is_dir() {
@@ -421,15 +394,23 @@ fn main() {
         print_usage_and_exit()
     }
 
+    let deb_rel = match args[2].as_str() {
+        "debug" => "debug",
+        "release" => "release",
+        _ => print_usage_and_exit(),
+    };
+
+    let config_path = Path::new(args[3].as_str());
+    let config_file = File::open(config_path).expect("Failed to open config file");
+    let config: Config = serde_yaml::from_reader(config_file).expect("Failed to parse config file");
+
     let bin_dir = motorh.join("build").join("bin").join(deb_rel);
     if !bin_dir.is_dir() {
         eprintln!("'{bin_dir:?}': not a directory.\n");
         print_usage_and_exit()
     }
 
-    // $MOTORH/vm_images/debug|release
     let img_dir = motorh.join("vm_images").join(deb_rel);
-    clear_dir_or_exit(&img_dir);
 
     let tmp_img_dir = motorh.join("build").join("vm_images").join(deb_rel);
     clear_dir_or_exit(&tmp_img_dir);
@@ -442,90 +423,40 @@ fn main() {
         &bin_dir.join("sys-io"),
     );
 
-    std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
-
-    // ////////////////////////////////////////////////// The full image.
-    // Prepare the filesystem.
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
-    // Add compiled programs to the data partition.
-    for prog in BIN_FULL {
+    for prog in &config.input_files {
         let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).to_owned());
+        files.insert(bin_dir.join(filename), (*prog).clone());
     }
 
-    // Add static files to the data partition.
-    add_static_dir(
-        &mut files,
-        motorh.join("img_files").join("full"),
-        Path::new("/"),
-    );
+    for dir in &config.static_dirs {
+        add_static_dir(&mut files, motorh.join(dir), Path::new("/"));
+    }
 
-    let fs_partition = tmp_img_dir.join("fs_part.full");
-    create_srfs_partition(&fs_partition, &files);
+    let fs_partition = tmp_img_dir.join("fs_part");
+    match config.filesystem.as_str() {
+        "srfs" => create_srfs_partition(&fs_partition, &files, config.data_partition_size_mb),
+        "motor-fs" => {
+            create_motorfs_partition(&fs_partition, &files, config.data_partition_size_mb)
+        }
+        "flatfs" => create_flatfs_partition(&fs_partition, &files),
+        _ => panic!("Unknown filesystem: {}", config.filesystem),
+    }
+
     create_mbr_disk(
         &bin_dir.join("mbr.bin"),
         &bin_dir.join("boot.bin"),
         &initrd,
         &fs_partition,
-        Some("srfs"),
-        &img_dir.join("motor.full.img"),
-    );
-
-    // ////////////////////////////////////////////////// The "web" image.
-    // Prepare the filesystem.
-    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
-
-    // Add compiled programs to the data partition.
-    for prog in BIN_WEB {
-        let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).to_owned());
-    }
-
-    // Add static files to the data partition.
-    add_static_dir(
-        &mut files,
-        motorh.join("img_files").join("web"),
-        Path::new("/"),
-    );
-
-    let fs_partition = tmp_img_dir.join("fs_part.web");
-    create_flatfs_partition(&fs_partition, &files);
-    create_mbr_disk(
-        &bin_dir.join("mbr.bin"),
-        &bin_dir.join("boot.bin"),
-        &initrd,
-        &fs_partition,
-        Some("flatfs"),
-        &img_dir.join("motor.web.img"),
-    );
-
-    // ////////////////////////////////////////////////// The "full" image with Motor FS.
-    // Prepare the filesystem.
-    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
-
-    // Add compiled programs to the data partition.
-    for prog in BIN_FULL {
-        let filename = Path::new(prog).file_name().unwrap();
-        files.insert(bin_dir.join(filename), (*prog).to_owned());
-    }
-
-    // Add static files to the data partition.
-    add_static_dir(
-        &mut files,
-        motorh.join("img_files").join("full"),
-        Path::new("/"),
-    );
-
-    let fs_partition = tmp_img_dir.join("fs_part.web.motor-fs");
-    create_motorfs_partition(&fs_partition, &files);
-    create_mbr_disk(
-        &bin_dir.join("mbr.bin"),
-        &bin_dir.join("boot.bin"),
-        &initrd,
-        &fs_partition,
-        Some("motor-fs"),
-        &img_dir.join("motor-fs.img"),
+        Some(&config.filesystem),
+        &img_dir.join(
+            format!(
+                "motor.{}.img",
+                config_path.file_stem().unwrap().to_str().unwrap()
+            )
+            .as_str(),
+        ),
     );
 
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");

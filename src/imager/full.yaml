@@ -1,0 +1,20 @@
+input_files:
+  - "/bin/httpd"
+  - "/bin/httpd-axum"
+  - "/bin/russhd"
+  - "/bin/kibim"
+  - "/bin/rush"
+  - "/sys/mdbg"
+  - "/sys/sys-init"
+  - "/sys/sys-log"
+  - "/sys/sys-tty"
+  - "/sys/sysbox"
+  - "/sys/tests/rnetbench"
+  - "/sys/tests/systest"
+  - "/sys/tests/mio-test"
+  - "/sys/tests/tokio-tests"
+  - "/sys/tests/crossbench"
+static_dirs:
+  - "img_files/full"
+filesystem: "srfs"
+data_partition_size_mb: 64
