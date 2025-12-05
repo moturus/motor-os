@@ -16,7 +16,7 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::Ordering::{AcqRel, Release};
+use core::sync::atomic::Ordering::{AcqRel, Relaxed, Release};
 
 #[derive(Default)]
 pub struct SpinLock<T> {
@@ -42,9 +42,18 @@ impl<T> SpinLock<T> {
 
     #[inline]
     pub fn lock(&self) -> Guard<'_, T> {
-        while self.locked.swap(true, AcqRel) {
-            core::hint::spin_loop();
+        loop {
+            // Try to acquire the lock.
+            if !self.locked.swap(true, AcqRel) {
+                break; // Acquired the lock
+            }
+
+            // Spin while the lock is already locked.
+            while self.locked.load(Relaxed) {
+                core::hint::spin_loop();
+            }
         }
+
         Guard { lock: self }
     }
 }
