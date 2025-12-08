@@ -43,12 +43,18 @@ async fn main() {
         std::thread::spawn(input_listener);
 
         env_logger::builder()
-            .filter_level(log::LevelFilter::Info)
-            // .filter_level(log::LevelFilter::Debug)
+            // .filter_level(log::LevelFilter::Info)
+            .filter_level(log::LevelFilter::Debug)
             .init();
     } else {
         moto_log::init("russhd").unwrap();
     }
+
+    #[cfg(not(target_os = "motor"))]
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        // .filter_level(log::LevelFilter::Debug)
+        .init();
 
     let args = Vec::from_iter(std::env::args());
     assert!(!args.is_empty());
@@ -105,12 +111,13 @@ struct ConnectionHandler {
     id: u64,
     config: Arc<config::Config>,
 
-    channel: Option<(ChannelId, server::Handle)>,
+    channel: Option<(Channel<Msg>, server::Handle)>,
     remote_addr: Option<SocketAddr>,
     pty_request: Option<PtyRequest>,
     authenticated_user: Option<String>,
 
     stdin_tx: Option<StdinTx>,
+    sftp_channel_id: Option<ChannelId>,
 }
 
 impl ConnectionHandler {
@@ -124,6 +131,7 @@ impl ConnectionHandler {
             remote_addr,
             authenticated_user: None,
             stdin_tx: None,
+            sftp_channel_id: None,
         }
     }
 
@@ -133,10 +141,10 @@ impl ConnectionHandler {
         #[cfg(not(target_os = "motor"))]
         let cmd = "/bin/bash -i";
 
-        let (channel, session) = self.channel.clone().unwrap();
+        let (channel, session) = self.channel.take().unwrap();
         let session_clone = session.clone();
         self.stdin_tx =
-            Some(russhd::local_session::spawn(cmd, channel, session, &self.config).await?);
+            Some(russhd::local_session::spawn(cmd, channel.id(), session, &self.config).await?);
 
         // Show a greeting.
         #[cfg(target_os = "motor")]
@@ -145,10 +153,20 @@ impl ConnectionHandler {
         let data = CryptoVec::from("Hello! Welcome to RUSSHD.\r\n\r\n");
 
         session_clone
-            .data(channel, data)
+            .data(channel.id(), data)
             .await
             .map_err(|_| russh::Error::Inconsistent)?;
 
+        Ok(())
+    }
+
+    async fn spawn_sftp_server(&mut self) -> Result<(), russh::Error> {
+        assert!(self.sftp_channel_id.is_none());
+        let (channel, _session) = self.channel.take().unwrap();
+        self.sftp_channel_id = Some(channel.id());
+
+        let sftp = russhd::sftp_session::SftpSession::default();
+        russh_sftp::server::run(channel.into_stream(), sftp).await;
         Ok(())
     }
 
@@ -160,10 +178,10 @@ impl ConnectionHandler {
                 return Err(russh::Error::RequestDenied);
             }
 
-            let (channel, session) = self.channel.clone().unwrap();
-            let _ = session.exit_status_request(channel, 0).await;
-            let _ = session.eof(channel).await;
-            let _ = session.close(channel).await;
+            let (channel, session) = self.channel.take().unwrap();
+            let _ = session.exit_status_request(channel.id(), 0).await;
+            let _ = session.eof(channel.id()).await;
+            let _ = session.close(channel.id()).await;
 
             tokio::spawn(async {
                 log::info!("shutdown initiated");
@@ -179,9 +197,9 @@ impl ConnectionHandler {
             return Ok(());
         }
 
-        let (channel, session) = self.channel.clone().unwrap();
+        let (channel, session) = self.channel.take().unwrap();
         self.stdin_tx =
-            Some(russhd::local_session::spawn(cmdline, channel, session, &self.config).await?);
+            Some(russhd::local_session::spawn(cmdline, channel.id(), session, &self.config).await?);
 
         Ok(())
     }
@@ -327,24 +345,24 @@ impl server::Handler for ConnectionHandler {
             return Ok(false);
         }
 
-        self.channel = Some((channel.id(), session.handle()));
+        self.channel = Some((channel, session.handle()));
         Ok(true)
     }
 
     async fn channel_eof(
         &mut self,
-        channel: ChannelId,
+        channel_id: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         // After a client has sent an EOF, indicating that they don't want
         // to send more data in this session, the channel can be closed.
-        session.close(channel)
+        session.close(channel_id)
     }
 
     #[allow(unused_variables, clippy::too_many_arguments)]
     async fn pty_request(
         &mut self,
-        channel: ChannelId,
+        channel_id: ChannelId,
         term: &str,
         col_width: u32,
         row_height: u32,
@@ -354,13 +372,13 @@ impl server::Handler for ConnectionHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         log::debug!(
-            "pty_request: {channel}-'{term}': {col_width}:{row_height} - {pix_width}:{pix_height} {modes:?}"
+            "pty_request: {channel_id}-'{term}': {col_width}:{row_height} - {pix_width}:{pix_height} {modes:?}"
         );
 
-        let Some((chan, _)) = self.channel else {
+        let Some((channel, _)) = &self.channel else {
             return Err(Self::Error::Inconsistent);
         };
-        if channel != chan {
+        if channel_id != channel.id() {
             return Err(Self::Error::Inconsistent);
         }
 
@@ -379,15 +397,15 @@ impl server::Handler for ConnectionHandler {
     #[allow(unused_variables)]
     async fn shell_request(
         &mut self,
-        channel: ChannelId,
+        channel_id: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         log::info!("shell_request");
 
-        let Some((chan, _)) = self.channel else {
+        let Some((channel, _)) = &self.channel else {
             return Err(Self::Error::Inconsistent);
         };
-        if channel != chan {
+        if channel_id != channel.id() {
             return Err(Self::Error::Inconsistent);
         }
         if self.pty_request.is_none() {
@@ -397,12 +415,11 @@ impl server::Handler for ConnectionHandler {
         self.spawn_shell().await
     }
 
-    #[allow(unused_variables)]
     async fn exec_request(
         &mut self,
-        channel: ChannelId,
+        _channel_id: ChannelId,
         data: &[u8],
-        session: &mut Session,
+        _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Ok(cmdline) = str::from_utf8(data) else {
             return Err(Self::Error::IO(std::io::ErrorKind::InvalidInput.into()));
@@ -412,24 +429,40 @@ impl server::Handler for ConnectionHandler {
         self.exec(cmdline).await
     }
 
-    #[allow(unused_variables)]
     async fn subsystem_request(
         &mut self,
-        channel: ChannelId,
+        channel_id: ChannelId,
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         log::info!("subsystem_request: {name}");
-        session.channel_failure(channel)
+        if name == "sftp" {
+            let Some((channel, _)) = &self.channel else {
+                return Err(Self::Error::Inconsistent);
+            };
+            if channel_id != channel.id() {
+                return Err(Self::Error::Inconsistent);
+            }
+
+            session.channel_success(channel_id)?;
+            self.spawn_sftp_server().await
+        } else {
+            session.channel_failure(channel_id)
+        }
     }
 
     async fn data(
         &mut self,
-        _channel: ChannelId,
+        channel_id: ChannelId,
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Some(stdin_tx) = self.stdin_tx.as_ref() else {
+            if let Some(sftp_channel_id) = self.sftp_channel_id.clone()
+                && sftp_channel_id == channel_id
+            {
+                return Ok(());
+            }
             log::warn!("Got remote data without local shell session.");
             return Err(russh::Error::Disconnect);
         };
