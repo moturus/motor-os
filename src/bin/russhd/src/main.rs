@@ -43,11 +43,12 @@ async fn main() {
         std::thread::spawn(input_listener);
 
         env_logger::builder()
-            // .filter_level(log::LevelFilter::Info)
-            .filter_level(log::LevelFilter::Debug)
+            .filter_level(log::LevelFilter::Info)
+            // .filter_level(log::LevelFilter::Debug)
             .init();
     } else {
         moto_log::init("russhd").unwrap();
+        log::set_max_level(log::LevelFilter::Info);
     }
 
     #[cfg(not(target_os = "motor"))]
@@ -354,9 +355,15 @@ impl server::Handler for ConnectionHandler {
         channel_id: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // After a client has sent an EOF, indicating that they don't want
-        // to send more data in this session, the channel can be closed.
-        session.close(channel_id)
+        if self.sftp_channel_id.is_none() {
+            // After a client has sent an EOF, indicating that they don't want
+            // to send more data in this session, the channel can be closed.
+            session.close(channel_id)
+        } else {
+            // It seems that sftp_server takes care of this: scp sometimes
+            // complained of double close requests if we did session.close() here.
+            Ok(())
+        }
     }
 
     #[allow(unused_variables, clippy::too_many_arguments)]

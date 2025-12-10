@@ -114,20 +114,21 @@ impl russh_sftp::server::Handler for SftpSession {
             return Err(StatusCode::BadMessage);
         };
 
-        log::debug!("read {handle}: seek at {offset}");
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(|err| {
-                log::warn!("seek {handle} failed: {err:?}");
+                log::warn!("seek {handle} {offset} failed: {err:?}");
                 StatusCode::Eof
             })?;
 
         let mut data = Vec::with_capacity(len as usize);
         data.resize(len as usize, 0);
-        log::debug!("reading {handle}");
 
         let mut total_read = 0;
         loop {
+            if total_read >= data.len() {
+                break;
+            }
             let num_read = file
                 .read(&mut data.as_mut_slice()[total_read..])
                 .await
