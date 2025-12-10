@@ -1109,7 +1109,7 @@ impl SyncFileSystem {
 
         let data_block_no = self.find_data_block(file_id, offset)?;
         let block_end = align_up(offset + 1, BLOCK_SIZE as u64);
-        let new_end = (offset + (buf.len() as u64)).min(block_end);
+        let new_end = end.min(block_end);
         let data_block = self.blockcache.read(data_block_no)?;
         unsafe {
             copy_nonoverlapping(

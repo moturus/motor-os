@@ -1,6 +1,6 @@
 [package]
 name = "srfs-core"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Simple Rust File System (Core)"
 repository = "https://github.com/moturus/srfs-core"
