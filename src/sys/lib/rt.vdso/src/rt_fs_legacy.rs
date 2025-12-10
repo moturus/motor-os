@@ -652,11 +652,11 @@ impl FsClient {
         match whence {
             moto_rt::fs::SEEK_CUR => {
                 if offset == 0 {
-                    return Ok(file.pos.load(Ordering::Relaxed));
+                    return Ok(file.pos.load(Ordering::Acquire));
                 }
 
                 loop {
-                    let curr = file.pos.load(Ordering::Relaxed) as i64;
+                    let curr = file.pos.load(Ordering::Acquire) as i64;
                     let new = curr + offset;
                     if (new > (file_size as i64)) || (new < 0) {
                         return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -667,7 +667,7 @@ impl FsClient {
                         .compare_exchange_weak(
                             curr as u64,
                             new as u64,
-                            Ordering::Relaxed,
+                            Ordering::AcqRel,
                             Ordering::Relaxed,
                         )
                         .is_ok()
@@ -683,7 +683,7 @@ impl FsClient {
                 if (offset as u64) > file_size {
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
-                file.pos.store(offset as u64, Ordering::Relaxed);
+                file.pos.store(offset as u64, Ordering::Release);
                 Ok(offset as u64)
             }
             moto_rt::fs::SEEK_END => {
@@ -695,7 +695,7 @@ impl FsClient {
                     return Err(moto_rt::E_NOT_IMPLEMENTED);
                 }
                 let new_pos = file_size - ((-offset) as u64);
-                file.pos.store(new_pos, Ordering::Relaxed);
+                file.pos.store(new_pos, Ordering::Release);
                 Ok(new_pos)
             }
             _ => Err(E_INVALID_ARGUMENT),
@@ -705,12 +705,13 @@ impl FsClient {
     fn read(file: &LegacyFile, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         let mut conn = Self::get()?.conn.lock();
         let raw_channel = conn.raw_channel();
+
         unsafe {
             let req = raw_channel.get_mut::<FileReadRequest>();
             req.header.cmd = CMD_FILE_READ;
             req.header.ver = 0;
             req.fd = file.fd;
-            req.offset = file.pos.load(Ordering::Relaxed);
+            req.offset = file.pos.load(Ordering::Acquire);
             req.max_bytes = {
                 if buf.len() > raw_channel.size() {
                     raw_channel.size()
@@ -733,7 +734,7 @@ impl FsClient {
         unsafe {
             let bytes = raw_channel.get_bytes(resp.data.as_ptr(), result_sz)?;
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.as_mut_ptr(), result_sz);
-            file.pos.fetch_add(result_sz as u64, Ordering::Relaxed);
+            file.pos.fetch_add(result_sz as u64, Ordering::AcqRel);
             Ok(result_sz)
         }
     }
@@ -751,7 +752,7 @@ impl FsClient {
             req.header.ver = 0;
             req.header.flags = 0;
             req.fd = file.fd;
-            req.offset = file.pos.load(Ordering::Relaxed);
+            req.offset = file.pos.load(Ordering::Acquire);
 
             let size =
                 (raw_channel.size() - core::mem::size_of::<FileWriteRequest>()).min(buf.len());
@@ -769,7 +770,7 @@ impl FsClient {
             return Err(resp.header.result);
         }
 
-        file.pos.fetch_add(resp.written as u64, Ordering::Relaxed);
+        file.pos.fetch_add(resp.written as u64, Ordering::AcqRel);
 
         Ok(resp.written as usize)
     }

@@ -336,7 +336,6 @@ impl TcpListener {
             channel_reservation,
             recv_queue,
             next_rx_seq: AtomicU64::new(1).into(),
-            tx_msg: Mutex::new(None),
             rx_waiter: Mutex::new(None),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
@@ -517,9 +516,6 @@ pub struct TcpStream {
     recv_queue: Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
     next_rx_seq: CachePadded<AtomicU64>,
 
-    // A pending tx message.
-    tx_msg: Mutex<Option<(io_channel::Msg, usize)>>,
-
     rx_waiter: Mutex<Option<SysHandle>>,
 
     // This reflects the state as reported by the driver (sys-io).
@@ -569,16 +565,6 @@ impl Drop for TcpStream {
         // Clear RX queue: basically, free up server-allocated pages.
         super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());
         assert!(self.recv_queue.lock().is_empty());
-
-        // Clear TX queue (of length 0 or 1).
-        let tx_msg = self.tx_msg.lock().take();
-        if let Some((msg, _)) = tx_msg {
-            assert_eq!(msg.command, api_net::NetCmd::TcpStreamTx as u16);
-            let sz_read = msg.payload.args_64()[1];
-            if sz_read > 0 {
-                let _ = self.channel().get_page(msg.payload.shared_pages()[0]);
-            }
-        }
 
         self.channel().tcp_stream_dropped(self.handle());
         super::rt_net::stats_tcp_stream_dropped();
@@ -855,7 +841,6 @@ impl TcpStream {
             nonblocking: AtomicBool::new(nonblocking),
             recv_queue: super::inner_rx_stream::InnerRxStream::new(),
             next_rx_seq: AtomicU64::new(1).into(),
-            tx_msg: Mutex::new(None),
             rx_waiter: Mutex::new(None),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
@@ -1287,16 +1272,6 @@ impl TcpStream {
     }
 
     fn have_write_buffer_space(&self) -> bool {
-        {
-            let mut tx_lock = self.tx_msg.lock();
-            if let Some((msg, write_sz)) = tx_lock.take()
-                && let Err(msg) = self.try_tx(msg, write_sz)
-            {
-                *tx_lock = Some((msg, write_sz));
-                return false;
-            }
-        }
-
         self.channel().may_alloc_page(self.subchannel_mask)
     }
 
@@ -1401,36 +1376,78 @@ impl TcpStream {
         written
     }
 
-    fn write_nonblocking(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
-        // These are checked at the callsite.
-        debug_assert!(self.tcp_state().can_write());
-
-        // Serialize writes (= keep tx_lock), as we have only one self.tx_msg to store into.
-        let mut tx_lock = self.tx_msg.lock();
-        if let Some((msg, write_sz)) = tx_lock.take()
-            && let Err(msg) = self.try_tx(msg, write_sz)
-        {
-            *tx_lock = Some((msg, write_sz));
-            self.channel().add_write_waiter(self);
-            return Err(moto_rt::E_NOT_READY);
-        }
-
+    fn do_write_nonblocking(&self, iovec: &[&[u8]]) -> Result<usize, ErrorCode> {
         let Ok(io_page) = self.channel().alloc_page(self.subchannel_mask) else {
             self.channel().add_write_waiter(self);
             return Err(moto_rt::E_NOT_READY);
         };
 
-        let write_sz = unsafe { Self::tx_copy(bufs, io_page.bytes_mut()) };
+        let write_sz = unsafe { Self::tx_copy(iovec, io_page.bytes_mut()) };
 
         let msg =
             api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
         if let Err(msg) = self.try_tx(msg, write_sz) {
-            *tx_lock = Some((msg, write_sz));
+            // Get the page back so that it can be released.
+            let io_page = self
+                .channel()
+                .get_page(msg.payload.shared_pages()[0])
+                .unwrap();
+            core::mem::drop(io_page);
             self.channel().add_write_waiter(self);
+            return Err(moto_rt::E_NOT_READY);
         }
 
-        // We copied write_sz bytes out, so must return Ok(write_sz).
         Ok(write_sz)
+    }
+
+    fn write_nonblocking(&self, iovec: &[&[u8]]) -> Result<usize, ErrorCode> {
+        // These are checked at the callsite.
+        debug_assert!(self.tcp_state().can_write());
+
+        fn seek_exact<'a>(bufs: &'a [&'a [u8]], mut offset: usize) -> (&'a [u8], &'a [&'a [u8]]) {
+            for (i, buf) in bufs.iter().enumerate() {
+                if offset < buf.len() {
+                    return (&buf[offset..], &bufs[i + 1..]);
+                }
+                offset -= buf.len();
+            }
+            (&[], &[])
+        }
+
+        let mut total_written = 0;
+
+        loop {
+            let (head, tail) = seek_exact(iovec, total_written);
+
+            if head.is_empty() && tail.is_empty() {
+                return Ok(total_written);
+            }
+
+            let result = if total_written == 0 {
+                self.do_write_nonblocking(iovec)
+            } else if head.is_empty() {
+                self.do_write_nonblocking(tail)
+            } else {
+                let mut iovec = Vec::with_capacity(tail.len() + 1);
+                iovec.push(head);
+                iovec.extend_from_slice(tail);
+                self.do_write_nonblocking(&iovec)
+            };
+
+            match result {
+                Ok(0) => panic!(),
+                Ok(n) => {
+                    total_written += n;
+                }
+                Err(e) => {
+                    if total_written > 0 {
+                        return Ok(total_written);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
     }
 
     fn try_tx(&self, msg: io_channel::Msg, write_sz: usize) -> Result<(), io_channel::Msg> {
