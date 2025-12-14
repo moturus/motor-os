@@ -174,6 +174,10 @@ pub extern "C" fn set_file_perm(_rt_fd: RtFd, _perm: u64) -> ErrorCode {
 }
 
 pub extern "C" fn stat(path_ptr: *const u8, path_size: usize, attr: *mut FileAttr) -> ErrorCode {
+    if crate::rt_fs::ok() {
+        return crate::rt_fs::stat(path_ptr, path_size, attr);
+    }
+
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
 

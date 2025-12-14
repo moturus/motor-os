@@ -1,10 +1,12 @@
 use crate::posix::PosixFile;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::ops::Deref;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
+use moto_io::fs::{EntryId, ROOT_ID};
 use moto_ipc::io_channel;
 use moto_rt::Error;
 use moto_rt::fs::HANDLE_URL_PREFIX;
@@ -285,16 +287,34 @@ impl AsyncFsClient {
     }
 
     fn file_open(path: &str, opts: u32) -> Result<File> {
-        let c_path = CanonicalPath::parse(path)?;
-
-        let mut msg = io_channel::Msg::new();
-        msg.command = api_fs::CMD_FILE_OPEN;
-
-        // let mut conn = Self::get()?.driver_connection.lock();
-
-        // how do we do O_NONBLOCK? Can we use Rust async?
+        if opts & moto_rt::fs::O_NONBLOCK != 0 {
+            // Not yet.
+            return Err(moto_rt::Error::NotImplemented);
+        }
+        let path = CanonicalPath::parse(path)?.abs_path;
+        let entry_id = Self::stat_internal(path.as_str())?;
 
         todo!()
+    }
+
+    fn stat_internal(path: &str) -> Result<EntryId> {
+        if path.is_empty() {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        if path == "/" {
+            return Ok(ROOT_ID);
+        }
+        if !path.starts_with('/') {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+
+        let (left, right) = path.rsplit_once('/').unwrap();
+        assert!(!right.is_empty());
+
+        todo!()
+        // if left.is_empty() {
+        //     return moto_io::fs::FileSystem::
+        // }
     }
 }
 
@@ -310,6 +330,26 @@ impl PosixFile for File {
 
 pub fn ok() -> bool {
     AsyncFsClient::get().is_ok()
+}
+
+pub extern "C" fn stat(
+    path_ptr: *const u8,
+    path_size: usize,
+    attr: *mut moto_rt::fs::FileAttr,
+) -> moto_rt::ErrorCode {
+    todo!()
+    /*
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    match AsyncFsClient::stat(path) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            E_OK
+        }
+        Err(err) => err,
+    }
+    */
 }
 
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {

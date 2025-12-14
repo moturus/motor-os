@@ -1,0 +1,13 @@
+[package]
+name = "moto-io"
+version = "0.1.0"
+edition = "2024"
+description = "Low-level (no-std) Motor OS IO."
+repository = "https://github.com/moturus/motor-os"
+keywords = ["no_std"]
+categories = ["no-std"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-trait = "0.1.88"
+async-fs = { path = "../async-fs", default-features = false, features = ["moto-rt"] }

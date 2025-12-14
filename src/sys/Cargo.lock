@@ -821,6 +821,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-io"
+version = "0.1.0"
+dependencies = [
+ "async-fs",
+ "async-trait",
+]
+
+[[package]]
 name = "moto-io-internal"
 version = "0.1.0"
 dependencies = [
@@ -1157,6 +1165,7 @@ dependencies = [
  "frusa 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "moto-async",
+ "moto-io",
  "moto-io-internal",
  "moto-ipc",
  "moto-rt",

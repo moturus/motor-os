@@ -4,6 +4,9 @@
 //! the overall design tries to ensure that modified blocks must
 //! be saved or have the modifications explicitly discarded.
 
+// TODO: investigate is clippy here should be listened to.
+#![allow(clippy::await_holding_refcell_ref)]
+
 use crate::Result;
 use crate::{AsyncBlockDevice, Block};
 
@@ -132,7 +135,7 @@ impl BlockCache {
         let mut block = self.internal_get_empty_block(block_no);
 
         self.block_dev
-            .read_block(block_no, &mut *block.block_mut())
+            .read_block(block_no, &mut block.block_mut())
             .await?;
         block.intenal_mark_clean();
 
@@ -163,9 +166,7 @@ impl BlockCache {
     pub async fn write_block(&mut self, block_no: u64) -> Result<()> {
         let block = self.cache.get_mut(&block_no).expect("block not found");
 
-        self.block_dev
-            .write_block(block_no, &*block.block())
-            .await?;
+        self.block_dev.write_block(block_no, &block.block()).await?;
         block.intenal_mark_clean();
         Ok(())
     }
@@ -174,9 +175,7 @@ impl BlockCache {
         let block = self.cache.get_mut(&block_no).expect("block not found");
 
         if block.is_dirty() {
-            self.block_dev
-                .write_block(block_no, &*block.block())
-                .await?;
+            self.block_dev.write_block(block_no, &block.block()).await?;
             block.intenal_mark_clean();
             Ok(true)
         } else {
