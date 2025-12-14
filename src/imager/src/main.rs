@@ -423,6 +423,8 @@ fn main() {
         &bin_dir.join("sys-io"),
     );
 
+    std::fs::copy(&bin_dir.join("kloader"), &img_dir.join("kloader")).unwrap();
+
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
     for prog in &config.input_files {
