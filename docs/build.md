@@ -23,7 +23,7 @@ sudo apt upgrade
 sudo apt install git
 sudo apt install build-essential
 sudo apt install nasm
-sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
+sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config curl
 ```
 
 (2) [Install Rust](https://www.rust-lang.org/tools/install).
@@ -31,22 +31,12 @@ sudo apt install clang cmake ninja-build libz-dev libssl-dev pkg-config
 (3) Add the following Rust magic:
 
 ```sh
-rustup default nightly-2025-11-17
-rustup component add rust-src --toolchain nightly-2025-11-17-x86_64-unknown-linux-gnu
+rustup default nightly-2025-12-13
+rustup component add rust-src --toolchain nightly-2025-12-13-x86_64-unknown-linux-gnu
 ```
 
 (Note: we pin to a specific nightly version for better reproducibility.
 See e.g. [issue 18](https://github.com/moturus/motor-os/issues/18)).
-
-## Clone the Motor OS repo
-
-```sh
-export MOTORH=$HOME/motorh
-mkdir $MOTORH
-cd $MOTORH
-git clone https://github.com/moturus/motor-os.git
-cd motor-os
-```
 
 ## Build Motor OS target/toolchain for Rust
 
@@ -97,6 +87,16 @@ Register the new toolchain:
 ```sh
 rustup toolchain link dev-x86_64-unknown-motor \
   $MOTORH/rust/build/x86_64-unknown-linux-gnu/stage2
+```
+
+## Clone the Motor OS repo
+
+```sh
+export MOTORH=$HOME/motorh
+mkdir $MOTORH
+cd $MOTORH
+git clone https://github.com/moturus/motor-os.git
+cd motor-os
 ```
 
 ## Build Motor OS
