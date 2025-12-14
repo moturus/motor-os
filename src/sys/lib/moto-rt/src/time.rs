@@ -142,6 +142,9 @@ pub fn since_system_start() -> Duration {
 }
 
 impl SystemTime {
+    pub const MIN: Self = Self { nanos: u128::MIN };
+    pub const MAX: Self = Self { nanos: u128::MAX };
+
     pub fn now() -> Self {
         SystemTime {
             nanos: abs_ticks_to_nanos(Instant::now().ticks),
