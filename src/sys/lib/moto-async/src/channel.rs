@@ -1,42 +1,34 @@
 //! MPSC async channel.
+//!
+//! It was somewhat difficult to make it work well with
+//! more than one sender. Having queues as VecDeque under
+//! a spinlock resulted in 5-10 usec/message in Release build,
+//! and 150ns (yes, nanos) in Debug build.
+//!
+//! By using concurrent queues (mpmc or SegQueue) with busy
+//! looping, this implementation reaches about 2 messages/usec
+//! in a test with two senders.
+//!
+//! There still ways to make it faster, as at the moment
+//! there are several places where busy-looping happen
+//! in a "nested" way.
 extern crate alloc;
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
-use moto_rt::spinlock::SpinLock;
-
-#[repr(C)]
 struct SharedChannelData {
+    // Need to track the number of senders to notify the receiver on the last drop.
     sender_count: AtomicUsize,
-    _padding_1: [u64; 7],
 
-    senders_waiting_count: AtomicUsize,
-    _padding_2: [u64; 7],
-    senders_waiting: SpinLock<VecDeque<Waker>>,
-    _padding_3: [u64; 7],
+    senders_waiting: crossbeam::queue::SegQueue<Waker>,
 
-    receiver_waiting: AtomicBool,
-    _padding_4: [u64; 7],
-    receiver: SpinLock<Option<Waker>>,
-}
-
-impl SharedChannelData {
-    fn pop_next_send_waiter(&self) -> Option<Waker> {
-        if self.senders_waiting_count.load(Ordering::Acquire) > 0 {
-            let mut guard = self.senders_waiting.lock();
-            if let Some(waker) = guard.pop_front() {
-                self.senders_waiting_count.fetch_sub(1, Ordering::Relaxed);
-                return Some(waker);
-            }
-        }
-
-        None
-    }
+    // A single-element queue for the single receiver in wait.
+    receiver_rx: moto_mpmc::Receiver<Waker>,
+    receiver_tx: moto_mpmc::Sender<Waker>,
 }
 
 pub struct Sender<T> {
@@ -49,19 +41,24 @@ pub struct Receiver<T> {
     shared: Arc<SharedChannelData>,
 }
 
+impl<T> Receiver<T> {
+    fn private_clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            shared: self.shared.clone(),
+        }
+    }
+}
+
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let (sender, receiver) = moto_mpmc::bounded(capacity);
+    let (receiver_tx, receiver_rx) = moto_mpmc::bounded(1);
 
     let shared = Arc::new(SharedChannelData {
         sender_count: AtomicUsize::new(1),
-        senders_waiting_count: AtomicUsize::new(0),
-        senders_waiting: SpinLock::new(VecDeque::new()),
-        receiver_waiting: AtomicBool::new(false),
-        receiver: SpinLock::new(None),
-        _padding_1: [0; 7],
-        _padding_2: [0; 7],
-        _padding_3: [0; 7],
-        _padding_4: [0; 7],
+        senders_waiting: Default::default(),
+        receiver_rx,
+        receiver_tx,
     });
 
     (
@@ -81,17 +78,14 @@ impl<T> Sender<T> {
         match self.inner.try_send(value) {
             Ok(()) => {
                 // Wake receiver if it was waiting.
-                if self.shared.receiver_waiting.swap(false, Ordering::Acquire)
-                    && let Some(waker) = self.shared.receiver.lock().take()
-                {
+                if let Ok(waker) = self.shared.receiver_rx.try_recv() {
                     waker.wake();
                 }
                 SendFuture(SendFutureInner::Ready(None))
             }
             Err(moto_mpmc::TrySendError::Full(val)) => {
                 SendFuture(SendFutureInner::Pending(SendPending {
-                    inner: self.inner.clone(),
-                    shared: self.shared.clone(),
+                    sender: self.clone(),
                     value: Some(val),
                 }))
             }
@@ -117,7 +111,7 @@ impl<T> Drop for Sender<T> {
         let senders = self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) - 1;
         if senders == 0 {
             // Notify receiver that no more data is coming.
-            if let Some(waker) = self.shared.receiver.lock().take() {
+            if let Ok(waker) = self.shared.receiver_rx.try_recv() {
                 waker.wake();
             }
         }
@@ -125,13 +119,14 @@ impl<T> Drop for Sender<T> {
 }
 
 struct SendPending<T> {
-    inner: Arc<moto_mpmc::Sender<T>>,
-    shared: Arc<SharedChannelData>,
-    value: Option<T>,
+    sender: Sender<T>,
+    value: Option<T>, // Value to send.
 }
 
+// Has to be "inner" as the future is public, and we can't have a public enum
+// with private variants.
 enum SendFutureInner<T> {
-    Ready(Option<T>),
+    Ready(Option<T>), // Value to return on error.
     Pending(SendPending<T>),
 }
 
@@ -152,17 +147,15 @@ impl<T> Future for SendFuture<T> {
                 None => Ok(()),
             }),
             SendFutureInner::Pending(this) => {
-                const BUSY_LOOP_ITERS: u32 = 32;
+                const BUSY_LOOP_ITERS: u32 = 12;
                 let mut busy_loop_iter = 0;
 
                 loop {
                     let value = unsafe { this.value.take().unwrap_unchecked() };
-                    match this.inner.try_send(value) {
+                    match this.sender.inner.try_send(value) {
                         Ok(()) => {
                             // Wake receiver if it was waiting.
-                            if this.shared.receiver_waiting.swap(false, Ordering::AcqRel)
-                                && let Some(waker) = this.shared.receiver.lock().take()
-                            {
+                            if let Ok(waker) = this.sender.shared.receiver_rx.try_recv() {
                                 waker.wake();
                             }
                             return Poll::Ready(Ok(()));
@@ -182,34 +175,7 @@ impl<T> Future for SendFuture<T> {
                 }
 
                 let waker = cx.waker().clone();
-                this.shared
-                    .senders_waiting_count
-                    .fetch_add(1, Ordering::Relaxed);
-                let mut guard = this.shared.senders_waiting.lock();
-
-                let value = unsafe { this.value.take().unwrap_unchecked() };
-                match this.inner.try_send(value) {
-                    Ok(()) => {
-                        this.shared
-                            .senders_waiting_count
-                            .fetch_sub(1, Ordering::Relaxed);
-                        core::mem::drop(guard);
-                        // Wake receiver if it was waiting.
-                        if this.shared.receiver_waiting.swap(false, Ordering::AcqRel)
-                            && let Some(waker) = this.shared.receiver.lock().take()
-                        {
-                            waker.wake();
-                        }
-                        return Poll::Ready(Ok(()));
-                    }
-                    Err(moto_mpmc::TrySendError::Full(val)) => {
-                        this.value = Some(val);
-                    }
-                    Err(moto_mpmc::TrySendError::Disconnected(val)) => {
-                        return Poll::Ready(Err(val));
-                    }
-                }
-                guard.push_back(waker);
+                this.sender.shared.senders_waiting.push(waker);
                 Poll::Pending
             }
         }
@@ -220,16 +186,13 @@ impl<T> Receiver<T> {
     pub fn recv(&mut self) -> RecvFuture<T> {
         match self.inner.try_recv() {
             Ok(val) => {
-                if let Some(waker) = self.shared.pop_next_send_waiter() {
+                if let Some(waker) = self.shared.senders_waiting.pop() {
                     waker.wake();
                 }
                 RecvFuture(RecvFutureInner::Ready(Some(val)))
             }
             Err(moto_mpmc::TryRecvError::Empty) => {
-                RecvFuture(RecvFutureInner::Pending(RecvPending {
-                    inner: self.inner.clone(),
-                    shared: self.shared.clone(),
-                }))
+                RecvFuture(RecvFutureInner::Pending(self.private_clone()))
             }
             Err(moto_mpmc::TryRecvError::Disconnected) => RecvFuture(RecvFutureInner::Ready(None)),
         }
@@ -238,20 +201,17 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        while let Some(waker) = self.shared.pop_next_send_waiter() {
+        while let Some(waker) = self.shared.senders_waiting.pop() {
             waker.wake();
         }
     }
 }
 
-struct RecvPending<T> {
-    inner: Arc<moto_mpmc::Receiver<T>>,
-    shared: Arc<SharedChannelData>,
-}
-
+// Has to be "inner" as the future is public, and we can't have a public enum
+// with private variants.
 enum RecvFutureInner<T> {
     Ready(Option<T>),
-    Pending(RecvPending<T>),
+    Pending(Receiver<T>),
 }
 
 pub struct RecvFuture<T>(RecvFutureInner<T>);
@@ -266,20 +226,16 @@ impl<T> Future for RecvFuture<T> {
         let this = unsafe { self.get_unchecked_mut() };
         match &mut this.0 {
             RecvFutureInner::Ready(val) => Poll::Ready(val.take()),
-            RecvFutureInner::Pending(slow) => {
-                const BUSY_LOOP_ITERS: u32 = 32;
+            RecvFutureInner::Pending(receiver) => {
+                let _ = receiver.shared.receiver_rx.try_recv(); // Clear the waiter.
+
+                const BUSY_LOOP_ITERS: u32 = 12;
                 let mut busy_loop_iter = 0;
 
-                *slow.shared.receiver.lock() = Some(cx.waker().clone());
-                slow.shared.receiver_waiting.store(true, Ordering::Release);
-
                 loop {
-                    match slow.inner.try_recv() {
+                    match receiver.inner.try_recv() {
                         Ok(val) => {
-                            *slow.shared.receiver.lock() = None;
-                            slow.shared.receiver_waiting.store(false, Ordering::Release);
-
-                            if let Some(waker) = slow.shared.pop_next_send_waiter() {
+                            if let Some(waker) = receiver.shared.senders_waiting.pop() {
                                 waker.wake();
                             }
                             return Poll::Ready(Some(val));
@@ -295,7 +251,24 @@ impl<T> Future for RecvFuture<T> {
                     }
                 }
 
-                Poll::Pending
+                receiver
+                    .shared
+                    .receiver_tx
+                    .try_send(cx.waker().clone())
+                    .unwrap();
+
+                // Check one more time, now with the waker set.
+                match receiver.inner.try_recv() {
+                    Ok(val) => {
+                        let _ = receiver.shared.receiver_rx.try_recv(); // Clear the waiter.
+                        if let Some(waker) = receiver.shared.senders_waiting.pop() {
+                            waker.wake();
+                        }
+                        Poll::Ready(Some(val))
+                    }
+                    Err(moto_mpmc::TryRecvError::Disconnected) => Poll::Ready(None),
+                    Err(moto_mpmc::TryRecvError::Empty) => Poll::Pending,
+                }
             }
         }
     }

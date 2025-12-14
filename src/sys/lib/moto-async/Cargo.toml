@@ -10,6 +10,7 @@ moto-mpmc = { path = "../moto-mpmc" }
 moto-rt   = { path = "../moto-rt"   }
 moto-sys  = { path = "../moto-sys"  }
 
+crossbeam = { version = "0.8", default-features = false, features = ["alloc", "crossbeam-queue"] }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4.28"
 

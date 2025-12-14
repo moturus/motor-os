@@ -37,7 +37,6 @@ use core::task::RawWakerVTable;
 use core::task::Waker;
 use futures::channel::oneshot;
 use futures::task::LocalFutureObj;
-use moto_rt::spinlock::SpinLock;
 use moto_rt::time::Instant;
 use moto_sys::SysHandle;
 
@@ -96,10 +95,13 @@ impl TaskId {
     }
 }
 
+// This is the waker to use cross-threads.
+// The local waker is just a pointer to TaskId.
 struct MotoWaker {
-    runqueue: alloc::sync::Weak<SpinLock<VecDeque<TaskId>>>,
+    // The queue to add task_id upon wake.
+    runqueue: Arc<crossbeam::queue::SegQueue<TaskId>>,
     task_id: TaskId,
-    wake_handle: SysHandle,
+    wake_handle: SysHandle, // The handle to call wake() on.
 }
 
 unsafe fn waker_clone(data: *const ()) -> RawWaker {
@@ -110,14 +112,14 @@ unsafe fn waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn waker_wake(data: *const ()) {
-    let waker = unsafe { (data as usize as *const MotoWaker).as_ref().unwrap() };
+    let waker = unsafe {
+        (data as usize as *const MotoWaker)
+            .as_ref()
+            .unwrap_unchecked()
+    };
 
-    if let Some(runqueue) = waker.runqueue.upgrade() {
-        runqueue.lock().push_back(waker.task_id);
-        if let Err(err) = moto_sys::SysCpu::wake(waker.wake_handle) {
-            log::warn!("Error {err} while waking {}.", waker.wake_handle.as_u64());
-        }
-    }
+    waker.runqueue.push(waker.task_id);
+    let _ = moto_sys::SysCpu::wake(waker.wake_handle);
 }
 
 unsafe fn waker_wake_by_ref(data: *const ()) {
@@ -202,7 +204,7 @@ struct LocalRuntimeInner {
     sys_wakes: RefCell<BTreeMap<SysHandle, moto_rt::ErrorCode>>,
 
     // Task IDs of wakes coming from wakers (!= LocalWaker).
-    nonlocal_wakes: Arc<SpinLock<VecDeque<TaskId>>>,
+    nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
 }
 
 impl LocalRuntimeInner {
@@ -221,7 +223,7 @@ impl LocalRuntimeInner {
 
     fn new_waker(&self, task_id: TaskId) -> Waker {
         let moto_waker = Arc::new(MotoWaker {
-            runqueue: Arc::downgrade(&self.nonlocal_wakes),
+            runqueue: self.nonlocal_wakes.clone(),
             task_id,
             wake_handle: moto_sys::current_thread(),
         });
@@ -260,11 +262,8 @@ impl LocalRuntimeInner {
     }
 
     fn merge_incoming(&self) {
-        let mut incoming = VecDeque::new();
-        core::mem::swap(&mut incoming, &mut *self.nonlocal_wakes.lock());
-
         let mut runqueue = self.runqueue.borrow_mut();
-        for task_id in incoming {
+        while let Some(task_id) = self.nonlocal_wakes.pop() {
             runqueue.push_back(task_id);
         }
 

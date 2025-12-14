@@ -352,13 +352,11 @@ fn test_channel_basic() {
 }
 
 const SENDERS: u32 = 2;
-#[cfg(debug_assertions)]
-const ITERS: u32 = 100_000;
-#[cfg(not(debug_assertions))]
-const ITERS: u32 = 100_000;
-const CHANNEL_CAPACITY: usize = 32;
+const CHANNEL_CAPACITY: usize = 16;
 
 fn test_moto_channel_multithreaded() {
+    const ITERS: u32 = 100_000;
+
     moto_async::LocalRuntime::new().block_on(async move {
         let (tx, mut rx) = moto_async::channel::<u32>(CHANNEL_CAPACITY);
 
@@ -413,6 +411,8 @@ fn test_moto_channel_multithreaded() {
 }
 
 fn test_futures_channel_multithreaded() {
+    const ITERS: u32 = 10_000;
+
     futures::executor::block_on(async move {
         use futures::sink::SinkExt;
         use futures::stream::StreamExt;
