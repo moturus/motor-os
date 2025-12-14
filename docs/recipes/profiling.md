@@ -18,26 +18,26 @@ to instrument ([docs](https://docs.rs/tracing/0.1.43/tracing/attr.instrument.htm
 * add the following to your binary's Cargo.toml:
 
 ```toml
-      tracing = "0.1"
-      tracing-subscriber = "0.3"
-      tracing-flame = "0.2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-flame = "0.2"
 ```
 
 * in the binary, wrap the region you want to profile with:
 
 ```Rust
-        use tracing_flame::FlameLayer;
-        use tracing_subscriber::prelude::*;
+use tracing_flame::FlameLayer;
+use tracing_subscriber::prelude::*;
 
-        const FNAME: &str = "/profile.folded";
-        let file = std::fs::File::create(FNAME).unwrap();
-        let (flame_layer, guard) = FlameLayer::with_file(FNAME).unwrap();
-        tracing_subscriber::registry().with(flame_layer).init();
+const FNAME: &str = "/profile.folded";
+let file = std::fs::File::create(FNAME).unwrap();
+let (flame_layer, guard) = FlameLayer::with_file(FNAME).unwrap();
+tracing_subscriber::registry().with(flame_layer).init();
 
-        tracing::info_span!("profiling_root").in_scope(|| {
-             /* place the code you want to profile here */
-        });
-        core::mem::drop(guard); // This will write the trace into the file.
+tracing::info_span!("profiling_root").in_scope(|| {
+     /* place the code you want to profile here */
+});
+core::mem::drop(guard); // This will write the trace into the file.
 ```
 
 ## Profile traces collection and visualization
