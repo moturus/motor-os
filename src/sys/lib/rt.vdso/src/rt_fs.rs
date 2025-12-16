@@ -12,7 +12,7 @@ use moto_rt::Error;
 use moto_rt::fs::HANDLE_URL_PREFIX;
 use moto_rt::fs::MAX_PATH_LEN;
 use moto_sys::SysHandle;
-use moto_sys_io::api_fs;
+use moto_sys_io::api_fs_legacy;
 
 type Result<T> = core::result::Result<T, Error>;
 
@@ -203,7 +203,7 @@ impl AsyncFsClient {
     fn create() -> Result<&'static Self> {
         moto_async::LocalRuntime::new().block_on(async move {
             let (io_sender, io_receiver) =
-                moto_ipc::io_channel::connect(moto_sys_io::api_fs::FS_URL)?;
+                moto_ipc::io_channel::connect(moto_sys_io::api_fs_legacy::FS_URL)?;
             let (client_handle, runtime_handle) =
                 moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
 

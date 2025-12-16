@@ -5,7 +5,7 @@ use core::sync::atomic::*;
 use moto_ipc::sync::*;
 use moto_rt::E_NOT_FOUND;
 use moto_sys::{ErrorCode, SysHandle};
-use moto_sys_io::api_fs::*;
+use moto_sys_io::api_fs_legacy::*;
 
 use super::filesystem::fs;
 

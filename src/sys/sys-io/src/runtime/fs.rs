@@ -1,6 +1,6 @@
 use async_fs::FileSystem;
 use moto_async::{AsFuture, LocalMutex};
-use moto_sys_io::api_fs::FS_URL;
+use moto_sys_io::api_fs_legacy::FS_URL;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;

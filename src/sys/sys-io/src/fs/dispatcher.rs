@@ -6,7 +6,7 @@
 //! (perhaps per mount point).
 use moto_ipc::sync::*;
 use moto_sys::SysHandle;
-use moto_sys_io::api_fs::*;
+use moto_sys_io::api_fs_legacy::*;
 use std::thread;
 
 struct Dispatcher {
