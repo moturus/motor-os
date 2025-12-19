@@ -14,7 +14,6 @@ use core::time::Duration;
 use crossbeam::utils::CachePadded;
 use moto_ipc::io_channel;
 use moto_rt::RtFd;
-use moto_rt::error::*;
 use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
 use moto_rt::netc;
@@ -255,11 +254,11 @@ impl TcpListener {
 
     pub fn listen(&self, max_backlog: u32) -> Result<(), ErrorCode> {
         if !self.nonblocking.load(Ordering::Relaxed) {
-            return Err(E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
         if max_backlog == 0 {
-            return Err(E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         }
         self.max_backlog.store(max_backlog, Ordering::Relaxed);
         if !self.accept_requests.lock().is_empty() {
@@ -285,7 +284,7 @@ impl TcpListener {
         }
 
         if self.nonblocking.load(Ordering::Relaxed) {
-            return Err(E_NOT_READY);
+            return Err(moto_rt::E_NOT_READY);
         };
 
         let req_id = self.post_accept(true).unwrap(); // TODO: wait for channel to become ready.
@@ -343,7 +342,7 @@ impl TcpListener {
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
-            error: AtomicU16::new(E_OK),
+            error: AtomicU16::new(moto_rt::E_OK),
         });
         crate::net::rt_net::stats_tcp_stream_created();
 
@@ -415,7 +414,7 @@ impl TcpListener {
                 assert_eq!(len, 1);
                 let nonblocking = unsafe { *(ptr as *const u8) };
                 if nonblocking > 1 {
-                    return E_INVALID_ARGUMENT;
+                    return moto_rt::E_INVALID_ARGUMENT;
                 }
                 self.set_nonblocking(nonblocking == 1)
             }
@@ -491,13 +490,13 @@ impl TcpListener {
         let was_blocking = !self.nonblocking.swap(nonblocking, Ordering::Release);
         if nonblocking && was_blocking {
             match self.listen(1024) {
-                Ok(()) => E_OK,
+                Ok(()) => moto_rt::E_OK,
                 Err(err) => err,
             }
             // TODO: at the moment, previously-issues blocking accepts
-            // will remain blocking. Maybe they should be kicked with E_NOT_READY?
+            // will remain blocking. Maybe they should be kicked with moto_rt::E_NOT_READY?
         } else {
-            E_OK
+            moto_rt::E_OK
         }
     }
 }
@@ -848,7 +847,7 @@ impl TcpStream {
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
-            error: AtomicU16::new(E_OK),
+            error: AtomicU16::new(moto_rt::E_OK),
         });
         super::rt_net::stats_tcp_stream_created();
 
@@ -926,7 +925,7 @@ impl TcpStream {
                     assert_eq!(len, 1);
                     let nonblocking = *(ptr as *const u8);
                     if nonblocking > 1 {
-                        return E_INVALID_ARGUMENT;
+                        return moto_rt::E_INVALID_ARGUMENT;
                     }
                     self.set_nonblocking(nonblocking == 1)
                 }
@@ -1569,7 +1568,7 @@ impl TcpStream {
     }
 
     fn take_error(&self) -> ErrorCode {
-        let err = self.error.swap(E_OK, Ordering::Relaxed);
+        let err = self.error.swap(moto_rt::E_OK, Ordering::Relaxed);
         err as ErrorCode
     }
 

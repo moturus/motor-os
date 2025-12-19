@@ -10,7 +10,6 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use moto_rt::RtFd;
-use moto_rt::error::*;
 use moto_rt::fs::*;
 use moto_rt::mutex::Mutex;
 use moto_sys_io::api_fs_legacy::*;
@@ -46,15 +45,15 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
             O_HANDLE_CHILD => {
                 let Ok(handle_str) = core::str::from_utf8(&path_bytes[HANDLE_URL_PREFIX.len()..])
                 else {
-                    return -(E_INVALID_ARGUMENT as i32);
+                    return -(moto_rt::E_INVALID_ARGUMENT as i32);
                 };
 
                 let Ok(handle) = handle_str.parse::<u64>() else {
-                    return -(E_INVALID_ARGUMENT as i32);
+                    return -(moto_rt::E_INVALID_ARGUMENT as i32);
                 };
                 return crate::proc_fd::new_child_fd(handle.into());
             }
-            _ => return -(E_INVALID_ARGUMENT as i32),
+            _ => return -(moto_rt::E_INVALID_ARGUMENT as i32),
         }
     }
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
@@ -72,27 +71,27 @@ pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
     // function or a macro? The challenge is that the final variable (a reference)
     // borrows the first variable (an Arc), and borrow checker complains...
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
     let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyFile>() else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     match FsClient::stat(&file.abs_path) {
         Ok(a) => {
             unsafe { *attr = a };
-            E_OK
+            moto_rt::E_OK
         }
         Err(err) => err,
     }
 }
 
 pub extern "C" fn fsync(rt_fd: i32) -> ErrorCode {
-    E_OK
+    moto_rt::E_OK
 }
 
 pub extern "C" fn datasync(rt_fd: i32) -> ErrorCode {
-    E_OK
+    moto_rt::E_OK
 }
 
 pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
@@ -101,10 +100,10 @@ pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
 
 pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
     let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyFile>() else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
 
     match FsClient::seek(file, offset, whence) {
@@ -117,7 +116,7 @@ pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
     match FsClient::mkdir(path) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
@@ -126,7 +125,7 @@ pub extern "C" fn unlink(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
     match FsClient::unlink(path, F_UNLINK_FILE) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
@@ -142,7 +141,7 @@ pub extern "C" fn rename(
     let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_size) };
     let new = unsafe { core::str::from_utf8_unchecked(new_bytes) };
     match FsClient::rename(old, new) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
@@ -151,7 +150,7 @@ pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
     match FsClient::unlink(path, F_UNLINK_DIR) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
@@ -160,7 +159,7 @@ pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> ErrorCode 
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
     match FsClient::unlink(path, F_UNLINK_DIR_ALL) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
@@ -184,7 +183,7 @@ pub extern "C" fn stat(path_ptr: *const u8, path_size: usize, attr: *mut FileAtt
     match FsClient::stat(path) {
         Ok(a) => {
             unsafe { *attr = a };
-            E_OK
+            moto_rt::E_OK
         }
         Err(err) => err,
     }
@@ -215,7 +214,7 @@ pub extern "C" fn canonicalize(
         *out_size = out_bytes.len();
     }
 
-    E_OK
+    moto_rt::E_OK
 }
 
 pub extern "C" fn copy(
@@ -240,24 +239,24 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
 
 pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
     let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyReadDir>() else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     match FsClient::close_fd(dir.fd, CloseFdRequest::F_READDIR) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
 
 pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
     let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<LegacyReadDir>() else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     let de = match FsClient::readdir_next(dir) {
@@ -266,7 +265,7 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
     };
 
     unsafe { *dentry = de };
-    E_OK
+    moto_rt::E_OK
 }
 
 pub extern "C" fn getcwd(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCode {
@@ -281,14 +280,14 @@ pub extern "C" fn getcwd(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCode {
         *out_size = out_bytes.len();
     }
 
-    E_OK
+    moto_rt::E_OK
 }
 
 pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
     match FsClient::chdir(path) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
@@ -702,7 +701,7 @@ impl FsClient {
                 file.pos.store(new_pos, Ordering::Release);
                 Ok(new_pos)
             }
-            _ => Err(E_INVALID_ARGUMENT),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT),
         }
     }
 

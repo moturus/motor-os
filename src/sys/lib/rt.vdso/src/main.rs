@@ -39,7 +39,7 @@ extern crate alloc;
 use core::{ptr::copy_nonoverlapping, sync::atomic::Ordering};
 use moto_rt::RtVdsoVtable;
 
-const RT_VERSION: u64 = 15;
+const RT_VERSION: u64 = 16;
 
 // The entry point.
 #[unsafe(no_mangle)]
@@ -49,8 +49,6 @@ pub extern "C" fn motor_start(version: u64) {
         moto_log!("VDSO: requested version: {version}; available: {RT_VERSION}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
     }
-
-    moto_log!("vdso: motor_start: {version}");
 
     let vtable = RtVdsoVtable::get();
     let self_addr = motor_start as *const () as usize as u64;

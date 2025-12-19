@@ -13,7 +13,6 @@ use core::time::Duration;
 use crossbeam::utils::CachePadded;
 use moto_ipc::io_channel;
 use moto_rt::RtFd;
-use moto_rt::error::*;
 use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
 use moto_rt::netc;
@@ -51,7 +50,7 @@ pub unsafe extern "C" fn dns_lookup(
             SocketAddrV4::new(addr_v4, port)
         } else {
             crate::moto_log!("dns_lookup: {}:{}: not implemented", host, port);
-            return E_NOT_IMPLEMENTED;
+            return moto_rt::E_NOT_IMPLEMENTED;
         };
 
         let res_addr = crate::rt_alloc::alloc(core::mem::size_of::<netc::sockaddr>() as u64, 16);
@@ -63,7 +62,7 @@ pub unsafe extern "C" fn dns_lookup(
         *result_addr = res_addr as usize;
         *result_len = 1;
     }
-    E_OK
+    moto_rt::E_OK
 }
 
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
@@ -82,34 +81,34 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         };
         posix::push_file(listener)
     } else {
-        -(E_NOT_IMPLEMENTED as RtFd)
+        -(moto_rt::E_NOT_IMPLEMENTED as RtFd)
     }
 }
 
 pub extern "C" fn listen(rt_fd: RtFd, max_backlog: u32) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
     let Some(listener) =
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
     else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     match listener.listen(max_backlog) {
-        Ok(()) => E_OK,
+        Ok(()) => moto_rt::E_OK,
         Err(err) => err,
     }
 }
 
 pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return -(E_BAD_HANDLE as RtFd);
+        return -(moto_rt::E_BAD_HANDLE as RtFd);
     };
     let Some(listener) =
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
     else {
-        return -(E_BAD_HANDLE as RtFd);
+        return -(moto_rt::E_BAD_HANDLE as RtFd);
     };
 
     let (stream, addr) = match listener.accept() {
@@ -143,7 +142,7 @@ pub extern "C" fn tcp_connect(
 
 pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     unsafe {
@@ -165,18 +164,18 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
             }
 
             match posix_file.set_nonblocking(nonblocking == 1) {
-                Ok(_) => E_OK,
+                Ok(_) => moto_rt::E_OK,
                 Err(err) => err,
             }
         } else {
-            E_BAD_HANDLE
+            moto_rt::E_BAD_HANDLE
         }
     }
 }
 
 pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: usize) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     unsafe {
@@ -191,14 +190,14 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         {
             udp_socket.getsockopt(option, ptr, len)
         } else {
-            E_BAD_HANDLE
+            moto_rt::E_BAD_HANDLE
         }
     }
 }
 
 pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
@@ -217,42 +216,42 @@ pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
         }
     }
 
-    -(E_BAD_HANDLE as i64)
+    -(moto_rt::E_BAD_HANDLE as i64)
 }
 
 pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     unsafe {
         if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
             if let Some(socket_addr) = tcp_stream.socket_addr() {
                 *addr = (socket_addr).into();
-                return E_OK;
+                return moto_rt::E_OK;
             }
-            return E_INVALID_ARGUMENT;
+            return moto_rt::E_INVALID_ARGUMENT;
         };
         if let Some(udp_socket) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
         {
             *addr = (*udp_socket.local_addr()).into();
-            return E_OK;
+            return moto_rt::E_OK;
         };
         if let Some(tcp_listener) =
             (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
         {
             *addr = (*tcp_listener.socket_addr()).into();
-            return E_OK;
+            return moto_rt::E_OK;
         };
     }
 
-    E_BAD_HANDLE
+    moto_rt::E_BAD_HANDLE
 }
 
 pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> ErrorCode {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     unsafe {
@@ -260,7 +259,7 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
             match tcp_stream.peer_addr() {
                 Ok(peer_addr) => {
                     *addr = peer_addr.into();
-                    return E_OK;
+                    return moto_rt::E_OK;
                 }
                 Err(err) => return err,
             }
@@ -271,14 +270,14 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
             match udp_socket.peer_addr() {
                 Some(peer_addr) => {
                     *addr = peer_addr.into();
-                    return E_OK;
+                    return moto_rt::E_OK;
                 }
                 None => return moto_rt::E_NOT_CONNECTED,
             }
         };
     }
 
-    E_BAD_HANDLE
+    moto_rt::E_BAD_HANDLE
 }
 
 pub unsafe extern "C" fn udp_recv_from(
@@ -307,12 +306,12 @@ unsafe fn udp_recv_or_peek_from(
     peek: bool,
 ) -> i64 {
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
     let Some(udp_socket) =
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
     else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
@@ -333,12 +332,12 @@ pub unsafe extern "C" fn udp_send_to(
 ) -> i64 {
     let addr = unsafe { (*addr).into() };
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
     let Some(udp_socket) =
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
     else {
-        return -(E_BAD_HANDLE as i64);
+        return -(moto_rt::E_BAD_HANDLE as i64);
     };
 
     let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
@@ -351,12 +350,12 @@ pub unsafe extern "C" fn udp_send_to(
 pub unsafe extern "C" fn udp_connect(rt_fd: RtFd, addr: *const netc::sockaddr) -> ErrorCode {
     let addr = unsafe { (*addr).into() };
     let Some(posix_file) = posix::get_file(rt_fd) else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
     let Some(udp_socket) =
         (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
     else {
-        return E_BAD_HANDLE;
+        return moto_rt::E_BAD_HANDLE;
     };
 
     udp_socket.connect(&addr);
@@ -985,7 +984,7 @@ impl NetChannel {
             self.maybe_wake_io_thread();
             Ok(())
         } else {
-            Err(E_NOT_READY)
+            Err(moto_rt::E_NOT_READY)
         }
     }
 
