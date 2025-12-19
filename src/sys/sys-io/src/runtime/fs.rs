@@ -1,6 +1,6 @@
 use async_fs::FileSystem;
 use moto_async::{AsFuture, LocalMutex};
-use moto_sys_io::api_fs_legacy::FS_URL;
+use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;
@@ -54,21 +54,21 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
     Ok(())
 }
 
-fn spawn_fs_listeners(fs: Box<dyn FileSystem>) {
+async fn spawn_fs_listeners(fs: Box<dyn FileSystem>) {
     let fs = Rc::new(LocalMutex::new(fs));
 
     const NUM_LISTENERS: usize = 5;
     for _ in 0..NUM_LISTENERS {
-        spawn_new_listener(fs.clone());
+        spawn_new_listener(fs.clone()).await;
     }
 }
 
-fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
-    let listener = moto_ipc::io_channel::ServerConnection::create(FS_URL)
-        .expect("Failed to spawn a sys-io-fs listener: {err:?}");
+async fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
+    // let listener = moto_ipc::io_channel::ServerConnection::create(FS_URL)
+    //     .expect("Failed to spawn a sys-io-fs listener: {err:?}");
 
     moto_async::LocalRuntime::spawn(async move {
-        fs_listener(fs.clone(), listener)
+        fs_listener(fs.clone())
             .await
             .inspect_err(|err| log::debug!("fs_listener exited with error {err}"));
 
@@ -77,18 +77,7 @@ fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
     });
 }
 
-async fn fs_listener(
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
-    mut listener: moto_ipc::io_channel::ServerConnection,
-) -> Result<()> {
-    listener
-        .wait_handle()
-        .as_future()
-        .await
-        .map_err(|code| std::io::Error::from_raw_os_error(code as i32))?;
-
-    listener
-        .accept()
-        .map_err(|code| std::io::Error::from_raw_os_error(code as i32))?;
+async fn fs_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) -> Result<()> {
+    // let (sender, receiver) = moto_ipc::io_channel::listen(FS_URL).await?;
     todo!()
 }

@@ -37,6 +37,7 @@ use core::task::RawWakerVTable;
 use core::task::Waker;
 use futures::channel::oneshot;
 use futures::task::LocalFutureObj;
+use moto_rt::Result;
 use moto_rt::time::Instant;
 use moto_sys::SysHandle;
 
@@ -201,7 +202,7 @@ struct LocalRuntimeInner {
     next_task_id: RefCell<u64>,
 
     // Wakes from wait_handles are stored here.
-    sys_wakes: RefCell<BTreeMap<SysHandle, moto_rt::ErrorCode>>,
+    sys_wakes: RefCell<BTreeMap<SysHandle, moto_rt::Error>>,
 
     // Task IDs of wakes coming from wakers (!= LocalWaker).
     nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
@@ -315,7 +316,9 @@ impl LocalRuntimeInner {
                     for task_id in tasks {
                         runqueue.push_back(task_id);
                     }
-                    self.sys_wakes.borrow_mut().insert(handle, moto_rt::E_OK);
+                    self.sys_wakes
+                        .borrow_mut()
+                        .insert(handle, moto_rt::Error::Ok);
                 }
             }
             Err(moto_rt::E_TIMED_OUT) => {}
@@ -332,7 +335,7 @@ impl LocalRuntimeInner {
                     }
                     self.sys_wakes
                         .borrow_mut()
-                        .insert(handle, moto_rt::E_BAD_HANDLE);
+                        .insert(handle, moto_rt::Error::BadHandle);
                 }
             }
             Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
@@ -561,7 +564,7 @@ pub struct SysHandleFuture {
 }
 
 impl AsFuture for SysHandle {
-    type Output = Result<(), moto_rt::ErrorCode>;
+    type Output = Result<()>;
 
     type AsFuture = SysHandleFuture;
 
@@ -574,7 +577,7 @@ impl AsFuture for SysHandle {
 }
 
 impl Future for SysHandleFuture {
-    type Output = Result<(), moto_rt::ErrorCode>;
+    type Output = Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let inner = LocalRuntimeInner::current();
@@ -587,7 +590,7 @@ impl Future for SysHandleFuture {
         };
 
         if let Some(wait_result) = inner.sys_wakes.borrow_mut().remove(&self.handle) {
-            Poll::Ready(if wait_result == moto_rt::E_OK {
+            Poll::Ready(if wait_result == moto_rt::Error::Ok {
                 Ok(())
             } else {
                 Err(wait_result)

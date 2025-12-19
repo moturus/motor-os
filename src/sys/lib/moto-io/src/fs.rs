@@ -11,17 +11,123 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::collections::btree_map::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::String;
-pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID, Result};
 use async_trait::async_trait;
+use core::{
+    cell::{Cell, RefCell},
+    task::{LocalWaker, Poll},
+};
+use moto_ipc::io_channel::Msg;
+use moto_rt::Error;
+use moto_sys_io::api_fs;
 
-pub struct FileSystem {}
+pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID, Result};
 
-#[async_trait(?Send)]
-impl async_fs::FileSystem for FileSystem {
+pub struct FsClient {
+    io_sender: moto_ipc::io_channel::Sender,
+    io_receiver: moto_ipc::io_channel::Receiver,
+
+    // Because FsClient is single-threaded, we use Cell<>, not AtomicU64.
+    request_counter: Cell<u64>,
+
+    responses: RefCell<BTreeMap<u64, ResponseWaiter>>,
+}
+
+enum ResponseWaiter {
+    Waker(LocalWaker),
+    Msg(Msg),
+}
+
+pub struct ResponseFuture {
+    request_id: u64,
+    fs_client: Rc<FsClient>,
+}
+
+impl Future for ResponseFuture {
+    type Output = Result<Msg>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let mut responses = self.fs_client.responses.borrow_mut();
+        match responses.entry(self.request_id) {
+            alloc::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(ResponseWaiter::Waker(cx.local_waker().clone()));
+                Poll::Pending
+            }
+            alloc::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                ResponseWaiter::Waker(local_waker) => {
+                    *local_waker = cx.local_waker().clone();
+                    Poll::Pending
+                }
+                ResponseWaiter::Msg(msg) => Poll::Ready(Ok(*msg)),
+            },
+        }
+    }
+}
+
+impl FsClient {
+    fn new_request_id(&self) -> u64 {
+        self.request_counter.update(|id| id + 1);
+        self.request_counter.get()
+    }
+
+    async fn send_recv(self: Rc<Self>, msg: Msg) -> Result<Msg> {
+        self.io_sender.send(msg).await?;
+        ResponseFuture {
+            request_id: msg.id,
+            fs_client: self,
+        }
+        .await
+    }
+
+    pub fn connect() -> Result<Rc<Self>> {
+        let (io_sender, io_receiver) = moto_ipc::io_channel::connect(moto_sys_io::api_fs::FS_URL)?;
+        Ok(Rc::new(Self {
+            io_sender,
+            io_receiver,
+            request_counter: Cell::new(0),
+            responses: Default::default(),
+        }))
+    }
+
     /// Find a file or directory by its full path.
-    async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>> {
-        todo!()
+    pub async fn stat(self: &Rc<Self>, path: &str) -> Result<EntryId> {
+        if path.len() > moto_rt::fs::MAX_PATH_LEN || path.is_empty() {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        if path == "/" {
+            return Ok(ROOT_ID);
+        }
+
+        if !path.starts_with('/') {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+
+        let mut current = ROOT_ID;
+        for entry in path.split('/') {
+            if entry.is_empty() {
+                continue;
+            }
+
+            let current = self.stat_one(current, entry).await?;
+        }
+
+        Ok(current)
+    }
+
+    async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::stat_msg(parent_id, fname, io_page);
+        msg.id = self.new_request_id();
+
+        let _self = self.clone();
+        let response = moto_async::LocalRuntime::spawn(_self.send_recv(msg)).await;
+
+        todo!("{fname}")
     }
 
     /// Create a file or directory.

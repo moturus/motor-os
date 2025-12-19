@@ -32,5 +32,7 @@
 //! Motor OS, being a volunteer-driven open-source effort, will focus on
 //! the typical/standard/legacy I/O paradigms, such as file systems and standard
 //! networking protocols.
+
+#![feature(local_waker)]
 #![no_std]
 pub mod fs;

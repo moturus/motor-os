@@ -741,7 +741,7 @@ impl NetChannel {
         if let Some(msg) = msg {
             fence(Ordering::SeqCst);
             if let Err(err) = self.conn.send(msg) {
-                assert_eq!(err, moto_rt::E_NOT_READY);
+                assert_eq!(err, moto_rt::Error::NotReady);
                 self.wake_driver();
                 return (false, Some(msg));
             }
@@ -751,7 +751,7 @@ impl NetChannel {
         while let Some(msg) = self.send_queue.pop() {
             fence(Ordering::SeqCst);
             if let Err(err) = self.conn.send(msg) {
-                assert_eq!(err, moto_rt::E_NOT_READY);
+                assert_eq!(err, moto_rt::Error::NotReady);
                 self.wake_driver();
                 return (false, Some(msg));
             }
@@ -1053,7 +1053,9 @@ impl NetChannel {
     }
 
     pub fn alloc_page(&self, subchannel_mask: u64) -> Result<io_channel::IoPage, ErrorCode> {
-        self.conn.alloc_page(subchannel_mask)
+        self.conn
+            .alloc_page(subchannel_mask)
+            .map_err(|err| err.into())
     }
 
     pub fn may_alloc_page(&self, subchannel_mask: u64) -> bool {
@@ -1061,7 +1063,7 @@ impl NetChannel {
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<io_channel::IoPage, u16> {
-        self.conn.get_page(page_idx)
+        self.conn.get_page(page_idx).map_err(|err| err.into())
     }
 }
 

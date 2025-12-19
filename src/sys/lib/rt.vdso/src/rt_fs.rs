@@ -1,12 +1,20 @@
+//! Rust's stdlib FS (filesystem) backend.
+//!
+//! This module bridges Motor OS's "native" FS client in moto-io,
+//! which is async and local-thread-only, with the posixy/Linuxy way
+//! Rust's stdlib expect FS to behave (FDs, polling, etc.).
 use crate::posix::PosixFile;
 use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Deref;
+use core::pin::Pin;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
-use moto_io::fs::{EntryId, ROOT_ID};
+use moto_io::fs::{EntryId, FsClient, ROOT_ID};
 use moto_ipc::io_channel;
 use moto_rt::Error;
 use moto_rt::fs::HANDLE_URL_PREFIX;
@@ -15,6 +23,9 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_fs_legacy;
 
 type Result<T> = core::result::Result<T, Error>;
+type IoTask = Box<
+    dyn FnOnce(alloc::rc::Rc<moto_io::fs::FsClient>) -> Pin<Box<dyn Future<Output = ()>>> + Send,
+>;
 
 // Given a path str from the user, figure out the absolute path, filename, etc.
 #[derive(Clone)]
@@ -126,12 +137,7 @@ impl CanonicalPath {
 }
 
 pub struct AsyncFsClient {
-    io_sender: moto_ipc::io_channel::Sender,
-    io_receiver: moto_ipc::io_channel::Receiver,
-
-    client_handle: SysHandle,
-    runtime_handle: SysHandle,
-
+    tasks_tx: moto_async::channel::Sender<IoTask>,
     cwd: moto_rt::mutex::Mutex<String>, // Current Working Directory.
 }
 
@@ -181,37 +187,40 @@ impl AsyncFsClient {
         }
     }
 
-    extern "C" fn runtime_thread(self_addr: usize) {
+    extern "C" fn runtime_thread(param: u64) {
         // Safety: safe by construction. See Self::create().
-        let self_: &'static Self = unsafe { (self_addr as *const Self).as_ref().unwrap() };
+        let boxed = unsafe {
+            Box::from_raw(
+                param as usize
+                    as *mut (
+                        moto_async::channel::Receiver<IoTask>,
+                        Rc<moto_io::fs::FsClient>,
+                    ),
+            )
+        };
+        let (tasks_rx, fs_client) = Box::into_inner(boxed);
         moto_sys::set_current_thread_name("rt_fs::runtime").unwrap();
 
-        moto_async::LocalRuntime::new().block_on(self_.runtime_task());
+        moto_async::LocalRuntime::new().block_on(Self::main_runtime_task(tasks_rx, fs_client));
     }
 
-    async fn runtime_task(&'static self) {
-        moto_async::LocalRuntime::spawn(self.local_queue_task()).await;
-    }
-
-    async fn local_queue_task(&'static self) {
+    async fn main_runtime_task(
+        mut tasks_rx: moto_async::channel::Receiver<IoTask>,
+        fs_client: Rc<moto_io::fs::FsClient>,
+    ) {
         loop {
-            self.runtime_handle.as_future().await;
-            todo!()
+            let io_task = tasks_rx.recv().await.unwrap();
+            let result = io_task(fs_client.clone()).await;
         }
     }
 
     fn create() -> Result<&'static Self> {
         moto_async::LocalRuntime::new().block_on(async move {
-            let (io_sender, io_receiver) =
-                moto_ipc::io_channel::connect(moto_sys_io::api_fs_legacy::FS_URL)?;
-            let (client_handle, runtime_handle) =
-                moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+            let fs_client = moto_io::fs::FsClient::connect()?;
+            let (tasks_tx, tasks_rx) = moto_async::channel(8);
 
             let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
-                io_sender,
-                io_receiver,
-                client_handle,
-                runtime_handle,
+                tasks_tx,
                 cwd: moto_rt::mutex::Mutex::new(
                     if let Some(cwd) = super::rt_process::EnvRt::get("PWD") {
                         cwd
@@ -222,12 +231,13 @@ impl AsyncFsClient {
             }));
 
             let addr = this as *mut _ as usize;
+            let runtime_thread_param = Box::into_raw(Box::new((tasks_rx, fs_client)));
 
             let thread_handle = moto_sys::SysCpu::spawn(
                 SysHandle::SELF,
                 4096 * 16,
                 Self::runtime_thread as *const () as usize as u64,
-                addr as u64,
+                runtime_thread_param as u64,
             )
             .expect("Error spawning the runtime thread (FS).");
 
@@ -286,35 +296,42 @@ impl AsyncFsClient {
         */
     }
 
-    fn file_open(path: &str, opts: u32) -> Result<File> {
+    fn file_open(&self, path: &str, opts: u32) -> Result<File> {
         if opts & moto_rt::fs::O_NONBLOCK != 0 {
             // Not yet.
             return Err(moto_rt::Error::NotImplemented);
         }
         let path = CanonicalPath::parse(path)?.abs_path;
-        let entry_id = Self::stat_internal(path.as_str())?;
+        let entry_id = self.stat_internal(path.as_str())?;
 
         todo!()
     }
 
-    fn stat_internal(path: &str) -> Result<EntryId> {
+    fn stat_internal(&self, path: &str) -> Result<EntryId> {
         if path.is_empty() {
             return Err(moto_rt::Error::InvalidArgument);
         }
         if path == "/" {
             return Ok(ROOT_ID);
         }
+
         if !path.starts_with('/') {
             return Err(moto_rt::Error::InvalidArgument);
         }
 
-        let (left, right) = path.rsplit_once('/').unwrap();
-        assert!(!right.is_empty());
+        let (tx_result, rx_result) = moto_async::oneshot();
+        let path_owned = path.to_owned();
+        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
+            Box::pin(async move {
+                let result = fs_client.stat(&path_owned).await;
+                tx_result.send(result);
+            })
+        });
 
-        todo!()
-        // if left.is_empty() {
-        //     return moto_io::fs::FileSystem::
-        // }
+        moto_async::LocalRuntime::new().block_on(async {
+            let _ = self.tasks_tx.send(task).await;
+            rx_result.await.unwrap()
+        })
     }
 }
 
@@ -373,7 +390,10 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
         }
     }
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
-    let file = match AsyncFsClient::file_open(path, opts) {
+    let file = match AsyncFsClient::get()
+        .expect("Couldn't initialize AsyncFsClient")
+        .file_open(path, opts)
+    {
         Ok(file) => file,
         Err(err) => return -(err as i32),
     };

@@ -11,6 +11,7 @@ use core::{fmt::Debug, sync::atomic::*};
 
 use alloc::sync::Arc;
 use moto_async::AsFuture;
+use moto_rt::Result;
 use moto_sys::*;
 
 // Although client+server can use any value in QueueEntry::command, it is recommended
@@ -83,6 +84,11 @@ impl Payload {
         unsafe { &mut self.args_64 }
     }
 
+    pub fn set_arg_128(&mut self, val: u128) {
+        self.args_64_mut()[0] = (val >> 64) as u64;
+        self.args_64_mut()[1] = (val & (u64::MAX as u128)) as u64;
+    }
+
     pub fn args_8(&self) -> &[u8; 24] {
         unsafe { &self.args_8 }
     }
@@ -97,6 +103,10 @@ impl Payload {
 
     pub fn args_64(&self) -> &[u64; 3] {
         unsafe { &self.args_64 }
+    }
+
+    pub fn arg_128(&self) -> u128 {
+        (self.args_64()[0] as u128) << 64 | (self.args_64()[1] as u128)
     }
 }
 
@@ -141,7 +151,7 @@ impl Default for Msg {
 impl Msg {
     pub fn new() -> Self {
         let mut result: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-        result.status = moto_rt::E_NOT_READY;
+        result.status = moto_rt::Error::NotReady.into();
         result
     }
 
@@ -260,9 +270,9 @@ impl RawChannel {
     }
 
     #[allow(clippy::mut_from_ref)]
-    fn page_bytes(&self, raw_page: RawIoPage) -> Result<&mut [u8], ErrorCode> {
+    fn page_bytes(&self, raw_page: RawIoPage) -> Result<&mut [u8]> {
         if raw_page.page_idx >= (CHANNEL_PAGE_COUNT as u16) {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::Error::InvalidArgument);
         }
 
         unsafe {
@@ -289,7 +299,7 @@ impl RawChannel {
         ones != 64
     }
 
-    fn alloc_page(&self, subchannel: SubChannel) -> Result<RawIoPage, ErrorCode> {
+    fn alloc_page(&self, subchannel: SubChannel) -> Result<RawIoPage> {
         let (bitmap_ref, subchannel_mask) = match subchannel {
             SubChannel::Client(mask) => (&self.client_pages_in_use, mask),
             SubChannel::Server(mask) => (&self.server_pages_in_use, mask),
@@ -300,7 +310,7 @@ impl RawChannel {
             let ones = (bitmap | !subchannel_mask).trailing_ones();
             if ones == 64 {
                 // Nothing left.
-                return Err(moto_rt::E_NOT_READY);
+                return Err(moto_rt::Error::NotReady);
             }
 
             let bit = 1u64 << ones;
@@ -323,9 +333,9 @@ impl RawChannel {
         }
     }
 
-    fn free_page(&self, raw_page: RawIoPage) -> Result<(), ErrorCode> {
+    fn free_page(&self, raw_page: RawIoPage) -> Result<()> {
         if (raw_page.page_idx as usize) >= CHANNEL_PAGE_COUNT {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::Error::InvalidArgument);
         }
 
         let bitmap = match raw_page.s_type {
@@ -518,7 +528,7 @@ impl Drop for ClientConnection {
 }
 
 impl ClientConnection {
-    pub fn connect(url: &str) -> Result<Self, ErrorCode> {
+    pub fn connect(url: &str) -> Result<Self> {
         let addr = SysMem::map(
             SysHandle::SELF,
             SysMem::F_READABLE | SysMem::F_WRITABLE,
@@ -563,8 +573,8 @@ impl ClientConnection {
         self.server_handle
     }
 
-    pub fn wake_server(&self) -> Result<(), moto_rt::ErrorCode> {
-        moto_sys::SysCpu::wake(self.server_handle)
+    pub fn wake_server(&self) -> Result<()> {
+        moto_sys::SysCpu::wake(self.server_handle).map_err(|err| err.into())
     }
 
     fn clear(&mut self) {
@@ -577,7 +587,7 @@ impl ClientConnection {
     }
 
     // See enqueue() in mpmc.cc.
-    pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
+    pub fn send(&self, msg: Msg) -> Result<()> {
         let raw_channel = self.raw_channel();
 
         let mut slot: &MsgSlot;
@@ -599,7 +609,7 @@ impl ClientConnection {
                     }
                 }
                 // The queue is full.
-                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY),
+                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady),
                 // We lost the race - continue.
                 core::cmp::Ordering::Greater => {
                     pos = raw_channel.client_queue_head.load(Ordering::Relaxed)
@@ -615,7 +625,7 @@ impl ClientConnection {
     }
 
     // See dequeue() in mpmc.cc.
-    pub fn recv(&self) -> Result<Msg, ErrorCode> {
+    pub fn recv(&self) -> Result<Msg> {
         let raw_channel = self.raw_channel();
 
         let mut slot: &MsgSlot;
@@ -637,7 +647,7 @@ impl ClientConnection {
                         Err(tail) => pos = tail, // continue
                     }
                 }
-                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is empty.
+                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady), // The queue is empty.
                 core::cmp::Ordering::Greater => {
                     // We lost the race - continue.
                     pos = raw_channel.server_queue_tail.load(Ordering::Relaxed)
@@ -651,7 +661,7 @@ impl ClientConnection {
         Ok(msg)
     }
 
-    pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+    pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         if let Ok(raw_page) = self
             .raw_channel()
             .alloc_page(SubChannel::Client(subchannel_mask))
@@ -662,7 +672,7 @@ impl ClientConnection {
                 remote_handle: SysHandle::NONE,
             })
         } else {
-            Err(moto_rt::E_NOT_READY)
+            Err(moto_rt::Error::NotReady)
         }
     }
 
@@ -671,9 +681,9 @@ impl ClientConnection {
             .may_alloc_page(SubChannel::Client(subchannel_mask))
     }
 
-    pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
-            Err(moto_rt::E_INVALID_ARGUMENT)
+            Err(moto_rt::Error::InvalidArgument)
         } else {
             Ok(IoPage::from_u16(
                 page_idx,
@@ -722,7 +732,7 @@ impl ClientConnection {
 pub enum ServerStatus {
     Created,
     Connected,
-    Error(ErrorCode),
+    Error(moto_rt::Error),
 }
 
 pub struct ServerConnection {
@@ -742,7 +752,7 @@ impl Drop for ServerConnection {
 }
 
 impl ServerConnection {
-    pub fn create(url: &str) -> Result<Self, ErrorCode> {
+    pub fn create(url: &str) -> Result<Self> {
         let addr = SysMem::map(
             SysHandle::SELF,
             0, // not mapped
@@ -773,9 +783,9 @@ impl ServerConnection {
     }
 
     // See dequeue() in mpmc.cc.
-    pub fn recv(&self) -> Result<Msg, ErrorCode> {
+    pub fn recv(&self) -> Result<Msg> {
         if self.status != ServerStatus::Connected {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::Error::InvalidArgument);
         }
 
         let raw_channel = self.raw_channel();
@@ -798,7 +808,7 @@ impl ServerConnection {
                         Err(tail) => tail, // continue
                     }
                 }
-                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is empty.
+                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady), // The queue is empty.
                 core::cmp::Ordering::Greater => {
                     // We lost the race - continue.
                     raw_channel.client_queue_tail.load(Ordering::Relaxed)
@@ -813,9 +823,9 @@ impl ServerConnection {
     }
 
     // See enqueue() in mpmc.cc.
-    pub fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
+    pub fn send(&self, msg: Msg) -> Result<()> {
         if self.status != ServerStatus::Connected {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::Error::InvalidArgument);
         }
 
         let raw_channel = self.raw_channel();
@@ -839,7 +849,7 @@ impl ServerConnection {
                         Err(head) => head, // continue
                     }
                 }
-                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is full.
+                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady), // The queue is full.
                 // We lost the race - continue.
                 core::cmp::Ordering::Greater => {
                     raw_channel.server_queue_head.load(Ordering::Relaxed)
@@ -858,15 +868,15 @@ impl ServerConnection {
         self.wait_handle
     }
 
-    pub fn wake_client(&self) -> Result<(), ErrorCode> {
-        moto_sys::SysCpu::wake(self.wait_handle)
+    pub fn wake_client(&self) -> Result<()> {
+        moto_sys::SysCpu::wake(self.wait_handle).map_err(|err| err.into())
     }
 
-    pub fn accept(&mut self) -> Result<(), ErrorCode> {
+    pub fn accept(&mut self) -> Result<()> {
         assert_eq!(self.status, ServerStatus::Created);
 
         if !moto_sys::SysObj::is_connected(self.wait_handle)? {
-            return Err(moto_rt::E_NOT_CONNECTED);
+            return Err(moto_rt::Error::NotConnected);
         };
 
         compiler_fence(Ordering::Acquire);
@@ -883,9 +893,9 @@ impl ServerConnection {
                     .load(Ordering::Relaxed)
                     != 0
             {
-                self.status = ServerStatus::Error(moto_rt::E_BAD_HANDLE);
+                self.status = ServerStatus::Error(moto_rt::Error::BadHandle);
                 self.clear();
-                return Err(moto_rt::E_BAD_HANDLE);
+                return Err(moto_rt::Error::BadHandle);
             }
         }
 
@@ -901,7 +911,7 @@ impl ServerConnection {
         self.wait_handle = SysHandle::NONE;
     }
 
-    pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+    pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         if let Ok(raw_page) = self
             .raw_channel()
             .alloc_page(SubChannel::Server(subchannel_mask))
@@ -912,7 +922,7 @@ impl ServerConnection {
                 remote_handle: SysHandle::NONE,
             })
         } else {
-            Err(moto_rt::E_NOT_READY)
+            Err(moto_rt::Error::NotReady)
         }
     }
 
@@ -921,9 +931,9 @@ impl ServerConnection {
             .may_alloc_page(SubChannel::Server(subchannel_mask))
     }
 
-    pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
-            Err(moto_rt::E_INVALID_ARGUMENT)
+            Err(moto_rt::Error::InvalidArgument)
         } else {
             Ok(IoPage::from_u16(
                 page_idx,
@@ -998,7 +1008,7 @@ impl Sender {
     }
 
     // See enqueue() in mpmc.cc.
-    fn try_send(&self, msg: Msg) -> Result<(), ErrorCode> {
+    fn try_send(&self, msg: Msg) -> Result<()> {
         let raw_channel = self.raw_channel();
 
         let (queue_head, queue) = match self.inner.endpoint_type {
@@ -1025,7 +1035,7 @@ impl Sender {
                     }
                 }
                 // The queue is full.
-                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY),
+                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady),
                 // We lost the race - continue.
                 core::cmp::Ordering::Greater => pos = queue_head.load(Ordering::Relaxed),
             }
@@ -1037,13 +1047,13 @@ impl Sender {
         Ok(())
     }
 
-    pub async fn send(&self, msg: Msg) -> Result<(), ErrorCode> {
+    pub async fn send(&self, msg: Msg) -> Result<()> {
         use moto_async::AsFuture;
 
         let mut wait_flag_set = false;
         loop {
             match self.try_send(msg) {
-                Err(moto_rt::E_NOT_READY) => {
+                Err(moto_rt::Error::NotReady) => {
                     if !wait_flag_set {
                         match self.inner.endpoint_type {
                             EndpointType::Client => self
@@ -1084,7 +1094,7 @@ impl Sender {
         }
     }
 
-    fn try_alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+    fn try_alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         if let Ok(raw_page) = self
             .raw_channel()
             .alloc_page(match self.inner.endpoint_type {
@@ -1098,17 +1108,17 @@ impl Sender {
                 remote_handle: self.inner.remote_handle,
             })
         } else {
-            Err(moto_rt::E_NOT_READY)
+            Err(moto_rt::Error::NotReady)
         }
     }
 
-    pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage, ErrorCode> {
+    pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         use moto_async::AsFuture;
 
         let mut wait_flag_set = false;
         loop {
             match self.try_alloc_page(subchannel_mask) {
-                Err(moto_rt::E_NOT_READY) => {
+                Err(moto_rt::Error::NotReady) => {
                     if !wait_flag_set {
                         match self.inner.endpoint_type {
                             EndpointType::Client => {
@@ -1151,7 +1161,7 @@ impl Receiver {
     }
 
     // See dequeue() in mpmc.cc.
-    fn try_recv(&self) -> Result<Msg, ErrorCode> {
+    fn try_recv(&self) -> Result<Msg> {
         let raw_channel = self.raw_channel();
 
         let mut slot: &MsgSlot;
@@ -1178,7 +1188,7 @@ impl Receiver {
                         Err(tail) => pos = tail, // continue
                     }
                 }
-                core::cmp::Ordering::Less => return Err(moto_rt::E_NOT_READY), // The queue is empty.
+                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady), // The queue is empty.
                 core::cmp::Ordering::Greater => {
                     // We lost the race - continue.
                     pos = queue_tail.load(Ordering::Relaxed)
@@ -1192,15 +1202,15 @@ impl Receiver {
         Ok(msg)
     }
 
-    pub async fn recv(&self) -> Result<Msg, ErrorCode> {
+    pub async fn recv(&self) -> Result<Msg> {
         use moto_async::AsFuture;
 
         let mut wait_flag_set = false;
-        let mut wait_error = moto_rt::E_OK;
+        let mut wait_error = moto_rt::Error::Ok;
         loop {
             match self.try_recv() {
-                Err(moto_rt::E_NOT_READY) => {
-                    if wait_error != moto_rt::E_OK {
+                Err(moto_rt::Error::NotReady) => {
+                    if wait_error != moto_rt::Error::Ok {
                         return Err(wait_error);
                     }
                     if !wait_flag_set {
@@ -1247,9 +1257,9 @@ impl Receiver {
         }
     }
 
-    pub fn get_page(&self, page_idx: u16) -> Result<IoPage, ErrorCode> {
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
         if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
-            Err(moto_rt::E_INVALID_ARGUMENT)
+            Err(moto_rt::Error::InvalidArgument)
         } else {
             Ok(IoPage::from_u16(
                 page_idx,
@@ -1260,7 +1270,7 @@ impl Receiver {
     }
 }
 
-pub fn connect(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
+pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
     let addr = SysMem::map(
         SysHandle::SELF,
         SysMem::F_READABLE | SysMem::F_WRITABLE,
@@ -1308,7 +1318,7 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
     Ok((sender, receiver))
 }
 
-pub async fn listen(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
+pub async fn listen(url: &str) -> Result<(Sender, Receiver)> {
     let addr = SysMem::map(
         SysHandle::SELF,
         0, // not mapped
@@ -1330,7 +1340,7 @@ pub async fn listen(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
     remote_handle.as_future().await?;
 
     if !moto_sys::SysObj::is_connected(remote_handle)? {
-        return Err(moto_rt::E_NOT_CONNECTED);
+        return Err(moto_rt::Error::NotConnected);
     };
 
     compiler_fence(Ordering::Acquire);
@@ -1342,7 +1352,7 @@ pub async fn listen(url: &str) -> Result<(Sender, Receiver), ErrorCode> {
         if (*raw_channel).server_queue_head.load(Ordering::Relaxed) != 0
             || (*raw_channel).server_queue_tail.load(Ordering::Relaxed) != 0
         {
-            return Err(moto_rt::E_BAD_HANDLE);
+            return Err(moto_rt::Error::BadHandle);
         }
     }
 

@@ -13,10 +13,10 @@ use moto_ipc::io_channel;
 use moto_sys::{ErrorCode, SysHandle};
 use moto_sys_io::api_net::{self, TcpState};
 
+use super::TcpRxBuf;
 use super::socket::SocketId;
 use super::socket::{DeferredAction, TcpSocket};
-use super::TcpRxBuf;
-use super::{netdev::NetDev, TcpTxBuf};
+use super::{TcpTxBuf, netdev::NetDev};
 use super::{smoltcp_helpers::socket_addr_from_endpoint, tcp_listener::TcpListenerId};
 use super::{socket::SocketKind, tcp_listener::TcpListener};
 
@@ -108,9 +108,11 @@ impl NetSys {
 
         let mut self_ref = unsafe {
             let self_ptr = Box::into_raw(self_ref);
-            assert!(NET_SYS
-                .swap(self_ptr, std::sync::atomic::Ordering::AcqRel)
-                .is_null());
+            assert!(
+                NET_SYS
+                    .swap(self_ptr, std::sync::atomic::Ordering::AcqRel)
+                    .is_null()
+            );
             Box::from_raw(self_ptr)
         };
 
@@ -252,11 +254,12 @@ impl NetSys {
                             local_addr,
                             num_listeners,
                         ) {
-                            assert!(self
-                                .conn_tcp_listeners
-                                .get_mut(&conn.wait_handle())
-                                .unwrap()
-                                .remove(&listener_id));
+                            assert!(
+                                self.conn_tcp_listeners
+                                    .get_mut(&conn.wait_handle())
+                                    .unwrap()
+                                    .remove(&listener_id)
+                            );
                             self.drop_tcp_listener(listener_id);
                             // TODO: maybe continue instead?
                             sqe.status = err;
@@ -272,11 +275,12 @@ impl NetSys {
                     socket_addr,
                     num_listeners,
                 ) {
-                    assert!(self
-                        .conn_tcp_listeners
-                        .get_mut(&conn.wait_handle())
-                        .unwrap()
-                        .remove(&listener_id));
+                    assert!(
+                        self.conn_tcp_listeners
+                            .get_mut(&conn.wait_handle())
+                            .unwrap()
+                            .remove(&listener_id)
+                    );
                     self.drop_tcp_listener(listener_id);
 
                     sqe.status = err;
@@ -1889,7 +1893,7 @@ impl NetSys {
             let page = match moto_socket.conn.alloc_page(moto_socket.subchannel_mask) {
                 Ok(page) => page,
                 Err(err) => {
-                    assert_eq!(err, moto_rt::E_NOT_READY);
+                    assert_eq!(err, moto_rt::Error::NotReady);
                     self.defer_socket_action(socket_id, None);
                     return;
                 }
@@ -1939,7 +1943,12 @@ impl NetSys {
             .sockets
             .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
 
-        let page_allocator = |subchannel_mask| moto_socket.conn.alloc_page(subchannel_mask);
+        let page_allocator = |subchannel_mask| {
+            moto_socket
+                .conn
+                .alloc_page(subchannel_mask)
+                .map_err(|err| err as u16)
+        };
 
         if let Ok((buf, udp_metadata)) = smol_socket.recv() {
             let addr: SocketAddr = socket_addr_from_endpoint(udp_metadata.endpoint);
@@ -2218,7 +2227,7 @@ impl NetSys {
         let moto_socket = self.udp_sockets.get_mut(&socket_id).unwrap();
         if moto_socket
             .tx_queue
-            .push_back(sqe, |idx| conn.get_page(idx))
+            .push_back(sqe, |idx| conn.get_page(idx).map_err(|err| err.into()))
             .is_err()
         {
             log::info!(

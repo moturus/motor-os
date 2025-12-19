@@ -135,7 +135,7 @@ impl IoRuntime {
             let msg = match conn.recv() {
                 Ok(sqe) => sqe,
                 Err(err) => {
-                    assert_eq!(err, moto_rt::E_NOT_READY);
+                    assert_eq!(err, moto_rt::Error::NotReady);
                     break;
                 }
             };
@@ -170,7 +170,7 @@ impl IoRuntime {
 
                     cqe.status = moto_rt::E_OK;
                     if let Err(err) = conn.send(cqe) {
-                        debug_assert_eq!(err, moto_rt::E_NOT_READY);
+                        debug_assert_eq!(err, moto_rt::Error::NotReady);
                         self.pending_completions.push_back(PendingCompletion {
                             msg: cqe,
                             endpoint_handle,
@@ -183,7 +183,7 @@ impl IoRuntime {
                             if let Some(cqe) = res {
                                 debug_assert_ne!(cqe.status(), moto_rt::E_NOT_READY);
                                 if let Err(err) = conn.send(cqe) {
-                                    debug_assert_eq!(err, moto_rt::E_NOT_READY);
+                                    debug_assert_eq!(err, moto_rt::Error::NotReady);
                                     self.pending_completions.push_back(PendingCompletion {
                                         msg: cqe,
                                         endpoint_handle,
@@ -277,7 +277,7 @@ impl IoRuntime {
             let wakee = completion.endpoint_handle;
 
             if let Err(err) = conn.0.send(completion.msg) {
-                debug_assert_eq!(err, moto_rt::E_NOT_READY);
+                debug_assert_eq!(err, moto_rt::Error::NotReady);
                 self.pending_completions.push_back(completion);
             }
 
