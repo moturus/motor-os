@@ -32,6 +32,8 @@ pub enum Error {
     Max,
 }
 
+pub type Result<T> = core::result::Result<T, Error>;
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         core::fmt::Debug::fmt(self, f)
@@ -138,11 +140,11 @@ pub fn log_panic(info: &core::panic::PanicInfo<'_>) {
 }
 
 #[cfg(not(feature = "base"))]
-pub fn ok_or_error(val: ErrorCode) -> Result<(), ErrorCode> {
-    if val == E_OK {
+pub fn into_result(val: ErrorCode) -> Result<()> {
+    if val == Error::Ok.into() {
         Ok(())
     } else {
-        Err(val)
+        Err(val.into())
     }
 }
 
@@ -152,7 +154,7 @@ macro_rules! to_result {
     ($arg:expr) => {{
         let res = $arg;
         if res < 0 {
-            Err((-res) as ErrorCode)
+            Err(((-res) as ErrorCode).into())
         } else {
             Ok(unsafe { res.try_into().unwrap_unchecked() })
         }

@@ -1,8 +1,9 @@
 use core::sync::atomic::Ordering;
 
 use super::error::ErrorCode;
-
+use crate::Result;
 use crate::RtVdsoVtable;
+use crate::into_result;
 
 pub type ThreadHandle = u64;
 
@@ -10,7 +11,7 @@ pub fn spawn(
     thread_fn: extern "C" fn(thread_arg: u64),
     stack_size: usize,
     thread_arg: u64,
-) -> Result<ThreadHandle, ErrorCode> {
+) -> Result<ThreadHandle> {
     let vdso_spawn: extern "C" fn(extern "C" fn(thread_arg: u64), usize, u64) -> u64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().thread_spawn.load(Ordering::Relaxed) as usize as *const (),
@@ -19,7 +20,7 @@ pub fn spawn(
 
     let res = vdso_spawn(thread_fn, stack_size, thread_arg);
     if res < u16::MAX as u64 {
-        Err(res as ErrorCode)
+        Err((res as ErrorCode).into())
     } else {
         Ok(res)
     }
@@ -45,22 +46,22 @@ pub fn sleep_until(deadline: crate::time::Instant) {
     vdso_sleep(deadline.as_u64())
 }
 
-pub fn set_name(name: &str) -> ErrorCode {
+pub fn set_name(name: &str) -> Result<()> {
     let vdso_set_name: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().thread_set_name.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    vdso_set_name(name.as_ptr(), name.len())
+    into_result(vdso_set_name(name.as_ptr(), name.len()))
 }
 
-pub fn join(handle: ThreadHandle) -> ErrorCode {
+pub fn join(handle: ThreadHandle) -> Result<()> {
     let vdso_join: extern "C" fn(u64) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().thread_join.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    vdso_join(handle)
+    into_result(vdso_join(handle))
 }

@@ -6,8 +6,11 @@ use alloc;
 #[cfg(not(feature = "rustc-dep-of-std"))]
 extern crate alloc;
 
+use crate::ErrorCode;
+use crate::Result;
 use crate::RtFd;
 use crate::RtVdsoVtable;
+use crate::into_result;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -17,9 +20,9 @@ pub const MAX_ENV_KEY_LEN: usize = 256;
 /// An arbitrarily defined maximum lenth of an environment variable value.
 pub const MAX_ENV_VAL_LEN: usize = 4092;
 
-pub const STDIO_INHERIT: RtFd = -((crate::error::E_MAX as RtFd) + 1);
-pub const STDIO_NULL: RtFd = -((crate::error::E_MAX as RtFd) + 2);
-pub const STDIO_MAKE_PIPE: RtFd = -((crate::error::E_MAX as RtFd) + 3);
+pub const STDIO_INHERIT: RtFd = -((ErrorCode::MAX as RtFd) + 1);
+pub const STDIO_NULL: RtFd = -((ErrorCode::MAX as RtFd) + 2);
+pub const STDIO_MAKE_PIPE: RtFd = -((ErrorCode::MAX as RtFd) + 3);
 
 /// If this ENV var is present, and its value is "true" or "TRUE",
 /// the stdio of the process will return true on is_terminal(), otherwise
@@ -201,7 +204,7 @@ pub struct SpawnResult {
     pub _reserved: i32,
 }
 
-pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCode> {
+pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd)> {
     use alloc::borrow::ToOwned;
     let vdso_spawn: extern "C" fn(*const SpawnArgsRt, *mut SpawnResult) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
@@ -267,42 +270,36 @@ pub fn spawn(args: SpawnArgs) -> Result<(u64, RtFd, RtFd, RtFd), crate::ErrorCod
         unsafe { crate::alloc::dealloc(args_rt.env as usize as *mut u8, layout) };
     }
 
-    if res != crate::E_OK {
-        Err(res)
-    } else {
-        Ok((
-            result_rt.handle,
-            result_rt.stdin,
-            result_rt.stdout,
-            result_rt.stderr,
-        ))
-    }
+    into_result(res)?;
+    Ok((
+        result_rt.handle,
+        result_rt.stdin,
+        result_rt.stdout,
+        result_rt.stderr,
+    ))
 }
 
-pub fn kill(handle: u64) -> crate::ErrorCode {
+pub fn kill(handle: u64) -> Result<()> {
     let vdso_kill: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().proc_kill.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    vdso_kill(handle)
+    into_result(vdso_kill(handle))
 }
 
-pub fn wait(handle: u64) -> Result<i32, crate::ErrorCode> {
+pub fn wait(handle: u64) -> Result<i32> {
     let vdso_wait: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().proc_wait.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    let result = vdso_wait(handle);
-    if result != crate::E_OK {
-        Err(result)
-    } else {
-        try_wait(handle)
-    }
+    into_result(vdso_wait(handle))?;
+    try_wait(handle)
 }
+
 fn convert_exit_status(exit_status: u64) -> i32 {
     if exit_status & 0xffff_ffff_0000_0000 == 0 {
         // Map u64 to i32.
@@ -316,7 +313,7 @@ fn convert_exit_status(exit_status: u64) -> i32 {
     }
 }
 
-pub fn try_wait(handle: u64) -> Result<i32, crate::ErrorCode> {
+pub fn try_wait(handle: u64) -> Result<i32> {
     let vdso_status: extern "C" fn(u64, *mut u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().proc_status.load(Ordering::Relaxed) as usize as *const (),
@@ -324,12 +321,8 @@ pub fn try_wait(handle: u64) -> Result<i32, crate::ErrorCode> {
     };
 
     let mut status = 0_u64;
-    let result = vdso_status(handle, &mut status);
-    if result == crate::E_OK {
-        Ok(convert_exit_status(status))
-    } else {
-        Err(result)
-    }
+    into_result(vdso_status(handle, &mut status))?;
+    Ok(convert_exit_status(status))
 }
 
 pub fn exit(code: i32) -> ! {
@@ -446,7 +439,7 @@ fn encode_args(args: &Vec<String>) -> (u64, Option<core::alloc::Layout>) {
     (result_addr as u64, Some(layout))
 }
 
-pub fn current_exe() -> Result<alloc::string::String, crate::ErrorCode> {
+pub fn current_exe() -> Result<alloc::string::String> {
     let vdso_current_exe: extern "C" fn(*mut u8, *mut usize) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().current_exe.load(Ordering::Relaxed) as usize as *const (),
@@ -457,8 +450,6 @@ pub fn current_exe() -> Result<alloc::string::String, crate::ErrorCode> {
     let mut len = 0_usize;
 
     use alloc::borrow::ToOwned;
-    match vdso_current_exe(bytes.as_mut_ptr(), &mut len) {
-        crate::E_OK => Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned()),
-        err => Err(err),
-    }
+    into_result(vdso_current_exe(bytes.as_mut_ptr(), &mut len))?;
+    Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned())
 }

@@ -107,7 +107,7 @@ pub const FD_STDOUT: RtFd = 1;
 pub const FD_STDERR: RtFd = 2;
 
 #[cfg(not(feature = "base"))]
-pub const RT_VERSION: u64 = 15;
+pub const RT_VERSION: u64 = 16;
 
 /// The main VDSO vtable. Versioning happens via passing RT_VERSION
 /// constant to vdso_entry. In theory, the VDSO object can support

@@ -8,9 +8,12 @@
 //! expose a flavor of POSIXy FS API, so we don't try to be too
 //! different here and expose a POSIXy FS API.
 
+use crate::Error;
+use crate::Result;
 use crate::RtFd;
 use crate::RtVdsoVtable;
 use crate::error::*;
+use crate::into_result;
 use core::sync::atomic::Ordering;
 
 #[cfg(not(feature = "rustc-dep-of-std"))]
@@ -119,7 +122,7 @@ pub fn is_terminal(rt_fd: RtFd) -> bool {
     }
 }
 
-pub fn duplicate(rt_fd: RtFd) -> Result<RtFd, ErrorCode> {
+pub fn duplicate(rt_fd: RtFd) -> Result<RtFd> {
     let vdso_duplicate: extern "C" fn(RtFd) -> RtFd = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_duplicate.load(Ordering::Relaxed) as usize as *const (),
@@ -130,7 +133,7 @@ pub fn duplicate(rt_fd: RtFd) -> Result<RtFd, ErrorCode> {
 }
 
 /// Opens a file at `path` with options specified by `opts`.
-pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
+pub fn open(path: &str, opts: u32) -> Result<RtFd> {
     let vdso_open: extern "C" fn(*const u8, usize, u32) -> i32 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_open.load(Ordering::Relaxed) as usize as *const ()
@@ -141,17 +144,17 @@ pub fn open(path: &str, opts: u32) -> Result<RtFd, ErrorCode> {
     to_result!(vdso_open(bytes.as_ptr(), bytes.len(), opts))
 }
 
-pub fn close(rt_fd: RtFd) -> Result<(), ErrorCode> {
+pub fn close(rt_fd: RtFd) -> Result<()> {
     let vdso_close: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_close.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_close(rt_fd))
+    into_result(vdso_close(rt_fd))
 }
 
-pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr, ErrorCode> {
+pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr> {
     let vdso_get_file_attr: extern "C" fn(i32, *mut FileAttr) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_get_file_attr.load(Ordering::Relaxed) as usize as *const (),
@@ -159,43 +162,41 @@ pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr, ErrorCode> {
     };
 
     let mut attr = FileAttr::new();
-    match vdso_get_file_attr(rt_fd, &mut attr) {
-        E_OK => Ok(attr),
-        err => Err(err),
-    }
+    into_result(vdso_get_file_attr(rt_fd, &mut attr))?;
+    Ok(attr)
 }
 
-pub fn fsync(rt_fd: RtFd) -> Result<(), ErrorCode> {
+pub fn fsync(rt_fd: RtFd) -> Result<()> {
     let vdso_fsync: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_fsync.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_fsync(rt_fd))
+    into_result(vdso_fsync(rt_fd))
 }
 
-pub fn datasync(rt_fd: RtFd) -> Result<(), ErrorCode> {
+pub fn datasync(rt_fd: RtFd) -> Result<()> {
     let vdso_datasync: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_datasync.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_datasync(rt_fd))
+    into_result(vdso_datasync(rt_fd))
 }
 
-pub fn truncate(rt_fd: RtFd, size: u64) -> Result<(), ErrorCode> {
+pub fn truncate(rt_fd: RtFd, size: u64) -> Result<()> {
     let vdso_truncate: extern "C" fn(i32, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_truncate.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_truncate(rt_fd, size))
+    into_result(vdso_truncate(rt_fd, size))
 }
 
-pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize> {
     let vdso_read: extern "C" fn(i32, *mut u8, usize) -> i64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_read.load(Ordering::Relaxed) as usize as *const ()
@@ -205,7 +206,7 @@ pub fn read(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
     to_result!(vdso_read(rt_fd, buf.as_mut_ptr(), buf.len()))
 }
 
-pub fn read_vectored(rt_fd: RtFd, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
+pub fn read_vectored(rt_fd: RtFd, bufs: &mut [&mut [u8]]) -> Result<usize> {
     use alloc::vec::Vec;
 
     let vdso_read_vectored: extern "C" fn(i32, *const usize, usize) -> i64 = unsafe {
@@ -226,7 +227,7 @@ pub fn read_vectored(rt_fd: RtFd, bufs: &mut [&mut [u8]]) -> Result<usize, Error
     to_result!(vdso_read_vectored(rt_fd, packed.as_ptr(), bufs.len()))
 }
 
-pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
+pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize> {
     let vdso_write: extern "C" fn(i32, *const u8, usize) -> i64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_write.load(Ordering::Relaxed) as usize as *const (),
@@ -236,7 +237,7 @@ pub fn write(rt_fd: RtFd, buf: &[u8]) -> Result<usize, ErrorCode> {
     to_result!(vdso_write(rt_fd, buf.as_ptr(), buf.len()))
 }
 
-pub fn write_vectored(rt_fd: RtFd, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+pub fn write_vectored(rt_fd: RtFd, bufs: &[&[u8]]) -> Result<usize> {
     use alloc::vec::Vec;
 
     let vdso_write_vectored: extern "C" fn(i32, *const usize, usize) -> i64 = unsafe {
@@ -260,17 +261,17 @@ pub fn write_vectored(rt_fd: RtFd, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
     to_result!(vdso_write_vectored(rt_fd, packed.as_ptr(), bufs.len()))
 }
 
-pub fn flush(rt_fd: RtFd) -> Result<(), ErrorCode> {
+pub fn flush(rt_fd: RtFd) -> Result<()> {
     let vdso_flush: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_flush.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_flush(rt_fd))
+    into_result(vdso_flush(rt_fd))
 }
 
-pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
+pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64> {
     let vdso_seek: extern "C" fn(i32, i64, u8) -> i64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_seek.load(Ordering::Relaxed) as usize as *const ()
@@ -280,7 +281,7 @@ pub fn seek(rt_fd: RtFd, offset: i64, whence: u8) -> Result<u64, ErrorCode> {
     to_result!(vdso_seek(rt_fd, offset, whence))
 }
 
-pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
+pub fn mkdir(path: &str) -> Result<()> {
     let vdso_mkdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_mkdir.load(Ordering::Relaxed) as usize as *const (),
@@ -288,10 +289,10 @@ pub fn mkdir(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    ok_or_error(vdso_mkdir(bytes.as_ptr(), bytes.len()))
+    into_result(vdso_mkdir(bytes.as_ptr(), bytes.len()))
 }
 
-pub fn unlink(path: &str) -> Result<(), ErrorCode> {
+pub fn unlink(path: &str) -> Result<()> {
     let vdso_unlink: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_unlink.load(Ordering::Relaxed) as usize as *const (),
@@ -299,10 +300,10 @@ pub fn unlink(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    ok_or_error(vdso_unlink(bytes.as_ptr(), bytes.len()))
+    into_result(vdso_unlink(bytes.as_ptr(), bytes.len()))
 }
 
-pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
+pub fn rename(old: &str, new: &str) -> Result<()> {
     let vdso_rename: extern "C" fn(*const u8, usize, *const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_rename.load(Ordering::Relaxed) as usize as *const (),
@@ -311,7 +312,7 @@ pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
 
     let old = old.as_bytes();
     let new = new.as_bytes();
-    ok_or_error(vdso_rename(
+    into_result(vdso_rename(
         old.as_ptr(),
         old.len(),
         new.as_ptr(),
@@ -319,7 +320,7 @@ pub fn rename(old: &str, new: &str) -> Result<(), ErrorCode> {
     ))
 }
 
-pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
+pub fn rmdir(path: &str) -> Result<()> {
     let vdso_rmdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_rmdir.load(Ordering::Relaxed) as usize as *const (),
@@ -327,10 +328,10 @@ pub fn rmdir(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    ok_or_error(vdso_rmdir(bytes.as_ptr(), bytes.len()))
+    into_result(vdso_rmdir(bytes.as_ptr(), bytes.len()))
 }
 
-pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
+pub fn rmdir_all(path: &str) -> Result<()> {
     let vdso_rmdir_all: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_rmdir_all.load(Ordering::Relaxed) as usize as *const (),
@@ -338,10 +339,10 @@ pub fn rmdir_all(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    ok_or_error(vdso_rmdir_all(bytes.as_ptr(), bytes.len()))
+    into_result(vdso_rmdir_all(bytes.as_ptr(), bytes.len()))
 }
 
-pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
+pub fn set_perm(path: &str, perm: u64) -> Result<()> {
     let vdso_set_perm: extern "C" fn(*const u8, usize, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_set_perm.load(Ordering::Relaxed) as usize as *const (),
@@ -349,20 +350,20 @@ pub fn set_perm(path: &str, perm: u64) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    ok_or_error(vdso_set_perm(bytes.as_ptr(), bytes.len(), perm))
+    into_result(vdso_set_perm(bytes.as_ptr(), bytes.len(), perm))
 }
 
-pub fn set_file_perm(rt_fd: RtFd, perm: u64) -> Result<(), ErrorCode> {
+pub fn set_file_perm(rt_fd: RtFd, perm: u64) -> Result<()> {
     let vdso_set_file_perm: extern "C" fn(RtFd, u64) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_set_file_perm.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_set_file_perm(rt_fd, perm))
+    into_result(vdso_set_file_perm(rt_fd, perm))
 }
 
-pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
+pub fn stat(path: &str) -> Result<FileAttr> {
     let vdso_stat: extern "C" fn(*const u8, usize, *mut FileAttr) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_stat.load(Ordering::Relaxed) as usize as *const ()
@@ -372,13 +373,11 @@ pub fn stat(path: &str) -> Result<FileAttr, ErrorCode> {
     let bytes = path.as_bytes();
     let mut attr = FileAttr::new();
 
-    match vdso_stat(bytes.as_ptr(), bytes.len(), &mut attr) {
-        E_OK => Ok(attr),
-        err => Err(err),
-    }
+    into_result(vdso_stat(bytes.as_ptr(), bytes.len(), &mut attr))?;
+    Ok(attr)
 }
 
-pub fn canonicalize(path: &str) -> Result<alloc::string::String, ErrorCode> {
+pub fn canonicalize(path: &str) -> Result<alloc::string::String> {
     let vdso_canonicalize: extern "C" fn(*const u8, usize, *mut u8, *mut usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_canonicalize.load(Ordering::Relaxed) as usize as *const (),
@@ -390,13 +389,16 @@ pub fn canonicalize(path: &str) -> Result<alloc::string::String, ErrorCode> {
     let mut len = 0_usize;
 
     use alloc::borrow::ToOwned;
-    match vdso_canonicalize(path.as_ptr(), path.len(), bytes.as_mut_ptr(), &mut len) {
-        E_OK => Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned()),
-        err => Err(err),
-    }
+    into_result(vdso_canonicalize(
+        path.as_ptr(),
+        path.len(),
+        bytes.as_mut_ptr(),
+        &mut len,
+    ))?;
+    Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned())
 }
 
-pub fn copy(from: &str, to: &str) -> Result<u64, ErrorCode> {
+pub fn copy(from: &str, to: &str) -> Result<u64> {
     let vdso_copy: extern "C" fn(*const u8, usize, *const u8, usize) -> i64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_copy.load(Ordering::Relaxed) as usize as *const ()
@@ -408,7 +410,7 @@ pub fn copy(from: &str, to: &str) -> Result<u64, ErrorCode> {
     to_result!(vdso_copy(from.as_ptr(), from.len(), to.as_ptr(), to.len()))
 }
 
-pub fn opendir(path: &str) -> Result<RtFd, ErrorCode> {
+pub fn opendir(path: &str) -> Result<RtFd> {
     let vdso_opendir: extern "C" fn(*const u8, usize) -> i32 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_opendir.load(Ordering::Relaxed) as usize as *const (),
@@ -419,17 +421,17 @@ pub fn opendir(path: &str) -> Result<RtFd, ErrorCode> {
     to_result!(vdso_opendir(bytes.as_ptr(), bytes.len()))
 }
 
-pub fn closedir(rt_fd: RtFd) -> Result<(), ErrorCode> {
+pub fn closedir(rt_fd: RtFd) -> Result<()> {
     let vdso_closedir: extern "C" fn(i32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_closedir.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_closedir(rt_fd))
+    into_result(vdso_closedir(rt_fd))
 }
 
-pub fn readdir(rt_fd: RtFd) -> Result<Option<DirEntry>, ErrorCode> {
+pub fn readdir(rt_fd: RtFd) -> Result<Option<DirEntry>> {
     let vdso_readdir: extern "C" fn(i32, *mut DirEntry) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_readdir.load(Ordering::Relaxed) as usize as *const (),
@@ -437,14 +439,14 @@ pub fn readdir(rt_fd: RtFd) -> Result<Option<DirEntry>, ErrorCode> {
     };
 
     let mut dentry = DirEntry::new();
-    match vdso_readdir(rt_fd, &mut dentry) {
-        E_OK => Ok(Some(dentry)),
-        E_NOT_FOUND => Ok(None),
-        err => Err(err),
+    match into_result(vdso_readdir(rt_fd, &mut dentry)) {
+        Ok(()) => Ok(Some(dentry)),
+        Err(Error::NotFound) => Ok(None),
+        Err(err) => Err(err),
     }
 }
 
-pub fn getcwd() -> Result<alloc::string::String, ErrorCode> {
+pub fn getcwd() -> Result<alloc::string::String> {
     let vdso_getcwd: extern "C" fn(*mut u8, *mut usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_getcwd.load(Ordering::Relaxed) as usize as *const (),
@@ -455,13 +457,11 @@ pub fn getcwd() -> Result<alloc::string::String, ErrorCode> {
     let mut len = 0_usize;
 
     use alloc::borrow::ToOwned;
-    match vdso_getcwd(bytes.as_mut_ptr(), &mut len) {
-        E_OK => Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned()),
-        err => Err(err),
-    }
+    into_result(vdso_getcwd(bytes.as_mut_ptr(), &mut len))?;
+    Ok(core::str::from_utf8(&bytes[..len]).unwrap().to_owned())
 }
 
-pub fn chdir(path: &str) -> Result<(), ErrorCode> {
+pub fn chdir(path: &str) -> Result<()> {
     let vdso_chdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().fs_chdir.load(Ordering::Relaxed) as usize as *const (),
@@ -469,5 +469,5 @@ pub fn chdir(path: &str) -> Result<(), ErrorCode> {
     };
 
     let bytes = path.as_bytes();
-    ok_or_error(vdso_chdir(bytes.as_ptr(), bytes.len()))
+    into_result(vdso_chdir(bytes.as_ptr(), bytes.len()))
 }

@@ -1,6 +1,8 @@
 use core::{alloc::Layout, sync::atomic::Ordering};
 
+use crate::Result;
 use crate::RtVdsoVtable;
+use crate::into_result;
 
 #[inline(always)]
 pub fn alloc(layout: Layout) -> *mut u8 {
@@ -72,15 +74,12 @@ pub(crate) fn raw_dealloc(addr: u64) {
 }
 
 #[inline(always)]
-pub fn release_handle(handle: u64) -> Result<(), crate::ErrorCode> {
+pub fn release_handle(handle: u64) -> Result<()> {
     let vdso_release_handle: extern "C" fn(u64) -> crate::ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().release_handle.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    match vdso_release_handle(handle) {
-        crate::E_OK => Ok(()),
-        err => Err(err),
-    }
+    into_result(vdso_release_handle(handle))
 }

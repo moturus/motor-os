@@ -1,8 +1,10 @@
 use super::netc;
+use crate::Error;
 use crate::ErrorCode;
+use crate::Result;
 use crate::RtFd;
 use crate::RtVdsoVtable;
-use crate::ok_or_error;
+use crate::into_result;
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 
@@ -44,32 +46,32 @@ pub const SO_MULTICAST_LOOP_V4: u64 = 11;
 pub const SO_MULTICAST_LOOP_V6: u64 = 12;
 pub const SO_MULTICAST_TTL_V4: u64 = 13;
 
-fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
+fn setsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<()> {
     let vdso_setsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_setsockopt.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_setsockopt(rt_fd, opt, ptr, len))
+    into_result(vdso_setsockopt(rt_fd, opt, ptr, len))
 }
 
-fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<(), ErrorCode> {
+fn getsockopt(rt_fd: RtFd, opt: u64, ptr: usize, len: usize) -> Result<()> {
     let vdso_getsockopt: extern "C" fn(RtFd, u64, usize, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_getsockopt.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_getsockopt(rt_fd, opt, ptr, len))
+    into_result(vdso_getsockopt(rt_fd, opt, ptr, len))
 }
 
-fn setsockopt_bool(rt_fd: RtFd, val: bool, opt: u64) -> Result<(), ErrorCode> {
+fn setsockopt_bool(rt_fd: RtFd, val: bool, opt: u64) -> Result<()> {
     let val: u8 = if val { 1 } else { 0 };
     setsockopt(rt_fd, opt, &val as *const _ as usize, 1)
 }
 
-fn getsockopt_bool(rt_fd: RtFd, opt: u64) -> Result<bool, ErrorCode> {
+fn getsockopt_bool(rt_fd: RtFd, opt: u64) -> Result<bool> {
     let mut val = 0_u8;
     getsockopt(rt_fd, opt, &mut val as *mut _ as usize, 1)?;
     match val {
@@ -79,7 +81,7 @@ fn getsockopt_bool(rt_fd: RtFd, opt: u64) -> Result<bool, ErrorCode> {
     }
 }
 
-pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
+pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd> {
     let vdso_bind: extern "C" fn(u8, *const netc::sockaddr) -> RtFd = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_bind.load(Ordering::Relaxed) as usize as *const (),
@@ -89,17 +91,17 @@ pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd, ErrorCode> {
     to_result!(vdso_bind(proto, addr))
 }
 
-pub fn listen(rt_fd: RtFd, max_backlog: u32) -> Result<(), ErrorCode> {
+pub fn listen(rt_fd: RtFd, max_backlog: u32) -> Result<()> {
     let vdso_listen: extern "C" fn(RtFd, u32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_listen.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_listen(rt_fd, max_backlog))
+    into_result(vdso_listen(rt_fd, max_backlog))
 }
 
-pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
+pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr)> {
     let vdso_accept: extern "C" fn(RtFd, *mut netc::sockaddr) -> RtFd = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_accept.load(Ordering::Relaxed) as usize as *const (),
@@ -109,18 +111,14 @@ pub fn accept(rt_fd: RtFd) -> Result<(RtFd, netc::sockaddr), ErrorCode> {
     let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
     let res = vdso_accept(rt_fd, &mut addr);
     if res < 0 {
-        return Err(-res as ErrorCode);
+        return Err((-res as ErrorCode).into());
     }
 
     Ok((res, addr))
 }
 
 /// Create a TCP stream by connecting to a remote addr.
-pub fn tcp_connect(
-    addr: &netc::sockaddr,
-    timeout: Duration,
-    nonblocking: bool,
-) -> Result<RtFd, ErrorCode> {
+pub fn tcp_connect(addr: &netc::sockaddr, timeout: Duration, nonblocking: bool) -> Result<RtFd> {
     let vdso_tcp_connect: extern "C" fn(*const netc::sockaddr, u64, bool) -> RtFd = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_tcp_connect.load(Ordering::Relaxed) as usize as *const (),
@@ -131,17 +129,17 @@ pub fn tcp_connect(
     to_result!(vdso_tcp_connect(addr, timeout, nonblocking))
 }
 
-pub fn udp_connect(rt_fd: RtFd, addr: &netc::sockaddr) -> Result<(), ErrorCode> {
+pub fn udp_connect(rt_fd: RtFd, addr: &netc::sockaddr) -> Result<()> {
     let vdso_udp_connect: extern "C" fn(RtFd, *const netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_udp_connect.load(Ordering::Relaxed) as usize as *const (),
         )
     };
 
-    ok_or_error(vdso_udp_connect(rt_fd, addr))
+    into_result(vdso_udp_connect(rt_fd, addr))
 }
 
-pub fn socket_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
+pub fn socket_addr(rt_fd: RtFd) -> Result<netc::sockaddr> {
     let vdso_socket_addr: extern "C" fn(RtFd, *mut netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_socket_addr.load(Ordering::Relaxed) as usize as *const (),
@@ -149,15 +147,11 @@ pub fn socket_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
     };
 
     let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
-    let res = vdso_socket_addr(rt_fd, &mut addr);
-    if res != crate::E_OK {
-        return Err(res as ErrorCode);
-    }
-
+    into_result(vdso_socket_addr(rt_fd, &mut addr))?;
     Ok(addr)
 }
 
-pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
+pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr> {
     let vdso_peer_addr: extern "C" fn(RtFd, *mut netc::sockaddr) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_peer_addr.load(Ordering::Relaxed) as usize as *const (),
@@ -165,43 +159,43 @@ pub fn peer_addr(rt_fd: RtFd) -> Result<netc::sockaddr, ErrorCode> {
     };
 
     let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
-    let res = vdso_peer_addr(rt_fd, &mut addr);
-    if res != crate::E_OK {
-        return Err(res as ErrorCode);
-    }
-
+    into_result(vdso_peer_addr(rt_fd, &mut addr))?;
     Ok(addr)
 }
 
-pub fn set_ttl(rt_fd: RtFd, ttl: u32) -> Result<(), ErrorCode> {
+pub fn set_ttl(rt_fd: RtFd, ttl: u32) -> Result<()> {
     setsockopt(rt_fd, SO_TTL, &ttl as *const _ as usize, 4)
 }
 
-pub fn ttl(rt_fd: RtFd) -> Result<u32, ErrorCode> {
+pub fn ttl(rt_fd: RtFd) -> Result<u32> {
     let mut ttl = 0_u32;
     getsockopt(rt_fd, SO_TTL, &mut ttl as *mut _ as usize, 4)?;
     Ok(ttl)
 }
 
-pub fn set_only_v6(rt_fd: RtFd, only_v6: bool) -> Result<(), ErrorCode> {
+pub fn set_only_v6(rt_fd: RtFd, only_v6: bool) -> Result<()> {
     setsockopt_bool(rt_fd, only_v6, SO_ONLY_IPV6)
 }
 
-pub fn only_v6(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+pub fn only_v6(rt_fd: RtFd) -> Result<bool> {
     getsockopt_bool(rt_fd, SO_ONLY_IPV6)
 }
 
-pub fn take_error(rt_fd: RtFd) -> Result<ErrorCode, ErrorCode> {
+pub fn take_error(rt_fd: RtFd) -> Result<Option<Error>> {
     let mut error = 0_u16;
     getsockopt(rt_fd, SO_ERROR, &mut error as *mut _ as usize, 2)?;
-    Ok(error as ErrorCode)
+    if error == Error::Ok.into() {
+        Ok(None)
+    } else {
+        Ok(Some(error.into()))
+    }
 }
 
-pub fn set_nonblocking(rt_fd: RtFd, nonblocking: bool) -> Result<(), ErrorCode> {
+pub fn set_nonblocking(rt_fd: RtFd, nonblocking: bool) -> Result<()> {
     setsockopt_bool(rt_fd, nonblocking, SO_NONBLOCKING)
 }
 
-pub fn peek(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
+pub fn peek(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize> {
     let vdso_peek: extern "C" fn(i32, *mut u8, usize) -> i64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_peek.load(Ordering::Relaxed) as usize as *const (),
@@ -211,7 +205,7 @@ pub fn peek(rt_fd: RtFd, buf: &mut [u8]) -> Result<usize, ErrorCode> {
     to_result!(vdso_peek(rt_fd, buf.as_mut_ptr(), buf.len()))
 }
 
-pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {
+pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<()> {
     let timeout: u64 = match timeout {
         Some(dur) => dur.as_nanos().try_into().unwrap_or(u64::MAX),
         None => u64::MAX,
@@ -219,7 +213,7 @@ pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), Er
 
     if timeout == 0 {
         // See TcpStream::set_read_timeout() doc in Rust stdlib.
-        return Err(crate::E_INVALID_ARGUMENT);
+        return Err(Error::InvalidArgument);
     }
 
     setsockopt(
@@ -230,7 +224,7 @@ pub fn set_read_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), Er
     )
 }
 
-pub fn read_timeout(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
+pub fn read_timeout(rt_fd: RtFd) -> Result<Option<Duration>> {
     let mut timeout_ns = 0_u64;
 
     getsockopt(
@@ -247,7 +241,7 @@ pub fn read_timeout(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
     }
 }
 
-pub fn set_write_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {
+pub fn set_write_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<()> {
     let timeout: u64 = match timeout {
         Some(dur) => dur.as_nanos().try_into().unwrap_or(u64::MAX),
         None => u64::MAX,
@@ -255,7 +249,7 @@ pub fn set_write_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), E
 
     if timeout == 0 {
         // See TcpStream::set_write_timeout() doc in Rust stdlib.
-        return Err(crate::E_INVALID_ARGUMENT);
+        return Err(Error::InvalidArgument);
     }
 
     setsockopt(
@@ -266,7 +260,7 @@ pub fn set_write_timeout(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), E
     )
 }
 
-pub fn write_timeout(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
+pub fn write_timeout(rt_fd: RtFd) -> Result<Option<Duration>> {
     let mut timeout_ns = 0_u64;
 
     getsockopt(
@@ -283,16 +277,16 @@ pub fn write_timeout(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
     }
 }
 
-pub fn shutdown(rt_fd: RtFd, shutdown: u8) -> Result<(), ErrorCode> {
+pub fn shutdown(rt_fd: RtFd, shutdown: u8) -> Result<()> {
     if 0 != ((shutdown & !SHUTDOWN_READ) & !SHUTDOWN_WRITE) {
-        return Err(crate::E_INVALID_ARGUMENT);
+        return Err(Error::InvalidArgument);
     }
 
     setsockopt(rt_fd, SO_SHUTDOWN, &shutdown as *const _ as usize, 1)
 }
 
 const MAX_LINGER_MS: u64 = 60_000; // 60 sec.
-pub fn set_linger(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCode> {
+pub fn set_linger(rt_fd: RtFd, timeout: Option<Duration>) -> Result<()> {
     let linger_millis: u64 = if let Some(timo) = timeout {
         let millis = timo.as_millis();
         if millis > (MAX_LINGER_MS as u128) {
@@ -306,7 +300,7 @@ pub fn set_linger(rt_fd: RtFd, timeout: Option<Duration>) -> Result<(), ErrorCod
     setsockopt(rt_fd, SO_LINGER, &linger_millis as *const u64 as usize, 8)
 }
 
-pub fn linger(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
+pub fn linger(rt_fd: RtFd) -> Result<Option<Duration>> {
     let mut linger_millis = 0_u64;
     getsockopt(rt_fd, SO_LINGER, &mut linger_millis as *mut _ as usize, 8)?;
     match linger_millis {
@@ -316,23 +310,23 @@ pub fn linger(rt_fd: RtFd) -> Result<Option<Duration>, ErrorCode> {
     }
 }
 
-pub fn set_nodelay(rt_fd: RtFd, nodelay: bool) -> Result<(), ErrorCode> {
+pub fn set_nodelay(rt_fd: RtFd, nodelay: bool) -> Result<()> {
     setsockopt_bool(rt_fd, nodelay, SO_NODELAY)
 }
 
-pub fn nodelay(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+pub fn nodelay(rt_fd: RtFd) -> Result<bool> {
     getsockopt_bool(rt_fd, SO_NODELAY)
 }
 
-pub fn set_udp_broadcast(rt_fd: RtFd, val: bool) -> Result<(), ErrorCode> {
+pub fn set_udp_broadcast(rt_fd: RtFd, val: bool) -> Result<()> {
     setsockopt_bool(rt_fd, val, SO_BROADCAST)
 }
 
-pub fn udp_broadcast(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+pub fn udp_broadcast(rt_fd: RtFd) -> Result<bool> {
     getsockopt_bool(rt_fd, SO_BROADCAST)
 }
 
-pub fn udp_recv_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
+pub fn udp_recv_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr)> {
     let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
 
     let vdso_udp_recv_from: extern "C" fn(i32, *mut u8, usize, *mut netc::sockaddr) -> i64 = unsafe {
@@ -345,13 +339,13 @@ pub fn udp_recv_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockad
 
     let res = vdso_udp_recv_from(rt_fd, buf.as_mut_ptr(), buf.len(), &mut addr as *mut _);
     if res < 0 {
-        Err((-res) as ErrorCode)
+        Err(((-res) as ErrorCode).into())
     } else {
         Ok(((res as usize), addr))
     }
 }
 
-pub fn udp_peek_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr), ErrorCode> {
+pub fn udp_peek_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockaddr)> {
     let mut addr: netc::sockaddr = unsafe { core::mem::zeroed() };
 
     let vdso_udp_peek_from: extern "C" fn(i32, *mut u8, usize, *mut netc::sockaddr) -> i64 = unsafe {
@@ -364,13 +358,13 @@ pub fn udp_peek_from(rt_fd: RtFd, buf: &mut [u8]) -> Result<(usize, netc::sockad
 
     let res = vdso_udp_peek_from(rt_fd, buf.as_mut_ptr(), buf.len(), &mut addr as *mut _);
     if res < 0 {
-        Err((-res) as ErrorCode)
+        Err(((-res) as ErrorCode).into())
     } else {
         Ok(((res as usize), addr))
     }
 }
 
-pub fn udp_send_to(rt_fd: RtFd, buf: &[u8], addr: &netc::sockaddr) -> Result<usize, ErrorCode> {
+pub fn udp_send_to(rt_fd: RtFd, buf: &[u8], addr: &netc::sockaddr) -> Result<usize> {
     let vdso_udp_send_to: extern "C" fn(i32, *const u8, usize, *const netc::sockaddr) -> i64 = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get().net_udp_send_to.load(Ordering::Relaxed) as usize as *const (),
@@ -385,29 +379,29 @@ pub fn udp_send_to(rt_fd: RtFd, buf: &[u8], addr: &netc::sockaddr) -> Result<usi
     ))
 }
 
-pub fn set_udp_multicast_loop_v4(rt_fd: RtFd, val: bool) -> Result<(), ErrorCode> {
+pub fn set_udp_multicast_loop_v4(rt_fd: RtFd, val: bool) -> Result<()> {
     setsockopt_bool(rt_fd, val, SO_MULTICAST_LOOP_V4)
 }
 
-pub fn udp_multicast_loop_v4(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+pub fn udp_multicast_loop_v4(rt_fd: RtFd) -> Result<bool> {
     getsockopt_bool(rt_fd, SO_MULTICAST_LOOP_V4)
 }
 
-pub fn set_udp_multicast_ttl_v4(rt_fd: RtFd, val: u32) -> Result<(), ErrorCode> {
+pub fn set_udp_multicast_ttl_v4(rt_fd: RtFd, val: u32) -> Result<()> {
     setsockopt(rt_fd, SO_MULTICAST_TTL_V4, &val as *const _ as usize, 4)
 }
 
-pub fn udp_multicast_ttl_v4(rt_fd: RtFd) -> Result<u32, ErrorCode> {
+pub fn udp_multicast_ttl_v4(rt_fd: RtFd) -> Result<u32> {
     let mut ttl = 0_u32;
     getsockopt(rt_fd, SO_MULTICAST_TTL_V4, &mut ttl as *mut _ as usize, 4)?;
     Ok(ttl)
 }
 
-pub fn set_udp_multicast_loop_v6(rt_fd: RtFd, val: bool) -> Result<(), ErrorCode> {
+pub fn set_udp_multicast_loop_v6(rt_fd: RtFd, val: bool) -> Result<()> {
     setsockopt_bool(rt_fd, val, SO_MULTICAST_LOOP_V6)
 }
 
-pub fn udp_multicast_loop_v6(rt_fd: RtFd) -> Result<bool, ErrorCode> {
+pub fn udp_multicast_loop_v6(rt_fd: RtFd) -> Result<bool> {
     getsockopt_bool(rt_fd, SO_MULTICAST_LOOP_V6)
 }
 
@@ -418,7 +412,7 @@ pub fn join_udp_multicast_v4(
     rt_fd: RtFd,
     addr: &netc::in_addr,
     iface: &netc::in_addr,
-) -> Result<(), ErrorCode> {
+) -> Result<()> {
     let vdso_multicast_op_v4: extern "C" fn(
         i32,
         u64,
@@ -432,7 +426,7 @@ pub fn join_udp_multicast_v4(
         )
     };
 
-    ok_or_error(vdso_multicast_op_v4(
+    into_result(vdso_multicast_op_v4(
         rt_fd,
         JOIN_MULTICAST_OP,
         addr as *const _,
@@ -444,7 +438,7 @@ pub fn leave_udp_multicast_v4(
     rt_fd: RtFd,
     addr: &netc::in_addr,
     iface: &netc::in_addr,
-) -> Result<(), ErrorCode> {
+) -> Result<()> {
     let vdso_multicast_op_v4: extern "C" fn(
         i32,
         u64,
@@ -458,7 +452,7 @@ pub fn leave_udp_multicast_v4(
         )
     };
 
-    ok_or_error(vdso_multicast_op_v4(
+    into_result(vdso_multicast_op_v4(
         rt_fd,
         LEAVE_MULTICAST_OP,
         addr as *const _,
@@ -466,11 +460,7 @@ pub fn leave_udp_multicast_v4(
     ))
 }
 
-pub fn join_udp_multicast_v6(
-    rt_fd: RtFd,
-    addr: &netc::in6_addr,
-    iface: u32,
-) -> Result<(), ErrorCode> {
+pub fn join_udp_multicast_v6(rt_fd: RtFd, addr: &netc::in6_addr, iface: u32) -> Result<()> {
     let vdso_multicast_op_v6: extern "C" fn(i32, u64, *const netc::in6_addr, u32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get()
@@ -479,7 +469,7 @@ pub fn join_udp_multicast_v6(
         )
     };
 
-    ok_or_error(vdso_multicast_op_v6(
+    into_result(vdso_multicast_op_v6(
         rt_fd,
         JOIN_MULTICAST_OP,
         addr as *const _,
@@ -487,11 +477,7 @@ pub fn join_udp_multicast_v6(
     ))
 }
 
-pub fn leave_udp_multicast_v6(
-    rt_fd: RtFd,
-    addr: &netc::in6_addr,
-    iface: u32,
-) -> Result<(), ErrorCode> {
+pub fn leave_udp_multicast_v6(rt_fd: RtFd, addr: &netc::in6_addr, iface: u32) -> Result<()> {
     let vdso_multicast_op_v6: extern "C" fn(i32, u64, *const netc::in6_addr, u32) -> ErrorCode = unsafe {
         core::mem::transmute(
             RtVdsoVtable::get()
@@ -500,7 +486,7 @@ pub fn leave_udp_multicast_v6(
         )
     };
 
-    ok_or_error(vdso_multicast_op_v6(
+    into_result(vdso_multicast_op_v6(
         rt_fd,
         LEAVE_MULTICAST_OP,
         addr as *const _,
@@ -511,7 +497,7 @@ pub fn leave_udp_multicast_v6(
 pub fn lookup_host(
     host: &str,
     port: u16,
-) -> Result<(u16, alloc::collections::VecDeque<netc::sockaddr>), ErrorCode> {
+) -> Result<(u16, alloc::collections::VecDeque<netc::sockaddr>)> {
     let vdso_lookup: extern "C" fn(
         /* host_bytes */ *const u8,
         /* host_bytes_sz */ usize,
@@ -527,16 +513,13 @@ pub fn lookup_host(
     let mut result_addr: usize = 0;
     let mut result_num: usize = 0;
 
-    let res = vdso_lookup(
+    into_result(vdso_lookup(
         host.as_bytes().as_ptr(),
         host.len(),
         port,
         &mut result_addr,
         &mut result_num,
-    );
-    if res != crate::E_OK {
-        return Err(res);
-    }
+    ))?;
 
     let addresses: &[netc::sockaddr] =
         unsafe { core::slice::from_raw_parts(result_addr as *const netc::sockaddr, result_num) };
