@@ -46,9 +46,11 @@ const RT_VERSION: u64 = 15;
 pub extern "C" fn motor_start(version: u64) {
     if version != RT_VERSION {
         // Doing an assert or panic will #PF, so we use lower-level API.
-        moto_log!("VDSO: unsupported version: {version}.");
+        moto_log!("VDSO: requested version: {version}; available: {RT_VERSION}.");
         moto_sys::sys_cpu::SysCpu::exit(1)
     }
+
+    moto_log!("vdso: motor_start: {version}");
 
     let vtable = RtVdsoVtable::get();
     let self_addr = motor_start as *const () as usize as u64;

@@ -266,7 +266,7 @@ pub fn init() {
     vdso_entry(RT_VERSION)
 }
 
-#[cfg(not(feature = "base"))]
+#[cfg(feature = "rustc-dep-of-std")]
 #[linkage = "weak"]
 #[unsafe(no_mangle)]
 pub extern "C" fn motor_runtime_start() {
@@ -277,7 +277,7 @@ pub extern "C" fn motor_runtime_start() {
     init();
 }
 
-#[cfg(not(feature = "base"))]
+#[cfg(feature = "rustc-dep-of-std")]
 #[doc(hidden)]
 pub fn start() {
     // Called by Rust stdlib in motor_start (sys/pal/motor/mod.rs)

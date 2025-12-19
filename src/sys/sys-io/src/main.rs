@@ -4,6 +4,7 @@
 #![feature(core_intrinsics)]
 #![feature(io_error_more)]
 #![feature(local_waker)]
+#![feature(motor_ext)]
 
 mod fs;
 mod logger;

@@ -95,6 +95,15 @@ pub fn load() {
     assert_eq!(addr, moto_rt::MOTO_SYS_CUSTOM_USERSPACE_REGION_START);
 
     moto_rt::init();
+
+    if moto_rt::RT_VERSION != std::os::motor::rt_version() {
+        log::error!(
+            "\n\n-- Rust std library expects moto-rt version {}; but we have {}.\n-- Something is not right.\n",
+            std::os::motor::rt_version(),
+            moto_rt::RT_VERSION
+        );
+        moto_sys::SysCpu::exit(0xbadc0de)
+    }
 }
 
 struct VsdoLoader {}
@@ -142,8 +151,8 @@ impl ElfLoader for VsdoLoader {
     }
 
     fn relocate(&mut self, entry: RelocationEntry) -> Result<(), ElfLoaderErr> {
-        use elfloader::arch::x86_64::RelocationTypes::*;
         use RelocationType::x86_64;
+        use elfloader::arch::x86_64::RelocationTypes::*;
 
         let addr: u64 = moto_rt::RT_VDSO_START + entry.offset;
         match entry.rtype {
