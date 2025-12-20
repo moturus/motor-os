@@ -5,8 +5,8 @@ use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
     sync::{
-        atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc,
+        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -176,17 +176,13 @@ static RUNTIME_QUEUE: std::sync::Mutex<VecDeque<RuntimeMsg>> =
     std::sync::Mutex::new(VecDeque::new());
 static RUNTIME_IPC_HANDLE: AtomicU64 = AtomicU64::new(0);
 
-const RUNTIME_STARTING: u32 = 0;
-const RUNTIME_STARTED: u32 = 1;
-
 /// Spawn the async runtime.
 pub fn spawn_async() {
     let (handle_here, handle_there) =
         moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
     RUNTIME_IPC_HANDLE.store(handle_here.as_u64(), std::sync::atomic::Ordering::Release);
 
-    let started_futex = Arc::new(AtomicU32::new(RUNTIME_STARTING));
-    let started_futex_clone = started_futex.clone();
+    let (tx, rx) = moto_async::oneshot();
 
     let _runtime_thread = std::thread::Builder::new()
         .name("sys-io:runtime".to_owned())
@@ -194,15 +190,16 @@ pub fn spawn_async() {
             // I/O IRQs are affined to CPU 0.
             moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
             moto_async::LocalRuntime::new().block_on(async move {
-                async_runtime(handle_there, started_futex_clone).await;
+                async_runtime(handle_there, tx).await;
             });
         });
 
-    use std::ops::Deref;
-    let _ = moto_rt::futex_wait(started_futex.deref(), RUNTIME_STARTING, None);
+    moto_async::LocalRuntime::new().block_on(async move {
+        let _ = rx.await;
+    });
 }
 
-async fn async_runtime(q_handle: SysHandle, started_futex: Arc<AtomicU32>) {
+async fn async_runtime(q_handle: SysHandle, started: moto_async::oneshot::Sender<()>) {
     log::debug!("async runtime starting");
     let queue_joiner = moto_async::LocalRuntime::spawn(global_queue_listener(q_handle));
 
@@ -231,11 +228,9 @@ async fn async_runtime(q_handle: SysHandle, started_futex: Arc<AtomicU32>) {
     let Ok(filesystem) = fs::init(block_device).await else {
         panic!("Cannot proceed without a filesystem.");
     };
-    started_futex.store(RUNTIME_STARTED, Ordering::Release);
 
     log::debug!("Runtime initialized.");
-    let _ = moto_rt::futex_wake(&started_futex);
-    // let _ = moto_async::LocalRuntime::spawn(block_device_listener(bd, started_futex));
+    let _ = started.send(());
 
     queue_joiner.await; // Never actually returns.
     unreachable!()

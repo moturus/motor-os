@@ -69,7 +69,6 @@ fn main() {
         panic!("let's not go there");
     }
     */
-
     virtio::init();
     fs::init();
     runtime::start();
