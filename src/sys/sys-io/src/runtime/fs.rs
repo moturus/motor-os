@@ -1,12 +1,16 @@
 use async_fs::FileSystem;
 use moto_async::{AsFuture, LocalMutex};
 use moto_rt::Result;
+use moto_sys_io::api_fs;
 use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::rc::Rc;
 
 mod virtio_partition;
+
+/// The max number of "requests" in flight per connection.
+const MAX_IN_FLIGHT: usize = 32;
 
 pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -> Result<()> {
     use zerocopy::FromZeros;
@@ -96,7 +100,7 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
 
 async fn fs_listener(
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
-    tx: moto_async::oneshot::Sender<()>,
+    started: moto_async::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
 
@@ -109,9 +113,53 @@ async fn fs_listener(
     {
         Some(res) => res,
         None => {
-            let _ = tx.send(());
+            let _ = started.send(());
             listener.await
         }
     }?;
-    todo!()
+
+    let receiver_stream = futures::stream::unfold(&receiver, |rx| async move {
+        match rx.recv().await {
+            Ok(msg) => Some((msg, rx)),
+            Err(_) => None,
+        }
+    });
+
+    use futures::StreamExt;
+
+    receiver_stream
+        .for_each_concurrent(MAX_IN_FLIGHT, move |msg| {
+            let sender = sender.clone();
+            let fs = fs.clone();
+            async move {
+                let _ = on_msg(msg, sender, fs).await;
+            }
+        })
+        .await;
+
+    log::debug!("FS connection closed.");
+    Ok(())
+}
+
+async fn on_msg(
+    msg: moto_ipc::io_channel::Msg,
+    sender: moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    match msg.command {
+        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, sender, fs).await,
+        cmd => {
+            log::warn!("Unrecognized FS command: {cmd}.");
+            Err(moto_rt::Error::InvalidData)
+        }
+    }
+}
+
+async fn on_cmd_stat(
+    msg: moto_ipc::io_channel::Msg,
+    sender: moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let (parent_id, fname) = api_fs::stat_msg_decode(msg, &sender)?;
+    todo!("got {parent_id}, {fname}")
 }

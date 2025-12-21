@@ -1146,6 +1146,18 @@ impl Sender {
             }
         }
     }
+
+    pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
+        if (page_idx & !IoPage::SERVER_FLAG) > (CHANNEL_PAGE_COUNT as u16) {
+            Err(moto_rt::Error::InvalidArgument)
+        } else {
+            Ok(IoPage::from_u16(
+                page_idx,
+                self.raw_channel(),
+                self.inner.remote_handle,
+            ))
+        }
+    }
 }
 
 pub struct Receiver {
@@ -1258,7 +1270,7 @@ impl Receiver {
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
-        if page_idx & !IoPage::SERVER_FLAG > (CHANNEL_PAGE_COUNT as u16) {
+        if (page_idx & !IoPage::SERVER_FLAG) > (CHANNEL_PAGE_COUNT as u16) {
             Err(moto_rt::Error::InvalidArgument)
         } else {
             Ok(IoPage::from_u16(

@@ -102,7 +102,8 @@ impl GetServerUrlResponse {
             return Err(u16::MAX);
         }
 
-        let bytes = core::slice::from_raw_parts(self.url.as_ptr(), self.url_size as usize);
+        let bytes =
+            unsafe { core::slice::from_raw_parts(self.url.as_ptr(), self.url_size as usize) };
         core::str::from_utf8(bytes).map_err(|_| -> u16 { u16::MAX })
     }
 }
@@ -244,7 +245,8 @@ impl RenameRequest {
         &'a self,
         raw_channel: &'a moto_ipc::sync::RawChannel,
     ) -> Result<&'a str, ErrorCode> {
-        let bytes = raw_channel.get_bytes(self.old.as_ptr(), self.old_fname_size as usize)?;
+        let bytes =
+            unsafe { raw_channel.get_bytes(self.old.as_ptr(), self.old_fname_size as usize) }?;
         core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 
@@ -256,7 +258,8 @@ impl RenameRequest {
         &'a self,
         raw_channel: &'a moto_ipc::sync::RawChannel,
     ) -> Result<&'a str, ErrorCode> {
-        let bytes = raw_channel.get_bytes(self.new.as_ptr(), self.new_fname_size as usize)?;
+        let bytes =
+            unsafe { raw_channel.get_bytes(self.new.as_ptr(), self.new_fname_size as usize) }?;
         core::str::from_utf8(bytes).map_err(|_| moto_rt::E_INVALID_ARGUMENT)
     }
 }

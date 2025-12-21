@@ -120,8 +120,9 @@ impl FsClient {
     }
 
     async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
+        moto_rt::error::log_to_kernel("stat one");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
-        let mut msg = api_fs::stat_msg(parent_id, fname, io_page);
+        let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
         msg.id = self.new_request_id();
 
         let _self = self.clone();

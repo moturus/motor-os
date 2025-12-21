@@ -9,9 +9,11 @@ categories = ["no-std"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-async-trait = "0.1.88"
-async-fs = { path = "../async-fs", default-features = false, features = ["moto-rt"] }
+async-fs    = { path = "../async-fs"         , default-features = false, features = ["moto-rt"] }
 moto-async  = { path = "../../lib/moto-async" }
 moto-ipc    = { path = "../moto-ipc"          }
 moto-rt     = { path = "../moto-rt"           }
 moto-sys-io = { path = "../moto-sys-io"       }
+
+# External deps.
+async-trait = "0.1.88"
