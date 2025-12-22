@@ -1,8 +1,12 @@
 use async_fs::Block;
 use async_trait::async_trait;
+use moto_virtio::BLOCK_SIZE as VIRTIO_BLOCK_SIZE;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;
+
+const FS_BLOCK_SIZE: usize = 4096;
+const VIRTIO_BLOCKS_IN_FS_BLOCK: usize = FS_BLOCK_SIZE / VIRTIO_BLOCK_SIZE; // 8
 
 pub(super) struct VirtioPartition {
     virtio_bd: Rc<RefCell<virtio_async::BlockDevice>>,
@@ -40,9 +44,32 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         self.virtio_blocks >> 3
     }
 
-    /// Read a single block.
+    /// Read a single 4k block.
     async fn read_block(&mut self, block_no: u64, block: &mut Block) -> Result<()> {
-        todo!()
+        use zerocopy::FromZeros;
+
+        log::debug!("read_block {block_no}");
+
+        // TODO: read in one go, instead of eight.
+        let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();
+
+        let first_sector_no =
+            block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
+        for idx in 0..VIRTIO_BLOCKS_IN_FS_BLOCK {
+            let completion = virtio_async::BlockDevice::post_read(
+                self.virtio_bd.clone(),
+                first_sector_no + (idx as u64),
+                virtio_block.as_mut(),
+            )
+            .unwrap();
+            completion.await;
+
+            let block_offset = idx * VIRTIO_BLOCK_SIZE;
+            block.as_bytes_mut()[block_offset..block_offset + VIRTIO_BLOCK_SIZE]
+                .clone_from_slice(virtio_block.bytes.as_slice());
+        }
+
+        Ok(())
     }
 
     /// Write a single block.

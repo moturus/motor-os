@@ -48,3 +48,43 @@ pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
 
     Ok((parent_id, fname))
 }
+
+pub fn stat_resp_encode(req: Msg, entry_id: u128) -> Msg {
+    let mut resp = Msg::new();
+    resp.id = req.id;
+    resp.handle = req.handle;
+    resp.wake_handle = req.handle;
+
+    resp.command = CMD_STAT;
+    resp.status = moto_rt::Error::Ok.into();
+
+    resp.payload.set_arg_128(entry_id);
+    resp
+}
+
+pub fn stat_resp_decode(msg: Msg) -> Result<u128> {
+    assert_eq!(msg.command, CMD_STAT);
+    if msg.status() != moto_rt::E_OK {
+        return Err(msg.status().into());
+    }
+    // if let Err(err) = msg.status() {
+    //     return Err(err);
+    // }
+
+    Ok(msg.payload.arg_128())
+}
+
+pub fn empty_resp_encode(req: Msg, status: Result<()>) -> Msg {
+    let mut resp = Msg::new();
+    resp.id = req.id;
+    resp.handle = req.handle;
+    resp.wake_handle = req.handle;
+
+    resp.command = req.command;
+    resp.status = match status {
+        Ok(()) => moto_rt::Error::Ok.into(),
+        Err(err) => err.into(),
+    };
+
+    resp
+}

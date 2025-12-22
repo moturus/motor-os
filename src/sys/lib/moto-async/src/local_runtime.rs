@@ -504,7 +504,11 @@ impl LocalRuntime {
                 .build();
 
             let mut tasks_ref = inner.tasks.borrow_mut();
-            let task = tasks_ref.get_mut(&next_runnable).unwrap();
+            let Some(task) = tasks_ref.get_mut(&next_runnable) else {
+                log::error!("unknown task: {}", next_runnable.0);
+                moto_rt::error::log_backtrace(-1);
+                continue;
+            };
             let pinned = Pin::new(&mut task.fut);
 
             // This may call spawn, or add a timer, which borrows inner.

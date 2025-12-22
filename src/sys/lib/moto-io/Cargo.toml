@@ -17,3 +17,4 @@ moto-sys-io = { path = "../moto-sys-io"       }
 
 # External deps.
 async-trait = "0.1.88"
+log         = "0.4.28"

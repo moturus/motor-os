@@ -132,16 +132,13 @@ impl<'a> Future for Completion<'a> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        //        log::info!("poll");
         loop {
             let mut virtq = self.virtqueue.borrow_mut();
             if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
-                // log::info!("ready! {}", self.chain_head);
                 return std::task::Poll::Ready(virtq.get_result(self.chain_head));
             }
 
             if let Some(_chain_head) = virtq.reclaim_used() {
-                // log::info!("got {_chain_head}");
                 continue;
             }
 
@@ -151,7 +148,6 @@ impl<'a> Future for Completion<'a> {
             match pinned.as_mut().poll(cx) {
                 std::task::Poll::Ready(_) => continue,
                 std::task::Poll::Pending => {
-                    // log::info!("will notify: {}", self.chain_head);
                     self.virtqueue.borrow().notify();
                     return std::task::Poll::Pending;
                 }
@@ -357,7 +353,6 @@ impl Virtqueue {
                 descriptor.flags = 0; // Clear VIRTQ_DESC_F_NEXT, if any.
                 self.free_head_idx = descriptor.next;
 
-                log::debug!("allocated chain {chain_start}");
                 return Some(chain_start);
             }
             descriptor.flags = VIRTQ_DESC_F_NEXT;
@@ -392,7 +387,6 @@ impl Virtqueue {
             self.free_head_idx = chain_head;
             break;
         }
-        log::info!("freed chain {chain_head}");
     }
 
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
@@ -454,7 +448,6 @@ impl Virtqueue {
             curr = descriptor.next;
         }
 
-        log::info!("submitted chain {chain_head}");
         this_mut.update_and_increment_available_idx(chain_head);
         // this_mut.notify();
         core::mem::drop(this_mut);

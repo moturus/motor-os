@@ -52,6 +52,7 @@ impl Future for ResponseFuture {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
+        log::error!("actually try to receive smth from io_receiver");
         let mut responses = self.fs_client.responses.borrow_mut();
         match responses.entry(self.request_id) {
             alloc::collections::btree_map::Entry::Vacant(entry) => {
@@ -120,15 +121,14 @@ impl FsClient {
     }
 
     async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
-        moto_rt::error::log_to_kernel("stat one");
+        log::debug!("stat_one in");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
         msg.id = self.new_request_id();
 
-        let _self = self.clone();
-        let response = moto_async::LocalRuntime::spawn(_self.send_recv(msg)).await;
-
-        todo!("{fname}")
+        let resp = self.clone().send_recv(msg).await?;
+        let entry_id = api_fs::stat_resp_decode(resp)?;
+        Ok(entry_id)
     }
 
     /// Create a file or directory.

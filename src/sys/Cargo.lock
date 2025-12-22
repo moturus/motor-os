@@ -826,6 +826,7 @@ version = "0.1.0"
 dependencies = [
  "async-fs",
  "async-trait",
+ "log",
  "moto-async",
  "moto-ipc",
  "moto-rt 0.16.0",

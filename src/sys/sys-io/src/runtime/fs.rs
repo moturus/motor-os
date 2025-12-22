@@ -118,48 +118,76 @@ async fn fs_listener(
         }
     }?;
 
-    let receiver_stream = futures::stream::unfold(&receiver, |rx| async move {
-        match rx.recv().await {
-            Ok(msg) => Some((msg, rx)),
-            Err(_) => None,
-        }
-    });
+    // We want to process more than one message at at time (due to I/O waits), but
+    // we don't want to have unlimited concurrency, we want backpressure.
+    //
+    // I tried to convert the receiver to a futures::Stream (via futures::stream::unfold()),
+    // and then use futures::stream::for_each_concurrent, but this didn't work
+    // with our runtime (maybe there is a bug in our runtime, maybe in for_each_concurrent).
+    // (N.B.: futures::stream::for_each works).
+    //
+    // So we are using mpsc to implement "tickets".
 
-    use futures::StreamExt;
+    let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
+    // Pre-populate.
+    for _ in 0..MAX_IN_FLIGHT {
+        let _ = ticket_tx.send(()).await;
+    }
 
-    receiver_stream
-        .for_each_concurrent(MAX_IN_FLIGHT, move |msg| {
-            let sender = sender.clone();
-            let fs = fs.clone();
-            async move {
-                let _ = on_msg(msg, sender, fs).await;
+    loop {
+        let _ticket = ticket_rx.recv().await;
+
+        // Now that we have a ticket, we can poll for msg.
+        match receiver.recv().await {
+            Ok(msg) => {
+                let sender = sender.clone();
+                let fs = fs.clone();
+                let ticket_tx = ticket_tx.clone();
+                moto_async::LocalRuntime::spawn(async move {
+                    on_msg(msg, sender, fs).await;
+                    let _ = ticket_tx.send(()).await;
+                });
             }
-        })
-        .await;
-
-    log::debug!("FS connection closed.");
-    Ok(())
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
     sender: moto_ipc::io_channel::Sender,
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
-) -> Result<()> {
-    match msg.command {
-        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, sender, fs).await,
+) {
+    if let Err(err) = match msg.command {
+        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(moto_rt::Error::InvalidData)
         }
+    } {
+        let resp = api_fs::empty_resp_encode(msg, Err(err));
+        let _ = sender.send(resp).await;
     }
 }
 
 async fn on_cmd_stat(
     msg: moto_ipc::io_channel::Msg,
-    sender: moto_ipc::io_channel::Sender,
+    sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, &sender)?;
-    todo!("got {parent_id}, {fname}")
+
+    let mut fs = fs.lock().await;
+    let Some(entry_id) = fs.stat(parent_id, fname.as_str()).await.map_err(|err| {
+        log::warn!("fs.stat() failed: {err:?}");
+        moto_rt::Error::NotFound
+    })?
+    else {
+        log::debug!("stat({parent_id}, {fname}): not found");
+        return Err(moto_rt::Error::NotFound);
+    };
+    core::mem::drop(fs);
+
+    let resp = api_fs::stat_resp_encode(msg, entry_id);
+    sender.send(resp).await
 }
