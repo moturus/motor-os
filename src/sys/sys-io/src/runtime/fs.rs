@@ -105,18 +105,19 @@ async fn fs_listener(
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
 
     // Do a poll to ensure the listener has started listening.
-    let (sender, receiver) = match core::future::poll_fn(|cx| match listener.as_mut().poll(cx) {
-        std::task::Poll::Ready(res) => std::task::Poll::Ready(Some(res)),
-        std::task::Poll::Pending => std::task::Poll::Ready(None),
-    })
-    .await
-    {
-        Some(res) => res,
-        None => {
-            let _ = started.send(());
-            listener.await
-        }
-    }?;
+    let (sender, mut receiver) =
+        match core::future::poll_fn(|cx| match listener.as_mut().poll(cx) {
+            std::task::Poll::Ready(res) => std::task::Poll::Ready(Some(res)),
+            std::task::Poll::Pending => std::task::Poll::Ready(None),
+        })
+        .await
+        {
+            Some(res) => res,
+            None => {
+                let _ = started.send(());
+                listener.await
+            }
+        }?;
 
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.

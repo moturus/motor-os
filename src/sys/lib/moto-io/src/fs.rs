@@ -13,8 +13,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::rc::Rc;
+use alloc::rc::Weak;
 use alloc::string::String;
 use async_trait::async_trait;
+use core::pin::Pin;
 use core::{
     cell::{Cell, RefCell},
     task::{LocalWaker, Poll},
@@ -27,7 +29,7 @@ pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID, Result};
 
 pub struct FsClient {
     io_sender: moto_ipc::io_channel::Sender,
-    io_receiver: moto_ipc::io_channel::Receiver,
+    io_receiver: RefCell<moto_ipc::io_channel::Receiver>,
 
     // Because FsClient is single-threaded, we use Cell<>, not AtomicU64.
     request_counter: Cell<u64>,
@@ -42,7 +44,7 @@ enum ResponseWaiter {
 
 pub struct ResponseFuture {
     request_id: u64,
-    fs_client: Rc<FsClient>,
+    fs_client: Weak<FsClient>,
 }
 
 impl Future for ResponseFuture {
@@ -52,21 +54,65 @@ impl Future for ResponseFuture {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
-        log::error!("actually try to receive smth from io_receiver");
-        let mut responses = self.fs_client.responses.borrow_mut();
+        let Some(fs_client) = self.fs_client.upgrade() else {
+            return Poll::Ready(Err(moto_rt::Error::NotConnected));
+        };
+
+        let mut responses = fs_client.responses.borrow_mut();
         match responses.entry(self.request_id) {
             alloc::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(ResponseWaiter::Waker(cx.local_waker().clone()));
-                Poll::Pending
             }
             alloc::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
                 ResponseWaiter::Waker(local_waker) => {
                     *local_waker = cx.local_waker().clone();
-                    Poll::Pending
                 }
-                ResponseWaiter::Msg(msg) => Poll::Ready(Ok(*msg)),
+                ResponseWaiter::Msg(msg) => {
+                    let msg = *msg;
+                    let _ = entry.remove_entry();
+                    return Poll::Ready(Ok(msg));
+                }
             },
         }
+        core::mem::drop(responses);
+
+        let result = loop {
+            match fs_client.io_receiver.borrow_mut().poll_recv(cx) {
+                Poll::Ready(Err(err)) => {
+                    break Err(err);
+                }
+                Poll::Ready(Ok(msg)) => {
+                    if msg.id == self.request_id {
+                        break Ok(msg);
+                    } else {
+                        let mut responses = fs_client.responses.borrow_mut();
+                        match responses.entry(msg.id) {
+                            alloc::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert_entry(ResponseWaiter::Msg(msg));
+                            }
+                            alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                                match entry.get_mut() {
+                                    ResponseWaiter::Waker(local_waker) => {
+                                        let mut val = ResponseWaiter::Msg(msg);
+                                        core::mem::swap(&mut val, entry.get_mut());
+                                        let ResponseWaiter::Waker(waker) = val else {
+                                            panic!();
+                                        };
+                                        waker.wake();
+                                        continue;
+                                    }
+                                    ResponseWaiter::Msg(msg) => todo!(),
+                                }
+                            }
+                        }
+                    }
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        };
+
+        fs_client.responses.borrow_mut().remove(&self.request_id);
+        Poll::Ready(result)
     }
 }
 
@@ -80,7 +126,7 @@ impl FsClient {
         self.io_sender.send(msg).await?;
         ResponseFuture {
             request_id: msg.id,
-            fs_client: self,
+            fs_client: Rc::downgrade(&self),
         }
         .await
     }
@@ -89,7 +135,7 @@ impl FsClient {
         let (io_sender, io_receiver) = moto_ipc::io_channel::connect(moto_sys_io::api_fs::FS_URL)?;
         Ok(Rc::new(Self {
             io_sender,
-            io_receiver,
+            io_receiver: RefCell::new(io_receiver),
             request_counter: Cell::new(0),
             responses: Default::default(),
         }))

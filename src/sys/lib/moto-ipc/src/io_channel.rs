@@ -1162,6 +1162,7 @@ impl Sender {
 
 pub struct Receiver {
     inner: Arc<IoChannelImpl>,
+    recv_future: moto_async::SysHandleFuture,
 }
 
 impl !Sync for Receiver {}
@@ -1214,16 +1215,14 @@ impl Receiver {
         Ok(msg)
     }
 
-    pub async fn recv(&self) -> Result<Msg> {
-        use moto_async::AsFuture;
-
+    pub fn poll_recv(&mut self, cx: &mut core::task::Context<'_>) -> core::task::Poll<Result<Msg>> {
         let mut wait_flag_set = false;
         let mut wait_error = moto_rt::Error::Ok;
         loop {
             match self.try_recv() {
                 Err(moto_rt::Error::NotReady) => {
                     if wait_error != moto_rt::Error::Ok {
-                        return Err(wait_error);
+                        return core::task::Poll::Ready(Err(wait_error));
                     }
                     if !wait_flag_set {
                         match self.inner.endpoint_type {
@@ -1237,11 +1236,16 @@ impl Receiver {
                         wait_flag_set = true;
                         continue; // Do one more recv() before waiting.
                     } else {
-                        if let Err(err) = self.inner.remote_handle.as_future().await {
-                            wait_error = err;
-                            continue; // Do one more recv() before returning.
+                        match self.recv_future.do_poll(cx) {
+                            core::task::Poll::Ready(Err(err)) => {
+                                wait_error = err;
+                                continue; // Do one more recv() before returning.
+                            }
+                            core::task::Poll::Ready(Ok(())) => {}
+                            core::task::Poll::Pending => return core::task::Poll::Pending,
                         }
-                        // We clear all wait flags on wakeup. Can we do better?
+
+                        // Wakeup; we clear all wait flags on wakeup. Can we do better?
                         match self.inner.endpoint_type {
                             EndpointType::Client => self.raw_channel().clear_client_waiting(),
                             EndpointType::Server => self.raw_channel().clear_server_waiting(),
@@ -1249,7 +1253,7 @@ impl Receiver {
                         wait_flag_set = false;
                     }
                 }
-                Err(err) => return Err(err),
+                Err(err) => return core::task::Poll::Ready(Err(err)),
                 Ok(msg) => {
                     if match self.inner.endpoint_type {
                         EndpointType::Client => self
@@ -1263,10 +1267,14 @@ impl Receiver {
                         // Ignore errors on recv.
                         let _ = moto_sys::SysCpu::wake(self.inner.remote_handle);
                     }
-                    return Ok(msg);
+                    return core::task::Poll::Ready(Ok(msg));
                 }
             }
         }
+    }
+
+    pub async fn recv(&mut self) -> Result<Msg> {
+        core::future::poll_fn(|cx| self.poll_recv(cx)).await
     }
 
     pub fn get_page(&self, page_idx: u16) -> Result<IoPage> {
@@ -1325,6 +1333,7 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
     };
     let receiver = Receiver {
         inner: sender.inner.clone(),
+        recv_future: sender.inner.remote_handle.as_future(),
     };
 
     Ok((sender, receiver))
@@ -1378,6 +1387,7 @@ pub async fn listen(url: &str) -> Result<(Sender, Receiver)> {
     };
     let receiver = Receiver {
         inner: sender.inner.clone(),
+        recv_future: sender.inner.remote_handle.as_future(),
     };
 
     Ok((sender, receiver))

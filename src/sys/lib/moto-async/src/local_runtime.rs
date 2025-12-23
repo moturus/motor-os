@@ -580,10 +580,8 @@ impl AsFuture for SysHandle {
     }
 }
 
-impl Future for SysHandleFuture {
-    type Output = Result<()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+impl SysHandleFuture {
+    pub fn do_poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let inner = LocalRuntimeInner::current();
 
         let Some(task_id) = self.task_id.as_ref() else {
@@ -603,5 +601,13 @@ impl Future for SysHandleFuture {
             inner.add_sys_waiter(self.handle, *task_id);
             Poll::Pending
         }
+    }
+}
+
+impl Future for SysHandleFuture {
+    type Output = Result<()>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.do_poll(cx)
     }
 }

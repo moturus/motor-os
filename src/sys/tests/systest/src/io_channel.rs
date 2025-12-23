@@ -9,7 +9,7 @@ fn basic_test() {
             let listener = moto_ipc::io_channel::listen("systest_foo");
             server_started.store(true, Ordering::Release);
 
-            let (sender, receiver) = listener.await.unwrap();
+            let (sender, mut receiver) = listener.await.unwrap();
             // Receive ping.
             let mut msg = receiver.recv().await.unwrap();
             assert_eq!(msg.id, 1);
@@ -26,7 +26,7 @@ fn basic_test() {
 
     let client_thread = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
-            let (sender, receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
+            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
 
             // Send ping.
             let mut msg = moto_ipc::io_channel::Msg::new();
@@ -56,7 +56,7 @@ fn test_ping_pong() {
             let listener = moto_ipc::io_channel::listen("systest_foo");
             server_started.store(true, Ordering::Release);
 
-            let (sender, receiver) = listener.await.unwrap();
+            let (sender, mut receiver) = listener.await.unwrap();
 
             for idx in 0..ITERS {
                 // Receive ping.
@@ -77,7 +77,7 @@ fn test_ping_pong() {
     let client_thread = std::thread::spawn(move || {
         let start = std::time::Instant::now();
         moto_async::LocalRuntime::new().block_on(async move {
-            let (sender, receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
+            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
 
             for idx in 0..ITERS {
                 // Send ping.
@@ -118,7 +118,7 @@ fn test_page_alloc() {
             let listener = moto_ipc::io_channel::listen("systest_foo");
             server_started.store(true, Ordering::Release);
 
-            let (sender, receiver) = listener.await.unwrap();
+            let (sender, mut receiver) = listener.await.unwrap();
             // Receive ping.
             let mut msg = receiver.recv().await.unwrap();
             assert_eq!(msg.id, 1);
@@ -143,7 +143,7 @@ fn test_page_alloc() {
         moto_async::LocalRuntime::new().block_on(async move {
             use futures::FutureExt;
 
-            let (sender, receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
+            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
 
             let mut pages = vec![];
 
