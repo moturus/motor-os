@@ -16,13 +16,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
 use moto_io::fs::{EntryId, FsClient, ROOT_ID};
 use moto_ipc::io_channel;
-use moto_rt::Error;
+use moto_rt::Result;
 use moto_rt::fs::HANDLE_URL_PREFIX;
 use moto_rt::fs::MAX_PATH_LEN;
 use moto_sys::SysHandle;
 use moto_sys_io::api_fs_legacy;
 
-type Result<T> = core::result::Result<T, Error>;
 type IoTask = Box<
     dyn FnOnce(alloc::rc::Rc<moto_io::fs::FsClient>) -> Pin<Box<dyn Future<Output = ()>>> + Send,
 >;
@@ -31,20 +30,32 @@ type IoTask = Box<
 #[derive(Clone)]
 struct CanonicalPath {
     abs_path: String,
-    fname_offset: u16, // The last component.
+    fname_offset: usize, // The last component.
 }
 
 impl CanonicalPath {
-    fn _filename(&self) -> &str {
-        &self.abs_path.as_str()[(self.fname_offset as usize)..]
+    fn filename(&self) -> &str {
+        &self.abs_path.as_str()[self.fname_offset..]
+    }
+
+    fn parent(&self) -> Option<&str> {
+        if self.is_root() {
+            None
+        } else {
+            Some(&self.abs_path.as_str()[..self.fname_offset])
+        }
+    }
+
+    fn is_root(&self) -> bool {
+        self.abs_path == "/"
     }
 
     fn normalize(abs_path: &str) -> Result<Self> {
         if abs_path.is_empty() || (abs_path.len() >= MAX_PATH_LEN) {
-            return Err(Error::InvalidFilename);
+            return Err(moto_rt::Error::InvalidFilename);
         }
         if &abs_path[0..1] != "/" {
-            return Err(Error::InvalidFilename);
+            return Err(moto_rt::Error::InvalidFilename);
         }
 
         if abs_path == "/" {
@@ -63,12 +74,12 @@ impl CanonicalPath {
                 continue;
             }
             if entry.len() != entry.trim().len() {
-                return Err(Error::InvalidFilename);
+                return Err(moto_rt::Error::InvalidFilename);
             }
 
             if entry == ".." {
                 if components.is_empty() {
-                    return Err(Error::InvalidFilename);
+                    return Err(moto_rt::Error::InvalidFilename);
                 }
                 components.pop();
             } else {
@@ -93,13 +104,13 @@ impl CanonicalPath {
 
         Ok(CanonicalPath {
             abs_path: result,
-            fname_offset: fname_offset as u16,
+            fname_offset,
         })
     }
 
     fn parse(path: &str) -> Result<Self> {
         if path.is_empty() || (path.len() >= MAX_PATH_LEN) || (path.len() != path.trim().len()) {
-            return Err(Error::InvalidFilename);
+            return Err(moto_rt::Error::InvalidFilename);
         }
 
         if path == "/" {
@@ -110,7 +121,7 @@ impl CanonicalPath {
         }
 
         if path.trim_end_matches('/').len() != path.len() {
-            return Err(Error::InvalidFilename);
+            return Err(moto_rt::Error::InvalidFilename);
         }
 
         if path.starts_with('/') {
@@ -122,7 +133,7 @@ impl CanonicalPath {
                 Ok(cwd) => cwd,
                 Err(_) => {
                     // Can't work with rel paths without cwd.
-                    return Err(Error::InvalidFilename);
+                    return Err(moto_rt::Error::InvalidFilename);
                 }
             }
         };
@@ -151,7 +162,7 @@ impl AsyncFsClient {
     pub fn get() -> Result<&'static Self> {
         let addr = ASYNC_CLIENT.load(core::sync::atomic::Ordering::Relaxed);
         if addr == CLIENT_ERROR {
-            return Err(Error::NotFound);
+            return Err(moto_rt::Error::NotFound);
         }
         if addr > CLIENT_ERROR {
             return Ok(unsafe { (addr as *const Self).as_ref_unchecked() });
@@ -297,33 +308,102 @@ impl AsyncFsClient {
     }
 
     fn file_open(&self, path: &str, opts: u32) -> Result<File> {
-        if opts & moto_rt::fs::O_NONBLOCK != 0 {
+        log::debug!("file_open('{path}', {opts:x})");
+
+        if (opts & moto_rt::fs::O_NONBLOCK) != 0 {
             // Not yet.
             return Err(moto_rt::Error::NotImplemented);
         }
-        let path = CanonicalPath::parse(path)?.abs_path;
-        let entry_id = self.stat_internal(path.as_str())?;
 
-        todo!()
+        if ((opts & moto_rt::fs::O_TRUNCATE) != 0) && ((opts & moto_rt::fs::O_APPEND) != 0) {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+
+        let path = CanonicalPath::parse(path)?;
+
+        let maybe_entry_id = match self.stat_internal(&path) {
+            Ok(entry_id) => Some(entry_id),
+            Err(moto_rt::Error::NotFound) => None,
+            Err(err) => return Err(err),
+        };
+
+        let entry_id = match maybe_entry_id {
+            Some(entry_id) => {
+                if (opts & moto_rt::fs::O_CREATE_NEW) != 0 {
+                    return Err(moto_rt::Error::AlreadyInUse);
+                }
+
+                log::error!("validate that entry is a file, not a dir");
+                if (opts & moto_rt::fs::O_TRUNCATE) != 0 {
+                    todo!("truncate");
+                }
+                entry_id
+            }
+            None => {
+                if (opts & (moto_rt::fs::O_CREATE_NEW | moto_rt::fs::O_CREATE)) == 0 {
+                    return Err(moto_rt::Error::NotFound);
+                }
+                self.create_internal(&path, moto_io::fs::EntryKind::File)?
+            }
+        };
+
+        let pos = if (opts & moto_rt::fs::O_APPEND) != 0 {
+            todo!()
+        } else {
+            0
+        };
+
+        Ok(File {
+            entry_id,
+            pos,
+            readable: (opts & moto_rt::fs::O_READ) != 0,
+            writable: (opts & moto_rt::fs::O_WRITE) != 0,
+        })
     }
 
-    fn stat_internal(&self, path: &str) -> Result<EntryId> {
-        if path.is_empty() {
-            return Err(moto_rt::Error::InvalidArgument);
-        }
-        if path == "/" {
-            return Ok(ROOT_ID);
-        }
-
-        if !path.starts_with('/') {
-            return Err(moto_rt::Error::InvalidArgument);
+    fn create_internal(
+        &self,
+        path: &CanonicalPath,
+        kind: moto_io::fs::EntryKind,
+    ) -> Result<EntryId> {
+        if path.is_root() {
+            return Err(moto_rt::Error::AlreadyInUse);
         }
 
         let (tx_result, rx_result) = moto_async::oneshot();
-        let path_owned = path.to_owned();
+        let path = path.clone();
         let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
             Box::pin(async move {
-                let result = fs_client.stat(&path_owned).await;
+                // We checked above that path is absolute and not root.
+                let parent = path.parent().unwrap();
+                let Ok(parent_id) = fs_client.stat(parent).await else {
+                    tx_result.send(Err(moto_rt::Error::NotFound));
+                    return;
+                };
+
+                let result = fs_client
+                    .create_entry(parent_id, kind, path.filename())
+                    .await;
+                tx_result.send(result);
+            })
+        });
+
+        moto_async::LocalRuntime::new().block_on(async {
+            let _ = self.tasks_tx.send(task).await;
+            rx_result.await.unwrap()
+        })
+    }
+
+    fn stat_internal(&self, path: &CanonicalPath) -> Result<EntryId> {
+        if path.is_root() {
+            return Ok(ROOT_ID);
+        }
+
+        let path = path.clone();
+        let (tx_result, rx_result) = moto_async::oneshot();
+        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
+            Box::pin(async move {
+                let result = fs_client.stat(&path.abs_path).await;
                 tx_result.send(result);
             })
         });
@@ -335,7 +415,12 @@ impl AsyncFsClient {
     }
 }
 
-struct File {}
+struct File {
+    entry_id: moto_io::fs::EntryId,
+    pos: u64,
+    readable: bool,
+    writable: bool,
+}
 
 impl PosixFile for File {
     fn kind(&self) -> crate::posix::PosixKind {

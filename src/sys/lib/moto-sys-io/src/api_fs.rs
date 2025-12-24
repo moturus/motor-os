@@ -7,7 +7,9 @@ extern crate alloc;
 use alloc::string::String;
 
 pub const FS_URL: &str = "sys-io-fs";
-pub const CMD_STAT: u16 = 2;
+pub const CMD_STAT: u16 = 1;
+pub const CMD_CREATE_FILE: u16 = 2;
+pub const CMD_CREATE_DIR: u16 = 3;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -26,9 +28,17 @@ pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     msg
 }
 
-pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
-    assert_eq!(msg.command, CMD_STAT);
+pub fn create_entry_msg_encode(parent_id: u128, is_dir: bool, name: &str, io_page: IoPage) -> Msg {
+    let mut msg = stat_msg_encode(parent_id, name, io_page);
+    msg.command = if is_dir {
+        CMD_CREATE_DIR
+    } else {
+        CMD_CREATE_FILE
+    };
+    msg
+}
 
+pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
     let parent_id = msg.payload.arg_128();
     let io_page_idx = msg.payload.shared_pages()[11];
     let io_page = sender.get_page(io_page_idx)?;
@@ -49,6 +59,10 @@ pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
     Ok((parent_id, fname))
 }
 
+pub fn create_entry_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
+    stat_msg_decode(msg, sender)
+}
+
 pub fn stat_resp_encode(req: Msg, entry_id: u128) -> Msg {
     let mut resp = Msg::new();
     resp.id = req.id;
@@ -64,6 +78,17 @@ pub fn stat_resp_encode(req: Msg, entry_id: u128) -> Msg {
 
 pub fn stat_resp_decode(msg: Msg) -> Result<u128> {
     assert_eq!(msg.command, CMD_STAT);
+    if msg.status() != moto_rt::E_OK {
+        return Err(msg.status().into());
+    }
+    // if let Err(err) = msg.status() {
+    //     return Err(err);
+    // }
+
+    Ok(msg.payload.arg_128())
+}
+
+pub fn create_entry_resp_decode(msg: Msg) -> Result<u128> {
     if msg.status() != moto_rt::E_OK {
         return Err(msg.status().into());
     }

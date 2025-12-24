@@ -1,4 +1,4 @@
-use async_fs::FileSystem;
+use async_fs::{EntryKind, FileSystem};
 use moto_async::{AsFuture, LocalMutex};
 use moto_rt::Result;
 use moto_sys_io::api_fs;
@@ -6,6 +6,8 @@ use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::rc::Rc;
+
+use crate::util::map_err_into_native;
 
 mod virtio_partition;
 
@@ -161,6 +163,8 @@ async fn on_msg(
 ) {
     if let Err(err) = match msg.command {
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_CREATE_DIR => todo!(),
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(moto_rt::Error::InvalidData)
@@ -181,12 +185,33 @@ async fn on_cmd_stat(
     let mut fs = fs.lock().await;
     let Some(entry_id) = fs.stat(parent_id, fname.as_str()).await.map_err(|err| {
         log::warn!("fs.stat() failed: {err:?}");
-        moto_rt::Error::NotFound
+        map_err_into_native(err)
     })?
     else {
         log::debug!("stat({parent_id}, {fname}): not found");
         return Err(moto_rt::Error::NotFound);
     };
+    core::mem::drop(fs);
+
+    let resp = api_fs::stat_resp_encode(msg, entry_id);
+    sender.send(resp).await
+}
+
+async fn on_cmd_create_file(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let (parent_id, fname) = api_fs::create_entry_msg_decode(msg, &sender)?;
+
+    let mut fs = fs.lock().await;
+    let entry_id = fs
+        .create_entry(parent_id, EntryKind::File, fname.as_str())
+        .await
+        .map_err(|err| {
+            log::warn!("fs.create_entry() failed: {err:?}");
+            map_err_into_native(err)
+        })?;
     core::mem::drop(fs);
 
     let resp = api_fs::stat_resp_encode(msg, entry_id);

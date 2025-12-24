@@ -22,10 +22,10 @@ use core::{
     task::{LocalWaker, Poll},
 };
 use moto_ipc::io_channel::Msg;
-use moto_rt::Error;
+use moto_rt::Result;
 use moto_sys_io::api_fs;
 
-pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID, Result};
+pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID};
 
 pub struct FsClient {
     io_sender: moto_ipc::io_channel::Sender,
@@ -167,7 +167,7 @@ impl FsClient {
     }
 
     async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
-        log::debug!("stat_one in");
+        log::debug!("stat_one({parent_id}, '{fname}')");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
         msg.id = self.new_request_id();
@@ -178,13 +178,25 @@ impl FsClient {
     }
 
     /// Create a file or directory.
-    async fn create_entry(
-        &mut self,
+    pub async fn create_entry(
+        self: &Rc<Self>,
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
     ) -> Result<EntryId> {
-        todo!()
+        log::debug!("create_entry({parent_id}, {kind:?}, '{name}')");
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::create_entry_msg_encode(
+            parent_id,
+            kind == EntryKind::Directory, /* is_dir */
+            name,
+            io_page,
+        );
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        let entry_id = api_fs::create_entry_resp_decode(resp)?;
+        Ok(entry_id)
     }
 
     /// Delete the file or directory.

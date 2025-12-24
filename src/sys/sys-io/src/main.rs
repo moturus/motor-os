@@ -11,6 +11,7 @@ mod logger;
 mod net;
 mod rt_vdso;
 mod runtime;
+mod util;
 mod virtio;
 
 extern crate alloc;
