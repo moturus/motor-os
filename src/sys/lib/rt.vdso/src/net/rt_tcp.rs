@@ -194,8 +194,8 @@ impl TcpListener {
         let req = api_net::bind_tcp_listener_request(&socket_addr, None);
         let channel_reservation = super::rt_net::reserve_channel();
         let resp = channel_reservation.channel().send_receive(req);
-        if resp.status() != moto_rt::E_OK {
-            return Err(resp.status());
+        if resp.status().is_err() {
+            return Err(resp.status);
         }
 
         if socket_addr.port() == 0 {
@@ -301,14 +301,14 @@ impl TcpListener {
 
     pub fn accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
         let mut pending_accept = self.get_pending_accept()?;
-        if pending_accept.resp.status() != moto_rt::E_OK {
+        if pending_accept.resp.status().is_err() {
             let rx_queue = self
                 .pending_accept_queues
                 .lock()
                 .remove(&pending_accept.resp.handle)
                 .unwrap();
             crate::net::rt_net::clear_rx_queue(&rx_queue, self.channel());
-            return Err(pending_accept.resp.status());
+            return Err(pending_accept.resp.status);
         }
 
         let remote_addr = api_net::get_socket_addr(&pending_accept.resp.payload);
@@ -458,7 +458,7 @@ impl TcpListener {
         req.handle = self.handle;
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_8_mut()[23] = ttl as u8;
-        self.channel().send_receive(req).status()
+        self.channel().send_receive(req).status
     }
 
     fn ttl(&self) -> Result<u32, ErrorCode> {
@@ -468,10 +468,10 @@ impl TcpListener {
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().send_receive(req);
 
-        if resp.status() == moto_rt::E_OK {
+        if resp.status().is_ok() {
             Ok(resp.payload.args_8()[23] as u32)
         } else {
-            Err(resp.status())
+            Err(resp.status)
         }
     }
     fn set_only_v6(&self, _: bool) -> Result<(), ErrorCode> {
@@ -867,7 +867,7 @@ impl TcpStream {
     }
 
     fn on_connect_response(&self, resp: io_channel::Msg) -> Result<(), ErrorCode> {
-        if resp.status() != moto_rt::E_OK {
+        if resp.status().is_err() {
             #[cfg(debug_assertions)]
             moto_log!(
                 "{}:{} TcpStream::connect {:?} failed",
@@ -881,14 +881,14 @@ impl TcpStream {
                 .swap(TcpState::Closed.into(), Ordering::Release);
             assert_eq!(prev, TcpState::Connecting.into());
 
-            self.error.store(resp.status(), Ordering::Release);
+            self.error.store(resp.status, Ordering::Release);
 
             self.event_source.on_event(
                 moto_rt::poll::POLL_READ_CLOSED
                     | moto_rt::poll::POLL_WRITE_CLOSED
                     | moto_rt::poll::POLL_ERROR,
             );
-            return Err(resp.status());
+            return Err(resp.status);
         }
 
         assert_ne!(0, resp.handle);
@@ -1499,7 +1499,7 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = option;
         let resp = self.channel().send_receive(req);
 
-        resp.status()
+        resp.status
     }
 
     fn set_linger(&self, dur: Option<Duration>) -> Result<(), ErrorCode> {
@@ -1526,7 +1526,7 @@ impl TcpStream {
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         req.payload.args_64_mut()[1] = nodelay as u64;
-        self.channel().send_receive(req).status()
+        self.channel().send_receive(req).status
     }
 
     fn nodelay(&self) -> Result<u8, ErrorCode> {
@@ -1536,11 +1536,11 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
         let resp = self.channel().send_receive(req);
 
-        if resp.status() == moto_rt::E_OK {
+        if resp.status().is_ok() {
             let res = resp.payload.args_64()[0];
             Ok(res as u8)
         } else {
-            Err(resp.status())
+            Err(resp.status)
         }
     }
 
@@ -1550,7 +1550,7 @@ impl TcpStream {
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         req.payload.args_32_mut()[2] = ttl;
-        self.channel().send_receive(req).status()
+        self.channel().send_receive(req).status
     }
 
     fn ttl(&self) -> Result<u32, ErrorCode> {
@@ -1560,10 +1560,10 @@ impl TcpStream {
         req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
         let resp = self.channel().send_receive(req);
 
-        if resp.status() == moto_rt::E_OK {
+        if resp.status().is_ok() {
             Ok(resp.payload.args_32()[0])
         } else {
-            Err(resp.status())
+            Err(resp.status)
         }
     }
 

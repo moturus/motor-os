@@ -89,8 +89,8 @@ impl UdpSocket {
         let req =
             api_net::bind_udp_socket_request(&socket_addr, channel_reservation.subchannel_idx());
         let resp = channel_reservation.channel().send_receive(req);
-        if resp.status() != moto_rt::E_OK {
-            return Err(resp.status());
+        if resp.status().is_err() {
+            return Err(resp.status);
         }
 
         if socket_addr.port() == 0 {

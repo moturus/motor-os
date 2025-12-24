@@ -150,7 +150,7 @@ impl IoRuntime {
                 timeout_wakeup = false;
             }
 
-            if msg.status() != moto_rt::E_NOT_READY {
+            if msg.status() != Err(moto_rt::Error::NotReady) {
                 log::error!(
                     "Dropping conn 0x{:x} due to bad sqe {} {:?}.",
                     endpoint_handle.as_u64(),
@@ -181,7 +181,7 @@ impl IoRuntime {
                     match self.net.process_sqe(conn, msg) {
                         Ok(res) => {
                             if let Some(cqe) = res {
-                                debug_assert_ne!(cqe.status(), moto_rt::E_NOT_READY);
+                                debug_assert_ne!(cqe.status(), Err(moto_rt::Error::NotReady));
                                 if let Err(err) = conn.send(cqe) {
                                     debug_assert_eq!(err, moto_rt::Error::NotReady);
                                     self.pending_completions.push_back(PendingCompletion {

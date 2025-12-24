@@ -159,8 +159,12 @@ impl Msg {
         *self = Self::new();
     }
 
-    pub fn status(&self) -> ErrorCode {
-        self.status
+    pub fn status(&self) -> Result<()> {
+        if self.status == moto_rt::Error::Ok.into() {
+            Ok(())
+        } else {
+            Err(self.status.into())
+        }
     }
 }
 

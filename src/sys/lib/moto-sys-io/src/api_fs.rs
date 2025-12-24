@@ -77,26 +77,11 @@ pub fn stat_resp_encode(req: Msg, entry_id: u128) -> Msg {
 }
 
 pub fn stat_resp_decode(msg: Msg) -> Result<u128> {
-    assert_eq!(msg.command, CMD_STAT);
-    if msg.status() != moto_rt::E_OK {
-        return Err(msg.status().into());
-    }
-    // if let Err(err) = msg.status() {
-    //     return Err(err);
-    // }
-
-    Ok(msg.payload.arg_128())
+    msg.status().map(|_| msg.payload.arg_128())
 }
 
 pub fn create_entry_resp_decode(msg: Msg) -> Result<u128> {
-    if msg.status() != moto_rt::E_OK {
-        return Err(msg.status().into());
-    }
-    // if let Err(err) = msg.status() {
-    //     return Err(err);
-    // }
-
-    Ok(msg.payload.arg_128())
+    msg.status().map(|_| msg.payload.arg_128())
 }
 
 pub fn empty_resp_encode(req: Msg, status: Result<()>) -> Msg {

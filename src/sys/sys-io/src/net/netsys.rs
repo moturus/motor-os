@@ -2288,7 +2288,7 @@ impl IoSubsystem for NetSys {
         conn: &Rc<io_channel::ServerConnection>,
         msg: io_channel::Msg,
     ) -> Result<Option<io_channel::Msg>, ()> {
-        debug_assert_eq!(msg.status(), moto_rt::E_NOT_READY);
+        debug_assert_eq!(msg.status(), Err(moto_rt::Error::NotReady));
 
         // log::debug!("{}:{} got SQE cmd {}", file!(), line!(), msg.command);
 
