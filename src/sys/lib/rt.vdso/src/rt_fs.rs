@@ -491,7 +491,7 @@ impl PosixFile for File {
 
     // rt_fd indicates which FD is closed.
     fn close(&self, rt_fd: moto_rt::RtFd) -> core::result::Result<(), moto_rt::ErrorCode> {
-        todo!()
+        Ok(())
     }
     fn set_nonblocking(&self, val: bool) -> core::result::Result<(), moto_rt::ErrorCode> {
         Err(moto_rt::E_NOT_IMPLEMENTED)
