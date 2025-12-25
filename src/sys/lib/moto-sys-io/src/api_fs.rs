@@ -1,4 +1,4 @@
-use moto_ipc::io_channel::{IoPage, Msg, Sender};
+use moto_ipc::io_channel::{IoPage, Msg, Receiver, Sender};
 use moto_rt::Result;
 use moto_rt::fs::MAX_PATH_LEN;
 
@@ -11,6 +11,7 @@ pub const CMD_STAT: u16 = 1;
 pub const CMD_CREATE_FILE: u16 = 2;
 pub const CMD_CREATE_DIR: u16 = 3;
 pub const CMD_WRITE: u16 = 4;
+pub const CMD_READ: u16 = 5;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -118,4 +119,46 @@ pub fn write_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u16, Io
     let len = msg.payload.args_16()[10];
 
     Ok((file_id, offset, len, io_page))
+}
+
+pub fn read_msg_encode(file_id: u128, offset: u64, len: u16) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_READ;
+
+    msg.payload.set_arg_128(file_id); // This takes 16 bytes.
+    msg.handle = offset;
+    msg.payload.args_16_mut()[10] = len;
+
+    msg
+}
+
+pub fn read_msg_decode(msg: Msg) -> (u128, u64, u16) {
+    let file_id = msg.payload.arg_128();
+
+    let offset = msg.handle;
+    let len = msg.payload.args_16()[10];
+
+    (file_id, offset, len)
+}
+
+pub fn read_resp_encode(msg_id: u64, len: u16, io_page: IoPage) -> Msg {
+    let mut msg = Msg::new();
+    msg.id = msg_id;
+    msg.command = CMD_READ;
+    msg.status = moto_rt::Error::Ok.into();
+
+    msg.payload.args_16_mut()[10] = len;
+    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+
+    msg
+}
+
+pub fn read_resp_decode(msg: Msg, receiver: &Receiver) -> Result<(u16, IoPage)> {
+    msg.status()?;
+
+    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page = receiver.get_page(io_page_idx)?;
+    let len = msg.payload.args_16()[10];
+
+    Ok((len, io_page))
 }

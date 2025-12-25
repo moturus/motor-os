@@ -360,7 +360,8 @@ impl DirEntryBlock {
             0 => Ok(false),
             1 => Ok(true),
             _ => {
-                log::error!("Corrupt dir entry {:?}: in_use: {in_use}", self.entry_id);
+                // The user could have passed a bad entry_id, so this is not necessarily an error.
+                log::warn!("Corrupt dir entry {:?}: in_use: {in_use}", self.entry_id);
                 Err(ErrorKind::InvalidData.into())
             }
         }

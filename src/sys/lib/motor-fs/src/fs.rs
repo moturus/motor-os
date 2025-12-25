@@ -403,7 +403,7 @@ impl FileSystem for MotorFs {
         drop(txn);
 
         log::debug!(
-            "read({}, {offset}, ...) - block no {} block key: {block_key}",
+            "read({:?}, {offset}, ...) - block no {} block key: {block_key}",
             u128::from(file_id),
             data_block_no.as_u64()
         );

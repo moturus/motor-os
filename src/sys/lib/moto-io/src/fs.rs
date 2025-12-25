@@ -169,7 +169,7 @@ impl FsClient {
                 continue;
             }
 
-            let current = self.stat_one(current, entry).await?;
+            current = self.stat_one(current, entry).await?;
         }
 
         Ok(current)
@@ -183,6 +183,7 @@ impl FsClient {
 
         let resp = self.clone().send_recv(msg).await?;
         let entry_id = api_fs::stat_resp_decode(resp)?;
+        log::debug!("stat_one({parent_id}, '{fname}') => {entry_id:x}");
         Ok(entry_id)
     }
 
@@ -286,6 +287,103 @@ impl FsClient {
         Ok(written)
     }
 
+    /// Read bytes from a file.
+    /// Note that cross-block reads may not be supported.
+    pub async fn read(
+        self: &Rc<Self>,
+        file_id: EntryId,
+        offset: u64,
+        mut buf: &mut [u8],
+    ) -> Result<usize> {
+        log::debug!(
+            "read({file_id:x}): offset: 0x{offset:x}, len: {}",
+            buf.len()
+        );
+
+        let mut to_be_read = 0_usize;
+        let mut actual_read = 0_usize;
+        let mut step_offset = offset;
+        let mut remaining_len = buf.len();
+        let mut error = None;
+        loop {
+            // `buf` can be large; we split it into 4k chunks; we send them
+            // in batches of BATCH_SIZE and then wait for completions.
+            const BATCH_SIZE: usize = 16;
+
+            let mut batch_ids = [0_u64; BATCH_SIZE];
+            let mut batch_idx = 0;
+            loop {
+                let step_len = ((BLOCK_SIZE as u64) - (step_offset & (BLOCK_SIZE as u64 - 1)))
+                    .min(remaining_len as u64);
+                debug_assert!(step_len < u16::MAX as u64);
+
+                let mut msg = api_fs::read_msg_encode(file_id, step_offset, step_len as u16);
+                let msg_id = self.new_request_id();
+                msg.id = msg_id;
+                if let Err(err) = self.clone().send(msg).await {
+                    todo!()
+                }
+
+                to_be_read += (step_len as usize);
+                step_offset += step_len;
+                remaining_len -= (step_len as usize);
+
+                batch_ids[batch_idx] = msg_id;
+                batch_idx += 1;
+                if batch_idx >= BATCH_SIZE {
+                    break;
+                }
+
+                if remaining_len == 0 {
+                    break;
+                }
+            }
+
+            for id in batch_ids {
+                if id == 0 {
+                    break;
+                }
+                match self.clone().recv(id).await {
+                    Ok(msg) => match api_fs::read_resp_decode(msg, &self.io_receiver.borrow()) {
+                        Ok((len, io_page)) => {
+                            assert!(len as usize <= buf.len());
+                            buf[..(len as usize)]
+                                .clone_from_slice(&io_page.bytes()[..(len as usize)]);
+                            buf = &mut buf[..(len as usize)];
+                            actual_read += len as usize;
+                        }
+                        Err(err) => {
+                            log::warn!("Error reading {file_id}: {err:?}.");
+                            error = Some(err);
+                            break;
+                        }
+                    },
+                    Err(err) => {
+                        error = Some(err);
+                        break;
+                    }
+                }
+            }
+
+            if remaining_len == 0 {
+                break;
+            }
+        }
+
+        log::debug!("read {actual_read} bytes from {file_id:x}) at offset: 0x{offset:x}");
+        if actual_read > 0 {
+            Ok(actual_read)
+        } else if let Some(err) = error {
+            if err == moto_rt::Error::UnexpectedEof {
+                Ok(0)
+            } else {
+                Err(err)
+            }
+        } else {
+            Ok(0)
+        }
+    }
+
     /// Delete the file or directory.
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
         todo!()
@@ -323,12 +421,6 @@ impl FsClient {
 
     /// The metadata of the directory entry.
     async fn metadata(&mut self, entry_id: EntryId) -> Result<Metadata> {
-        todo!()
-    }
-
-    /// Read bytes from a file.
-    /// Note that cross-block reads may not be supported.
-    async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
         todo!()
     }
 

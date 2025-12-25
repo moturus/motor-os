@@ -353,6 +353,7 @@ impl AsyncFsClient {
             0
         };
 
+        log::debug!("file_open('{}', {opts:x}) -> {entry_id:x}", path.abs_path);
         Ok(File {
             entry_id,
             pos: AtomicU64::new(pos),
@@ -436,6 +437,28 @@ impl AsyncFsClient {
             rx_result.await.unwrap()
         })
     }
+
+    fn read(&self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        let (tx_result, rx_result) = moto_async::oneshot();
+
+        let buf_addr = buf.as_mut_ptr() as usize;
+        let buf_len = buf.len();
+
+        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
+            Box::pin(async move {
+                // Safety: `buf` is only used within task, which terminates before
+                //         `fn write` returns.
+                let buf = unsafe { core::slice::from_raw_parts_mut(buf_addr as *mut u8, buf_len) };
+                let result = fs_client.read(file_id, offset, buf).await;
+                tx_result.send(result);
+            })
+        });
+
+        moto_async::LocalRuntime::new().block_on(async {
+            let _ = self.tasks_tx.send(task).await;
+            rx_result.await.unwrap()
+        })
+    }
 }
 
 struct File {
@@ -471,7 +494,22 @@ impl PosixFile for File {
     }
 
     fn read(&self, buf: &mut [u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
-        todo!()
+        if !self.readable {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+
+        if self.nonblocking.load(Ordering::Acquire) {
+            todo!("Implement nonblocking FS ops");
+        }
+
+        let pos = self.pos.load(Ordering::Acquire);
+        let read = AsyncFsClient::get()
+            .expect("Couldn't initialize AsyncFsClient")
+            .read(self.entry_id, pos, buf)
+            .map_err(|err| err as moto_rt::ErrorCode)?;
+
+        self.pos.store(pos + (read as u64), Ordering::Release);
+        Ok(read)
     }
     unsafe fn read_vectored(
         &self,
