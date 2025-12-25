@@ -165,12 +165,13 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_CREATE_DIR => todo!(),
+        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, fs).await,
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(moto_rt::Error::InvalidData)
         }
     } {
-        let resp = api_fs::empty_resp_encode(msg, Err(err));
+        let resp = api_fs::empty_resp_encode(msg.id, Err(err));
         let _ = sender.send(resp).await;
     }
 }
@@ -213,7 +214,28 @@ async fn on_cmd_create_file(
             map_err_into_native(err)
         })?;
     core::mem::drop(fs);
+    log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
     let resp = api_fs::stat_resp_encode(msg, entry_id);
     sender.send(resp).await
+}
+
+async fn on_cmd_write(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let (file_id, offset, len, io_page) = api_fs::write_msg_decode(msg, sender)?;
+    log::debug!("write: {file_id:x}: offset: {offset:x}, len: {len}");
+
+    let mut fs = fs.lock().await;
+    let written = fs
+        .write(file_id, offset, &io_page.bytes()[..(len as usize)])
+        .await
+        .map_err(map_err_into_native)?;
+    assert_eq!(written, len as usize);
+
+    let resp = api_fs::empty_resp_encode(msg.id, Ok(()));
+    let _ = sender.send(resp).await;
+    Ok(())
 }

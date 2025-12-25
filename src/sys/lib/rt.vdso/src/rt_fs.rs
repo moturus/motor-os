@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Deref;
 use core::pin::Pin;
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
 use moto_io::fs::{EntryId, FsClient, ROOT_ID};
@@ -355,9 +355,10 @@ impl AsyncFsClient {
 
         Ok(File {
             entry_id,
-            pos,
+            pos: AtomicU64::new(pos),
             readable: (opts & moto_rt::fs::O_READ) != 0,
             writable: (opts & moto_rt::fs::O_WRITE) != 0,
+            nonblocking: AtomicBool::new(false),
         })
     }
 
@@ -413,19 +414,115 @@ impl AsyncFsClient {
             rx_result.await.unwrap()
         })
     }
+
+    fn write(&self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+        let (tx_result, rx_result) = moto_async::oneshot();
+
+        let buf_addr = buf.as_ptr() as usize;
+        let buf_len = buf.len();
+
+        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
+            Box::pin(async move {
+                // Safety: `buf` is only used within task, which terminates before
+                //         `fn write` returns.
+                let buf = unsafe { core::slice::from_raw_parts(buf_addr as *const u8, buf_len) };
+                let result = fs_client.write(file_id, offset, buf).await;
+                tx_result.send(result);
+            })
+        });
+
+        moto_async::LocalRuntime::new().block_on(async {
+            let _ = self.tasks_tx.send(task).await;
+            rx_result.await.unwrap()
+        })
+    }
 }
 
 struct File {
     entry_id: moto_io::fs::EntryId,
-    pos: u64,
+    pos: AtomicU64,
     readable: bool,
     writable: bool,
+    nonblocking: AtomicBool,
 }
 
 impl PosixFile for File {
     fn kind(&self) -> crate::posix::PosixKind {
         todo!()
     }
+
+    fn write(&self, buf: &[u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        if !self.writable {
+            return Err(moto_rt::E_NOT_ALLOWED);
+        }
+
+        if self.nonblocking.load(Ordering::Acquire) {
+            todo!("Implement nonblocking FS ops");
+        }
+
+        let pos = self.pos.load(Ordering::Acquire);
+        let written = AsyncFsClient::get()
+            .expect("Couldn't initialize AsyncFsClient")
+            .write(self.entry_id, pos, buf)
+            .map_err(|err| err as moto_rt::ErrorCode)?;
+
+        self.pos.store(pos + (written as u64), Ordering::Release);
+        Ok(written)
+    }
+
+    fn read(&self, buf: &mut [u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        todo!()
+    }
+    unsafe fn read_vectored(
+        &self,
+        bufs: &mut [&mut [u8]],
+    ) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        todo!()
+    }
+    unsafe fn write_vectored(
+        &self,
+        bufs: &[&[u8]],
+    ) -> core::result::Result<usize, moto_rt::ErrorCode> {
+        todo!()
+    }
+    fn flush(&self) -> core::result::Result<(), moto_rt::ErrorCode> {
+        todo!()
+    }
+
+    // rt_fd indicates which FD is closed.
+    fn close(&self, rt_fd: moto_rt::RtFd) -> core::result::Result<(), moto_rt::ErrorCode> {
+        todo!()
+    }
+    fn set_nonblocking(&self, val: bool) -> core::result::Result<(), moto_rt::ErrorCode> {
+        Err(moto_rt::E_NOT_IMPLEMENTED)
+    }
+
+    /*
+    fn poll_add(
+        &self,
+        r_id: u64,
+        source_fd: moto_rt::RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> core::result::Result<(), moto_rt::ErrorCode> {
+        todo!()
+        // Err(E_INVALID_ARGUMENT)
+    }
+    fn poll_set(
+        &self,
+        r_id: u64,
+        source_fd: moto_rt::RtFd,
+        token: Token,
+        interests: Interests,
+    ) -> core::result::Result<(), moto_rt::ErrorCode> {
+        todo!()
+        // Err(E_INVALID_ARGUMENT)
+    }
+    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> core::result::Result<(), moto_rt::ErrorCode> {
+        panic!("Unexpected poll_del for {:?}", self.kind())
+        // Err(E_INVALID_ARGUMENT)
+    }
+    */
 }
 
 // ------------------------------------ public API ------------------------------ //

@@ -10,6 +10,7 @@ pub const FS_URL: &str = "sys-io-fs";
 pub const CMD_STAT: u16 = 1;
 pub const CMD_CREATE_FILE: u16 = 2;
 pub const CMD_CREATE_DIR: u16 = 3;
+pub const CMD_WRITE: u16 = 4;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -84,17 +85,37 @@ pub fn create_entry_resp_decode(msg: Msg) -> Result<u128> {
     msg.status().map(|_| msg.payload.arg_128())
 }
 
-pub fn empty_resp_encode(req: Msg, status: Result<()>) -> Msg {
+pub fn empty_resp_encode(msg_id: u64, status: Result<()>) -> Msg {
     let mut resp = Msg::new();
-    resp.id = req.id;
-    resp.handle = req.handle;
-    resp.wake_handle = req.handle;
+    resp.id = msg_id;
 
-    resp.command = req.command;
     resp.status = match status {
         Ok(()) => moto_rt::Error::Ok.into(),
         Err(err) => err.into(),
     };
 
     resp
+}
+
+pub fn write_msg_encode(file_id: u128, offset: u64, len: u16, io_page: IoPage) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_WRITE;
+
+    msg.payload.set_arg_128(file_id); // This takes 16 bytes.
+    msg.handle = offset;
+    msg.payload.args_16_mut()[10] = len;
+    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+
+    msg
+}
+
+pub fn write_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u16, IoPage)> {
+    let file_id = msg.payload.arg_128();
+    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page = sender.get_page(io_page_idx)?;
+
+    let offset = msg.handle;
+    let len = msg.payload.args_16()[10];
+
+    Ok((file_id, offset, len, io_page))
 }

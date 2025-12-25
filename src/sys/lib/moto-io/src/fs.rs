@@ -25,6 +25,7 @@ use moto_ipc::io_channel::Msg;
 use moto_rt::Result;
 use moto_sys_io::api_fs;
 
+use async_fs::BLOCK_SIZE;
 pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID};
 
 pub struct FsClient {
@@ -123,9 +124,17 @@ impl FsClient {
     }
 
     async fn send_recv(self: Rc<Self>, msg: Msg) -> Result<Msg> {
-        self.io_sender.send(msg).await?;
+        self.clone().send(msg).await?;
+        self.recv(msg.id).await
+    }
+
+    async fn send(self: Rc<Self>, msg: Msg) -> Result<()> {
+        self.io_sender.send(msg).await
+    }
+
+    async fn recv(self: Rc<Self>, msg_id: u64) -> Result<Msg> {
         ResponseFuture {
-            request_id: msg.id,
+            request_id: msg_id,
             fs_client: Rc::downgrade(&self),
         }
         .await
@@ -184,7 +193,7 @@ impl FsClient {
         kind: EntryKind,
         name: &str, // Leaf name.
     ) -> Result<EntryId> {
-        log::debug!("create_entry({parent_id}, {kind:?}, '{name}')");
+        log::debug!("create_entry({parent_id:x}, {kind:?}, '{name}')");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::create_entry_msg_encode(
             parent_id,
@@ -196,7 +205,85 @@ impl FsClient {
 
         let resp = self.clone().send_recv(msg).await?;
         let entry_id = api_fs::create_entry_resp_decode(resp)?;
+        log::debug!("created entry {entry_id:x}");
         Ok(entry_id)
+    }
+
+    // Sends a write msg out, returns its ID.
+    async fn write_one(self: &Rc<Self>, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<u64> {
+        todo!()
+    }
+
+    /// Write bytes to a file.
+    /// Note that cross-block writes may not be supported.
+    pub async fn write(
+        self: &Rc<Self>,
+        file_id: EntryId,
+        offset: u64,
+        mut buf: &[u8],
+    ) -> Result<usize> {
+        log::debug!(
+            "write({file_id:x}): offset: 0x{offset:x}, len: {}",
+            buf.len()
+        );
+
+        let mut written = 0_usize;
+        let mut step_offset = offset;
+        loop {
+            // `buf` can be large; we split it into 4k chunks; we send them
+            // in batches of BATCH_SIZE and then wait for completions.
+            const BATCH_SIZE: usize = 16;
+
+            let mut batch_ids = [0_u64; BATCH_SIZE];
+            let mut batch_idx = 0;
+            loop {
+                let step_len = ((BLOCK_SIZE as u64) - (step_offset & (BLOCK_SIZE as u64 - 1)))
+                    .min(buf.len() as u64);
+                debug_assert!(step_len < u16::MAX as u64);
+
+                let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+                io_page.bytes_mut()[0..step_len as usize]
+                    .clone_from_slice(&buf[0..(step_len as usize)]);
+
+                let mut msg =
+                    api_fs::write_msg_encode(file_id, step_offset, step_len as u16, io_page);
+                let msg_id = self.new_request_id();
+                msg.id = msg_id;
+                if let Err(err) = self.clone().send(msg).await {
+                    todo!()
+                }
+
+                written += (step_len as usize);
+                step_offset += step_len;
+                buf = &buf[(step_len as usize)..];
+
+                batch_ids[batch_idx] = msg_id;
+                batch_idx += 1;
+                if batch_idx >= BATCH_SIZE {
+                    break;
+                }
+
+                if buf.is_empty() {
+                    break;
+                }
+            }
+
+            for id in batch_ids {
+                if id == 0 {
+                    break;
+                }
+                if let Err(err) = self.clone().recv(id).await {
+                    todo!()
+                }
+            }
+
+            if buf.is_empty() {
+                break;
+            }
+        }
+
+        log::debug!("wrote {written} bytes to {file_id:x}) at offset: 0x{offset:x}");
+        Ok(written)
     }
 
     /// Delete the file or directory.
@@ -242,12 +329,6 @@ impl FsClient {
     /// Read bytes from a file.
     /// Note that cross-block reads may not be supported.
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        todo!()
-    }
-
-    /// Write bytes to a file.
-    /// Note that cross-block writes may not be supported.
-    async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
         todo!()
     }
 

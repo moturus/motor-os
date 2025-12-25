@@ -74,7 +74,31 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
 
     /// Write a single block.
     async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()> {
-        todo!()
+        use zerocopy::FromZeros;
+
+        log::debug!("write_block {block_no}");
+
+        // TODO: write in one go, instead of eight.
+        let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();
+
+        let first_sector_no =
+            block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
+        for idx in 0..VIRTIO_BLOCKS_IN_FS_BLOCK {
+            let block_offset = idx * VIRTIO_BLOCK_SIZE;
+            virtio_block.bytes.as_mut_slice().clone_from_slice(
+                &block.as_bytes()[block_offset..block_offset + VIRTIO_BLOCK_SIZE],
+            );
+
+            let completion = virtio_async::BlockDevice::post_write(
+                self.virtio_bd.clone(),
+                first_sector_no + (idx as u64),
+                virtio_block.as_ref(),
+            )
+            .unwrap();
+            completion.await;
+        }
+
+        Ok(())
     }
 
     /// Flush dirty blocks to the underlying storage.

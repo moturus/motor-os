@@ -64,7 +64,7 @@ fn main() {
     {
         runtime::spawn_async();
         std::fs::write("/foo", "bar").expect("async write failed");
-        let bytes = std::fs::read("/too").expect("async read failed");
+        let bytes = std::fs::read("/foo").expect("async read failed");
         assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
         panic!("let's not go there");

@@ -326,7 +326,7 @@ impl<'a> Txn<'a> {
             };
 
         log::debug!(
-            "write({}, {offset}, ...) - block no: {} block key: {block_key}",
+            "write({:?}, {offset}, ...) - block no: {} block key: {block_key}",
             u128::from(file_id),
             data_block_no.as_u64()
         );

@@ -48,15 +48,27 @@ pub struct VirtioBlock {
     pub bytes: [u8; VIRTIO_BLOCK_SIZE],
 }
 
-pub struct VirtioBlockRef<'a> {
+pub struct VirtioBlockRefMut<'a> {
     pub bytes: *mut u8,
     _marker: PhantomData<&'a mut ()>,
 }
 
+pub struct VirtioBlockRef<'a> {
+    pub bytes: *const u8,
+    _marker: PhantomData<&'a ()>,
+}
+
 impl VirtioBlock {
-    pub fn as_mut<'a>(&'a mut self) -> VirtioBlockRef<'a> {
-        VirtioBlockRef {
+    pub fn as_mut<'a>(&'a mut self) -> VirtioBlockRefMut<'a> {
+        VirtioBlockRefMut {
             bytes: self.bytes.as_mut_ptr(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn as_ref<'a>(&'a self) -> VirtioBlockRef<'a> {
+        VirtioBlockRef {
+            bytes: self.bytes.as_ptr(),
             _marker: PhantomData,
         }
     }
@@ -186,7 +198,7 @@ impl BlockDevice {
     pub fn post_read<'a>(
         this: Rc<RefCell<Self>>,
         sector: u64,
-        block_ref: VirtioBlockRef<'a>,
+        block_ref: VirtioBlockRefMut<'a>,
     ) -> Option<Completion<'a>> {
         let vq = this.borrow().dev.virtqueues[0].clone();
         let mut virtqueue = vq.borrow_mut();
@@ -230,38 +242,57 @@ impl BlockDevice {
         let completion = Virtqueue::add_buffs(vq, &buffs, 1, 2, chain_head);
 
         Some(completion)
+    }
 
-        /*
-        let mut wait_failed = false;
-        while !virtqueue.more_used_deprecated() {
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-            if wait_failed {
-                super::nop(); // Don't spam the kernel if something is wrong here.
-            } else {
-                wait_failed = virtqueue.wait_deprecated().is_err();
-                if wait_failed {
-                    log::error!("virtqueue.wait() failed: switching to spinning.");
-                }
-            }
-        }
-        let consumed = virtqueue.consume_used_deprecated();
-        // Qemu indicates that 513 bytes were consumed, but CHV says 512.
-        assert!((consumed == 512) || (consumed == 513));
+    /// Returns the ID of the submitted request.
+    #[inline(never)]
+    pub fn post_write<'a>(
+        this: Rc<RefCell<Self>>,
+        sector: u64,
+        block_ref: VirtioBlockRef<'a>,
+    ) -> Option<Completion<'a>> {
+        let vq = this.borrow().dev.virtqueues[0].clone();
+        let mut virtqueue = vq.borrow_mut();
+        let Some(chain_head) = virtqueue.alloc_descriptor_chain(3) else {
+            return None;
+        };
 
-        // todo!("add vring_get_isr");
-        core::sync::atomic::fence(core::sync::atomic::Ordering::AcqRel);
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::AcqRel);
-        let status = unsafe { (status_addr as *const u8).read_volatile() };
-        if status == VIRTIO_BLK_S_OK {
-            Ok(())
-        } else if status == VIRTIO_BLK_S_IOERR {
-            log::error!("VirtioBlk read error");
-            Err(ErrorKind::Other.into())
-        } else {
-            panic!("status: {}", status)
-        }
-        */
+        let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
+
+        *header = BlkHeader {
+            type_: 1, /* VIRTIO_BLK_T_OUT */
+            _reserved: 0,
+            sector,
+        };
+
+        const VIRTIO_BLK_S_OK: u8 = 0;
+        const VIRTIO_BLK_S_IOERR: u8 = 1;
+        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
+
+        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
+        let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
+        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
+
+        use super::virtio_queue::UserData;
+        let buffs: [UserData; 3] = [
+            UserData {
+                addr: header as *mut _ as usize as u64,
+                len: core::mem::size_of::<BlkHeader>() as u32,
+            },
+            UserData {
+                addr: block_ref.bytes as usize as u64,
+                len: VIRTIO_BLOCK_SIZE as u32,
+            },
+            UserData {
+                addr: status as *mut _ as usize as u64,
+                len: 1,
+            },
+        ];
+
+        core::mem::drop(virtqueue);
+        let completion = Virtqueue::add_buffs(vq, &buffs, 2, 1, chain_head);
+
+        Some(completion)
     }
 
     /*
