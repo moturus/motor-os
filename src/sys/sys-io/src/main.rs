@@ -60,14 +60,14 @@ fn main() {
 
     // This block is for development/testing only, until ready.
     /*
-    #[cfg(debug_assertions)]
     {
         runtime::spawn_async();
         std::fs::write("/foo", "bar").expect("async write failed");
         let bytes = std::fs::read("/foo").expect("async read failed");
         assert_eq!(bytes.as_slice(), "bar".as_bytes());
+        log::info!("async FS smoke test PASSED");
 
-        panic!("let's not go there");
+        // panic!("let's not go there");
     }
     */
     virtio::init();

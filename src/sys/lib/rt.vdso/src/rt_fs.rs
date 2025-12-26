@@ -321,7 +321,7 @@ impl AsyncFsClient {
 
         let path = CanonicalPath::parse(path)?;
 
-        let maybe_entry_id = match self.stat_internal(&path) {
+        let maybe_entry_id = match self.stat_internal(path.clone()) {
             Ok(entry_id) => Some(entry_id),
             Err(moto_rt::Error::NotFound) => None,
             Err(err) => return Err(err),
@@ -363,6 +363,30 @@ impl AsyncFsClient {
         })
     }
 
+    /// Run `io_task` on the runtime thread.
+    fn blocking_run<T, F, Fut>(&self, io_task: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(Rc<FsClient>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+    {
+        let (tx_result, rx_result) = moto_async::oneshot();
+
+        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
+            let future = io_task(fs_client);
+
+            Box::pin(async move {
+                let result = future.await;
+                let _ = tx_result.send(result);
+            })
+        });
+
+        moto_async::LocalRuntime::new().block_on(async {
+            let _ = self.tasks_tx.send(task).await;
+            rx_result.await.unwrap()
+        })
+    }
+
     fn create_internal(
         &self,
         path: &CanonicalPath,
@@ -371,93 +395,52 @@ impl AsyncFsClient {
         if path.is_root() {
             return Err(moto_rt::Error::AlreadyInUse);
         }
-
-        let (tx_result, rx_result) = moto_async::oneshot();
         let path = path.clone();
-        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
-            Box::pin(async move {
-                // We checked above that path is absolute and not root.
-                let parent = path.parent().unwrap();
-                let Ok(parent_id) = fs_client.stat(parent).await else {
-                    tx_result.send(Err(moto_rt::Error::NotFound));
-                    return;
-                };
 
-                let result = fs_client
-                    .create_entry(parent_id, kind, path.filename())
-                    .await;
-                tx_result.send(result);
-            })
-        });
+        self.blocking_run(move |fs_client| async move {
+            let parent = path.parent().unwrap();
+            let Ok(parent_id) = fs_client.stat(parent).await else {
+                return Err(moto_rt::Error::NotFound);
+            };
 
-        moto_async::LocalRuntime::new().block_on(async {
-            let _ = self.tasks_tx.send(task).await;
-            rx_result.await.unwrap()
+            fs_client
+                .create_entry(parent_id, kind, path.filename())
+                .await
         })
     }
 
-    fn stat_internal(&self, path: &CanonicalPath) -> Result<EntryId> {
+    fn stat_internal(&self, path: CanonicalPath) -> Result<EntryId> {
         if path.is_root() {
             return Ok(ROOT_ID);
         }
 
-        let path = path.clone();
-        let (tx_result, rx_result) = moto_async::oneshot();
-        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
-            Box::pin(async move {
-                let result = fs_client.stat(&path.abs_path).await;
-                tx_result.send(result);
-            })
-        });
-
-        moto_async::LocalRuntime::new().block_on(async {
-            let _ = self.tasks_tx.send(task).await;
-            rx_result.await.unwrap()
-        })
+        self.blocking_run(move |fs_client| async move { fs_client.stat(&path.abs_path).await })
     }
 
     fn write(&self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
-        let (tx_result, rx_result) = moto_async::oneshot();
-
         let buf_addr = buf.as_ptr() as usize;
         let buf_len = buf.len();
 
-        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
-            Box::pin(async move {
-                // Safety: `buf` is only used within task, which terminates before
-                //         `fn write` returns.
-                let buf = unsafe { core::slice::from_raw_parts(buf_addr as *const u8, buf_len) };
-                let result = fs_client.write(file_id, offset, buf).await;
-                tx_result.send(result);
-            })
-        });
-
-        moto_async::LocalRuntime::new().block_on(async {
-            let _ = self.tasks_tx.send(task).await;
-            rx_result.await.unwrap()
+        self.blocking_run(move |fs_client| async move {
+            // Safety: The task blocks the caller, keeping the original slice valid.
+            let buf = unsafe { core::slice::from_raw_parts(buf_addr as *const u8, buf_len) };
+            fs_client.write(file_id, offset, buf).await
         })
     }
 
     fn read(&self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        let (tx_result, rx_result) = moto_async::oneshot();
-
         let buf_addr = buf.as_mut_ptr() as usize;
         let buf_len = buf.len();
 
-        let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
-            Box::pin(async move {
-                // Safety: `buf` is only used within task, which terminates before
-                //         `fn write` returns.
-                let buf = unsafe { core::slice::from_raw_parts_mut(buf_addr as *mut u8, buf_len) };
-                let result = fs_client.read(file_id, offset, buf).await;
-                tx_result.send(result);
-            })
-        });
-
-        moto_async::LocalRuntime::new().block_on(async {
-            let _ = self.tasks_tx.send(task).await;
-            rx_result.await.unwrap()
+        self.blocking_run(move |fs_client| async move {
+            // Safety: The task blocks the caller, keeping the original slice valid.
+            let buf = unsafe { core::slice::from_raw_parts_mut(buf_addr as *mut u8, buf_len) };
+            fs_client.read(file_id, offset, buf).await
         })
+    }
+
+    fn stat(&self, path: &str) -> Result<moto_rt::fs::FileAttr> {
+        todo!()
     }
 }
 
@@ -574,19 +557,16 @@ pub extern "C" fn stat(
     path_size: usize,
     attr: *mut moto_rt::fs::FileAttr,
 ) -> moto_rt::ErrorCode {
-    todo!()
-    /*
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
 
-    match AsyncFsClient::stat(path) {
+    match AsyncFsClient::get().unwrap().stat(path) {
         Ok(a) => {
             unsafe { *attr = a };
-            E_OK
+            moto_rt::Error::Ok.into()
         }
-        Err(err) => err,
+        Err(err) => err.into(),
     }
-    */
 }
 
 pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 {
