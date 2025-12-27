@@ -7,10 +7,11 @@ use crate::BlockHeader;
 use crate::BlockNo;
 use crate::Superblock;
 use crate::Txn;
+use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Pod)]
 #[repr(C, align(8))]
 pub(crate) struct KV {
     /// Key is dir name hash for when children are dir entries,
@@ -19,6 +20,8 @@ pub(crate) struct KV {
 
     pub child_block_no: BlockNo,
 }
+
+unsafe impl bytemuck::Zeroable for KV {}
 
 impl Default for KV {
     fn default() -> Self {
@@ -30,6 +33,7 @@ impl Default for KV {
 }
 
 /// B+ Tree node. Size: ORDER * 16 + 8.
+#[derive(Clone, Copy)]
 #[repr(C, align(8))]
 pub(crate) struct Node<const ORDER: usize> {
     num_keys: u8, // The number of keys in use.
@@ -38,7 +42,8 @@ pub(crate) struct Node<const ORDER: usize> {
     kv: [KV; ORDER],
 }
 
-unsafe impl<const ORDER: usize> plain::Plain for Node<ORDER> {}
+unsafe impl<const ORDER: usize> bytemuck::Zeroable for Node<ORDER> {}
+unsafe impl<const ORDER: usize> bytemuck::Pod for Node<ORDER> {}
 
 impl<const ORDER: usize> Node<ORDER> {
     const KIND_LEAF: u8 = 1;

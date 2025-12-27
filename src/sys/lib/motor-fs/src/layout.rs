@@ -17,24 +17,27 @@
 
 use std::io::ErrorKind;
 
+use crate::Txn;
+use crate::bplus_tree;
+use crate::bplus_tree::Node;
 pub use async_fs::BLOCK_SIZE;
 use async_fs::Block;
 pub use async_fs::EntryId;
 pub use async_fs::EntryKind;
 use async_fs::Metadata;
 use async_fs::Timestamp;
+use bytemuck::Pod;
 use std::io::Result;
-
-use crate::Txn;
-use crate::bplus_tree;
-use crate::bplus_tree::Node;
 
 pub const MAX_FILENAME_LEN: usize = 255;
 pub(crate) const TXN_BLOCKS: u64 = 14;
 pub const RESERVED_BLOCKS: u64 = TXN_BLOCKS + 2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod)]
+#[repr(transparent)]
 pub(crate) struct BlockNo(u64);
+
+unsafe impl bytemuck::Zeroable for BlockNo {}
 
 impl BlockNo {
     pub fn null() -> Self {
@@ -51,7 +54,7 @@ impl BlockNo {
 }
 
 /// EntryId uniquely identifies a file or a directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod)]
 #[repr(C, align(16))]
 pub(crate) struct EntryIdInternal {
     /// The number of the block the Entry physically resides on.
@@ -61,6 +64,8 @@ pub(crate) struct EntryIdInternal {
     /// Never changes and is never re-used.
     pub generation: u64,
 }
+
+unsafe impl bytemuck::Zeroable for EntryIdInternal {}
 
 const _: () = assert!(16 == size_of::<EntryIdInternal>());
 const _: () = assert!(size_of::<EntryId>() == size_of::<EntryIdInternal>());
@@ -101,6 +106,7 @@ pub const ROOT_DIR_ID: EntryId = unsafe { core::mem::transmute(ROOT_DIR_ID_INTER
 pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 
 /// Superblock (block #0).
+#[derive(Pod, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct Superblock {
     magic: u64,             // MAGIC.
@@ -120,7 +126,7 @@ pub(crate) struct Superblock {
                             // crc32: u32, // CRC32 of this data structure.
 }
 const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
-unsafe impl plain::Plain for Superblock {}
+unsafe impl bytemuck::Zeroable for Superblock {}
 
 impl Superblock {
     /// Returns the superblock and the root dir.
@@ -142,7 +148,7 @@ impl Superblock {
         let mut block_1 = Block::new_zeroed();
         let root_dir = block_1.get_mut_at_offset::<DirEntryBlock>(0);
 
-        root_dir.block_header.block_type = BlockType::DirEntry;
+        root_dir.block_header.block_type = BlockType::DirEntry as u8;
         root_dir.block_header.in_use = 1;
         root_dir.block_header.blocks_in_use = 1;
 
@@ -218,7 +224,7 @@ impl Superblock {
         let mut target_block = txn.get_txn_block(block_no).await?.clone();
         let mut target_mut_ref = target_block.block_mut();
         let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
-        ebh.block_type = BlockType::EmptyBlock;
+        ebh.block_type = BlockType::EmptyBlock as u8;
         ebh.next_empty_block = this.freelist_head;
         this.freelist_head = block_no;
         this.free_blocks += 1;
@@ -233,7 +239,7 @@ impl Superblock {
         let mut target_mut_ref = target_block.block_mut();
 
         let bh = target_mut_ref.get_mut_at_offset::<BlockHeader>(0);
-        let blocks_in_use = match bh.block_type {
+        let blocks_in_use = match BlockType::from_u8(bh.block_type)? {
             BlockType::FileEntry => bh.blocks_in_use,
             BlockType::DirEntry => panic!("This is a bug."),
             BlockType::TreeNode => todo!(),
@@ -260,26 +266,33 @@ pub(crate) enum BlockType {
     EmptyBlock = 4, // A standalone empty block.
 }
 
-// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// pub(crate) enum ChildType {
-//     TreeNode,
-//     Entry,
-// }
+impl BlockType {
+    pub(crate) fn from_u8(val: u8) -> Result<Self> {
+        match val {
+            1 => Ok(Self::FileEntry),
+            2 => Ok(Self::DirEntry),
+            3 => Ok(Self::TreeNode),
+            4 => Ok(Self::EmptyBlock),
+            _ => Err(std::io::Error::from(ErrorKind::InvalidData)),
+        }
+    }
+}
 
+#[derive(Pod, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct EmptyBlockHeader {
-    block_type: BlockType, // Must be BlockType::EmptyBlock.
+    block_type: u8, // Must be BlockType::EmptyBlock.
     _padding: [u8; 7],
     next_empty_block: BlockNo, // Null if this is the last empty block.
 }
 
 const _: () = assert!(16 == core::mem::size_of::<EmptyBlockHeader>());
-unsafe impl plain::Plain for EmptyBlockHeader {}
+unsafe impl bytemuck::Zeroable for EmptyBlockHeader {}
 
-// #[derive(Clone, Copy)]
+#[derive(Pod, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct BlockHeader {
-    block_type: BlockType,
+    block_type: u8,
     in_use: u8, // 1 => true, 0 => false; _ => block corrupted.
     _padding_1: [u8; 6],
 
@@ -290,14 +303,15 @@ pub(crate) struct BlockHeader {
 
 impl BlockHeader {
     pub fn set_block_type(&mut self, block_type: BlockType) {
-        self.block_type = block_type;
+        self.block_type = block_type as u8;
     }
 }
 
 const _: () = assert!(16 == core::mem::size_of::<BlockHeader>());
-unsafe impl plain::Plain for BlockHeader {}
+unsafe impl bytemuck::Zeroable for BlockHeader {}
 
 /// Directory Entry (file or directory) Header.
+#[derive(Pod, Clone, Copy)]
 #[repr(C, align(4096))]
 pub(crate) struct DirEntryBlock {
     block_header: BlockHeader,
@@ -316,9 +330,10 @@ pub(crate) struct DirEntryBlock {
     hash_seed: u64, // offset 432.
 
     btree_root: bplus_tree::Node<BTREE_ROOT_ORDER>,
+    _padding: [u8; 16],
 }
 
-unsafe impl plain::Plain for DirEntryBlock {}
+unsafe impl bytemuck::Zeroable for DirEntryBlock {}
 
 pub(crate) const BTREE_ROOT_ORDER: usize = 226;
 pub(crate) const BTREE_ROOT_OFFSET: usize = 456;
@@ -339,7 +354,7 @@ impl DirEntryBlock {
     }
 
     pub fn kind(&self) -> EntryKind {
-        match self.block_header.block_type {
+        match BlockType::from_u8(self.block_header.block_type).unwrap() {
             BlockType::FileEntry => EntryKind::File,
             BlockType::DirEntry => EntryKind::Directory,
             _ => panic!("Dir entries must be pre-validated."),
@@ -422,7 +437,7 @@ impl DirEntryBlock {
             return Err(ErrorKind::InvalidData.into());
         }
 
-        match self.block_header.block_type {
+        match BlockType::from_u8(self.block_header.block_type)? {
             BlockType::FileEntry | BlockType::DirEntry => {}
             block_type => {
                 log::error!(
@@ -573,8 +588,8 @@ impl DirEntryBlock {
         let child = Self::from_block_mut(&mut *child_block_ref);
 
         child.block_header.block_type = match kind {
-            EntryKind::Directory => BlockType::DirEntry,
-            EntryKind::File => BlockType::FileEntry,
+            EntryKind::Directory => BlockType::DirEntry as u8,
+            EntryKind::File => BlockType::FileEntry as u8,
         };
 
         child.block_header.in_use = 1;

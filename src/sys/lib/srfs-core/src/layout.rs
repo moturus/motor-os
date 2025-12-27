@@ -1,6 +1,7 @@
 use super::*;
 use async_fs::BLOCK_SIZE;
 use async_fs::Block;
+use bytemuck::Pod;
 /// Various data structures as they are on the permanent storage.
 ///
 /// EntryMetadata is the same for files and directories.
@@ -55,7 +56,7 @@ pub(crate) fn crc32_verify(bytes: &[u8]) -> Result<()> {
 pub use async_fs::EntryKind;
 
 /// EntryId uniquely identifies a file or a directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod)]
 #[repr(C)]
 pub struct EntryId {
     /// The number of the block the Entry physically resides on.
@@ -65,6 +66,8 @@ pub struct EntryId {
     /// Never changes and is never re-used.
     pub generation: u64,
 }
+
+unsafe impl bytemuck::Zeroable for EntryId {}
 
 pub const ROOT_DIR_ID: EntryId = EntryId {
     block_no: 1,
@@ -88,13 +91,15 @@ impl EntryId {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod)]
 #[repr(C)]
 pub struct Timestamp {
     pub secs: u64,
     pub ns: u32,
     _pad: u32,
 }
+
+unsafe impl bytemuck::Zeroable for Timestamp {}
 
 impl Timestamp {
     pub fn now() -> Self {
@@ -126,7 +131,7 @@ impl From<Timestamp> for std::time::SystemTime {
 }
 
 // An entry in a directory.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Pod)]
 #[repr(C)]
 pub struct DirEntry {
     pub id: EntryId,
@@ -134,9 +139,9 @@ pub struct DirEntry {
     pub name_len: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<DirEntry>() == 272);
+unsafe impl bytemuck::Zeroable for DirEntry {}
 
-unsafe impl plain::Plain for DirEntry {}
+const _: () = assert!(core::mem::size_of::<DirEntry>() == 272);
 
 impl std::fmt::Debug for DirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -163,7 +168,7 @@ impl DirEntry {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod)]
 #[repr(C)]
 pub(crate) struct EntryMetadata {
     pub id: EntryId,
@@ -177,7 +182,7 @@ pub(crate) struct EntryMetadata {
     pub crc32: u32, // CRC32 of this data structure.
 }
 
-unsafe impl plain::Plain for EntryMetadata {}
+unsafe impl bytemuck::Zeroable for EntryMetadata {}
 
 const _: () = assert!(core::mem::size_of::<EntryMetadata>() == 128);
 const _: () = assert!(core::mem::size_of::<EntryMetadata>() < BLOCK_SIZE);
@@ -347,7 +352,7 @@ pub(crate) const TXN_TYPE_MOVE: u32 = 5;
 
 // The first block header. Duplicated at [0..) and [2048..) of the first block
 // of the partition.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Pod)]
 #[repr(C)]
 pub(crate) struct SuperblockHeader {
     pub magic: u64,                   // MAGIC.
@@ -366,7 +371,7 @@ pub(crate) struct SuperblockHeader {
     pub crc32: u32,                   // CRC32 of this data structure.
 }
 
-unsafe impl plain::Plain for SuperblockHeader {}
+unsafe impl bytemuck::Zeroable for SuperblockHeader {}
 
 impl SuperblockHeader {
     pub fn as_bytes(&self) -> &[u8] {

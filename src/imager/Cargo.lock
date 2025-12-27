@@ -87,10 +87,10 @@ name = "async-fs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytemuck",
  "camino",
  "log",
  "lru",
- "plain",
  "tokio",
 ]
 
@@ -145,6 +145,26 @@ dependencies = [
  "radium",
  "tap",
  "wyz",
+]
+
+[[package]]
+name = "bytemuck"
+version = "1.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbdf580320f38b612e485521afda1ee26d10cc9884efaaa750d383e13e3c5f4"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -381,10 +401,10 @@ version = "0.1.0"
 dependencies = [
  "async-fs",
  "async-trait",
+ "bytemuck",
  "crc",
  "log",
  "micromap",
- "plain",
 ]
 
 [[package]]
@@ -407,12 +427,6 @@ name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
-
-[[package]]
-name = "plain"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "proc-macro2"
@@ -553,10 +567,10 @@ name = "srfs-core"
 version = "0.2.1"
 dependencies = [
  "async-fs",
+ "bytemuck",
  "crc",
  "log",
  "lru",
- "plain",
 ]
 
 [[package]]

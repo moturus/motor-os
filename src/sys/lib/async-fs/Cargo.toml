@@ -16,7 +16,7 @@ moto-rt = { path = "../moto-rt", optional = true }
 async-trait = "0.1.88"
 log = "0.4.28"
 lru = "0.14.0"
-plain = "0.2.3"
+bytemuck = { version = "1.24", features = ["latest_stable_rust"] }
 
 tokio  = { version = "1.44.2", optional = true, default-features = false }
 camino = { version = "1.1.10", optional = true }

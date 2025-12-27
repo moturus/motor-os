@@ -57,15 +57,13 @@ impl Block {
         &mut self.bytes
     }
 
-    pub fn get_at_offset<T: plain::Plain>(&self, offset: usize) -> &T {
+    pub fn get_at_offset<T: bytemuck::Pod>(&self, offset: usize) -> &T {
         assert!(core::mem::size_of::<T>() + offset <= BLOCK_SIZE);
-        plain::from_bytes(&self.bytes[offset..(offset + core::mem::size_of::<T>())])
-            .expect("Bad alignment")
+        bytemuck::from_bytes(&self.bytes[offset..(offset + core::mem::size_of::<T>())])
     }
 
-    pub fn get_mut_at_offset<T: plain::Plain>(&mut self, offset: usize) -> &mut T {
+    pub fn get_mut_at_offset<T: bytemuck::Pod>(&mut self, offset: usize) -> &mut T {
         assert!(core::mem::size_of::<T>() + offset <= BLOCK_SIZE);
-        plain::from_mut_bytes(&mut self.bytes[offset..(offset + core::mem::size_of::<T>())])
-            .expect("Bad alignment")
+        bytemuck::from_bytes_mut(&mut self.bytes[offset..(offset + core::mem::size_of::<T>())])
     }
 }

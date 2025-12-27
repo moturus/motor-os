@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use bytemuck::Pod;
 
 #[cfg(feature = "std")]
 pub type Result<T> = std::io::Result<T>;
@@ -50,12 +51,14 @@ impl TryFrom<u8> for EntryKind {
 pub type EntryId = u128;
 pub const ROOT_ID: EntryId = 0;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod)]
 #[repr(C, align(4))]
 pub struct Timestamp {
     secs: [u8; 8],  // le bytes u64
     nanos: [u8; 4], // le bytes u32
 }
+
+unsafe impl bytemuck::Zeroable for Timestamp {}
 
 impl Timestamp {
     #[cfg(feature = "std")]
@@ -108,7 +111,7 @@ impl From<std::time::SystemTime> for Timestamp {
 }
 
 /// Directory Entry Metadata.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Pod)]
 #[repr(C, align(8))]
 pub struct Metadata {
     pub size: u64, // File size or the number of directory entries.
@@ -119,6 +122,8 @@ pub struct Metadata {
     _reserved: [u8; 11],
     pub user_extensions: [u8; 72], // Permissions, ACL, whatever.
 }
+
+unsafe impl bytemuck::Zeroable for Metadata {}
 
 const _: () = assert!(128 == core::mem::size_of::<Metadata>());
 
