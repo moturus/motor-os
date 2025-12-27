@@ -11,6 +11,7 @@ edition = "2024"
 
 [dependencies]
 log      = "0.4.28"
+async-fs = { path = "../async-fs", default-features = false, features = ["moto-rt"] }
 moto-ipc = { path = "../moto-ipc" }
 moto-rt  = { path = "../moto-rt"  }
 moto-sys = { path = "../moto-sys" }

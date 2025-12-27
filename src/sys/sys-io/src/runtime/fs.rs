@@ -1,13 +1,14 @@
 use async_fs::{EntryKind, FileSystem};
 use moto_async::{AsFuture, LocalMutex};
-use moto_rt::Result;
 use moto_sys_io::api_fs;
 use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
 use std::io::ErrorKind;
+use std::io::Result;
 use std::rc::Rc;
 
 use crate::util::map_err_into_native;
+use crate::util::map_native_error;
 
 mod virtio_partition;
 
@@ -25,7 +26,7 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
 
     let mbr = crate::fs::mbr::Mbr::parse(virtio_block.bytes.as_slice()).map_err(|err| {
         log::error!("Mbr::parse() failed: {err:?}.");
-        moto_rt::Error::InvalidData
+        std::io::Error::from(ErrorKind::InvalidData)
     })?;
 
     let mut fs: Option<Box<dyn FileSystem>> = None;
@@ -52,13 +53,13 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
                     )
                     .map_err(|err| {
                         log::error!("Mbr::parse() failed: {err:?}.");
-                        moto_rt::Error::InvalidData
+                        std::io::Error::from(ErrorKind::InvalidData)
                     })?,
                 );
                 fs = Some(Box::new(motor_fs::MotorFs::open(partition).await.map_err(
                     |err| {
                         log::error!("Mbr::parse() failed: {err:?}.");
-                        moto_rt::Error::InvalidData
+                        std::io::Error::from(ErrorKind::InvalidData)
                     },
                 )?));
             }
@@ -68,7 +69,7 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
 
     let Some(fs) = fs else {
         log::error!("Couldn't find a data partition.");
-        return Err(moto_rt::Error::InvalidData);
+        return Err(std::io::Error::from(ErrorKind::InvalidData));
     };
 
     spawn_fs_listeners(fs).await;
@@ -119,7 +120,8 @@ async fn fs_listener(
                 let _ = started.send(());
                 listener.await
             }
-        }?;
+        }
+        .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?;
 
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
@@ -151,7 +153,7 @@ async fn fs_listener(
                     let _ = ticket_tx.send(()).await;
                 });
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(std::io::Error::from_raw_os_error(err as u16 as i32)),
         }
     }
 }
@@ -167,12 +169,13 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_CREATE_DIR => todo!(),
         moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
-            Err(moto_rt::Error::InvalidData)
+            Err(std::io::Error::from(ErrorKind::InvalidData))
         }
     } {
-        let resp = api_fs::empty_resp_encode(msg.id, Err(err));
+        let resp = api_fs::empty_resp_encode(msg.id, Err(map_err_into_native(err)));
         let _ = sender.send(resp).await;
     }
 }
@@ -182,21 +185,21 @@ async fn on_cmd_stat(
     sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
-    let (parent_id, fname) = api_fs::stat_msg_decode(msg, &sender)?;
+    let (parent_id, fname) = api_fs::stat_msg_decode(msg, &sender).map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
     let Some(entry_id) = fs.stat(parent_id, fname.as_str()).await.map_err(|err| {
         log::warn!("fs.stat() failed: {err:?}");
-        map_err_into_native(err)
+        err
     })?
     else {
         log::debug!("stat({parent_id}, {fname}): not found");
-        return Err(moto_rt::Error::NotFound);
+        return Err(std::io::Error::from(ErrorKind::NotFound));
     };
     core::mem::drop(fs);
 
     let resp = api_fs::stat_resp_encode(msg, entry_id);
-    sender.send(resp).await
+    sender.send(resp).await.map_err(map_native_error)
 }
 
 async fn on_cmd_create_file(
@@ -204,7 +207,8 @@ async fn on_cmd_create_file(
     sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
-    let (parent_id, fname) = api_fs::create_entry_msg_decode(msg, &sender)?;
+    let (parent_id, fname) =
+        api_fs::create_entry_msg_decode(msg, &sender).map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
     let entry_id = fs
@@ -213,12 +217,13 @@ async fn on_cmd_create_file(
         .map_err(|err| {
             log::warn!("fs.create_entry() failed: {err:?}");
             map_err_into_native(err)
-        })?;
+        })
+        .map_err(map_native_error)?;
     core::mem::drop(fs);
     log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
     let resp = api_fs::stat_resp_encode(msg, entry_id);
-    sender.send(resp).await
+    sender.send(resp).await.map_err(map_native_error)
 }
 
 async fn on_cmd_write(
@@ -226,14 +231,14 @@ async fn on_cmd_write(
     sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
-    let (file_id, offset, len, io_page) = api_fs::write_msg_decode(msg, sender)?;
+    let (file_id, offset, len, io_page) =
+        api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
     log::debug!("write: {file_id:x}: offset: {offset:x}, len: {len}");
 
     let mut fs = fs.lock().await;
     let written = fs
         .write(file_id, offset, &io_page.bytes()[..(len as usize)])
-        .await
-        .map_err(map_err_into_native)?;
+        .await?;
     assert_eq!(written, len as usize);
 
     let resp = api_fs::empty_resp_encode(msg.id, Ok(()));
@@ -249,15 +254,38 @@ async fn on_cmd_read(
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
     log::debug!("read: {file_id:x}: offset: {offset:x}, len: {len}");
 
-    let io_page = sender.alloc_page(u64::MAX).await?;
+    let io_page = sender
+        .alloc_page(u64::MAX)
+        .await
+        .map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
     let read = fs
         .read(file_id, offset, &mut io_page.bytes_mut()[..(len as usize)])
-        .await
-        .map_err(map_err_into_native)?;
+        .await?;
 
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_metadata(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let entry_id = api_fs::metadata_msg_decode(msg);
+    log::debug!("metadata: {entry_id:x}");
+
+    let mut fs = fs.lock().await;
+    let metadata = fs.metadata(entry_id).await?;
+
+    let io_page = sender
+        .alloc_page(u64::MAX)
+        .await
+        .map_err(map_native_error)?;
+
+    let resp = api_fs::metadata_resp_encode(msg.id, metadata, io_page);
     let _ = sender.send(resp).await;
     Ok(())
 }

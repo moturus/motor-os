@@ -75,7 +75,7 @@ pub struct FileAttr {
 impl FileAttr {
     pub const VERSION: u64 = 1;
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             version: Self::VERSION,
             ..Default::default()

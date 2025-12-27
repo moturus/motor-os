@@ -176,7 +176,7 @@ impl FsClient {
     }
 
     async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
-        log::debug!("stat_one({parent_id}, '{fname}')");
+        log::debug!("stat_one({parent_id:x}, '{fname}')");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
         msg.id = self.new_request_id();
@@ -208,11 +208,6 @@ impl FsClient {
         let entry_id = api_fs::create_entry_resp_decode(resp)?;
         log::debug!("created entry {entry_id:x}");
         Ok(entry_id)
-    }
-
-    // Sends a write msg out, returns its ID.
-    async fn write_one(self: &Rc<Self>, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<u64> {
-        todo!()
     }
 
     /// Write bytes to a file.
@@ -384,6 +379,22 @@ impl FsClient {
         }
     }
 
+    /// The metadata of the directory entry.
+    pub async fn metadata(self: &Rc<Self>, entry_id: EntryId) -> Result<Metadata> {
+        log::debug!("metadata({entry_id:x})");
+        let mut msg = api_fs::metadata_msg_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        let metadata = api_fs::metadata_resp_decode(resp, &self.io_receiver.borrow())?;
+        log::debug!(
+            "metadata({entry_id:?}) => {:?} sz: {}",
+            metadata.kind(),
+            metadata.size
+        );
+        Ok(metadata)
+    }
+
     /// Delete the file or directory.
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
         todo!()
@@ -416,11 +427,6 @@ impl FsClient {
 
     /// Filename of the entry, without parent directories.
     async fn name(&mut self, entry_id: EntryId) -> Result<String> {
-        todo!()
-    }
-
-    /// The metadata of the directory entry.
-    async fn metadata(&mut self, entry_id: EntryId) -> Result<Metadata> {
         todo!()
     }
 

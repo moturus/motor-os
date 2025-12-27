@@ -440,7 +440,24 @@ impl AsyncFsClient {
     }
 
     fn stat(&self, path: &str) -> Result<moto_rt::fs::FileAttr> {
-        todo!()
+        let path = CanonicalPath::parse(path)?;
+        let entry_id = self.stat_internal(path)?;
+
+        let metadata =
+            self.blocking_run(move |fs_client| async move { fs_client.metadata(entry_id).await })?;
+
+        let mut file_attr = moto_rt::fs::FileAttr::new();
+        file_attr.size = metadata.size;
+        file_attr.perm = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
+        file_attr.file_type = match metadata.kind() {
+            moto_io::fs::EntryKind::Directory => moto_rt::fs::FILETYPE_DIRECTORY,
+            moto_io::fs::EntryKind::File => moto_rt::fs::FILETYPE_FILE,
+        };
+        file_attr.created = metadata.created.as_nanos();
+        file_attr.modified = metadata.modified.as_nanos();
+        file_attr.accessed = metadata.accessed.as_nanos();
+
+        Ok(file_attr)
     }
 }
 

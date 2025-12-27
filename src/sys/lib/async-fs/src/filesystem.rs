@@ -57,8 +57,8 @@ pub struct Timestamp {
     nanos: [u8; 4], // le bytes u32
 }
 
-#[cfg(feature = "std")]
 impl Timestamp {
+    #[cfg(feature = "std")]
     pub fn now() -> Self {
         {
             let ts = std::time::UNIX_EPOCH.elapsed().unwrap();
@@ -75,6 +75,12 @@ impl Timestamp {
             secs: [0; 8],
             nanos: [0; 4],
         }
+    }
+
+    pub fn as_nanos(&self) -> u128 {
+        let secs = u64::from_le_bytes(self.secs);
+        let nanos = u32::from_le_bytes(self.nanos);
+        (secs as u128) * 1_000_000_000 + (nanos as u128)
     }
 }
 
@@ -130,6 +136,18 @@ impl Metadata {
 
     pub fn try_kind(&self) -> Result<EntryKind> {
         self.kind.try_into()
+    }
+
+    pub fn zeroed() -> Self {
+        Self {
+            size: 0,
+            created: Timestamp::zero(),
+            modified: Timestamp::zero(),
+            accessed: Timestamp::zero(),
+            kind: 0,
+            _reserved: [0; 11],
+            user_extensions: [0; 72],
+        }
     }
 }
 

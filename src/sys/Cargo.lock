@@ -897,6 +897,7 @@ dependencies = [
 name = "moto-sys-io"
 version = "0.2.4"
 dependencies = [
+ "async-fs",
  "log",
  "moto-ipc",
  "moto-rt 0.16.0",

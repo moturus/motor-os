@@ -43,3 +43,7 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
         _ => moto_rt::Error::Unknown,
     }
 }
+
+pub fn map_native_error(err: moto_rt::Error) -> std::io::Error {
+    std::io::Error::from_raw_os_error(err as u16 as i32)
+}
