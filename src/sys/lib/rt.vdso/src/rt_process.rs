@@ -683,6 +683,7 @@ unsafe fn spawn_impl(
     };
     let program_name =
         core::str::from_utf8(program_name).map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
+    log::debug!("spawn {program_name}");
     let exe = resolve_exe(program_name)?;
 
     let fd = moto_rt::fs::open(exe.as_str(), moto_rt::fs::O_READ)?;
@@ -699,6 +700,7 @@ unsafe fn spawn_impl(
     }
     let mut buf: [u8; 4] = [0; 4];
 
+    log::debug!("will read {exe}");
     let sz = moto_rt::fs::read(fd, &mut buf).inspect_err(|_| {
         moto_rt::fs::close(fd).unwrap();
     })?;

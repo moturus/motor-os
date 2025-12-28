@@ -66,6 +66,9 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
 }
 
 pub extern "C" fn get_file_attr(rt_fd: i32, attr: *mut FileAttr) -> ErrorCode {
+    if crate::rt_fs::ok() {
+        return crate::rt_fs::get_file_attr(rt_fd, attr);
+    }
     // TODO: the following four lines is boilerplate repeated several times to get
     // a specific type out of fd; maybe there is a way to do that using a generic
     // function or a macro? The challenge is that the final variable (a reference)
@@ -99,6 +102,9 @@ pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
 }
 
 pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
+    if crate::rt_fs::ok() {
+        return crate::rt_fs::seek(rt_fd, offset, whence);
+    }
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return -(moto_rt::E_BAD_HANDLE as i64);
     };

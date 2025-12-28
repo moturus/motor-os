@@ -183,7 +183,7 @@ impl FsClient {
 
         let resp = self.clone().send_recv(msg).await?;
         let entry_id = api_fs::stat_resp_decode(resp)?;
-        log::debug!("stat_one({parent_id}, '{fname}') => {entry_id:x}");
+        log::debug!("stat_one({parent_id:x}, '{fname}') => {entry_id:x}");
         Ok(entry_id)
     }
 
@@ -388,7 +388,7 @@ impl FsClient {
         let resp = self.clone().send_recv(msg).await?;
         let metadata = api_fs::metadata_resp_decode(resp, &self.io_receiver.borrow())?;
         log::debug!(
-            "metadata({entry_id:?}) => {:?} sz: {}",
+            "metadata({entry_id:x}) => {:?} sz: {}",
             metadata.kind(),
             metadata.size
         );

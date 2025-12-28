@@ -443,6 +443,10 @@ impl AsyncFsClient {
         let path = CanonicalPath::parse(path)?;
         let entry_id = self.stat_internal(path)?;
 
+        self.metadata(entry_id)
+    }
+
+    fn metadata(&self, entry_id: EntryId) -> Result<moto_rt::fs::FileAttr> {
         let metadata =
             self.blocking_run(move |fs_client| async move { fs_client.metadata(entry_id).await })?;
 
@@ -616,4 +620,100 @@ pub extern "C" fn open(path_ptr: *const u8, path_size: usize, opts: u32) -> i32 
     };
 
     crate::posix::push_file(alloc::sync::Arc::new(file))
+}
+
+pub extern "C" fn get_file_attr(
+    rt_fd: i32,
+    attr: *mut moto_rt::fs::FileAttr,
+) -> moto_rt::ErrorCode {
+    use core::any::Any;
+
+    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+
+    match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            moto_rt::Error::Ok.into()
+        }
+        Err(err) => err.into(),
+    }
+}
+
+pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
+    use core::any::Any;
+
+    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
+        return -(moto_rt::E_BAD_HANDLE as i64);
+    };
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+        return -(moto_rt::E_BAD_HANDLE as i64);
+    };
+
+    let file_size = {
+        let attr = match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
+            Ok(attr) => attr,
+            Err(err) => return -(err as u16 as i64),
+        };
+
+        if attr.file_type != moto_rt::fs::FILETYPE_FILE {
+            return -(moto_rt::Error::InvalidArgument as u16 as i64);
+        }
+        attr.size
+    };
+    match whence {
+        moto_rt::fs::SEEK_CUR => {
+            if offset == 0 {
+                return file.pos.load(Ordering::Acquire) as i64;
+            }
+
+            loop {
+                let curr = file.pos.load(Ordering::Acquire) as i64;
+                let new = curr + offset;
+                if (new > (file_size as i64)) || (new < 0) {
+                    return -(moto_rt::Error::InvalidArgument as u16 as i64);
+                }
+
+                if file
+                    .pos
+                    .compare_exchange_weak(
+                        curr as u64,
+                        new as u64,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    return new as i64;
+                }
+            }
+        }
+        moto_rt::fs::SEEK_SET => {
+            if offset < 0 {
+                return -(moto_rt::Error::InvalidArgument as u16 as i64);
+            }
+            if (offset as u64) > file_size {
+                return -(moto_rt::Error::InvalidArgument as u16 as i64);
+            }
+            file.pos.store(offset as u64, Ordering::Release);
+            offset
+        }
+        moto_rt::fs::SEEK_END => {
+            if (offset < 0) && ((-offset as u64) > file_size) {
+                return -(moto_rt::Error::InvalidArgument as u16 as i64);
+            }
+            if offset > 0 {
+                log::error!("File::seek past end Not Implemented");
+                return -(moto_rt::Error::NotImplemented as u16 as i64);
+            }
+            let new_pos = file_size - ((-offset) as u64);
+            file.pos.store(new_pos, Ordering::Release);
+            new_pos as i64
+        }
+        _ => -(moto_rt::Error::InvalidArgument as u16 as i64),
+    }
 }
