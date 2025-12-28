@@ -58,8 +58,7 @@ pub extern "C" fn motor_runtime_start() {
 fn main() {
     runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
 
-    // This block is for development/testing only, until ready.
-    /*
+    #[cfg(feature = "motor-fs")]
     {
         runtime::spawn_async();
         std::fs::write("/foo", "bar").expect("async write failed");
@@ -69,10 +68,13 @@ fn main() {
 
         // panic!("let's not go there");
     }
-    */
-    virtio::init();
-    fs::init();
-    runtime::start();
+
+    #[cfg(not(feature = "motor-fs"))]
+    {
+        virtio::init();
+        fs::init();
+        runtime::start();
+    }
 
     let mut cmd = std::process::Command::new("/sys/sys-init");
 

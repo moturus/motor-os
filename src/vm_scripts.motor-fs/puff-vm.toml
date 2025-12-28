@@ -1,0 +1,10 @@
+pvh = "kloader"
+initramfs = "initrd"
+num_cpus = 4
+mem_size = "256M"
+blk = ["motor.motor-fs.img"]
+
+[net.dev0]
+mac = "a4:a1:c2:00:00:01"
+mtu = 1500
+if_name = "moto-tap"
