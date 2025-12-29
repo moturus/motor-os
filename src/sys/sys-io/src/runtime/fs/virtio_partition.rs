@@ -48,8 +48,6 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
     async fn read_block(&mut self, block_no: u64, block: &mut Block) -> Result<()> {
         use zerocopy::FromZeros;
 
-        log::debug!("read_block {block_no}");
-
         // TODO: read in one go, instead of eight.
         let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();
 
@@ -75,8 +73,6 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
     /// Write a single block.
     async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()> {
         use zerocopy::FromZeros;
-
-        log::debug!("write_block {block_no}");
 
         // TODO: write in one go, instead of eight.
         let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();

@@ -22,13 +22,15 @@ use zerocopy::FromZeros;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-#[repr(C, packed)]
+#[repr(C, align(8))]
 struct VirtqDesc {
     addr: le64,
     len: le32,
     flags: le16,
     next: le16,
 }
+
+const _: () = assert!(core::mem::size_of::<VirtqDesc>() == 16);
 
 // Updated by the driver (here, in this file).
 struct VirtqAvail {
@@ -263,7 +265,7 @@ impl Virtqueue {
         for idx in 0..(queue_size - 1) {
             descriptors[idx as usize].next = idx + 1;
         }
-        // descriptors[queue_size as usize - 1].next = 0;
+        descriptors[queue_size as usize - 1].next = 0;
 
         let available_ring = VirtqAvail::from_addr(virt_addr, queue_size);
         let used_ring = VirtqUsed::from_addr(virt_addr, queue_size);
@@ -278,6 +280,8 @@ impl Virtqueue {
         };
 
         let header_buffers_phys_addr = super::mapper().virt_to_phys(header_buffers_vaddr)?;
+
+        log::debug!("New virtqueue sz: {queue_size}");
 
         Ok(Rc::new(RefCell::new(Virtqueue {
             virt_addr,
@@ -324,23 +328,27 @@ impl Virtqueue {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         unsafe {
             let idx = *self.available_ring.next_available_idx;
-            ((&mut self.available_ring.ring[idx as usize]) as *mut u16).write_volatile(head);
+            ((&mut self.available_ring.ring[(idx & self.queue_size_mask) as usize]) as *mut u16)
+                .write_volatile(head);
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+            // Note: we must wrap around at u16::MAX, not at queue_size, otherwise
+            // both CHV and Qemu misbehave.
+            let next_idx = idx.wrapping_add(1);
             self.available_ring
                 .next_available_idx
-                .write_volatile((idx + 1) & self.queue_size_mask);
+                .write_volatile(next_idx);
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn alloc_descriptor_chain(&mut self, chain_len: u16) -> Option<u16> {
+        debug_assert!(chain_len <= self.queue_size);
         let chain_start = self.free_head_idx;
 
         let mut curr = chain_start;
         for idx in 0..chain_len {
-            if curr == self.queue_size {
-                break;
-            }
+            debug_assert!(curr < self.queue_size);
 
             let header_buffer = &mut self.header_buffers[curr as usize];
             debug_assert_eq!(0, header_buffer.in_use_by_device);
@@ -357,12 +365,16 @@ impl Virtqueue {
             }
             descriptor.flags = VIRTQ_DESC_F_NEXT;
 
+            debug_assert_ne!(curr, descriptor.next);
             curr = descriptor.next;
         }
 
         // Allocation failed: clear "in_use".
         curr = chain_start;
-        while curr != self.queue_size {
+        loop {
+            if self.header_buffers[curr as usize].in_use_by_device == 0 {
+                break;
+            }
             self.header_buffers[curr as usize].in_use_by_device = 0;
             curr = self.get_descriptor_mut(curr).next;
         }
@@ -373,26 +385,27 @@ impl Virtqueue {
     fn free_descriptor_chain(&mut self, chain_head: u16) {
         let mut curr = chain_head;
         let free_head_idx = self.free_head_idx;
+        debug_assert_ne!(curr, free_head_idx);
+
         loop {
             debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_device);
             debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_completion);
 
             let descriptor = self.get_descriptor_mut(curr);
-            if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
-                curr = descriptor.next;
-                continue;
+            if descriptor.flags & VIRTQ_DESC_F_NEXT == 0 {
+                descriptor.next = free_head_idx;
+                break;
             }
-
-            descriptor.next = free_head_idx;
-            self.free_head_idx = chain_head;
-            break;
+            curr = descriptor.next;
         }
+
+        self.free_head_idx = chain_head;
     }
 
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
     pub fn get_buffer<T>(&mut self, idx: u16) -> (&'static mut T, u16) {
-        assert!(idx < self.queue_size);
-        assert!(core::mem::size_of::<T>() <= 16);
+        debug_assert!(idx < self.queue_size);
+        debug_assert!(core::mem::size_of::<T>() <= 16);
         let next = self.get_descriptor_mut(idx).next;
         // Safety: checked above that the inded and the size are Ok.
         unsafe {
@@ -402,13 +415,13 @@ impl Virtqueue {
     }
 
     fn get_descriptor_mut(&mut self, idx: u16) -> &mut VirtqDesc {
-        assert!(idx < self.queue_size);
+        debug_assert!(idx < self.queue_size);
 
         &mut self.descriptors[idx as usize]
     }
 
     fn get_descriptor(&self, idx: u16) -> &VirtqDesc {
-        assert!(idx < self.queue_size);
+        debug_assert!(idx < self.queue_size);
 
         &self.descriptors[idx as usize]
     }
@@ -497,7 +510,6 @@ impl Virtqueue {
         }
 
         self.next_used_idx = (self.next_used_idx + 1) & self.queue_size_mask;
-        // log::info!("reclaim done: {chain_head}!");
         Some(chain_head)
     }
 

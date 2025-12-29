@@ -348,7 +348,6 @@ impl FsClient {
                             actual_read += len as usize;
                         }
                         Err(err) => {
-                            log::warn!("Error reading {file_id}: {err:?}.");
                             error = Some(err);
                             break;
                         }
@@ -365,7 +364,7 @@ impl FsClient {
             }
         }
 
-        log::debug!("read {actual_read} bytes from {file_id:x}) at offset: 0x{offset:x}");
+        log::debug!("done reading {actual_read} bytes from {file_id:x}) at offset: 0x{offset:x}");
         if actual_read > 0 {
             Ok(actual_read)
         } else if let Some(err) = error {

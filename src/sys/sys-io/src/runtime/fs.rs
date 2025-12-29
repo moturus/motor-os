@@ -252,7 +252,10 @@ async fn on_cmd_read(
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
-    log::debug!("read: {file_id:x}: offset: {offset:x}, len: {len}");
+    // log::debug!(
+    //     "read: {file_id:x}: offset: {offset:x}, len: {len} msg id: {}",
+    //     msg.id
+    // );
 
     let io_page = sender
         .alloc_page(u64::MAX)
@@ -266,6 +269,7 @@ async fn on_cmd_read(
 
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
     let _ = sender.send(resp).await;
+    // log::debug!("read done: {file_id:x}: offset: {offset:x}, len: {len} ({read})");
     Ok(())
 }
 
