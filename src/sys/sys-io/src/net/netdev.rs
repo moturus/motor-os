@@ -68,18 +68,18 @@ impl TxToken for VirtioTxToken {
             self.dev().send_pending_tx();
         }
 
-        if self.dev().pending_tx.is_empty() {
-            if let Some(tx_packet) = self.dev().virtio_dev.tx_get() {
-                let buf = tx_packet.bytes_mut();
-                assert!(buf.len() >= len);
-                let packet = &mut buf[0..len];
-                let res = f(packet);
+        if self.dev().pending_tx.is_empty()
+            && let Some(tx_packet) = self.dev().virtio_dev.tx_get()
+        {
+            let buf = tx_packet.bytes_mut();
+            assert!(buf.len() >= len);
+            let packet = &mut buf[0..len];
+            let res = f(packet);
 
-                // #[cfg(debug_assertions)]
-                // log::debug!("enqueueing tx {} bytes into the NIC (zero pending)", len);
-                tx_packet.consume(len as u16);
-                return res;
-            }
+            // #[cfg(debug_assertions)]
+            // log::debug!("enqueueing tx {} bytes into the NIC (zero pending)", len);
+            tx_packet.consume(len as u16);
+            return res;
         }
 
         let mut buffer = vec![0u8; len];
@@ -377,10 +377,10 @@ impl NetDev {
     }
 
     pub fn poll(&mut self) -> bool {
-        if let SmoltcpDevice::VirtIo(dev) = &mut self.device {
-            if !dev.pending_tx.is_empty() {
-                dev.send_pending_tx();
-            }
+        if let SmoltcpDevice::VirtIo(dev) = &mut self.device
+            && !dev.pending_tx.is_empty()
+        {
+            dev.send_pending_tx();
         }
 
         let Self {

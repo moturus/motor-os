@@ -203,6 +203,8 @@ clean:
 	rm -rf vm_images
 	rm -rf src/sys/target
 	rm -rf src/boot/*/target
+	rm -rf src/third_party/*/target
+	rm -rf src/third_party/*/Cargo.lock
 	cd src/imager && cargo clean && rm -rf target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target

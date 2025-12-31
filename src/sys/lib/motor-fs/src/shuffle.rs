@@ -19,6 +19,7 @@ fn fnv1a_hash_32(data: &[u8]) -> u32 {
 fn generate_round_keys(seed: u64) -> [u32; ROUNDS] {
     let mut keys = [0u32; ROUNDS];
     let seed_bytes = seed.to_be_bytes();
+    #[allow(clippy::needless_range_loop)]
     for i in 0..ROUNDS {
         // Combine seed and round number to get a unique key per round
         let mut data_to_hash = Vec::from(seed_bytes);
@@ -40,6 +41,7 @@ pub fn shuffle_u64(n: u64, seed: u64) -> u64 {
     let mut left = (n >> 32) as u32;
     let mut right = n as u32;
 
+    #[allow(clippy::needless_range_loop)]
     for i in 0..ROUNDS {
         let temp = left ^ round_function(right, round_keys[i]);
         left = right;

@@ -465,7 +465,7 @@ impl server::Handler for ConnectionHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Some(stdin_tx) = self.stdin_tx.as_ref() else {
-            if let Some(sftp_channel_id) = self.sftp_channel_id.clone()
+            if let Some(sftp_channel_id) = self.sftp_channel_id
                 && sftp_channel_id == channel_id
             {
                 return Ok(());

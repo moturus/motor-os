@@ -5,7 +5,7 @@ use moto_sys::ErrorCode;
 const BLOCK_SIZE: u64 = moto_virtio::BLOCK_SIZE as u64;
 const PAGE_SIZE_SMALL: u64 = moto_sys::sys_mem::PAGE_SIZE_SMALL;
 
-const _: () = assert!(PAGE_SIZE_SMALL % BLOCK_SIZE == 0);
+const _: () = assert!(PAGE_SIZE_SMALL.is_multiple_of(BLOCK_SIZE));
 const _: () = assert!(BLOCK_SIZE <= PAGE_SIZE_SMALL);
 
 struct FileSystemFlatFS {

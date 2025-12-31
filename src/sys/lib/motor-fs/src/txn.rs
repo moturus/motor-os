@@ -50,11 +50,11 @@ impl<'a> Drop for Txn<'a> {
 }
 
 impl<'a> Txn<'a> {
-    fn block_cache<'b>(&'b mut self) -> &'b mut BlockCache {
+    fn block_cache(&mut self) -> &mut BlockCache {
         self.fs.block_cache()
     }
 
-    async fn commit<'b>(&'b mut self) -> Result<()> {
+    async fn commit(&mut self) -> Result<()> {
         log::trace!("{}:{} do a proper txn", file!(), line!());
 
         let Txn {
@@ -88,10 +88,7 @@ impl<'a> Txn<'a> {
         }
     }
 
-    pub async fn get_block<'b>(
-        &'b mut self,
-        block_no: BlockNo,
-    ) -> std::io::Result<&'b CachedBlock> {
+    pub async fn get_block(&mut self, block_no: BlockNo) -> std::io::Result<&CachedBlock> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this = unsafe {
@@ -108,10 +105,7 @@ impl<'a> Txn<'a> {
 
     /// Unlike get_block() above, get_txn_block() ensures the block is part of the transaction,
     /// i.e. will be saved in Txn::commit().
-    pub async fn get_txn_block<'b>(
-        &'b mut self,
-        block_no: BlockNo,
-    ) -> std::io::Result<&'b mut CachedBlock> {
+    pub async fn get_txn_block(&mut self, block_no: BlockNo) -> std::io::Result<&mut CachedBlock> {
         assert!(!self.read_only);
 
         // TODO: remove unsafe when NLL Problem #3 is solved.
@@ -140,7 +134,7 @@ impl<'a> Txn<'a> {
         Ok(txn_block)
     }
 
-    pub fn get_empty_block_mut<'b>(&'b mut self, block_no: BlockNo) -> &'b mut CachedBlock {
+    pub fn get_empty_block_mut(&mut self, block_no: BlockNo) -> &mut CachedBlock {
         assert!(!self.read_only);
 
         // TODO: remove unsafe when NLL Problem #3 is solved.
@@ -300,7 +294,6 @@ impl<'a> Txn<'a> {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        let file_id: EntryIdInternal = file_id.into();
         let block = fs.block_cache().get_block(file_id.block_no()).await?;
         dir_entry!(block).validate_entry(file_id)?;
         if dir_entry!(block).metadata().kind() != EntryKind::File {

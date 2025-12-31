@@ -6,12 +6,16 @@
 #![feature(local_waker)]
 #![feature(motor_ext)]
 
+#[cfg(not(feature = "motor-fs"))]
 mod fs;
+
 mod logger;
 mod net;
 mod rt_vdso;
 mod runtime;
 mod util;
+
+#[cfg(not(feature = "motor-fs"))]
 mod virtio;
 
 extern crate alloc;

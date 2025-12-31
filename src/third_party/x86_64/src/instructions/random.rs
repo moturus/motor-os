@@ -10,7 +10,7 @@ impl RdRand {
     pub fn new() -> Option<Self> {
         // RDRAND support indicated by CPUID page 01h, ecx bit 30
         // https://en.wikipedia.org/wiki/RdRand#Overview
-        let cpuid = unsafe { core::arch::x86_64::__cpuid(0x1) };
+        let cpuid = core::arch::x86_64::__cpuid(0x1);
         if cpuid.ecx & (1 << 30) != 0 {
             Some(RdRand(()))
         } else {

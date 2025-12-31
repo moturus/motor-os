@@ -207,6 +207,7 @@ impl Superblock {
     }
 
     // Free a single block without looking inside: could be a data block, or an empty file/directory.
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn free_single_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
         assert!(block_no.as_u64() > 1);
         let mut sb_block = txn.get_txn_block(BlockNo(0)).await?.clone();
@@ -560,6 +561,7 @@ impl DirEntryBlock {
         Ok(data_block_id.block_no)
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn set_file_size_in_entry(
         txn: &mut Txn<'_>,
         file_id: EntryIdInternal,
@@ -567,7 +569,7 @@ impl DirEntryBlock {
     ) -> Result<()> {
         let entry_block = txn.get_txn_block(file_id.block_no).await?;
         let mut entry_ref = entry_block.block_mut();
-        let entry = DirEntryBlock::from_block_mut(&mut *entry_ref);
+        let entry = DirEntryBlock::from_block_mut(&mut entry_ref);
         assert_eq!(entry.kind(), EntryKind::File);
 
         entry.metadata.modified = Timestamp::now();
@@ -585,7 +587,7 @@ impl DirEntryBlock {
     ) {
         let child_block = txn.get_empty_block_mut(entry_id.block_no);
         let mut child_block_ref = child_block.block_mut();
-        let child = Self::from_block_mut(&mut *child_block_ref);
+        let child = Self::from_block_mut(&mut child_block_ref);
 
         child.block_header.block_type = match kind {
             EntryKind::Directory => BlockType::DirEntry as u8,
@@ -653,7 +655,7 @@ impl DirEntryBlock {
         let (name_buf, name_len) = {
             let entry_block = txn.get_txn_block(entry_id.block_no).await?;
             let mut entry_ref = entry_block.block_mut();
-            let entry = DirEntryBlock::from_block_mut(&mut *entry_ref);
+            let entry = DirEntryBlock::from_block_mut(&mut entry_ref);
             assert_eq!(entry.parent_id, parent_id); // The caller must ensure this.
             if mark_not_used {
                 entry.block_header.in_use = 0;
@@ -699,10 +701,10 @@ impl DirEntryBlock {
         .await?;
 
         let parent_block = txn.get_txn_block(parent_id.block_no).await?;
-        Self::from_block_mut(&mut *parent_block.block_mut())
+        Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .modified = Timestamp::now();
-        Self::from_block_mut(&mut *parent_block.block_mut())
+        Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .size -= 1;
 
@@ -716,7 +718,7 @@ impl DirEntryBlock {
         key: u64,
     ) -> Result<()> {
         let parent_block = txn.get_txn_block(parent_block_no).await?;
-        Self::from_block_mut(&mut *parent_block.block_mut())
+        Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .modified = Timestamp::now();
 
@@ -733,11 +735,11 @@ impl DirEntryBlock {
             )
             .await;
 
-            if let Err(err) = &result {
-                if err.kind() == ErrorKind::Interrupted {
-                    log::trace!("link_child_block: interrupted: retry");
-                    continue;
-                }
+            if let Err(err) = &result
+                && err.kind() == ErrorKind::Interrupted
+            {
+                log::trace!("link_child_block: interrupted: retry");
+                continue;
             }
 
             return result;
@@ -751,7 +753,7 @@ impl DirEntryBlock {
         key: u64,
     ) -> Result<()> {
         let parent_block = txn.get_txn_block(parent_block_no).await?;
-        Self::from_block_mut(&mut *parent_block.block_mut())
+        Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .modified = Timestamp::now();
 
@@ -767,10 +769,10 @@ impl DirEntryBlock {
 
     pub async fn increment_dir_size(txn: &mut Txn<'_>, dir_id: EntryIdInternal) -> Result<()> {
         let dir_block = txn.get_txn_block(dir_id.block_no).await?;
-        Self::from_block_mut(&mut *dir_block.block_mut())
+        Self::from_block_mut(&mut dir_block.block_mut())
             .metadata
             .size += 1;
-        Self::from_block_mut(&mut *dir_block.block_mut())
+        Self::from_block_mut(&mut dir_block.block_mut())
             .metadata
             .modified = Timestamp::now();
         Ok(())
@@ -781,10 +783,10 @@ impl DirEntryBlock {
         entry_id: EntryIdInternal,
     ) -> Result<()> {
         let entry_block = txn.get_txn_block(entry_id.block_no).await?;
-        Self::from_block_mut(&mut *entry_block.block_mut())
+        Self::from_block_mut(&mut entry_block.block_mut())
             .block_header
             .blocks_in_use += 1;
-        Self::from_block_mut(&mut *entry_block.block_mut())
+        Self::from_block_mut(&mut entry_block.block_mut())
             .metadata
             .modified = Timestamp::now();
         Ok(())
@@ -795,7 +797,7 @@ impl DirEntryBlock {
         entry_id: EntryIdInternal,
     ) -> Result<()> {
         let entry_block = txn.get_txn_block(entry_id.block_no).await?;
-        Self::from_block_mut(&mut *entry_block.block_mut())
+        Self::from_block_mut(&mut entry_block.block_mut())
             .block_header
             .blocks_in_use -= 1;
         Ok(())
@@ -814,6 +816,9 @@ pub fn validate_filename(filename: &str) -> Result<()> {
     Ok(())
 }
 
+// Note: this macro returns a refcell's ref, which clippy flags when held across .await.
+// This may or may not be an issue. In any case, the worse that would happen is a panic,
+// not a silent data corruption.
 macro_rules! dir_entry {
     ($cached_block:ident) => {
         crate::layout::DirEntryBlock::from_block(&*$cached_block.block())

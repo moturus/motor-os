@@ -88,9 +88,7 @@ pub mod native_cpuid {
     use core::arch::x86_64 as arch;
 
     pub fn cpuid_count(a: u32, c: u32) -> CpuIdResult {
-        // Safety: CPUID is supported on all x86_64 CPUs and all x86 CPUs with
-        // SSE, but not by SGX.
-        let result = unsafe { self::arch::__cpuid_count(a, c) };
+        let result = self::arch::__cpuid_count(a, c);
 
         CpuIdResult {
             eax: result.eax,

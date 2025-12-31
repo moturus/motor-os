@@ -202,9 +202,7 @@ impl BlockDevice {
     ) -> Option<Completion<'a>> {
         let vq = this.borrow().dev.virtqueues[0].clone();
         let mut virtqueue = vq.borrow_mut();
-        let Some(chain_head) = virtqueue.alloc_descriptor_chain(3) else {
-            return None;
-        };
+        let chain_head = virtqueue.alloc_descriptor_chain(3)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
 
@@ -253,9 +251,7 @@ impl BlockDevice {
     ) -> Option<Completion<'a>> {
         let vq = this.borrow().dev.virtqueues[0].clone();
         let mut virtqueue = vq.borrow_mut();
-        let Some(chain_head) = virtqueue.alloc_descriptor_chain(3) else {
-            return None;
-        };
+        let chain_head = virtqueue.alloc_descriptor_chain(3)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
 

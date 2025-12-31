@@ -57,7 +57,7 @@ impl MotorFs {
     pub fn check_err(&self) -> Result<()> {
         match &self.error {
             Ok(_) => Ok(()),
-            Err(err) => Err(err.kind().clone().into()),
+            Err(err) => Err(err.kind().into()),
         }
     }
 
@@ -104,6 +104,7 @@ impl MotorFs {
 
 #[async_trait(?Send)]
 impl FileSystem for MotorFs {
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>> {
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
@@ -220,7 +221,7 @@ impl FileSystem for MotorFs {
                 assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL.into());
                 break;
             };
-            if grandparent_id == entry_id.into() {
+            if grandparent_id == entry_id {
                 log::debug!("MotorFS::move_entry: cannot move an entry under its own child.");
                 return Err(ErrorKind::InvalidInput.into());
             }
@@ -240,6 +241,7 @@ impl FileSystem for MotorFs {
     }
 
     /// Get the first entry in a directory.
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -273,6 +275,7 @@ impl FileSystem for MotorFs {
     }
 
     /// Get the next entry in a directory.
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
         if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Ok(None);

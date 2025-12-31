@@ -379,7 +379,7 @@ impl Virtqueue {
             curr = self.get_descriptor_mut(curr).next;
         }
 
-        return None;
+        None
     }
 
     fn free_descriptor_chain(&mut self, chain_head: u16) {

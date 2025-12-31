@@ -2072,19 +2072,19 @@ impl NetSys {
     const MIN_DEFERRED_ACTION_NS: u64 = 300;
 
     fn defer_socket_action(&mut self, socket_id: SocketId, started: Option<Instant>) {
-        if let Some(started) = started {
-            if Self::backoff_done(started) {
-                log::debug!(
-                    "Dropping socket 0x{:x} due to timeout.",
-                    u64::from(socket_id)
-                );
+        if let Some(started) = started
+            && Self::backoff_done(started)
+        {
+            log::debug!(
+                "Dropping socket 0x{:x} due to timeout.",
+                u64::from(socket_id)
+            );
 
-                match socket_id.kind() {
-                    SocketKind::Tcp => self.drop_tcp_socket(socket_id),
-                    SocketKind::Udp => self.drop_udp_socket(socket_id),
-                };
-                return;
-            }
+            match socket_id.kind() {
+                SocketKind::Tcp => self.drop_tcp_socket(socket_id),
+                SocketKind::Udp => self.drop_udp_socket(socket_id),
+            };
+            return;
         }
 
         let next = self.backoff(started);

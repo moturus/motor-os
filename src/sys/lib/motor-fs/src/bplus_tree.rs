@@ -110,43 +110,48 @@ impl<const ORDER: usize> Node<ORDER> {
         key: u64,
     ) -> Result<Option<BlockNo>> {
         let block = txn.get_block(this_block_no).await?;
-        let block_ref = block.block();
-        let node = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if node.num_keys as usize > ORDER {
-            log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
-            return Err(ErrorKind::InvalidData.into());
-        }
+        let (child_block_no, key) = {
+            let block_ref = block.block();
+            let node = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if node.num_keys == 0 {
-            return Ok(None);
-        }
-
-        if node.is_leaf() {
-            return match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-            {
-                Ok(pos) => Ok(Some(node.kv[pos].child_block_no)),
-                Err(_) => Ok(None),
-            };
-        }
-
-        // This is not a leaf -> go one step down.
-        let pos = match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-        {
-            Ok(pos) => pos,
-            Err(pos) => {
-                assert!(pos > 0);
-                pos - 1
+            if node.num_keys as usize > ORDER {
+                log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
             }
+
+            if node.num_keys == 0 {
+                return Ok(None);
+            }
+
+            if node.is_leaf() {
+                return match node.kv[..(node.num_keys as usize)]
+                    .binary_search_by_key(&key, |kv| kv.key)
+                {
+                    Ok(pos) => Ok(Some(node.kv[pos].child_block_no)),
+                    Err(_) => Ok(None),
+                };
+            }
+
+            // This is not a leaf -> go one step down.
+            let pos =
+                match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key) {
+                    Ok(pos) => pos,
+                    Err(pos) => {
+                        assert!(pos > 0);
+                        pos - 1
+                    }
+                };
+
+            let child_block_no = node.kv[pos].child_block_no;
+
+            log::debug!(
+                "first_child_with_key() recursive: key: {key}, child_block: {}",
+                child_block_no.as_u64()
+            );
+
+            (child_block_no, key)
         };
-
-        let child_block_no = node.kv[pos].child_block_no;
-        core::mem::drop(block_ref);
-
-        log::debug!(
-            "first_child_with_key() recursive: key: {key}, child_block: {}",
-            child_block_no.as_u64()
-        );
 
         // Recursive call (modulo ORDER).
         Box::pin(Node::<BTREE_NODE_ORDER>::first_child_with_key(
@@ -287,42 +292,47 @@ impl<const ORDER: usize> Node<ORDER> {
 
         // Get this block.
         let this_block = txn.get_txn_block(node_block_no).await?;
-        let mut this_block_ref = this_block.block_mut();
-        let this = this_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
-        assert!(this.is_full());
 
-        // Save data to copy.
-        let split_pos = (ORDER >> 1) + 1;
-        assert!(split_pos <= u8::MAX as usize);
+        let right_key = {
+            let mut this_block_ref = this_block.block_mut();
+            let this = this_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
+            assert!(this.is_full());
 
-        // TODO: we don't need to copy all KV below; but the Rust version in use
-        // as of 2025-08-15 won't allow to have `split_pos` as const and thus
-        // initialize kv on stack, so we have this little inefficiency.
-        let kv_entries = this.kv;
-        let right_key = kv_entries[split_pos].key;
-        let leaf_flag = this.kind & Self::KIND_LEAF;
+            // Save data to copy.
+            let split_pos = (ORDER >> 1) + 1;
+            assert!(split_pos <= u8::MAX as usize);
 
-        log::debug!(
-            "split_node(): node: {} key: {right_key} right: {}",
-            node_block_no.as_u64(),
-            right_block_no.as_u64()
-        );
+            // TODO: we don't need to copy all KV below; but the Rust version in use
+            // as of 2025-08-15 won't allow to have `split_pos` as const and thus
+            // initialize kv on stack, so we have this little inefficiency.
+            let kv_entries = this.kv;
+            let right_key = kv_entries[split_pos].key;
+            let leaf_flag = this.kind & Self::KIND_LEAF;
 
-        // Update this node.
-        this.num_keys = split_pos as u8;
-        core::mem::drop(this_block_ref);
+            log::debug!(
+                "split_node(): node: {} key: {right_key} right: {}",
+                node_block_no.as_u64(),
+                right_block_no.as_u64()
+            );
 
-        // Update the right block.
-        // TODO: the code below is very similar to a piece in split_root().
-        let right_block = txn.get_empty_block_mut(right_block_no);
-        let mut right_block_ref = right_block.block_mut();
-        let right_node =
-            right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
+            // Update this node.
+            this.num_keys = split_pos as u8;
+            core::mem::drop(this_block_ref);
 
-        right_node.num_keys = (ORDER - split_pos) as u8;
-        right_node.kind = leaf_flag;
-        right_node.kv[..(right_node.num_keys as usize)].clone_from_slice(&kv_entries[split_pos..]);
-        core::mem::drop(right_block_ref);
+            // Update the right block.
+            // TODO: the code below is very similar to a piece in split_root().
+            let right_block = txn.get_empty_block_mut(right_block_no);
+            let mut right_block_ref = right_block.block_mut();
+            let right_node =
+                right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
+
+            right_node.num_keys = (ORDER - split_pos) as u8;
+            right_node.kind = leaf_flag;
+            right_node.kv[..(right_node.num_keys as usize)]
+                .clone_from_slice(&kv_entries[split_pos..]);
+
+            right_key
+        };
 
         // Insert the link to the new node into the parent.
         if level == 1 {
@@ -372,12 +382,13 @@ impl<const ORDER: usize> Node<ORDER> {
         };
 
         node_mut.num_keys += 1;
-        return Ok(());
+        Ok(())
     }
 
     // Inserts link `val` at `key`, returns the list of blocks to save.
     // Note: we split full nodes "preemptively", so that there is no need to
     // do cascading splits up the tree.
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn node_insert_link(
         txn: &mut Txn<'_>,
         node_block_no: BlockNo,
@@ -387,35 +398,38 @@ impl<const ORDER: usize> Node<ORDER> {
         level: u8,
     ) -> Result<()> {
         let node_block = txn.get_txn_block(node_block_no).await?;
-        let node_block_ref = node_block.block();
-        let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if node.is_full() {
-            core::mem::drop(node_block_ref);
-            Self::split_node(txn, node_block_no, parent_node_block_no, level).await?;
+        let child_block_no = {
+            // We explicitly drop node_block_ref below. Clippy is reporting false positives.
+            let node_block_ref = node_block.block();
+            let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-            // Because the split may result in the inserted link going to the sibling
-            // node, we need to restart this op.
-            return Err(ErrorKind::Interrupted.into());
-        }
+            if node.is_full() {
+                core::mem::drop(node_block_ref);
+                Self::split_node(txn, node_block_no, parent_node_block_no, level).await?;
 
-        if node.is_leaf() {
-            core::mem::drop(node_block_ref);
-            return Self::insert_kv(txn, node_block_no, key, val).await;
-        }
-
-        // This is not a leaf -> go one step down.
-        let pos = match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-        {
-            Ok(pos) => pos,
-            Err(pos) => {
-                assert!(pos > 0);
-                pos - 1
+                // Because the split may result in the inserted link going to the sibling
+                // node, we need to restart this op.
+                return Err(ErrorKind::Interrupted.into());
             }
-        };
 
-        let child_block_no = node.kv[pos].child_block_no;
-        core::mem::drop(node_block_ref);
+            if node.is_leaf() {
+                core::mem::drop(node_block_ref);
+                return Self::insert_kv(txn, node_block_no, key, val).await;
+            }
+
+            // This is not a leaf -> go one step down.
+            let pos =
+                match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key) {
+                    Ok(pos) => pos,
+                    Err(pos) => {
+                        assert!(pos > 0);
+                        pos - 1
+                    }
+                };
+
+            node.kv[pos].child_block_no
+        };
 
         // Recursive call (modulo ORDER).
         Box::pin(Node::<BTREE_NODE_ORDER>::node_insert_link(
@@ -430,6 +444,7 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     // Deletes link `val` at `key`.
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn root_delete_link<'a>(
         txn: &mut Txn<'a>,
         this_block_no: BlockNo,

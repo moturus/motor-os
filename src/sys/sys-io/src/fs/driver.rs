@@ -62,7 +62,7 @@ struct Driver {
 impl Driver {
     fn run() -> ! {
         let ipc_server = LocalServer::new(super::DRIVER_URL, ChannelSize::Small, 50, 20)
-            .expect(format!("Failed to start listening on {}.", super::DRIVER_URL).as_str());
+            .unwrap_or_else(|_| panic!("Failed to start listening on {}.", super::DRIVER_URL));
         let mut driver = Driver { ipc_server };
 
         // VirtIO interrupts are affined to CPU 0.

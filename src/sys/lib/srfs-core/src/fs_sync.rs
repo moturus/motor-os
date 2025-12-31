@@ -177,7 +177,7 @@ impl SyncFileSystem {
             self.blockcache.write(parent_id.block_no)?;
         } else if prev_size < MAX_ENTRIES_ONLY_DATA_BLOCKS {
             let need_new_block = prev_size == MAX_ENTRIES_IN_META_BLOCK
-                || (prev_size % MAX_ENTRIES_IN_DATA_BLOCK == 0);
+                || prev_size.is_multiple_of(MAX_ENTRIES_IN_DATA_BLOCK);
             if need_new_block {
                 // Allocate a new data block.
                 let data_block_no = self.allocate_txn_block(BlockType::Data)?;
@@ -238,9 +238,9 @@ impl SyncFileSystem {
                 self.plus_one(parent_id.block_no)?;
             }
         } else {
-            let need_new_data_block = prev_size % MAX_ENTRIES_IN_DATA_BLOCK == 0;
+            let need_new_data_block = prev_size.is_multiple_of(MAX_ENTRIES_IN_DATA_BLOCK);
             let need_new_list_block = prev_size == MAX_ENTRIES_ONLY_DATA_BLOCKS
-                || (prev_size % MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST == 0);
+                || prev_size.is_multiple_of(MAX_ENTRIES_COVERED_BY_FIRST_LEVEL_BLOCKLIST);
 
             if need_new_data_block {
                 // Allocate a new data block.
@@ -1241,7 +1241,8 @@ impl SyncFileSystem {
             );
         } else if new_size <= MAX_BYTES_SINGLE_LEVEL_LIST_BLOCKS {
             // Files of size between ~2M and ~1G.
-            let need_new_link_block = (prev_size % BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST == 0)
+            let need_new_link_block = prev_size
+                .is_multiple_of(BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST)
                 || (prev_size == MAX_BYTES_ONLY_DATA_BLOCKS);
 
             if need_new_link_block {
@@ -1308,9 +1309,9 @@ impl SyncFileSystem {
             }
         } else {
             // ~1G+ files here.
-            let need_new_list_of_links_block =
-                (prev_size % BYTES_COVERED_BY_SECOND_LEVEL_BLOCKLIST == 0)
-                    || (prev_size == MAX_BYTES_SINGLE_LEVEL_LIST_BLOCKS);
+            let need_new_list_of_links_block = prev_size
+                .is_multiple_of(BYTES_COVERED_BY_SECOND_LEVEL_BLOCKLIST)
+                || (prev_size == MAX_BYTES_SINGLE_LEVEL_LIST_BLOCKS);
 
             if need_new_list_of_links_block {
                 // Always a new link block here.
@@ -1382,7 +1383,8 @@ impl SyncFileSystem {
                     return Err(err);
                 }
 
-                let need_new_link_block = prev_size % BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST == 0;
+                let need_new_link_block =
+                    prev_size.is_multiple_of(BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST);
                 let link_block_idx = (prev_size & (BYTES_COVERED_BY_SECOND_LEVEL_BLOCKLIST - 1))
                     >> BYTES_COVERED_BY_FIRST_LEVEL_BLOCKLIST.ilog2();
 

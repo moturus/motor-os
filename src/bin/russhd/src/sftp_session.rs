@@ -55,23 +55,23 @@ impl russh_sftp::server::Handler for SftpSession {
             })
         } else {
             log::warn!("close: handle: '{handle}' not found");
-            Err(StatusCode::BadMessage.into())
+            Err(StatusCode::BadMessage)
         }
     }
 
     async fn opendir(&mut self, _id: u32, path: String) -> Result<Handle, Self::Error> {
         log::info!("opendir: {}", path);
-        Err(StatusCode::OpUnsupported.into())
+        Err(StatusCode::OpUnsupported)
     }
 
     async fn readdir(&mut self, _id: u32, handle: String) -> Result<Name, Self::Error> {
         log::info!("readdir: {}", handle);
-        Err(StatusCode::OpUnsupported.into())
+        Err(StatusCode::OpUnsupported)
     }
 
     async fn realpath(&mut self, _id: u32, path: String) -> Result<Name, Self::Error> {
         log::info!("realpath: {}", path);
-        Err(StatusCode::OpUnsupported.into())
+        Err(StatusCode::OpUnsupported)
     }
 
     /// Called on SSH_FXP_OPEN
@@ -121,9 +121,7 @@ impl russh_sftp::server::Handler for SftpSession {
                 StatusCode::Eof
             })?;
 
-        let mut data = Vec::with_capacity(len as usize);
-        data.resize(len as usize, 0);
-
+        let mut data = vec![0; len as usize];
         let mut total_read = 0;
         loop {
             if total_read >= data.len() {

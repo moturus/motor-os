@@ -688,7 +688,7 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
                     )
                     .is_ok()
                 {
-                    return new as i64;
+                    return new;
                 }
             }
         }

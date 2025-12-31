@@ -534,8 +534,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tcp_listener = TcpListener::bind(args.addr).unwrap();
 
-    let tls_config = if args.ssl_cert.is_some() {
-        let cert_file = args.ssl_cert.as_ref().unwrap();
+    let tls_config = if let Some(ssl_cert) = args.ssl_cert.as_ref() {
+        let cert_file = ssl_cert;
         let private_key_file = args.ssl_key.as_ref().unwrap();
 
         let certs = rustls_pemfile::certs(&mut BufReader::new(&mut File::open(cert_file)?))

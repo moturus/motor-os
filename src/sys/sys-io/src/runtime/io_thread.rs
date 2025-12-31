@@ -231,20 +231,20 @@ impl IoRuntime {
         }
 
         // It is unsafe to work with listeners without an explicit wakeup (accept will #PF).
-        if likely(!timeout_wakeup) {
-            if let Some(mut listener) = self.listeners.remove(&handle) {
-                self.spawn_listeners_if_needed();
-                if listener.accept().is_err() {
-                    #[cfg(debug_assertions)]
-                    log::debug!("io_runtime: accept() failed.");
-                    return;
-                }
-                let conn_name = super::conn_name(handle);
+        if likely(!timeout_wakeup)
+            && let Some(mut listener) = self.listeners.remove(&handle)
+        {
+            self.spawn_listeners_if_needed();
+            if listener.accept().is_err() {
                 #[cfg(debug_assertions)]
-                crate::moto_log!("New conn 0x{:x} {}.", handle.as_u64(), conn_name);
-                self.connections
-                    .insert(handle, (Rc::new(listener), conn_name));
+                log::debug!("io_runtime: accept() failed.");
+                return;
             }
+            let conn_name = super::conn_name(handle);
+            #[cfg(debug_assertions)]
+            crate::moto_log!("New conn 0x{:x} {}.", handle.as_u64(), conn_name);
+            self.connections
+                .insert(handle, (Rc::new(listener), conn_name));
         }
 
         self.poll_endpoint(handle, timeout_wakeup);
@@ -337,10 +337,10 @@ impl IoRuntime {
     }
 
     fn wait_timeout(&mut self) -> core::time::Duration {
-        if let Some(timo) = self.net.wait_timeout() {
-            if timo < Self::MAX_TIMEOUT {
-                return timo;
-            }
+        if let Some(timo) = self.net.wait_timeout()
+            && timo < Self::MAX_TIMEOUT
+        {
+            return timo;
         }
         Self::MAX_TIMEOUT
     }

@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
+mod mbr;
 mod virtio_partition;
 
 /// The max number of "requests" in flight per connection.
@@ -24,7 +25,7 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
             .unwrap();
     completion.await;
 
-    let mbr = crate::fs::mbr::Mbr::parse(virtio_block.bytes.as_slice()).map_err(|err| {
+    let mbr = mbr::Mbr::parse(virtio_block.bytes.as_slice()).map_err(|err| {
         log::error!("Mbr::parse() failed: {err:?}.");
         std::io::Error::from(ErrorKind::InvalidData)
     })?;
@@ -33,13 +34,13 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
     for pte in &mbr.entries {
         log::trace!("MBR PTE: {pte:?}");
         match pte.partition_type {
-            crate::fs::mbr::PartitionType::FlatFs => {
+            mbr::PartitionType::FlatFs => {
                 log::warn!("FlatFs is not (yet?) supported with async runtime");
             }
-            crate::fs::mbr::PartitionType::SrFs => {
+            mbr::PartitionType::SrFs => {
                 log::warn!("SrFs is not (yet?) supported with async runtime");
             }
-            crate::fs::mbr::PartitionType::MotorFs => {
+            mbr::PartitionType::MotorFs => {
                 if fs.is_some() {
                     log::error!("Found more than one DATA partion.");
                     panic!();
@@ -185,7 +186,7 @@ async fn on_cmd_stat(
     sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
-    let (parent_id, fname) = api_fs::stat_msg_decode(msg, &sender).map_err(map_native_error)?;
+    let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
     let Some(entry_id) = fs.stat(parent_id, fname.as_str()).await.map_err(|err| {
@@ -208,7 +209,7 @@ async fn on_cmd_create_file(
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
     let (parent_id, fname) =
-        api_fs::create_entry_msg_decode(msg, &sender).map_err(map_native_error)?;
+        api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
     let entry_id = fs

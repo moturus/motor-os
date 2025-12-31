@@ -178,7 +178,7 @@ impl TcpSocket {
 
     #[allow(unused)]
     pub(super) fn dump_state(&self) {
-        if self.tx_queue.len() > 0 {
+        if !self.tx_queue.is_empty() {
             log::warn!(
                 "socket: id {} conn 0x{:x} txq len: {}",
                 self.id.0,

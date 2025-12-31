@@ -654,8 +654,8 @@ impl VirtioDevice {
 
             virtq_borrowed.queue_notify_off =
                 cfg_bar.read_u16(bar_offset + queue_notify_off_offset);
-            self.setup_queue_msix(cfg_bar, bar_offset, &mut *virtq_borrowed)?; // Step 7.2
-            self.setup_queue_data(cfg_bar, bar_offset, &*virtq_borrowed); // Step 7.3
+            self.setup_queue_msix(cfg_bar, bar_offset, &mut virtq_borrowed)?; // Step 7.2
+            self.setup_queue_data(cfg_bar, bar_offset, &virtq_borrowed); // Step 7.3
 
             // Step 7.4
             cfg_bar.write_u16(
@@ -672,7 +672,7 @@ impl VirtioDevice {
         }
 
         if queue_num < min_virtqueues {
-            return Err(ErrorKind::InvalidData.into());
+            Err(ErrorKind::InvalidData.into())
         } else {
             self.virtqueues = virtqueues;
             Ok(())

@@ -52,12 +52,12 @@ async fn main() {
             },
         ));
 
-    if args.ssl_cert.is_some() {
+    if let Some(ssl_cert) = args.ssl_cert.as_ref() {
         rustls::crypto::ring::default_provider()
             .install_default()
             .unwrap();
         let config = RustlsConfig::from_pem_file(
-            PathBuf::from(args.ssl_cert.as_ref().unwrap()),
+            PathBuf::from(ssl_cert),
             PathBuf::from(args.ssl_key.as_ref().unwrap()),
         )
         .await

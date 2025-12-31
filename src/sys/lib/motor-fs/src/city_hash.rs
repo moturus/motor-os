@@ -92,6 +92,7 @@ fn fmix(mut h: u32) -> u32 {
     h
 }
 
+#[allow(clippy::manual_rotate)]
 fn rotate32(val: u32, shift: i32) -> u32 {
     // Avoid shifting by 32: doing so yields an undefined result.
     if shift == 0 {
@@ -252,6 +253,7 @@ pub fn city_hash32(s: &[u8]) -> u32 {
 }
 
 // Bitwise right rotate.
+#[allow(clippy::manual_rotate)]
 fn rotate(val: u64, shift: i32) -> u64 {
     // Avoid shifting by 64: doing so yields an undefined result.
     if shift == 0 {
