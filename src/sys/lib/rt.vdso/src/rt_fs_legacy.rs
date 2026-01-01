@@ -135,7 +135,7 @@ pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
 
 pub extern "C" fn unlink(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::unlink(path_ptr, path_size);
     }
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };

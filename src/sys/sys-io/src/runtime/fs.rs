@@ -172,6 +172,7 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, fs).await,
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(std::io::Error::from(ErrorKind::InvalidData))
@@ -316,6 +317,23 @@ async fn on_cmd_resize(
     Ok(())
 }
 
+async fn on_cmd_delete_entry(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let entry_id = api_fs::delete_entry_msg_decode(msg);
+
+    let mut fs = fs.lock().await;
+    let resp = api_fs::empty_resp_encode(
+        msg.id,
+        fs.delete_entry(entry_id).await.map_err(map_err_into_native),
+    );
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
 pub fn smoke_test() {
     std::fs::write("/foo", "bar").expect("async write failed");
     let bytes = std::fs::read("/foo").expect("async read failed");
@@ -334,8 +352,21 @@ pub fn smoke_test() {
         moto_rt::fnv1a_hash_64(bytes_back.as_slice())
     );
 
+    let metadata = std::fs::metadata("/bar").unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 8197);
+
     std::fs::remove_file("/foo").unwrap();
     std::fs::remove_file("/bar").unwrap();
+
+    assert_eq!(
+        std::fs::metadata("/foo").err().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        std::fs::metadata("/bar").err().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
 
     log::info!("async FS smoke test PASSED");
 }

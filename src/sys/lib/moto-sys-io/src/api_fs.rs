@@ -14,6 +14,7 @@ pub const CMD_WRITE: u16 = 4;
 pub const CMD_READ: u16 = 5;
 pub const CMD_METADATA: u16 = 6;
 pub const CMD_RESIZE: u16 = 7;
+pub const CMD_DELETE_ENTRY: u16 = 8;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -225,4 +226,16 @@ pub fn resize_msg_encode(file_id: u128, new_size: u64) -> Msg {
 
 pub fn resize_msg_decode(msg: Msg) -> (u128, u64) {
     (msg.payload.arg_128(), msg.payload.args_64()[2])
+}
+
+pub fn delete_entry_msg_encode(entry_id: u128) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_DELETE_ENTRY;
+    msg.payload.set_arg_128(entry_id); // This takes 16 bytes.
+
+    msg
+}
+
+pub fn delete_entry_msg_decode(msg: Msg) -> u128 {
+    msg.payload.arg_128()
 }

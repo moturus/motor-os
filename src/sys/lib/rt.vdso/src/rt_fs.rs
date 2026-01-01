@@ -467,6 +467,18 @@ impl AsyncFsClient {
     fn resize(&self, file_id: EntryId, new_size: u64) -> Result<()> {
         self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
     }
+
+    fn unlink(&self, path: &str) -> Result<()> {
+        let path = CanonicalPath::parse(path)?;
+        if path.is_root() {
+            return Err(moto_rt::Error::NotAllowed);
+        }
+
+        self.blocking_run(move |fs_client| async move {
+            let entry_id = fs_client.stat(&path.abs_path).await?;
+            fs_client.delete_entry(entry_id).await
+        })
+    }
 }
 
 struct File {
@@ -732,8 +744,18 @@ pub extern "C" fn truncate(rt_fd: i32, size: u64) -> moto_rt::ErrorCode {
         return moto_rt::E_BAD_HANDLE;
     };
 
-    match AsyncFsClient::get().unwrap().resize(file.entry_id, size) {
-        Ok(()) => moto_rt::Error::Ok.into(),
-        Err(err) => err.into(),
-    }
+    AsyncFsClient::get()
+        .unwrap()
+        .resize(file.entry_id, size)
+        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
+}
+
+pub extern "C" fn unlink(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    AsyncFsClient::get()
+        .unwrap()
+        .unlink(path)
+        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }

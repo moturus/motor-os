@@ -410,8 +410,13 @@ impl FsClient {
     }
 
     /// Delete the file or directory.
-    async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
-        todo!()
+    pub async fn delete_entry(self: &Rc<Self>, entry_id: EntryId) -> Result<()> {
+        log::debug!("delete_entry({entry_id:x})");
+        let mut msg = api_fs::delete_entry_msg_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
     }
 
     /// Rename and/or move the file or directory.
