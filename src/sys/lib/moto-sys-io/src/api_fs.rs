@@ -13,6 +13,7 @@ pub const CMD_CREATE_DIR: u16 = 3;
 pub const CMD_WRITE: u16 = 4;
 pub const CMD_READ: u16 = 5;
 pub const CMD_METADATA: u16 = 6;
+pub const CMD_RESIZE: u16 = 7;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -211,4 +212,17 @@ pub fn metadata_resp_decode(msg: Msg, receiver: &Receiver) -> Result<async_fs::M
     }
 
     Ok(metadata)
+}
+
+pub fn resize_msg_encode(file_id: u128, new_size: u64) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_RESIZE;
+    msg.payload.set_arg_128(file_id); // This takes 16 bytes.
+    msg.payload.args_64_mut()[2] = new_size;
+
+    msg
+}
+
+pub fn resize_msg_decode(msg: Msg) -> (u128, u64) {
+    (msg.payload.arg_128(), msg.payload.args_64()[2])
 }

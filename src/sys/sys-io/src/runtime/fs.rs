@@ -171,6 +171,7 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, fs).await,
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(std::io::Error::from(ErrorKind::InvalidData))
@@ -291,6 +292,26 @@ async fn on_cmd_metadata(
         .map_err(map_native_error)?;
 
     let resp = api_fs::metadata_resp_encode(msg.id, metadata, io_page);
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_resize(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let (file_id, new_size) = api_fs::resize_msg_decode(msg);
+    log::debug!("resize: {file_id:x}, {new_size}");
+
+    let mut fs = fs.lock().await;
+    let resp = api_fs::empty_resp_encode(
+        msg.id,
+        fs.resize(file_id, new_size)
+            .await
+            .map_err(map_err_into_native),
+    );
+
     let _ = sender.send(resp).await;
     Ok(())
 }

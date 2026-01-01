@@ -98,7 +98,10 @@ pub extern "C" fn datasync(rt_fd: i32) -> ErrorCode {
 }
 
 pub extern "C" fn truncate(rt_fd: i32, size: u64) -> ErrorCode {
-    todo!()
+    if crate::rt_fs::ok() {
+        return crate::rt_fs::truncate(rt_fd, size);
+    }
+    moto_rt::Error::NotImplemented as ErrorCode
 }
 
 pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {

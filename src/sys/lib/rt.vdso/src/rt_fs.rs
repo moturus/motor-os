@@ -335,7 +335,7 @@ impl AsyncFsClient {
 
                 log::error!("validate that entry is a file, not a dir");
                 if (opts & moto_rt::fs::O_TRUNCATE) != 0 {
-                    todo!("truncate");
+                    self.resize(entry_id, 0)?;
                 }
                 entry_id
             }
@@ -462,6 +462,10 @@ impl AsyncFsClient {
         file_attr.accessed = metadata.accessed.as_nanos();
 
         Ok(file_attr)
+    }
+
+    fn resize(&self, file_id: EntryId, new_size: u64) -> Result<()> {
+        self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
     }
 }
 
@@ -715,5 +719,21 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
             new_pos as i64
         }
         _ => -(moto_rt::Error::InvalidArgument as u16 as i64),
+    }
+}
+
+pub extern "C" fn truncate(rt_fd: i32, size: u64) -> moto_rt::ErrorCode {
+    use core::any::Any;
+
+    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+
+    match AsyncFsClient::get().unwrap().resize(file.entry_id, size) {
+        Ok(()) => moto_rt::Error::Ok.into(),
+        Err(err) => err.into(),
     }
 }

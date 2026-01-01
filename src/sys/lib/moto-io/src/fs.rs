@@ -394,6 +394,16 @@ impl FsClient {
         Ok(metadata)
     }
 
+    /// Resize the file.
+    pub async fn resize(self: &Rc<Self>, file_id: EntryId, new_size: u64) -> Result<()> {
+        log::debug!("resize({file_id:x}, {new_size})");
+        let mut msg = api_fs::resize_msg_encode(file_id, new_size);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
     /// Delete the file or directory.
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
         todo!()
@@ -426,11 +436,6 @@ impl FsClient {
 
     /// Filename of the entry, without parent directories.
     async fn name(&mut self, entry_id: EntryId) -> Result<String> {
-        todo!()
-    }
-
-    /// Resize the file.
-    async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
         todo!()
     }
 
