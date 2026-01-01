@@ -216,12 +216,14 @@ impl FsClient {
         self: &Rc<Self>,
         file_id: EntryId,
         offset: u64,
-        mut buf: &[u8],
+        buf: &[u8],
     ) -> Result<usize> {
         log::debug!(
             "write({file_id:x}): offset: 0x{offset:x}, len: {}",
             buf.len()
         );
+
+        let mut buf_running = buf;
 
         let mut written = 0_usize;
         let mut step_offset = offset;
@@ -234,12 +236,12 @@ impl FsClient {
             let mut batch_idx = 0;
             loop {
                 let step_len = ((BLOCK_SIZE as u64) - (step_offset & (BLOCK_SIZE as u64 - 1)))
-                    .min(buf.len() as u64);
+                    .min(buf_running.len() as u64);
                 debug_assert!(step_len < u16::MAX as u64);
 
                 let io_page = self.io_sender.alloc_page(u64::MAX).await?;
                 io_page.bytes_mut()[0..step_len as usize]
-                    .clone_from_slice(&buf[0..(step_len as usize)]);
+                    .clone_from_slice(&buf_running[0..(step_len as usize)]);
 
                 let mut msg =
                     api_fs::write_msg_encode(file_id, step_offset, step_len as u16, io_page);
@@ -251,7 +253,7 @@ impl FsClient {
 
                 written += (step_len as usize);
                 step_offset += step_len;
-                buf = &buf[(step_len as usize)..];
+                buf_running = &buf_running[(step_len as usize)..];
 
                 batch_ids[batch_idx] = msg_id;
                 batch_idx += 1;
@@ -259,7 +261,7 @@ impl FsClient {
                     break;
                 }
 
-                if buf.is_empty() {
+                if buf_running.is_empty() {
                     break;
                 }
             }
@@ -273,7 +275,7 @@ impl FsClient {
                 }
             }
 
-            if buf.is_empty() {
+            if buf_running.is_empty() {
                 break;
             }
         }
@@ -288,17 +290,19 @@ impl FsClient {
         self: &Rc<Self>,
         file_id: EntryId,
         offset: u64,
-        mut buf: &mut [u8],
+        buf: &mut [u8],
     ) -> Result<usize> {
         log::debug!(
             "read({file_id:x}): offset: 0x{offset:x}, len: {}",
             buf.len()
         );
 
+        let mut buf_running = buf;
+
         let mut to_be_read = 0_usize;
         let mut actual_read = 0_usize;
         let mut step_offset = offset;
-        let mut remaining_len = buf.len();
+        let mut remaining_len = buf_running.len();
         let mut error = None;
         loop {
             // `buf` can be large; we split it into 4k chunks; we send them
@@ -341,10 +345,11 @@ impl FsClient {
                 match self.clone().recv(id).await {
                     Ok(msg) => match api_fs::read_resp_decode(msg, &self.io_receiver.borrow()) {
                         Ok((len, io_page)) => {
-                            assert!(len as usize <= buf.len());
-                            buf[..(len as usize)]
+                            assert!(len as usize <= buf_running.len());
+                            buf_running[..(len as usize)]
                                 .clone_from_slice(&io_page.bytes()[..(len as usize)]);
-                            buf = &mut buf[..(len as usize)];
+                            // buf = &mut buf[..(len as usize)];
+                            buf_running = &mut buf_running[(len as usize)..];
                             actual_read += len as usize;
                         }
                         Err(err) => {

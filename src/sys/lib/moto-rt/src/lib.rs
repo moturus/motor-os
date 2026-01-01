@@ -330,3 +330,18 @@ pub fn internal_helper(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> 
 
     vdso_internal_helper(a0, a1, a2, a3, a4, a5)
 }
+
+/// FNV-1a hash.
+///
+/// See https://en.wikipedia.org/wiki/Fowler-Noll-Vo_hash_function
+pub fn fnv1a_hash_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV_OFFSET_BASIS
+    const FNV_PRIME: u64 = 0x100000001b3; // FNV_PRIME
+
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    hash
+}

@@ -98,13 +98,16 @@ async fn create_motorfs_partition_async(
             .await
             .unwrap();
 
-        let source_file = File::open(src).unwrap();
+        let bytes = std::fs::read(src)
+            .map_err(|err| panic!("Error reading file '{src:?}': {err:?}."))
+            .unwrap();
+        let hash = util::fnv1a_hash_64(bytes.as_slice());
         println!(
-            "creating file {dst} of size {}",
-            source_file.metadata().unwrap().len()
+            "creating file {dst} of size {} and hash 0x{hash:x}.",
+            bytes.len()
         );
 
-        let mut buf_reader = BufReader::new(source_file);
+        let mut buf_reader = BufReader::new(std::io::Cursor::new(bytes));
 
         let mut buf = [0_u8; 4096];
         let mut offset = 0;

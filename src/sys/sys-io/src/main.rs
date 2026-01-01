@@ -5,6 +5,7 @@
 #![feature(io_error_more)]
 #![feature(local_waker)]
 #![feature(motor_ext)]
+#![feature(random)]
 
 #[cfg(not(feature = "motor-fs"))]
 mod fs;
@@ -65,10 +66,7 @@ fn main() {
     #[cfg(feature = "motor-fs")]
     {
         runtime::spawn_async();
-        std::fs::write("/foo", "bar").expect("async write failed");
-        let bytes = std::fs::read("/foo").expect("async read failed");
-        assert_eq!(bytes.as_slice(), "bar".as_bytes());
-        log::info!("async FS smoke test PASSED");
+        runtime::fs_smoke_test();
 
         // panic!("let's not go there");
     }

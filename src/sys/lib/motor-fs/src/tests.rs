@@ -280,14 +280,17 @@ async fn midsize_file_test() -> Result<()> {
     const FILE_SIZE: u64 = 1024 * 1024 * 8 + 65536 + 512;
 
     // Write.
-    let mut file_size = 0;
+    let mut file_offset = 0;
     let mut bufno = 0;
-    while file_size < FILE_SIZE {
+    while file_offset < FILE_SIZE {
         buf[0] = (bufno & 0xff) as u8;
         bufno += 1;
-        let written = fs.write(file_id, file_size, buf.as_slice()).await.unwrap();
+        let written = fs
+            .write(file_id, file_offset, buf.as_slice())
+            .await
+            .unwrap();
         assert_eq!(written, buf.len());
-        file_size += written as u64;
+        file_offset += written as u64;
     }
 
     assert_eq!(FILE_SIZE, fs.metadata(file_id).await.unwrap().size);

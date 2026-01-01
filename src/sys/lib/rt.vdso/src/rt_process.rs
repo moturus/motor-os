@@ -571,8 +571,11 @@ fn run_elf(
 
     let sz = read_all(fd, buf)?;
     if sz != file_sz as usize {
+        log::warn!("Unexpected EOF reading exe '{exe}'");
         return Err(moto_rt::E_UNEXPECTED_EOF);
     }
+
+    log::debug!("Will spawn '{exe}'");
 
     let args = unsafe { ProcessData::deserialize_vec(args_rt.args) };
 
@@ -594,12 +597,20 @@ fn run_elf(
         0,
         &full_url,
     )?);
-    let load_result = load_binary(buf, address_space.syshandle())?;
+    let load_result = load_binary(buf, address_space.syshandle()).inspect_err(|err| {
+        let hash = moto_rt::fnv1a_hash_64(buf);
+        log::warn!(
+            "\n\tError loading ELF for '{exe}': {err:?}; buf len: {} hash: 0x{hash:x}.",
+            buf.len()
+        )
+    })?;
     let res = crate::load::load_vdso(address_space.syshandle().as_u64());
     if res != moto_rt::E_OK {
+        log::warn!("Spawn '{exe}': VDSO error: {res}.");
         return Err(res);
     };
 
+    log::debug!("starting {exe}: ENV.");
     // Parse env.
     let raw_env = unsafe { ProcessData::deserialize_vec(args_rt.env) };
     assert_eq!(0, raw_env.len() & 1); // Must be even number: keys + vals.
@@ -624,6 +635,7 @@ fn run_elf(
         }
     }
 
+    log::debug!("starting {exe}: ENV 20.");
     // Create the process from the address space.
     let proc_url = alloc::format!("process:entry_point={load_result};capabilities={caps}");
     let process = moto_sys::syscalls::RaiiHandle::from(moto_sys::SysObj::create(
@@ -655,6 +667,7 @@ fn run_elf(
 
     let main_thread = moto_sys::SysObj::get(process.syshandle(), 0, "main_thread").unwrap();
     if moto_sys::SysCpu::wake(main_thread).is_ok() {
+        log::debug!("starting {exe}");
         // While thread objects extracted from TCB or returned from spawn()
         // must not be put(), this is a cross-process thread handle, and so
         // it must be put().

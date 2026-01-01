@@ -708,7 +708,6 @@ pub fn init_virtio_devices(
         ONCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     );
-    log::info!("virtio-async: initializing VirtIO");
 
     unsafe { MAPPER = Some(mapper) };
 

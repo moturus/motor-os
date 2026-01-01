@@ -315,3 +315,27 @@ async fn on_cmd_resize(
     let _ = sender.send(resp).await;
     Ok(())
 }
+
+pub fn smoke_test() {
+    std::fs::write("/foo", "bar").expect("async write failed");
+    let bytes = std::fs::read("/foo").expect("async read failed");
+    assert_eq!(bytes.as_slice(), "bar".as_bytes());
+
+    let mut bytes = vec![0_u8; 8197];
+    for byte in &mut bytes {
+        *byte = std::random::random(..);
+    }
+
+    std::fs::write("/bar", bytes.as_slice()).unwrap();
+    let bytes_back = std::fs::read("/bar").unwrap();
+
+    assert_eq!(
+        moto_rt::fnv1a_hash_64(bytes.as_slice()),
+        moto_rt::fnv1a_hash_64(bytes_back.as_slice())
+    );
+
+    std::fs::remove_file("/foo").unwrap();
+    std::fs::remove_file("/bar").unwrap();
+
+    log::info!("async FS smoke test PASSED");
+}
