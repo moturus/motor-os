@@ -120,6 +120,8 @@ async fn create_motorfs_partition_async(
             offset += sz as u64;
         }
     }
+
+    fs.flush().await.unwrap();
 }
 
 fn create_motorfs_partition(
