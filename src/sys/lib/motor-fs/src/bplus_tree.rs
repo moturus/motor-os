@@ -75,11 +75,12 @@ impl<const ORDER: usize> Node<ORDER> {
         self.num_keys == (ORDER as u8)
     }
 
+    /// Get the (key, block_no) of the first child, if any.
     pub async fn first_child<'a>(
         txn: &mut Txn<'a>,
         this_block_no: BlockNo,
         this_offset: usize,
-    ) -> Result<Option<BlockNo>> {
+    ) -> Result<Option<KV>> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
@@ -98,7 +99,7 @@ impl<const ORDER: usize> Node<ORDER> {
         }
 
         if this.is_leaf() {
-            return Ok(Some(this.kv[0].child_block_no));
+            return Ok(Some(this.kv[0]));
         }
 
         todo!()

@@ -140,7 +140,6 @@ impl FileSystem for MotorFs {
 
         loop {
             let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-
             assert_eq!(
                 dir_entry!(parent_block).hash(dir_entry!(child_block).name()?),
                 hash
@@ -188,7 +187,8 @@ impl FileSystem for MotorFs {
         if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
         }
-        Txn::do_delete_entry_txn(self, entry_id.into()).await
+        Txn::do_delete_entry_txn(self, entry_id.into()).await?;
+        self.block_cache.flush().await
     }
 
     async fn move_entry(
@@ -267,11 +267,11 @@ impl FileSystem for MotorFs {
         drop(txn);
 
         let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-        Ok(Some(
-            dir_entry!(child_block)
-                .entry_id_with_validation(child_block_no)?
-                .into(),
-        ))
+        let res = dir_entry!(child_block)
+            .entry_id_with_validation(child_block_no)?
+            .into();
+
+        Ok(Some(res))
     }
 
     /// Get the next entry in a directory.
@@ -316,11 +316,12 @@ impl FileSystem for MotorFs {
         drop(txn);
 
         let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-        Ok(Some(
+        let res = Ok(Some(
             dir_entry!(child_block)
                 .entry_id_with_validation(child_block_no)?
                 .into(),
-        ))
+        ));
+        res
     }
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
@@ -332,7 +333,8 @@ impl FileSystem for MotorFs {
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
-        Ok(Some(dir_entry!(block).parent_id().into()))
+        let res = Ok(Some(dir_entry!(block).parent_id().into()));
+        res
     }
 
     async fn name(&mut self, entry_id: EntryId) -> Result<String> {
@@ -345,7 +347,8 @@ impl FileSystem for MotorFs {
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
-        dir_entry!(block).name().map(|s| s.to_owned())
+        let res = dir_entry!(block).name().map(|s| s.to_owned());
+        res
     }
 
     async fn metadata(&mut self, entry_id: EntryId) -> Result<async_fs::Metadata> {
@@ -358,7 +361,8 @@ impl FileSystem for MotorFs {
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
-        Ok(*dir_entry!(block).metadata())
+        let res = *dir_entry!(block).metadata();
+        Ok(res)
     }
 
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -393,7 +397,7 @@ impl FileSystem for MotorFs {
 
         let mut txn = Txn::new_readonly(self);
         let Some(data_block_no) =
-            DirEntryBlock::data_block_at_key(&mut txn, file_id, block_key).await?
+            DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, block_key).await?
         else {
             log::debug!("MotorFs::Read(): block not found: key {block_key} offset {offset}.");
             // No data block => "read" zeroes.
@@ -425,7 +429,8 @@ impl FileSystem for MotorFs {
     async fn empty_blocks(&mut self) -> Result<u64> {
         self.check_err()?;
         let sb = self.block_cache.get_block(0).await?;
-        Ok(sb.block().get_at_offset::<Superblock>(0).free_blocks())
+        let res = sb.block().get_at_offset::<Superblock>(0).free_blocks();
+        Ok(res)
     }
 
     async fn flush(&mut self) -> Result<()> {
@@ -433,6 +438,6 @@ impl FileSystem for MotorFs {
     }
 
     fn num_blocks(&self) -> u64 {
-        self.block_cache.device().num_blocks()
+        self.block_cache.total_blocks()
     }
 }

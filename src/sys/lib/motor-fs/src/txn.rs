@@ -88,7 +88,7 @@ impl<'a> Txn<'a> {
         }
     }
 
-    pub async fn get_block(&mut self, block_no: BlockNo) -> std::io::Result<&CachedBlock> {
+    pub async fn get_block(&mut self, block_no: BlockNo) -> std::io::Result<CachedBlock> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this = unsafe {
@@ -97,7 +97,7 @@ impl<'a> Txn<'a> {
         };
 
         if let Some(txn_block) = this.txn_cache.get(&block_no) {
-            return Ok(txn_block);
+            return Ok(txn_block.clone());
         }
 
         self.block_cache().get_block(block_no.as_u64()).await
@@ -313,16 +313,10 @@ impl<'a> Txn<'a> {
 
         // Step 1: find or insert the data block.
         let data_block_no =
-            match DirEntryBlock::data_block_at_key(&mut txn, file_id, block_key).await? {
+            match DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, block_key).await? {
                 Some(block_no) => block_no,
                 None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_key).await?,
             };
-
-        log::debug!(
-            "write({:?}, {offset}, ...) - block no: {} block key: {block_key}",
-            u128::from(file_id),
-            data_block_no.as_u64()
-        );
 
         // Step 2: update the data lock.
         let data_block = txn.get_txn_block(data_block_no).await?;
@@ -331,8 +325,12 @@ impl<'a> Txn<'a> {
             .copy_from_slice(buf);
 
         // Step 3: update the file size & modified.
-        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id, prev_file_size.max(new_file_size))
-            .await?;
+        DirEntryBlock::set_file_size_in_entry(
+            &mut txn,
+            file_id.block_no,
+            prev_file_size.max(new_file_size),
+        )
+        .await?;
 
         txn.commit().await?;
 
@@ -367,8 +365,9 @@ impl<'a> Txn<'a> {
             read_only: false,
         };
 
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
+
         // The trivial case: just bump the size var.
-        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id, new_size).await?;
         if new_size > prev_size {
             return txn.commit().await;
         }
@@ -389,7 +388,8 @@ impl<'a> Txn<'a> {
         if last_block_start < new_size {
             // Case (a): no data blocks to drop.
             let Some(data_block_no) =
-                DirEntryBlock::data_block_at_key(&mut txn, file_id, last_block_key).await?
+                DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, last_block_key)
+                    .await?
             else {
                 // Nothing to see here.
                 return txn.commit().await;
@@ -407,7 +407,7 @@ impl<'a> Txn<'a> {
         if (new_size + (BLOCK_SIZE as u64)) > last_block_start {
             // Case (b): only the last block needs dropping.
             if let Some(data_block_no) =
-                DirEntryBlock::data_block_at_key(&mut txn, file_id, last_block_key).await?
+                DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, last_block_key).await?
             {
                 DirEntryBlock::unlink_child_block(
                     &mut txn,
@@ -417,8 +417,7 @@ impl<'a> Txn<'a> {
                 )
                 .await?;
 
-                DirEntryBlock::decrement_blocks_in_use(&mut txn, file_id).await?;
-
+                DirEntryBlock::decrement_blocks_in_use(&mut txn, file_id.block_no).await?;
                 Superblock::free_single_block(&mut txn, data_block_no).await?;
             };
 
@@ -427,7 +426,8 @@ impl<'a> Txn<'a> {
             let last_block_key =
                 DirEntryBlock::get_hash_u64(&mut txn, file_id, last_block_start).await?;
             let Some(data_block_no) =
-                DirEntryBlock::data_block_at_key(&mut txn, file_id, last_block_key).await?
+                DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, last_block_key)
+                    .await?
             else {
                 // Nothing to see here.
                 return txn.commit().await;

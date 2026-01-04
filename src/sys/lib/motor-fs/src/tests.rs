@@ -26,6 +26,14 @@ async fn create_fs(tag: &str, num_blocks: u64) -> Result<MotorFs> {
     MotorFs::format(Box::new(bd)).await
 }
 
+async fn open_fs(tag: &str) -> Result<MotorFs> {
+    let path = std::env::temp_dir().join(tag);
+    let path = Utf8PathBuf::from_path_buf(path).unwrap();
+
+    let bd = async_fs::file_block_device::AsyncFileBlockDevice::open(&path).await?;
+    MotorFs::open(Box::new(bd)).await
+}
+
 #[test]
 fn basic() {
     init_logger();
@@ -54,6 +62,16 @@ fn midsize_file() {
         .unwrap();
 
     rt.block_on(midsize_file_test()).unwrap();
+}
+
+#[test]
+fn delete_reopen() {
+    init_logger();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(delete_reopen_test()).unwrap();
 }
 
 async fn basic_test() -> Result<()> {
@@ -311,6 +329,48 @@ async fn midsize_file_test() -> Result<()> {
     }
 
     println!("midsize_file_test PASS");
+    Ok(())
+}
+
+/// Create a ~9MB file on a 16MB partition. Should easily fit.
+async fn delete_reopen_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+    const FS_TAG: &str = "motor_fs_delete_reopen_test";
+    let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID;
+
+    let foo_id = fs.create_entry(root, EntryKind::File, "foo").await.unwrap();
+    fs.write(foo_id, 0, b"foobar").await.unwrap();
+    assert_eq!(fs.stat(root, "foo").await.unwrap().unwrap(), foo_id);
+
+    let bar_id = fs.create_entry(root, EntryKind::File, "bar").await.unwrap();
+    fs.write(bar_id, 0, b"foobarbaz").await.unwrap();
+    assert_eq!(fs.stat(root, "bar").await.unwrap().unwrap(), bar_id);
+
+    fs.flush().await?;
+
+    let mut fs = open_fs(FS_TAG).await?;
+    assert_eq!(fs.stat(root, "foo").await.unwrap().unwrap(), foo_id);
+    assert_eq!(fs.stat(root, "bar").await.unwrap().unwrap(), bar_id);
+
+    fs.delete_entry(foo_id).await.unwrap();
+
+    let baz_id = fs.create_entry(root, EntryKind::File, "baz").await.unwrap();
+    fs.write(baz_id, 0, b"baz").await.unwrap();
+    assert_eq!(fs.stat(root, "baz").await.unwrap().unwrap(), foo_id);
+
+    fs.delete_entry(bar_id).await.unwrap();
+    assert!(fs.stat(root, "foo").await.unwrap().is_none());
+    assert!(fs.stat(root, "bar").await.unwrap().is_none());
+
+    fs.flush().await?;
+
+    let mut fs = open_fs(FS_TAG).await?;
+    assert!(fs.stat(root, "foo").await.unwrap().is_none());
+    assert!(fs.stat(root, "bar").await.unwrap().is_none());
+
+    println!("delete_reopen_test PASS");
     Ok(())
 }
 

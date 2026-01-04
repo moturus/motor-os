@@ -174,6 +174,7 @@ impl Superblock {
         self.free_blocks
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn allocate_block<'a>(txn: &mut Txn<'a>) -> Result<EntryIdInternal> {
         let sb_block = txn.get_txn_block(BlockNo(0)).await?;
         let mut block_ref = sb_block.block_mut();
@@ -184,7 +185,8 @@ impl Superblock {
             return Err(ErrorKind::StorageFull.into());
         }
 
-        if this.freelist_head.is_null() {
+        let block_no = this.freelist_head;
+        if block_no.is_null() {
             if this.empty_area_start != (this.num_blocks - TXN_BLOCKS - this.free_blocks) {
                 log::error!(
                     "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
@@ -201,7 +203,52 @@ impl Superblock {
                 BlockNo(this.empty_area_start - 1),
                 this.generation,
             ));
+        };
+
+        drop(block_ref);
+
+        let target_block = txn.get_txn_block(block_no).await?.clone();
+        let target_ref = target_block.block();
+        let ebh = target_ref.get_at_offset::<EmptyBlockHeader>(0);
+
+        match BlockType::from_u8(ebh.block_type)
+            .inspect_err(|err| log::error!("allocate_block: {err:?}"))?
+        {
+            BlockType::FileEntry => {
+                drop(target_ref);
+                return Self::reallocate_last_block(txn, block_no).await;
+            }
+            BlockType::DirEntry => panic!("This is a bug"),
+            BlockType::TreeNode => panic!("This is a bug"),
+            BlockType::EmptyBlock => {}
         }
+
+        let next_empty_block = ebh.next_empty_block;
+
+        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let mut block_ref = sb_block.block_mut();
+        let this = block_ref.get_mut_at_offset::<Self>(0);
+        this.freelist_head = next_empty_block;
+        this.free_blocks -= 1;
+        this.generation += 1;
+        let generation = this.generation;
+
+        Ok(EntryIdInternal::new(block_no, generation))
+    }
+
+    /// Take the last block in use by the file entry, detach it from the file, and return it.
+    async fn reallocate_last_block<'a>(
+        txn: &mut Txn<'a>,
+        file_block_no: BlockNo,
+    ) -> Result<EntryIdInternal> {
+        let Some(kv) =
+            Node::<BTREE_ROOT_ORDER>::first_child(txn, file_block_no, BTREE_ROOT_OFFSET).await?
+        else {
+            todo!("return file_block_no; check if freelist_head points at it");
+        }; // Find the last leaf.
+
+        DirEntryBlock::unlink_child_block(txn, file_block_no, kv.child_block_no, kv.key).await?;
+        DirEntryBlock::decrement_blocks_in_use(txn, file_block_no).await?;
 
         todo!()
     }
@@ -216,7 +263,7 @@ impl Superblock {
 
         assert!(block_no.as_u64() < (this.num_blocks - TXN_BLOCKS));
 
-        if block_no.as_u64() == (this.empty_area_start - 1) {
+        if block_no.as_u64() == (this.empty_area_start - 1) && this.freelist_head.is_null() {
             this.free_blocks += 1;
             this.empty_area_start -= 1;
             return Ok(());
@@ -243,7 +290,7 @@ impl Superblock {
         let blocks_in_use = match BlockType::from_u8(bh.block_type)? {
             BlockType::FileEntry => bh.blocks_in_use,
             BlockType::DirEntry => panic!("This is a bug."),
-            BlockType::TreeNode => todo!(),
+            BlockType::TreeNode => panic!("This is a bug."),
             BlockType::EmptyBlock => panic!("This is a bug."),
         };
 
@@ -283,11 +330,15 @@ impl BlockType {
 #[repr(C)]
 pub(crate) struct EmptyBlockHeader {
     block_type: u8, // Must be BlockType::EmptyBlock.
-    _padding: [u8; 7],
+    in_use: u8,     // 1 => true, 0 => false; _ => block corrupted.
+    _padding_1: [u8; 6],
+
+    // The number of blocks, including this block and tree nodes, the entity is using.
+    blocks_in_use: u64,
     next_empty_block: BlockNo, // Null if this is the last empty block.
 }
 
-const _: () = assert!(16 == core::mem::size_of::<EmptyBlockHeader>());
+const _: () = assert!(24 == core::mem::size_of::<EmptyBlockHeader>());
 unsafe impl bytemuck::Zeroable for EmptyBlockHeader {}
 
 #[derive(Pod, Clone, Copy)]
@@ -298,7 +349,6 @@ pub(crate) struct BlockHeader {
     _padding_1: [u8; 6],
 
     // The number of blocks, including this block and tree nodes, the entity is using.
-    // Note that this field is overwritten in EmptyBlockHeader.
     blocks_in_use: u64,
 }
 
@@ -316,7 +366,7 @@ unsafe impl bytemuck::Zeroable for BlockHeader {}
 #[repr(C, align(4096))]
 pub(crate) struct DirEntryBlock {
     block_header: BlockHeader,
-    entry_id: EntryIdInternal,  // offset 16.
+    entry_id: EntryIdInternal,  // offset 16. Overwritten in empty blocks.
     parent_id: EntryIdInternal, // offset 32.
 
     // When several entries hash names to the same value, they form an SLL.
@@ -456,7 +506,9 @@ impl DirEntryBlock {
 
     pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        Node::<BTREE_ROOT_ORDER>::first_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET).await
+        Node::<BTREE_ROOT_ORDER>::first_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET)
+            .await
+            .map(|maybe_kv| maybe_kv.map(|kv| kv.child_block_no))
     }
 
     pub async fn next_child(&self, txn: &mut Txn<'_>, hash: u64) -> Result<Option<BlockNo>> {
@@ -476,10 +528,10 @@ impl DirEntryBlock {
 
     pub async fn data_block_at_key(
         txn: &mut Txn<'_>,
-        file_id: EntryIdInternal,
+        file_block_no: BlockNo,
         block_key: u64,
     ) -> Result<Option<BlockNo>> {
-        Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, file_id.block_no, block_key).await
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, file_block_no, block_key).await
     }
 
     pub fn parent_id(&self) -> EntryIdInternal {
@@ -550,7 +602,7 @@ impl DirEntryBlock {
         file_id: EntryIdInternal,
         block_key: u64,
     ) -> Result<BlockNo> {
-        Self::increment_blocks_in_use(txn, file_id).await?;
+        Self::increment_blocks_in_use(txn, file_id.block_no).await?;
 
         let data_block_id = Superblock::allocate_block(txn).await?;
         Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
@@ -564,10 +616,10 @@ impl DirEntryBlock {
     #[allow(clippy::await_holding_refcell_ref)]
     pub async fn set_file_size_in_entry(
         txn: &mut Txn<'_>,
-        file_id: EntryIdInternal,
+        file_block_no: BlockNo,
         new_size: u64,
     ) -> Result<()> {
-        let entry_block = txn.get_txn_block(file_id.block_no).await?;
+        let entry_block = txn.get_txn_block(file_block_no).await?;
         let mut entry_ref = entry_block.block_mut();
         let entry = DirEntryBlock::from_block_mut(&mut entry_ref);
         assert_eq!(entry.kind(), EntryKind::File);
@@ -722,8 +774,6 @@ impl DirEntryBlock {
             .metadata
             .modified = Timestamp::now();
 
-        log::trace!("link_child_block: if this is a dir, we may need to link into the SLL");
-
         loop {
             let result = Node::<BTREE_ROOT_ORDER>::node_insert_link(
                 txn,
@@ -778,28 +828,20 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn increment_blocks_in_use(
-        txn: &mut Txn<'_>,
-        entry_id: EntryIdInternal,
-    ) -> Result<()> {
-        let entry_block = txn.get_txn_block(entry_id.block_no).await?;
-        Self::from_block_mut(&mut entry_block.block_mut())
-            .block_header
-            .blocks_in_use += 1;
-        Self::from_block_mut(&mut entry_block.block_mut())
-            .metadata
-            .modified = Timestamp::now();
+    pub async fn increment_blocks_in_use(txn: &mut Txn<'_>, entry_block_no: BlockNo) -> Result<()> {
+        let entry_block = txn.get_txn_block(entry_block_no).await?;
+        let mut block_mut = entry_block.block_mut();
+        let self_ = Self::from_block_mut(&mut block_mut);
+        self_.block_header.blocks_in_use += 1;
+        self_.metadata.modified = Timestamp::now();
         Ok(())
     }
 
-    pub async fn decrement_blocks_in_use(
-        txn: &mut Txn<'_>,
-        entry_id: EntryIdInternal,
-    ) -> Result<()> {
-        let entry_block = txn.get_txn_block(entry_id.block_no).await?;
-        Self::from_block_mut(&mut entry_block.block_mut())
-            .block_header
-            .blocks_in_use -= 1;
+    pub async fn decrement_blocks_in_use(txn: &mut Txn<'_>, entry_block_no: BlockNo) -> Result<()> {
+        let entry_block = txn.get_txn_block(entry_block_no).await?;
+        let mut block_mut = entry_block.block_mut();
+        let self_ = Self::from_block_mut(&mut block_mut);
+        self_.block_header.blocks_in_use -= 1;
         Ok(())
     }
 }
@@ -821,7 +863,7 @@ pub fn validate_filename(filename: &str) -> Result<()> {
 // not a silent data corruption.
 macro_rules! dir_entry {
     ($cached_block:ident) => {
-        crate::layout::DirEntryBlock::from_block(&*$cached_block.block())
+        crate::layout::DirEntryBlock::from_block(&$cached_block.block())
     };
 }
 

@@ -118,8 +118,12 @@ impl BlockCache {
         })
     }
 
+    pub fn total_blocks(&self) -> u64 {
+        self.block_dev.num_blocks()
+    }
+
     /// Get a reference to a cached block.
-    pub async fn get_block(&mut self, block_no: u64) -> Result<&CachedBlock> {
+    pub async fn get_block(&mut self, block_no: u64) -> Result<CachedBlock> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         unsafe {
@@ -127,7 +131,7 @@ impl BlockCache {
                 let this = self as *mut Self;
                 let this = this.as_mut().unwrap_unchecked();
                 if let Some(block) = this.cache.get(&block_no) {
-                    return Ok(block);
+                    return Ok(block.clone());
                 }
             }
         }
@@ -139,12 +143,13 @@ impl BlockCache {
             .await?;
         block.intenal_mark_clean();
 
-        Ok(self.internal_push_block(block))
+        self.internal_push_block(block.clone());
+        Ok(block)
     }
 
     /// Get an empty block. Use with caution: any previously stored
     /// data in the block on the block device will be lost.
-    pub fn get_empty_block(&mut self, block_no: u64) -> &CachedBlock {
+    pub fn get_empty_block(&mut self, block_no: u64) -> CachedBlock {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         unsafe {
@@ -152,15 +157,15 @@ impl BlockCache {
                 let this = self as *mut Self;
                 let this = this.as_mut().unwrap_unchecked();
                 if let Some(block) = this.cache.get_mut(&block_no) {
-                    log::trace!("BlockCache::get_empty_block(): clearing cached block {block_no}");
                     block.block_mut().clear();
                     block.internal_mark_dirty();
-                    return block;
+                    return block.clone();
                 }
             }
         }
         let block = self.internal_get_empty_block(block_no);
-        self.internal_push_block(block)
+        self.internal_push_block(block.clone());
+        block
     }
 
     pub async fn write_block(&mut self, block_no: u64) -> Result<()> {
@@ -216,14 +221,6 @@ impl BlockCache {
         self.block_dev.flush().await
     }
 
-    pub fn device_mut(&mut self) -> &mut dyn AsyncBlockDevice {
-        self.block_dev.as_mut()
-    }
-
-    pub fn device(&self) -> &dyn AsyncBlockDevice {
-        self.block_dev.as_ref()
-    }
-
     fn internal_get_empty_block(&mut self, block_no: u64) -> CachedBlock {
         if let Some(mut block) = self.free_blocks.pop() {
             assert!(!block.is_dirty());
@@ -236,15 +233,14 @@ impl BlockCache {
         }
     }
 
-    fn internal_push_block(&mut self, block: CachedBlock) -> &CachedBlock {
+    fn internal_push_block(&mut self, block: CachedBlock) {
         let block_no = block.block_no();
 
         if let Some((_, prev)) = self.cache.push(block_no, block) {
             assert!(!prev.is_dirty(), "Block {} is dirty.", prev.block_no());
+            log::trace!("Block {} pushed out of cache.", prev.block_no());
             self.free_blocks.push(prev);
         }
-
-        self.cache.get(&block_no).unwrap()
     }
 
     #[cfg(debug_assertions)]

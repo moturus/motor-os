@@ -239,7 +239,6 @@ async fn on_cmd_write(
 ) -> Result<()> {
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
-    log::debug!("write: {file_id:x}: offset: {offset:x}, len: {len}");
 
     let mut fs = fs.lock().await;
     let written = fs
@@ -258,10 +257,6 @@ async fn on_cmd_read(
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
-    // log::debug!(
-    //     "read: {file_id:x}: offset: {offset:x}, len: {len} msg id: {}",
-    //     msg.id
-    // );
 
     let io_page = sender
         .alloc_page(u64::MAX)
@@ -275,7 +270,6 @@ async fn on_cmd_read(
 
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
     let _ = sender.send(resp).await;
-    // log::debug!("read done: {file_id:x}: offset: {offset:x}, len: {len} ({read})");
     Ok(())
 }
 
@@ -285,7 +279,6 @@ async fn on_cmd_metadata(
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
-    log::debug!("metadata: {entry_id:x}");
 
     let mut fs = fs.lock().await;
     let metadata = fs.metadata(entry_id).await?;
@@ -306,7 +299,6 @@ async fn on_cmd_resize(
     fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
-    log::debug!("resize: {file_id:x}, {new_size}");
 
     let mut fs = fs.lock().await;
     let resp = api_fs::empty_resp_encode(

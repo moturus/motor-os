@@ -176,14 +176,12 @@ impl FsClient {
     }
 
     async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
-        log::debug!("stat_one({parent_id:x}, '{fname}')");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;
         let entry_id = api_fs::stat_resp_decode(resp)?;
-        log::debug!("stat_one({parent_id:x}, '{fname}') => {entry_id:x}");
         Ok(entry_id)
     }
 
@@ -194,7 +192,6 @@ impl FsClient {
         kind: EntryKind,
         name: &str, // Leaf name.
     ) -> Result<EntryId> {
-        log::debug!("create_entry({parent_id:x}, {kind:?}, '{name}')");
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::create_entry_msg_encode(
             parent_id,
@@ -206,7 +203,6 @@ impl FsClient {
 
         let resp = self.clone().send_recv(msg).await?;
         let entry_id = api_fs::create_entry_resp_decode(resp)?;
-        log::debug!("created entry {entry_id:x}");
         Ok(entry_id)
     }
 
@@ -218,11 +214,6 @@ impl FsClient {
         offset: u64,
         buf: &[u8],
     ) -> Result<usize> {
-        log::debug!(
-            "write({file_id:x}): offset: 0x{offset:x}, len: {}",
-            buf.len()
-        );
-
         let mut buf_running = buf;
 
         let mut written = 0_usize;
@@ -280,7 +271,6 @@ impl FsClient {
             }
         }
 
-        log::debug!("wrote {written} bytes to {file_id:x}) at offset: 0x{offset:x}");
         Ok(written)
     }
 
@@ -292,11 +282,6 @@ impl FsClient {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize> {
-        log::debug!(
-            "read({file_id:x}): offset: 0x{offset:x}, len: {}",
-            buf.len()
-        );
-
         let mut buf_running = buf;
 
         let mut to_be_read = 0_usize;
@@ -369,7 +354,6 @@ impl FsClient {
             }
         }
 
-        log::debug!("done reading {actual_read} bytes from {file_id:x}) at offset: 0x{offset:x}");
         if actual_read > 0 {
             Ok(actual_read)
         } else if let Some(err) = error {
@@ -385,23 +369,16 @@ impl FsClient {
 
     /// The metadata of the directory entry.
     pub async fn metadata(self: &Rc<Self>, entry_id: EntryId) -> Result<Metadata> {
-        log::debug!("metadata({entry_id:x})");
         let mut msg = api_fs::metadata_msg_encode(entry_id);
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;
         let metadata = api_fs::metadata_resp_decode(resp, &self.io_receiver.borrow())?;
-        log::debug!(
-            "metadata({entry_id:x}) => {:?} sz: {}",
-            metadata.kind(),
-            metadata.size
-        );
         Ok(metadata)
     }
 
     /// Resize the file.
     pub async fn resize(self: &Rc<Self>, file_id: EntryId, new_size: u64) -> Result<()> {
-        log::debug!("resize({file_id:x}, {new_size})");
         let mut msg = api_fs::resize_msg_encode(file_id, new_size);
         msg.id = self.new_request_id();
 
@@ -411,7 +388,6 @@ impl FsClient {
 
     /// Delete the file or directory.
     pub async fn delete_entry(self: &Rc<Self>, entry_id: EntryId) -> Result<()> {
-        log::debug!("delete_entry({entry_id:x})");
         let mut msg = api_fs::delete_entry_msg_encode(entry_id);
         msg.id = self.new_request_id();
 
