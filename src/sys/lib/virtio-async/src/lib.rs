@@ -16,7 +16,7 @@ pub use pci::le16;
 pub use pci::le32;
 pub use pci::le64;
 
-pub use virtio_blk::{BlockDevice, VirtioBlock};
+pub use virtio_blk::BlockDevice;
 pub use virtio_device::{Device, init_virtio_devices};
 pub use virtio_queue::Completion;
 
@@ -31,9 +31,6 @@ pub fn nop() {
         core::arch::asm!("nop", "pause");
     }
 }
-
-pub const VIRTIO_BLOCK_SIZE: usize = 512;
-pub const VIRTIO_BLOCK_SIZE_LOG2: usize = 9;
 
 // This is the kernel/syscall interface consumed by the library:
 // see crate::init_virtio_devices().

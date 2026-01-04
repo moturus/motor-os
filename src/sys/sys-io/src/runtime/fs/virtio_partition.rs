@@ -1,4 +1,4 @@
-use async_fs::Block;
+use async_fs::{AsyncBlockDevice, Block};
 use async_trait::async_trait;
 use moto_virtio::BLOCK_SIZE as VIRTIO_BLOCK_SIZE;
 use std::cell::RefCell;
@@ -48,23 +48,21 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
     async fn read_block(&mut self, block_no: u64, block: &mut Block) -> Result<()> {
         use zerocopy::FromZeros;
 
-        // TODO: read in one go, instead of eight.
-        let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();
-
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
-        for idx in 0..VIRTIO_BLOCKS_IN_FS_BLOCK {
-            let completion = virtio_async::BlockDevice::post_read(
-                self.virtio_bd.clone(),
-                first_sector_no + (idx as u64),
-                virtio_block.as_mut(),
-            )
-            .unwrap();
-            completion.await;
+        let completion = virtio_async::BlockDevice::post_read(
+            self.virtio_bd.clone(),
+            first_sector_no,
+            block.as_bytes_mut(),
+        )
+        .unwrap();
+        let (len, stat) = completion.await;
 
-            let block_offset = idx * VIRTIO_BLOCK_SIZE;
-            block.as_bytes_mut()[block_offset..block_offset + VIRTIO_BLOCK_SIZE]
-                .clone_from_slice(virtio_block.bytes.as_slice());
+        if block_no == 2 {
+            let hash = moto_rt::fnv1a_hash_64(block.as_bytes());
+            if hash == 0xb93a0c83ce3b6325 {
+                panic!("bad hash for block {block_no}");
+            }
         }
 
         Ok(())
@@ -74,31 +72,25 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
     async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()> {
         use zerocopy::FromZeros;
 
-        // TODO: write in one go, instead of eight.
-        let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();
-
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
-        for idx in 0..VIRTIO_BLOCKS_IN_FS_BLOCK {
-            let block_offset = idx * VIRTIO_BLOCK_SIZE;
-            virtio_block.bytes.as_mut_slice().clone_from_slice(
-                &block.as_bytes()[block_offset..block_offset + VIRTIO_BLOCK_SIZE],
-            );
 
-            let completion = virtio_async::BlockDevice::post_write(
-                self.virtio_bd.clone(),
-                first_sector_no + (idx as u64),
-                virtio_block.as_ref(),
-            )
-            .unwrap();
-            completion.await;
-        }
+        let completion = virtio_async::BlockDevice::post_write(
+            self.virtio_bd.clone(),
+            first_sector_no,
+            block.as_bytes(),
+        )
+        .unwrap();
+        completion.await;
 
         Ok(())
     }
 
     /// Flush dirty blocks to the underlying storage.
     async fn flush(&mut self) -> Result<()> {
-        todo!()
+        virtio_async::BlockDevice::post_flush(self.virtio_bd.clone())
+            .unwrap()
+            .await;
+        Ok(())
     }
 }

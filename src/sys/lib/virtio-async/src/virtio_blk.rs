@@ -10,8 +10,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use zerocopy::FromZeros;
 
-use super::VIRTIO_BLOCK_SIZE;
-use super::VIRTIO_BLOCK_SIZE_LOG2;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
 use crate::Completion;
@@ -19,6 +17,9 @@ use crate::virtio_queue::Virtqueue;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Little Endian is often assumed here.");
+
+// Although virtio uses blocks of 512 bytes, we expose blocks of 4k.
+pub const BLOCK_SIZE: usize = 4096;
 
 /*
  *  VIRTIO_BLK_F_SIZE_MAX (1) Maximum size of any single segment is in size_max.
@@ -41,38 +42,6 @@ compile_error!("Little Endian is often assumed here.");
 const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
-
-#[derive(FromZeros)]
-#[repr(C, align(512))]
-pub struct VirtioBlock {
-    pub bytes: [u8; VIRTIO_BLOCK_SIZE],
-}
-
-pub struct VirtioBlockRefMut<'a> {
-    pub bytes: *mut u8,
-    _marker: PhantomData<&'a mut ()>,
-}
-
-pub struct VirtioBlockRef<'a> {
-    pub bytes: *const u8,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl VirtioBlock {
-    pub fn as_mut<'a>(&'a mut self) -> VirtioBlockRefMut<'a> {
-        VirtioBlockRefMut {
-            bytes: self.bytes.as_mut_ptr(),
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn as_ref<'a>(&'a self) -> VirtioBlockRef<'a> {
-        VirtioBlockRef {
-            bytes: self.bytes.as_ptr(),
-            _marker: PhantomData,
-        }
-    }
-}
 
 // See struct virtio_blk_req in VirtIO spec.
 #[derive(Clone, Copy)]
@@ -193,13 +162,15 @@ impl BlockDevice {
         Ok(())
     }
 
-    /// Returns the ID of the submitted request.
     #[inline(never)]
     pub fn post_read<'a>(
         this: Rc<RefCell<Self>>,
         sector: u64,
-        block_ref: VirtioBlockRefMut<'a>,
+        buf: &'a mut [u8],
     ) -> Option<Completion<'a>> {
+        assert!(buf.len() <= BLOCK_SIZE);
+        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
+
         let vq = this.borrow().dev.virtqueues[0].clone();
         let mut virtqueue = vq.borrow_mut();
         let chain_head = virtqueue.alloc_descriptor_chain(3)?;
@@ -227,8 +198,8 @@ impl BlockDevice {
                 len: core::mem::size_of::<BlkHeader>() as u32,
             },
             UserData {
-                addr: block_ref.bytes as usize as u64,
-                len: VIRTIO_BLOCK_SIZE as u32,
+                addr: buf.as_mut_ptr() as usize as u64,
+                len: buf.len() as u32,
             },
             UserData {
                 addr: status as *mut _ as usize as u64,
@@ -242,13 +213,15 @@ impl BlockDevice {
         Some(completion)
     }
 
-    /// Returns the ID of the submitted request.
     #[inline(never)]
     pub fn post_write<'a>(
         this: Rc<RefCell<Self>>,
         sector: u64,
-        block_ref: VirtioBlockRef<'a>,
+        buf: &'a [u8],
     ) -> Option<Completion<'a>> {
+        assert!(buf.len() <= BLOCK_SIZE);
+        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
+
         let vq = this.borrow().dev.virtqueues[0].clone();
         let mut virtqueue = vq.borrow_mut();
         let chain_head = virtqueue.alloc_descriptor_chain(3)?;
@@ -276,8 +249,8 @@ impl BlockDevice {
                 len: core::mem::size_of::<BlkHeader>() as u32,
             },
             UserData {
-                addr: block_ref.bytes as usize as u64,
-                len: VIRTIO_BLOCK_SIZE as u32,
+                addr: buf.as_ptr() as usize as u64,
+                len: buf.len() as u32,
             },
             UserData {
                 addr: status as *mut _ as usize as u64,
@@ -287,6 +260,47 @@ impl BlockDevice {
 
         core::mem::drop(virtqueue);
         let completion = Virtqueue::add_buffs(vq, &buffs, 2, 1, chain_head);
+
+        Some(completion)
+    }
+
+    /// Returns the ID of the submitted request.
+    #[inline(never)]
+    pub fn post_flush<'a>(this: Rc<RefCell<Self>>) -> Option<Completion<'a>> {
+        let vq = this.borrow().dev.virtqueues[0].clone();
+        let mut virtqueue = vq.borrow_mut();
+        let chain_head = virtqueue.alloc_descriptor_chain(2)?;
+
+        let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
+
+        *header = BlkHeader {
+            type_: 4, /* VIRTIO_BLK_T_FLUSH */
+            _reserved: 0,
+            sector: 0,
+        };
+
+        const VIRTIO_BLK_S_OK: u8 = 0;
+        const VIRTIO_BLK_S_IOERR: u8 = 1;
+        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
+
+        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
+        let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
+        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
+
+        use super::virtio_queue::UserData;
+        let buffs: [UserData; 2] = [
+            UserData {
+                addr: header as *mut _ as usize as u64,
+                len: core::mem::size_of::<BlkHeader>() as u32,
+            },
+            UserData {
+                addr: status as *mut _ as usize as u64,
+                len: 1,
+            },
+        ];
+
+        core::mem::drop(virtqueue);
+        let completion = Virtqueue::add_buffs(vq, &buffs, 1, 1, chain_head);
 
         Some(completion)
     }

@@ -19,13 +19,16 @@ const MAX_IN_FLIGHT: usize = 32;
 pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -> Result<()> {
     use zerocopy::FromZeros;
 
-    let mut virtio_block = virtio_async::VirtioBlock::new_zeroed();
-    let completion =
-        virtio_async::BlockDevice::post_read(block_device.clone(), 0, virtio_block.as_mut())
-            .unwrap();
+    let mut first_block = async_fs::Block::new_zeroed();
+    let completion = virtio_async::BlockDevice::post_read(
+        block_device.clone(),
+        0,
+        &mut first_block.as_bytes_mut()[..512],
+    )
+    .unwrap();
     completion.await;
 
-    let mbr = mbr::Mbr::parse(virtio_block.bytes.as_slice()).map_err(|err| {
+    let mbr = mbr::Mbr::parse(&first_block.as_bytes()[..512]).map_err(|err| {
         log::error!("Mbr::parse() failed: {err:?}.");
         std::io::Error::from(ErrorKind::InvalidData)
     })?;
@@ -335,6 +338,15 @@ async fn on_cmd_delete_entry(
 }
 
 pub fn smoke_test() {
+    assert_eq!(
+        std::fs::metadata("/foo").err().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        std::fs::metadata("/bar").err().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
     std::fs::write("/foo", "bar").expect("async write failed");
     let bytes = std::fs::read("/foo").expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
@@ -354,7 +366,7 @@ pub fn smoke_test() {
 
     let metadata = std::fs::metadata("/bar").unwrap();
     assert!(metadata.is_file());
-    assert_eq!(metadata.len(), 8197);
+    assert_eq!(metadata.len(), bytes.len() as u64);
 
     std::fs::remove_file("/foo").unwrap();
     std::fs::remove_file("/bar").unwrap();
