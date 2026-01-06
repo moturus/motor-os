@@ -358,7 +358,7 @@ async fn delete_reopen_test() -> Result<()> {
 
     let baz_id = fs.create_entry(root, EntryKind::File, "baz").await.unwrap();
     fs.write(baz_id, 0, b"baz").await.unwrap();
-    assert_eq!(fs.stat(root, "baz").await.unwrap().unwrap(), foo_id);
+    assert_eq!(fs.stat(root, "baz").await.unwrap().unwrap(), baz_id);
 
     fs.delete_entry(bar_id).await.unwrap();
     assert!(fs.stat(root, "foo").await.unwrap().is_none());
@@ -369,6 +369,11 @@ async fn delete_reopen_test() -> Result<()> {
     let mut fs = open_fs(FS_TAG).await?;
     assert!(fs.stat(root, "foo").await.unwrap().is_none());
     assert!(fs.stat(root, "bar").await.unwrap().is_none());
+    fs.delete_entry(baz_id).await.unwrap();
+    assert!(fs.delete_entry(baz_id).await.is_err());
+
+    assert_eq!(0, fs.metadata(root).await.unwrap().size);
+    assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
 
     println!("delete_reopen_test PASS");
     Ok(())

@@ -174,6 +174,7 @@ impl Superblock {
         self.free_blocks
     }
 
+    // Allocate a new/empty block. Also increments generation.
     #[allow(clippy::await_holding_refcell_ref)]
     pub async fn allocate_block<'a>(txn: &mut Txn<'a>) -> Result<EntryIdInternal> {
         let sb_block = txn.get_txn_block(BlockNo(0)).await?;
@@ -185,8 +186,8 @@ impl Superblock {
             return Err(ErrorKind::StorageFull.into());
         }
 
-        let block_no = this.freelist_head;
-        if block_no.is_null() {
+        let head_bn = this.freelist_head;
+        if head_bn.is_null() {
             if this.empty_area_start != (this.num_blocks - TXN_BLOCKS - this.free_blocks) {
                 log::error!(
                     "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
@@ -207,50 +208,54 @@ impl Superblock {
 
         drop(block_ref);
 
-        let target_block = txn.get_txn_block(block_no).await?.clone();
-        let target_ref = target_block.block();
-        let ebh = target_ref.get_at_offset::<EmptyBlockHeader>(0);
+        let head_block = txn.get_txn_block(head_bn).await?.clone();
+        let head_ref = head_block.block();
+        let ebh = head_ref.get_at_offset::<EmptyBlockHeader>(0);
+        let maybe_next = ebh.next_empty_block;
 
-        match BlockType::from_u8(ebh.block_type)
+        let (next_head, res) = match BlockType::from_u8(ebh.block_type)
             .inspect_err(|err| log::error!("allocate_block: {err:?}"))?
         {
             BlockType::FileEntry => {
-                drop(target_ref);
-                return Self::reallocate_last_block(txn, block_no).await;
+                drop(head_ref);
+                let res = Self::reallocate_first_block(txn, head_bn).await?;
+                if res == head_bn {
+                    (maybe_next, res)
+                } else {
+                    (head_bn, res)
+                }
             }
             BlockType::DirEntry => panic!("This is a bug"),
             BlockType::TreeNode => panic!("This is a bug"),
-            BlockType::EmptyBlock => {}
-        }
-
-        let next_empty_block = ebh.next_empty_block;
+            BlockType::EmptyBlock => (maybe_next, head_bn),
+        };
 
         let sb_block = txn.get_txn_block(BlockNo(0)).await?;
         let mut block_ref = sb_block.block_mut();
         let this = block_ref.get_mut_at_offset::<Self>(0);
-        this.freelist_head = next_empty_block;
+        this.freelist_head = next_head;
         this.free_blocks -= 1;
         this.generation += 1;
         let generation = this.generation;
 
-        Ok(EntryIdInternal::new(block_no, generation))
+        Ok(EntryIdInternal::new(res, generation))
     }
 
-    /// Take the last block in use by the file entry, detach it from the file, and return it.
-    async fn reallocate_last_block<'a>(
+    /// Take the first block in use by the file entry, detach it from the file, and return it.
+    async fn reallocate_first_block<'a>(
         txn: &mut Txn<'a>,
         file_block_no: BlockNo,
-    ) -> Result<EntryIdInternal> {
+    ) -> Result<BlockNo> {
         let Some(kv) =
             Node::<BTREE_ROOT_ORDER>::first_child(txn, file_block_no, BTREE_ROOT_OFFSET).await?
         else {
-            todo!("return file_block_no; check if freelist_head points at it");
-        }; // Find the last leaf.
+            return Ok(file_block_no);
+        };
 
         DirEntryBlock::unlink_child_block(txn, file_block_no, kv.child_block_no, kv.key).await?;
         DirEntryBlock::decrement_blocks_in_use(txn, file_block_no).await?;
 
-        todo!()
+        Ok(kv.child_block_no)
     }
 
     // Free a single block without looking inside: could be a data block, or an empty file/directory.
