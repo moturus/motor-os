@@ -1,0 +1,49 @@
+loopback = true
+
+[devices.net0]
+mac = "a4:a1:c2:00:00:01"
+cidrs = ["192.168.4.2/24"]
+
+[[devices.net0.routes]]
+ip_network = "0.0.0.0/0"  # The default gateway.
+gateway = "192.168.4.1"
+
+# The second device.
+# Create it in the host this way:
+#
+# sudo ip tuntap add mode tap moto-tap-2
+# sudo ip addr add 192.168.6.1/24 dev moto-tap-2
+# sudo ip link set moto-tap-2 up
+#
+# [devices.net1]
+# mac = "a4:a1:c2:00:00:02"
+# cidrs = ["192.168.6.2/24"]
+# 
+# [[devices.net1.routes]]
+# ip_network = "192.168.6.0/0"  # The default gateway.
+# gateway = "192.168.6.1"
+
+# Create net0 tap in the host:
+#
+# sudo ip tuntap add mode tap moto-tap
+# sudo ip addr add 192.168.4.1/24 dev moto-tap
+# sudo ip link set moto-tap up
+
+# Examples:
+# 
+# A devices with two IP addesses and two routes:
+# 
+# [devices.net0]
+# mac = "a4:a1:c2:00:00:01"
+# cidrs = [
+#  "1.2.3.4/16",
+#  "5.6.7.8/24",
+# ]
+#
+# [[devices.net0.routes]]
+# ip_network = "1.2.1.1/16"
+# gateway = "1.2.3.12"
+# 
+# [[devices.net0.routes]]
+# ip_network = "5.6.7.1/24"
+# gateway = "5.6.7.10"

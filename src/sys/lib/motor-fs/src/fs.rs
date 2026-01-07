@@ -146,7 +146,10 @@ impl FileSystem for MotorFs {
             let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
             assert_eq!(
                 dir_entry!(parent_block).hash(dir_entry!(child_block).name()?),
-                hash
+                hash,
+                "bad child hash: child: '{filename}', parent: {} child block: {}",
+                id.block_no.as_u64(),
+                child_block_no.as_u64()
             );
 
             if dir_entry!(child_block).name()? == filename {
@@ -396,7 +399,10 @@ impl FileSystem for MotorFs {
         let Some(data_block_no) =
             DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, block_key).await?
         else {
-            log::debug!("MotorFs::Read(): block not found: key {block_key} offset {offset}.");
+            log::debug!(
+                "MotorFs::Read(): block not found:\n\tkey {block_key:x} offset {offset} file_block: {:x}.",
+                file_id.block_no()
+            );
             // No data block => "read" zeroes.
             for byte in &mut buf[..to_read] {
                 *byte = 0;

@@ -1,7 +1,7 @@
 input_files:
   - "/bin/httpd"
   - "/bin/httpd-axum"
-  - "/bin/russhd"
+#  - "/bin/russhd"
   - "/bin/kibim"
   - "/bin/rush"
   - "/sys/mdbg"
@@ -15,6 +15,6 @@ input_files:
   - "/sys/tests/tokio-tests"
   - "/sys/tests/crossbench"
 static_dirs:
-  - "img_files/full"
+  - "img_files/motor-fs"
 filesystem: "motor-fs"
 data_partition_size_mb: 64

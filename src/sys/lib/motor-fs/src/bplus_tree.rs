@@ -147,8 +147,9 @@ impl<const ORDER: usize> Node<ORDER> {
             let child_block_no = node.kv[pos].child_block_no;
 
             log::debug!(
-                "first_child_with_key() recursive: key: {key}, child_block: {}",
-                child_block_no.as_u64()
+                "first_child_with_key() recursive:\n\tkey: {key:x}, child_block: {:x} parent block: {:x}",
+                child_block_no.as_u64(),
+                this_block_no.as_u64()
             );
 
             (child_block_no, key)

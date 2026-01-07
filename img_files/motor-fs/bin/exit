@@ -1,0 +1,7 @@
+#!/bin/rush
+
+# `exit` is a rush built-in; so when trying to execute
+# `exit 5` from a remote ssh, it will return an error,
+# as it can't find 'exit' binary. So we have this script.
+exit $@
+

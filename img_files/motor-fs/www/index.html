@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Motor OS</title>
+<style>
+  @font-face {
+      font-family: 'RobotoMono';
+      src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+           url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+      font-weight: normal;
+      font-style: normal;
+  }
+
+  .main-body {
+    height: 160px;   
+    text-align: left;
+    line-height: 1.4;
+    font-size: 16px;
+    padding: 0 10px;
+    margin: 50px auto;
+    max-width: 900px;
+    font-family:'RobotoMono',monospace;
+  }
+</style>
+</head>
+
+<body>
+<div class="main-body">
+<p align="right">Motor OS | <a href="what.html">What</a> | <a href="why.html">Why</a> | <a href="https://github.com/moturus/motor-os" target="_blank">GitHub</a></p>
+<h1>Motor OS</h1>
+
+<p>Motor OS is a simple, fast, and secure operating system built for the cloud.
+Designed specifically for virtualized workloads such as web serving, serverless computing,
+and edge caching, it addresses inefficiencies found in traditional operating systems
+like Linux when running in virtual environments.</p>
+
+<p>Motor OS is built entirely in Rust. It supports x64 KVM-based virtual machines
+and can run on Qemu, Cloud Hypervisor, or Alioth VMMs. The system, including
+its libraries and syscalls, is implemented in Rust and optimized for Rust-based client applications.</p>
+
+</div>
+
+</body>
+</html>
