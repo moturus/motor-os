@@ -303,7 +303,7 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
 
 pub extern "C" fn getcwd(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::getcwd(out_ptr, out_size);
     }
     let cwd = match FsClient::getcwd() {
         Ok(cwd) => cwd,
@@ -321,7 +321,7 @@ pub extern "C" fn getcwd(out_ptr: *mut u8, out_size: *mut usize) -> ErrorCode {
 
 pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::chdir(path_ptr, path_size);
     }
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };

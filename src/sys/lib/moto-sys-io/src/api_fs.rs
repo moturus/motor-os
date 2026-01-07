@@ -33,16 +33,6 @@ pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     msg
 }
 
-pub fn create_entry_msg_encode(parent_id: u128, is_dir: bool, name: &str, io_page: IoPage) -> Msg {
-    let mut msg = stat_msg_encode(parent_id, name, io_page);
-    msg.command = if is_dir {
-        CMD_CREATE_DIR
-    } else {
-        CMD_CREATE_FILE
-    };
-    msg
-}
-
 pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
     let parent_id = msg.payload.arg_128();
     let io_page_idx = msg.payload.shared_pages()[11];
@@ -64,11 +54,7 @@ pub fn stat_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
     Ok((parent_id, fname))
 }
 
-pub fn create_entry_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
-    stat_msg_decode(msg, sender)
-}
-
-pub fn stat_resp_encode(req: Msg, entry_id: u128) -> Msg {
+pub fn stat_resp_encode(req: Msg, entry_id: u128, entry_kind: async_fs::EntryKind) -> Msg {
     let mut resp = Msg::new();
     resp.id = req.id;
     resp.handle = req.handle;
@@ -78,11 +64,32 @@ pub fn stat_resp_encode(req: Msg, entry_id: u128) -> Msg {
     resp.status = moto_rt::Error::Ok.into();
 
     resp.payload.set_arg_128(entry_id);
+    resp.payload.args_8_mut()[23] = entry_kind as u8;
     resp
 }
 
-pub fn stat_resp_decode(msg: Msg) -> Result<u128> {
-    msg.status().map(|_| msg.payload.arg_128())
+pub fn stat_resp_decode(msg: Msg) -> Result<(u128, async_fs::EntryKind)> {
+    msg.status()?;
+    Ok((
+        msg.payload.arg_128(),
+        msg.payload.args_8()[23]
+            .try_into()
+            .map_err(|_| moto_rt::Error::InternalError)?,
+    ))
+}
+
+pub fn create_entry_msg_encode(parent_id: u128, is_dir: bool, name: &str, io_page: IoPage) -> Msg {
+    let mut msg = stat_msg_encode(parent_id, name, io_page);
+    msg.command = if is_dir {
+        CMD_CREATE_DIR
+    } else {
+        CMD_CREATE_FILE
+    };
+    msg
+}
+
+pub fn create_entry_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, String)> {
+    stat_msg_decode(msg, sender)
 }
 
 pub fn create_entry_resp_decode(msg: Msg) -> Result<u128> {

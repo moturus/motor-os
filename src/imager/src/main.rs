@@ -90,7 +90,7 @@ async fn create_motorfs_partition_async(
         let parent = target_path.parent().unwrap();
         let filename = target_path.file_name().unwrap().to_str().unwrap();
 
-        let parent_id = util::_motor_fs_create_dir_all(&mut fs, parent)
+        let parent_id = util::motor_fs_create_dir_all(&mut fs, parent)
             .await
             .unwrap();
         let new_file_id = fs

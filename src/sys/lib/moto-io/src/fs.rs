@@ -151,38 +151,45 @@ impl FsClient {
     }
 
     /// Find a file or directory by its full path.
-    pub async fn stat(self: &Rc<Self>, path: &str) -> Result<EntryId> {
+    pub async fn stat(self: &Rc<Self>, path: &str) -> Result<(EntryId, EntryKind)> {
         if path.len() > moto_rt::fs::MAX_PATH_LEN || path.is_empty() {
             return Err(moto_rt::Error::InvalidArgument);
         }
         if path == "/" {
-            return Ok(ROOT_ID);
+            return Ok((ROOT_ID, EntryKind::Directory));
         }
 
         if !path.starts_with('/') {
             return Err(moto_rt::Error::InvalidArgument);
         }
 
-        let mut current = ROOT_ID;
-        for entry in path.split('/') {
-            if entry.is_empty() {
+        let (mut entry_id, mut entry_kind) = (ROOT_ID, EntryKind::Directory);
+        for entry_name in path.split('/') {
+            if entry_name.is_empty() {
                 continue;
             }
 
-            current = self.stat_one(current, entry).await?;
+            if entry_kind != EntryKind::Directory {
+                return Err(moto_rt::Error::NotFound);
+            }
+
+            (entry_id, entry_kind) = self.stat_one(entry_id, entry_name).await?;
         }
 
-        Ok(current)
+        Ok((entry_id, entry_kind))
     }
 
-    async fn stat_one(self: &Rc<Self>, parent_id: EntryId, fname: &str) -> Result<EntryId> {
+    async fn stat_one(
+        self: &Rc<Self>,
+        parent_id: EntryId,
+        fname: &str,
+    ) -> Result<(EntryId, EntryKind)> {
         let io_page = self.io_sender.alloc_page(u64::MAX).await?;
         let mut msg = api_fs::stat_msg_encode(parent_id, fname, io_page);
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;
-        let entry_id = api_fs::stat_resp_decode(resp)?;
-        Ok(entry_id)
+        api_fs::stat_resp_decode(resp)
     }
 
     /// Create a file or directory.

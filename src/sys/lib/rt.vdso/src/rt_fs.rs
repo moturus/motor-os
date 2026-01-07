@@ -14,7 +14,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
-use moto_io::fs::{EntryId, FsClient, ROOT_ID};
+use moto_io::fs::{EntryId, EntryKind, FsClient, ROOT_ID};
 use moto_ipc::io_channel;
 use moto_rt::Result;
 use moto_rt::fs::HANDLE_URL_PREFIX;
@@ -129,7 +129,7 @@ impl CanonicalPath {
         }
 
         let mut abs_path = {
-            match AsyncFsClient::getcwd() {
+            match AsyncFsClient::get().unwrap().getcwd() {
                 Ok(cwd) => cwd,
                 Err(_) => {
                     // Can't work with rel paths without cwd.
@@ -264,47 +264,17 @@ impl AsyncFsClient {
         })
     }
 
-    fn getcwd() -> Result<String> {
-        Ok(Self::get()?.cwd.lock().clone())
+    fn getcwd(&self) -> Result<String> {
+        Ok(self.cwd.lock().clone())
     }
 
-    fn chdir(_path: &str) -> Result<()> {
-        todo!()
-        /*
-        let c_path = CanonicalPath::parse(path)?;
-        let self_ = Self::get()?;
+    fn chdir(&self, path: &str) -> Result<()> {
+        let path = CanonicalPath::parse(path)?;
 
-        let cwd = {
-            let mut conn = self_.conn.lock();
-            let raw_channel = conn.raw_channel();
-            unsafe {
-                let req = raw_channel.get_mut::<StatRequest>();
-                req.header.cmd = CMD_STAT;
-                req.header.ver = 0;
-                req.header.flags = 0;
-                req.parent_fd = 0;
+        let entry_id = self.stat_internal(path.clone())?;
 
-                req.fname_size = c_path.abs_path.len() as u16;
-                raw_channel.put_bytes(c_path.abs_path.as_bytes(), req.fname.as_mut_ptr())?;
-            }
-
-            conn.do_rpc(None)?;
-
-            let resp = unsafe { raw_channel.get::<StatResponse>() };
-            if resp.header.result != 0 {
-                return Err(resp.header.result);
-            }
-
-            if resp.attr.file_type != moto_rt::fs::FILETYPE_DIRECTORY {
-                return Err(moto_rt::E_NOT_A_DIRECTORY);
-            }
-
-            c_path.abs_path
-        };
-
-        *self_.cwd.lock() = cwd;
+        *self.cwd.lock() = path.abs_path;
         Ok(())
-        */
     }
 
     fn file_open(&self, path: &str, opts: u32) -> Result<File> {
@@ -322,18 +292,21 @@ impl AsyncFsClient {
         let path = CanonicalPath::parse(path)?;
 
         let maybe_entry_id = match self.stat_internal(path.clone()) {
-            Ok(entry_id) => Some(entry_id),
+            Ok(val) => Some(val),
             Err(moto_rt::Error::NotFound) => None,
             Err(err) => return Err(err),
         };
 
         let entry_id = match maybe_entry_id {
-            Some(entry_id) => {
+            Some((entry_id, entry_kind)) => {
                 if (opts & moto_rt::fs::O_CREATE_NEW) != 0 {
                     return Err(moto_rt::Error::AlreadyInUse);
                 }
 
-                log::error!("validate that entry is a file, not a dir");
+                if entry_kind != EntryKind::File {
+                    return Err(moto_rt::Error::InvalidArgument);
+                }
+
                 if (opts & moto_rt::fs::O_TRUNCATE) != 0 {
                     self.resize(entry_id, 0)?;
                 }
@@ -387,11 +360,7 @@ impl AsyncFsClient {
         })
     }
 
-    fn create_internal(
-        &self,
-        path: &CanonicalPath,
-        kind: moto_io::fs::EntryKind,
-    ) -> Result<EntryId> {
+    fn create_internal(&self, path: &CanonicalPath, kind: EntryKind) -> Result<EntryId> {
         if path.is_root() {
             return Err(moto_rt::Error::AlreadyInUse);
         }
@@ -399,9 +368,13 @@ impl AsyncFsClient {
 
         self.blocking_run(move |fs_client| async move {
             let parent = path.parent().unwrap();
-            let Ok(parent_id) = fs_client.stat(parent).await else {
+            let Ok((parent_id, parent_kind)) = fs_client.stat(parent).await else {
                 return Err(moto_rt::Error::NotFound);
             };
+
+            if parent_kind != EntryKind::Directory {
+                return Err(moto_rt::Error::NotADirectory);
+            }
 
             fs_client
                 .create_entry(parent_id, kind, path.filename())
@@ -409,9 +382,9 @@ impl AsyncFsClient {
         })
     }
 
-    fn stat_internal(&self, path: CanonicalPath) -> Result<EntryId> {
+    fn stat_internal(&self, path: CanonicalPath) -> Result<(EntryId, EntryKind)> {
         if path.is_root() {
-            return Ok(ROOT_ID);
+            return Ok((ROOT_ID, EntryKind::Directory));
         }
 
         self.blocking_run(move |fs_client| async move { fs_client.stat(&path.abs_path).await })
@@ -441,7 +414,7 @@ impl AsyncFsClient {
 
     fn stat(&self, path: &str) -> Result<moto_rt::fs::FileAttr> {
         let path = CanonicalPath::parse(path)?;
-        let entry_id = self.stat_internal(path)?;
+        let (entry_id, _) = self.stat_internal(path)?;
 
         self.metadata(entry_id)
     }
@@ -475,7 +448,7 @@ impl AsyncFsClient {
         }
 
         self.blocking_run(move |fs_client| async move {
-            let entry_id = fs_client.stat(&path.abs_path).await?;
+            let (entry_id, _) = fs_client.stat(&path.abs_path).await?;
             fs_client.delete_entry(entry_id).await
         })
     }
@@ -757,5 +730,31 @@ pub extern "C" fn unlink(path_ptr: *const u8, path_size: usize) -> moto_rt::Erro
     AsyncFsClient::get()
         .unwrap()
         .unlink(path)
+        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
+}
+
+pub extern "C" fn getcwd(out_ptr: *mut u8, out_size: *mut usize) -> moto_rt::ErrorCode {
+    let cwd = match AsyncFsClient::get().unwrap().getcwd() {
+        Ok(cwd) => cwd,
+        Err(err) => return err.into(),
+    };
+
+    let out_bytes = cwd.as_bytes();
+    assert!(out_bytes.len() <= moto_rt::fs::MAX_PATH_LEN);
+    unsafe {
+        core::ptr::copy_nonoverlapping(out_bytes.as_ptr(), out_ptr, out_bytes.len());
+        *out_size = out_bytes.len();
+    }
+
+    moto_rt::E_OK
+}
+
+pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    AsyncFsClient::get()
+        .unwrap()
+        .chdir(path)
         .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }

@@ -105,7 +105,11 @@ impl MotorFs {
 #[async_trait(?Send)]
 impl FileSystem for MotorFs {
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>> {
+    async fn stat(
+        &mut self,
+        parent_id: EntryId,
+        filename: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>> {
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
 
@@ -146,10 +150,9 @@ impl FileSystem for MotorFs {
             );
 
             if dir_entry!(child_block).name()? == filename {
-                let result = dir_entry!(child_block)
-                    .entry_id_with_validation(child_block_no)?
-                    .into();
-                return Ok(Some(result));
+                let (id, kind) =
+                    dir_entry!(child_block).entry_id_with_validation(child_block_no)?;
+                return Ok(Some((id.into(), kind)));
             }
 
             child_block_no = if let Some(id) = dir_entry!(child_block).next_entry_id() {
@@ -267,11 +270,9 @@ impl FileSystem for MotorFs {
         drop(txn);
 
         let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-        let res = dir_entry!(child_block)
-            .entry_id_with_validation(child_block_no)?
-            .into();
+        let (id, _) = dir_entry!(child_block).entry_id_with_validation(child_block_no)?;
 
-        Ok(Some(res))
+        Ok(Some(id.into()))
     }
 
     /// Get the next entry in a directory.
@@ -316,12 +317,8 @@ impl FileSystem for MotorFs {
         drop(txn);
 
         let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-        let res = Ok(Some(
-            dir_entry!(child_block)
-                .entry_id_with_validation(child_block_no)?
-                .into(),
-        ));
-        res
+        let (id, _) = dir_entry!(child_block).entry_id_with_validation(child_block_no)?;
+        Ok(Some(id.into()))
     }
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {

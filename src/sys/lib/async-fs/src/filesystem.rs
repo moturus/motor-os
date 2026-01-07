@@ -160,7 +160,11 @@ impl Metadata {
 #[async_trait(?Send)]
 pub trait FileSystem {
     /// Find a file or directory by its full path.
-    async fn stat(&mut self, parent_id: EntryId, filename: &str) -> Result<Option<EntryId>>;
+    async fn stat(
+        &mut self,
+        parent_id: EntryId,
+        filename: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>>;
 
     /// Create a file or directory.
     async fn create_entry(

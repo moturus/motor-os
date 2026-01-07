@@ -438,7 +438,10 @@ impl DirEntryBlock {
         }
     }
 
-    pub fn entry_id_with_validation(&self, block_no: BlockNo) -> Result<EntryIdInternal> {
+    pub fn entry_id_with_validation(
+        &self,
+        block_no: BlockNo,
+    ) -> Result<(EntryIdInternal, EntryKind)> {
         let entry_id = self.entry_id;
         if entry_id.block_no != block_no {
             log::error!("Corrupt dir entry: block no {block_no:?} does not match {entry_id:?}.");
@@ -450,7 +453,7 @@ impl DirEntryBlock {
         }
 
         self.validate_entry(entry_id)?;
-        Ok(entry_id)
+        Ok((entry_id, self.metadata.kind()))
     }
 
     #[cfg(all(test, debug_assertions))]

@@ -194,7 +194,7 @@ async fn on_cmd_stat(
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
-    let Some(entry_id) = fs.stat(parent_id, fname.as_str()).await.map_err(|err| {
+    let Some((entry_id, entry_kind)) = fs.stat(parent_id, fname.as_str()).await.map_err(|err| {
         log::warn!("fs.stat() failed: {err:?}");
         err
     })?
@@ -204,7 +204,7 @@ async fn on_cmd_stat(
     };
     core::mem::drop(fs);
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id);
+    let resp = api_fs::stat_resp_encode(msg, entry_id, entry_kind);
     sender.send(resp).await.map_err(map_native_error)
 }
 
@@ -228,7 +228,7 @@ async fn on_cmd_create_file(
     core::mem::drop(fs);
     log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
-    let resp = api_fs::stat_resp_encode(msg, entry_id);
+    let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::File);
     sender.send(resp).await.map_err(map_native_error)
 }
 

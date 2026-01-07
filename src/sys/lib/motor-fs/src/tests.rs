@@ -110,8 +110,10 @@ async fn basic_test() -> Result<()> {
         ErrorKind::InvalidFilename
     );
 
-    assert_eq!(first, fs.stat(root, "first").await?.unwrap());
-    assert_eq!(first, fs.stat(async_fs::ROOT_ID, "first").await?.unwrap());
+    assert_eq!(
+        (first, EntryKind::Directory),
+        fs.stat(root, "first").await?.unwrap()
+    );
 
     // Check timestamps.
     let root_metadata = fs.metadata(root).await?;
@@ -342,23 +344,38 @@ async fn delete_reopen_test() -> Result<()> {
 
     let foo_id = fs.create_entry(root, EntryKind::File, "foo").await.unwrap();
     fs.write(foo_id, 0, b"foobar").await.unwrap();
-    assert_eq!(fs.stat(root, "foo").await.unwrap().unwrap(), foo_id);
+    assert_eq!(
+        fs.stat(root, "foo").await.unwrap().unwrap(),
+        (foo_id, EntryKind::File)
+    );
 
     let bar_id = fs.create_entry(root, EntryKind::File, "bar").await.unwrap();
     fs.write(bar_id, 0, b"foobarbaz").await.unwrap();
-    assert_eq!(fs.stat(root, "bar").await.unwrap().unwrap(), bar_id);
+    assert_eq!(
+        fs.stat(root, "bar").await.unwrap().unwrap(),
+        (bar_id, EntryKind::File)
+    );
 
     fs.flush().await?;
 
     let mut fs = open_fs(FS_TAG).await?;
-    assert_eq!(fs.stat(root, "foo").await.unwrap().unwrap(), foo_id);
-    assert_eq!(fs.stat(root, "bar").await.unwrap().unwrap(), bar_id);
+    assert_eq!(
+        fs.stat(root, "foo").await.unwrap().unwrap(),
+        (foo_id, EntryKind::File)
+    );
+    assert_eq!(
+        fs.stat(root, "bar").await.unwrap().unwrap(),
+        (bar_id, EntryKind::File)
+    );
 
     fs.delete_entry(foo_id).await.unwrap();
 
     let baz_id = fs.create_entry(root, EntryKind::File, "baz").await.unwrap();
     fs.write(baz_id, 0, b"baz").await.unwrap();
-    assert_eq!(fs.stat(root, "baz").await.unwrap().unwrap(), baz_id);
+    assert_eq!(
+        fs.stat(root, "baz").await.unwrap().unwrap(),
+        (baz_id, EntryKind::File)
+    );
 
     fs.delete_entry(bar_id).await.unwrap();
     assert!(fs.stat(root, "foo").await.unwrap().is_none());
