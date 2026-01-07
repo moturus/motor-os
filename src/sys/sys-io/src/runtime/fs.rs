@@ -176,6 +176,7 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, fs).await,
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(std::io::Error::from(ErrorKind::InvalidData))
@@ -324,6 +325,18 @@ async fn on_cmd_delete_entry(
         msg.id,
         fs.delete_entry(entry_id).await.map_err(map_err_into_native),
     );
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_flush(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+) -> Result<()> {
+    let mut fs = fs.lock().await;
+    let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
 
     let _ = sender.send(resp).await;
     Ok(())

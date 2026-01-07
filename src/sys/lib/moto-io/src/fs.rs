@@ -402,6 +402,13 @@ impl FsClient {
         resp.status()
     }
 
+    pub async fn flush(self: &Rc<Self>) -> Result<()> {
+        let mut msg = api_fs::flush_msg_encode();
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
     /// Rename and/or move the file or directory.
     async fn move_entry(
         &mut self,
@@ -438,10 +445,6 @@ impl FsClient {
     }
 
     async fn empty_blocks(&mut self) -> Result<u64> {
-        todo!()
-    }
-
-    async fn flush(&mut self) -> Result<()> {
         todo!()
     }
 }

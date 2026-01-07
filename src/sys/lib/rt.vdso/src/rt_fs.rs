@@ -452,6 +452,10 @@ impl AsyncFsClient {
             fs_client.delete_entry(entry_id).await
         })
     }
+
+    fn flush(&self) -> Result<()> {
+        self.blocking_run(move |fs_client| async move { fs_client.flush().await })
+    }
 }
 
 struct File {
@@ -516,8 +520,12 @@ impl PosixFile for File {
     ) -> core::result::Result<usize, moto_rt::ErrorCode> {
         todo!()
     }
+
     fn flush(&self) -> core::result::Result<(), moto_rt::ErrorCode> {
-        todo!()
+        AsyncFsClient::get()
+            .unwrap()
+            .flush()
+            .map_err(|err| err as moto_rt::ErrorCode)
     }
 
     // rt_fd indicates which FD is closed.
