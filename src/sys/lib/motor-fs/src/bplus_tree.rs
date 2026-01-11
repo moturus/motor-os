@@ -145,13 +145,6 @@ impl<const ORDER: usize> Node<ORDER> {
                 };
 
             let child_block_no = node.kv[pos].child_block_no;
-
-            log::debug!(
-                "first_child_with_key() recursive:\n\tkey: {key:x}, child_block: {:x} parent block: {:x}",
-                child_block_no.as_u64(),
-                this_block_no.as_u64()
-            );
-
             (child_block_no, key)
         };
 
@@ -310,12 +303,6 @@ impl<const ORDER: usize> Node<ORDER> {
             let kv_entries = this.kv;
             let right_key = kv_entries[split_pos].key;
             let leaf_flag = this.kind & Self::KIND_LEAF;
-
-            log::debug!(
-                "split_node(): node: {} key: {right_key} right: {}",
-                node_block_no.as_u64(),
-                right_block_no.as_u64()
-            );
 
             // Update this node.
             this.num_keys = split_pos as u8;
