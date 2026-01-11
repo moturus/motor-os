@@ -344,7 +344,7 @@ impl<const ORDER: usize> Node<ORDER> {
         }
     }
 
-    pub async fn insert_kv(
+    async fn insert_kv(
         txn: &mut Txn<'_>,
         node_block_no: BlockNo,
         key: u64,
