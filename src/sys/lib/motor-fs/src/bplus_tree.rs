@@ -1,15 +1,18 @@
 //! B+ tree.
 use crate::BTREE_NODE_OFFSET;
-use crate::BTREE_NODE_ORDER;
+use crate::BTREE_NODE_ORDER; // = 253
 use crate::BTREE_ROOT_OFFSET;
-use crate::BTREE_ROOT_ORDER;
+use crate::BTREE_ROOT_ORDER; // = 226
 use crate::BlockHeader;
 use crate::BlockNo;
 use crate::Superblock;
 use crate::Txn;
+use async_fs::block_cache::CachedBlock;
 use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
+
+const BTREE_NODE_MIN_KEYS: usize = BTREE_NODE_ORDER / 2; // = 126
 
 #[derive(Clone, Copy, Pod)]
 #[repr(C, align(8))]
@@ -76,18 +79,14 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Get the (key, block_no) of the first child, if any.
-    pub async fn first_child<'a>(
-        txn: &mut Txn<'a>,
-        this_block_no: BlockNo,
-        this_offset: usize,
-    ) -> Result<Option<KV>> {
+    pub async fn first_child<'a>(txn: &mut Txn<'a>, this_block_no: BlockNo) -> Result<Option<KV>> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
         let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
 
         let block = this_txn.get_block(this_block_no).await?;
         let block_ref = block.block();
-        let this = block_ref.get_at_offset::<Self>(this_offset);
+        let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
         if this.num_keys as usize > ORDER {
             log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
@@ -102,7 +101,9 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(Some(this.kv[0]));
         }
 
-        todo!()
+        let child_block_no = this.kv[0].child_block_no;
+        // Recursive call (modulo ORDER).
+        Box::pin(Node::<BTREE_NODE_ORDER>::first_child(txn, child_block_no)).await
     }
 
     pub async fn first_child_with_key(
@@ -432,14 +433,24 @@ impl<const ORDER: usize> Node<ORDER> {
         .await
     }
 
-    // Deletes link `val` at `key`.
-    #[allow(clippy::await_holding_refcell_ref)]
     pub async fn root_delete_link<'a>(
         txn: &mut Txn<'a>,
         this_block_no: BlockNo,
-        this_offset: usize,
         key: u64,
         block_no: BlockNo,
+    ) -> Result<()> {
+        Self::node_delete_link(txn, this_block_no, key, block_no, BlockNo::null(), 0).await
+    }
+
+    // Deletes link `val` at `key`.
+    #[allow(clippy::await_holding_refcell_ref)]
+    async fn node_delete_link<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        key: u64,
+        block_no: BlockNo,
+        parent_node_block_no: BlockNo,
+        level: u8,
     ) -> Result<()> {
         // TODO: remove unsafe when NLL Problem #3 is solved.
         // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
@@ -447,7 +458,7 @@ impl<const ORDER: usize> Node<ORDER> {
 
         let block = this_txn.get_block(this_block_no).await?;
         let block_ref = block.block();
-        let this = block_ref.get_at_offset::<Self>(this_offset);
+        let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
         if this.is_leaf() {
             let Ok(pos) =
@@ -469,16 +480,101 @@ impl<const ORDER: usize> Node<ORDER> {
 
             let block = txn.get_txn_block(this_block_no).await?;
             let mut block_ref = block.block_mut();
-            let this_mut = block_ref.get_mut_at_offset::<Self>(this_offset);
+            let this_mut = block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
             for idx in pos..((this_mut.num_keys - 1) as usize) {
                 this_mut.kv[idx] = this_mut.kv[idx + 1];
             }
 
             this_mut.num_keys -= 1;
 
+            if !this_mut.is_root() && (usize::from(this_mut.num_keys) < BTREE_NODE_MIN_KEYS) {
+                core::mem::drop(block_ref);
+
+                Node::<BTREE_NODE_ORDER>::fix_node_underflow(
+                    txn,
+                    this_block_no,
+                    parent_node_block_no,
+                    level,
+                )
+                .await?;
+            }
+
             return Ok(());
         }
 
+        // Need to go down.
+        let pos = match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+        {
+            Ok(pos) => pos,
+            Err(pos) => {
+                if pos == 0 {
+                    log::error!("Node::delete_link(): bad key");
+                    return Err(ErrorKind::InvalidData.into());
+                }
+                pos - 1
+            }
+        };
+
+        let child_block_no = this.kv[pos].child_block_no;
+
+        // Recursive call (modulo ORDER).
+        Box::pin(Node::<BTREE_NODE_ORDER>::node_delete_link(
+            txn,
+            child_block_no,
+            key,
+            block_no,
+            this_block_no,
+            level + 1,
+        ))
+        .await
+    }
+
+    #[allow(clippy::await_holding_refcell_ref)]
+    async fn fix_node_underflow<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        parent_node_block_no: BlockNo,
+        level: u8,
+    ) -> Result<()> {
+        assert!(level > 0);
+        assert!(!parent_node_block_no.is_null());
+
+        // Either move keys from siblings that have keys to spare, or merge with a sibling
+        // if can't borrow any keys.
+
+        let block = txn.get_block(this_block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+        assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+        let this_first_key = this.kv[0].key;
+
+        let left_sibling =
+            Self::get_left_sibling(txn, parent_node_block_no, level == 1, this_first_key).await?;
+
+        if !left_sibling.is_null() {
+            let sibling_block = txn.get_block(left_sibling).await?;
+            let sibling_ref = sibling_block.block();
+            let sibling = sibling_ref.get_at_offset::<Self>(Self::offset_in_block());
+            if sibling.num_keys as usize > BTREE_NODE_MIN_KEYS {
+                // Rebalance left => this.
+                todo!()
+            }
+        }
+
         todo!()
+    }
+
+    async fn get_left_sibling(
+        txn: &mut Txn<'_>,
+        parent_block_no: BlockNo,
+        parent_is_root: bool,
+        key: u64,
+    ) -> Result<BlockNo> {
+        todo!()
+        /*
+        let parent_block = txn.get_block(parent_node_block_no).await?;
+        let parent_block_ref = parent_block.block();
+        let parent = parent_block_ref.get_at_offset::<___Self>(___Self::offset_in_block());
+        */
     }
 }

@@ -246,9 +246,7 @@ impl Superblock {
         txn: &mut Txn<'a>,
         file_block_no: BlockNo,
     ) -> Result<BlockNo> {
-        let Some(kv) =
-            Node::<BTREE_ROOT_ORDER>::first_child(txn, file_block_no, BTREE_ROOT_OFFSET).await?
-        else {
+        let Some(kv) = Node::<BTREE_ROOT_ORDER>::first_child(txn, file_block_no).await? else {
             return Ok(file_block_no);
         };
 
@@ -514,7 +512,7 @@ impl DirEntryBlock {
 
     pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
-        Node::<BTREE_ROOT_ORDER>::first_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET)
+        Node::<BTREE_ROOT_ORDER>::first_child(txn, self.entry_id.block_no)
             .await
             .map(|maybe_kv| maybe_kv.map(|kv| kv.child_block_no))
     }
@@ -767,7 +765,6 @@ impl DirEntryBlock {
         Node::<BTREE_ROOT_ORDER>::root_delete_link(
             txn,
             parent_id.block_no,
-            BTREE_ROOT_OFFSET,
             hash,
             entry_id.block_no,
         )
@@ -828,14 +825,7 @@ impl DirEntryBlock {
             .metadata
             .modified = Timestamp::now();
 
-        Node::<BTREE_ROOT_ORDER>::root_delete_link(
-            txn,
-            parent_block_no,
-            BTREE_ROOT_OFFSET,
-            key,
-            child_block_no,
-        )
-        .await
+        Node::<BTREE_ROOT_ORDER>::root_delete_link(txn, parent_block_no, key, child_block_no).await
     }
 
     pub async fn increment_dir_size(txn: &mut Txn<'_>, dir_id: EntryIdInternal) -> Result<()> {

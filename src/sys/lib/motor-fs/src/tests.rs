@@ -333,7 +333,7 @@ async fn midsize_file_test() -> Result<()> {
         crate::shuffle::fnv1a_hash_64(bytes_back.as_slice())
     );
 
-    // Clear: test block accounting.
+    // Clear: test free block accounting.
     fs.delete_entry(file_id).await.unwrap();
     assert!(
         fs.read(file_id, 4096, &mut bytes.as_mut_slice()[..4096])
@@ -351,7 +351,6 @@ async fn midsize_file_test() -> Result<()> {
         fs.empty_blocks().await.unwrap()
     );
 
-    /*
     // Recreate a large file: this tests reallocating blocks from a deleted file.
     let file_id = fs
         .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "bar")
@@ -368,7 +367,6 @@ async fn midsize_file_test() -> Result<()> {
         assert_eq!(written, len);
         file_offset += written;
     }
-    */
 
     println!("midsize_file_test PASS");
     Ok(())
