@@ -287,48 +287,47 @@ async fn midsize_file_test() -> Result<()> {
         .await
         .unwrap();
 
+    let mut bytes = vec![0_u8; 1024 * 1024 * 9 + 1001];
+    for byte in &mut bytes {
+        *byte = std::random::random(..);
+    }
+
     let file_id = fs
         .create_entry(parent_id, EntryKind::File, "foo")
         .await
         .unwrap();
 
-    let mut buf = [0_u8; 512];
-    for idx in 0..512 {
-        buf[idx] = (idx & 0xff) as u8;
-    }
-
-    const FILE_SIZE: u64 = 1024 * 1024 * 8 + 65536 + 512;
-
     // Write.
     let mut file_offset = 0;
-    let mut bufno = 0;
-    while file_offset < FILE_SIZE {
-        buf[0] = (bufno & 0xff) as u8;
-        bufno += 1;
-        let written = fs
-            .write(file_id, file_offset, buf.as_slice())
-            .await
-            .unwrap();
-        assert_eq!(written, buf.len());
-        file_offset += written as u64;
-    }
+    while file_offset < bytes.len() {
+        let len = 4096.min(bytes.len() - file_offset);
+        let buf = &bytes.as_slice()[file_offset..(file_offset + len)];
 
-    assert_eq!(FILE_SIZE, fs.metadata(file_id).await.unwrap().size);
+        let written = fs.write(file_id, file_offset as u64, buf).await.unwrap();
+        assert_eq!(written, len);
+        file_offset += written;
+    }
 
     // Read.
-    let mut offset = 0;
-    bufno = 0;
-    while offset < FILE_SIZE {
-        let read = fs.read(file_id, offset, buf.as_mut_slice()).await.unwrap();
-        assert_eq!(read, buf.len());
+    let mut bytes_back = vec![];
+    bytes_back.resize(bytes.len(), 0);
 
-        assert_eq!(buf[0], (bufno & 0xff) as u8);
-        offset += read as u64;
-        bufno += 1;
-        for idx in 1..buf.len() {
-            assert_eq!(buf[idx], (idx & 0xff) as u8);
-        }
+    let mut offset = 0;
+
+    while offset < bytes.len() {
+        let len = 4096.min(bytes.len() - offset);
+        let buf = &mut bytes_back.as_mut_slice()[offset..(offset + len)];
+
+        let read = fs.read(file_id, offset as u64, buf).await.unwrap();
+        assert_eq!(read, len);
+
+        offset += read;
     }
+
+    assert_eq!(
+        crate::shuffle::fnv1a_hash_64(bytes.as_slice()),
+        crate::shuffle::fnv1a_hash_64(bytes_back.as_slice())
+    );
 
     println!("midsize_file_test PASS");
     Ok(())
