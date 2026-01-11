@@ -280,6 +280,10 @@ async fn midsize_file_test() -> Result<()> {
     const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
 
     let mut fs = create_fs("motor_fs_midsize_file_test", NUM_BLOCKS).await?;
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS,
+        fs.empty_blocks().await.unwrap()
+    );
 
     let root = crate::ROOT_DIR_ID;
     let parent_id = fs
@@ -329,11 +333,47 @@ async fn midsize_file_test() -> Result<()> {
         crate::shuffle::fnv1a_hash_64(bytes_back.as_slice())
     );
 
+    // Clear: test block accounting.
+    fs.delete_entry(file_id).await.unwrap();
+    assert!(
+        fs.read(file_id, 4096, &mut bytes.as_mut_slice()[..4096])
+            .await
+            .is_err()
+    );
+    assert!(
+        fs.write(file_id, 4096, &bytes.as_slice()[..4096])
+            .await
+            .is_err()
+    );
+    fs.delete_entry(parent_id).await.unwrap();
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS,
+        fs.empty_blocks().await.unwrap()
+    );
+
+    /*
+    // Recreate a large file: this tests reallocating blocks from a deleted file.
+    let file_id = fs
+        .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "bar")
+        .await
+        .unwrap();
+
+    // Write.
+    let mut file_offset = 0;
+    while file_offset < bytes.len() {
+        let len = 4096.min(bytes.len() - file_offset);
+        let buf = &bytes.as_slice()[file_offset..(file_offset + len)];
+
+        let written = fs.write(file_id, file_offset as u64, buf).await.unwrap();
+        assert_eq!(written, len);
+        file_offset += written;
+    }
+    */
+
     println!("midsize_file_test PASS");
     Ok(())
 }
 
-/// Create a ~9MB file on a 16MB partition. Should easily fit.
 async fn delete_reopen_test() -> Result<()> {
     const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
     const FS_TAG: &str = "motor_fs_delete_reopen_test";

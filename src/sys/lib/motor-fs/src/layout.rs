@@ -610,13 +610,26 @@ impl DirEntryBlock {
         file_id: EntryIdInternal,
         block_key: u64,
     ) -> Result<BlockNo> {
-        Self::increment_blocks_in_use(txn, file_id.block_no).await?;
+        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let free_blocks_prev = sb_block
+            .block()
+            .get_at_offset::<Superblock>(0)
+            .free_blocks();
 
         let data_block_id = Superblock::allocate_block(txn).await?;
-        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
-
         // We just allocated a new data block: need to zero it out.
         let _ = txn.get_empty_block_mut(data_block_id.block_no);
+
+        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
+
+        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let used_blocks = free_blocks_prev
+            - sb_block
+                .block()
+                .get_at_offset::<Superblock>(0)
+                .free_blocks();
+
+        Self::increment_blocks_in_use(txn, file_id.block_no, used_blocks).await?;
 
         Ok(data_block_id.block_no)
     }
@@ -836,11 +849,15 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn increment_blocks_in_use(txn: &mut Txn<'_>, entry_block_no: BlockNo) -> Result<()> {
+    pub async fn increment_blocks_in_use(
+        txn: &mut Txn<'_>,
+        entry_block_no: BlockNo,
+        val: u64,
+    ) -> Result<()> {
         let entry_block = txn.get_txn_block(entry_block_no).await?;
         let mut block_mut = entry_block.block_mut();
         let self_ = Self::from_block_mut(&mut block_mut);
-        self_.block_header.blocks_in_use += 1;
+        self_.block_header.blocks_in_use += val;
         self_.metadata.modified = Timestamp::now();
         Ok(())
     }
