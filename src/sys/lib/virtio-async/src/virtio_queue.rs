@@ -478,7 +478,7 @@ impl Virtqueue {
             return None;
         }
 
-        let head = self.next_used_idx;
+        let head = self.next_used_idx & self.queue_size_mask;
         let elem = &self.used_ring.ring[head as usize];
 
         let chain_head = elem.id as u16;
@@ -509,7 +509,7 @@ impl Virtqueue {
             self.free_descriptor_chain(chain_head);
         }
 
-        self.next_used_idx = (self.next_used_idx + 1) & self.queue_size_mask;
+        self.next_used_idx = self.next_used_idx.wrapping_add(1);
         Some(chain_head)
     }
 
