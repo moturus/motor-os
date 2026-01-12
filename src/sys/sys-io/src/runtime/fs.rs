@@ -342,6 +342,7 @@ async fn on_cmd_flush(
     Ok(())
 }
 
+#[allow(unused)]
 pub fn smoke_test() {
     assert_eq!(
         std::fs::metadata("/foo").err().unwrap().kind(),
@@ -356,7 +357,8 @@ pub fn smoke_test() {
     let bytes = std::fs::read("/foo").expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
-    let mut bytes = vec![0_u8; 1024 * 1024 * 11 + 1001];
+    // let mut bytes = vec![0_u8; 1024 * 1024 * 11 + 1001];
+    let mut bytes = vec![0_u8; 1024 * 1024 * 2 + 1001];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }

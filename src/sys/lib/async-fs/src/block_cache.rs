@@ -124,16 +124,8 @@ impl BlockCache {
 
     /// Get a reference to a cached block.
     pub async fn get_block(&mut self, block_no: u64) -> Result<CachedBlock> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        unsafe {
-            {
-                let this = self as *mut Self;
-                let this = this.as_mut().unwrap_unchecked();
-                if let Some(block) = this.cache.get(&block_no) {
-                    return Ok(block.clone());
-                }
-            }
+        if let Some(block) = self.cache.get(&block_no) {
+            return Ok(block.clone());
         }
 
         let mut block = self.internal_get_empty_block(block_no);
@@ -150,19 +142,12 @@ impl BlockCache {
     /// Get an empty block. Use with caution: any previously stored
     /// data in the block on the block device will be lost.
     pub fn get_empty_block(&mut self, block_no: u64) -> CachedBlock {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        unsafe {
-            {
-                let this = self as *mut Self;
-                let this = this.as_mut().unwrap_unchecked();
-                if let Some(block) = this.cache.get_mut(&block_no) {
-                    block.block_mut().clear();
-                    block.internal_mark_dirty();
-                    return block.clone();
-                }
-            }
+        if let Some(block) = self.cache.get_mut(&block_no) {
+            block.block_mut().clear();
+            block.internal_mark_dirty();
+            return block.clone();
         }
+
         let block = self.internal_get_empty_block(block_no);
         self.internal_push_block(block.clone());
         block

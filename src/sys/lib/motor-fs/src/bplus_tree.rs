@@ -7,7 +7,6 @@ use crate::BlockHeader;
 use crate::BlockNo;
 use crate::Superblock;
 use crate::Txn;
-use async_fs::block_cache::CachedBlock;
 use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -79,12 +78,8 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Get the (key, block_no) of the first child, if any.
-    pub async fn first_child<'a>(txn: &mut Txn<'a>, this_block_no: BlockNo) -> Result<Option<KV>> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
-
-        let block = this_txn.get_block(this_block_no).await?;
+    pub async fn first_child(txn: &mut Txn<'_>, this_block_no: BlockNo) -> Result<Option<KV>> {
+        let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
@@ -158,17 +153,13 @@ impl<const ORDER: usize> Node<ORDER> {
         .await
     }
 
-    pub async fn next_child<'a>(
-        txn: &mut Txn<'a>,
+    pub async fn next_child(
+        txn: &mut Txn<'_>,
         this_block_no: BlockNo,
         this_offset: usize,
         key: u64,
     ) -> Result<Option<BlockNo>> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
-
-        let block = this_txn.get_block(this_block_no).await?;
+        let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(this_offset);
 
@@ -206,7 +197,7 @@ impl<const ORDER: usize> Node<ORDER> {
         let right_block_no = Superblock::allocate_block(txn).await?.block_no;
 
         // Get the root block.
-        let root_block = txn.get_txn_block(root_block_no).await?;
+        let mut root_block = txn.get_block(root_block_no).await?;
         let mut root_block_ref = root_block.block_mut();
         let root = root_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
         assert_eq!(root.num_keys as usize, ORDER);
@@ -237,7 +228,7 @@ impl<const ORDER: usize> Node<ORDER> {
         core::mem::drop(root_block_ref);
 
         // Update the left block.
-        let left_block = txn.get_empty_block_mut(left_block_no);
+        let mut left_block = txn.get_empty_block_mut(left_block_no);
         let mut left_block_ref = left_block.block_mut();
 
         let bh = left_block_ref.get_mut_at_offset::<BlockHeader>(0);
@@ -253,7 +244,7 @@ impl<const ORDER: usize> Node<ORDER> {
         core::mem::drop(left_block_ref);
 
         // Update the right block.
-        let right_block = txn.get_empty_block_mut(right_block_no);
+        let mut right_block = txn.get_empty_block_mut(right_block_no);
         let mut right_block_ref = right_block.block_mut();
         let right_node =
             right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
@@ -287,7 +278,7 @@ impl<const ORDER: usize> Node<ORDER> {
         let right_block_no = Superblock::allocate_block(txn).await?.block_no;
 
         // Get this block.
-        let this_block = txn.get_txn_block(node_block_no).await?;
+        let mut this_block = txn.get_block(node_block_no).await?;
 
         let right_key = {
             let mut this_block_ref = this_block.block_mut();
@@ -311,7 +302,7 @@ impl<const ORDER: usize> Node<ORDER> {
 
             // Update the right block.
             // TODO: the code below is very similar to a piece in split_root().
-            let right_block = txn.get_empty_block_mut(right_block_no);
+            let mut right_block = txn.get_empty_block_mut(right_block_no);
             let mut right_block_ref = right_block.block_mut();
             let right_node =
                 right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
@@ -351,7 +342,7 @@ impl<const ORDER: usize> Node<ORDER> {
         key: u64,
         val: BlockNo,
     ) -> Result<()> {
-        let node_block = txn.get_txn_block(node_block_no).await?;
+        let mut node_block = txn.get_block(node_block_no).await?;
         let mut node_ref_mut = node_block.block_mut();
         let node_mut = node_ref_mut.get_mut_at_offset::<Self>(Self::offset_in_block());
         assert!((node_mut.num_keys as usize) < ORDER);
@@ -387,7 +378,7 @@ impl<const ORDER: usize> Node<ORDER> {
         parent_node_block_no: BlockNo,
         level: u8,
     ) -> Result<()> {
-        let node_block = txn.get_txn_block(node_block_no).await?;
+        let node_block = txn.get_block(node_block_no).await?;
 
         let child_block_no = {
             // We explicitly drop node_block_ref below. Clippy is reporting false positives.
@@ -444,19 +435,15 @@ impl<const ORDER: usize> Node<ORDER> {
 
     // Deletes link `val` at `key`.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn node_delete_link<'a>(
-        txn: &mut Txn<'a>,
+    async fn node_delete_link(
+        txn: &mut Txn<'_>,
         this_block_no: BlockNo,
         key: u64,
         block_no: BlockNo,
         parent_node_block_no: BlockNo,
         level: u8,
     ) -> Result<()> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
-
-        let block = this_txn.get_block(this_block_no).await?;
+        let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
@@ -478,7 +465,7 @@ impl<const ORDER: usize> Node<ORDER> {
 
             core::mem::drop(block_ref);
 
-            let block = txn.get_txn_block(this_block_no).await?;
+            let mut block = txn.get_block(this_block_no).await?;
             let mut block_ref = block.block_mut();
             let this_mut = block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
             for idx in pos..((this_mut.num_keys - 1) as usize) {
@@ -530,8 +517,8 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn fix_node_underflow<'a>(
-        txn: &mut Txn<'a>,
+    async fn fix_node_underflow(
+        txn: &mut Txn<'_>,
         this_block_no: BlockNo,
         parent_node_block_no: BlockNo,
         level: u8,
@@ -564,6 +551,7 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
+    #[allow(unused)]
     async fn get_left_sibling(
         txn: &mut Txn<'_>,
         parent_block_no: BlockNo,

@@ -176,8 +176,8 @@ impl Superblock {
 
     // Allocate a new/empty block. Also increments generation.
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn allocate_block<'a>(txn: &mut Txn<'a>) -> Result<EntryIdInternal> {
-        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+    pub async fn allocate_block(txn: &mut Txn<'_>) -> Result<EntryIdInternal> {
+        let mut sb_block = txn.get_block(BlockNo(0)).await?;
         let mut block_ref = sb_block.block_mut();
         let this = block_ref.get_mut_at_offset::<Self>(0);
 
@@ -208,7 +208,7 @@ impl Superblock {
 
         drop(block_ref);
 
-        let head_block = txn.get_txn_block(head_bn).await?.clone();
+        let head_block = txn.get_block(head_bn).await?.clone();
         let head_ref = head_block.block();
         let ebh = head_ref.get_at_offset::<EmptyBlockHeader>(0);
         let maybe_next = ebh.next_empty_block;
@@ -230,7 +230,7 @@ impl Superblock {
             BlockType::EmptyBlock => (maybe_next, head_bn),
         };
 
-        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let mut sb_block = txn.get_block(BlockNo(0)).await?;
         let mut block_ref = sb_block.block_mut();
         let this = block_ref.get_mut_at_offset::<Self>(0);
         this.freelist_head = next_head;
@@ -260,7 +260,7 @@ impl Superblock {
     #[allow(clippy::await_holding_refcell_ref)]
     pub async fn free_single_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
         assert!(block_no.as_u64() > 1);
-        let mut sb_block = txn.get_txn_block(BlockNo(0)).await?.clone();
+        let mut sb_block = txn.get_block(BlockNo(0)).await?.clone();
         let mut sb_mut_ref = sb_block.block_mut();
         let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
 
@@ -272,7 +272,7 @@ impl Superblock {
             return Ok(());
         }
 
-        let mut target_block = txn.get_txn_block(block_no).await?.clone();
+        let mut target_block = txn.get_block(block_no).await?.clone();
         let mut target_mut_ref = target_block.block_mut();
         let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
         ebh.block_type = BlockType::EmptyBlock as u8;
@@ -284,8 +284,8 @@ impl Superblock {
     }
 
     pub async fn free_complex_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
-        let mut target_block = txn.get_txn_block(block_no).await?.clone();
-        let mut sb_block = txn.get_txn_block(BlockNo(0)).await?.clone();
+        let mut target_block = txn.get_block(block_no).await?.clone();
+        let mut sb_block = txn.get_block(BlockNo(0)).await?.clone();
 
         let mut target_mut_ref = target_block.block_mut();
 
@@ -581,8 +581,8 @@ impl DirEntryBlock {
         &mut self.metadata
     }
 
-    pub async fn get_hash<'a, 'b: 'a>(
-        txn: &'b mut Txn<'a>,
+    pub async fn get_hash(
+        txn: &mut Txn<'_>,
         parent_id: EntryIdInternal,
         filename: &str,
     ) -> Result<u64> {
@@ -608,7 +608,7 @@ impl DirEntryBlock {
         file_id: EntryIdInternal,
         block_key: u64,
     ) -> Result<BlockNo> {
-        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let sb_block = txn.get_block(BlockNo(0)).await?;
         let free_blocks_prev = sb_block
             .block()
             .get_at_offset::<Superblock>(0)
@@ -620,7 +620,7 @@ impl DirEntryBlock {
 
         Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
 
-        let sb_block = txn.get_txn_block(BlockNo(0)).await?;
+        let sb_block = txn.get_block(BlockNo(0)).await?;
         let used_blocks = free_blocks_prev
             - sb_block
                 .block()
@@ -638,7 +638,7 @@ impl DirEntryBlock {
         file_block_no: BlockNo,
         new_size: u64,
     ) -> Result<()> {
-        let entry_block = txn.get_txn_block(file_block_no).await?;
+        let mut entry_block = txn.get_block(file_block_no).await?;
         let mut entry_ref = entry_block.block_mut();
         let entry = DirEntryBlock::from_block_mut(&mut entry_ref);
         assert_eq!(entry.kind(), EntryKind::File);
@@ -656,7 +656,7 @@ impl DirEntryBlock {
         kind: async_fs::EntryKind,
         filename: &str,
     ) {
-        let child_block = txn.get_empty_block_mut(entry_id.block_no);
+        let mut child_block = txn.get_empty_block_mut(entry_id.block_no);
         let mut child_block_ref = child_block.block_mut();
         let child = Self::from_block_mut(&mut child_block_ref);
 
@@ -683,17 +683,8 @@ impl DirEntryBlock {
         child.btree_root.init_new_root();
     }
 
-    pub async fn delete_entry<'a, 'b>(
-        txn: &'b mut Txn<'a>,
-        entry_id: EntryIdInternal,
-    ) -> Result<()> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_txn = unsafe {
-            let this = txn as *mut Txn<'a>;
-            this.as_mut().unwrap_unchecked()
-        };
-        let entry_block = this_txn.get_block(entry_id.block_no).await?.clone();
+    pub async fn delete_entry(txn: &mut Txn<'_>, entry_id: EntryIdInternal) -> Result<()> {
+        let entry_block = txn.get_block(entry_id.block_no).await?.clone();
         dir_entry!(entry_block).validate_entry(entry_id)?;
         let parent_id = dir_entry!(entry_block).parent_id();
 
@@ -717,14 +708,14 @@ impl DirEntryBlock {
         }
     }
 
-    pub async fn unlink_entry<'a, 'b>(
-        txn: &'b mut Txn<'a>,
+    pub async fn unlink_entry(
+        txn: &mut Txn<'_>,
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
         mark_not_used: bool,
     ) -> Result<()> {
         let (name_buf, name_len) = {
-            let entry_block = txn.get_txn_block(entry_id.block_no).await?;
+            let mut entry_block = txn.get_block(entry_id.block_no).await?;
             let mut entry_ref = entry_block.block_mut();
             let entry = DirEntryBlock::from_block_mut(&mut entry_ref);
             assert_eq!(entry.parent_id, parent_id); // The caller must ensure this.
@@ -743,10 +734,7 @@ impl DirEntryBlock {
             (name_buf, name_len)
         };
 
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_txn = unsafe { (txn as *mut Txn).as_mut().unwrap_unchecked() };
-        let hash = Self::get_hash(this_txn, parent_id, unsafe {
+        let hash = Self::get_hash(txn, parent_id, unsafe {
             str::from_utf8_unchecked(&name_buf[..name_len])
         })
         .await?;
@@ -770,7 +758,7 @@ impl DirEntryBlock {
         )
         .await?;
 
-        let parent_block = txn.get_txn_block(parent_id.block_no).await?;
+        let mut parent_block = txn.get_block(parent_id.block_no).await?;
         Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .modified = Timestamp::now();
@@ -787,7 +775,7 @@ impl DirEntryBlock {
         child_block_no: BlockNo,
         key: u64,
     ) -> Result<()> {
-        let parent_block = txn.get_txn_block(parent_block_no).await?;
+        let mut parent_block = txn.get_block(parent_block_no).await?;
         Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .modified = Timestamp::now();
@@ -820,7 +808,7 @@ impl DirEntryBlock {
         child_block_no: BlockNo,
         key: u64,
     ) -> Result<()> {
-        let parent_block = txn.get_txn_block(parent_block_no).await?;
+        let mut parent_block = txn.get_block(parent_block_no).await?;
         Self::from_block_mut(&mut parent_block.block_mut())
             .metadata
             .modified = Timestamp::now();
@@ -829,7 +817,7 @@ impl DirEntryBlock {
     }
 
     pub async fn increment_dir_size(txn: &mut Txn<'_>, dir_id: EntryIdInternal) -> Result<()> {
-        let dir_block = txn.get_txn_block(dir_id.block_no).await?;
+        let mut dir_block = txn.get_block(dir_id.block_no).await?;
         Self::from_block_mut(&mut dir_block.block_mut())
             .metadata
             .size += 1;
@@ -844,7 +832,7 @@ impl DirEntryBlock {
         entry_block_no: BlockNo,
         val: u64,
     ) -> Result<()> {
-        let entry_block = txn.get_txn_block(entry_block_no).await?;
+        let mut entry_block = txn.get_block(entry_block_no).await?;
         let mut block_mut = entry_block.block_mut();
         let self_ = Self::from_block_mut(&mut block_mut);
         self_.block_header.blocks_in_use += val;
@@ -853,7 +841,7 @@ impl DirEntryBlock {
     }
 
     pub async fn decrement_blocks_in_use(txn: &mut Txn<'_>, entry_block_no: BlockNo) -> Result<()> {
-        let entry_block = txn.get_txn_block(entry_block_no).await?;
+        let mut entry_block = txn.get_block(entry_block_no).await?;
         let mut block_mut = entry_block.block_mut();
         let self_ = Self::from_block_mut(&mut block_mut);
         self_.block_header.blocks_in_use -= 1;

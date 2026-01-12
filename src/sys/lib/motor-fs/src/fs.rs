@@ -4,34 +4,6 @@
 //!       to resemble dir entry or tree blocks, and then issue operations like
 //!       insert/delete. This should be fixed at a higher (OS?) level.
 
-// Note: quite often the following construct is used to create a second
-//       mutable reference to an object:
-//
-//   // TODO: remove unsafe when NLL Problem #3 is solved.
-//   // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-//   let this = unsafe {
-//       let this = self as *mut Self;
-//       this.as_mut().unwrap_unchecked()
-//   };
-//
-// Sometimes it is indeed because the compiler has the NLL Problem #3 bug.
-// But sometimes it is because an async function takes '&mut txn' parameter
-// and returns a future that borrows it; if the future were to outlive the txn,
-// we would have a dangling reference. But all of the functions here are only
-// called from trait Filesystem (async) methods, and the assumption is that
-// the client/caller keeps the filesystem object around long enough to outlive
-// all futures "in flight".
-//
-// This is an unsafe assumption, but we present (and implement) trait Filesystem
-// as a safe interface.
-//
-// TODO: fix the unsafety described above. One option is to take &'static mut self
-//       in all trait Filesystem methods, thus explicitly indicating that we assume
-//       the filesystem object to outlive anything the implementation can do.
-//
-//       This will be too harsh, though: the client code won't be able to unmount
-//       filesystems once mounted...
-
 use async_fs::block_cache::BlockCache;
 use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
 use async_fs::{EntryId, EntryKind};

@@ -15,7 +15,7 @@ use async_fs::{
 use std::io::{ErrorKind, Result};
 
 /// Max number of blocks a single transaction may touch.
-const TXN_CACHE_SIZE: usize = 12;
+const TXN_CACHE_SIZE: usize = 16;
 
 /// The transaction object: accumulates "dirty" blocks, then either discards
 /// them on error (so no changes to the underlying FS happen) or applies them
@@ -28,20 +28,9 @@ pub struct Txn<'a> {
 
 impl<'a> Drop for Txn<'a> {
     fn drop(&mut self) {
-        let Txn {
-            fs,
-            txn_cache,
-            read_only,
-        } = self;
-
-        if *read_only {
-            assert!(txn_cache.is_empty());
-            return;
-        }
-
-        for (block_no, block) in txn_cache.drain() {
+        for (block_no, block) in self.txn_cache.drain() {
             assert_eq!(block_no.as_u64(), block.block_no());
-            fs.block_cache().discard(block);
+            assert!(!block.is_dirty());
         }
 
         #[cfg(debug_assertions)]
@@ -88,80 +77,31 @@ impl<'a> Txn<'a> {
         }
     }
 
-    pub async fn get_block(&mut self, block_no: BlockNo) -> std::io::Result<CachedBlock> {
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-
-        if let Some(txn_block) = this.txn_cache.get(&block_no) {
-            return Ok(txn_block.clone());
-        }
-
-        self.block_cache().get_block(block_no.as_u64()).await
-    }
-
     /// Unlike get_block() above, get_txn_block() ensures the block is part of the transaction,
     /// i.e. will be saved in Txn::commit().
-    pub async fn get_txn_block(&mut self, block_no: BlockNo) -> std::io::Result<&mut CachedBlock> {
-        assert!(!self.read_only);
-
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_1 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-        let this_2 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-
-        if let Some(txn_block) = this_1.txn_cache.get_mut(&block_no) {
-            return Ok(txn_block);
+    pub async fn get_block(&mut self, block_no: BlockNo) -> std::io::Result<CachedBlock> {
+        if let Some(block) = self.txn_cache.get(&block_no) {
+            return Ok(block.clone());
         }
 
         let block = self.block_cache().get_block(block_no.as_u64()).await?;
-        this_2.txn_cache.insert(block_no, block.clone());
+        self.txn_cache.insert(block_no, block.clone());
 
-        // Recursion.
-        let Some(txn_block) = this_2.txn_cache.get_mut(&block_no) else {
-            panic!();
-        };
-
-        Ok(txn_block)
+        Ok(block)
     }
 
-    pub fn get_empty_block_mut(&mut self, block_no: BlockNo) -> &mut CachedBlock {
+    pub fn get_empty_block_mut(&mut self, block_no: BlockNo) -> CachedBlock {
         assert!(!self.read_only);
 
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_1 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-        let this_2 = unsafe {
-            let this = self as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-
-        if let Some(txn_block) = this_1.txn_cache.get_mut(&block_no) {
+        if let Some(txn_block) = self.txn_cache.get_mut(&block_no) {
             txn_block.block_mut().clear();
-            return txn_block;
+            return txn_block.clone();
         }
 
         let block = self.block_cache().get_empty_block(block_no.as_u64());
-        this_2.txn_cache.insert(block_no, block.clone());
+        self.txn_cache.insert(block_no, block.clone());
 
-        // Recursion.
-        let Some(txn_block) = this_2.txn_cache.get_mut(&block_no) else {
-            panic!();
-        };
-
-        txn_block
+        block
     }
 
     pub async fn do_create_entry_txn(
@@ -181,13 +121,7 @@ impl<'a> Txn<'a> {
             read_only: false,
         };
 
-        // TODO: remove unsafe when NLL Problem #3 is solved.
-        // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-        let this_txn = unsafe {
-            let this = &mut txn as *mut Self;
-            this.as_mut().unwrap_unchecked()
-        };
-        let hash = DirEntryBlock::get_hash(this_txn, parent_id, filename).await?;
+        let hash = DirEntryBlock::get_hash(&mut txn, parent_id, filename).await?;
 
         let entry_id = Superblock::allocate_block(&mut txn).await?;
         DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename);
@@ -244,13 +178,7 @@ impl<'a> Txn<'a> {
         // Unlink + re-link the entry record.
         {
             DirEntryBlock::unlink_entry(&mut txn, old_parent_id, entry_id, false).await?;
-            // TODO: remove unsafe when NLL Problem #3 is solved.
-            // See https://www.reddit.com/r/rust/comments/1lhrptf/compiling_iflet_temporaries_in_rust_2024_187/
-            let this_txn = unsafe {
-                let this = &mut txn as *mut Self;
-                this.as_mut().unwrap_unchecked()
-            };
-            let hash = DirEntryBlock::get_hash(this_txn, new_parent_id, new_name).await?;
+            let hash = DirEntryBlock::get_hash(&mut txn, new_parent_id, new_name).await?;
             DirEntryBlock::link_child_block(
                 &mut txn,
                 new_parent_id.block_no,
@@ -263,7 +191,7 @@ impl<'a> Txn<'a> {
 
         // Finally, update the entry record itself.
         {
-            let entry_block = txn.get_txn_block(entry_id.block_no).await?;
+            let mut entry_block = txn.get_block(entry_id.block_no).await?;
             let entry_ref = &mut *entry_block.block_mut();
 
             DirEntryBlock::from_block_mut(entry_ref)
@@ -319,7 +247,7 @@ impl<'a> Txn<'a> {
             };
 
         // Step 2: update the data lock.
-        let data_block = txn.get_txn_block(data_block_no).await?;
+        let mut data_block = txn.get_block(data_block_no).await?;
         data_block.block_mut().as_bytes_mut()
             [(offset - block_start) as usize..(new_file_size - block_start) as usize]
             .copy_from_slice(buf);
@@ -398,7 +326,7 @@ impl<'a> Txn<'a> {
             // Zero out truncated bytes.
             let new_end = (new_size - last_block_start) as usize;
             let old_end = (prev_size - last_block_start) as usize;
-            let data_block = txn.get_txn_block(data_block_no).await?;
+            let mut data_block = txn.get_block(data_block_no).await?;
             data_block.block_mut().as_bytes_mut()[new_end..old_end].fill(0);
 
             return txn.commit().await;
@@ -435,7 +363,7 @@ impl<'a> Txn<'a> {
 
             // Zero out truncated bytes.
             let new_end = (new_size - last_block_start) as usize;
-            let data_block = txn.get_txn_block(data_block_no).await?;
+            let mut data_block = txn.get_block(data_block_no).await?;
             data_block.block_mut().as_bytes_mut()[new_end..].fill(0);
 
             return txn.commit().await;
