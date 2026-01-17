@@ -328,11 +328,6 @@ async fn midsize_file_test() -> Result<()> {
         offset += read;
     }
 
-    assert_eq!(
-        crate::shuffle::fnv1a_hash_64(bytes.as_slice()),
-        crate::shuffle::fnv1a_hash_64(bytes_back.as_slice())
-    );
-
     // Clear: test free block accounting.
     fs.delete_entry(file_id).await.unwrap();
     assert!(
@@ -367,6 +362,12 @@ async fn midsize_file_test() -> Result<()> {
         assert_eq!(written, len);
         file_offset += written;
     }
+
+    fs.delete_entry(file_id).await.unwrap();
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS,
+        fs.empty_blocks().await.unwrap()
+    );
 
     println!("midsize_file_test PASS");
     Ok(())

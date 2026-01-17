@@ -15,7 +15,6 @@ mod bplus_tree;
 mod city_hash;
 mod fs;
 mod layout;
-mod shuffle;
 mod txn;
 
 pub(crate) use layout::*;

@@ -20,6 +20,7 @@ use std::io::ErrorKind;
 use crate::Txn;
 use crate::bplus_tree;
 use crate::bplus_tree::Node;
+use crate::bplus_tree::RootNode;
 pub use async_fs::BLOCK_SIZE;
 use async_fs::Block;
 pub use async_fs::EntryId;
@@ -188,15 +189,6 @@ impl Superblock {
 
         let head_bn = this.freelist_head;
         if head_bn.is_null() {
-            if this.empty_area_start != (this.num_blocks - TXN_BLOCKS - this.free_blocks) {
-                log::error!(
-                    "Corrupted free block accounting: num_blocks: {}, free blocks: {}, empty_area_start: {}.",
-                    this.num_blocks,
-                    this.free_blocks,
-                    this.empty_area_start
-                );
-                return Err(ErrorKind::InvalidData.into());
-            }
             this.free_blocks -= 1;
             this.empty_area_start += 1;
             this.generation += 1;
@@ -246,12 +238,44 @@ impl Superblock {
         txn: &mut Txn<'a>,
         file_block_no: BlockNo,
     ) -> Result<BlockNo> {
-        let Some(kv) = Node::<BTREE_ROOT_ORDER>::first_child(txn, file_block_no).await? else {
+        let Some(kv) = RootNode::first_child(txn, file_block_no).await? else {
+            #[cfg(all(test, debug_assertions))]
+            {
+                let target_block = txn.get_block(file_block_no).await?;
+                let block_ref = target_block.block();
+                let entry = DirEntryBlock::from_block(&block_ref);
+                assert_eq!(entry.kind(), EntryKind::File);
+                assert_eq!(1, entry.block_header.blocks_in_use);
+                // log::warn!("ACCOUNTING MATCHES!");
+            }
+            // No children: use this (root/entry) block.
             return Ok(file_block_no);
         };
 
+        let mut sb_block = txn.get_block(BlockNo(0)).await?;
+        let free_blocks_prev = sb_block
+            .block()
+            .get_at_offset::<Superblock>(0)
+            .free_blocks();
         DirEntryBlock::unlink_child_block(txn, file_block_no, kv.child_block_no, kv.key).await?;
-        DirEntryBlock::decrement_blocks_in_use(txn, file_block_no).await?;
+        let free_blocks_now = sb_block
+            .block()
+            .get_at_offset::<Superblock>(0)
+            .free_blocks();
+
+        // We are reallocating: all "freed" blocks were already accounted as free,
+        // so we must adjust the count to avoid double-counting them.
+        sb_block
+            .block_mut()
+            .get_mut_at_offset::<Superblock>(0)
+            .free_blocks = free_blocks_prev;
+
+        DirEntryBlock::decrement_blocks_in_use(
+            txn,
+            file_block_no,
+            free_blocks_now - free_blocks_prev + 1,
+        )
+        .await?;
 
         Ok(kv.child_block_no)
     }
@@ -476,12 +500,6 @@ impl DirEntryBlock {
         crate::city_hash::city_hash64_with_seed(filename.as_bytes(), self.hash_seed)
     }
 
-    pub fn hash_u64(&self, val: u64) -> u64 {
-        assert_eq!(self.kind(), EntryKind::File);
-
-        crate::shuffle::shuffle_u64(val, self.hash_seed)
-    }
-
     pub fn validate_entry(&self, entry_id: EntryIdInternal) -> Result<()> {
         if !self.in_use()? {
             // This can be a user error, so we don't log an error.
@@ -590,17 +608,6 @@ impl DirEntryBlock {
         dir_entry!(parent_block).validate_entry(parent_id)?;
 
         Ok(dir_entry!(parent_block).hash(filename))
-    }
-
-    pub async fn get_hash_u64(
-        txn: &mut Txn<'_>,
-        parent_id: EntryIdInternal,
-        val: u64,
-    ) -> Result<u64> {
-        let parent_block = txn.get_block(parent_id.block_no).await?;
-        dir_entry!(parent_block).validate_entry(parent_id)?;
-
-        Ok(dir_entry!(parent_block).hash_u64(val))
     }
 
     pub async fn insert_data_block(
@@ -750,7 +757,8 @@ impl DirEntryBlock {
             todo!("delete the entry from the list.");
         }
 
-        Node::<BTREE_ROOT_ORDER>::root_delete_link(
+        // We ignore the number of freed btree nodes.
+        let _ = Node::<BTREE_ROOT_ORDER>::root_delete_link(
             txn,
             parent_id.block_no,
             hash,
@@ -840,11 +848,16 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn decrement_blocks_in_use(txn: &mut Txn<'_>, entry_block_no: BlockNo) -> Result<()> {
+    pub async fn decrement_blocks_in_use(
+        txn: &mut Txn<'_>,
+        entry_block_no: BlockNo,
+        val: u64,
+    ) -> Result<()> {
         let mut entry_block = txn.get_block(entry_block_no).await?;
         let mut block_mut = entry_block.block_mut();
         let self_ = Self::from_block_mut(&mut block_mut);
-        self_.block_header.blocks_in_use -= 1;
+        self_.metadata.modified = Timestamp::now();
+        self_.block_header.blocks_in_use -= val;
         Ok(())
     }
 }

@@ -11,7 +11,11 @@ use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
 
-const BTREE_NODE_MIN_KEYS: usize = BTREE_NODE_ORDER / 2; // = 126
+// Note: we keep min keys at less than half to prevent insert/delete thrashing.
+// TODO: figure out the best value for this constant.
+// Note: because root nodes and non-root nodes have different orders,
+// we need to have min keys less than half the root node order, to avoid complexity.
+const BTREE_NODE_MIN_KEYS: usize = BTREE_ROOT_ORDER / 2 - 5; // = 108
 
 #[derive(Clone, Copy, Pod)]
 #[repr(C, align(8))]
@@ -47,9 +51,16 @@ pub(crate) struct Node<const ORDER: usize> {
 unsafe impl<const ORDER: usize> bytemuck::Zeroable for Node<ORDER> {}
 unsafe impl<const ORDER: usize> bytemuck::Pod for Node<ORDER> {}
 
+pub(crate) type RootNode = Node<BTREE_ROOT_ORDER>;
+pub(crate) type NonRootNode = Node<BTREE_NODE_ORDER>;
+
 impl<const ORDER: usize> Node<ORDER> {
     const KIND_LEAF: u8 = 1;
     const KIND_ROOT: u8 = 2;
+
+    const fn order() -> usize {
+        ORDER
+    }
 
     pub fn init_new_root(&mut self) {
         self.num_keys = 0;
@@ -98,7 +109,7 @@ impl<const ORDER: usize> Node<ORDER> {
 
         let child_block_no = this.kv[0].child_block_no;
         // Recursive call (modulo ORDER).
-        Box::pin(Node::<BTREE_NODE_ORDER>::first_child(txn, child_block_no)).await
+        Box::pin(NonRootNode::first_child(txn, child_block_no)).await
     }
 
     pub async fn first_child_with_key(
@@ -145,12 +156,7 @@ impl<const ORDER: usize> Node<ORDER> {
         };
 
         // Recursive call (modulo ORDER).
-        Box::pin(Node::<BTREE_NODE_ORDER>::first_child_with_key(
-            txn,
-            child_block_no,
-            key,
-        ))
-        .await
+        Box::pin(NonRootNode::first_child_with_key(txn, child_block_no, key)).await
     }
 
     pub async fn next_child(
@@ -189,74 +195,6 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
-    async fn split_root(txn: &mut Txn<'_>, root_block_no: BlockNo) -> Result<()> {
-        assert_eq!(ORDER, BTREE_ROOT_ORDER);
-
-        // Allocate two new blocks.
-        let left_block_no = Superblock::allocate_block(txn).await?.block_no;
-        let right_block_no = Superblock::allocate_block(txn).await?.block_no;
-
-        // Get the root block.
-        let mut root_block = txn.get_block(root_block_no).await?;
-        let mut root_block_ref = root_block.block_mut();
-        let root = root_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
-        assert_eq!(root.num_keys as usize, ORDER);
-
-        // Save data to copy.
-        let root_entries = root.kv;
-        let left_key = u64::MIN;
-        let split_pos = (ORDER >> 1) + 1;
-        assert!(split_pos <= u8::MAX as usize);
-        let right_key = root_entries[split_pos].key;
-        let leaf_flag = root.kind & Self::KIND_LEAF;
-
-        log::debug!(
-            "split_root(): root: {} key: {right_key} left: {} right: {}",
-            root_block_no.as_u64(),
-            left_block_no.as_u64(),
-            right_block_no.as_u64()
-        );
-
-        // Update root.
-        root.kind &= !Self::KIND_LEAF;
-        root.num_keys = 2;
-        root.kv[0].key = left_key;
-        root.kv[0].child_block_no = left_block_no;
-        root.kv[1].key = right_key;
-        root.kv[1].child_block_no = right_block_no;
-
-        core::mem::drop(root_block_ref);
-
-        // Update the left block.
-        let mut left_block = txn.get_empty_block_mut(left_block_no);
-        let mut left_block_ref = left_block.block_mut();
-
-        let bh = left_block_ref.get_mut_at_offset::<BlockHeader>(0);
-        bh.set_block_type(crate::BlockType::TreeNode);
-
-        let left_node =
-            left_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
-
-        left_node.num_keys = split_pos as u8;
-        left_node.kind = leaf_flag;
-        left_node.kv[..split_pos].clone_from_slice(&root_entries[..split_pos]);
-
-        core::mem::drop(left_block_ref);
-
-        // Update the right block.
-        let mut right_block = txn.get_empty_block_mut(right_block_no);
-        let mut right_block_ref = right_block.block_mut();
-        let right_node =
-            right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
-
-        right_node.num_keys = (BTREE_ROOT_ORDER - split_pos) as u8;
-        right_node.kind = leaf_flag;
-        right_node.kv[..(right_node.num_keys as usize)]
-            .clone_from_slice(&root_entries[split_pos..]);
-
-        Ok(())
-    }
-
     async fn split_node(
         txn: &mut Txn<'_>,
         node_block_no: BlockNo,
@@ -268,7 +206,7 @@ impl<const ORDER: usize> Node<ORDER> {
         if is_root {
             assert_eq!(ORDER, BTREE_ROOT_ORDER);
             assert_eq!(level, 0);
-            return Self::split_root(txn, node_block_no).await;
+            return RootNode::split_root(txn, node_block_no).await;
         } else {
             assert_eq!(ORDER, BTREE_NODE_ORDER);
             assert!(level > 0);
@@ -304,8 +242,7 @@ impl<const ORDER: usize> Node<ORDER> {
             // TODO: the code below is very similar to a piece in split_root().
             let mut right_block = txn.get_empty_block_mut(right_block_no);
             let mut right_block_ref = right_block.block_mut();
-            let right_node =
-                right_block_ref.get_mut_at_offset::<Node<BTREE_NODE_ORDER>>(BTREE_NODE_OFFSET);
+            let right_node = right_block_ref.get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
 
             right_node.num_keys = (ORDER - split_pos) as u8;
             right_node.kind = leaf_flag;
@@ -318,21 +255,9 @@ impl<const ORDER: usize> Node<ORDER> {
         // Insert the link to the new node into the parent.
         if level == 1 {
             // The parent is root.
-            Node::<BTREE_ROOT_ORDER>::insert_kv(
-                txn,
-                parent_node_block_no,
-                right_key,
-                right_block_no,
-            )
-            .await
+            RootNode::insert_kv(txn, parent_node_block_no, right_key, right_block_no).await
         } else {
-            Node::<BTREE_NODE_ORDER>::insert_kv(
-                txn,
-                parent_node_block_no,
-                right_key,
-                right_block_no,
-            )
-            .await
+            NonRootNode::insert_kv(txn, parent_node_block_no, right_key, right_block_no).await
         }
     }
 
@@ -413,7 +338,7 @@ impl<const ORDER: usize> Node<ORDER> {
         };
 
         // Recursive call (modulo ORDER).
-        Box::pin(Node::<BTREE_NODE_ORDER>::node_insert_link(
+        Box::pin(NonRootNode::node_insert_link(
             txn,
             child_block_no,
             key,
@@ -424,41 +349,39 @@ impl<const ORDER: usize> Node<ORDER> {
         .await
     }
 
-    pub async fn root_delete_link<'a>(
-        txn: &mut Txn<'a>,
-        this_block_no: BlockNo,
-        key: u64,
-        block_no: BlockNo,
-    ) -> Result<()> {
-        Self::node_delete_link(txn, this_block_no, key, block_no, BlockNo::null(), 0).await
-    }
-
     // Deletes link `val` at `key`.
+    // Returns KV from _this_block_no_ to be removed, if any.
     #[allow(clippy::await_holding_refcell_ref)]
     async fn node_delete_link(
         txn: &mut Txn<'_>,
         this_block_no: BlockNo,
         key: u64,
-        block_no: BlockNo,
+        block_no_to_delete: BlockNo,
         parent_node_block_no: BlockNo,
         level: u8,
-    ) -> Result<()> {
+    ) -> Result<Option<(u64, BlockNo)>> {
         let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if this.is_leaf() {
-            let Ok(pos) =
-                this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-            else {
-                return Err(ErrorKind::NotFound.into());
-            };
+        let pos = match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
+        {
+            Ok(pos) => pos,
+            Err(pos) => {
+                if pos == 0 {
+                    log::error!("node_delete_link(): not found");
+                    return Err(ErrorKind::NotFound.into());
+                }
+                pos - 1
+            }
+        };
 
-            if this.kv[pos].child_block_no != block_no {
+        if this.is_leaf() {
+            if this.kv[pos].child_block_no != block_no_to_delete {
                 log::error!(
                     "Node::delete_link(): bad link: {} vs {}.",
                     this.kv[pos].child_block_no.as_u64(),
-                    block_no.as_u64()
+                    block_no_to_delete.as_u64()
                 );
                 return Err(ErrorKind::InvalidData.into());
             }
@@ -477,92 +400,627 @@ impl<const ORDER: usize> Node<ORDER> {
             if !this_mut.is_root() && (usize::from(this_mut.num_keys) < BTREE_NODE_MIN_KEYS) {
                 core::mem::drop(block_ref);
 
-                Node::<BTREE_NODE_ORDER>::fix_node_underflow(
+                return NonRootNode::fix_node_underflow(
                     txn,
                     this_block_no,
                     parent_node_block_no,
                     level,
                 )
-                .await?;
+                .await;
             }
-
-            return Ok(());
+            return Ok(None);
         }
 
         // Need to go down.
-        let pos = match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-        {
-            Ok(pos) => pos,
-            Err(pos) => {
-                if pos == 0 {
-                    log::error!("Node::delete_link(): bad key");
-                    return Err(ErrorKind::InvalidData.into());
-                }
-                pos - 1
-            }
-        };
-
         let child_block_no = this.kv[pos].child_block_no;
+        core::mem::drop(block_ref);
 
         // Recursive call (modulo ORDER).
-        Box::pin(Node::<BTREE_NODE_ORDER>::node_delete_link(
+        if let Some((key, node_block_no)) = Box::pin(NonRootNode::node_delete_link(
             txn,
             child_block_no,
             key,
-            block_no,
+            block_no_to_delete,
             this_block_no,
             level + 1,
         ))
-        .await
+        .await?
+        {
+            // log::debug!(
+            //     "node_delete_link: block {} at key {key} and level {} has expired",
+            //     node_block_no.as_u64(),
+            //     level + 1
+            // );
+
+            // Remove {key, node_block_no} from this.
+            let mut block = txn.get_block(this_block_no).await?;
+            let mut block_ref = block.block_mut();
+            let this_mut = block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
+
+            let pos = match this_mut.kv[..(this_mut.num_keys as usize)]
+                .binary_search_by_key(&key, |kv| kv.key)
+            {
+                Ok(pos) => pos,
+                Err(pos) => {
+                    assert!(pos > 0);
+                    pos - 1
+                }
+            };
+
+            for idx in pos..((this_mut.num_keys - 1) as usize) {
+                this_mut.kv[idx] = this_mut.kv[idx + 1];
+            }
+
+            this_mut.num_keys -= 1;
+
+            Superblock::free_single_block(txn, node_block_no).await?;
+
+            // We don't bother fixing root node underflow here. We let the number
+            // of root children go down to one, and then if the child underflows,
+            // we just copy it into the parent.
+            if !this_mut.is_root() && (usize::from(this_mut.num_keys) < BTREE_NODE_MIN_KEYS) {
+                core::mem::drop(block_ref);
+
+                return NonRootNode::fix_node_underflow(
+                    txn,
+                    this_block_no,
+                    parent_node_block_no,
+                    level,
+                )
+                .await;
+            }
+            return Ok(None);
+        } else {
+            Ok(None)
+        }
     }
 
+    // Fixes the underflow of this_block_no. Returns, optionally, the key and block no
+    // of the link that should be removed in the parent.
     #[allow(clippy::await_holding_refcell_ref)]
     async fn fix_node_underflow(
         txn: &mut Txn<'_>,
         this_block_no: BlockNo,
         parent_node_block_no: BlockNo,
         level: u8,
-    ) -> Result<()> {
+    ) -> Result<Option<(u64, BlockNo)>> {
         assert!(level > 0);
         assert!(!parent_node_block_no.is_null());
 
         // Either move keys from siblings that have keys to spare, or merge with a sibling
-        // if can't borrow any keys.
+        // if can't borrow any keys. Merging will trigger a key removal in the parent, which
+        // may result in the undeflow and thus a recursive call here.
 
         let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
         assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
         let this_first_key = this.kv[0].key;
+        let this_last_key = this.kv[(this.num_keys - 1) as usize].key;
 
-        let left_sibling =
-            Self::get_left_sibling(txn, parent_node_block_no, level == 1, this_first_key).await?;
+        drop(block_ref);
+        drop(block);
 
-        if !left_sibling.is_null() {
-            let sibling_block = txn.get_block(left_sibling).await?;
-            let sibling_ref = sibling_block.block();
-            let sibling = sibling_ref.get_at_offset::<Self>(Self::offset_in_block());
-            if sibling.num_keys as usize > BTREE_NODE_MIN_KEYS {
-                // Rebalance left => this.
-                todo!()
+        // log::debug!(
+        //     "fix_node_underflow: this: {} parent: {} level: {level} this_first_key: {this_first_key} this_last_key: {this_last_key}",
+        //     this_block_no.as_u64(),
+        //     parent_node_block_no.as_u64()
+        // );
+
+        // Try rebalance left.
+        if level > 1 {
+            if Self::try_rebalance_left(txn, parent_node_block_no, this_block_no, this_first_key)
+                .await?
+            {
+                return Ok(None);
+            }
+        } else {
+            if RootNode::try_rebalance_left(
+                txn,
+                parent_node_block_no,
+                this_block_no,
+                this_first_key,
+            )
+            .await?
+            {
+                return Ok(None);
             }
         }
 
-        todo!()
+        // Try rebalance right.
+        if level > 1 {
+            if Self::try_rebalance_right(txn, parent_node_block_no, this_block_no, this_last_key)
+                .await?
+            {
+                return Ok(None);
+            }
+        } else {
+            if RootNode::try_rebalance_right(
+                txn,
+                parent_node_block_no,
+                this_block_no,
+                this_last_key,
+            )
+            .await?
+            {
+                return Ok(None);
+            }
+        }
+
+        // Try merge left. Either merge left or merge right will succeed.
+        if level > 1 {
+            if let Some(kv) =
+                Self::try_merge_left(txn, parent_node_block_no, this_block_no, this_first_key)
+                    .await?
+            {
+                return Ok(Some(kv));
+            }
+        } else {
+            if let Some(kv) =
+                RootNode::try_merge_left(txn, parent_node_block_no, this_block_no, this_first_key)
+                    .await?
+            {
+                return Ok(Some(kv));
+            }
+        }
+
+        // Try merge right. Either merge left or merge right will succeed.
+        if level > 1 {
+            if let Some(kv) =
+                Self::try_merge_right(txn, parent_node_block_no, this_block_no, this_last_key)
+                    .await?
+            {
+                return Ok(Some(kv));
+            }
+        } else {
+            if let Some(kv) =
+                RootNode::try_merge_right(txn, parent_node_block_no, this_block_no, this_last_key)
+                    .await?
+            {
+                return Ok(Some(kv));
+            }
+        }
+
+        // Nothing worked. This means that this node is the only child of a root node.
+        // Just move things up.
+        assert_eq!(level, 1);
+        RootNode::assimilate_single_child(txn, parent_node_block_no, this_block_no).await?;
+        Ok(None)
+        /*
+        log::error!(
+            "fix_node_underflow: nothing worked...: block {} level {level} parent {}",
+            this_block_no.as_u64(),
+            parent_node_block_no.as_u64()
+        );
+        panic!();
+        Err(ErrorKind::InvalidData.into())
+        */
     }
 
-    #[allow(unused)]
-    async fn get_left_sibling(
+    async fn try_rebalance_left(
+        txn: &mut Txn<'_>,
+        block_no: BlockNo,
+        child_block_no: BlockNo,
+        child_left_key: u64,
+    ) -> Result<bool> {
+        let left_sibling = Self::get_left_child(txn, block_no, child_left_key).await?;
+        if left_sibling.is_null() {
+            return Ok(false);
+        }
+
+        let mut sibling_block = txn.get_block(left_sibling).await?;
+        let sibling_ref = sibling_block.block();
+        let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+        if sibling.num_keys as usize <= BTREE_NODE_MIN_KEYS {
+            return Ok(false);
+        }
+
+        // Extract the last element from the left sibling.
+        let kv = sibling.kv[(sibling.num_keys as usize) - 1];
+        let new_key = kv.key;
+
+        drop(sibling_ref);
+        let mut sibling_ref = sibling_block.block_mut();
+        let sibling = sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+        sibling.num_keys -= 1;
+
+        // Insert it into _this_ node.
+        let mut child_block = txn.get_block(child_block_no).await?;
+        let mut block_ref = child_block.block_mut();
+        let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+        this.num_keys += 1;
+
+        this.kv[this.num_keys as usize] = kv;
+        this.kv[..(this.num_keys as usize)].rotate_right(1);
+
+        // Update this node's key in the parent.
+        Self::set_child_key(txn, block_no, child_block_no, child_left_key, new_key).await?;
+
+        Ok(true)
+    }
+
+    async fn try_rebalance_right(
+        txn: &mut Txn<'_>,
+        block_no: BlockNo,
+        child_block_no: BlockNo,
+        child_right_key: u64,
+    ) -> Result<bool> {
+        let right_sibling = Self::get_right_child(txn, block_no, child_right_key).await?;
+        if right_sibling.is_null() {
+            return Ok(false);
+        }
+
+        let mut sibling_block = txn.get_block(right_sibling).await?;
+        let sibling_ref = sibling_block.block();
+        let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+        if sibling.num_keys as usize <= BTREE_NODE_MIN_KEYS {
+            return Ok(false);
+        }
+
+        // Extract the first element from the right sibling.
+        let kv = sibling.kv[0];
+        let old_key = kv.key;
+        let new_key = sibling.kv[1].key;
+
+        drop(sibling_ref);
+        let mut sibling_ref = sibling_block.block_mut();
+        let sibling = sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+        sibling.kv[..(sibling.num_keys as usize)].rotate_left(1);
+        sibling.num_keys -= 1;
+
+        // Insert it into _this_ node.
+        let mut child_block = txn.get_block(child_block_no).await?;
+        let mut block_ref = child_block.block_mut();
+        let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+
+        this.kv[this.num_keys as usize] = kv;
+        this.num_keys += 1;
+
+        // Update this node's key in the parent.
+        Self::set_child_key(txn, block_no, right_sibling, old_key, new_key).await?;
+
+        Ok(true)
+    }
+
+    async fn set_child_key(
         txn: &mut Txn<'_>,
         parent_block_no: BlockNo,
-        parent_is_root: bool,
-        key: u64,
+        child_block_no: BlockNo,
+        old_key: u64,
+        new_key: u64,
+    ) -> Result<()> {
+        let mut parent_block = txn.get_block(parent_block_no).await?;
+        let mut parent_ref = parent_block.block_mut();
+        let parent = parent_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
+
+        let child_pos = parent.kv[..(parent.num_keys as usize)]
+            .binary_search_by_key(&old_key, |kv| kv.key)
+            .unwrap();
+        assert!(child_pos < (parent.num_keys as usize));
+        assert_eq!(child_block_no, parent.kv[child_pos].child_block_no);
+
+        parent.kv[child_pos].key = new_key;
+
+        Ok(())
+    }
+
+    /// Return the block number of the child to the left of the key specified (if any).
+    async fn get_left_child(
+        txn: &mut Txn<'_>,
+        block_no: BlockNo,
+        child_key: u64,
     ) -> Result<BlockNo> {
-        todo!()
+        if child_key == 0 {
+            return Ok(BlockNo::null());
+        }
+
+        let block = txn.get_block(block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+
+        let child_pos = match this.kv[..(this.num_keys as usize)]
+            .binary_search_by_key(&child_key, |kv| kv.key)
+        {
+            Ok(pos) => pos,
+            Err(pos) => {
+                if pos == 0 {
+                    return Ok(BlockNo::null());
+                } else {
+                    pos - 1
+                }
+            }
+        };
+
+        assert!(child_pos < (this.num_keys as usize));
+
+        if child_pos == 0 {
+            Ok(BlockNo::null())
+        } else {
+            log::error!(
+                "get_left_child: key: {child_key} pos {child_pos}\nkv[{}] = {}:{} kv[{}] = {}:{}",
+                child_pos - 1,
+                this.kv[child_pos - 1].key,
+                this.kv[child_pos - 1].child_block_no.as_u64(),
+                child_pos,
+                this.kv[child_pos].key,
+                this.kv[child_pos].child_block_no.as_u64()
+            );
+            Ok(this.kv[child_pos - 1].child_block_no)
+        }
+    }
+
+    /// Return the block number of the child to the right of the key specified (if any).
+    async fn get_right_child(
+        txn: &mut Txn<'_>,
+        block_no: BlockNo,
+        child_key: u64,
+    ) -> Result<BlockNo> {
+        if child_key == u64::MAX {
+            return Ok(BlockNo::null());
+        }
+
+        let block = txn.get_block(block_no).await?;
+        let block_ref = block.block();
+        let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+
+        let child_pos = match this.kv[..(this.num_keys as usize)]
+            .binary_search_by_key(&(child_key + 1), |kv| kv.key)
+        {
+            Ok(pos) => pos,
+            Err(pos) => pos,
+        };
+
+        if child_pos >= (this.num_keys as usize) {
+            Ok(BlockNo::null())
+        } else {
+            Ok(this.kv[child_pos].child_block_no)
+        }
+    }
+
+    async fn try_merge_left(
+        txn: &mut Txn<'_>,
+        block_no: BlockNo,
+        child_block_no: BlockNo,
+        child_left_key: u64,
+    ) -> Result<Option<(u64, BlockNo)>> {
+        let left_sibling = Self::get_left_child(txn, block_no, child_left_key).await?;
+        if left_sibling.is_null() {
+            return Ok(None);
+        }
+
+        // Merge this node into the left sibling; this node will be deleted.
+        let mut sibling_block = txn.get_block(left_sibling).await?;
+        let mut sibling_ref = sibling_block.block_mut();
+        let sibling = sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+
+        // Because we first tried (unsuccessfully) borrowing from the sibling, the sibling
+        // must have the min number of keys.
+        if sibling.num_keys as usize != BTREE_NODE_MIN_KEYS {
+            log::error!(
+                "merge left: bad num keys: {} child block: {} sibling block: {} child key: {child_left_key}",
+                sibling.num_keys,
+                child_block_no.as_u64(),
+                left_sibling.as_u64()
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        let this_block = txn.get_block(child_block_no).await?;
+        let this_ref = this_block.block();
+        let this = this_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+
+        if sibling.kv[BTREE_NODE_MIN_KEYS - 1].key >= this.kv[0].key {
+            log::error!(
+                "merge left: bad keys: {} >= {}",
+                sibling.kv[BTREE_NODE_MIN_KEYS - 1].key,
+                this.kv[0].key
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        // Some assertions.
+        assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+        assert_eq!(this.kind, sibling.kind);
+        assert!(!this.is_root());
+        assert!(!sibling.is_root());
+
+        // Copy the keys over.
+        sibling.kv[BTREE_NODE_MIN_KEYS..(BTREE_NODE_MIN_KEYS * 2 - 1)]
+            .clone_from_slice(&this.kv[..(BTREE_NODE_MIN_KEYS - 1)]);
+        sibling.num_keys = (BTREE_NODE_MIN_KEYS * 2 - 1) as u8;
+
+        Ok(Some((child_left_key, child_block_no)))
+    }
+
+    async fn try_merge_right(
+        txn: &mut Txn<'_>,
+        block_no: BlockNo,
+        child_block_no: BlockNo,
+        child_right_key: u64,
+    ) -> Result<Option<(u64, BlockNo)>> {
+        let right_sibling = Self::get_right_child(txn, block_no, child_right_key).await?;
+        if right_sibling.is_null() {
+            return Ok(None);
+        }
+
+        // Merge the right sibling into this node. The right sibling will be deleted.
+        let sibling_block = txn.get_block(right_sibling).await?;
+        let sibling_ref = sibling_block.block();
+        let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+
+        // Because we first tried (unsuccessfully) borrowing from the sibling, the sibling
+        // must have the min number of keys.
+        if sibling.num_keys as usize != BTREE_NODE_MIN_KEYS {
+            log::error!(
+                "merge right: bad num keys: {} child block: {} sibling block: {} child key: {child_right_key}",
+                sibling.num_keys,
+                child_block_no.as_u64(),
+                right_sibling.as_u64()
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        let mut this_block = txn.get_block(child_block_no).await?;
+        let mut this_ref = this_block.block_mut();
+        let this = this_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+
+        // Some assertions.
+        assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+        assert_eq!(this.kind, sibling.kind);
+        assert!(!this.is_root());
+        assert!(!sibling.is_root());
+
+        if this.kv[BTREE_NODE_MIN_KEYS - 2].key >= sibling.kv[0].key {
+            log::error!(
+                "merge right: bad keys: {} >= {}",
+                this.kv[BTREE_NODE_MIN_KEYS - 2].key,
+                sibling.kv[0].key
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        // Copy the keys over.
+        this.kv[(BTREE_NODE_MIN_KEYS - 1)..(BTREE_NODE_MIN_KEYS * 2 - 1)]
+            .clone_from_slice(&sibling.kv[..BTREE_NODE_MIN_KEYS]);
+        this.num_keys = (BTREE_NODE_MIN_KEYS * 2 - 1) as u8;
+
+        Ok(Some((sibling.kv[0].key, right_sibling)))
+    }
+}
+
+impl RootNode {
+    async fn split_root(txn: &mut Txn<'_>, root_block_no: BlockNo) -> Result<()> {
+        // Allocate two new blocks.
+        let left_block_no = Superblock::allocate_block(txn).await?.block_no;
+        let right_block_no = Superblock::allocate_block(txn).await?.block_no;
+
+        // Get the root block.
+        let mut root_block = txn.get_block(root_block_no).await?;
+        let mut root_block_ref = root_block.block_mut();
+        let root = root_block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
+        assert_eq!(root.num_keys as usize, Self::order());
+
+        // Save data to copy.
+        let root_entries = root.kv;
+        let left_key = u64::MIN;
+        let split_pos = (Self::order() >> 1) + 1;
+        assert!(split_pos <= u8::MAX as usize);
+        let right_key = root_entries[split_pos].key;
+        let leaf_flag = root.kind & Self::KIND_LEAF;
+
+        // log::debug!(
+        //     "split_root(): root: {} key: {right_key} left: {} right: {}",
+        //     root_block_no.as_u64(),
+        //     left_block_no.as_u64(),
+        //     right_block_no.as_u64()
+        // );
+
+        // Update root.
+        root.kind &= !Self::KIND_LEAF;
+        root.num_keys = 2;
+        root.kv[0].key = left_key;
+        root.kv[0].child_block_no = left_block_no;
+        root.kv[1].key = right_key;
+        root.kv[1].child_block_no = right_block_no;
+
+        core::mem::drop(root_block_ref);
+
+        // Update the left block.
+        let mut left_block = txn.get_empty_block_mut(left_block_no);
+        let mut left_block_ref = left_block.block_mut();
+
+        let bh = left_block_ref.get_mut_at_offset::<BlockHeader>(0);
+        bh.set_block_type(crate::BlockType::TreeNode);
+
+        let left_node = left_block_ref.get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
+
+        left_node.num_keys = split_pos as u8;
+        left_node.kind = leaf_flag;
+        left_node.kv[..split_pos].clone_from_slice(&root_entries[..split_pos]);
+
+        core::mem::drop(left_block_ref);
+
+        // Update the right block.
+        let mut right_block = txn.get_empty_block_mut(right_block_no);
+        let mut right_block_ref = right_block.block_mut();
+        let right_node = right_block_ref.get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
+
+        right_node.num_keys = (BTREE_ROOT_ORDER - split_pos) as u8;
+        right_node.kind = leaf_flag;
+        right_node.kv[..(right_node.num_keys as usize)]
+            .clone_from_slice(&root_entries[split_pos..]);
+
+        Ok(())
+    }
+
+    /// Return the number of freed btree nodes.
+    pub async fn root_delete_link<'a>(
+        txn: &mut Txn<'a>,
+        this_block_no: BlockNo,
+        key: u64,
+        block_no_to_delete: BlockNo,
+    ) -> Result<()> {
+        Self::node_delete_link(
+            txn,
+            this_block_no,
+            key,
+            block_no_to_delete,
+            BlockNo::null(),
+            0,
+        )
+        .await
+        .map(|kv| {
+            assert!(kv.is_none());
+        })
+    }
+
+    async fn assimilate_single_child(
+        txn: &mut Txn<'_>,
+        root_block_no: BlockNo,
+        child_block_no: BlockNo,
+    ) -> Result<()> {
+        // Get the root block.
+        let mut root_block = txn.get_block(root_block_no).await?;
+        let mut root_block_ref = root_block.block_mut();
+        let root = root_block_ref.get_mut_at_offset::<RootNode>(RootNode::offset_in_block());
+
         /*
-        let parent_block = txn.get_block(parent_node_block_no).await?;
-        let parent_block_ref = parent_block.block();
-        let parent = parent_block_ref.get_at_offset::<___Self>(___Self::offset_in_block());
+        log::error!(
+            "assimilate: root {} child {} root num keys {} kv0 {}:{} kv1 {}:{}",
+            root_block_no.as_u64(),
+            child_block_no.as_u64(),
+            root.num_keys,
+            root.kv[0].key,
+            root.kv[0].child_block_no.as_u64(),
+            root.kv[1].key,
+            root.kv[1].child_block_no.as_u64()
+        );
         */
+
+        assert_eq!(root.num_keys as usize, 1);
+        assert!(!root.is_leaf());
+        assert!(root.is_root());
+
+        // Get the child.
+        let child_block = txn.get_block(child_block_no).await?;
+        let child_block_ref = child_block.block();
+        let child = child_block_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+        assert_eq!(child.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+
+        // Move data.
+        root.num_keys = (BTREE_NODE_MIN_KEYS - 1) as u8;
+        if child.is_leaf() {
+            root.kind |= Self::KIND_LEAF;
+        }
+        root.kv[..(BTREE_NODE_MIN_KEYS - 1)]
+            .clone_from_slice(&child.kv[..(BTREE_NODE_MIN_KEYS - 1)]);
+
+        drop(root_block_ref);
+        drop(child_block_ref);
+
+        // Delete the child.
+        Superblock::free_single_block(txn, child_block_no).await?;
+
+        Ok(())
     }
 }

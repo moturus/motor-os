@@ -357,7 +357,7 @@ impl FileSystem for MotorFs {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        let block_key = dir_entry!(entry_block).hash_u64(block_start);
+        let block_key = block_start / (BLOCK_SIZE as u64);
 
         assert!(buf.len() <= BLOCK_SIZE);
 

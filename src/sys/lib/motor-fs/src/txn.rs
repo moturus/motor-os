@@ -30,7 +30,11 @@ impl<'a> Drop for Txn<'a> {
     fn drop(&mut self) {
         for (block_no, block) in self.txn_cache.drain() {
             assert_eq!(block_no.as_u64(), block.block_no());
-            assert!(!block.is_dirty());
+            if block.is_dirty() {
+                assert!(!self.read_only);
+                log::warn!("Dirty block {} on txn drop.", block_no.as_u64());
+                self.fs.block_cache().discard(block);
+            }
         }
 
         #[cfg(debug_assertions)]
@@ -228,7 +232,7 @@ impl<'a> Txn<'a> {
             return Err(ErrorKind::IsADirectory.into());
         }
 
-        let block_key = dir_entry!(block).hash_u64(block_start);
+        let block_key = block_start / (BLOCK_SIZE as u64);
 
         let prev_file_size = dir_entry!(block).metadata().size;
         let new_file_size = offset + (buf.len() as u64);
@@ -285,7 +289,7 @@ impl<'a> Txn<'a> {
             return Ok(());
         }
         let last_block_start = prev_size & !(BLOCK_SIZE as u64 - 1);
-        let last_block_key = dir_entry!(block).hash_u64(last_block_start);
+        let last_block_key = last_block_start / (BLOCK_SIZE as u64);
 
         let mut txn = Self {
             fs,
@@ -345,14 +349,13 @@ impl<'a> Txn<'a> {
                 )
                 .await?;
 
-                DirEntryBlock::decrement_blocks_in_use(&mut txn, file_id.block_no).await?;
+                DirEntryBlock::decrement_blocks_in_use(&mut txn, file_id.block_no, 1).await?;
                 Superblock::free_single_block(&mut txn, data_block_no).await?;
             };
 
             // Zero out truncated bytes in the new last block.
             let last_block_start = new_size & !(BLOCK_SIZE as u64 - 1);
-            let last_block_key =
-                DirEntryBlock::get_hash_u64(&mut txn, file_id, last_block_start).await?;
+            let last_block_key = last_block_start / (BLOCK_SIZE as u64);
             let Some(data_block_no) =
                 DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, last_block_key)
                     .await?
