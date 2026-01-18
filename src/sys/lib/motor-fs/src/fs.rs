@@ -405,6 +405,9 @@ impl FileSystem for MotorFs {
         self.check_err()?;
         let sb = self.block_cache.get_block(0).await?;
         let res = sb.block().get_at_offset::<Superblock>(0).free_blocks();
+        sb.block()
+            .get_at_offset::<Superblock>(0)
+            .check_accounting()?;
         Ok(res)
     }
 

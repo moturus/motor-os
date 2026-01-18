@@ -175,60 +175,96 @@ impl Superblock {
         self.free_blocks
     }
 
+    #[inline]
+    pub(crate) fn check_accounting(&self) -> Result<()> {
+        if !self.freelist_head.is_null() {
+            Ok(())
+        } else {
+            if self.num_blocks == self.empty_area_start + self.free_blocks + TXN_BLOCKS {
+                Ok(())
+            } else {
+                let mut error_count: i64 = (self.num_blocks as i64)
+                    - ((self.empty_area_start + self.free_blocks + TXN_BLOCKS) as i64);
+                let verb = if error_count > 0 {
+                    "deficit"
+                } else {
+                    error_count *= -1;
+                    "surplus"
+                };
+                log::error!(
+                    "Free block accounting error: num_blocks: {} empty_area_start: {} free_blocks: {}\n\tFree block {}: {}",
+                    self.num_blocks,
+                    self.empty_area_start,
+                    self.free_blocks,
+                    verb,
+                    error_count
+                );
+                #[cfg(test)]
+                {
+                    panic!();
+                }
+                #[cfg(not(test))]
+                Err(ErrorKind::InvalidData.into())
+            }
+        }
+    }
+
     // Allocate a new/empty block. Also increments generation.
     #[allow(clippy::await_holding_refcell_ref)]
     pub async fn allocate_block(txn: &mut Txn<'_>) -> Result<EntryIdInternal> {
         let mut sb_block = txn.get_block(BlockNo(0)).await?;
-        let mut block_ref = sb_block.block_mut();
-        let this = block_ref.get_mut_at_offset::<Self>(0);
+        let mut superblock_ref = sb_block.block_mut();
+        let superblock = superblock_ref.get_mut_at_offset::<Self>(0);
 
-        if this.free_blocks == 0 {
-            log::warn!("Storage full. Total blocks: {}.", this.num_blocks);
+        if superblock.free_blocks == 0 {
+            log::warn!("Storage full. Total blocks: {}.", superblock.num_blocks);
             return Err(ErrorKind::StorageFull.into());
         }
 
-        let head_bn = this.freelist_head;
+        let head_bn = superblock.freelist_head;
         if head_bn.is_null() {
-            this.free_blocks -= 1;
-            this.empty_area_start += 1;
-            this.generation += 1;
+            superblock.check_accounting()?;
+            superblock.free_blocks -= 1;
+            superblock.empty_area_start += 1;
+            superblock.generation += 1;
             return Ok(EntryIdInternal::new(
-                BlockNo(this.empty_area_start - 1),
-                this.generation,
+                BlockNo(superblock.empty_area_start - 1),
+                superblock.generation,
             ));
         };
 
-        drop(block_ref);
+        drop(superblock_ref); // Refcell will get re-borrowed.
 
         let head_block = txn.get_block(head_bn).await?.clone();
         let head_ref = head_block.block();
         let ebh = head_ref.get_at_offset::<EmptyBlockHeader>(0);
         let maybe_next = ebh.next_empty_block;
 
-        let (next_head, res) = match BlockType::from_u8(ebh.block_type)
+        let (opt_next_head, res) = match BlockType::from_u8(ebh.block_type)
             .inspect_err(|err| log::error!("allocate_block: {err:?}"))?
         {
             BlockType::FileEntry => {
                 drop(head_ref);
                 let res = Self::reallocate_first_block(txn, head_bn).await?;
                 if res == head_bn {
-                    (maybe_next, res)
+                    (Some(maybe_next), res)
                 } else {
-                    (head_bn, res)
+                    (None, res)
                 }
             }
             BlockType::DirEntry => panic!("This is a bug"),
             BlockType::TreeNode => panic!("This is a bug"),
-            BlockType::EmptyBlock => (maybe_next, head_bn),
+            BlockType::EmptyBlock => (Some(maybe_next), head_bn),
         };
 
-        let mut sb_block = txn.get_block(BlockNo(0)).await?;
-        let mut block_ref = sb_block.block_mut();
-        let this = block_ref.get_mut_at_offset::<Self>(0);
-        this.freelist_head = next_head;
-        this.free_blocks -= 1;
-        this.generation += 1;
-        let generation = this.generation;
+        let mut superblock_ref = sb_block.block_mut();
+        let superblock = superblock_ref.get_mut_at_offset::<Self>(0);
+        if let Some(next_head) = opt_next_head {
+            superblock.freelist_head = next_head;
+        }
+        superblock.free_blocks -= 1;
+        superblock.generation += 1;
+        let generation = superblock.generation;
 
         Ok(EntryIdInternal::new(res, generation))
     }
@@ -252,16 +288,15 @@ impl Superblock {
             return Ok(file_block_no);
         };
 
+        // Prev accounting.
         let mut sb_block = txn.get_block(BlockNo(0)).await?;
-        let free_blocks_prev = sb_block
-            .block()
-            .get_at_offset::<Superblock>(0)
-            .free_blocks();
+        let free_blocks_prev = sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
+
+        // The main op.
         DirEntryBlock::unlink_child_block(txn, file_block_no, kv.child_block_no, kv.key).await?;
-        let free_blocks_now = sb_block
-            .block()
-            .get_at_offset::<Superblock>(0)
-            .free_blocks();
+
+        // Now accounting.
+        let free_blocks_now = sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
         // We are reallocating: all "freed" blocks were already accounted as free,
         // so we must adjust the count to avoid double-counting them.
@@ -277,6 +312,12 @@ impl Superblock {
         )
         .await?;
 
+        #[cfg(all(test, debug_assertions))]
+        sb_block
+            .block()
+            .get_at_offset::<Superblock>(0)
+            .check_accounting()?;
+
         Ok(kv.child_block_no)
     }
 
@@ -290,7 +331,7 @@ impl Superblock {
 
         assert!(block_no.as_u64() < (this.num_blocks - TXN_BLOCKS));
 
-        if block_no.as_u64() == (this.empty_area_start - 1) && this.freelist_head.is_null() {
+        if block_no.as_u64() == (this.empty_area_start - 1) {
             this.free_blocks += 1;
             this.empty_area_start -= 1;
             return Ok(());
@@ -325,8 +366,8 @@ impl Superblock {
         let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
         let ebh = target_mut_ref.get_mut_at_offset::<EmptyBlockHeader>(0);
         ebh.next_empty_block = this.freelist_head;
-        this.freelist_head = block_no;
         this.free_blocks += blocks_in_use;
+        this.freelist_head = block_no;
 
         Ok(())
     }
@@ -616,10 +657,7 @@ impl DirEntryBlock {
         block_key: u64,
     ) -> Result<BlockNo> {
         let sb_block = txn.get_block(BlockNo(0)).await?;
-        let free_blocks_prev = sb_block
-            .block()
-            .get_at_offset::<Superblock>(0)
-            .free_blocks();
+        let free_blocks_prev = sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
         let data_block_id = Superblock::allocate_block(txn).await?;
         // We just allocated a new data block: need to zero it out.
@@ -627,12 +665,8 @@ impl DirEntryBlock {
 
         Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
 
-        let sb_block = txn.get_block(BlockNo(0)).await?;
-        let used_blocks = free_blocks_prev
-            - sb_block
-                .block()
-                .get_at_offset::<Superblock>(0)
-                .free_blocks();
+        let used_blocks =
+            free_blocks_prev - sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
         Self::increment_blocks_in_use(txn, file_id.block_no, used_blocks).await?;
 
