@@ -72,6 +72,15 @@ impl MotorFs {
             error: Ok(()),
         })
     }
+
+    #[cfg(test)]
+    pub async fn test_remove_block_at_offset(
+        &mut self,
+        file_id: EntryId,
+        offset: u64,
+    ) -> Result<()> {
+        Txn::test_remove_block_txn(self, file_id.into(), offset).await
+    }
 }
 
 #[async_trait(?Send)]

@@ -52,6 +52,10 @@ impl BlockNo {
     pub fn as_u64(&self) -> u64 {
         self.0
     }
+
+    pub const fn from_u64(val: u64) -> Self {
+        Self(val)
+    }
 }
 
 /// EntryId uniquely identifies a file or a directory.

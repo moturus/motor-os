@@ -586,15 +586,6 @@ impl<const ORDER: usize> Node<ORDER> {
         assert_eq!(level, 1);
         RootNode::assimilate_single_child(txn, parent_node_block_no, this_block_no).await?;
         Ok(None)
-        /*
-        log::error!(
-            "fix_node_underflow: nothing worked...: block {} level {level} parent {}",
-            this_block_no.as_u64(),
-            parent_node_block_no.as_u64()
-        );
-        panic!();
-        Err(ErrorKind::InvalidData.into())
-        */
     }
 
     async fn try_rebalance_left(
@@ -628,9 +619,9 @@ impl<const ORDER: usize> Node<ORDER> {
         let mut child_block = txn.get_block(child_block_no).await?;
         let mut block_ref = child_block.block_mut();
         let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        this.num_keys += 1;
-
         this.kv[this.num_keys as usize] = kv;
+
+        this.num_keys += 1;
         this.kv[..(this.num_keys as usize)].rotate_right(1);
 
         // Update this node's key in the parent.
@@ -693,9 +684,15 @@ impl<const ORDER: usize> Node<ORDER> {
         let mut parent_ref = parent_block.block_mut();
         let parent = parent_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
 
-        let child_pos = parent.kv[..(parent.num_keys as usize)]
+        let child_pos = match parent.kv[..(parent.num_keys as usize)]
             .binary_search_by_key(&old_key, |kv| kv.key)
-            .unwrap();
+        {
+            Ok(pos) => pos,
+            Err(pos) => {
+                assert!(pos > 0);
+                pos - 1
+            }
+        };
         assert!(child_pos < (parent.num_keys as usize));
         assert_eq!(child_block_no, parent.kv[child_pos].child_block_no);
 
@@ -736,15 +733,15 @@ impl<const ORDER: usize> Node<ORDER> {
         if child_pos == 0 {
             Ok(BlockNo::null())
         } else {
-            log::error!(
-                "get_left_child: key: {child_key} pos {child_pos}\nkv[{}] = {}:{} kv[{}] = {}:{}",
-                child_pos - 1,
-                this.kv[child_pos - 1].key,
-                this.kv[child_pos - 1].child_block_no.as_u64(),
-                child_pos,
-                this.kv[child_pos].key,
-                this.kv[child_pos].child_block_no.as_u64()
-            );
+            // log::error!(
+            //     "get_left_child: key: {child_key} pos {child_pos}\nkv[{}] = {}:{} kv[{}] = {}:{}",
+            //     child_pos - 1,
+            //     this.kv[child_pos - 1].key,
+            //     this.kv[child_pos - 1].child_block_no.as_u64(),
+            //     child_pos,
+            //     this.kv[child_pos].key,
+            //     this.kv[child_pos].child_block_no.as_u64()
+            // );
             Ok(this.kv[child_pos - 1].child_block_no)
         }
     }
@@ -885,6 +882,36 @@ impl<const ORDER: usize> Node<ORDER> {
         this.num_keys = (BTREE_NODE_MIN_KEYS * 2 - 1) as u8;
 
         Ok(Some((sibling.kv[0].key, right_sibling)))
+    }
+
+    #[allow(unused)]
+    #[cfg(test)]
+    pub async fn test_log_tree(txn: &mut Txn<'_>, node_block_no: BlockNo) -> Result<()> {
+        let node_block = txn.get_block(node_block_no).await?;
+        let node_block_ref = node_block.block();
+        let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
+
+        let mut output = format!(
+            "\nnode {}: num_keys: {} is_root: {} is_leaf: {}\n",
+            node_block_no.as_u64(),
+            node.num_keys,
+            node.is_root(),
+            node.is_leaf()
+        );
+
+        for kv in &node.kv[..(node.num_keys as usize)] {
+            output.push_str(format!("{}:{} ", kv.key, kv.child_block_no.as_u64()).as_str());
+        }
+
+        log::info!("{}", output);
+
+        if !node.is_leaf() {
+            for kv in &node.kv[..(node.num_keys as usize)] {
+                Box::pin(NonRootNode::test_log_tree(txn, kv.child_block_no)).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 

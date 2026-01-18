@@ -2,6 +2,7 @@ use async_fs::EntryId;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
 use camino::Utf8PathBuf;
+use rand::Rng;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::sync::Once;
@@ -490,6 +491,10 @@ fn test_hash_debug() {
 ///
 /// Repeat several times.
 async fn random_file_test() -> Result<()> {
+    use rand::RngCore;
+    use rand::thread_rng;
+    let mut rng = thread_rng();
+
     const PARTITION_SZ: u64 = 1024 * 1024 * 8;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
 
@@ -499,6 +504,91 @@ async fn random_file_test() -> Result<()> {
     let mut fs = create_fs("motor_fs_random_file_test", NUM_BLOCKS).await?;
     assert_eq!(
         NUM_BLOCKS - RESERVED_BLOCKS,
+        fs.empty_blocks().await.unwrap()
+    );
+
+    let file_id = fs
+        .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "foo")
+        .await
+        .unwrap();
+
+    let mut bytes = std::collections::HashMap::new();
+
+    let mut blocks = Vec::with_capacity(FILE_SZ as usize / 4096);
+    for idx in 0..(FILE_SZ / 4096) {
+        blocks.push(idx as usize);
+    }
+
+    // Fill the file up to FILE_SZ at random offsets: this tests btree insertion.
+    while !blocks.is_empty() {
+        let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
+        let block_no = blocks.remove(block_idx);
+
+        let mut block = Box::new(async_fs::Block::new_zeroed());
+        rng.fill_bytes(block.as_bytes_mut());
+
+        fs.write(file_id, (block_no * 4096) as u64, block.as_bytes())
+            .await
+            .unwrap();
+
+        bytes.insert(block_no, block);
+    }
+
+    assert_eq!(FILE_SZ, fs.metadata(file_id).await?.size);
+
+    // Fill the remainder.
+    loop {
+        let block_no = bytes.len();
+        let mut block = Box::new(async_fs::Block::new_zeroed());
+        rng.fill_bytes(block.as_bytes_mut());
+
+        match fs
+            .write(file_id, (block_no * 4096) as u64, block.as_bytes())
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                assert_eq!(err.kind(), ErrorKind::StorageFull);
+                break;
+            }
+        }
+
+        bytes.insert(block_no, block);
+    }
+
+    assert_eq!(0, fs.empty_blocks().await.unwrap());
+    let file_sz = fs.metadata(file_id).await?.size;
+    log::debug!("file size: {file_sz}; blocks: {}", file_sz / 4096);
+    assert_eq!((file_sz / 4096) as usize, bytes.len());
+
+    // Check the data.
+    let mut file_bytes = async_fs::Block::new_zeroed();
+    for idx in 0..bytes.len() {
+        fs.read(file_id, (idx * 4096) as u64, file_bytes.as_bytes_mut())
+            .await
+            .unwrap();
+
+        let block = bytes.get(&idx).unwrap();
+        assert!(file_bytes.as_bytes() == block.as_bytes());
+    }
+
+    // Remove blocks at random offsets: this tests btree deletion.
+    let mut blocks = Vec::with_capacity(bytes.len());
+    for idx in 0..bytes.len() {
+        blocks.push(idx as usize);
+    }
+    while !blocks.is_empty() {
+        let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
+        let block_no = blocks.remove(block_idx);
+
+        fs.test_remove_block_at_offset(file_id, (block_no * 4096) as u64)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(file_sz, fs.metadata(file_id).await?.size);
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS - 1, // The entry blocks is still there.
         fs.empty_blocks().await.unwrap()
     );
 

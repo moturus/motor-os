@@ -374,4 +374,60 @@ impl<'a> Txn<'a> {
 
         todo!("do the complicated dance");
     }
+
+    #[cfg(test)]
+    pub async fn test_remove_block_txn(
+        fs: &'a mut MotorFs,
+        file_id: EntryIdInternal,
+        offset: u64,
+    ) -> Result<()> {
+        assert_eq!(0, offset & (BLOCK_SIZE as u64 - 1));
+
+        let block_key = offset / (BLOCK_SIZE as u64);
+
+        let mut txn = Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        // let data_block_no = DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, block_key)
+        //     .await?
+        //     .expect(format!("data block at {block_key} not found").as_str());
+
+        let Some(data_block_no) =
+            DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, block_key).await?
+        else {
+            log::error!("\n\n data block for key {block_key} not found!\n\n");
+            crate::bplus_tree::RootNode::test_log_tree(&mut txn, file_id.block_no).await?;
+            panic!("\n\n");
+        };
+        let sb_block = txn.get_block(BlockNo::from_u64(0)).await?;
+        let free_blocks_prev = sb_block
+            .block()
+            .get_at_offset::<Superblock>(0)
+            .free_blocks();
+
+        DirEntryBlock::unlink_child_block(&mut txn, file_id.block_no, data_block_no, block_key)
+            .await?;
+
+        let free_blocks_now = sb_block
+            .block()
+            .get_at_offset::<Superblock>(0)
+            .free_blocks();
+
+        DirEntryBlock::decrement_blocks_in_use(
+            &mut txn,
+            file_id.block_no,
+            free_blocks_now - free_blocks_prev + 1,
+        )
+        .await?;
+
+        Superblock::free_single_block(&mut txn, data_block_no).await?;
+
+        // log::debug!("removed block {block_key}");
+        // crate::bplus_tree::RootNode::test_log_tree(&mut txn, file_id.block_no).await?;
+
+        txn.commit().await
+    }
 }
