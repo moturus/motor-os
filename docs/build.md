@@ -47,6 +47,8 @@ pre-built toolchains for Tier-3 targets.
 Check out Rust sources:
 
 ```sh
+export MOTORH=$HOME/motorh
+mkdir $MOTORH
 cd $MOTORH
 git clone https://github.com/rust-lang/rust.git
 cd rust
@@ -92,8 +94,6 @@ rustup toolchain link dev-x86_64-unknown-motor \
 ## Clone the Motor OS repo
 
 ```sh
-export MOTORH=$HOME/motorh
-mkdir $MOTORH
 cd $MOTORH
 git clone https://github.com/moturus/motor-os.git
 cd motor-os
