@@ -588,7 +588,7 @@ async fn random_file_test() -> Result<()> {
 
     assert_eq!(file_sz, fs.metadata(file_id).await?.size);
     assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS - 1, // The entry blocks is still there.
+        NUM_BLOCKS - RESERVED_BLOCKS - 1, // The entry block is still there.
         fs.empty_blocks().await.unwrap()
     );
 

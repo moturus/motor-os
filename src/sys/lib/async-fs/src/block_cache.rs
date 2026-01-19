@@ -153,6 +153,7 @@ impl BlockCache {
         block
     }
 
+    /*
     pub async fn write_block(&mut self, block_no: u64) -> Result<()> {
         let block = self.cache.get_mut(&block_no).expect("block not found");
 
@@ -160,6 +161,7 @@ impl BlockCache {
         block.intenal_mark_clean();
         Ok(())
     }
+    */
 
     pub async fn write_block_if_dirty(&mut self, block_no: u64) -> Result<bool> {
         let block = self.cache.get_mut(&block_no).expect("block not found");

@@ -53,6 +53,7 @@ impl BlockNo {
         self.0
     }
 
+    #[allow(unused)]
     pub const fn from_u64(val: u64) -> Self {
         Self(val)
     }
