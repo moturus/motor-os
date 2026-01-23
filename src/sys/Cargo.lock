@@ -945,6 +945,7 @@ dependencies = [
  "camino",
  "crc",
  "env_logger",
+ "futures",
  "log",
  "micromap",
  "rand 0.8.5",

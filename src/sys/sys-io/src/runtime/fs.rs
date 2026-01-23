@@ -357,18 +357,30 @@ pub fn smoke_test() {
     let bytes = std::fs::read("/foo").expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
-    // let mut bytes = vec![0_u8; 1024 * 1024 * 11 + 1001];
-    let mut bytes = vec![0_u8; 1024 * 1024 * 2 + 1001];
+    let mut bytes = vec![0_u8; 1024 * 1024 * 11 + 1001];
+    // let mut bytes = vec![0_u8; 1024 * 1024 * 2 + 1001];
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
 
+    let ts0 = std::time::Instant::now();
     std::fs::write("/bar", bytes.as_slice()).unwrap();
+    let ts1 = std::time::Instant::now();
     let bytes_back = std::fs::read("/bar").unwrap();
+    let dur_read = ts1.elapsed();
+    let dur_write = ts1 - ts0;
 
     assert_eq!(
         moto_rt::fnv1a_hash_64(bytes.as_slice()),
         moto_rt::fnv1a_hash_64(bytes_back.as_slice())
+    );
+
+    let write_mbps = (bytes.len() as f64) / dur_write.as_secs_f64() / (1024.0 * 1024.0);
+    let read_mbps = (bytes.len() as f64) / dur_write.as_secs_f64() / (1024.0 * 1024.0);
+    log::info!(
+        "async FS smoke test: write {:.3} mbps; read: {:.3} mbps",
+        write_mbps,
+        read_mbps
     );
 
     let metadata = std::fs::metadata("/bar").unwrap();

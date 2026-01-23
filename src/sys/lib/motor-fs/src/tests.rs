@@ -5,6 +5,7 @@ use camino::Utf8PathBuf;
 use rand::Rng;
 use std::io::ErrorKind;
 use std::io::Result;
+use std::io::Write;
 use std::sync::Once;
 use std::time::SystemTime;
 
@@ -83,6 +84,39 @@ fn random_file() {
         .unwrap();
 
     rt.block_on(random_file_test()).unwrap();
+}
+
+#[test]
+#[ignore]
+fn write_speed() {
+    init_logger();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(write_speed_test()).unwrap();
+}
+
+#[test]
+#[ignore]
+fn native_write_speed() {
+    init_logger();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(native_write_speed_test()).unwrap();
+}
+
+#[test]
+#[ignore]
+fn native_write_speed_async() {
+    init_logger();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(native_write_speed_async_test()).unwrap();
 }
 
 async fn basic_test() -> Result<()> {
@@ -480,16 +514,6 @@ fn test_hash_debug() {
     }
 }
 
-/// On a partition create a file of the same size (minus a small number of blocks)
-/// by writing blocks at random offsets: stresses btree insertion.
-///
-/// Check free block accounting.
-///
-/// Delete blocks in random order: stresses btree deletion.
-///
-/// Check free block accounting.
-///
-/// Repeat several times.
 async fn random_file_test() -> Result<()> {
     use rand::RngCore;
     use rand::thread_rng;
@@ -593,5 +617,128 @@ async fn random_file_test() -> Result<()> {
     );
 
     println!("random_file_test PASS");
+    Ok(())
+}
+
+async fn write_speed_test() -> Result<()> {
+    // use futures::StreamExt;
+    use rand::RngCore;
+    use rand::thread_rng;
+
+    let mut rng = thread_rng();
+
+    const PARTITION_SZ: u64 = 1024 * 1024 * 256;
+    const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
+
+    // B+ tree overhead should be less than one block per 100.
+    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1);
+
+    let mut fs = create_fs("motor_fs_write_speed_test", NUM_BLOCKS).await?;
+
+    let mut block = Box::new(async_fs::Block::new_zeroed());
+    rng.fill_bytes(block.as_bytes_mut());
+
+    let file_id = fs
+        .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "foo")
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    // let mut completion_queue = futures::stream::FuturesUnordered::new();
+
+    for idx in 0..FILE_BLOCKS {
+        // completion_queue.push(fs.write(file_id, idx * 4096, block.as_bytes()));
+        fs.write(file_id, idx * 4096, block.as_bytes())
+            .await
+            .unwrap();
+    }
+
+    // while let Some(completion) = completion_queue.next().await {
+    //     completion.unwrap();
+    // }
+
+    let elapsed = started.elapsed();
+
+    // let file_sz = fs.metadata(file_id).await?.size;
+    // assert_eq!(file_sz, FILE_BLOCKS * 4096);
+    let file_sz = FILE_BLOCKS * 4096;
+
+    let write_speed_mbps = (file_sz as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+    println!("Write speed: {:.3} MB/s", write_speed_mbps);
+
+    println!("write_speed_test PASS");
+    Ok(())
+}
+
+async fn native_write_speed_test() -> Result<()> {
+    use rand::RngCore;
+    use rand::thread_rng;
+
+    let mut rng = thread_rng();
+
+    const PARTITION_SZ: u64 = 1024 * 1024 * 256;
+    const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
+
+    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1);
+
+    let mut block = Box::new(async_fs::Block::new_zeroed());
+    rng.fill_bytes(block.as_bytes_mut());
+
+    let mut file = std::fs::File::create("/tmp/motor_fs_native_write_speed_test").unwrap();
+
+    let started = std::time::Instant::now();
+    for _idx in 0..FILE_BLOCKS {
+        file.write_all(block.as_bytes()).unwrap();
+    }
+
+    file.flush().unwrap();
+    let elapsed = started.elapsed();
+
+    let file_sz = FILE_BLOCKS * 4096;
+
+    let write_speed_mbps = (file_sz as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+    println!("Native write speed: {:.3} MB/s", write_speed_mbps);
+
+    println!("native_write_speed_test PASS");
+    Ok(())
+}
+
+async fn native_write_speed_async_test() -> Result<()> {
+    use rand::RngCore;
+    use rand::thread_rng;
+    use tokio::io::AsyncWriteExt;
+
+    let mut rng = thread_rng();
+
+    const PARTITION_SZ: u64 = 1024 * 1024 * 256;
+    const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
+
+    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1);
+
+    let mut block = Box::new(async_fs::Block::new_zeroed());
+    rng.fill_bytes(block.as_bytes_mut());
+
+    let mut file = tokio::fs::File::create("/tmp/motor_fs_native_write_speed_async_test")
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+
+    for _idx in 0..FILE_BLOCKS {
+        file.write_all(block.as_bytes()).await.unwrap();
+    }
+
+    file.flush().await.unwrap();
+
+    let elapsed = started.elapsed();
+
+    // let file_sz = fs.metadata(file_id).await?.size;
+    // assert_eq!(file_sz, FILE_BLOCKS * 4096);
+    let file_sz = FILE_BLOCKS * 4096;
+
+    let write_speed_mbps = (file_sz as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+    println!("Native async write speed: {:.3} MB/s", write_speed_mbps);
+
+    println!("native_write_speed_async_test PASS");
     Ok(())
 }
