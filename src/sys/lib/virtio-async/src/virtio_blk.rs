@@ -305,6 +305,9 @@ impl BlockDevice {
         Some(completion)
     }
 
+    pub fn notify(this: Rc<RefCell<Self>>) {
+        this.borrow().dev.virtqueues[0].borrow().notify();
+    }
     /*
     #[inline(never)]
     async fn write(&mut self, sector: u64, buf: &[u8]) -> Result<()> {

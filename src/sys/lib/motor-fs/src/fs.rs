@@ -57,20 +57,73 @@ impl MotorFs {
             return Err(ErrorKind::StorageFull.into());
         }
 
-        // TODO: do we need to do any kind of (superficial) validation?
-        // On the one hand, it could be useful; on the other, it will
-        // slow down the bootup, which is a priority. So for now
-        // no explicit validation other than the num blocks check above.
-
         log::debug!(
             "Opening a Motor FS partition: {} MB.",
             dev.num_blocks() / 256
         );
 
-        Ok(Self {
+        let mut self_ = Self {
             block_cache: BlockCache::new(dev, CACHE_SIZE).await?,
             error: Ok(()),
-        })
+        };
+
+        self_
+            .do_on_open_checks()
+            .await
+            .inspect_err(|err| log::error!("Motor FS: open checks failed: {err:?}."))?;
+
+        Ok(self_)
+    }
+
+    async fn do_on_open_checks(&mut self) -> Result<()> {
+        // TODO: do we need to do any kind of (superficial) validation?
+        // On the one hand, it could be useful; on the other, it will
+        // slow down the bootup, which is a priority. So for now
+        // no explicit validation other than the num blocks check above.
+
+        /*
+        {
+            // Test writing blocks.
+            let num_blocks = 1024 * 1024 * 32 / 4096;
+
+            let started = std::time::Instant::now();
+            for idx in 0..num_blocks {
+                let block = self.block_cache.get_empty_block(idx + 10);
+                self.block_cache
+                    .write_block_if_dirty(idx + 10)
+                    .await
+                    .unwrap();
+            }
+            let elapsed = started.elapsed();
+            let write_mbps =
+                ((num_blocks * 4096) as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+            log::info!("do_on_open_checks: write speed {:.3} MB/sec", write_mbps);
+
+            panic!("we just killed the volume");
+        }
+
+        {
+            // Test large file write.
+            let file_id = self
+                .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "__test__")
+                .await?;
+            let block = async_fs::Block::new_zeroed();
+
+            let num_blocks = 1024 * 1024 * 32 / 4096;
+
+            let started = std::time::Instant::now();
+            for idx in 0..num_blocks {
+                self.write(file_id, idx * 4096, block.as_bytes()).await?;
+            }
+            let elapsed = started.elapsed();
+            let write_mbps =
+                ((num_blocks * 4096) as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+            log::info!("do_on_open_checks: write speed {:.3} MB/sec", write_mbps);
+            self.delete_entry(file_id).await?;
+        }
+        */
+
+        Ok(())
     }
 
     #[cfg(test)]

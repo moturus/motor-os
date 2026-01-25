@@ -17,7 +17,7 @@ pub(super) struct VirtioPartition {
 }
 
 impl VirtioPartition {
-    pub fn from_virtio_bd(
+    pub async fn from_virtio_bd(
         virtio_bd: Rc<RefCell<virtio_async::BlockDevice>>,
         virtio_block_offset: u64,
         virtio_blocks: u64,
@@ -30,6 +30,50 @@ impl VirtioPartition {
             );
             return Err(ErrorKind::InvalidData.into());
         }
+
+        /*
+        {
+            let block = async_fs::Block::new_zeroed();
+
+            const MEGS: u64 = 32;
+            const NUM_BLOCKS: u64 = 1024 * 1024 * MEGS / 4096;
+            const BATCH_SIZE: u64 = 64;
+
+            let mut comps = Vec::with_capacity(BATCH_SIZE as usize);
+
+            let started = std::time::Instant::now();
+            let mut block_no = 0;
+            while block_no < NUM_BLOCKS {
+                for idx in 0..BATCH_SIZE {
+                    let first_sector_no =
+                        block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + virtio_block_offset;
+                    block_no += 1;
+
+                    let completion = virtio_async::BlockDevice::post_write(
+                        virtio_bd.clone(),
+                        first_sector_no,
+                        block.as_bytes(),
+                    )
+                    .unwrap();
+
+                    comps.push(completion);
+                    if idx == 0 {
+                        virtio_async::BlockDevice::notify(virtio_bd.clone());
+                    }
+                }
+
+                while let Some(comp) = comps.pop() {
+                    comp.await;
+                }
+                assert!(comps.is_empty());
+            }
+            let elapsed = started.elapsed();
+            let write_mbps = (MEGS as f64) / elapsed.as_secs_f64();
+            log::info!("virtio_partition: write speed {:.3} MB/sec", write_mbps);
+            panic!()
+        }
+        */
+
         Ok(Self {
             virtio_bd,
             virtio_block_offset,
@@ -57,13 +101,6 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         )
         .unwrap();
         let (len, stat) = completion.await;
-
-        if block_no == 2 {
-            let hash = moto_rt::fnv1a_hash_64(block.as_bytes());
-            if hash == 0xb93a0c83ce3b6325 {
-                panic!("bad hash for block {block_no}");
-            }
-        }
 
         Ok(())
     }

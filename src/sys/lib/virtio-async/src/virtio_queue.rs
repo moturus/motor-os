@@ -310,7 +310,7 @@ impl Virtqueue {
         self.wait_handle = handle;
     }
 
-    fn notify(&self) {
+    pub fn notify(&self) {
         // Safety: safe by construction.
         unsafe { (*self.notify_bar).write_u16(self.notify_offset, 0) };
     }

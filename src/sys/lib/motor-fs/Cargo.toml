@@ -19,6 +19,5 @@ micromap = "0.1.0"
 async-fs = { path = "../async-fs", features = ["file-dev"] }
 camino = "1.1.10"
 env_logger = "0.11"
-futures = "0.3"
 rand = "0.8"
 tokio = { version = "1.44.2", default-features = false, features = ["rt"] }

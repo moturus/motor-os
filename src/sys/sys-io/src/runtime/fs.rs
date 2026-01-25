@@ -55,6 +55,7 @@ pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -
                         pte.lba as u64,
                         pte.sectors as u64,
                     )
+                    .await
                     .map_err(|err| {
                         log::error!("Mbr::parse() failed: {err:?}.");
                         std::io::Error::from(ErrorKind::InvalidData)

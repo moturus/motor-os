@@ -25,7 +25,6 @@ virtio-async     = { path = "../lib/virtio-async"     }
 async-trait  = "0.1.88"
 crossbeam    = "0.8.4"
 elfloader    = { path = "../../third_party/elfloader" }
-futures      = { version = "0.3.31", default-features = false, features = ["alloc"] }
 ipnetwork    = "0.20.0"
 log          = "0.4.28"
 rand         = { version = "0.9.0", features = ["small_rng"], default-features = false }
