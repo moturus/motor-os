@@ -7,7 +7,6 @@ use std::io::ErrorKind;
 use std::io::Result;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::Arc;
 use zerocopy::FromZeros;
 
 use super::pci::PciBar;
@@ -58,7 +57,8 @@ struct BlkHeader {
 //const VIRTIO_BLK_F_BLK_SIZE : u64 = 1u64 << 6;
 
 pub struct BlockDevice {
-    dev: Box<VirtioDevice>,
+    dev: Rc<RefCell<VirtioDevice>>,
+    virtqueue: Rc<RefCell<Virtqueue>>,
     capacity: u64, // The number of sectors of BLOCK_SIZE.
     read_only: bool,
 }
@@ -70,70 +70,62 @@ impl BlockDevice {
     }
 
     pub fn wait_handle(&self) -> moto_sys::SysHandle {
-        assert_eq!(1, self.dev.virtqueues.len());
-        self.dev.virtqueues[0].borrow().wait_handle()
+        self.virtqueue.borrow().wait_handle()
     }
 
-    fn self_init(&mut self) -> Result<()> {
-        self.dev.acknowledge_driver(); // Step 3
-        self.negotiate_features()?; // Steps 4, 5, 6
-        self.dev.init_virtqueues(1, 1)?; // Step 7
-        self.dev.driver_ok(); // Step 8
+    pub(super) fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<BlockDevice>> {
+        let mut dev_mut = dev.borrow_mut();
 
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let notify_bar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap() as *const PciBar;
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64
-                * self.dev.virtqueues[0].borrow().queue_notify_off as u64);
-
-        self.dev.virtqueues[0]
-            .borrow_mut()
-            .set_notify_params(notify_bar, notify_offset);
-
-        Ok(())
-    }
-
-    pub(super) fn init(dev: Box<VirtioDevice>) -> Result<BlockDevice> {
-        if dev.device_cfg.is_none() {
+        if dev_mut.device_cfg.is_none() {
             log::warn!("Skiping VirtioBlk device without device configuration.");
             return Err(ErrorKind::Other.into());
         }
 
-        let mut blk = BlockDevice {
-            dev,
-            capacity: 0,
-            read_only: true,
-        };
+        dev_mut.acknowledge_driver(); // Step 3
+        let (capacity, read_only) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
+        dev_mut.init_virtqueues(1, 1)?; // Step 7
+        dev_mut.driver_ok(); // Step 8
 
-        match blk.self_init() {
-            Ok(()) => {
-                log::debug!(
-                    "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
-                    blk.dev.pci_device.id,
-                    blk.capacity,
-                    blk.read_only
-                );
-                Ok(blk)
-            }
-            Err(err) => {
-                log::error!("Failed to initialize VirtioBlk device.");
-                blk.dev.mark_failed();
-                Err(err)
-            }
-        }
+        let virtqueue = dev_mut.virtqueues[0].clone();
+
+        let notify_cap = dev_mut.notify_cfg.unwrap();
+        let notify_bar = dev_mut.pci_device.bars[notify_cap.bar as usize]
+            .as_ref()
+            .unwrap() as *const PciBar;
+        let notify_offset = notify_cap.offset as u64
+            + (notify_cap.notify_off_multiplier as u64
+                * virtqueue.borrow().queue_notify_off as u64);
+
+        virtqueue
+            .borrow_mut()
+            .set_notify_params(notify_bar, notify_offset);
+
+        log::debug!(
+            "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
+            dev_mut.pci_device.id,
+            capacity,
+            read_only
+        );
+
+        drop(dev_mut);
+
+        Ok(Rc::new(BlockDevice {
+            dev,
+            capacity,
+            read_only,
+            virtqueue,
+        }))
     }
 
-    // Step 4
-    fn negotiate_features(&mut self) -> Result<()> {
-        let features_available = self.dev.get_available_features();
+    // Step 4; returns (capacity, read_only)
+    fn negotiate_features(dev: &mut VirtioDevice) -> Result<(u64, bool)> {
+        let features_available = dev.get_available_features();
         log::debug!("BLK devices features: 0x{features_available:x}");
 
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
             log::warn!(
                 "Virtio BLK device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
-                self.dev.pci_device.id,
+                dev.pci_device.id,
                 features_available
             );
             return Err(ErrorKind::Other.into());
@@ -147,32 +139,26 @@ impl BlockDevice {
         // | VIRTIO_BLK_F_RO;
         // (VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_RO | VIRTIO_BLK_F_BLK_SIZE);
         //  | VIRTIO_BLK_F_RO);
-        self.dev.write_enabled_features(features_acked);
-        self.dev.confirm_features()?;
+        dev.write_enabled_features(features_acked);
+        dev.confirm_features()?;
 
-        self.read_only = (features_acked & VIRTIO_BLK_F_RO) != 0;
+        let read_only = (features_acked & VIRTIO_BLK_F_RO) != 0;
 
-        let device_cfg = self.dev.device_cfg.as_ref().unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[device_cfg.bar as usize]
+        let device_cfg = dev.device_cfg.as_ref().unwrap();
+        let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]
             .as_ref()
             .unwrap();
         let capacity = cfg_bar.read_u64(device_cfg.offset as u64);
-        self.capacity = capacity;
 
-        Ok(())
+        Ok((capacity, read_only))
     }
 
     #[inline(never)]
-    pub fn post_read<'a>(
-        this: Rc<RefCell<Self>>,
-        sector: u64,
-        buf: &'a mut [u8],
-    ) -> Option<Completion<'a>> {
+    pub fn post_read<'a>(self: Rc<Self>, sector: u64, buf: &'a mut [u8]) -> Option<Completion<'a>> {
         assert!(buf.len() <= BLOCK_SIZE);
         assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
 
-        let vq = this.borrow().dev.virtqueues[0].clone();
-        let mut virtqueue = vq.borrow_mut();
+        let mut virtqueue = self.virtqueue.borrow_mut();
         let chain_head = virtqueue.alloc_descriptor_chain(3)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
@@ -208,22 +194,17 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        let completion = Virtqueue::add_buffs(vq, &buffs, 1, 2, chain_head);
+        let completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head);
 
         Some(completion)
     }
 
     #[inline(never)]
-    pub fn post_write<'a>(
-        this: Rc<RefCell<Self>>,
-        sector: u64,
-        buf: &'a [u8],
-    ) -> Option<Completion<'a>> {
+    pub fn post_write<'a>(self: Rc<Self>, sector: u64, buf: &'a [u8]) -> Option<Completion<'a>> {
         assert!(buf.len() <= BLOCK_SIZE);
         assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
 
-        let vq = this.borrow().dev.virtqueues[0].clone();
-        let mut virtqueue = vq.borrow_mut();
+        let mut virtqueue = self.virtqueue.borrow_mut();
         let chain_head = virtqueue.alloc_descriptor_chain(3)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
@@ -259,16 +240,15 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        let completion = Virtqueue::add_buffs(vq, &buffs, 2, 1, chain_head);
+        let completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head);
 
         Some(completion)
     }
 
     /// Returns the ID of the submitted request.
     #[inline(never)]
-    pub fn post_flush<'a>(this: Rc<RefCell<Self>>) -> Option<Completion<'a>> {
-        let vq = this.borrow().dev.virtqueues[0].clone();
-        let mut virtqueue = vq.borrow_mut();
+    pub fn post_flush<'a>(self: Rc<Self>) -> Option<Completion<'a>> {
+        let mut virtqueue = self.virtqueue.borrow_mut();
         let chain_head = virtqueue.alloc_descriptor_chain(2)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
@@ -300,12 +280,12 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        let completion = Virtqueue::add_buffs(vq, &buffs, 1, 1, chain_head);
+        let completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head);
 
         Some(completion)
     }
 
-    pub fn notify(this: Rc<RefCell<Self>>) {
-        this.borrow().dev.virtqueues[0].borrow().notify();
+    pub fn notify(self: Rc<Self>) {
+        self.virtqueue.borrow().notify();
     }
 }

@@ -16,7 +16,7 @@ mod virtio_partition;
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 32;
 
-pub(super) async fn init(block_device: Rc<RefCell<virtio_async::BlockDevice>>) -> Result<()> {
+pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<()> {
     use zerocopy::FromZeros;
 
     let mut first_block = async_fs::Block::new_zeroed();

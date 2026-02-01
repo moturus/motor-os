@@ -17,7 +17,7 @@ use crate::virtio_blk::BlockDevice;
 use core::mem::offset_of;
 use std::io::Result;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum VirtioDeviceKind {
     Unknown(u16),
     Net,
@@ -160,7 +160,7 @@ impl VirtioDevice {
     //   step 6 re-read dev status to ensure FEATURES_OK
     //   step 7 generic init of virtqueues
     //   step 8 confirm drive ok
-    fn parse(device_id: PciDeviceID) -> Result<Box<Self>> {
+    fn parse(device_id: PciDeviceID) -> Result<Rc<RefCell<Self>>> {
         // Step 0: init.
         if device_id.vendor_id() != 0x1af4 {
             log::debug!(
@@ -258,7 +258,7 @@ impl VirtioDevice {
             }
         }
 
-        Ok(Box::new(VirtioDevice {
+        Ok(Rc::new(RefCell::new(VirtioDevice {
             pci_device,
             kind,
             common_cfg: *common_cfg,
@@ -266,7 +266,7 @@ impl VirtioDevice {
             notify_cfg,
             msix: None,
             virtqueues: Vec::new(),
-        }))
+        })))
     }
 
     // Step 0: see virtio_pci_device::init() in osv.
@@ -715,12 +715,16 @@ pub fn init_virtio_devices(
     let mut devices = vec![];
 
     for dev in &pci_devices {
-        if let Ok(mut device) = VirtioDevice::parse(*dev) {
-            device.init();
-            device.reset();
-            device.acknowledge_device();
+        if let Ok(device) = VirtioDevice::parse(*dev) {
+            let kind = {
+                let mut device = device.borrow_mut();
+                device.init();
+                device.reset();
+                device.acknowledge_device();
+                device.kind
+            };
 
-            match device.kind {
+            match kind {
                 VirtioDeviceKind::Block => {
                     devices.push(Device::Block(super::virtio_blk::BlockDevice::init(device)?));
                 }
@@ -744,6 +748,6 @@ pub fn init_virtio_devices(
 }
 
 pub enum Device {
-    Block(crate::virtio_blk::BlockDevice),
+    Block(Rc<crate::virtio_blk::BlockDevice>),
     // Rng(crate::virtio_rng::Rng),
 }

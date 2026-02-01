@@ -9,7 +9,7 @@ const FS_BLOCK_SIZE: usize = 4096;
 const VIRTIO_BLOCKS_IN_FS_BLOCK: usize = FS_BLOCK_SIZE / VIRTIO_BLOCK_SIZE; // 8
 
 pub(super) struct VirtioPartition {
-    virtio_bd: Rc<RefCell<virtio_async::BlockDevice>>,
+    virtio_bd: Rc<virtio_async::BlockDevice>,
 
     // This partition starts at `virtio_block_offset` and contains `virtio_blocks`.
     virtio_block_offset: u64,
@@ -18,7 +18,7 @@ pub(super) struct VirtioPartition {
 
 impl VirtioPartition {
     pub async fn from_virtio_bd(
-        virtio_bd: Rc<RefCell<virtio_async::BlockDevice>>,
+        virtio_bd: Rc<virtio_async::BlockDevice>,
         virtio_block_offset: u64,
         virtio_blocks: u64,
     ) -> Result<Self> {

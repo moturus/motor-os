@@ -217,7 +217,7 @@ async fn async_runtime(q_handle: SysHandle, started: moto_async::oneshot::Sender
                     block_device.is_none(),
                     "Multiple block devices are not supported yet."
                 );
-                block_device = Some(Rc::new(RefCell::new(bd)));
+                block_device = Some(bd);
             }
         }
     }
