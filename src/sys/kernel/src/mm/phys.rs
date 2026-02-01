@@ -366,7 +366,8 @@ impl<S: PageSize> MemoryArea<S> {
     fn sort(&mut self) {
         // Stable sort allocates, and this is called during bootups, so we don't want to allocate.
         self.segments
-            .sort_unstable_by(|a, b| a.segment.start.cmp(&b.segment.start));
+            // .sort_unstable_by(|a, b| a.segment.start.cmp(&b.segment.start));
+            .sort_unstable_by_key(|a| a.segment.start);
     }
 
     #[cfg(debug_assertions)]

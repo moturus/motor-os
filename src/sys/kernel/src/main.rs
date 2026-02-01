@@ -5,7 +5,6 @@
 #![allow(internal_features)]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
-#![feature(alloc_layout_extra)]
 #![feature(allocator_api)]
 #![feature(assert_matches)]
 #![feature(btreemap_alloc)]

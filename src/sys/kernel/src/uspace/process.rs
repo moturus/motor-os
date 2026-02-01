@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
-use core::assert_matches::assert_matches;
+use core::assert_matches;
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
