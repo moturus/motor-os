@@ -2,11 +2,15 @@
 
 use std::path::Path;
 
+use async_fs::file_block_device::AsyncFileBlockDevice;
 use async_fs::EntryId;
 use async_fs::FileSystem;
 use motor_fs::MotorFs;
 
-pub async fn motor_fs_create_dir_all(fs: &mut MotorFs, path: &Path) -> std::io::Result<EntryId> {
+pub async fn motor_fs_create_dir_all(
+    fs: &mut MotorFs<AsyncFileBlockDevice>,
+    path: &Path,
+) -> std::io::Result<EntryId> {
     let components: Vec<_> = path.components().collect();
 
     let mut parent_id = motor_fs::ROOT_DIR_ID;

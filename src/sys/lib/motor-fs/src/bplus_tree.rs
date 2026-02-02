@@ -7,6 +7,7 @@ use crate::BlockHeader;
 use crate::BlockNo;
 use crate::Superblock;
 use crate::Txn;
+use async_fs::AsyncBlockDevice;
 use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -89,7 +90,10 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Get the (key, block_no) of the first child, if any.
-    pub async fn first_child(txn: &mut Txn<'_>, this_block_no: BlockNo) -> Result<Option<KV>> {
+    pub async fn first_child<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        this_block_no: BlockNo,
+    ) -> Result<Option<KV>> {
         let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
@@ -112,8 +116,8 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(NonRootNode::first_child(txn, child_block_no)).await
     }
 
-    pub async fn first_child_with_key(
-        txn: &mut Txn<'_>,
+    pub async fn first_child_with_key<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         key: u64,
     ) -> Result<Option<BlockNo>> {
@@ -159,8 +163,8 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(NonRootNode::first_child_with_key(txn, child_block_no, key)).await
     }
 
-    pub async fn next_child(
-        txn: &mut Txn<'_>,
+    pub async fn next_child<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         this_offset: usize,
         key: u64,
@@ -195,8 +199,8 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
-    async fn split_node(
-        txn: &mut Txn<'_>,
+    async fn split_node<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
         parent_node_block_no: BlockNo,
         level: u8,
@@ -261,8 +265,8 @@ impl<const ORDER: usize> Node<ORDER> {
         }
     }
 
-    async fn insert_kv(
-        txn: &mut Txn<'_>,
+    async fn insert_kv<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
         key: u64,
         val: BlockNo,
@@ -295,8 +299,8 @@ impl<const ORDER: usize> Node<ORDER> {
     // Note: we split full nodes "preemptively", so that there is no need to
     // do cascading splits up the tree.
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn node_insert_link(
-        txn: &mut Txn<'_>,
+    pub async fn node_insert_link<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
         key: u64,
         val: BlockNo,
@@ -352,8 +356,8 @@ impl<const ORDER: usize> Node<ORDER> {
     // Deletes link `val` at `key`.
     // Returns KV from _this_block_no_ to be removed, if any.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn node_delete_link(
-        txn: &mut Txn<'_>,
+    async fn node_delete_link<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         key: u64,
         block_no_to_delete: BlockNo,
@@ -478,8 +482,8 @@ impl<const ORDER: usize> Node<ORDER> {
     // Fixes the underflow of this_block_no. Returns, optionally, the key and block no
     // of the link that should be removed in the parent.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn fix_node_underflow(
-        txn: &mut Txn<'_>,
+    async fn fix_node_underflow<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         parent_node_block_no: BlockNo,
         level: u8,
@@ -588,8 +592,8 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(None)
     }
 
-    async fn try_rebalance_left(
-        txn: &mut Txn<'_>,
+    async fn try_rebalance_left<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
         child_left_key: u64,
@@ -630,8 +634,8 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(true)
     }
 
-    async fn try_rebalance_right(
-        txn: &mut Txn<'_>,
+    async fn try_rebalance_right<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
         child_right_key: u64,
@@ -673,8 +677,8 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(true)
     }
 
-    async fn set_child_key(
-        txn: &mut Txn<'_>,
+    async fn set_child_key<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         parent_block_no: BlockNo,
         child_block_no: BlockNo,
         old_key: u64,
@@ -702,8 +706,8 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Return the block number of the child to the left of the key specified (if any).
-    async fn get_left_child(
-        txn: &mut Txn<'_>,
+    async fn get_left_child<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_key: u64,
     ) -> Result<BlockNo> {
@@ -747,8 +751,8 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Return the block number of the child to the right of the key specified (if any).
-    async fn get_right_child(
-        txn: &mut Txn<'_>,
+    async fn get_right_child<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_key: u64,
     ) -> Result<BlockNo> {
@@ -774,8 +778,8 @@ impl<const ORDER: usize> Node<ORDER> {
         }
     }
 
-    async fn try_merge_left(
-        txn: &mut Txn<'_>,
+    async fn try_merge_left<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
         child_left_key: u64,
@@ -829,8 +833,8 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(Some((child_left_key, child_block_no)))
     }
 
-    async fn try_merge_right(
-        txn: &mut Txn<'_>,
+    async fn try_merge_right<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
         child_right_key: u64,
@@ -886,7 +890,10 @@ impl<const ORDER: usize> Node<ORDER> {
 
     #[allow(unused)]
     #[cfg(test)]
-    pub async fn test_log_tree(txn: &mut Txn<'_>, node_block_no: BlockNo) -> Result<()> {
+    pub async fn test_log_tree<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        node_block_no: BlockNo,
+    ) -> Result<()> {
         let node_block = txn.get_block(node_block_no).await?;
         let node_block_ref = node_block.block();
         let node = node_block_ref.get_at_offset::<Self>(Self::offset_in_block());
@@ -916,7 +923,10 @@ impl<const ORDER: usize> Node<ORDER> {
 }
 
 impl RootNode {
-    async fn split_root(txn: &mut Txn<'_>, root_block_no: BlockNo) -> Result<()> {
+    async fn split_root<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        root_block_no: BlockNo,
+    ) -> Result<()> {
         // Allocate two new blocks.
         let left_block_no = Superblock::allocate_block(txn).await?.block_no;
         let right_block_no = Superblock::allocate_block(txn).await?.block_no;
@@ -981,8 +991,8 @@ impl RootNode {
     }
 
     /// Return the number of freed btree nodes.
-    pub async fn root_delete_link<'a>(
-        txn: &mut Txn<'a>,
+    pub async fn root_delete_link<'a, BD: AsyncBlockDevice>(
+        txn: &mut Txn<'a, BD>,
         this_block_no: BlockNo,
         key: u64,
         block_no_to_delete: BlockNo,
@@ -1001,8 +1011,8 @@ impl RootNode {
         })
     }
 
-    async fn assimilate_single_child(
-        txn: &mut Txn<'_>,
+    async fn assimilate_single_child<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         root_block_no: BlockNo,
         child_block_no: BlockNo,
     ) -> Result<()> {

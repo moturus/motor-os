@@ -20,12 +20,12 @@ pub const PARTITION_ID: u8 = 0x2e;
 
 const CACHE_SIZE: usize = 512; // 2MB.
 
-pub struct MotorFs {
-    block_cache: async_fs::block_cache::BlockCache,
+pub struct MotorFs<BD: AsyncBlockDevice> {
+    block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
 }
 
-impl MotorFs {
+impl<BD: AsyncBlockDevice> MotorFs<BD> {
     pub fn check_err(&self) -> Result<()> {
         match &self.error {
             Ok(_) => Ok(()),
@@ -33,7 +33,7 @@ impl MotorFs {
         }
     }
 
-    pub async fn format(mut dev: Box<dyn AsyncBlockDevice>) -> Result<Self> {
+    pub async fn format(mut dev: Box<BD>) -> Result<Self> {
         if dev.num_blocks() <= RESERVED_BLOCKS {
             return Err(ErrorKind::StorageFull.into());
         }
@@ -48,11 +48,11 @@ impl MotorFs {
         })
     }
 
-    pub fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache {
+    pub fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache<BD> {
         &mut self.block_cache
     }
 
-    pub async fn open(dev: Box<dyn AsyncBlockDevice>) -> Result<Self> {
+    pub async fn open(dev: Box<BD>) -> Result<Self> {
         if dev.num_blocks() <= RESERVED_BLOCKS {
             return Err(ErrorKind::StorageFull.into());
         }
@@ -137,7 +137,7 @@ impl MotorFs {
 }
 
 #[async_trait(?Send)]
-impl FileSystem for MotorFs {
+impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
         &mut self,
@@ -458,6 +458,15 @@ impl FileSystem for MotorFs {
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
     }
+
+    // async fn write_proper<'a, F: Future<Output = ()>>(
+    //     &mut self,
+    //     file_id: EntryId,
+    //     offset: u64,
+    //     buf: &'a [u8],
+    // ) -> Result<(Completion<'a, F>, usize)> {
+    //     todo!()
+    // }
 
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
         Txn::do_resize_txn(self, file_id.into(), new_size).await

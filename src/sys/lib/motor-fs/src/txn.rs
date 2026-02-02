@@ -9,7 +9,7 @@
 
 use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, Superblock, dir_entry};
 use async_fs::{
-    BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
+    AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
 use std::io::{ErrorKind, Result};
@@ -20,13 +20,13 @@ const TXN_CACHE_SIZE: usize = 16;
 /// The transaction object: accumulates "dirty" blocks, then either discards
 /// them on error (so no changes to the underlying FS happen) or applies them
 /// "atomically", i.e. either all or nothing.
-pub struct Txn<'a> {
-    fs: &'a mut MotorFs,
+pub struct Txn<'a, BD: AsyncBlockDevice> {
+    fs: &'a mut MotorFs<BD>,
     txn_cache: micromap::Map<BlockNo, CachedBlock, TXN_CACHE_SIZE>,
     read_only: bool,
 }
 
-impl<'a> Drop for Txn<'a> {
+impl<'a, BD: AsyncBlockDevice> Drop for Txn<'a, BD> {
     fn drop(&mut self) {
         for (block_no, block) in self.txn_cache.drain() {
             assert_eq!(block_no.as_u64(), block.block_no());
@@ -42,8 +42,8 @@ impl<'a> Drop for Txn<'a> {
     }
 }
 
-impl<'a> Txn<'a> {
-    fn block_cache(&mut self) -> &mut BlockCache {
+impl<'a, BD: AsyncBlockDevice> Txn<'a, BD> {
+    fn block_cache(&mut self) -> &mut BlockCache<BD> {
         self.fs.block_cache()
     }
 
@@ -73,7 +73,7 @@ impl<'a> Txn<'a> {
         Ok(())
     }
 
-    pub fn new_readonly(fs: &'a mut MotorFs) -> Self {
+    pub fn new_readonly(fs: &'a mut MotorFs<BD>) -> Self {
         Self {
             fs,
             txn_cache: micromap::Map::new(),
@@ -109,7 +109,7 @@ impl<'a> Txn<'a> {
     }
 
     pub async fn do_create_entry_txn(
-        fs: &'a mut MotorFs,
+        fs: &'a mut MotorFs<BD>,
         parent_id: EntryIdInternal,
         kind: EntryKind,
         filename: &'a str,
@@ -136,7 +136,10 @@ impl<'a> Txn<'a> {
         Ok(entry_id)
     }
 
-    pub async fn do_delete_entry_txn(fs: &'a mut MotorFs, entry_id: EntryIdInternal) -> Result<()> {
+    pub async fn do_delete_entry_txn(
+        fs: &'a mut MotorFs<BD>,
+        entry_id: EntryIdInternal,
+    ) -> Result<()> {
         log::trace!("{}:{} - delete entry: {entry_id:?}", file!(), line!());
 
         let mut txn = Self {
@@ -150,7 +153,7 @@ impl<'a> Txn<'a> {
     }
 
     pub async fn do_move_entry_txn(
-        fs: &'a mut MotorFs,
+        fs: &'a mut MotorFs<BD>,
         entry_id: EntryIdInternal,
         old_parent_id: EntryIdInternal,
         new_parent_id: EntryIdInternal,
@@ -212,7 +215,7 @@ impl<'a> Txn<'a> {
     }
 
     pub async fn do_write_txn(
-        fs: &'a mut MotorFs,
+        fs: &'a mut MotorFs<BD>,
         file_id: EntryIdInternal,
         offset: u64,
         buf: &[u8],
@@ -270,7 +273,7 @@ impl<'a> Txn<'a> {
     }
 
     pub async fn do_resize_txn(
-        fs: &'a mut MotorFs,
+        fs: &'a mut MotorFs<BD>,
         file_id: EntryIdInternal,
         new_size: u64,
     ) -> Result<()> {
@@ -377,7 +380,7 @@ impl<'a> Txn<'a> {
 
     #[cfg(test)]
     pub async fn test_remove_block_txn(
-        fs: &'a mut MotorFs,
+        fs: &'a mut MotorFs<BD>,
         file_id: EntryIdInternal,
         offset: u64,
     ) -> Result<()> {

@@ -17,6 +17,15 @@ pub trait AsyncBlockDevice {
     /// Write a single block.
     async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()>;
 
+    /*
+        /// Write multiple blocks.
+        async fn write_proper<'a, B: crate::AsBlock, F: Future<Output = ()>>(
+            &mut self,
+            block_no: u64,
+            blocks: crate::IoSlice<'a, B>,
+        ) -> Result<(crate::WriteCompletion<'a, F>, usize)>;
+    */
+
     /// Flush dirty blocks to the underlying storage.
     async fn flush(&mut self) -> Result<()>;
 }

@@ -101,16 +101,16 @@ impl CachedBlock {
 }
 
 /// LRU-based block cache.
-pub struct BlockCache {
-    block_dev: Box<dyn AsyncBlockDevice>,
+pub struct BlockCache<BD: AsyncBlockDevice> {
+    block_dev: Box<BD>,
     cache: LruCache<u64, CachedBlock>,
 
     free_blocks: Vec<CachedBlock>,
 }
 
 // TODO: add batch writes.
-impl BlockCache {
-    pub async fn new(block_dev: Box<dyn AsyncBlockDevice>, max_len: usize) -> Result<Self> {
+impl<BD: AsyncBlockDevice> BlockCache<BD> {
+    pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
         Ok(Self {
             cache: LruCache::new(NonZero::new(max_len).unwrap()),
             block_dev,

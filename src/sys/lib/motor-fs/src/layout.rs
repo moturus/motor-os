@@ -21,6 +21,7 @@ use crate::Txn;
 use crate::bplus_tree;
 use crate::bplus_tree::Node;
 use crate::bplus_tree::RootNode;
+use async_fs::AsyncBlockDevice;
 pub use async_fs::BLOCK_SIZE;
 use async_fs::Block;
 pub use async_fs::EntryId;
@@ -216,7 +217,9 @@ impl Superblock {
 
     // Allocate a new/empty block. Also increments generation.
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn allocate_block(txn: &mut Txn<'_>) -> Result<EntryIdInternal> {
+    pub async fn allocate_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+    ) -> Result<EntryIdInternal> {
         let mut sb_block = txn.get_block(BlockNo(0)).await?;
         let mut superblock_ref = sb_block.block_mut();
         let superblock = superblock_ref.get_mut_at_offset::<Self>(0);
@@ -275,8 +278,8 @@ impl Superblock {
     }
 
     /// Take the first block in use by the file entry, detach it from the file, and return it.
-    async fn reallocate_first_block<'a>(
-        txn: &mut Txn<'a>,
+    async fn reallocate_first_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         file_block_no: BlockNo,
     ) -> Result<BlockNo> {
         let Some(kv) = RootNode::first_child(txn, file_block_no).await? else {
@@ -328,7 +331,10 @@ impl Superblock {
 
     // Free a single block without looking inside: could be a data block, or an empty file/directory.
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn free_single_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
+    pub async fn free_single_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        block_no: BlockNo,
+    ) -> Result<()> {
         assert!(block_no.as_u64() > 1);
         let mut sb_block = txn.get_block(BlockNo(0)).await?.clone();
         let mut sb_mut_ref = sb_block.block_mut();
@@ -353,7 +359,10 @@ impl Superblock {
         Ok(())
     }
 
-    pub async fn free_complex_block<'a>(txn: &mut Txn<'a>, block_no: BlockNo) -> Result<()> {
+    pub async fn free_complex_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        block_no: BlockNo,
+    ) -> Result<()> {
         let mut target_block = txn.get_block(block_no).await?.clone();
         let mut sb_block = txn.get_block(BlockNo(0)).await?.clone();
 
@@ -574,30 +583,37 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn first_child(&self, txn: &mut Txn<'_>) -> Result<Option<BlockNo>> {
+    pub async fn first_child<BD: AsyncBlockDevice>(
+        &self,
+        txn: &mut Txn<'_, BD>,
+    ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
         Node::<BTREE_ROOT_ORDER>::first_child(txn, self.entry_id.block_no)
             .await
             .map(|maybe_kv| maybe_kv.map(|kv| kv.child_block_no))
     }
 
-    pub async fn next_child(&self, txn: &mut Txn<'_>, hash: u64) -> Result<Option<BlockNo>> {
+    pub async fn next_child<BD: AsyncBlockDevice>(
+        &self,
+        txn: &mut Txn<'_, BD>,
+        hash: u64,
+    ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
         Node::<BTREE_ROOT_ORDER>::next_child(txn, self.entry_id.block_no, BTREE_ROOT_OFFSET, hash)
             .await
     }
 
-    pub async fn first_child_with_hash(
+    pub async fn first_child_with_hash<BD: AsyncBlockDevice>(
         &self,
-        txn: &mut Txn<'_>,
+        txn: &mut Txn<'_, BD>,
         hash: u64,
     ) -> Result<Option<BlockNo>> {
         assert_eq!(self.kind(), EntryKind::Directory);
         Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, self.entry_id.block_no, hash).await
     }
 
-    pub async fn data_block_at_key(
-        txn: &mut Txn<'_>,
+    pub async fn data_block_at_key<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         file_block_no: BlockNo,
         block_key: u64,
     ) -> Result<Option<BlockNo>> {
@@ -645,8 +661,8 @@ impl DirEntryBlock {
         &mut self.metadata
     }
 
-    pub async fn get_hash(
-        txn: &mut Txn<'_>,
+    pub async fn get_hash<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         parent_id: EntryIdInternal,
         filename: &str,
     ) -> Result<u64> {
@@ -656,8 +672,8 @@ impl DirEntryBlock {
         Ok(dir_entry!(parent_block).hash(filename))
     }
 
-    pub async fn insert_data_block(
-        txn: &mut Txn<'_>,
+    pub async fn insert_data_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         file_id: EntryIdInternal,
         block_key: u64,
     ) -> Result<BlockNo> {
@@ -679,8 +695,8 @@ impl DirEntryBlock {
     }
 
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn set_file_size_in_entry(
-        txn: &mut Txn<'_>,
+    pub async fn set_file_size_in_entry<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         file_block_no: BlockNo,
         new_size: u64,
     ) -> Result<()> {
@@ -695,8 +711,8 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub fn init_child_entry<'a, 'b>(
-        txn: &'b mut Txn<'a>,
+    pub fn init_child_entry<'a, 'b, BD: AsyncBlockDevice>(
+        txn: &'b mut Txn<'a, BD>,
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
         kind: async_fs::EntryKind,
@@ -729,7 +745,10 @@ impl DirEntryBlock {
         child.btree_root.init_new_root();
     }
 
-    pub async fn delete_entry(txn: &mut Txn<'_>, entry_id: EntryIdInternal) -> Result<()> {
+    pub async fn delete_entry<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        entry_id: EntryIdInternal,
+    ) -> Result<()> {
         let entry_block = txn.get_block(entry_id.block_no).await?.clone();
         dir_entry!(entry_block).validate_entry(entry_id)?;
         let parent_id = dir_entry!(entry_block).parent_id();
@@ -754,8 +773,8 @@ impl DirEntryBlock {
         }
     }
 
-    pub async fn unlink_entry(
-        txn: &mut Txn<'_>,
+    pub async fn unlink_entry<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
         mark_not_used: bool,
@@ -816,8 +835,8 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn link_child_block(
-        txn: &mut Txn<'_>,
+    pub async fn link_child_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         parent_block_no: BlockNo,
         child_block_no: BlockNo,
         key: u64,
@@ -849,8 +868,8 @@ impl DirEntryBlock {
         }
     }
 
-    pub async fn unlink_child_block(
-        txn: &mut Txn<'_>,
+    pub async fn unlink_child_block<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         parent_block_no: BlockNo,
         child_block_no: BlockNo,
         key: u64,
@@ -863,7 +882,10 @@ impl DirEntryBlock {
         Node::<BTREE_ROOT_ORDER>::root_delete_link(txn, parent_block_no, key, child_block_no).await
     }
 
-    pub async fn increment_dir_size(txn: &mut Txn<'_>, dir_id: EntryIdInternal) -> Result<()> {
+    pub async fn increment_dir_size<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        dir_id: EntryIdInternal,
+    ) -> Result<()> {
         let mut dir_block = txn.get_block(dir_id.block_no).await?;
         Self::from_block_mut(&mut dir_block.block_mut())
             .metadata
@@ -874,8 +896,8 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn increment_blocks_in_use(
-        txn: &mut Txn<'_>,
+    pub async fn increment_blocks_in_use<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         entry_block_no: BlockNo,
         val: u64,
     ) -> Result<()> {
@@ -887,8 +909,8 @@ impl DirEntryBlock {
         Ok(())
     }
 
-    pub async fn decrement_blocks_in_use(
-        txn: &mut Txn<'_>,
+    pub async fn decrement_blocks_in_use<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
         entry_block_no: BlockNo,
         val: u64,
     ) -> Result<()> {
