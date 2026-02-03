@@ -68,7 +68,6 @@ impl Block {
     }
 }
 
-/*
 pub struct WriteCompletion<'a, F>
 where
     F: Future<Output = ()>,
@@ -100,4 +99,3 @@ pub trait AsBlock {
 pub struct IoSlice<'a, B: AsBlock> {
     blocks: &'a [B],
 }
-*/

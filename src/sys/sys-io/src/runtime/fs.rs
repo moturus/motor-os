@@ -1,4 +1,6 @@
+use async_fs::EntryId;
 use async_fs::{EntryKind, FileSystem};
+use async_trait::async_trait;
 use moto_async::{AsFuture, LocalMutex};
 use moto_sys_io::api_fs;
 use moto_sys_io::api_fs::FS_URL;
@@ -7,6 +9,7 @@ use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
 
+use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
@@ -15,6 +18,143 @@ mod virtio_partition;
 
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 32;
+
+enum FS {
+    MotorFs(motor_fs::MotorFs<VirtioPartition>),
+}
+
+#[async_trait(?Send)]
+impl FileSystem for FS {
+    /// Find a file or directory by its full path.
+    async fn stat(
+        &mut self,
+        parent_id: EntryId,
+        filename: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.stat(parent_id, filename).await,
+        }
+    }
+
+    /// Create a file or directory.
+    async fn create_entry(
+        &mut self,
+        parent_id: EntryId,
+        kind: EntryKind,
+        name: &str, // Leaf name.
+    ) -> Result<EntryId> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.create_entry(parent_id, kind, name).await,
+        }
+    }
+
+    /// Delete the file or directory.
+    async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.delete_entry(entry_id).await,
+        }
+    }
+
+    /// Rename and/or move the file or directory.
+    async fn move_entry(
+        &mut self,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.move_entry(entry_id, new_parent_id, new_name).await,
+        }
+    }
+
+    /// Get the first entry in a directory.
+    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.get_first_entry(parent_id).await,
+        }
+    }
+
+    /// Get the next entry in a directory.
+    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.get_next_entry(entry_id).await,
+        }
+    }
+
+    /// Get the parent of the entry.
+    async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.get_parent(entry_id).await,
+        }
+    }
+
+    /// Filename of the entry, without parent directories.
+    async fn name(&mut self, entry_id: EntryId) -> Result<String> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.name(entry_id).await,
+        }
+    }
+
+    /// The metadata of the directory entry.
+    async fn metadata(&mut self, entry_id: EntryId) -> Result<async_fs::Metadata> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.metadata(entry_id).await,
+        }
+    }
+
+    /// Read bytes from a file.
+    /// Note that cross-block reads may not be supported.
+    async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.read(file_id, offset, buf).await,
+        }
+    }
+
+    /// Write bytes to a file.
+    /// Note that cross-block writes may not be supported.
+    async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.write(file_id, offset, buf).await,
+        }
+    }
+
+    async fn write_vectored<'a, B: async_fs::AsBlock, F: Future<Output = ()>>(
+        &mut self,
+        file_id: EntryId,
+        offset: u64,
+        bufs: &async_fs::IoSlice<'a, B>,
+    ) -> Result<(async_fs::WriteCompletion<'a, F>, usize)> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.write_vectored(file_id, offset, bufs).await,
+        }
+    }
+
+    /// Resize the file.
+    async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.resize(file_id, new_size).await,
+        }
+    }
+
+    /// The total number of blocks in the FS.
+    fn num_blocks(&self) -> u64 {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.num_blocks(),
+        }
+    }
+
+    async fn empty_blocks(&mut self) -> Result<u64> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.empty_blocks().await,
+        }
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.flush().await,
+        }
+    }
+}
 
 pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<()> {
     use zerocopy::FromZeros;
@@ -33,7 +173,7 @@ pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<
         std::io::Error::from(ErrorKind::InvalidData)
     })?;
 
-    let mut fs: Option<Box<dyn FileSystem>> = None;
+    let mut fs: Option<Rc<LocalMutex<FS>>> = None;
     for pte in &mbr.entries {
         log::trace!("MBR PTE: {pte:?}");
         match pte.partition_type {
@@ -61,12 +201,12 @@ pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<
                         std::io::Error::from(ErrorKind::InvalidData)
                     })?,
                 );
-                fs = Some(Box::new(motor_fs::MotorFs::open(partition).await.map_err(
-                    |err| {
+                fs = Some(Rc::new(LocalMutex::new(FS::MotorFs(
+                    motor_fs::MotorFs::open(partition).await.map_err(|err| {
                         log::error!("Mbr::parse() failed: {err:?}.");
                         std::io::Error::from(ErrorKind::InvalidData)
-                    },
-                )?));
+                    })?,
+                ))));
             }
             _ => continue,
         }
@@ -81,16 +221,14 @@ pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<
     Ok(())
 }
 
-async fn spawn_fs_listeners(fs: Box<dyn FileSystem>) {
-    let fs = Rc::new(LocalMutex::new(fs));
-
+async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {
     const NUM_LISTENERS: usize = 5;
     for _ in 0..NUM_LISTENERS {
         spawn_new_listener(fs.clone()).await;
     }
 }
 
-async fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
+async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
     // Use oneshot to signal the start of listening, otherwise connects may fail.
     let (tx, rx) = moto_async::oneshot();
 
@@ -107,7 +245,7 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<Box<dyn FileSystem>>>) {
 }
 
 async fn fs_listener(
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
     started: moto_async::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
@@ -166,7 +304,7 @@ async fn fs_listener(
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
     sender: moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) {
     if let Err(err) = match msg.command {
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
@@ -191,7 +329,7 @@ async fn on_msg(
 async fn on_cmd_stat(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
@@ -213,7 +351,7 @@ async fn on_cmd_stat(
 async fn on_cmd_create_file(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
@@ -237,7 +375,7 @@ async fn on_cmd_create_file(
 async fn on_cmd_write(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
@@ -256,7 +394,7 @@ async fn on_cmd_write(
 async fn on_cmd_read(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
 
@@ -278,7 +416,7 @@ async fn on_cmd_read(
 async fn on_cmd_metadata(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
 
@@ -298,7 +436,7 @@ async fn on_cmd_metadata(
 async fn on_cmd_resize(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
 
@@ -317,7 +455,7 @@ async fn on_cmd_resize(
 async fn on_cmd_delete_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
 
@@ -334,7 +472,7 @@ async fn on_cmd_delete_entry(
 async fn on_cmd_flush(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<Box<dyn FileSystem>>>,
+    fs: Rc<LocalMutex<FS>>,
 ) -> Result<()> {
     let mut fs = fs.lock().await;
     let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
