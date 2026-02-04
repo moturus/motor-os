@@ -208,13 +208,6 @@ pub trait FileSystem {
     /// Note that cross-block writes may not be supported.
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
 
-    async fn write_vectored<'a, B: crate::AsBlock, F: Future<Output = ()>>(
-        &mut self,
-        file_id: EntryId,
-        offset: u64,
-        bufs: &crate::IoSlice<'a, B>,
-    ) -> Result<(crate::WriteCompletion<'a, F>, usize)>;
-
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()>;
 

@@ -84,6 +84,8 @@ impl VirtioPartition {
 
 #[async_trait(?Send)]
 impl async_fs::AsyncBlockDevice for VirtioPartition {
+    type Completion<'a> = virtio_async::Completion<'a>;
+
     fn num_blocks(&self) -> u64 {
         self.virtio_blocks >> 3
     }
@@ -121,6 +123,14 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         completion.await;
 
         Ok(())
+    }
+
+    async fn write_block_2<'a>(
+        &mut self,
+        block_no: u64,
+        block: &'a Block,
+    ) -> Result<Self::Completion<'a>> {
+        todo!()
     }
 
     /// Flush dirty blocks to the underlying storage.

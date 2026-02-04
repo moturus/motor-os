@@ -459,15 +459,6 @@ impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
     }
 
-    async fn write_vectored<'a, B: async_fs::AsBlock, F: Future<Output = ()>>(
-        &mut self,
-        file_id: EntryId,
-        offset: u64,
-        bufs: &async_fs::IoSlice<'a, B>,
-    ) -> Result<(async_fs::WriteCompletion<'a, F>, usize)> {
-        todo!()
-    }
-
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
         Txn::do_resize_txn(self, file_id.into(), new_size).await
     }

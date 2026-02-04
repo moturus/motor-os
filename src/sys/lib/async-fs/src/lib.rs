@@ -67,35 +67,3 @@ impl Block {
         bytemuck::from_bytes_mut(&mut self.bytes[offset..(offset + core::mem::size_of::<T>())])
     }
 }
-
-pub struct WriteCompletion<'a, F>
-where
-    F: Future<Output = ()>,
-{
-    inner: F,
-    _phantom_data: core::marker::PhantomData<&'a ()>,
-}
-
-impl<'a, F: Future<Output = ()>> Future for WriteCompletion<'a, F> {
-    type Output = ();
-
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        // Safety: structured pinning.
-        unsafe {
-            let inner_future = self.map_unchecked_mut(|s| &mut s.inner);
-            inner_future.poll(cx)
-        }
-    }
-}
-
-pub trait AsBlock {
-    fn as_block(&self) -> &Block;
-    fn as_block_mut(&mut self) -> &mut Block;
-}
-
-pub struct IoSlice<'a, B: AsBlock> {
-    blocks: &'a [B],
-}

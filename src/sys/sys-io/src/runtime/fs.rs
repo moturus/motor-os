@@ -118,17 +118,6 @@ impl FileSystem for FS {
         }
     }
 
-    async fn write_vectored<'a, B: async_fs::AsBlock, F: Future<Output = ()>>(
-        &mut self,
-        file_id: EntryId,
-        offset: u64,
-        bufs: &async_fs::IoSlice<'a, B>,
-    ) -> Result<(async_fs::WriteCompletion<'a, F>, usize)> {
-        match self {
-            FS::MotorFs(motor_fs) => motor_fs.write_vectored(file_id, offset, bufs).await,
-        }
-    }
-
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
         match self {

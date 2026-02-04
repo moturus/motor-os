@@ -46,6 +46,8 @@ impl AsyncFileBlockDevice {
 
 #[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
+    type Completion<'a> = core::future::Ready<()>;
+
     fn num_blocks(&self) -> u64 {
         self.num_blocks
     }
@@ -80,6 +82,16 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
             .await?;
 
         self.file.write_all(block.as_bytes()).await
+    }
+
+    async fn write_block_2<'a>(
+        &mut self,
+        block_no: u64,
+        block: &'a Block,
+    ) -> Result<Self::Completion<'a>> {
+        self.write_block(block_no, block).await?;
+        // Ok(crate::WriteCompletion::wrap(core::future::ready::<()>(())))
+        Ok(core::future::ready::<()>(()))
     }
 
     async fn flush(&mut self) -> Result<()> {
