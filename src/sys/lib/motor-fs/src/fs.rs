@@ -138,6 +138,8 @@ impl<BD: AsyncBlockDevice> MotorFs<BD> {
 
 #[async_trait(?Send)]
 impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
+    type Completion<'a> = BD::Completion<'a>;
+
     #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
         &mut self,
@@ -457,6 +459,16 @@ impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
+    }
+
+    #[allow(unused)]
+    async fn write_2<'a>(
+        &mut self,
+        file_id: EntryId,
+        offset: u64,
+        buf: &'a [u8],
+    ) -> Result<(usize, Self::Completion<'a>)> {
+        todo!()
     }
 
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {

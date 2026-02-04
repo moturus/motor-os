@@ -90,7 +90,6 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         block: &'a Block,
     ) -> Result<Self::Completion<'a>> {
         self.write_block(block_no, block).await?;
-        // Ok(crate::WriteCompletion::wrap(core::future::ready::<()>(())))
         Ok(core::future::ready::<()>(()))
     }
 

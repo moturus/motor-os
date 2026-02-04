@@ -25,6 +25,8 @@ enum FS {
 
 #[async_trait(?Send)]
 impl FileSystem for FS {
+    type Completion<'a> = <VirtioPartition as async_fs::AsyncBlockDevice>::Completion<'a>;
+
     /// Find a file or directory by its full path.
     async fn stat(
         &mut self,
@@ -116,6 +118,18 @@ impl FileSystem for FS {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.write(file_id, offset, buf).await,
         }
+    }
+
+    /// Write bytes to a file.
+    /// Note that cross-block writes may not be supported.
+    #[allow(unused)]
+    async fn write_2<'a>(
+        &mut self,
+        file_id: EntryId,
+        offset: u64,
+        buf: &'a [u8],
+    ) -> Result<(usize, Self::Completion<'a>)> {
+        todo!()
     }
 
     /// Resize the file.

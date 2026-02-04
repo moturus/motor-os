@@ -159,6 +159,8 @@ impl Metadata {
 /// Filesystem trait.
 #[async_trait(?Send)]
 pub trait FileSystem {
+    type Completion<'a>;
+
     /// Find a file or directory by its full path.
     async fn stat(
         &mut self,
@@ -207,6 +209,15 @@ pub trait FileSystem {
     /// Write bytes to a file.
     /// Note that cross-block writes may not be supported.
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
+
+    /// Write bytes to a file.
+    /// Note that cross-block writes may not be supported.
+    async fn write_2<'a>(
+        &mut self,
+        file_id: EntryId,
+        offset: u64,
+        buf: &'a [u8],
+    ) -> Result<(usize, Self::Completion<'a>)>;
 
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()>;
