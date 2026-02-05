@@ -84,7 +84,7 @@ impl VirtioPartition {
 
 #[async_trait(?Send)]
 impl async_fs::AsyncBlockDevice for VirtioPartition {
-    type Completion<'a> = virtio_async::Completion<'a>;
+    type Completion<'a> = virtio_async::VqCompletion<'a>;
 
     fn num_blocks(&self) -> u64 {
         self.virtio_blocks >> 3
@@ -109,18 +109,16 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
 
     /// Write a single block.
     async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()> {
-        use zerocopy::FromZeros;
-
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
-        let completion = virtio_async::BlockDevice::post_write(
+        virtio_async::BlockDevice::post_write(
             self.virtio_bd.clone(),
             first_sector_no,
             block.as_bytes(),
         )
-        .unwrap();
-        completion.await;
+        .await
+        .await;
 
         Ok(())
     }
@@ -130,7 +128,15 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         block_no: u64,
         block: &'a Block,
     ) -> Result<Self::Completion<'a>> {
-        todo!()
+        let first_sector_no =
+            block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
+
+        Ok(virtio_async::BlockDevice::post_write(
+            self.virtio_bd.clone(),
+            first_sector_no,
+            block.as_bytes(),
+        )
+        .await)
     }
 
     /// Flush dirty blocks to the underlying storage.

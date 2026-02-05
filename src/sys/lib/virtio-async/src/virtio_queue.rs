@@ -14,6 +14,7 @@ use crate::virtio_device::mapper;
 use moto_async::AsFuture;
 use moto_sys::SysHandle;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -120,13 +121,56 @@ struct HeaderBuffer {
 
 static _A: () = assert!(core::mem::size_of::<HeaderBuffer>() == 24);
 
-pub struct Completion<'a> {
+pub(crate) struct VqAlloc {
+    num_to_alloc: u16,
+    virtqueue: Rc<RefCell<Virtqueue>>,
+}
+
+impl VqAlloc {
+    pub(crate) fn new(virtqueue: Rc<RefCell<Virtqueue>>, num_to_alloc: u16) -> Self {
+        Self {
+            num_to_alloc,
+            virtqueue,
+        }
+    }
+}
+
+impl Future for VqAlloc {
+    type Output = u16;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        loop {
+            let mut virtq = self.virtqueue.borrow_mut();
+            if let Some(chain_head) = virtq.alloc_descriptor_chain(self.num_to_alloc) {
+                return std::task::Poll::Ready(chain_head);
+            }
+
+            let mut pinned = Box::pin(virtq.wait_handle.as_future());
+            core::mem::drop(virtq);
+
+            match pinned.as_mut().poll(cx) {
+                std::task::Poll::Ready(_) => continue,
+                std::task::Poll::Pending => {
+                    let mut vq = self.virtqueue.borrow_mut();
+                    vq.alloc_waiters.push_back(cx.local_waker().clone());
+                    vq.notify();
+                    return std::task::Poll::Pending;
+                }
+            }
+        }
+    }
+}
+
+pub struct VqCompletion<'a> {
     chain_head: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
     _phantom_data: PhantomData<&'a ()>,
 }
 
-impl<'a> Future for Completion<'a> {
+impl<'a> Future for VqCompletion<'a> {
     // Return consumed len/bytes in u32; the status in u8.
     type Output = (u32, u8);
 
@@ -150,7 +194,9 @@ impl<'a> Future for Completion<'a> {
             match pinned.as_mut().poll(cx) {
                 std::task::Poll::Ready(_) => continue,
                 std::task::Poll::Pending => {
-                    self.virtqueue.borrow().notify();
+                    let mut vq = self.virtqueue.borrow_mut();
+                    vq.completion_waiters.push_back(cx.local_waker().clone());
+                    vq.notify();
                     return std::task::Poll::Pending;
                 }
             }
@@ -158,7 +204,7 @@ impl<'a> Future for Completion<'a> {
     }
 }
 
-impl Drop for Completion<'_> {
+impl Drop for VqCompletion<'_> {
     fn drop(&mut self) {
         let mut virtqueue = self.virtqueue.borrow_mut();
         let mut curr = self.chain_head;
@@ -218,6 +264,9 @@ pub(super) struct Virtqueue {
     notify_offset: u64,
 
     queue_size_mask: u16, // queue_size - 1
+
+    alloc_waiters: VecDeque<std::task::LocalWaker>,
+    completion_waiters: VecDeque<std::task::LocalWaker>,
 }
 
 impl Virtqueue {
@@ -299,6 +348,8 @@ impl Virtqueue {
             notify_bar: core::ptr::null(),
             notify_offset: 0,
             queue_size_mask: queue_size - 1,
+            alloc_waiters: VecDeque::new(),
+            completion_waiters: VecDeque::new(),
         })))
     }
 
@@ -351,8 +402,9 @@ impl Virtqueue {
             debug_assert!(curr < self.queue_size);
 
             let header_buffer = &mut self.header_buffers[curr as usize];
-            debug_assert_eq!(0, header_buffer.in_use_by_device);
-            debug_assert_eq!(0, header_buffer.in_use_by_completion);
+            if header_buffer.in_use_by_device != 0 || header_buffer.in_use_by_completion != 0 {
+                break;
+            }
             header_buffer.in_use_by_device = 1;
 
             let descriptor = self.get_descriptor_mut(curr);
@@ -432,7 +484,7 @@ impl Virtqueue {
         outgoing: u16,
         incoming: u16,
         chain_head: u16,
-    ) -> Completion<'a> {
+    ) -> VqCompletion<'a> {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
@@ -465,7 +517,7 @@ impl Virtqueue {
         // this_mut.notify();
         core::mem::drop(this_mut);
 
-        Completion {
+        VqCompletion {
             chain_head,
             virtqueue: this,
             _phantom_data: PhantomData,

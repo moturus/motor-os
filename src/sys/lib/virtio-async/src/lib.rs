@@ -1,5 +1,6 @@
 #![allow(internal_features)]
 #![feature(core_intrinsics)]
+#![feature(local_waker)]
 #![allow(unused)]
 
 use std::io::Result;
@@ -18,7 +19,7 @@ pub use pci::le64;
 
 pub use virtio_blk::BlockDevice;
 pub use virtio_device::{Device, init_virtio_devices};
-pub use virtio_queue::Completion;
+pub use virtio_queue::VqCompletion;
 
 pub(crate) use virtio_device::mapper;
 

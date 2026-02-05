@@ -11,8 +11,9 @@ use zerocopy::FromZeros;
 
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
-use crate::Completion;
+use crate::VqCompletion;
 use crate::virtio_queue::Virtqueue;
+use crate::virtio_queue::VqAlloc;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Little Endian is often assumed here.");
@@ -154,7 +155,11 @@ impl BlockDevice {
     }
 
     #[inline(never)]
-    pub fn post_read<'a>(self: Rc<Self>, sector: u64, buf: &'a mut [u8]) -> Option<Completion<'a>> {
+    pub fn post_read<'a>(
+        self: Rc<Self>,
+        sector: u64,
+        buf: &'a mut [u8],
+    ) -> Option<VqCompletion<'a>> {
         assert!(buf.len() <= BLOCK_SIZE);
         assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
 
@@ -200,12 +205,12 @@ impl BlockDevice {
     }
 
     #[inline(never)]
-    pub fn post_write<'a>(self: Rc<Self>, sector: u64, buf: &'a [u8]) -> Option<Completion<'a>> {
+    pub async fn post_write<'a>(self: Rc<Self>, sector: u64, buf: &'a [u8]) -> VqCompletion<'a> {
         assert!(buf.len() <= BLOCK_SIZE);
         assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
 
+        let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
         let mut virtqueue = self.virtqueue.borrow_mut();
-        let chain_head = virtqueue.alloc_descriptor_chain(3)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
 
@@ -240,14 +245,12 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        let completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head);
-
-        Some(completion)
+        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head)
     }
 
     /// Returns the ID of the submitted request.
     #[inline(never)]
-    pub fn post_flush<'a>(self: Rc<Self>) -> Option<Completion<'a>> {
+    pub fn post_flush<'a>(self: Rc<Self>) -> Option<VqCompletion<'a>> {
         let mut virtqueue = self.virtqueue.borrow_mut();
         let chain_head = virtqueue.alloc_descriptor_chain(2)?;
 
