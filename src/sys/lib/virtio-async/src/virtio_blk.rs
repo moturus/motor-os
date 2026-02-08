@@ -265,7 +265,7 @@ impl BlockDevice {
 
     /// Returns the ID of the submitted request.
     #[inline(never)]
-    pub async fn post_flush(self: Rc<Self>) {
+    pub async fn post_flush(self: Rc<Self>) -> Result<()> {
         let chain_head = VqAlloc::new(self.virtqueue.clone(), 2).await;
 
         let mut virtqueue = self.virtqueue.borrow_mut();
@@ -298,10 +298,10 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head).await;
+        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head).await
     }
 
-    pub fn notify(self: Rc<Self>) {
+    pub fn notify(&self) {
         self.virtqueue.borrow().notify();
     }
 }

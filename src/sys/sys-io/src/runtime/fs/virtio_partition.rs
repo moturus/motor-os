@@ -158,7 +158,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
             block.as_bytes_mut(),
         )
         .await;
-        completion.await;
+        completion.await?;
 
         Ok(())
     }
@@ -195,7 +195,10 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
 
     /// Flush dirty blocks to the underlying storage.
     async fn flush(&self) -> Result<()> {
-        virtio_async::BlockDevice::post_flush(self.virtio_bd.clone()).await;
-        Ok(())
+        virtio_async::BlockDevice::post_flush(self.virtio_bd.clone()).await
+    }
+
+    fn notify(&self) {
+        self.virtio_bd.notify();
     }
 }

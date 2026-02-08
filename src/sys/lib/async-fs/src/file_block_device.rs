@@ -49,7 +49,7 @@ impl AsyncFileBlockDevice {
 
 #[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
-    type Completion = core::future::Ready<()>;
+    type Completion = core::future::Ready<Result<()>>;
 
     fn num_blocks(&self) -> u64 {
         self.num_blocks
@@ -93,11 +93,13 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         block: crate::block_cache::FlushingBlock,
     ) -> Result<Self::Completion> {
         self.write_block(block_no, block.block()).await?;
-        Ok(core::future::ready(()))
+        Ok(core::future::ready(Ok(())))
     }
 
     async fn flush(&self) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         self.file.borrow_mut().flush().await
     }
+
+    fn notify(&self) {}
 }

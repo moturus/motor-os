@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 /// Asynchronous Block Device.
 #[async_trait(?Send)]
 pub trait AsyncBlockDevice {
-    type Completion: core::future::Future<Output = ()> + 'static;
+    type Completion: core::future::Future<Output = Result<()>> + 'static;
 
     /// The number of blocks in this device.
     fn num_blocks(&self) -> u64;
@@ -27,4 +27,7 @@ pub trait AsyncBlockDevice {
 
     /// Flush dirty blocks to the underlying storage.
     async fn flush(&self) -> Result<()>;
+
+    /// Notify the device that there is work to do.
+    fn notify(&self);
 }

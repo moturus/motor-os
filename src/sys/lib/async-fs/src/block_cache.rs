@@ -212,14 +212,44 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Box<BD>,
     lru_cache: LruCache<u64, CachedBlock>,
     free_blocks: Vec<CachedBlock>,
+    completion_queue: VecDeque<BD::Completion>,
 }
 
 impl<BD: AsyncBlockDevice> BlockCache<BD> {
+    const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
+
     pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
+        /*
+        #[cfg(feature = "moto-rt")]
+        {
+            let mut self_ = Self {
+                block_dev,
+                lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
+                free_blocks: Vec::new(),
+                completion_queue: VecDeque::new(),
+            };
+            const MEGS: u64 = 32;
+            const NUM_BLOCKS: u64 = 1024 * 1024 * MEGS / 4096;
+
+            let started = moto_rt::time::Instant::now();
+            let mut block_no = 0;
+            while block_no < NUM_BLOCKS {
+                let block = self_.get_empty_block(block_no);
+                self_.write_block_if_dirty(block).await.unwrap();
+                block_no += 1;
+            }
+            self_.flush().await.unwrap();
+            let elapsed = started.elapsed();
+            let write_mbps = (MEGS as f64) / elapsed.as_secs_f64();
+            log::info!("block_cache: write speed {:.3} MB/sec", write_mbps);
+            panic!()
+        }
+        */
         Ok(Self {
             block_dev,
             lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
             free_blocks: Vec::new(),
+            completion_queue: VecDeque::new(),
         })
     }
 
@@ -316,22 +346,12 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             .write_block_with_completion(block_no, flusher)
             .await?;
 
-        #[cfg(feature = "moto-rt")]
-        {
-            let _handle = moto_async::LocalRuntime::spawn(async move {
-                completion.await;
-            });
-            // _handle.await;
+        if self.completion_queue.is_empty() {
+            self.block_dev.notify();
         }
-
-        #[cfg(not(feature = "moto-rt"))]
-        completion.await;
-
-        #[cfg(debug_assertions)]
-        #[cfg(not(feature = "moto-rt"))]
-        {
-            let block_ref = block.inner.borrow_mut();
-            assert_eq!(block_ref.state, BlockState::Clean);
+        self.completion_queue.push_back(completion);
+        if self.completion_queue.len() >= Self::MAX_COMPLETIONS_IN_FLIGHT {
+            self.wait_for_completions(false).await?;
         }
         Ok(())
     }
@@ -340,7 +360,19 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
         #[cfg(debug_assertions)]
         self.debug_check_clean();
 
-        self.block_dev.flush().await
+        let f = self.block_dev.flush();
+        while let Some(completion) = self.completion_queue.pop_front() {
+            completion.await?;
+        }
+        f.await
+    }
+
+    async fn wait_for_completions(&mut self, _drain: bool) -> Result<()> {
+        while let Some(completion) = self.completion_queue.pop_front() {
+            completion.await?;
+        }
+
+        Ok(())
     }
 
     #[cfg(debug_assertions)]
