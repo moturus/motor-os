@@ -207,46 +207,24 @@ impl CachedBlock {
     }
 }
 
-struct InnerBlockCache {
+/// LRU-based block cache.
+pub struct BlockCache<BD: AsyncBlockDevice> {
+    block_dev: Box<BD>,
     lru_cache: LruCache<u64, CachedBlock>,
     free_blocks: Vec<CachedBlock>,
 }
 
-impl InnerBlockCache {
-    fn new(max_len: usize) -> Self {
-        Self {
+impl<BD: AsyncBlockDevice> BlockCache<BD> {
+    pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
+        Ok(Self {
+            block_dev,
             lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
             free_blocks: Vec::new(),
-        }
+        })
     }
 
-    fn get_block(&mut self, block_no: u64) -> Option<CachedBlock> {
-        self.lru_cache.get(&block_no).cloned()
-    }
-
-    fn push(&mut self, block_no: u64, block: CachedBlock) {
-        if let Some(existing) = self.lru_cache.get(&block_no) {
-            assert_eq!(
-                existing.inner.as_ptr() as usize,
-                block.inner.as_ptr() as usize
-            );
-        } else {
-            self.push_new(block_no, block);
-        }
-    }
-
-    fn push_new(&mut self, block_no: u64, block: CachedBlock) {
-        if let Some((prev_block_no, prev)) = self.lru_cache.push(block_no, block) {
-            assert_ne!(block_no, prev_block_no);
-            if prev.inner.borrow().state == BlockState::Flushing {
-                todo!("keep")
-            }
-            assert_eq!(BlockState::Clean, prev.inner.borrow().state);
-        }
-    }
-
-    fn get_free_empty_block(this: &Rc<RefCell<Self>>, block_no: u64) -> CachedBlock {
-        if let Some(block) = this.borrow_mut().free_blocks.pop() {
+    fn get_free_empty_block(&mut self, block_no: u64) -> CachedBlock {
+        if let Some(block) = self.free_blocks.pop() {
             let mut block_ref = block.inner.borrow_mut();
             assert_eq!(block_ref.state, BlockState::Clean);
             block_ref.block_no = block_no;
@@ -259,7 +237,7 @@ impl InnerBlockCache {
         }
     }
 
-    fn discard_dirty(&mut self, block: CachedBlock) {
+    pub fn discard_dirty(&mut self, block: CachedBlock) {
         if let Some(existing) = self.lru_cache.pop(&block.block_no()) {
             assert_eq!(
                 existing.inner.as_ptr() as usize,
@@ -275,40 +253,17 @@ impl InnerBlockCache {
         }
     }
 
-    #[cfg(debug_assertions)]
-    fn debug_check_clean(&mut self) {
-        for (block_no, block) in self.lru_cache.iter() {
-            assert!(!block.is_dirty(), "Block {block_no} is dirty.");
-        }
-    }
-}
-
-/// LRU-based block cache.
-pub struct BlockCache<BD: AsyncBlockDevice> {
-    block_dev: Box<BD>,
-    inner_cache: Rc<RefCell<InnerBlockCache>>,
-}
-
-// TODO: add batch writes.
-impl<BD: AsyncBlockDevice> BlockCache<BD> {
-    pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
-        Ok(Self {
-            block_dev,
-            inner_cache: Rc::new(RefCell::new(InnerBlockCache::new(max_len))),
-        })
-    }
-
     pub fn total_blocks(&self) -> u64 {
         self.block_dev.num_blocks()
     }
 
     /// Get a reference to a cached block.
     pub async fn get_block(&mut self, block_no: u64) -> Result<CachedBlock> {
-        if let Some(block) = self.inner_cache.borrow_mut().get_block(block_no) {
-            return Ok(block);
+        if let Some(block) = self.lru_cache.get(&block_no) {
+            return Ok(block.clone());
         }
 
-        let mut block = InnerBlockCache::get_free_empty_block(&self.inner_cache, block_no);
+        let mut block = self.get_free_empty_block(block_no);
 
         self.block_dev
             .read_block(block_no, &mut block.block_mut())
@@ -318,16 +273,16 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             block_ref.state = BlockState::Clean;
         }
 
-        self.inner_cache
-            .borrow_mut()
-            .push_new(block_no, block.clone());
+        if let Some((_prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
+            debug_assert!(!prev_block.is_dirty());
+        };
         Ok(block)
     }
 
     /// Get an empty block. Use with caution: any previously stored
     /// data in the block on the block device will be lost.
     pub fn get_empty_block(&mut self, block_no: u64) -> CachedBlock {
-        if let Some(block) = self.inner_cache.borrow_mut().get_block(block_no) {
+        if let Some(block) = self.lru_cache.get(&block_no) {
             let mut block_ref = block.inner.borrow_mut();
             if block_ref.state == BlockState::Flushing {
                 todo!("detach flushing");
@@ -336,13 +291,13 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             block_ref.block.clear();
             block_ref.state = BlockState::Dirty;
             drop(block_ref);
-            return block;
+            return block.clone();
         }
 
-        let block = InnerBlockCache::get_free_empty_block(&self.inner_cache, block_no);
-        self.inner_cache
-            .borrow_mut()
-            .push_new(block_no, block.clone());
+        let block = self.get_free_empty_block(block_no);
+        if let Some((_prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
+            debug_assert!(!prev_block.is_dirty());
+        };
         block
     }
 
@@ -381,14 +336,6 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
         Ok(())
     }
 
-    pub fn push(&mut self, block_no: u64, block: CachedBlock) {
-        self.inner_cache.borrow_mut().push(block_no, block);
-    }
-
-    pub fn discard_dirty(&mut self, block: CachedBlock) {
-        self.inner_cache.borrow_mut().discard_dirty(block);
-    }
-
     pub async fn flush(&mut self) -> Result<()> {
         #[cfg(debug_assertions)]
         self.debug_check_clean();
@@ -398,6 +345,8 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
 
     #[cfg(debug_assertions)]
     pub fn debug_check_clean(&mut self) {
-        self.inner_cache.borrow_mut().debug_check_clean();
+        for (block_no, block) in self.lru_cache.iter() {
+            assert!(!block.is_dirty(), "Block {block_no} is dirty.");
+        }
     }
 }
