@@ -17,7 +17,7 @@ mod mbr;
 mod virtio_partition;
 
 /// The max number of "requests" in flight per connection.
-const MAX_IN_FLIGHT: usize = 32;
+const MAX_IN_FLIGHT: usize = 64;
 
 enum FS {
     MotorFs(motor_fs::MotorFs<VirtioPartition>),
@@ -25,8 +25,6 @@ enum FS {
 
 #[async_trait(?Send)]
 impl FileSystem for FS {
-    type Completion<'a> = <VirtioPartition as async_fs::AsyncBlockDevice>::Completion<'a>;
-
     /// Find a file or directory by its full path.
     async fn stat(
         &mut self,
@@ -120,18 +118,6 @@ impl FileSystem for FS {
         }
     }
 
-    /// Write bytes to a file.
-    /// Note that cross-block writes may not be supported.
-    #[allow(unused)]
-    async fn write_2<'a>(
-        &mut self,
-        file_id: EntryId,
-        offset: u64,
-        buf: &'a [u8],
-    ) -> Result<(usize, Self::Completion<'a>)> {
-        todo!()
-    }
-
     /// Resize the file.
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
         match self {
@@ -163,13 +149,13 @@ pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<
     use zerocopy::FromZeros;
 
     let mut first_block = async_fs::Block::new_zeroed();
-    let completion = virtio_async::BlockDevice::post_read(
+    virtio_async::BlockDevice::post_read(
         block_device.clone(),
         0,
         &mut first_block.as_bytes_mut()[..512],
     )
-    .unwrap();
-    completion.await;
+    .await
+    .await;
 
     let mbr = mbr::Mbr::parse(&first_block.as_bytes()[..512]).map_err(|err| {
         log::error!("Mbr::parse() failed: {err:?}.");
@@ -518,7 +504,7 @@ pub fn smoke_test() {
     );
 
     let write_mbps = (bytes.len() as f64) / dur_write.as_secs_f64() / (1024.0 * 1024.0);
-    let read_mbps = (bytes.len() as f64) / dur_write.as_secs_f64() / (1024.0 * 1024.0);
+    let read_mbps = (bytes.len() as f64) / dur_read.as_secs_f64() / (1024.0 * 1024.0);
     log::info!(
         "async FS smoke test: write {:.3} mbps; read: {:.3} mbps",
         write_mbps,

@@ -11,7 +11,8 @@ use zerocopy::FromZeros;
 
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
-use crate::VqCompletion;
+use crate::WriteCompletion;
+use crate::virtio_queue::ReadCompletion;
 use crate::virtio_queue::Virtqueue;
 use crate::virtio_queue::VqAlloc;
 
@@ -155,16 +156,13 @@ impl BlockDevice {
     }
 
     #[inline(never)]
-    pub fn post_read<'a>(
+    pub async fn post_read<T: AsMut<[u8]>>(
         self: Rc<Self>,
         sector: u64,
-        buf: &'a mut [u8],
-    ) -> Option<VqCompletion<'a>> {
-        assert!(buf.len() <= BLOCK_SIZE);
-        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
-
+        mut bytes: T,
+    ) -> ReadCompletion<T> {
+        let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
         let mut virtqueue = self.virtqueue.borrow_mut();
-        let chain_head = virtqueue.alloc_descriptor_chain(3)?;
 
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
 
@@ -182,6 +180,10 @@ impl BlockDevice {
         let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
         *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
 
+        let buf = bytes.as_mut();
+        assert!(buf.len() <= BLOCK_SIZE);
+        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
+
         use super::virtio_queue::UserData;
         let buffs: [UserData; 3] = [
             UserData {
@@ -198,17 +200,21 @@ impl BlockDevice {
             },
         ];
 
-        core::mem::drop(virtqueue);
-        let completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head);
+        drop(virtqueue);
+        let vq_completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head);
 
-        Some(completion)
+        ReadCompletion {
+            vq_completion,
+            bytes,
+        }
     }
 
     #[inline(never)]
-    pub async fn post_write<'a>(self: Rc<Self>, sector: u64, buf: &'a [u8]) -> VqCompletion<'a> {
-        assert!(buf.len() <= BLOCK_SIZE);
-        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
-
+    pub async fn post_write<T: AsRef<[u8]>>(
+        self: Rc<Self>,
+        sector: u64,
+        bytes: T,
+    ) -> WriteCompletion<T> {
         let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
         let mut virtqueue = self.virtqueue.borrow_mut();
 
@@ -228,6 +234,10 @@ impl BlockDevice {
         let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
         *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
 
+        let buf: &[u8] = bytes.as_ref();
+        assert!(buf.len() <= BLOCK_SIZE);
+        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
+
         use super::virtio_queue::UserData;
         let buffs: [UserData; 3] = [
             UserData {
@@ -244,16 +254,21 @@ impl BlockDevice {
             },
         ];
 
-        core::mem::drop(virtqueue);
-        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head)
+        drop(virtqueue);
+        let vq_completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head);
+
+        WriteCompletion {
+            vq_completion,
+            bytes,
+        }
     }
 
     /// Returns the ID of the submitted request.
     #[inline(never)]
-    pub fn post_flush<'a>(self: Rc<Self>) -> Option<VqCompletion<'a>> {
-        let mut virtqueue = self.virtqueue.borrow_mut();
-        let chain_head = virtqueue.alloc_descriptor_chain(2)?;
+    pub async fn post_flush(self: Rc<Self>) {
+        let chain_head = VqAlloc::new(self.virtqueue.clone(), 2).await;
 
+        let mut virtqueue = self.virtqueue.borrow_mut();
         let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
 
         *header = BlkHeader {
@@ -283,9 +298,7 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        let completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head);
-
-        Some(completion)
+        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head).await;
     }
 
     pub fn notify(self: Rc<Self>) {

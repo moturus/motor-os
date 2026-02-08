@@ -33,7 +33,7 @@ impl<'a, BD: AsyncBlockDevice> Drop for Txn<'a, BD> {
             if block.is_dirty() {
                 assert!(!self.read_only);
                 log::warn!("Dirty block {} on txn drop.", block_no.as_u64());
-                self.fs.block_cache().discard(block);
+                self.fs.block_cache().discard_dirty(block);
             }
         }
 
@@ -60,11 +60,8 @@ impl<'a, BD: AsyncBlockDevice> Txn<'a, BD> {
 
         // For now, just save all dirty blocks.
         for (block_no, block) in txn_cache.drain() {
-            assert_eq!(block_no.as_u64(), block.block_no());
-            fs.block_cache().push(block);
-            fs.block_cache()
-                .write_block_if_dirty(block_no.as_u64())
-                .await?;
+            debug_assert_eq!(block_no.as_u64(), block.block_no());
+            fs.block_cache().write_block_if_dirty(block).await?;
         }
 
         #[cfg(debug_assertions)]

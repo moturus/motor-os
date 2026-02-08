@@ -6,13 +6,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["std"]
+default  = ["std"]
 file-dev = ["camino", "tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
-moto-rt = ["dep:moto-rt"]
+moto-rt  = ["dep:moto-async", "dep:moto-rt"]
 std = []
 
 [dependencies]
-moto-rt = { path = "../moto-rt", optional = true }
+moto-async = { path = "../moto-async", optional = true }
+moto-rt    = { path = "../moto-rt"   , optional = true }
 async-trait = "0.1.88"
 log = "0.4.28"
 lru = "0.14.0"

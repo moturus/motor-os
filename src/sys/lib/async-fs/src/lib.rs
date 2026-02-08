@@ -1,4 +1,5 @@
 //! AsyncBlockDevice and AsyncFs traits.
+#![feature(box_as_ptr)]
 #![allow(async_fn_in_trait)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -17,6 +18,12 @@ extern crate alloc;
 
 #[cfg(all(not(feature = "std"), not(feature = "moto-rt")))]
 compile_error!("async-fs must have either 'std' or 'moto-rt' feature.");
+
+#[cfg(feature = "std")]
+pub type Result<T> = std::io::Result<T>;
+
+#[cfg(not(feature = "std"))]
+pub type Result<T> = core::result::Result<T, moto_rt::Error>;
 
 pub const BLOCK_SIZE: usize = 4096;
 
@@ -65,5 +72,11 @@ impl Block {
     pub fn get_mut_at_offset<T: bytemuck::Pod>(&mut self, offset: usize) -> &mut T {
         assert!(core::mem::size_of::<T>() + offset <= BLOCK_SIZE);
         bytemuck::from_bytes_mut(&mut self.bytes[offset..(offset + core::mem::size_of::<T>())])
+    }
+}
+
+impl AsRef<[u8]> for Block {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
     }
 }

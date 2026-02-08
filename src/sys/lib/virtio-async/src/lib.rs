@@ -3,6 +3,7 @@
 #![feature(local_waker)]
 #![allow(unused)]
 
+use std::cell::RefCell;
 use std::io::Result;
 
 mod pci;
@@ -19,18 +20,12 @@ pub use pci::le64;
 
 pub use virtio_blk::BlockDevice;
 pub use virtio_device::{Device, init_virtio_devices};
-pub use virtio_queue::VqCompletion;
+pub use virtio_queue::WriteCompletion;
 
 pub(crate) use virtio_device::mapper;
 
 pub const fn align_up(addr: u64, align: u64) -> u64 {
     (addr + align - 1) & !(align - 1)
-}
-
-pub fn nop() {
-    unsafe {
-        core::arch::asm!("nop", "pause");
-    }
 }
 
 // This is the kernel/syscall interface consumed by the library:

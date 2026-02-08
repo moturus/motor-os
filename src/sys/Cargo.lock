@@ -91,6 +91,7 @@ dependencies = [
  "camino",
  "log",
  "lru",
+ "moto-async",
  "moto-rt 0.16.0",
  "tokio",
 ]

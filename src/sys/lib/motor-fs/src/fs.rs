@@ -33,7 +33,7 @@ impl<BD: AsyncBlockDevice> MotorFs<BD> {
         }
     }
 
-    pub async fn format(mut dev: Box<BD>) -> Result<Self> {
+    pub async fn format(dev: Box<BD>) -> Result<Self> {
         if dev.num_blocks() <= RESERVED_BLOCKS {
             return Err(ErrorKind::StorageFull.into());
         }
@@ -138,8 +138,6 @@ impl<BD: AsyncBlockDevice> MotorFs<BD> {
 
 #[async_trait(?Send)]
 impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
-    type Completion<'a> = BD::Completion<'a>;
-
     #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
         &mut self,
@@ -220,6 +218,7 @@ impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
+        log::debug!("create_entry: parent_id: {parent_id:x} kind: {kind:?} fname: '{filename}'");
         Txn::do_create_entry_txn(self, parent_id.into(), kind, filename)
             .await
             .map(|e| e.into())
@@ -229,8 +228,9 @@ impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
         if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
         }
-        Txn::do_delete_entry_txn(self, entry_id.into()).await?;
-        self.block_cache.flush().await
+
+        log::debug!("delete_entry {entry_id:x}");
+        Txn::do_delete_entry_txn(self, entry_id.into()).await
     }
 
     async fn move_entry(
@@ -272,6 +272,7 @@ impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
 
         let old_parent_id = self.get_parent(entry_id).await?.unwrap();
 
+        log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
         Txn::do_move_entry_txn(
             self,
             entry_id.into(),
@@ -458,17 +459,11 @@ impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
     }
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+        log::trace!(
+            "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
+            buf.len()
+        );
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
-    }
-
-    #[allow(unused)]
-    async fn write_2<'a>(
-        &mut self,
-        file_id: EntryId,
-        offset: u64,
-        buf: &'a [u8],
-    ) -> Result<(usize, Self::Completion<'a>)> {
-        todo!()
     }
 
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {

@@ -8,23 +8,23 @@ use alloc::boxed::Box;
 /// Asynchronous Block Device.
 #[async_trait(?Send)]
 pub trait AsyncBlockDevice {
-    type Completion<'a>;
+    type Completion: core::future::Future<Output = ()> + 'static;
 
     /// The number of blocks in this device.
     fn num_blocks(&self) -> u64;
 
     /// Read a single block.
-    async fn read_block(&mut self, block_no: u64, block: &mut Block) -> Result<()>;
+    async fn read_block(&self, block_no: u64, block: &mut Block) -> Result<()>;
 
     /// Write a single block.
-    async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()>;
+    async fn write_block(&self, block_no: u64, block: &Block) -> Result<()>;
 
-    async fn write_block_2<'a>(
-        &mut self,
+    async fn write_block_with_completion(
+        &self,
         block_no: u64,
-        block: &'a Block,
-    ) -> Result<Self::Completion<'a>>;
+        block: crate::block_cache::FlushingBlock,
+    ) -> Result<Self::Completion>;
 
     /// Flush dirty blocks to the underlying storage.
-    async fn flush(&mut self) -> Result<()>;
+    async fn flush(&self) -> Result<()>;
 }

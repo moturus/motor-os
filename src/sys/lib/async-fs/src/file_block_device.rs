@@ -7,7 +7,7 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 pub struct AsyncFileBlockDevice {
-    file: tokio::fs::File,
+    file: std::cell::RefCell<tokio::fs::File>,
     num_blocks: u64,
 }
 
@@ -25,7 +25,7 @@ impl AsyncFileBlockDevice {
         }
 
         Ok(Self {
-            file,
+            file: std::cell::RefCell::new(file),
             num_blocks: len >> BLOCK_SIZE.ilog2(),
         })
     }
@@ -40,19 +40,22 @@ impl AsyncFileBlockDevice {
 
         file.set_len(num_blocks << BLOCK_SIZE.ilog2()).await?;
 
-        Ok(Self { file, num_blocks })
+        Ok(Self {
+            file: std::cell::RefCell::new(file),
+            num_blocks,
+        })
     }
 }
 
 #[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
-    type Completion<'a> = core::future::Ready<()>;
+    type Completion = core::future::Ready<()>;
 
     fn num_blocks(&self) -> u64 {
         self.num_blocks
     }
 
-    async fn read_block(&mut self, block_no: u64, block: &mut Block) -> Result<()> {
+    async fn read_block(&self, block_no: u64, block: &mut Block) -> Result<()> {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncSeekExt;
 
@@ -61,14 +64,14 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        self.file
-            .seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
+        let mut file = self.file.borrow_mut();
+        file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
             .await?;
 
-        self.file.read_exact(block.as_bytes_mut()).await.map(|_| {})
+        file.read_exact(block.as_bytes_mut()).await.map(|_| {})
     }
 
-    async fn write_block(&mut self, block_no: u64, block: &Block) -> Result<()> {
+    async fn write_block(&self, block_no: u64, block: &Block) -> Result<()> {
         use tokio::io::AsyncSeekExt;
         use tokio::io::AsyncWriteExt;
 
@@ -77,24 +80,24 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        self.file
-            .seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
+        let mut file = self.file.borrow_mut();
+        file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
             .await?;
 
-        self.file.write_all(block.as_bytes()).await
+        file.write_all(block.as_bytes()).await
     }
 
-    async fn write_block_2<'a>(
-        &mut self,
+    async fn write_block_with_completion(
+        &self,
         block_no: u64,
-        block: &'a Block,
-    ) -> Result<Self::Completion<'a>> {
-        self.write_block(block_no, block).await?;
-        Ok(core::future::ready::<()>(()))
+        block: crate::block_cache::FlushingBlock,
+    ) -> Result<Self::Completion> {
+        self.write_block(block_no, block.block()).await?;
+        Ok(core::future::ready(()))
     }
 
-    async fn flush(&mut self) -> Result<()> {
+    async fn flush(&self) -> Result<()> {
         use tokio::io::AsyncWriteExt;
-        self.file.flush().await
+        self.file.borrow_mut().flush().await
     }
 }

@@ -241,7 +241,8 @@ impl Superblock {
             ));
         };
 
-        drop(superblock_ref); // Refcell will get re-borrowed.
+        // Refcell may get re-borrowed in Self::reallocate_first_block, so we should drop the ref.
+        drop(superblock_ref);
 
         let head_block = txn.get_block(head_bn).await?.clone();
         let head_ref = head_block.block();

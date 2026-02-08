@@ -164,77 +164,6 @@ impl Future for VqAlloc {
     }
 }
 
-pub struct VqCompletion<'a> {
-    chain_head: u16,
-    virtqueue: Rc<RefCell<Virtqueue>>,
-    _phantom_data: PhantomData<&'a ()>,
-}
-
-impl<'a> Future for VqCompletion<'a> {
-    // Return consumed len/bytes in u32; the status in u8.
-    type Output = (u32, u8);
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        loop {
-            let mut virtq = self.virtqueue.borrow_mut();
-            if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
-                return std::task::Poll::Ready(virtq.get_result(self.chain_head));
-            }
-
-            if let Some(_chain_head) = virtq.reclaim_used() {
-                continue;
-            }
-
-            let mut pinned = Box::pin(virtq.wait_handle.as_future());
-            core::mem::drop(virtq);
-
-            match pinned.as_mut().poll(cx) {
-                std::task::Poll::Ready(_) => continue,
-                std::task::Poll::Pending => {
-                    let mut vq = self.virtqueue.borrow_mut();
-                    vq.completion_waiters.push_back(cx.local_waker().clone());
-                    vq.notify();
-                    return std::task::Poll::Pending;
-                }
-            }
-        }
-    }
-}
-
-impl Drop for VqCompletion<'_> {
-    fn drop(&mut self) {
-        let mut virtqueue = self.virtqueue.borrow_mut();
-        let mut curr = self.chain_head;
-        let mut chain_in_use = true;
-        loop {
-            virtqueue.header_buffers[curr as usize].in_use_by_completion = 0;
-            if curr == self.chain_head {
-                chain_in_use = virtqueue.header_buffers[curr as usize].in_use_by_device == 1;
-            } else {
-                debug_assert_eq!(
-                    chain_in_use,
-                    virtqueue.header_buffers[curr as usize].in_use_by_device == 1
-                );
-            }
-
-            let descriptor = virtqueue.get_descriptor(curr);
-            if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
-                curr = descriptor.next;
-                continue;
-            } else {
-                break;
-            }
-        }
-
-        if !chain_in_use {
-            virtqueue.free_descriptor_chain(self.chain_head);
-        }
-    }
-}
-
 pub(super) struct Virtqueue {
     pub virt_addr: u64,
     pub queue_size: u16,
@@ -376,6 +305,8 @@ impl Virtqueue {
     }
 
     fn update_and_increment_available_idx(&mut self, head: u16) {
+        // Note: we can unconditionally add/increment available_idx
+        //       because we successfully allocated (available) descriptors.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         unsafe {
             let idx = *self.available_ring.next_available_idx;
@@ -478,13 +409,13 @@ impl Virtqueue {
         &self.descriptors[idx as usize]
     }
 
-    pub fn add_buffs<'a>(
+    pub(crate) fn add_buffs(
         this: Rc<RefCell<Self>>,
         data: &[UserData],
         outgoing: u16,
         incoming: u16,
         chain_head: u16,
-    ) -> VqCompletion<'a> {
+    ) -> VqCompletion {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
@@ -513,6 +444,8 @@ impl Virtqueue {
             curr = descriptor.next;
         }
 
+        // Note: we can unconditionally add/increment available_idx
+        //       because we successfully allocated (available) descriptors.
         this_mut.update_and_increment_available_idx(chain_head);
         // this_mut.notify();
         core::mem::drop(this_mut);
@@ -520,7 +453,6 @@ impl Virtqueue {
         VqCompletion {
             chain_head,
             virtqueue: this,
-            _phantom_data: PhantomData,
         }
     }
 
@@ -589,5 +521,112 @@ impl Virtqueue {
 impl Drop for Virtqueue {
     fn drop(&mut self) {
         log::error!("Virtqueue::drop(): not implemented");
+    }
+}
+
+pub(crate) struct VqCompletion {
+    chain_head: u16,
+    virtqueue: Rc<RefCell<Virtqueue>>,
+}
+
+impl Future for VqCompletion {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        loop {
+            let mut virtq = self.virtqueue.borrow_mut();
+            if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
+                let (_consumed, status) = virtq.get_result(self.chain_head);
+                assert_eq!(status, 0, "Bad VirtQ status: {status}.");
+                return std::task::Poll::Ready(());
+            }
+
+            if let Some(_chain_head) = virtq.reclaim_used() {
+                continue;
+            }
+
+            let mut pinned = Box::pin(virtq.wait_handle.as_future());
+            core::mem::drop(virtq);
+
+            match pinned.as_mut().poll(cx) {
+                std::task::Poll::Ready(_) => continue,
+                std::task::Poll::Pending => {
+                    let mut vq = self.virtqueue.borrow_mut();
+                    vq.completion_waiters.push_back(cx.local_waker().clone());
+                    vq.notify();
+                    return std::task::Poll::Pending;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for VqCompletion {
+    fn drop(&mut self) {
+        let mut virtqueue = self.virtqueue.borrow_mut();
+        let mut curr = self.chain_head;
+        let mut chain_in_use = true;
+        loop {
+            virtqueue.header_buffers[curr as usize].in_use_by_completion = 0;
+            if curr == self.chain_head {
+                chain_in_use = virtqueue.header_buffers[curr as usize].in_use_by_device == 1;
+            } else {
+                debug_assert_eq!(
+                    chain_in_use,
+                    virtqueue.header_buffers[curr as usize].in_use_by_device == 1
+                );
+            }
+
+            let descriptor = virtqueue.get_descriptor(curr);
+            if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
+                curr = descriptor.next;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if !chain_in_use {
+            virtqueue.free_descriptor_chain(self.chain_head);
+        }
+    }
+}
+
+pub struct WriteCompletion<T: AsRef<[u8]>> {
+    pub(crate) vq_completion: VqCompletion,
+    pub(crate) bytes: T,
+}
+
+impl<T: AsRef<[u8]>> Future for WriteCompletion<T> {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: We are manually projecting the Pin.
+        let pinned = unsafe { self.map_unchecked_mut(|s| &mut s.vq_completion) };
+        pinned.poll(cx)
+    }
+}
+
+pub struct ReadCompletion<T: AsMut<[u8]>> {
+    pub(crate) vq_completion: VqCompletion,
+    pub(crate) bytes: T,
+}
+
+impl<T: AsMut<[u8]>> Future for ReadCompletion<T> {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: We are manually projecting the Pin.
+        let pinned = unsafe { self.map_unchecked_mut(|s| &mut s.vq_completion) };
+        pinned.poll(cx)
     }
 }

@@ -1,6 +1,7 @@
 use async_fs::EntryId;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
+use async_fs::file_block_device::AsyncFileBlockDevice;
 use camino::Utf8PathBuf;
 use rand::Rng;
 use std::io::ErrorKind;
@@ -9,9 +10,9 @@ use std::io::Write;
 use std::sync::Once;
 use std::time::SystemTime;
 
-use crate::MotorFs;
 use crate::RESERVED_BLOCKS;
 
+type MotorFs = crate::MotorFs<AsyncFileBlockDevice>;
 static LOGGER: Once = Once::new();
 fn init_logger() {
     LOGGER.call_once(|| {
@@ -143,6 +144,7 @@ async fn basic_test() -> Result<()> {
         .create_entry(root, async_fs::EntryKind::Directory, "first")
         .await?;
     assert_eq!(1, fs.metadata(root).await?.size);
+
     assert_eq!(0, fs.metadata(first).await?.size);
     assert_eq!(root, fs.get_parent(first).await?.unwrap());
 
