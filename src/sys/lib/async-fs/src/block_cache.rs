@@ -23,6 +23,7 @@ use std::rc::Rc;
 use alloc::rc::Rc;
 
 use core::cell::RefCell;
+use core::mem::ManuallyDrop;
 use core::num::NonZero;
 use lru::LruCache;
 
@@ -30,6 +31,9 @@ use lru::LruCache;
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+
+const MAX_FREE_BLOCKS: usize = 128;
+const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockState {
@@ -42,8 +46,9 @@ enum BlockState {
 struct InnerCachedBlock {
     block_no: u64,
     state: BlockState,
-    block: Box<Block>,
+    block: ManuallyDrop<Box<Block>>,
 
+    free_blocks: Rc<RefCell<Vec<Box<Block>>>>,
     // When a dirty block goes into the block device, it's state becomes
     // "Flushing". If then a transaction wants to modify the block,
     // the flushing block goes into Self::flushing, and a copy is
@@ -54,6 +59,7 @@ struct InnerCachedBlock {
 
 impl Drop for InnerCachedBlock {
     fn drop(&mut self) {
+        #[cfg(debug_assertions)]
         #[cfg(feature = "moto-rt")]
         {
             if self.state != BlockState::Clean {
@@ -63,6 +69,7 @@ impl Drop for InnerCachedBlock {
                 moto_rt::error::log_backtrace(-1);
             }
         }
+
         assert!(
             self.state == BlockState::Clean,
             "Block 0x{:x} is {:?} when dropped.",
@@ -70,6 +77,17 @@ impl Drop for InnerCachedBlock {
             self.state
         );
         assert!(self.flushing.is_empty());
+
+        // Safety: safe because we are in drop(), so nobody will ever
+        // access self.block.
+        let block = unsafe { ManuallyDrop::take(&mut self.block) };
+
+        let mut free_blocks_ref = self.free_blocks.borrow_mut();
+        if free_blocks_ref.len() < MAX_FREE_BLOCKS {
+            free_blocks_ref.push(block);
+        } else {
+            drop(block);
+        }
     }
 }
 
@@ -92,7 +110,7 @@ impl FlushingBlock {
         assert_eq!(inner_ref.state, BlockState::Dirty);
         inner_ref.state = BlockState::Flushing;
         let flushing_ptr = Box::as_ptr(&inner_ref.block);
-        log::debug!(
+        log::trace!(
             "new flushing block 0x{:x} at ptr 0x{:x}",
             inner_ref.block_no,
             flushing_ptr as usize
@@ -113,7 +131,7 @@ impl FlushingBlock {
 impl Drop for FlushingBlock {
     fn drop(&mut self) {
         let mut inner_ref = self.inner.borrow_mut();
-        log::debug!(
+        log::trace!(
             "FlushingBlock drop 0x{:x} at ptr 0x{:x}",
             inner_ref.block_no,
             self.flushing_ptr as usize
@@ -128,6 +146,7 @@ impl Drop for FlushingBlock {
         // We cannot assume that completions complete serially.
         let mut idx = usize::MAX;
         let queue = &mut inner_ref.flushing;
+        assert!(queue.len() < MAX_COMPLETIONS_IN_FLIGHT);
 
         #[allow(clippy::needless_range_loop)]
         for pos in 0..queue.len() {
@@ -137,7 +156,11 @@ impl Drop for FlushingBlock {
             }
         }
         assert!(idx < queue.len(), "Flushing block not found??");
-        queue.remove(idx);
+        let block = queue.remove(idx).unwrap();
+        let mut free_blocks_ref = inner_ref.free_blocks.borrow_mut();
+        if free_blocks_ref.len() < MAX_FREE_BLOCKS {
+            free_blocks_ref.push(block);
+        }
     }
 }
 
@@ -156,11 +179,20 @@ pub struct CachedBlock {
 const _: () = assert!(size_of::<CachedBlock>() <= 32);
 
 impl CachedBlock {
-    fn new_empty(block_no: u64) -> Self {
+    fn new_empty(block_no: u64, free_blocks: Rc<RefCell<Vec<Box<Block>>>>) -> Self {
+        let block = free_blocks
+            .borrow_mut()
+            .pop()
+            .map(|mut block| {
+                block.clear();
+                block
+            })
+            .unwrap_or_else(|| Box::new(Block::new_zeroed()));
         Self {
             inner: Rc::new(RefCell::new(InnerCachedBlock {
                 state: BlockState::Clean,
-                block: Box::new(Block::new_zeroed()),
+                block: ManuallyDrop::new(block),
+                free_blocks,
                 block_no,
                 flushing: VecDeque::new(),
             })),
@@ -175,8 +207,7 @@ impl CachedBlock {
     /// modify dirty/clean state.
     #[inline]
     pub fn block(&self) -> core::cell::Ref<'_, Block> {
-        let ref_box = core::cell::Ref::map(self.inner.borrow(), |inner| &inner.block);
-        core::cell::Ref::map(ref_box, |b| &**b)
+        core::cell::Ref::map(self.inner.borrow(), |inner| &**inner.block)
     }
 
     /// Get a read/write reference to the underlying data. Marks
@@ -187,19 +218,23 @@ impl CachedBlock {
 
         // This is important: do copy-on-write.
         if mut_ref.state == BlockState::Flushing {
-            let mut copy: Box<Block> = Box::new(*mut_ref.block.as_ref());
+            let mut copy = if let Some(mut block) = mut_ref.free_blocks.borrow_mut().pop() {
+                *block.as_mut() = *mut_ref.block.as_ref();
+                block
+            } else {
+                Box::new(*mut_ref.block.as_ref())
+            };
             core::mem::swap(&mut copy, &mut mut_ref.block);
             log::trace!(
                 "Pushed flushing block 0x{:x} at ptr 0x{:x}",
                 mut_ref.block_no,
                 Box::as_ptr(&copy) as usize
             );
-            mut_ref.flushing.push_front(copy);
+            mut_ref.flushing.push_back(copy);
         }
 
         mut_ref.state = BlockState::Dirty;
-        let ref_box = core::cell::RefMut::map(mut_ref, |inner| &mut inner.block);
-        core::cell::RefMut::map(ref_box, |b| &mut **b)
+        core::cell::RefMut::map(mut_ref, |inner| &mut **inner.block)
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -211,22 +246,23 @@ impl CachedBlock {
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Box<BD>,
     lru_cache: LruCache<u64, CachedBlock>,
-    free_blocks: Vec<CachedBlock>,
+    free_blocks: Rc<RefCell<Vec<Box<Block>>>>,
     completion_queue: VecDeque<BD::Completion>,
+    #[allow(unused)]
+    cache_misses: u64,
 }
 
 impl<BD: AsyncBlockDevice> BlockCache<BD> {
-    const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
-
     pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
         /*
         #[cfg(feature = "moto-rt")]
         {
             let mut self_ = Self {
                 block_dev,
-                lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
-                free_blocks: Vec::new(),
+                lru_cache: LruCache::new(NonZero::new(128 /* max_len */).unwrap()),
+                free_blocks: Default::default(),
                 completion_queue: VecDeque::new(),
+                cache_misses: 0,
             };
             const MEGS: u64 = 32;
             const NUM_BLOCKS: u64 = 1024 * 1024 * MEGS / 4096;
@@ -241,32 +277,27 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             self_.flush().await.unwrap();
             let elapsed = started.elapsed();
             let write_mbps = (MEGS as f64) / elapsed.as_secs_f64();
-            log::info!("block_cache: write speed {:.3} MB/sec", write_mbps);
+            log::info!(
+                "block_cache: write speed {:.3} MB/sec; cache_misses: {}",
+                write_mbps,
+                self_.cache_misses
+            );
             panic!()
         }
         */
         Ok(Self {
             block_dev,
             lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
-            free_blocks: Vec::new(),
-            completion_queue: VecDeque::new(),
+            free_blocks: Default::default(),
+            completion_queue: Default::default(),
+            cache_misses: 0,
         })
     }
 
     fn get_free_empty_block(&mut self, block_no: u64) -> CachedBlock {
-        if let Some(block) = self.free_blocks.pop() {
-            let mut block_ref = block.inner.borrow_mut();
-            assert_eq!(block_ref.state, BlockState::Clean);
-            block_ref.block_no = block_no;
-            block_ref.block.clear();
-            block_ref.state = BlockState::Dirty;
-            drop(block_ref);
-            block
-        } else {
-            let block = CachedBlock::new_empty(block_no);
-            block.inner.borrow_mut().state = BlockState::Dirty;
-            block
-        }
+        let block = CachedBlock::new_empty(block_no, self.free_blocks.clone());
+        block.inner.borrow_mut().state = BlockState::Dirty;
+        block
     }
 
     pub fn discard_dirty(&mut self, block: CachedBlock) {
@@ -295,6 +326,7 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             return Ok(block.clone());
         }
 
+        self.cache_misses += 1;
         let mut block = self.get_free_empty_block(block_no);
 
         self.block_dev
@@ -352,7 +384,7 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             self.block_dev.notify();
         }
         self.completion_queue.push_back(completion);
-        if self.completion_queue.len() >= Self::MAX_COMPLETIONS_IN_FLIGHT {
+        if self.completion_queue.len() >= MAX_COMPLETIONS_IN_FLIGHT {
             self.wait_for_completions(false).await?;
         }
         Ok(())
