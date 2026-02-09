@@ -263,7 +263,9 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             drop(block_ref);
             block
         } else {
-            CachedBlock::new_empty(block_no)
+            let block = CachedBlock::new_empty(block_no);
+            block.inner.borrow_mut().state = BlockState::Dirty;
+            block
         }
     }
 
