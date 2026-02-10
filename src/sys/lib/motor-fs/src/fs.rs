@@ -20,12 +20,12 @@ pub const PARTITION_ID: u8 = 0x2e;
 
 const CACHE_SIZE: usize = 512; // 2MB.
 
-pub struct MotorFs<BD: AsyncBlockDevice> {
+pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
     block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
 }
 
-impl<BD: AsyncBlockDevice> MotorFs<BD> {
+impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     pub fn check_err(&self) -> Result<()> {
         match &self.error {
             Ok(_) => Ok(()),
@@ -137,7 +137,7 @@ impl<BD: AsyncBlockDevice> MotorFs<BD> {
 }
 
 #[async_trait(?Send)]
-impl<BD: AsyncBlockDevice> FileSystem for MotorFs<BD> {
+impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
         &mut self,

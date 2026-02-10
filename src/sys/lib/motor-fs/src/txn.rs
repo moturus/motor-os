@@ -6,6 +6,19 @@
 //! - move entry
 //! - write to file
 //! - set file size
+//!
+//! How transactions work:
+//! - all transactions have a counter;
+//! - there there are two write-ahead areas to write ahead transactions
+//! - each transaction has a transaction header: basically block #0 (superblock)
+//!   with the current transaction ID with the list of blocks modified by this
+//!   transaction
+//! - on commit block #0 with the transaction header is written to the transaction
+//!   area; then the remaining dirty blocks are written after it
+//! - at this point the transaction returns, with an async flusher
+//!   flushing the blocks into their normal places
+//! - this async flusher is different from the async flusher the block cache
+//!   uses to track completions
 
 use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, Superblock, dir_entry};
 use async_fs::{
@@ -20,13 +33,13 @@ const TXN_CACHE_SIZE: usize = 16;
 /// The transaction object: accumulates "dirty" blocks, then either discards
 /// them on error (so no changes to the underlying FS happen) or applies them
 /// "atomically", i.e. either all or nothing.
-pub struct Txn<'a, BD: AsyncBlockDevice> {
+pub struct Txn<'a, BD: AsyncBlockDevice + 'static> {
     fs: &'a mut MotorFs<BD>,
     txn_cache: micromap::Map<BlockNo, CachedBlock, TXN_CACHE_SIZE>,
     read_only: bool,
 }
 
-impl<'a, BD: AsyncBlockDevice> Drop for Txn<'a, BD> {
+impl<'a, BD: AsyncBlockDevice + 'static> Drop for Txn<'a, BD> {
     fn drop(&mut self) {
         for (block_no, block) in self.txn_cache.drain() {
             assert_eq!(block_no.as_u64(), block.block_no());
@@ -42,7 +55,7 @@ impl<'a, BD: AsyncBlockDevice> Drop for Txn<'a, BD> {
     }
 }
 
-impl<'a, BD: AsyncBlockDevice> Txn<'a, BD> {
+impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
     fn block_cache(&mut self) -> &mut BlockCache<BD> {
         self.fs.block_cache()
     }
@@ -64,8 +77,10 @@ impl<'a, BD: AsyncBlockDevice> Txn<'a, BD> {
             fs.block_cache().write_block_if_dirty(block).await?;
         }
 
-        #[cfg(debug_assertions)]
-        self.block_cache().debug_check_clean();
+        fs.block_cache().start_flushing().await;
+
+        // #[cfg(debug_assertions)]
+        // self.block_cache().debug_check_clean();
 
         Ok(())
     }

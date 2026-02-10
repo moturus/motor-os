@@ -242,26 +242,64 @@ impl CachedBlock {
     }
 }
 
+#[cfg(feature = "moto-rt")]
+enum BackgroundMessage {
+    Block((u64, FlushingBlock)),
+    Flush,
+}
+
 /// LRU-based block cache.
 pub struct BlockCache<BD: AsyncBlockDevice> {
-    block_dev: Box<BD>,
+    block_dev: Rc<BD>,
     lru_cache: LruCache<u64, CachedBlock>,
     free_blocks: Rc<RefCell<Vec<Box<Block>>>>,
-    completion_queue: VecDeque<BD::Completion>,
+
+    #[cfg(feature = "moto-rt")]
+    completion_sink: moto_async::channel::Sender<BackgroundMessage>,
+
     #[allow(unused)]
     cache_misses: u64,
 }
 
-impl<BD: AsyncBlockDevice> BlockCache<BD> {
+impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
+        let block_dev: Rc<BD> = Rc::from(block_dev);
+
+        #[cfg(feature = "moto-rt")]
+        let sender = {
+            let (sender, mut receiver) = moto_async::channel(MAX_COMPLETIONS_IN_FLIGHT);
+
+            let bd = block_dev.clone();
+            let _handle = moto_async::LocalRuntime::spawn(async move {
+                let mut completions: VecDeque<BD::Completion> = VecDeque::new();
+                while let Some(msg) = receiver.recv().await {
+                    match msg {
+                        BackgroundMessage::Block((block_no, flushing_block)) => {
+                            let c = bd
+                                .write_block_with_completion(block_no, flushing_block)
+                                .await
+                                .unwrap_or_else(|_| panic!("Error writing block to the device"));
+                            completions.push_back(c);
+                            // c.await;
+                        }
+                        BackgroundMessage::Flush => {
+                            while let Some(c) = completions.pop_front() {
+                                let _ = c.await;
+                            }
+                        }
+                    }
+                }
+            });
+            sender
+        };
         /*
         #[cfg(feature = "moto-rt")]
         {
             let mut self_ = Self {
                 block_dev,
-                lru_cache: LruCache::new(NonZero::new(128 /* max_len */).unwrap()),
+                lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
                 free_blocks: Default::default(),
-                completion_queue: VecDeque::new(),
+                completion_sink: sender,
                 cache_misses: 0,
             };
             const MEGS: u64 = 32;
@@ -273,6 +311,9 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
                 let block = self_.get_empty_block(block_no);
                 self_.write_block_if_dirty(block).await.unwrap();
                 block_no += 1;
+                if block_no % 64 == 0 {
+                    let _ = self_.completion_sink.send(BackgroundMessage::Flush).await;
+                }
             }
             self_.flush().await.unwrap();
             let elapsed = started.elapsed();
@@ -289,7 +330,8 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
             block_dev,
             lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
             free_blocks: Default::default(),
-            completion_queue: Default::default(),
+            #[cfg(feature = "moto-rt")]
+            completion_sink: sender,
             cache_misses: 0,
         })
     }
@@ -375,38 +417,45 @@ impl<BD: AsyncBlockDevice> BlockCache<BD> {
         drop(block_ref);
 
         let flusher = FlushingBlock::new(block.inner.clone());
-        let completion = self
-            .block_dev
-            .write_block_with_completion(block_no, flusher)
-            .await?;
 
-        if self.completion_queue.is_empty() {
-            self.block_dev.notify();
+        #[cfg(feature = "moto-rt")]
+        self.completion_sink
+            .send(BackgroundMessage::Block((block_no, flusher)))
+            .await
+            .unwrap_or_else(|_e| panic!()); // Impossible; but we can't just unwrap().
+
+        #[cfg(not(feature = "moto-rt"))]
+        {
+            let completion = self
+                .block_dev
+                .write_block_with_completion(block_no, flusher)
+                .await?;
+            completion.await?;
         }
-        self.completion_queue.push_back(completion);
-        if self.completion_queue.len() >= MAX_COMPLETIONS_IN_FLIGHT {
-            self.wait_for_completions(false).await?;
-        }
+
         Ok(())
+    }
+
+    pub async fn start_flushing(&mut self) {
+        #[cfg(feature = "moto-rt")]
+        self.completion_sink
+            .send(BackgroundMessage::Flush)
+            .await
+            .unwrap_or_else(|_e| panic!()); // Impossible; but we can't just unwrap().
     }
 
     pub async fn flush(&mut self) -> Result<()> {
         #[cfg(debug_assertions)]
         self.debug_check_clean();
 
+        #[cfg(feature = "moto-rt")]
+        self.completion_sink
+            .send(BackgroundMessage::Flush)
+            .await
+            .unwrap_or_else(|_| panic!()); // Impossible.
+
         let f = self.block_dev.flush();
-        while let Some(completion) = self.completion_queue.pop_front() {
-            completion.await?;
-        }
         f.await
-    }
-
-    async fn wait_for_completions(&mut self, _drain: bool) -> Result<()> {
-        while let Some(completion) = self.completion_queue.pop_front() {
-            completion.await?;
-        }
-
-        Ok(())
     }
 
     #[cfg(debug_assertions)]

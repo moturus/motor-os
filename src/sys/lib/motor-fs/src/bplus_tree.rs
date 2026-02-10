@@ -90,7 +90,7 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Get the (key, block_no) of the first child, if any.
-    pub async fn first_child<BD: AsyncBlockDevice>(
+    pub async fn first_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
     ) -> Result<Option<KV>> {
@@ -116,7 +116,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(NonRootNode::first_child(txn, child_block_no)).await
     }
 
-    pub async fn first_child_with_key<BD: AsyncBlockDevice>(
+    pub async fn first_child_with_key<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         key: u64,
@@ -163,7 +163,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(NonRootNode::first_child_with_key(txn, child_block_no, key)).await
     }
 
-    pub async fn next_child<BD: AsyncBlockDevice>(
+    pub async fn next_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         this_offset: usize,
@@ -199,7 +199,7 @@ impl<const ORDER: usize> Node<ORDER> {
         todo!()
     }
 
-    async fn split_node<BD: AsyncBlockDevice>(
+    async fn split_node<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
         parent_node_block_no: BlockNo,
@@ -265,7 +265,7 @@ impl<const ORDER: usize> Node<ORDER> {
         }
     }
 
-    async fn insert_kv<BD: AsyncBlockDevice>(
+    async fn insert_kv<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
         key: u64,
@@ -299,7 +299,7 @@ impl<const ORDER: usize> Node<ORDER> {
     // Note: we split full nodes "preemptively", so that there is no need to
     // do cascading splits up the tree.
     #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn node_insert_link<BD: AsyncBlockDevice>(
+    pub async fn node_insert_link<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
         key: u64,
@@ -356,7 +356,7 @@ impl<const ORDER: usize> Node<ORDER> {
     // Deletes link `val` at `key`.
     // Returns KV from _this_block_no_ to be removed, if any.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn node_delete_link<BD: AsyncBlockDevice>(
+    async fn node_delete_link<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         key: u64,
@@ -482,7 +482,7 @@ impl<const ORDER: usize> Node<ORDER> {
     // Fixes the underflow of this_block_no. Returns, optionally, the key and block no
     // of the link that should be removed in the parent.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn fix_node_underflow<BD: AsyncBlockDevice>(
+    async fn fix_node_underflow<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         parent_node_block_no: BlockNo,
@@ -592,7 +592,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(None)
     }
 
-    async fn try_rebalance_left<BD: AsyncBlockDevice>(
+    async fn try_rebalance_left<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
@@ -634,7 +634,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(true)
     }
 
-    async fn try_rebalance_right<BD: AsyncBlockDevice>(
+    async fn try_rebalance_right<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
@@ -677,7 +677,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(true)
     }
 
-    async fn set_child_key<BD: AsyncBlockDevice>(
+    async fn set_child_key<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         parent_block_no: BlockNo,
         child_block_no: BlockNo,
@@ -706,7 +706,7 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Return the block number of the child to the left of the key specified (if any).
-    async fn get_left_child<BD: AsyncBlockDevice>(
+    async fn get_left_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_key: u64,
@@ -751,7 +751,7 @@ impl<const ORDER: usize> Node<ORDER> {
     }
 
     /// Return the block number of the child to the right of the key specified (if any).
-    async fn get_right_child<BD: AsyncBlockDevice>(
+    async fn get_right_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_key: u64,
@@ -778,7 +778,7 @@ impl<const ORDER: usize> Node<ORDER> {
         }
     }
 
-    async fn try_merge_left<BD: AsyncBlockDevice>(
+    async fn try_merge_left<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
@@ -833,7 +833,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(Some((child_left_key, child_block_no)))
     }
 
-    async fn try_merge_right<BD: AsyncBlockDevice>(
+    async fn try_merge_right<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
         child_block_no: BlockNo,
@@ -890,7 +890,7 @@ impl<const ORDER: usize> Node<ORDER> {
 
     #[allow(unused)]
     #[cfg(test)]
-    pub async fn test_log_tree<BD: AsyncBlockDevice>(
+    pub async fn test_log_tree<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
     ) -> Result<()> {
@@ -923,7 +923,7 @@ impl<const ORDER: usize> Node<ORDER> {
 }
 
 impl RootNode {
-    async fn split_root<BD: AsyncBlockDevice>(
+    async fn split_root<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         root_block_no: BlockNo,
     ) -> Result<()> {
@@ -991,7 +991,7 @@ impl RootNode {
     }
 
     /// Return the number of freed btree nodes.
-    pub async fn root_delete_link<'a, BD: AsyncBlockDevice>(
+    pub async fn root_delete_link<'a, BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'a, BD>,
         this_block_no: BlockNo,
         key: u64,
@@ -1011,7 +1011,7 @@ impl RootNode {
         })
     }
 
-    async fn assimilate_single_child<BD: AsyncBlockDevice>(
+    async fn assimilate_single_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         root_block_no: BlockNo,
         child_block_no: BlockNo,
