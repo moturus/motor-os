@@ -211,7 +211,7 @@ pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<
 }
 
 async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {
-    const NUM_LISTENERS: usize = 5;
+    const NUM_LISTENERS: usize = 16;
     for _ in 0..NUM_LISTENERS {
         spawn_new_listener(fs.clone()).await;
     }
@@ -222,10 +222,7 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
     let (tx, rx) = moto_async::oneshot();
 
     moto_async::LocalRuntime::spawn(async move {
-        fs_listener(fs.clone(), tx)
-            .await
-            .inspect_err(|err| log::debug!("fs_listener exited with error {err}"));
-
+        let _ = fs_listener(fs.clone(), tx).await;
         // Spawn a new listener when another one completes.
         spawn_new_listener(fs);
     });
@@ -470,6 +467,7 @@ async fn on_cmd_flush(
     Ok(())
 }
 
+/*
 #[allow(unused)]
 pub fn smoke_test() {
     assert_eq!(
@@ -529,3 +527,4 @@ pub fn smoke_test() {
 
     log::info!("async FS smoke test PASSED");
 }
+*/

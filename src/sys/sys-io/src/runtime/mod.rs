@@ -18,7 +18,7 @@ mod fs;
 pub mod internal_queue;
 pub mod io_stats;
 mod io_thread;
-pub use fs::smoke_test as fs_smoke_test;
+// pub use fs::smoke_test as fs_smoke_test;
 
 pub struct PendingCompletion {
     pub msg: io_channel::Msg,

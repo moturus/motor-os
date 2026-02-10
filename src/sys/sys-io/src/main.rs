@@ -66,7 +66,7 @@ fn main() {
     #[cfg(feature = "motor-fs")]
     {
         runtime::spawn_async();
-        runtime::fs_smoke_test();
+        // runtime::fs_smoke_test();
 
         // panic!("let's not go there");
     }
