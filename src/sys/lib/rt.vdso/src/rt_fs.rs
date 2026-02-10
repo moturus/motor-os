@@ -766,3 +766,31 @@ pub extern "C" fn chdir(path_ptr: *const u8, path_size: usize) -> moto_rt::Error
         .chdir(path)
         .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }
+
+pub extern "C" fn canonicalize(
+    in_ptr: *const u8,
+    in_size: usize,
+    out_ptr: *mut u8,
+    out_size: *mut usize,
+) -> moto_rt::ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(in_ptr, in_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    let c_path = match CanonicalPath::parse(path) {
+        Ok(cp) => cp,
+        Err(err) => return err.into(),
+    };
+    match AsyncFsClient::get().unwrap().stat(c_path.abs_path.as_str()) {
+        Ok(_) => {}
+        Err(err) => return err.into(),
+    }
+
+    let out_bytes = c_path.abs_path.as_bytes();
+    assert!(out_bytes.len() <= moto_rt::fs::MAX_PATH_LEN);
+    unsafe {
+        core::ptr::copy_nonoverlapping(out_bytes.as_ptr(), out_ptr, out_bytes.len());
+        *out_size = out_bytes.len();
+    }
+
+    moto_rt::E_OK
+}

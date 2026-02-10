@@ -219,6 +219,9 @@ pub extern "C" fn canonicalize(
     out_ptr: *mut u8,
     out_size: *mut usize,
 ) -> ErrorCode {
+    if crate::rt_fs::ok() {
+        return crate::rt_fs::canonicalize(in_ptr, in_size, out_ptr, out_size);
+    }
     let path_bytes = unsafe { core::slice::from_raw_parts(in_ptr, in_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
 
