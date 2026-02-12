@@ -35,6 +35,7 @@ struct CanonicalPath {
 }
 
 impl CanonicalPath {
+    /// The leaf filename.
     fn filename(&self) -> &str {
         &self.abs_path.as_str()[self.fname_offset..]
     }
@@ -470,6 +471,19 @@ impl AsyncFsClient {
 
     fn flush(&self) -> Result<()> {
         self.blocking_run(move |fs_client| async move { fs_client.flush().await })
+    }
+
+    fn move_entry(
+        &self,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: String,
+    ) -> Result<()> {
+        self.blocking_run(move |fs_client| async move {
+            fs_client
+                .move_entry(entry_id, new_parent_id, new_name.as_str())
+                .await
+        })
     }
 }
 
@@ -910,4 +924,54 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> mot
     }
 
     moto_rt::E_OK
+}
+
+pub extern "C" fn rename(
+    old_ptr: *const u8,
+    old_size: usize,
+    new_ptr: *const u8,
+    new_size: usize,
+) -> moto_rt::ErrorCode {
+    let old_bytes = unsafe { core::slice::from_raw_parts(old_ptr, old_size) };
+    let old = unsafe { core::str::from_utf8_unchecked(old_bytes) };
+    let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_size) };
+    let new = unsafe { core::str::from_utf8_unchecked(new_bytes) };
+    let client = AsyncFsClient::get().unwrap();
+
+    let old_path = match CanonicalPath::parse(old) {
+        Ok(val) => val,
+        Err(err) => return err as u16,
+    };
+
+    let new_path = match CanonicalPath::parse(new) {
+        Ok(val) => val,
+        Err(err) => return err as u16,
+    };
+
+    if new_path.filename().len() > moto_rt::fs::MAX_FILENAME_LEN {
+        return moto_rt::Error::InvalidFilename as u16;
+    }
+
+    // Figure out the entry ID.
+    let Ok((entry_id, _)) = client.stat_internal(old_path) else {
+        return moto_rt::Error::InvalidFilename as u16;
+    };
+
+    // Figure out the new parent ID.
+    let Some(new_parent) = new_path.parent() else {
+        return moto_rt::Error::InvalidFilename as u16;
+    };
+    let new_parent_path = CanonicalPath::normalize(new_parent).unwrap();
+
+    let Ok((new_parent_id, new_parent_kind)) = client.stat_internal(new_parent_path) else {
+        return moto_rt::Error::InvalidFilename as u16;
+    };
+    if new_parent_kind != EntryKind::Directory {
+        return moto_rt::Error::InvalidFilename as u16;
+    }
+
+    // Do the move.
+    client
+        .move_entry(entry_id, new_parent_id, new_path.filename().to_owned())
+        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }

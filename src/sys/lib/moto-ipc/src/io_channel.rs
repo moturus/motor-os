@@ -166,6 +166,15 @@ impl Msg {
             Err(self.status.into())
         }
     }
+
+    pub fn set_long_handle(&mut self, handle: u128) {
+        self.handle = (handle >> 64) as u64;
+        self.wake_handle = (handle & (u64::MAX as u128)) as u64;
+    }
+
+    pub fn get_long_handle(&self) -> u128 {
+        (self.handle as u128) << 64 | (self.wake_handle as u128)
+    }
 }
 
 pub const QUEUE_SIZE: u64 = 64;

@@ -152,7 +152,7 @@ pub extern "C" fn rename(
     new_size: usize,
 ) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::rename(old_ptr, old_size, new_ptr, new_size);
     }
     let old_bytes = unsafe { core::slice::from_raw_parts(old_ptr, old_size) };
     let old = unsafe { core::str::from_utf8_unchecked(old_bytes) };

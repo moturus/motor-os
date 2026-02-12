@@ -409,14 +409,20 @@ impl FsClient {
         let resp = self.clone().send_recv(msg).await?;
         resp.status()
     }
+
     /// Rename and/or move the file or directory.
-    async fn move_entry(
-        &mut self,
+    pub async fn move_entry(
+        self: &Rc<Self>,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()> {
-        todo!()
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::move_entry_req_encode(entry_id, new_parent_id, new_name, io_page);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
     }
 
     /// Get the first entry in a directory.

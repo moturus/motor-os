@@ -305,6 +305,7 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => on_cmd_get_first_entry(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => on_cmd_get_next_entry(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -375,6 +376,7 @@ async fn on_cmd_write(
         .write(file_id, offset, &io_page.bytes()[..(len as usize)])
         .await?;
     assert_eq!(written, len as usize);
+    core::mem::drop(fs);
 
     let resp = api_fs::empty_resp_encode(msg.id, Ok(()));
     let _ = sender.send(resp).await;
@@ -397,6 +399,7 @@ async fn on_cmd_read(
     let read = fs
         .read(file_id, offset, &mut io_page.bytes_mut()[..(len as usize)])
         .await?;
+    core::mem::drop(fs);
 
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
     let _ = sender.send(resp).await;
@@ -417,6 +420,7 @@ async fn on_cmd_metadata(
         .alloc_page(u64::MAX)
         .await
         .map_err(map_native_error)?;
+    core::mem::drop(fs);
 
     let resp = api_fs::metadata_resp_encode(msg.id, metadata, io_page);
     let _ = sender.send(resp).await;
@@ -437,6 +441,7 @@ async fn on_cmd_resize(
             .await
             .map_err(map_err_into_native),
     );
+    core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -454,6 +459,7 @@ async fn on_cmd_delete_entry(
         msg.id,
         fs.delete_entry(entry_id).await.map_err(map_err_into_native),
     );
+    core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -466,6 +472,7 @@ async fn on_cmd_flush(
 ) -> Result<()> {
     let mut fs = fs.lock().await;
     let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
+    core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -479,6 +486,7 @@ async fn on_cmd_get_first_entry(
     let parent_id = api_fs::get_first_entry_req_decode(msg);
     let mut fs = fs.lock().await;
     let resp = api_fs::get_first_entry_resp_encode(msg, fs.get_first_entry(parent_id).await?);
+    core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -492,6 +500,7 @@ async fn on_cmd_get_next_entry(
     let entry_id = api_fs::get_next_entry_req_decode(msg);
     let mut fs = fs.lock().await;
     let next_entry_id = fs.get_next_entry(entry_id).await?;
+    core::mem::drop(fs);
     let resp = api_fs::get_next_entry_resp_encode(msg, next_entry_id);
 
     let _ = sender.send(resp).await;
@@ -506,6 +515,7 @@ async fn on_cmd_get_name(
     let entry_id = api_fs::get_name_req_decode(msg);
     let mut fs = fs.lock().await;
     let name = fs.name(entry_id).await?;
+    core::mem::drop(fs);
     if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
         return Err(std::io::ErrorKind::InvalidData.into());
     }
@@ -516,6 +526,27 @@ async fn on_cmd_get_name(
         .map_err(map_native_error)?;
 
     let resp = api_fs::get_name_resp_encode(msg.id, name.as_str(), io_page);
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_move_entry(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<FS>>,
+) -> Result<()> {
+    let (entry_id, new_parent_id, fname) =
+        api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
+
+    let mut fs = fs.lock().await;
+    let resp = api_fs::empty_resp_encode(
+        msg.id,
+        fs.move_entry(entry_id, new_parent_id, fname.as_str())
+            .await
+            .map_err(map_err_into_native),
+    );
+    core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
     Ok(())
