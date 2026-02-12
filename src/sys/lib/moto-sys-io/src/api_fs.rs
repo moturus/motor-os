@@ -63,7 +63,6 @@ pub fn stat_resp_encode(req: Msg, entry_id: u128, entry_kind: async_fs::EntryKin
     let mut resp = Msg::new();
     resp.id = req.id;
     resp.handle = req.handle;
-    resp.wake_handle = req.handle;
 
     resp.command = CMD_STAT;
     resp.status = moto_rt::Error::Ok.into();
@@ -275,7 +274,6 @@ pub fn get_first_entry_resp_encode(req: Msg, entry_id: Option<EntryId>) -> Msg {
     let mut resp = Msg::new();
     resp.id = req.id;
     resp.handle = req.handle;
-    resp.wake_handle = req.handle;
 
     resp.command = CMD_GET_FIRST_ENTRY;
     resp.status = moto_rt::Error::Ok.into();
@@ -306,7 +304,6 @@ pub fn get_next_entry_resp_encode(req: Msg, entry_id: Option<EntryId>) -> Msg {
     let mut resp = Msg::new();
     resp.id = req.id;
     resp.handle = req.handle;
-    resp.wake_handle = req.handle;
 
     resp.command = CMD_GET_NEXT_ENTRY;
     resp.status = moto_rt::Error::Ok.into();

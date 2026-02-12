@@ -115,10 +115,10 @@ impl Payload {
 pub struct Msg {
     pub id: u64,           // IN. See user_data in io_uring.pdf. Used by client-side executor.
     pub handle: u64,       // IN/OUT. Like Windows handle, or Unix fd.
+    pub wake_handle: u64,  // IN (used by client-side executor to notify upon completion).
     pub command: u16,      // IN.
     pub status: ErrorCode, // OUT.
     pub flags: u32,        // IN/OUT.
-    pub wake_handle: u64,  // IN (used by client-side executor to notify upon completion).
     pub payload: Payload,  // IN/OUT.
 }
 
