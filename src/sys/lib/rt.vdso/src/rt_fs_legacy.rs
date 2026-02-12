@@ -255,7 +255,7 @@ pub extern "C" fn copy(
 
 pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::opendir(path_ptr, path_size);
     }
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
@@ -269,7 +269,7 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
 
 pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::closedir(rt_fd);
     }
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return moto_rt::E_BAD_HANDLE;
@@ -286,7 +286,7 @@ pub extern "C" fn closedir(rt_fd: i32) -> ErrorCode {
 
 pub extern "C" fn readdir(rt_fd: i32, dentry: *mut DirEntry) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return crate::rt_fs::readdir(rt_fd, dentry);
     }
     let Some(posix_file) = posix::get_file(rt_fd) else {
         return moto_rt::E_BAD_HANDLE;

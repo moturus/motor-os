@@ -302,6 +302,10 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => on_cmd_get_first_entry(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => on_cmd_get_next_entry(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, fs).await,
+
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
             Err(std::io::Error::from(ErrorKind::InvalidData))
@@ -462,6 +466,56 @@ async fn on_cmd_flush(
 ) -> Result<()> {
     let mut fs = fs.lock().await;
     let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_get_first_entry(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<FS>>,
+) -> Result<()> {
+    let parent_id = api_fs::get_first_entry_req_decode(msg);
+    let mut fs = fs.lock().await;
+    let resp = api_fs::get_first_entry_resp_encode(msg, fs.get_first_entry(parent_id).await?);
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_get_next_entry(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<FS>>,
+) -> Result<()> {
+    let entry_id = api_fs::get_next_entry_req_decode(msg);
+    let mut fs = fs.lock().await;
+    let next_entry_id = fs.get_next_entry(entry_id).await?;
+    let resp = api_fs::get_next_entry_resp_encode(msg, next_entry_id);
+
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_get_name(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<FS>>,
+) -> Result<()> {
+    let entry_id = api_fs::get_name_req_decode(msg);
+    let mut fs = fs.lock().await;
+    let name = fs.name(entry_id).await?;
+    if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+
+    let io_page = sender
+        .alloc_page(u64::MAX)
+        .await
+        .map_err(map_native_error)?;
+
+    let resp = api_fs::get_name_resp_encode(msg.id, name.as_str(), io_page);
 
     let _ = sender.send(resp).await;
     Ok(())

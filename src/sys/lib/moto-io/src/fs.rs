@@ -420,13 +420,21 @@ impl FsClient {
     }
 
     /// Get the first entry in a directory.
-    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
-        todo!()
+    pub async fn get_first_entry(self: &Rc<Self>, parent_id: EntryId) -> Result<Option<EntryId>> {
+        let mut msg = api_fs::get_first_entry_req_encode(parent_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::get_first_entry_resp_decode(resp)
     }
 
     /// Get the next entry in a directory.
-    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
-        todo!()
+    pub async fn get_next_entry(self: &Rc<Self>, entry_id: EntryId) -> Result<Option<EntryId>> {
+        let mut msg = api_fs::get_next_entry_req_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::get_next_entry_resp_decode(resp)
     }
 
     /// Get the parent of the entry.
@@ -435,8 +443,12 @@ impl FsClient {
     }
 
     /// Filename of the entry, without parent directories.
-    async fn name(&mut self, entry_id: EntryId) -> Result<String> {
-        todo!()
+    pub async fn name(self: &Rc<Self>, entry_id: EntryId) -> Result<String> {
+        let mut msg = api_fs::get_name_req_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::get_name_resp_decode(resp, &self.io_receiver.borrow())
     }
 
     /// The total number of blocks in the FS.

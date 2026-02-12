@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::any::Any;
 use core::ops::Deref;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64};
@@ -390,6 +391,20 @@ impl AsyncFsClient {
         self.blocking_run(move |fs_client| async move { fs_client.stat(&path.abs_path).await })
     }
 
+    fn get_first_entry(&self, parent_id: EntryId) -> Result<Option<EntryId>> {
+        self.blocking_run(
+            move |fs_client| async move { fs_client.get_first_entry(parent_id).await },
+        )
+    }
+
+    fn get_next_entry(&self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        self.blocking_run(move |fs_client| async move { fs_client.get_next_entry(entry_id).await })
+    }
+
+    fn name(&self, entry_id: EntryId) -> Result<String> {
+        self.blocking_run(move |fs_client| async move { fs_client.name(entry_id).await })
+    }
+
     fn write(&self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
         let buf_addr = buf.as_ptr() as usize;
         let buf_len = buf.len();
@@ -468,7 +483,7 @@ struct File {
 
 impl PosixFile for File {
     fn kind(&self) -> crate::posix::PosixKind {
-        todo!()
+        crate::posix::PosixKind::File
     }
 
     fn write(&self, buf: &[u8]) -> core::result::Result<usize, moto_rt::ErrorCode> {
@@ -532,6 +547,7 @@ impl PosixFile for File {
     fn close(&self, rt_fd: moto_rt::RtFd) -> core::result::Result<(), moto_rt::ErrorCode> {
         Ok(())
     }
+
     fn set_nonblocking(&self, val: bool) -> core::result::Result<(), moto_rt::ErrorCode> {
         Err(moto_rt::E_NOT_IMPLEMENTED)
     }
@@ -562,6 +578,21 @@ impl PosixFile for File {
         // Err(E_INVALID_ARGUMENT)
     }
     */
+}
+
+struct ReadDir {
+    dir_id: moto_io::fs::EntryId,
+    prev_entry_id: moto_rt::mutex::Mutex<Option<moto_io::fs::EntryId>>,
+}
+
+impl PosixFile for ReadDir {
+    fn kind(&self) -> crate::posix::PosixKind {
+        crate::posix::PosixKind::ReadDir
+    }
+
+    fn close(&self, rt_fd: moto_rt::RtFd) -> core::result::Result<(), moto_rt::ErrorCode> {
+        Ok(())
+    }
 }
 
 // ------------------------------------ public API ------------------------------ //
@@ -780,7 +811,7 @@ pub extern "C" fn canonicalize(
         Ok(cp) => cp,
         Err(err) => return err.into(),
     };
-    match AsyncFsClient::get().unwrap().stat(c_path.abs_path.as_str()) {
+    match AsyncFsClient::get().unwrap().stat_internal(c_path.clone()) {
         Ok(_) => {}
         Err(err) => return err.into(),
     }
@@ -790,6 +821,92 @@ pub extern "C" fn canonicalize(
     unsafe {
         core::ptr::copy_nonoverlapping(out_bytes.as_ptr(), out_ptr, out_bytes.len());
         *out_size = out_bytes.len();
+    }
+
+    moto_rt::E_OK
+}
+
+pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+
+    let c_path = match CanonicalPath::parse(path) {
+        Ok(cp) => cp,
+        Err(err) => return err as u16 as i32,
+    };
+    let (entry_id, entry_kind) = match AsyncFsClient::get().unwrap().stat_internal(c_path) {
+        Ok(val) => val,
+        Err(err) => return err as u16 as i32,
+    };
+
+    if entry_kind != EntryKind::Directory {
+        return moto_rt::Error::NotADirectory as u16 as i32;
+    }
+
+    let rdr = ReadDir {
+        dir_id: entry_id,
+        prev_entry_id: moto_rt::mutex::Mutex::new(None),
+    };
+
+    crate::posix::push_file(alloc::sync::Arc::new(rdr))
+}
+
+pub extern "C" fn closedir(rt_fd: i32) -> moto_rt::ErrorCode {
+    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+    let _ = crate::posix::pop_file(rt_fd);
+    moto_rt::E_OK
+}
+
+pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> moto_rt::ErrorCode {
+    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+
+    let fs_client = AsyncFsClient::get().unwrap();
+
+    let entry_id = if let Some(prev_id) = *dir.prev_entry_id.lock() {
+        fs_client.get_next_entry(prev_id)
+    } else {
+        fs_client.get_first_entry(dir.dir_id)
+    };
+
+    let entry_id = match entry_id {
+        Ok(Some(val)) => val,
+        Ok(None) => return moto_rt::Error::NotFound.into(),
+        Err(err) => return err.into(),
+    };
+
+    *dir.prev_entry_id.lock() = Some(entry_id);
+
+    let attr = match fs_client.metadata(entry_id) {
+        Ok(val) => val,
+        Err(err) => return err.into(),
+    };
+
+    let name = match fs_client.name(entry_id) {
+        Ok(val) => val,
+        Err(err) => return err.into(),
+    };
+
+    if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
+        return moto_rt::Error::InvalidData.into();
+    }
+
+    // Safety: we (have to) trust the caller.
+    unsafe {
+        let dentry_mut: &mut moto_rt::fs::DirEntry = dentry.as_mut().unwrap();
+        *dentry_mut = moto_rt::fs::DirEntry::default();
+        dentry_mut.attr = attr;
+        dentry_mut.fname_size = name.len() as u16;
+        dentry_mut.fname[..name.len()].clone_from_slice(&name.as_bytes()[..name.len()]);
     }
 
     moto_rt::E_OK

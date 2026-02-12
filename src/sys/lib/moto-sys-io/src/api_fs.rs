@@ -1,3 +1,4 @@
+use async_fs::EntryId;
 use moto_ipc::io_channel::{IoPage, Msg, Receiver, Sender};
 use moto_rt::Result;
 use moto_rt::fs::MAX_PATH_LEN;
@@ -16,6 +17,9 @@ pub const CMD_METADATA: u16 = 6;
 pub const CMD_RESIZE: u16 = 7;
 pub const CMD_DELETE_ENTRY: u16 = 8;
 pub const CMD_FLUSH: u16 = 9;
+pub const CMD_GET_FIRST_ENTRY: u16 = 10;
+pub const CMD_GET_NEXT_ENTRY: u16 = 11;
+pub const CMD_GET_NAME: u16 = 12;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -253,4 +257,104 @@ pub fn flush_msg_encode() -> Msg {
     msg.command = CMD_FLUSH;
 
     msg
+}
+
+pub fn get_first_entry_req_encode(parent_id: EntryId) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_GET_FIRST_ENTRY;
+    msg.payload.set_arg_128(parent_id); // This takes 16 bytes.
+
+    msg
+}
+
+pub fn get_first_entry_req_decode(msg: Msg) -> u128 {
+    msg.payload.arg_128()
+}
+
+pub fn get_first_entry_resp_encode(req: Msg, entry_id: Option<EntryId>) -> Msg {
+    let mut resp = Msg::new();
+    resp.id = req.id;
+    resp.handle = req.handle;
+    resp.wake_handle = req.handle;
+
+    resp.command = CMD_GET_FIRST_ENTRY;
+    resp.status = moto_rt::Error::Ok.into();
+
+    resp.payload.set_arg_128(entry_id.unwrap_or(0));
+    resp
+}
+
+pub fn get_first_entry_resp_decode(resp: Msg) -> Result<Option<EntryId>> {
+    resp.status()?;
+    let entry_id = resp.payload.arg_128();
+    Ok(if entry_id == 0 { None } else { Some(entry_id) })
+}
+
+pub fn get_next_entry_req_encode(entry_id: EntryId) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_GET_NEXT_ENTRY;
+    msg.payload.set_arg_128(entry_id); // This takes 16 bytes.
+
+    msg
+}
+
+pub fn get_next_entry_req_decode(msg: Msg) -> u128 {
+    msg.payload.arg_128()
+}
+
+pub fn get_next_entry_resp_encode(req: Msg, entry_id: Option<EntryId>) -> Msg {
+    let mut resp = Msg::new();
+    resp.id = req.id;
+    resp.handle = req.handle;
+    resp.wake_handle = req.handle;
+
+    resp.command = CMD_GET_NEXT_ENTRY;
+    resp.status = moto_rt::Error::Ok.into();
+
+    resp.payload.set_arg_128(entry_id.unwrap_or(0));
+    resp
+}
+
+pub fn get_next_entry_resp_decode(resp: Msg) -> Result<Option<EntryId>> {
+    resp.status()?;
+    let entry_id = resp.payload.arg_128();
+    Ok(if entry_id == 0 { None } else { Some(entry_id) })
+}
+
+pub fn get_name_req_encode(entry_id: EntryId) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_GET_NAME;
+    msg.payload.set_arg_128(entry_id); // This takes 16 bytes.
+
+    msg
+}
+
+pub fn get_name_req_decode(msg: Msg) -> u128 {
+    msg.payload.arg_128()
+}
+
+pub fn get_name_resp_encode(msg_id: u64, name: &str, io_page: IoPage) -> Msg {
+    let mut msg = Msg::new();
+    msg.id = msg_id;
+    msg.command = CMD_GET_NAME;
+    msg.status = moto_rt::Error::Ok.into();
+
+    io_page.bytes_mut()[..name.len()].clone_from_slice(name.as_bytes());
+    msg.payload.args_16_mut()[10] = name.len() as u16;
+    msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+
+    msg
+}
+
+pub fn get_name_resp_decode(msg: Msg, receiver: &Receiver) -> Result<String> {
+    msg.status()?;
+
+    let io_page_idx = msg.payload.shared_pages()[11];
+    let io_page = receiver.get_page(io_page_idx)?;
+    let len = msg.payload.args_16()[10];
+    let name = &io_page.bytes()[..(len as usize)];
+    let name = str::from_utf8(name).map_err(|_| moto_rt::Error::InvalidData)?;
+
+    use alloc::borrow::ToOwned;
+    Ok(name.to_owned())
 }

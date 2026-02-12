@@ -94,6 +94,12 @@ pub struct DirEntry {
     pub fname: [u8; MAX_FILENAME_LEN],
 }
 
+impl core::default::Default for DirEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DirEntry {
     pub const VERSION: u64 = 1;
 
