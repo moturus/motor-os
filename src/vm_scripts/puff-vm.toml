@@ -3,6 +3,8 @@ initramfs = "initrd"
 num_cpus = 4
 mem_size = "256M"
 blk = ["motor.full.img"]
+log_file = "/tmp/puff.log"
+log_level = "info"
 
 [net.dev0]
 mac = "a4:a1:c2:00:00:01"
