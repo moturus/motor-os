@@ -5,6 +5,7 @@ use core::sync::atomic::Ordering;
 use crate::posix;
 use crate::posix::PosixFile;
 use crate::posix::PosixKind;
+use crate::rt_fs;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -123,7 +124,7 @@ pub extern "C" fn seek(rt_fd: i32, offset: i64, whence: u8) -> i64 {
 
 pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return rt_fs::mkdir(path_ptr, path_size);
     }
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
@@ -178,7 +179,7 @@ pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> ErrorCode {
 
 pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> ErrorCode {
     if crate::rt_fs::ok() {
-        todo!()
+        return rt_fs::rmdir_all(path_ptr, path_size);
     }
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };

@@ -485,6 +485,33 @@ impl AsyncFsClient {
                 .await
         })
     }
+
+    fn unlink_recursively(&self, entry_id: EntryId) -> Result<()> {
+        // We don't want to ddos sys-io, so we do the loop here.
+        let metadata =
+            self.blocking_run(move |fs_client| async move { fs_client.metadata(entry_id).await })?;
+        if metadata.kind() != EntryKind::Directory {
+            return self.blocking_run(move |fs_client| async move {
+                fs_client.delete_entry(entry_id).await
+            });
+        }
+
+        if let Some(first_entry) = self.get_first_entry(entry_id)? {
+            let mut prev_entry = first_entry;
+
+            loop {
+                if let Some(next_entry) = self.get_next_entry(prev_entry)? {
+                    self.unlink_recursively(prev_entry)?;
+                    prev_entry = next_entry;
+                } else {
+                    self.unlink_recursively(prev_entry)?;
+                    break;
+                }
+            }
+        }
+
+        self.blocking_run(move |fs_client| async move { fs_client.delete_entry(entry_id).await })
+    }
 }
 
 struct File {
@@ -973,5 +1000,48 @@ pub extern "C" fn rename(
     // Do the move.
     client
         .move_entry(entry_id, new_parent_id, new_path.filename().to_owned())
+        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
+}
+
+pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    log::debug!("rmdir_all({path})");
+
+    let Ok(path) = CanonicalPath::parse(path) else {
+        return moto_rt::Error::InvalidFilename as u16;
+    };
+    if path.is_root() {
+        return moto_rt::Error::NotAllowed as u16;
+    }
+
+    let client = AsyncFsClient::get().unwrap();
+    let Ok((entry_id, entry_kind)) = client.stat_internal(path) else {
+        return moto_rt::Error::InvalidFilename as u16;
+    };
+    if entry_kind != EntryKind::Directory {
+        return moto_rt::Error::NotADirectory as u16;
+    }
+
+    client
+        .unlink_recursively(entry_id)
+        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
+}
+
+pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
+    log::debug!("mkdir({path})");
+
+    let Ok(path) = CanonicalPath::parse(path) else {
+        return moto_rt::Error::InvalidFilename as u16;
+    };
+    if path.is_root() {
+        return moto_rt::Error::AlreadyInUse as u16;
+    }
+
+    AsyncFsClient::get()
+        .unwrap()
+        .create_internal(&path, moto_io::fs::EntryKind::Directory)
         .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }

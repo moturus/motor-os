@@ -295,7 +295,7 @@ async fn on_msg(
     if let Err(err) = match msg.command {
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_CREATE_DIR => todo!(),
+        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
@@ -350,6 +350,30 @@ async fn on_cmd_create_file(
     let mut fs = fs.lock().await;
     let entry_id = fs
         .create_entry(parent_id, EntryKind::File, fname.as_str())
+        .await
+        .map_err(|err| {
+            log::warn!("fs.create_entry() failed: {err:?}");
+            map_err_into_native(err)
+        })
+        .map_err(map_native_error)?;
+    core::mem::drop(fs);
+    log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
+
+    let resp = api_fs::stat_resp_encode(msg, entry_id, EntryKind::File);
+    sender.send(resp).await.map_err(map_native_error)
+}
+
+async fn on_cmd_create_dir(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<FS>>,
+) -> Result<()> {
+    let (parent_id, fname) =
+        api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
+
+    let mut fs = fs.lock().await;
+    let entry_id = fs
+        .create_entry(parent_id, EntryKind::Directory, fname.as_str())
         .await
         .map_err(|err| {
             log::warn!("fs.create_entry() failed: {err:?}");
