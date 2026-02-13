@@ -211,28 +211,34 @@ pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<
 }
 
 async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {
-    const NUM_LISTENERS: usize = 16;
+    const NUM_LISTENERS: usize = 8;
     for _ in 0..NUM_LISTENERS {
         spawn_new_listener(fs.clone()).await;
     }
+    // Note: we must not return until there is a started listener,
+    //       otherwise the FS is not yet functional.
 }
 
 async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
-    // Use oneshot to signal the start of listening, otherwise connects may fail.
-    let (tx, rx) = moto_async::oneshot();
+    let (started_tx, started_rx) = moto_async::oneshot();
+    let (connected_tx, connected_rx) = moto_async::oneshot();
 
     moto_async::LocalRuntime::spawn(async move {
-        let _ = fs_listener(fs.clone(), tx).await;
-        // Spawn a new listener when another one completes.
-        spawn_new_listener(fs);
+        let _ = fs_listener(fs.clone(), started_tx, connected_tx).await;
+        // Spawn an extra one once the previous one is connected.
+        let _ = connected_rx.await;
+        spawn_new_listener(fs).await;
     });
 
-    let _ = rx.await;
+    // Note: we must not return until there is a started listener,
+    //       otherwise the FS is not yet functional.
+    let _ = started_rx.await;
 }
 
 async fn fs_listener(
     fs: Rc<LocalMutex<FS>>,
-    started: moto_async::oneshot::Sender<()>,
+    started_tx: moto_async::oneshot::Sender<()>,
+    connected_tx: moto_async::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
 
@@ -246,11 +252,12 @@ async fn fs_listener(
         {
             Some(res) => res,
             None => {
-                let _ = started.send(());
+                let _ = started_tx.send(());
                 listener.await
             }
         }
         .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?;
+    let _ = connected_tx.send(());
 
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
@@ -575,65 +582,3 @@ async fn on_cmd_move_entry(
     let _ = sender.send(resp).await;
     Ok(())
 }
-
-/*
-#[allow(unused)]
-pub fn smoke_test() {
-    assert_eq!(
-        std::fs::metadata("/foo").err().unwrap().kind(),
-        std::io::ErrorKind::NotFound
-    );
-    assert_eq!(
-        std::fs::metadata("/bar").err().unwrap().kind(),
-        std::io::ErrorKind::NotFound
-    );
-
-    std::fs::write("/foo", "bar").expect("async write failed");
-    let bytes = std::fs::read("/foo").expect("async read failed");
-    assert_eq!(bytes.as_slice(), "bar".as_bytes());
-
-    let mut bytes = vec![0_u8; 1024 * 1024 * 11 + 1001];
-    // let mut bytes = vec![0_u8; 1024 * 1024 * 2 + 1001];
-    for byte in &mut bytes {
-        *byte = std::random::random(..);
-    }
-
-    let ts0 = std::time::Instant::now();
-    std::fs::write("/bar", bytes.as_slice()).unwrap();
-    let ts1 = std::time::Instant::now();
-    let bytes_back = std::fs::read("/bar").unwrap();
-    let dur_read = ts1.elapsed();
-    let dur_write = ts1 - ts0;
-
-    assert_eq!(
-        moto_rt::fnv1a_hash_64(bytes.as_slice()),
-        moto_rt::fnv1a_hash_64(bytes_back.as_slice())
-    );
-
-    let write_mbps = (bytes.len() as f64) / dur_write.as_secs_f64() / (1024.0 * 1024.0);
-    let read_mbps = (bytes.len() as f64) / dur_read.as_secs_f64() / (1024.0 * 1024.0);
-    log::info!(
-        "async FS smoke test: write {:.3} mbps; read: {:.3} mbps",
-        write_mbps,
-        read_mbps
-    );
-
-    let metadata = std::fs::metadata("/bar").unwrap();
-    assert!(metadata.is_file());
-    assert_eq!(metadata.len(), bytes.len() as u64);
-
-    std::fs::remove_file("/foo").unwrap();
-    std::fs::remove_file("/bar").unwrap();
-
-    assert_eq!(
-        std::fs::metadata("/foo").err().unwrap().kind(),
-        std::io::ErrorKind::NotFound
-    );
-    assert_eq!(
-        std::fs::metadata("/bar").err().unwrap().kind(),
-        std::io::ErrorKind::NotFound
-    );
-
-    log::info!("async FS smoke test PASSED");
-}
-*/
