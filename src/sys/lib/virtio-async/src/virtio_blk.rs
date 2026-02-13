@@ -176,6 +176,7 @@ impl BlockDevice {
         const VIRTIO_BLK_S_IOERR: u8 = 1;
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
+        let (_, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
         // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
         let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
         *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
@@ -230,6 +231,7 @@ impl BlockDevice {
         const VIRTIO_BLK_S_IOERR: u8 = 1;
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
+        let (_, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
         // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
         let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
         *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
