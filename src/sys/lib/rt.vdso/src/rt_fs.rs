@@ -271,9 +271,22 @@ impl AsyncFsClient {
     }
 
     fn chdir(&self, path: &str) -> Result<()> {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(moto_rt::Error::NotADirectory);
+        }
+
+        let path = if path.len() > 1 {
+            path.strip_suffix('/').unwrap_or(path)
+        } else {
+            path
+        };
         let path = CanonicalPath::parse(path)?;
 
-        let entry_id = self.stat_internal(path.clone())?;
+        let (_entry_id, entry_kind) = self.stat_internal(path.clone())?;
+        if entry_kind != EntryKind::Directory {
+            return Err(moto_rt::Error::NotADirectory);
+        }
 
         *self.cwd.lock() = path.abs_path;
         Ok(())
