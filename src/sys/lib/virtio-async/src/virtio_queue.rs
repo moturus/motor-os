@@ -148,18 +148,16 @@ impl Future for VqAlloc {
                 return std::task::Poll::Ready(chain_head);
             }
 
-            let mut pinned = Box::pin(virtq.wait_handle.as_future());
-            core::mem::drop(virtq);
-
-            match pinned.as_mut().poll(cx) {
-                std::task::Poll::Ready(_) => continue,
-                std::task::Poll::Pending => {
-                    let mut vq = self.virtqueue.borrow_mut();
-                    vq.alloc_waiters.push_back(cx.local_waker().clone());
-                    vq.notify();
-                    return std::task::Poll::Pending;
-                }
+            let mut empty = true;
+            while let Some(_chain_head) = virtq.reclaim_used() {
+                empty = false;
             }
+            if !empty {
+                continue;
+            }
+
+            virtq.alloc_waiters.push_back(cx.local_waker().clone());
+            return std::task::Poll::Pending;
         }
     }
 }
@@ -195,7 +193,9 @@ pub(super) struct Virtqueue {
     queue_size_mask: u16, // queue_size - 1
 
     alloc_waiters: VecDeque<std::task::LocalWaker>,
-    completion_waiters: VecDeque<std::task::LocalWaker>,
+
+    // For each slot we may have a waker.
+    completion_waiters: Vec<Option<std::task::LocalWaker>>,
 }
 
 impl Virtqueue {
@@ -258,10 +258,12 @@ impl Virtqueue {
         };
 
         let header_buffers_phys_addr = super::mapper().virt_to_phys(header_buffers_vaddr)?;
+        let mut completion_waiters = Vec::with_capacity(queue_size as usize);
+        completion_waiters.resize(queue_size as usize, None);
 
         log::debug!("New virtqueue sz: {queue_size}");
 
-        Ok(Rc::new(RefCell::new(Virtqueue {
+        let self_ = Rc::new(RefCell::new(Virtqueue {
             virt_addr,
             queue_size,
             queue_num,
@@ -278,8 +280,10 @@ impl Virtqueue {
             notify_offset: 0,
             queue_size_mask: queue_size - 1,
             alloc_waiters: VecDeque::new(),
-            completion_waiters: VecDeque::new(),
-        })))
+            completion_waiters,
+        }));
+        // Self::spawn_monitoring(self_.clone());
+        Ok(self_)
     }
 
     pub fn queue_size(&self) -> u16 {
@@ -383,6 +387,15 @@ impl Virtqueue {
         }
 
         self.free_head_idx = chain_head;
+
+        // Wake a couple of waiters (this deallocation may free more descriptors
+        // than the first waiter may consume).
+        if let Some(waker) = self.alloc_waiters.pop_front() {
+            waker.wake();
+            if let Some(waker) = self.alloc_waiters.pop_front() {
+                waker.wake();
+            }
+        }
     }
 
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
@@ -494,6 +507,10 @@ impl Virtqueue {
         }
 
         self.next_used_idx = self.next_used_idx.wrapping_add(1);
+        assert!(chain_head < self.queue_size);
+        if let Some(waker) = self.completion_waiters[chain_head as usize].take() {
+            waker.wake();
+        }
         Some(chain_head)
     }
 
@@ -516,6 +533,31 @@ impl Virtqueue {
             return (consumed, header_buffer.header[0] as u8);
         }
     }
+
+    /*
+    fn spawn_monitoring(this: Rc<RefCell<Self>>) {
+        moto_async::LocalRuntime::spawn(async move {
+            loop {
+                moto_async::sleep(std::time::Duration::from_secs(3)).await;
+                let vq = this.borrow();
+
+                let alloc_waiters = vq.alloc_waiters.len();
+                let mut completion_waiters = 0;
+                for cw in &vq.completion_waiters {
+                    if cw.is_some() {
+                        completion_waiters += 1;
+                    }
+                }
+
+                if alloc_waiters + completion_waiters > 0 {
+                    log::error!("vq: aw: {alloc_waiters} cw: {completion_waiters}",);
+                } else {
+                    log::error!("vq: emty");
+                }
+            }
+        });
+    }
+    */
 }
 
 impl Drop for Virtqueue {
@@ -536,9 +578,16 @@ impl Future for VqCompletion {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
+        // Works OK without spinning, but some tests show 3%-5% throughput upside.
+        const MAX_SPINS: u32 = 4;
+        let mut spin_iter = 0;
         loop {
+            spin_iter += 1;
             let mut virtq = self.virtqueue.borrow_mut();
+            while let Some(_chain_head) = virtq.reclaim_used() {}
+
             if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
+                virtq.completion_waiters[self.chain_head as usize] = None;
                 let (_consumed, status) = virtq.get_result(self.chain_head);
                 if status == 0 {
                     return std::task::Poll::Ready(Ok(()));
@@ -549,19 +598,23 @@ impl Future for VqCompletion {
                 )));
             }
 
-            if let Some(_chain_head) = virtq.reclaim_used() {
-                continue;
-            }
-
-            let mut pinned = Box::pin(virtq.wait_handle.as_future());
-            core::mem::drop(virtq);
-
-            match pinned.as_mut().poll(cx) {
-                std::task::Poll::Ready(_) => continue,
+            let mut device_irq_waiter = Box::pin(virtq.wait_handle.as_future());
+            match device_irq_waiter.as_mut().poll(cx) {
+                std::task::Poll::Ready(_) => {
+                    virtq.completion_waiters[self.chain_head as usize] = None;
+                    spin_iter = 0;
+                    continue;
+                }
                 std::task::Poll::Pending => {
-                    let mut vq = self.virtqueue.borrow_mut();
-                    vq.completion_waiters.push_back(cx.local_waker().clone());
-                    vq.notify();
+                    if spin_iter == 1 {
+                        virtq.notify();
+                    }
+                    if spin_iter < MAX_SPINS {
+                        continue;
+                    }
+                    virtq.notify();
+                    virtq.completion_waiters[self.chain_head as usize] =
+                        Some(cx.local_waker().clone());
                     return std::task::Poll::Pending;
                 }
             }
