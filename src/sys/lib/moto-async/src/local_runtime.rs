@@ -505,8 +505,10 @@ impl LocalRuntime {
 
             let mut tasks_ref = inner.tasks.borrow_mut();
             let Some(task) = tasks_ref.get_mut(&next_runnable) else {
-                log::error!("unknown task: {}", next_runnable.0);
-                moto_rt::error::log_backtrace(-1);
+                // This could happen if the local waker gets cloned and woken
+                // multiple times; this will enqueue it multiple times into
+                // the runnable queue.
+                log::trace!("unknown task: {}", next_runnable.0);
                 continue;
             };
             let pinned = Pin::new(&mut task.fut);
