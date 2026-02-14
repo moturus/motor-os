@@ -32,8 +32,12 @@ use bytemuck::Pod;
 use std::io::Result;
 
 pub const MAX_FILENAME_LEN: usize = 255;
-pub(crate) const TXN_BLOCKS: u64 = 14;
-pub const RESERVED_BLOCKS: u64 = TXN_BLOCKS + 2;
+pub const RESERVED_BLOCKS: usize = MAX_TXNS_IN_LOG * MAX_BLOCKS_IN_TXN + 2;
+
+/// The max number of transactions in the log.
+pub(crate) const MAX_TXNS_IN_LOG: usize = 8;
+pub(crate) const MAX_BLOCKS_IN_TXN: usize = 8;
+pub(crate) const BLOCKS_IN_TXN_LOG: u64 = (MAX_TXNS_IN_LOG * MAX_BLOCKS_IN_TXN) as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod)]
 #[repr(transparent)]
@@ -112,6 +116,16 @@ pub const ROOT_DIR_ID: EntryId = unsafe { core::mem::transmute(ROOT_DIR_ID_INTER
 /// Just a random number.
 pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 
+#[derive(Pod, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct TxnLogData {
+    prev_txn: u128,
+    this_txn: u128,
+    txn_blocks: [BlockNo; MAX_BLOCKS_IN_TXN],
+}
+
+unsafe impl bytemuck::Zeroable for TxnLogData {}
+
 /// Superblock (block #0).
 #[derive(Pod, Clone, Copy)]
 #[repr(C)]
@@ -123,14 +137,10 @@ pub(crate) struct Superblock {
     generation: u64,        // Auto-incrementing. Used in EntityId.
     freelist_head: BlockNo, // The head of the block freelist.
     empty_area_start: u64,  // All blocks after this one are unused.
+    _reserved: u64,
 
-                            // txn_meta_block: u64,          // A meta block currently being worked on.
-                            // txn_data_block: u64,          // A file data block currently being worked on.
-                            // txn_link_block: u64,          // A directory list block or file data block list.
-                            // txn_list_of_links_block: u64, // A file list-of-lists block currently being worked on.
-                            // txn_blocks_owner: u64,        // The "owner" of the txn blocks to check upon bootup.
-                            // txn_type: u32,                // TXN_TYPE_***.
-                            // crc32: u32, // CRC32 of this data structure.
+    last_committed_txn: u128,
+    txn_log_data: [TxnLogData; MAX_TXNS_IN_LOG],
 }
 const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
 unsafe impl bytemuck::Zeroable for Superblock {}
@@ -138,7 +148,9 @@ unsafe impl bytemuck::Zeroable for Superblock {}
 impl Superblock {
     /// Returns the superblock and the root dir.
     pub fn format(num_blocks: u64) -> (Block, Block) {
-        assert!(num_blocks >= RESERVED_BLOCKS);
+        use bytemuck::Zeroable;
+
+        assert!(num_blocks >= RESERVED_BLOCKS as u64);
 
         let mut block_0 = Block::new_zeroed();
         let sb = block_0.get_mut_at_offset::<Self>(0);
@@ -146,10 +158,13 @@ impl Superblock {
             magic: MAGIC,
             version: 1,
             num_blocks,
-            free_blocks: num_blocks - RESERVED_BLOCKS,
+            free_blocks: num_blocks - RESERVED_BLOCKS as u64,
             empty_area_start: 2,
             generation: 1,
             freelist_head: BlockNo::null(),
+            last_committed_txn: 0,
+            txn_log_data: [TxnLogData::zeroed(); MAX_TXNS_IN_LOG],
+            _reserved: 0,
         };
 
         let mut block_1 = Block::new_zeroed();
@@ -186,11 +201,14 @@ impl Superblock {
         if !self.freelist_head.is_null() {
             Ok(())
         } else {
-            if self.num_blocks == self.empty_area_start + self.free_blocks + TXN_BLOCKS {
+            if self.num_blocks
+                == self.empty_area_start + self.free_blocks + BLOCKS_IN_TXN_LOG as u64
+            {
                 Ok(())
             } else {
                 let mut error_count: i64 = (self.num_blocks as i64)
-                    - ((self.empty_area_start + self.free_blocks + TXN_BLOCKS) as i64);
+                    - ((self.empty_area_start + self.free_blocks + BLOCKS_IN_TXN_LOG as u64)
+                        as i64);
                 let verb = if error_count > 0 {
                     "deficit"
                 } else {
@@ -341,7 +359,7 @@ impl Superblock {
         let mut sb_mut_ref = sb_block.block_mut();
         let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
 
-        assert!(block_no.as_u64() < (this.num_blocks - TXN_BLOCKS));
+        assert!(block_no.as_u64() < (this.num_blocks - BLOCKS_IN_TXN_LOG as u64));
 
         if block_no.as_u64() == (this.empty_area_start - 1) {
             this.free_blocks += 1;

@@ -34,7 +34,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     }
 
     pub async fn format(dev: Box<BD>) -> Result<Self> {
-        if dev.num_blocks() <= RESERVED_BLOCKS {
+        if dev.num_blocks() <= RESERVED_BLOCKS as u64 {
             return Err(ErrorKind::StorageFull.into());
         }
         let (superblock, root_dir) = Superblock::format(dev.num_blocks());
@@ -53,7 +53,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     }
 
     pub async fn open(dev: Box<BD>) -> Result<Self> {
-        if dev.num_blocks() <= RESERVED_BLOCKS {
+        if dev.num_blocks() <= RESERVED_BLOCKS as u64 {
             return Err(ErrorKind::StorageFull.into());
         }
 

@@ -127,7 +127,10 @@ async fn basic_test() -> Result<()> {
     let mut fs = create_fs("motor_fs_basic_test", NUM_BLOCKS).await?;
 
     assert_eq!(NUM_BLOCKS, fs.num_blocks());
-    assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
+        fs.empty_blocks().await?
+    );
 
     let root = crate::ROOT_DIR_ID;
     assert!(fs.get_parent(root).await?.is_none());
@@ -195,7 +198,7 @@ async fn basic_test() -> Result<()> {
 
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS
+        NUM_BLOCKS - RESERVED_BLOCKS as u64
     );
     let root_metadata = fs.metadata(root).await?;
     assert!(ts_now <= root_metadata.modified.into());
@@ -206,7 +209,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(3, fs.metadata(root).await?.size);
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS - 3
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 3
     );
 
     let dir22 = fs.create_entry(dir2, EntryKind::Directory, "dir22").await?;
@@ -222,7 +225,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(BYTES.len() as u64, fs.metadata(file).await?.size);
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS - 6
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 6
     );
 
     let mut buf = [0_u8; 256];
@@ -242,7 +245,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(0, fs.read(file, 0, &mut buf).await.unwrap());
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS - 5
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 5
     );
 
     // Resize up: populate with zeroes.
@@ -253,7 +256,7 @@ async fn basic_test() -> Result<()> {
     }
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS - 5
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 5
     );
 
     // Move.
@@ -266,7 +269,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(root, fs.get_parent(dir22).await?.unwrap());
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS - 5
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 5
     );
 
     // Add some bytes to the file before deleting it, so that it uses
@@ -278,7 +281,7 @@ async fn basic_test() -> Result<()> {
     );
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS - 6
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 6
     );
 
     // Clear out.
@@ -288,7 +291,10 @@ async fn basic_test() -> Result<()> {
     fs.delete_entry(dir3).await.unwrap();
     fs.delete_entry(dir22).await.unwrap();
     assert_eq!(0, fs.metadata(root).await.unwrap().size);
-    assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
+        fs.empty_blocks().await?
+    );
 
     println!("basic_test PASS");
     Ok(())
@@ -352,7 +358,7 @@ async fn midsize_file_test() -> Result<()> {
 
     let mut fs = create_fs("motor_fs_midsize_file_test", NUM_BLOCKS).await?;
     assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS,
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
         fs.empty_blocks().await.unwrap()
     );
 
@@ -413,7 +419,7 @@ async fn midsize_file_test() -> Result<()> {
     );
     fs.delete_entry(parent_id).await.unwrap();
     assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS,
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
         fs.empty_blocks().await.unwrap()
     );
 
@@ -436,7 +442,7 @@ async fn midsize_file_test() -> Result<()> {
 
     fs.delete_entry(file_id).await.unwrap();
     assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS,
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
         fs.empty_blocks().await.unwrap()
     );
 
@@ -499,7 +505,10 @@ async fn delete_reopen_test() -> Result<()> {
     assert!(fs.delete_entry(baz_id).await.is_err());
 
     assert_eq!(0, fs.metadata(root).await.unwrap().size);
-    assert_eq!(NUM_BLOCKS - RESERVED_BLOCKS, fs.empty_blocks().await?);
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
+        fs.empty_blocks().await?
+    );
 
     println!("delete_reopen_test PASS");
     Ok(())
@@ -525,11 +534,11 @@ async fn random_file_test() -> Result<()> {
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
 
     // B+ tree overhead should be less than one block per 100.
-    const FILE_SZ: u64 = PARTITION_SZ - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1) * 4096;
+    const FILE_SZ: u64 = PARTITION_SZ - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1) * 4096;
 
     let mut fs = create_fs("motor_fs_random_file_test", NUM_BLOCKS).await?;
     assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS,
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
         fs.empty_blocks().await.unwrap()
     );
 
@@ -614,7 +623,7 @@ async fn random_file_test() -> Result<()> {
 
     assert_eq!(file_sz, fs.metadata(file_id).await?.size);
     assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS - 1, // The entry block is still there.
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 1, // The entry block is still there.
         fs.empty_blocks().await.unwrap()
     );
 
@@ -633,7 +642,7 @@ async fn write_speed_test() -> Result<()> {
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
 
     // B+ tree overhead should be less than one block per 100.
-    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1);
+    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
     let mut fs = create_fs("motor_fs_write_speed_test", NUM_BLOCKS).await?;
 
@@ -681,7 +690,7 @@ async fn native_write_speed_test() -> Result<()> {
     const PARTITION_SZ: u64 = 1024 * 1024 * 256;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
 
-    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1);
+    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
     let mut block = Box::new(async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
@@ -715,7 +724,7 @@ async fn native_write_speed_async_test() -> Result<()> {
     const PARTITION_SZ: u64 = 1024 * 1024 * 256;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
 
-    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS + NUM_BLOCKS / 100 + 1);
+    const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
     let mut block = Box::new(async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
