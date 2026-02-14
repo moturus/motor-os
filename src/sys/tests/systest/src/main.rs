@@ -424,8 +424,7 @@ fn main() {
 
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
-    moto_async::run_all_tests();
-    io_channel::run_all_tests();
+    fs::run_tests();
     // return;
 
     // Test that a userspace interrupt is handled correctly.
@@ -440,6 +439,8 @@ fn main() {
         moto_rt::E_NOT_ALLOWED
     );
 
+    moto_async::run_all_tests();
+    io_channel::run_all_tests();
     test_thread_names();
     test_cpus();
     tls::test_tls();
@@ -463,7 +464,6 @@ fn main() {
     test_reentrant_mutex();
     // tcp::test_wget();
     test_file_write();
-    moto_async::run_all_tests();
 
     test_lazy_memory_map();
     test_syscall();
