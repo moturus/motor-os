@@ -96,6 +96,12 @@ impl<'a, T> Future for LocalMutexWaiter<'a, T> {
 
         // Not our turn.
         wait_queue.push_front(waiter_id);
+        drop(wait_queue);
+        self.mutex
+            .waiters
+            .borrow_mut()
+            .insert(waiter_id, cx.local_waker().clone());
+        self.mutex.wake_next_waiter();
         core::task::Poll::Pending
     }
 }
