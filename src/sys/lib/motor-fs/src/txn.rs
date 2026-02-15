@@ -20,7 +20,9 @@
 //! - this async flusher is different from the async flusher the block cache
 //!   uses to track completions
 
-use crate::{BlockNo, DirEntryBlock, EntryIdInternal, MotorFs, Superblock, dir_entry};
+use crate::{
+    BlockNo, DirEntryBlock, EntryIdInternal, MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
+};
 use async_fs::{
     AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
     block_cache::{BlockCache, CachedBlock},
@@ -71,18 +73,20 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
 
         assert!(!read_only);
 
+        let mut txn_blocks: [Option<(BlockNo, CachedBlock)>; MAX_BLOCKS_IN_TXN] =
+            [const { None }; MAX_BLOCKS_IN_TXN];
+        let mut next_idx = 0;
+
         // For now, just save all dirty blocks.
         for (block_no, block) in txn_cache.drain() {
             debug_assert_eq!(block_no.as_u64(), block.block_no());
-            fs.block_cache().write_block_if_dirty(block).await?;
+            if block.is_dirty() {
+                txn_blocks[next_idx] = Some((block_no, block));
+                next_idx += 1;
+            }
         }
 
-        fs.block_cache().start_flushing().await;
-
-        // #[cfg(debug_assertions)]
-        // self.block_cache().debug_check_clean();
-
-        Ok(())
+        crate::txn_log::log_txn(fs, txn_blocks).await
     }
 
     pub fn new_readonly(fs: &'a mut MotorFs<BD>) -> Self {
