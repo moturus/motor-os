@@ -12,8 +12,8 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 use crate::{
-    DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID, ROOT_DIR_ID_INTERNAL, Superblock,
-    Txn, dir_entry, validate_filename,
+    BLOCKS_IN_TXN_LOG, DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID,
+    ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry, validate_filename,
 };
 
 pub const PARTITION_ID: u8 = 0x2e;
@@ -23,6 +23,8 @@ const CACHE_SIZE: usize = 512; // 2MB.
 pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
     block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
+
+    last_committed_txn: u128,
 }
 
 impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
@@ -34,7 +36,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     }
 
     pub async fn format(dev: Box<BD>) -> Result<Self> {
-        if dev.num_blocks() <= RESERVED_BLOCKS as u64 {
+        let num_blocks = dev.num_blocks();
+        if num_blocks <= RESERVED_BLOCKS as u64 {
             return Err(ErrorKind::StorageFull.into());
         }
         let (superblock, root_dir) = Superblock::format(dev.num_blocks());
@@ -43,7 +46,14 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         dev.write_block(1, &root_dir).await?;
 
         Ok(Self {
-            block_cache: BlockCache::new(dev, CACHE_SIZE).await?,
+            block_cache: BlockCache::new(
+                dev,
+                CACHE_SIZE,
+                num_blocks - BLOCKS_IN_TXN_LOG as u64,
+                BLOCKS_IN_TXN_LOG as usize,
+            )
+            .await?,
+            last_committed_txn: 0,
             error: Ok(()),
         })
     }
@@ -53,7 +63,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     }
 
     pub async fn open(dev: Box<BD>) -> Result<Self> {
-        if dev.num_blocks() <= RESERVED_BLOCKS as u64 {
+        let num_blocks = dev.num_blocks();
+        if num_blocks <= RESERVED_BLOCKS as u64 {
             return Err(ErrorKind::StorageFull.into());
         }
 
@@ -62,8 +73,22 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             dev.num_blocks() / 256
         );
 
+        let mut block_cache = BlockCache::new(
+            dev,
+            CACHE_SIZE,
+            num_blocks - BLOCKS_IN_TXN_LOG as u64,
+            BLOCKS_IN_TXN_LOG as usize,
+        )
+        .await?;
+
+        let sb_block = block_cache.get_block(0).await?;
+        let superblock_ref = sb_block.block();
+        let superblock = superblock_ref.get_at_offset::<Superblock>(0);
+        let last_committed_txn = superblock.last_committed_txn();
+
         let mut self_ = Self {
-            block_cache: BlockCache::new(dev, CACHE_SIZE).await?,
+            block_cache,
+            last_committed_txn,
             error: Ok(()),
         };
 

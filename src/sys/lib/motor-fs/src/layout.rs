@@ -196,6 +196,10 @@ impl Superblock {
         self.free_blocks
     }
 
+    pub(crate) fn last_committed_txn(&self) -> u128 {
+        self.last_committed_txn
+    }
+
     #[inline]
     pub(crate) fn check_accounting(&self) -> Result<()> {
         if !self.freelist_head.is_null() {

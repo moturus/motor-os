@@ -259,10 +259,20 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
 
     #[allow(unused)]
     cache_misses: u64,
+
+    // Pinned blocks are always cached. Used for txn log.
+    pinned_blocks_start: u64,
+    pinned_blocks_num: usize,
+    pinned_blocks: Vec<CachedBlock>,
 }
 
 impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
-    pub async fn new(block_dev: Box<BD>, max_len: usize) -> Result<Self> {
+    pub async fn new(
+        block_dev: Box<BD>,
+        max_len: usize,
+        pinned_blocks_start: u64,
+        pinned_blocks_num: usize,
+    ) -> Result<Self> {
         let block_dev: Rc<BD> = Rc::from(block_dev);
 
         #[cfg(feature = "moto-rt")]
@@ -326,24 +336,51 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             panic!()
         }
         */
+
+        let free_blocks = Rc::new(RefCell::new(Vec::new()));
+
+        let mut pinned_blocks = Vec::with_capacity(pinned_blocks_num);
+        for idx in 0..pinned_blocks_num {
+            let block_no = pinned_blocks_start + idx as u64;
+            let mut block = CachedBlock::new_empty(block_no, free_blocks.clone());
+            block_dev
+                .read_block(block_no, &mut block.block_mut())
+                .await?;
+            block.inner.borrow_mut().state = BlockState::Clean;
+            pinned_blocks.push(block);
+        }
+
         Ok(Self {
             block_dev,
             lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
-            free_blocks: Default::default(),
+            free_blocks,
             #[cfg(feature = "moto-rt")]
             completion_sink: sender,
             cache_misses: 0,
+            pinned_blocks_start,
+            pinned_blocks_num,
+            pinned_blocks,
         })
     }
 
+    fn is_pinned(&self, block_no: u64) -> bool {
+        block_no >= self.pinned_blocks_start
+            && (block_no < (self.pinned_blocks_start + self.pinned_blocks_num as u64))
+    }
+
     fn get_free_empty_block(&mut self, block_no: u64) -> CachedBlock {
+        assert!(!self.is_pinned(block_no));
+
         let block = CachedBlock::new_empty(block_no, self.free_blocks.clone());
         block.inner.borrow_mut().state = BlockState::Dirty;
         block
     }
 
     pub fn discard_dirty(&mut self, block: CachedBlock) {
-        if let Some(existing) = self.lru_cache.pop(&block.block_no()) {
+        let block_no = block.block_no();
+        assert!(!self.is_pinned(block_no));
+
+        if let Some(existing) = self.lru_cache.pop(&block_no) {
             assert_eq!(
                 existing.inner.as_ptr() as usize,
                 block.inner.as_ptr() as usize
@@ -364,6 +401,9 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
     /// Get a reference to a cached block.
     pub async fn get_block(&mut self, block_no: u64) -> Result<CachedBlock> {
+        if self.is_pinned(block_no) {
+            return Ok(self.pinned_blocks[(block_no - self.pinned_blocks_start) as usize].clone());
+        }
         if let Some(block) = self.lru_cache.get(&block_no) {
             return Ok(block.clone());
         }
@@ -388,6 +428,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     /// Get an empty block. Use with caution: any previously stored
     /// data in the block on the block device will be lost.
     pub fn get_empty_block(&mut self, block_no: u64) -> CachedBlock {
+        assert!(!self.is_pinned(block_no));
+
         if let Some(block) = self.lru_cache.get(&block_no) {
             let mut block_ref = block.inner.borrow_mut();
             if block_ref.state == BlockState::Flushing {
@@ -415,6 +457,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         let block_no = block_ref.block_no;
         drop(block_ref);
+        assert!(!self.is_pinned(block_no));
 
         let flusher = FlushingBlock::new(block.inner.clone());
 

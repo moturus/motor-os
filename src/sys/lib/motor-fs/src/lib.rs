@@ -16,9 +16,11 @@ mod city_hash;
 mod fs;
 mod layout;
 mod txn;
+mod txn_log;
 
 pub(crate) use layout::*;
 pub(crate) use txn::*;
+pub(crate) use txn_log::*;
 
 pub use fs::*;
 pub use layout::ROOT_DIR_ID;

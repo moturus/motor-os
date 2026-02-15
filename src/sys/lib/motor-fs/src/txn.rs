@@ -60,16 +60,16 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         self.fs.block_cache()
     }
 
-    async fn commit(&mut self) -> Result<()> {
+    async fn commit(mut self) -> Result<()> {
         log::trace!("{}:{} do a proper txn", file!(), line!());
 
         let Txn {
-            fs,
-            txn_cache,
+            ref mut fs,
+            ref mut txn_cache,
             read_only,
         } = self;
 
-        assert!(!*read_only);
+        assert!(!read_only);
 
         // For now, just save all dirty blocks.
         for (block_no, block) in txn_cache.drain() {
