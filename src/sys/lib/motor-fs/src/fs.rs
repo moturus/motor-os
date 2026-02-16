@@ -24,7 +24,7 @@ pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
     block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
 
-    last_committed_txn: u128,
+    txn_logger: crate::txn_log::TxnLogger,
 }
 
 impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
@@ -33,6 +33,10 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             Ok(_) => Ok(()),
             Err(err) => Err(err.kind().into()),
         }
+    }
+
+    pub(crate) fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache<BD> {
+        &mut self.block_cache
     }
 
     pub async fn format(dev: Box<BD>) -> Result<Self> {
@@ -45,21 +49,21 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         dev.write_block(0, &superblock).await?;
         dev.write_block(1, &root_dir).await?;
 
+        let mut block_cache = BlockCache::new(
+            dev,
+            CACHE_SIZE,
+            num_blocks - BLOCKS_IN_TXN_LOG as u64,
+            BLOCKS_IN_TXN_LOG as usize,
+        )
+        .await?;
+
+        let txn_logger = crate::txn_log::TxnLogger::new(&mut block_cache);
+
         Ok(Self {
-            block_cache: BlockCache::new(
-                dev,
-                CACHE_SIZE,
-                num_blocks - BLOCKS_IN_TXN_LOG as u64,
-                BLOCKS_IN_TXN_LOG as usize,
-            )
-            .await?,
-            last_committed_txn: 0,
+            block_cache,
+            txn_logger,
             error: Ok(()),
         })
-    }
-
-    pub fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache<BD> {
-        &mut self.block_cache
     }
 
     pub async fn open(dev: Box<BD>) -> Result<Self> {
@@ -84,11 +88,11 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         let sb_block = block_cache.get_block(0).await?;
         let superblock_ref = sb_block.block();
         let superblock = superblock_ref.get_at_offset::<Superblock>(0);
-        let last_committed_txn = superblock.last_committed_txn();
+        let txn_logger = crate::txn_log::TxnLogger::open(&mut block_cache).await?;
 
         let mut self_ = Self {
             block_cache,
-            last_committed_txn,
+            txn_logger,
             error: Ok(()),
         };
 

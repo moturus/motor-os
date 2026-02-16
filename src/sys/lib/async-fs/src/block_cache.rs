@@ -399,6 +399,14 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         self.block_dev.num_blocks()
     }
 
+    pub fn pinned_blocks_start(&self) -> u64 {
+        self.pinned_blocks_start
+    }
+
+    pub fn pinned_blocks_num(&self) -> usize {
+        self.pinned_blocks_num
+    }
+
     /// Get a reference to a cached block.
     pub async fn get_block(&mut self, block_no: u64) -> Result<CachedBlock> {
         if self.is_pinned(block_no) {
@@ -449,7 +457,9 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         block
     }
 
-    pub async fn write_block_if_dirty(&mut self, block: CachedBlock) -> Result<()> {
+    /// Write CachedBlock to block_no. Note that block_no may not be equal to block.block_no();
+    pub async fn write_block(&mut self, block_no: u64, block: CachedBlock) -> Result<()> {
+        /*
         let block_ref = block.inner.borrow();
         if block_ref.state != BlockState::Dirty {
             return Ok(());
@@ -458,6 +468,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         let block_no = block_ref.block_no;
         drop(block_ref);
         assert!(!self.is_pinned(block_no));
+        */
 
         let flusher = FlushingBlock::new(block.inner.clone());
 
