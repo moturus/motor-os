@@ -10,12 +10,6 @@
 use crate::Result;
 use crate::{AsyncBlockDevice, Block};
 
-#[cfg(not(feature = "std"))]
-use alloc::collections::VecDeque;
-
-#[cfg(feature = "std")]
-use std::collections::VecDeque;
-
 #[cfg(feature = "std")]
 use std::rc::Rc;
 
@@ -32,20 +26,27 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 const MAX_FREE_BLOCKS: usize = 128;
+
+#[cfg(feature = "moto-rt")]
 const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockState {
     Clean,
     Dirty,
-    Flushing,
 }
 
 // Panics if dropped when dirty.
 struct InnerCachedBlock {
     block_no: u64,
     state: BlockState,
+
+    // When the block is "mutable", Rc::strong_count(&block) == 1.
     block: Rc<Block>,
+
+    // A "clean" copy of the mutable block in case we need to
+    // roll back the transaction (see "discard_dirty_block").
+    prev_clean_block: Option<Rc<Block>>,
 
     free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
 }
@@ -66,6 +67,7 @@ impl Drop for InnerCachedBlock {
             self.block_no,
             self.state
         );
+        assert!(self.prev_clean_block.is_none());
 
         if Rc::strong_count(&self.block) == 1 {
             let mut free_blocks_ref = self.free_blocks.borrow_mut();
@@ -92,8 +94,8 @@ impl FlushingBlock {
     fn new(inner: Rc<RefCell<InnerCachedBlock>>) -> Self {
         let mut inner_ref = inner.borrow_mut();
 
-        assert_eq!(inner_ref.state, BlockState::Dirty);
-        inner_ref.state = BlockState::Flushing;
+        inner_ref.state = BlockState::Clean;
+        inner_ref.prev_clean_block = None;
         let flushing = inner_ref.block.clone();
         drop(inner_ref);
         Self { inner, flushing }
@@ -106,13 +108,7 @@ impl FlushingBlock {
 
 impl Drop for FlushingBlock {
     fn drop(&mut self) {
-        let mut inner_ref = self.inner.borrow_mut();
-        if inner_ref.state == BlockState::Flushing
-            && Rc::as_ptr(&self.flushing) as usize == Rc::as_ptr(&inner_ref.block) as usize
-        {
-            inner_ref.state = BlockState::Clean;
-            return;
-        }
+        let inner_ref = self.inner.borrow_mut();
 
         if Rc::strong_count(&self.flushing) == 1 {
             let mut free_blocks_ref = inner_ref.free_blocks.borrow_mut();
@@ -151,6 +147,7 @@ impl CachedBlock {
             inner: Rc::new(RefCell::new(InnerCachedBlock {
                 state: BlockState::Clean,
                 block,
+                prev_clean_block: None,
                 free_blocks,
                 block_no,
             })),
@@ -175,14 +172,15 @@ impl CachedBlock {
         let mut mut_ref = self.inner.borrow_mut();
 
         // This is important: do copy-on-write.
-        if mut_ref.state == BlockState::Flushing {
-            let mut copy = if let Some(mut block) = mut_ref.free_blocks.borrow_mut().pop() {
+        if mut_ref.state == BlockState::Clean && Rc::strong_count(&mut_ref.block) > 1 {
+            let copy = if let Some(mut block) = mut_ref.free_blocks.borrow_mut().pop() {
                 *Rc::get_mut(&mut block).unwrap() = *mut_ref.block; // .as_ref();
                 block
             } else {
                 Rc::new(*mut_ref.block.as_ref())
             };
-            core::mem::swap(&mut copy, &mut mut_ref.block);
+            mut_ref.prev_clean_block = Some(mut_ref.block.clone());
+            mut_ref.block = copy;
         }
 
         mut_ref.state = BlockState::Dirty;
@@ -229,6 +227,12 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         #[cfg(feature = "moto-rt")]
         let sender = {
+            #[cfg(not(feature = "std"))]
+            use alloc::collections::VecDeque;
+
+            #[cfg(feature = "std")]
+            use std::collections::VecDeque;
+
             let (sender, mut receiver) = moto_async::channel(MAX_COMPLETIONS_IN_FLIGHT);
 
             let bd = block_dev.clone();
@@ -294,10 +298,11 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         for idx in 0..pinned_blocks_num {
             let block_no = pinned_blocks_start + idx as u64;
             let mut block = CachedBlock::new_empty(block_no, free_blocks.clone());
+            block.inner.borrow_mut().state = BlockState::Dirty; // To avoid copy-on-write.
             block_dev
                 .read_block(block_no, &mut block.block_mut())
                 .await?;
-            block.inner.borrow_mut().state = BlockState::Clean;
+            block.inner.borrow_mut().state = BlockState::Clean; // We just read it. It's clean.
             pinned_blocks.push(block);
         }
 
@@ -327,22 +332,23 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         block
     }
 
-    pub fn discard_dirty(&mut self, block: CachedBlock) {
+    pub fn discard_dirty_block(&mut self, block: CachedBlock) {
         let block_no = block.block_no();
         assert!(!self.is_pinned(block_no));
 
-        if let Some(existing) = self.lru_cache.pop(&block_no) {
-            assert_eq!(
-                existing.inner.as_ptr() as usize,
-                block.inner.as_ptr() as usize
-            );
-        }
+        let mut block_ref = block.inner.borrow_mut();
+        assert_eq!(block_ref.state, BlockState::Dirty);
+        block_ref.state = BlockState::Clean;
 
-        {
-            let mut block_ref = block.inner.borrow_mut();
-            // Dirty can't be Flushing.
-            assert_ne!(block_ref.state, BlockState::Flushing);
-            block_ref.state = BlockState::Clean;
+        if let Some(prev_clean) = block_ref.prev_clean_block.take() {
+            block_ref.block = prev_clean;
+        } else {
+            // No clean copy, so we must remove the block from the cache.
+            let existing = self.lru_cache.pop(&block_no).unwrap();
+            assert_eq!(
+                Rc::as_ptr(&existing.inner) as usize,
+                Rc::as_ptr(&block.inner) as usize
+            );
         }
     }
 
@@ -376,10 +382,14 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         {
             let mut block_ref = block.inner.borrow_mut();
             block_ref.state = BlockState::Clean;
+            assert!(block_ref.prev_clean_block.is_none());
         }
 
         if let Some((_prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
-            debug_assert!(!prev_block.is_dirty());
+            let prev_ref = prev_block.inner.borrow();
+            assert_eq!(prev_ref.state, BlockState::Clean);
+            assert!(prev_ref.prev_clean_block.is_none());
+            assert_eq!(1, Rc::strong_count(&prev_ref.block));
         };
         Ok(block)
     }
@@ -391,10 +401,18 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         if let Some(block) = self.lru_cache.get(&block_no) {
             let mut block_ref = block.inner.borrow_mut();
-            if block_ref.state == BlockState::Flushing {
-                todo!("detach flushing");
-            }
+            // This is important: do copy-on-write.
             assert_eq!(block_ref.state, BlockState::Clean);
+            assert!(block_ref.prev_clean_block.is_none());
+            let empty_block = if let Some(mut block) = block_ref.free_blocks.borrow_mut().pop() {
+                Rc::get_mut(&mut block).unwrap().clear();
+                block
+            } else {
+                Rc::new(Block::new_zeroed())
+            };
+            block_ref.prev_clean_block = Some(block_ref.block.clone());
+            block_ref.block = empty_block;
+
             Rc::get_mut(&mut block_ref.block).unwrap().clear();
             block_ref.state = BlockState::Dirty;
             drop(block_ref);
@@ -403,7 +421,10 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         let block = self.get_free_empty_block(block_no);
         if let Some((_prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
-            debug_assert!(!prev_block.is_dirty());
+            let prev_ref = prev_block.inner.borrow();
+            assert_eq!(prev_ref.state, BlockState::Clean);
+            assert!(prev_ref.prev_clean_block.is_none());
+            assert_eq!(1, Rc::strong_count(&prev_ref.block));
         };
         block
     }
