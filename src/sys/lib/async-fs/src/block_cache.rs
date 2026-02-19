@@ -23,7 +23,6 @@ use std::rc::Rc;
 use alloc::rc::Rc;
 
 use core::cell::RefCell;
-use core::mem::ManuallyDrop;
 use core::num::NonZero;
 use lru::LruCache;
 
@@ -46,14 +45,14 @@ enum BlockState {
 struct InnerCachedBlock {
     block_no: u64,
     state: BlockState,
-    block: ManuallyDrop<Box<Block>>,
+    block: Rc<Block>,
 
-    free_blocks: Rc<RefCell<Vec<Box<Block>>>>,
+    free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
     // When a dirty block goes into the block device, it's state becomes
     // "Flushing". If then a transaction wants to modify the block,
     // the flushing block goes into Self::flushing, and a copy is
     // stored in Self::block. The state then changes to Dirty.
-    flushing: VecDeque<Box<Block>>,
+    flushing: VecDeque<Rc<Block>>,
     // discard_hint: bool,  // A hint that the block should be discarded after flushing.
 }
 
@@ -78,15 +77,11 @@ impl Drop for InnerCachedBlock {
         );
         assert!(self.flushing.is_empty());
 
-        // Safety: safe because we are in drop(), so nobody will ever
-        // access self.block.
-        let block = unsafe { ManuallyDrop::take(&mut self.block) };
-
-        let mut free_blocks_ref = self.free_blocks.borrow_mut();
-        if free_blocks_ref.len() < MAX_FREE_BLOCKS {
-            free_blocks_ref.push(block);
-        } else {
-            drop(block);
+        if Rc::strong_count(&self.block) == 1 {
+            let mut free_blocks_ref = self.free_blocks.borrow_mut();
+            if free_blocks_ref.len() < MAX_FREE_BLOCKS {
+                free_blocks_ref.push(self.block.clone());
+            }
         }
     }
 }
@@ -94,12 +89,12 @@ impl Drop for InnerCachedBlock {
 /// When a block is flushing to block dev, it may be read but not written to.
 pub struct FlushingBlock {
     inner: Rc<RefCell<InnerCachedBlock>>,
-    flushing_ptr: *const Block,
+    flushing: Rc<Block>,
 }
 
 impl AsRef<[u8]> for FlushingBlock {
     fn as_ref(&self) -> &[u8] {
-        self.block().as_ref()
+        self.flushing.as_bytes()
     }
 }
 
@@ -109,35 +104,21 @@ impl FlushingBlock {
 
         assert_eq!(inner_ref.state, BlockState::Dirty);
         inner_ref.state = BlockState::Flushing;
-        let flushing_ptr = Box::as_ptr(&inner_ref.block);
-        log::trace!(
-            "new flushing block 0x{:x} at ptr 0x{:x}",
-            inner_ref.block_no,
-            flushing_ptr as usize
-        );
+        let flushing = inner_ref.block.clone();
         drop(inner_ref);
-        Self {
-            inner,
-            flushing_ptr,
-        }
+        Self { inner, flushing }
     }
 
     pub fn block(&self) -> &Block {
-        // Safety: safe by construction.
-        unsafe { self.flushing_ptr.as_ref().unwrap() }
+        &self.flushing
     }
 }
 
 impl Drop for FlushingBlock {
     fn drop(&mut self) {
         let mut inner_ref = self.inner.borrow_mut();
-        log::trace!(
-            "FlushingBlock drop 0x{:x} at ptr 0x{:x}",
-            inner_ref.block_no,
-            self.flushing_ptr as usize
-        );
         if inner_ref.state == BlockState::Flushing
-            && self.flushing_ptr == Box::as_ptr(&inner_ref.block)
+            && Rc::as_ptr(&self.flushing) as usize == Rc::as_ptr(&inner_ref.block) as usize
         {
             inner_ref.state = BlockState::Clean;
             return;
@@ -150,7 +131,7 @@ impl Drop for FlushingBlock {
 
         #[allow(clippy::needless_range_loop)]
         for pos in 0..queue.len() {
-            if self.flushing_ptr == Box::as_ptr(&queue[pos]) {
+            if Rc::as_ptr(&self.flushing) == Rc::as_ptr(&queue[pos]) {
                 idx = pos;
                 break;
             }
@@ -179,19 +160,19 @@ pub struct CachedBlock {
 const _: () = assert!(size_of::<CachedBlock>() <= 32);
 
 impl CachedBlock {
-    fn new_empty(block_no: u64, free_blocks: Rc<RefCell<Vec<Box<Block>>>>) -> Self {
+    fn new_empty(block_no: u64, free_blocks: Rc<RefCell<Vec<Rc<Block>>>>) -> Self {
         let block = free_blocks
             .borrow_mut()
             .pop()
             .map(|mut block| {
-                block.clear();
+                Rc::get_mut(&mut block).unwrap().clear();
                 block
             })
-            .unwrap_or_else(|| Box::new(Block::new_zeroed()));
+            .unwrap_or_else(|| Rc::new(Block::new_zeroed()));
         Self {
             inner: Rc::new(RefCell::new(InnerCachedBlock {
                 state: BlockState::Clean,
-                block: ManuallyDrop::new(block),
+                block,
                 free_blocks,
                 block_no,
                 flushing: VecDeque::new(),
@@ -207,7 +188,7 @@ impl CachedBlock {
     /// modify dirty/clean state.
     #[inline]
     pub fn block(&self) -> core::cell::Ref<'_, Block> {
-        core::cell::Ref::map(self.inner.borrow(), |inner| &**inner.block)
+        core::cell::Ref::map(self.inner.borrow(), |inner| &*inner.block)
     }
 
     /// Get a read/write reference to the underlying data. Marks
@@ -219,22 +200,17 @@ impl CachedBlock {
         // This is important: do copy-on-write.
         if mut_ref.state == BlockState::Flushing {
             let mut copy = if let Some(mut block) = mut_ref.free_blocks.borrow_mut().pop() {
-                *block.as_mut() = *mut_ref.block.as_ref();
+                *Rc::get_mut(&mut block).unwrap() = *mut_ref.block; // .as_ref();
                 block
             } else {
-                Box::new(*mut_ref.block.as_ref())
+                Rc::new(*mut_ref.block.as_ref())
             };
             core::mem::swap(&mut copy, &mut mut_ref.block);
-            log::trace!(
-                "Pushed flushing block 0x{:x} at ptr 0x{:x}",
-                mut_ref.block_no,
-                Box::as_ptr(&copy) as usize
-            );
             mut_ref.flushing.push_back(copy);
         }
 
         mut_ref.state = BlockState::Dirty;
-        core::cell::RefMut::map(mut_ref, |inner| &mut **inner.block)
+        core::cell::RefMut::map(mut_ref, |inner| Rc::get_mut(&mut inner.block).unwrap())
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -252,7 +228,7 @@ enum BackgroundMessage {
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Rc<BD>,
     lru_cache: LruCache<u64, CachedBlock>,
-    free_blocks: Rc<RefCell<Vec<Box<Block>>>>,
+    free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
 
     #[cfg(feature = "moto-rt")]
     completion_sink: moto_async::channel::Sender<BackgroundMessage>,
@@ -444,7 +420,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                 todo!("detach flushing");
             }
             assert_eq!(block_ref.state, BlockState::Clean);
-            block_ref.block.clear();
+            Rc::get_mut(&mut block_ref.block).unwrap().clear();
             block_ref.state = BlockState::Dirty;
             drop(block_ref);
             return block.clone();
