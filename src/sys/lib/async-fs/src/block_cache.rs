@@ -46,7 +46,7 @@ struct InnerCachedBlock {
     // roll back the transaction (see "discard_dirty_block").
     prev_clean_block: Option<Rc<Block>>,
 
-    free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
+    supporting_caches: Rc<RefCell<SupportingCaches>>,
 }
 
 impl Drop for InnerCachedBlock {
@@ -68,8 +68,10 @@ impl Drop for InnerCachedBlock {
         assert!(self.prev_clean_block.is_none());
 
         if Rc::strong_count(&self.block) == 1 {
-            let mut free_blocks_ref = self.free_blocks.borrow_mut();
-            free_blocks_ref.push(self.block.clone());
+            self.supporting_caches
+                .borrow_mut()
+                .free_blocks
+                .push(self.block.clone());
         }
     }
 }
@@ -107,8 +109,11 @@ impl Drop for FlushingBlock {
         let inner_ref = self.inner.borrow_mut();
 
         if Rc::strong_count(&self.flushing) == 1 {
-            let mut free_blocks_ref = inner_ref.free_blocks.borrow_mut();
-            free_blocks_ref.push(self.flushing.clone());
+            inner_ref
+                .supporting_caches
+                .borrow_mut()
+                .free_blocks
+                .push(self.flushing.clone());
         }
     }
 }
@@ -128,9 +133,10 @@ pub struct CachedBlock {
 const _: () = assert!(size_of::<CachedBlock>() <= 32);
 
 impl CachedBlock {
-    fn new_empty(block_no: u64, free_blocks: Rc<RefCell<Vec<Rc<Block>>>>) -> Self {
-        let block = free_blocks
+    fn new_empty(block_no: u64, supporting_caches: Rc<RefCell<SupportingCaches>>) -> Self {
+        let block = supporting_caches
             .borrow_mut()
+            .free_blocks
             .pop()
             .map(|mut block| {
                 Rc::get_mut(&mut block).unwrap().clear();
@@ -142,7 +148,7 @@ impl CachedBlock {
                 state: BlockState::Clean,
                 block,
                 prev_clean_block: None,
-                free_blocks,
+                supporting_caches,
                 block_no,
             })),
         }
@@ -167,12 +173,13 @@ impl CachedBlock {
 
         // This is important: do copy-on-write.
         if mut_ref.state == BlockState::Clean && Rc::strong_count(&mut_ref.block) > 1 {
-            let copy = if let Some(mut block) = mut_ref.free_blocks.borrow_mut().pop() {
-                *Rc::get_mut(&mut block).unwrap() = *mut_ref.block; // .as_ref();
-                block
-            } else {
-                Rc::new(*mut_ref.block.as_ref())
-            };
+            let copy =
+                if let Some(mut block) = mut_ref.supporting_caches.borrow_mut().free_blocks.pop() {
+                    *Rc::get_mut(&mut block).unwrap() = *mut_ref.block; // .as_ref();
+                    block
+                } else {
+                    Rc::new(*mut_ref.block.as_ref())
+                };
             mut_ref.prev_clean_block = Some(mut_ref.block.clone());
             mut_ref.block = copy;
         }
@@ -192,6 +199,10 @@ enum BackgroundMessage {
     Flush,
 }
 
+struct SupportingCaches {
+    free_blocks: Vec<Rc<Block>>,
+}
+
 /// LRU-based block cache.
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Rc<BD>,
@@ -199,7 +210,7 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
 
     // The main cache.
     lru_cache: LruCache<u64, CachedBlock>,
-    free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
+    supporting_caches: Rc<RefCell<SupportingCaches>>,
 
     #[cfg(feature = "moto-rt")]
     completion_sink: moto_async::channel::Sender<BackgroundMessage>,
@@ -255,12 +266,14 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             sender
         };
 
-        let free_blocks = Rc::new(RefCell::new(Vec::new()));
+        let supporting_caches = Rc::new(RefCell::new(SupportingCaches {
+            free_blocks: Vec::new(),
+        }));
 
         let mut pinned_blocks = Vec::with_capacity(pinned_blocks_num);
         for idx in 0..pinned_blocks_num {
             let block_no = pinned_blocks_start + idx as u64;
-            let mut block = CachedBlock::new_empty(block_no, free_blocks.clone());
+            let mut block = CachedBlock::new_empty(block_no, supporting_caches.clone());
             block.inner.borrow_mut().state = BlockState::Dirty; // To avoid copy-on-write.
             block_dev
                 .read_block(
@@ -276,7 +289,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             block_dev,
             cache_size,
             lru_cache: LruCache::new(NonZero::new(cache_size).unwrap()),
-            free_blocks,
+            supporting_caches,
             #[cfg(feature = "moto-rt")]
             completion_sink: sender,
             cache_misses: 0,
@@ -294,7 +307,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     fn get_free_empty_block(&mut self, block_no: u64) -> CachedBlock {
         assert!(!self.is_pinned(block_no));
 
-        let block = CachedBlock::new_empty(block_no, self.free_blocks.clone());
+        let block = CachedBlock::new_empty(block_no, self.supporting_caches.clone());
         block.inner.borrow_mut().state = BlockState::Dirty;
         block
     }
@@ -371,7 +384,9 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             // This is important: do copy-on-write.
             assert_eq!(block_ref.state, BlockState::Clean);
             assert!(block_ref.prev_clean_block.is_none());
-            let empty_block = if let Some(mut block) = block_ref.free_blocks.borrow_mut().pop() {
+            let empty_block = if let Some(mut block) =
+                block_ref.supporting_caches.borrow_mut().free_blocks.pop()
+            {
                 Rc::get_mut(&mut block).unwrap().clear();
                 block
             } else {
@@ -422,7 +437,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         // We do not restrict the size of free blocks cache because it
         // cannot grow substantially larger than the main cache size.
         // TODO: convert to debug_assert.
-        assert!(self.free_blocks.borrow().len() < 3 * self.cache_size);
+        assert!(self.supporting_caches.borrow().free_blocks.len() < self.cache_size);
 
         #[cfg(feature = "moto-rt")]
         self.completion_sink
