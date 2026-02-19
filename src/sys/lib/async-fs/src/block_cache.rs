@@ -48,12 +48,6 @@ struct InnerCachedBlock {
     block: Rc<Block>,
 
     free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
-    // When a dirty block goes into the block device, it's state becomes
-    // "Flushing". If then a transaction wants to modify the block,
-    // the flushing block goes into Self::flushing, and a copy is
-    // stored in Self::block. The state then changes to Dirty.
-    flushing: VecDeque<Rc<Block>>,
-    // discard_hint: bool,  // A hint that the block should be discarded after flushing.
 }
 
 impl Drop for InnerCachedBlock {
@@ -64,9 +58,6 @@ impl Drop for InnerCachedBlock {
             if self.state != BlockState::Clean {
                 moto_rt::error::log_backtrace(-1);
             }
-            if !self.flushing.is_empty() {
-                moto_rt::error::log_backtrace(-1);
-            }
         }
 
         assert!(
@@ -75,7 +66,6 @@ impl Drop for InnerCachedBlock {
             self.block_no,
             self.state
         );
-        assert!(self.flushing.is_empty());
 
         if Rc::strong_count(&self.block) == 1 {
             let mut free_blocks_ref = self.free_blocks.borrow_mut();
@@ -124,23 +114,11 @@ impl Drop for FlushingBlock {
             return;
         }
 
-        // We cannot assume that completions complete serially.
-        let mut idx = usize::MAX;
-        let queue = &mut inner_ref.flushing;
-        assert!(queue.len() < MAX_COMPLETIONS_IN_FLIGHT);
-
-        #[allow(clippy::needless_range_loop)]
-        for pos in 0..queue.len() {
-            if Rc::as_ptr(&self.flushing) == Rc::as_ptr(&queue[pos]) {
-                idx = pos;
-                break;
+        if Rc::strong_count(&self.flushing) == 1 {
+            let mut free_blocks_ref = inner_ref.free_blocks.borrow_mut();
+            if free_blocks_ref.len() < MAX_FREE_BLOCKS {
+                free_blocks_ref.push(self.flushing.clone());
             }
-        }
-        assert!(idx < queue.len(), "Flushing block not found??");
-        let block = queue.remove(idx).unwrap();
-        let mut free_blocks_ref = inner_ref.free_blocks.borrow_mut();
-        if free_blocks_ref.len() < MAX_FREE_BLOCKS {
-            free_blocks_ref.push(block);
         }
     }
 }
@@ -175,7 +153,6 @@ impl CachedBlock {
                 block,
                 free_blocks,
                 block_no,
-                flushing: VecDeque::new(),
             })),
         }
     }
@@ -206,7 +183,6 @@ impl CachedBlock {
                 Rc::new(*mut_ref.block.as_ref())
             };
             core::mem::swap(&mut copy, &mut mut_ref.block);
-            mut_ref.flushing.push_back(copy);
         }
 
         mut_ref.state = BlockState::Dirty;
@@ -266,7 +242,6 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                                 .await
                                 .unwrap_or_else(|_| panic!("Error writing block to the device"));
                             completions.push_back(c);
-                            // c.await;
                         }
                         BackgroundMessage::Flush => {
                             while let Some(c) = completions.pop_front() {
@@ -435,17 +410,6 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
     /// Write CachedBlock to block_no. Note that block_no may not be equal to block.block_no();
     pub async fn write_block(&mut self, block_no: u64, block: CachedBlock) -> Result<()> {
-        /*
-        let block_ref = block.inner.borrow();
-        if block_ref.state != BlockState::Dirty {
-            return Ok(());
-        }
-
-        let block_no = block_ref.block_no;
-        drop(block_ref);
-        assert!(!self.is_pinned(block_no));
-        */
-
         let flusher = FlushingBlock::new(block.inner.clone());
 
         #[cfg(feature = "moto-rt")]
