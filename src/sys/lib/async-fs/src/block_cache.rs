@@ -25,8 +25,6 @@ use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-const MAX_FREE_BLOCKS: usize = 128;
-
 #[cfg(feature = "moto-rt")]
 const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
 
@@ -71,9 +69,7 @@ impl Drop for InnerCachedBlock {
 
         if Rc::strong_count(&self.block) == 1 {
             let mut free_blocks_ref = self.free_blocks.borrow_mut();
-            if free_blocks_ref.len() < MAX_FREE_BLOCKS {
-                free_blocks_ref.push(self.block.clone());
-            }
+            free_blocks_ref.push(self.block.clone());
         }
     }
 }
@@ -112,9 +108,7 @@ impl Drop for FlushingBlock {
 
         if Rc::strong_count(&self.flushing) == 1 {
             let mut free_blocks_ref = inner_ref.free_blocks.borrow_mut();
-            if free_blocks_ref.len() < MAX_FREE_BLOCKS {
-                free_blocks_ref.push(self.flushing.clone());
-            }
+            free_blocks_ref.push(self.flushing.clone());
         }
     }
 }
@@ -201,6 +195,9 @@ enum BackgroundMessage {
 /// LRU-based block cache.
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Rc<BD>,
+    cache_size: usize,
+
+    // The main cache.
     lru_cache: LruCache<u64, CachedBlock>,
     free_blocks: Rc<RefCell<Vec<Rc<Block>>>>,
 
@@ -210,7 +207,7 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
     #[allow(unused)]
     cache_misses: u64,
 
-    // Pinned blocks are always cached. Used for txn log.
+    // Pinned blocks are always cached. Used by txn log.
     pinned_blocks_start: u64,
     pinned_blocks_num: usize,
     pinned_blocks: Vec<CachedBlock>,
@@ -219,7 +216,7 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
 impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     pub async fn new(
         block_dev: Box<BD>,
-        max_len: usize,
+        cache_size: usize,
         pinned_blocks_start: u64,
         pinned_blocks_num: usize,
     ) -> Result<Self> {
@@ -257,40 +254,6 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             });
             sender
         };
-        /*
-        #[cfg(feature = "moto-rt")]
-        {
-            let mut self_ = Self {
-                block_dev,
-                lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
-                free_blocks: Default::default(),
-                completion_sink: sender,
-                cache_misses: 0,
-            };
-            const MEGS: u64 = 32;
-            const NUM_BLOCKS: u64 = 1024 * 1024 * MEGS / 4096;
-
-            let started = moto_rt::time::Instant::now();
-            let mut block_no = 0;
-            while block_no < NUM_BLOCKS {
-                let block = self_.get_empty_block(block_no);
-                self_.write_block_if_dirty(block).await.unwrap();
-                block_no += 1;
-                if block_no % 64 == 0 {
-                    let _ = self_.completion_sink.send(BackgroundMessage::Flush).await;
-                }
-            }
-            self_.flush().await.unwrap();
-            let elapsed = started.elapsed();
-            let write_mbps = (MEGS as f64) / elapsed.as_secs_f64();
-            log::info!(
-                "block_cache: write speed {:.3} MB/sec; cache_misses: {}",
-                write_mbps,
-                self_.cache_misses
-            );
-            panic!()
-        }
-        */
 
         let free_blocks = Rc::new(RefCell::new(Vec::new()));
 
@@ -300,7 +263,10 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             let mut block = CachedBlock::new_empty(block_no, free_blocks.clone());
             block.inner.borrow_mut().state = BlockState::Dirty; // To avoid copy-on-write.
             block_dev
-                .read_block(block_no, &mut block.block_mut())
+                .read_block(
+                    block_no,
+                    &mut block.block_mut(), /* This block_mut() does c-o-w. */
+                )
                 .await?;
             block.inner.borrow_mut().state = BlockState::Clean; // We just read it. It's clean.
             pinned_blocks.push(block);
@@ -308,7 +274,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         Ok(Self {
             block_dev,
-            lru_cache: LruCache::new(NonZero::new(max_len).unwrap()),
+            cache_size,
+            lru_cache: LruCache::new(NonZero::new(cache_size).unwrap()),
             free_blocks,
             #[cfg(feature = "moto-rt")]
             completion_sink: sender,
@@ -452,6 +419,11 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     }
 
     pub async fn start_flushing(&mut self) {
+        // We do not restrict the size of free blocks cache because it
+        // cannot grow substantially larger than the main cache size.
+        // TODO: convert to debug_assert.
+        assert!(self.free_blocks.borrow().len() < 3 * self.cache_size);
+
         #[cfg(feature = "moto-rt")]
         self.completion_sink
             .send(BackgroundMessage::Flush)

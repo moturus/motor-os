@@ -127,7 +127,6 @@ impl TxnLogger {
         drop(superblock_ref);
 
         // Write to the txn log.
-        /*
         for idx in 0..blocks_in_txn {
             block_cache
                 .write_block(
@@ -136,8 +135,7 @@ impl TxnLogger {
                 )
                 .await?;
         }
-        block_cache.start_flushing().await; // REMOVE
-        */
+        // block_cache.start_flushing().await; // REMOVE
 
         // Write to the main data area.
         for idx in 0..blocks_in_txn {
