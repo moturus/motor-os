@@ -77,7 +77,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             [const { None }; MAX_BLOCKS_IN_TXN];
         let mut next_idx = 0;
 
-        // For now, just save all dirty blocks.
+        // Collect dirty blocks.
         for (block_no, block) in txn_cache.drain() {
             debug_assert_eq!(block_no.as_u64(), block.block_no());
             if block.is_dirty() {
@@ -86,7 +86,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             }
         }
 
-        crate::txn_log::log_txn(fs, txn_blocks).await
+        fs.log_txn(txn_blocks).await
     }
 
     pub fn new_readonly(fs: &'a mut MotorFs<BD>) -> Self {

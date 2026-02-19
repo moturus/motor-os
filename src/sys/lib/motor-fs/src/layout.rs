@@ -119,8 +119,7 @@ pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 #[derive(Pod, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct TxnLogData {
-    txn_id: u128,
-    txn_blocks: [BlockNo; MAX_BLOCKS_IN_TXN],
+    pub(crate) txn_blocks: [BlockNo; MAX_BLOCKS_IN_TXN],
 }
 
 unsafe impl bytemuck::Zeroable for TxnLogData {}
@@ -138,8 +137,8 @@ pub(crate) struct Superblock {
     empty_area_start: u64,  // All blocks after this one are unused.
     _reserved: u64,
 
-    last_checkpointed_txn_id: u128,
-    txn_log_data: [TxnLogData; MAX_TXNS_IN_LOG],
+    pub(crate) last_checkpointed_txn_id: u128,
+    pub(crate) txn_log_data: [TxnLogData; MAX_TXNS_IN_LOG],
 }
 const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
 unsafe impl bytemuck::Zeroable for Superblock {}
@@ -195,7 +194,7 @@ impl Superblock {
         self.free_blocks
     }
 
-    pub(crate) fn last_committed_txn_id(&self) -> u128 {
+    pub(crate) fn last_checkpointed_txn_id(&self) -> u128 {
         self.last_checkpointed_txn_id
     }
 

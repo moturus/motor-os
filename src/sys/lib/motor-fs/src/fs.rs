@@ -85,9 +85,6 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         )
         .await?;
 
-        let sb_block = block_cache.get_block(0).await?;
-        let superblock_ref = sb_block.block();
-        let superblock = superblock_ref.get_at_offset::<Superblock>(0);
         let txn_logger = crate::txn_log::TxnLogger::open(&mut block_cache).await?;
 
         let mut self_ = Self {
@@ -153,6 +150,27 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         */
 
         Ok(())
+    }
+
+    pub(crate) async fn log_txn(
+        &mut self,
+        txn_blocks: [Option<(crate::BlockNo, async_fs::block_cache::CachedBlock)>;
+            crate::MAX_BLOCKS_IN_TXN],
+    ) -> Result<()> {
+        let Self {
+            block_cache,
+            txn_logger,
+            ..
+        } = self;
+
+        if let Err(err) = txn_logger.log_txn(block_cache, txn_blocks).await {
+            log::error!("FS error: {err:?}.");
+            let kind = err.kind();
+            self.error = Err(err);
+            Err(kind.into())
+        } else {
+            Ok(())
+        }
     }
 
     #[cfg(test)]
