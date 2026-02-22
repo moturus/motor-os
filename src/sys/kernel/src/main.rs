@@ -6,10 +6,8 @@
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![feature(allocator_api)]
-#![feature(assert_matches)]
 #![feature(btreemap_alloc)]
 #![feature(core_intrinsics)]
-// #![feature(concat_idents)]
 #![feature(get_mut_unchecked)]
 
 // #[macro_use]
