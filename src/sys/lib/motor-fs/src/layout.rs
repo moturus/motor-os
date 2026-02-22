@@ -530,7 +530,10 @@ impl DirEntryBlock {
             1 => Ok(true),
             _ => {
                 // The user could have passed a bad entry_id, so this is not necessarily an error.
-                log::warn!("Corrupt dir entry {:?}: in_use: {in_use}", self.entry_id);
+                log::warn!(
+                    "Corrupt dir entry: block {:x}: in_use: {in_use}",
+                    self.entry_id.block_no.as_u64()
+                );
                 Err(ErrorKind::InvalidData.into())
             }
         }
@@ -584,7 +587,11 @@ impl DirEntryBlock {
         }
 
         if self.entry_id != entry_id {
-            log::error!("Corrupt dir entry: {:?} != {entry_id:?}", self.entry_id);
+            log::error!(
+                "Corrupt dir entry: \n\t{:x} != {:x}",
+                self.entry_id.block_no.as_u64(),
+                entry_id.block_no.as_u64()
+            );
             return Err(ErrorKind::InvalidData.into());
         }
 

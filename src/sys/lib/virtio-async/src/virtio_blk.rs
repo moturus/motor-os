@@ -134,6 +134,7 @@ impl BlockDevice {
         }
 
         if (features_available & VIRTIO_BLK_F_FLUSH) == 0 {
+            log::error!("VirtioBLK: VIRTIO_BLK_F_FLUSH feature is not available");
             return Err(ErrorKind::Other.into());
         }
 
@@ -156,7 +157,7 @@ impl BlockDevice {
     }
 
     #[inline(never)]
-    pub async fn post_read<T: AsMut<[u8]>>(
+    pub async fn post_read<T: AsMut<[u8]> + Unpin>(
         self: Rc<Self>,
         sector: u64,
         mut bytes: T,
@@ -202,16 +203,14 @@ impl BlockDevice {
         ];
 
         drop(virtqueue);
-        let vq_completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head);
+        let vq_completion =
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head, bytes);
 
-        ReadCompletion {
-            vq_completion,
-            bytes,
-        }
+        ReadCompletion { vq_completion }
     }
 
     #[inline(never)]
-    pub async fn post_write<T: AsRef<[u8]>>(
+    pub async fn post_write<T: AsRef<[u8]> + Unpin>(
         self: Rc<Self>,
         sector: u64,
         bytes: T,
@@ -257,12 +256,10 @@ impl BlockDevice {
         ];
 
         drop(virtqueue);
-        let vq_completion = Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head);
+        let vq_completion =
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 2, 1, chain_head, bytes);
 
-        WriteCompletion {
-            vq_completion,
-            bytes,
-        }
+        WriteCompletion { vq_completion }
     }
 
     /// Returns the ID of the submitted request.
@@ -300,7 +297,9 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head).await
+        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ())
+            .await
+            .1
     }
 
     pub fn notify(&self) {

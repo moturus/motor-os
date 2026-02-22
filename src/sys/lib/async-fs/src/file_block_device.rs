@@ -1,6 +1,7 @@
 use crate::AsyncBlockDevice;
 use crate::BLOCK_SIZE;
 use crate::Block;
+use crate::block_cache::FlushingBlock;
 use async_trait::async_trait;
 use camino::Utf8Path;
 use std::io::ErrorKind;
@@ -49,7 +50,7 @@ impl AsyncFileBlockDevice {
 
 #[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
-    type Completion = core::future::Ready<Result<()>>;
+    type Completion = core::future::Ready<(FlushingBlock, Result<()>)>;
 
     fn num_blocks(&self) -> u64 {
         self.num_blocks
@@ -71,10 +72,11 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         file.read_exact(block.as_bytes_mut()).await.map(|_| {})
     }
 
-    async fn write_block(&self, block_no: u64, block: &Block) -> Result<()> {
+    async fn write_block(&self, block_no: u64, block: &[u8]) -> Result<()> {
         use tokio::io::AsyncSeekExt;
         use tokio::io::AsyncWriteExt;
 
+        assert_eq!(block.len(), BLOCK_SIZE);
         if block_no >= self.num_blocks {
             log::debug!("Block number {block_no} out of range.");
             return Err(ErrorKind::InvalidInput.into());
@@ -84,16 +86,16 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
             .await?;
 
-        file.write_all(block.as_bytes()).await
+        file.write_all(block).await
     }
 
     async fn write_block_with_completion(
         &self,
         block_no: u64,
-        block: crate::block_cache::FlushingBlock,
+        block: FlushingBlock,
     ) -> Result<Self::Completion> {
-        self.write_block(block_no, block.block()).await?;
-        Ok(core::future::ready(Ok(())))
+        self.write_block(block_no, block.as_ref()).await?;
+        Ok(core::future::ready((block, Ok(()))))
     }
 
     async fn flush(&self) -> Result<()> {

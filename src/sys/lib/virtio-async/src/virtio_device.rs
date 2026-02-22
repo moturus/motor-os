@@ -60,7 +60,7 @@ pub const VIRTIO_F_RING_INDIRECT_DESC: u64 = 1u64 << 28;
 pub const VIRTIO_F_RING_EVENT_IDX: u64 = 1u64 << 29;
 // pub const VIRTIO_F_EVENT_IDX: u64 = 1u64 << 29; // Same as VIRTIO_F_RING_EVENT_IDX.
 pub const VIRTIO_F_VERSION_1: u64 = 1u64 << 32;
-pub const _VIRTIO_F_IN_ORDER: u64 = 1u64 << 35;
+pub const _VIRTIO_F_IN_ORDER: u64 = 1u64 << 35; // Usually is not available.
 
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
@@ -649,7 +649,7 @@ impl VirtioDevice {
             }
 
             // Step 7.1: allocate virtqueues
-            let virtqueue = Virtqueue::allocate(self, queue_num, queue_size)?;
+            let virtqueue = Virtqueue::allocate_virtqueue(self, queue_num, queue_size)?;
             let mut virtq_borrowed = virtqueue.borrow_mut();
 
             virtq_borrowed.queue_notify_off =

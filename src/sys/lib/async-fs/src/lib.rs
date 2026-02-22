@@ -45,17 +45,6 @@ impl Block {
         *self = Self::new_zeroed()
     }
 
-    pub async fn from_dev<Dev: AsyncBlockDevice>(dev: &mut Dev, block_no: u64) -> Result<Self> {
-        // Safety: we never read from the uninit memory.
-        unsafe {
-            #[allow(invalid_value)]
-            #[allow(clippy::uninit_assumed_init)]
-            let mut block = core::mem::MaybeUninit::<Block>::uninit().assume_init();
-            dev.read_block(block_no, &mut block).await?;
-            Ok(block)
-        }
-    }
-
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }

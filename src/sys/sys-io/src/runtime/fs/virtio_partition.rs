@@ -31,107 +31,6 @@ impl VirtioPartition {
             return Err(ErrorKind::InvalidData.into());
         }
 
-        /*
-        {
-            const MEGS: u64 = 32;
-            const NUM_BLOCKS: u64 = 1024 * 1024 * MEGS / 4096;
-            const BATCH_SIZE: u64 = 64;
-
-            let mut comps = Vec::with_capacity(BATCH_SIZE as usize);
-
-            // Note: if block is allocated only once (outside the loop), write throughput
-            //       on HP OmniBook 7 Aero is up to 1900 MB/sec;
-            //       if the block is allocated on each loop iteration, the speed drops
-            //       to 1200 MB/sec.
-            // let block = async_fs::Block::new_zeroed();
-
-            let started = std::time::Instant::now();
-            let mut block_no = 0;
-            while block_no < NUM_BLOCKS {
-                for idx in 0..BATCH_SIZE {
-                    let first_sector_no =
-                        block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + virtio_block_offset;
-                    block_no += 1;
-
-                    let block = async_fs::Block::new_zeroed();
-                    let completion = virtio_async::BlockDevice::post_write(
-                        virtio_bd.clone(),
-                        first_sector_no,
-                        // block.as_bytes(),
-                        block,
-                    )
-                    .await;
-
-                    comps.push(completion);
-                    if idx == 0 {
-                        virtio_async::BlockDevice::notify(virtio_bd.clone());
-                    }
-                }
-
-                while let Some(comp) = comps.pop() {
-                    comp.await;
-                }
-                assert!(comps.is_empty());
-            }
-            let elapsed = started.elapsed();
-            let write_mbps = (MEGS as f64) / elapsed.as_secs_f64();
-            log::info!("virtio_partition: write speed {:.3} MB/sec", write_mbps);
-            panic!()
-        }
-        */
-        /*
-        {
-            const MEGS: u64 = 32;
-            const NUM_BLOCKS: u64 = 1024 * 1024 * MEGS / 4096;
-            const BATCH_SIZE: u64 = 64;
-
-            // Note: if block is allocated only once (outside the loop), write throughput
-            //       on HP OmniBook 7 Aero is up to 1900 MB/sec;
-            //       if the block is allocated on each loop iteration, the speed drops
-            //       to 1200 MB/sec.
-            // let block = async_fs::Block::new_zeroed();
-
-            let started = std::time::Instant::now();
-            let mut block_no = 0;
-            while block_no < NUM_BLOCKS {
-                // let mut comps = Vec::with_capacity(BATCH_SIZE as usize);
-                // for idx in 0..BATCH_SIZE {
-                let first_sector_no =
-                    block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + virtio_block_offset;
-                block_no += 1;
-
-                let block = async_fs::Block::new_zeroed();
-                let completion = virtio_async::BlockDevice::post_write(
-                    virtio_bd.clone(),
-                    first_sector_no,
-                    // block.as_bytes(),
-                    block,
-                )
-                .await;
-
-                // moto_async::LocalRuntime::spawn(async move {
-                completion.await;
-                // });
-
-                // comps.push(completion);
-                // if idx == 0 {
-                //     virtio_async::BlockDevice::notify(virtio_bd.clone());
-                // }
-                // }
-
-                // moto_async::LocalRuntime::spawn(async move {
-                // while let Some(comp) = comps.pop() {
-                //     comp.await;
-                // }
-                // });
-            }
-            let elapsed = started.elapsed();
-            let write_mbps = (MEGS as f64) / elapsed.as_secs_f64();
-            log::info!("virtio_partition: write speed {:.3} MB/sec", write_mbps);
-            panic!()
-        }
-        */
-
         Ok(Self {
             virtio_bd,
             virtio_block_offset,
@@ -158,23 +57,17 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
             block.as_bytes_mut(),
         )
         .await;
-        completion.await?;
-
-        Ok(())
+        completion.await.1
     }
 
     /// Write a single block.
-    async fn write_block(&self, block_no: u64, block: &Block) -> Result<()> {
+    async fn write_block(&self, block_no: u64, block: &[u8]) -> Result<()> {
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
-        virtio_async::BlockDevice::post_write(
-            self.virtio_bd.clone(),
-            first_sector_no,
-            block.as_bytes(),
-        )
-        .await
-        .await;
+        virtio_async::BlockDevice::post_write(self.virtio_bd.clone(), first_sector_no, block)
+            .await
+            .await;
 
         Ok(())
     }

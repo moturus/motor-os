@@ -46,8 +46,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         }
         let (superblock, root_dir) = Superblock::format(dev.num_blocks());
 
-        dev.write_block(0, &superblock).await?;
-        dev.write_block(1, &root_dir).await?;
+        dev.write_block(0, superblock.as_bytes()).await?;
+        dev.write_block(1, root_dir.as_bytes()).await?;
 
         let mut block_cache = BlockCache::new(
             dev,
@@ -193,6 +193,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     ) -> Result<Option<(EntryId, EntryKind)>> {
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
+        log::debug!("stat: {parent_id:x} '{filename}'");
 
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID

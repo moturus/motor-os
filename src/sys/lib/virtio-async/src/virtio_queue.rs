@@ -1,12 +1,4 @@
 //! VirtIO Queue.
-//!
-//! Note: the VirtIO spec explicitly states that requests from the available queue
-//! may be processed in any order, and thus used request IDs can also appear in any
-//! order. It thus _may_ seem important to keep track of out-of-order used idxes
-//! coming in. But this will not help with throughput, only with latency under
-//! high load scenarios; and as such tracking complicates the code and adds CPU
-//! usage, it is not even clear that latency will be materially improved, so
-//! out virtqueues below only track next_available and last_used.
 use super::virtio_device::VirtioDevice;
 use super::{le16, le32, le64};
 use crate::pci::PciBar;
@@ -199,7 +191,7 @@ pub(super) struct Virtqueue {
 }
 
 impl Virtqueue {
-    pub(super) fn allocate(
+    pub(super) fn allocate_virtqueue(
         dev: &VirtioDevice,
         queue_num: u16,
         queue_size: u16,
@@ -422,13 +414,14 @@ impl Virtqueue {
         &self.descriptors[idx as usize]
     }
 
-    pub(crate) fn add_buffs(
+    pub(crate) fn add_buffs<T: Unpin>(
         this: Rc<RefCell<Self>>,
         data: &[UserData],
         outgoing: u16,
         incoming: u16,
         chain_head: u16,
-    ) -> VqCompletion {
+        bytes: T,
+    ) -> VqCompletion<T> {
         assert_ne!(outgoing + incoming, 0);
         assert_eq!(outgoing + incoming, data.len() as u16);
 
@@ -453,7 +446,6 @@ impl Virtqueue {
                 flags |= VIRTQ_DESC_F_WRITE;
             }
             descriptor.flags = flags;
-
             curr = descriptor.next;
         }
 
@@ -466,10 +458,12 @@ impl Virtqueue {
         VqCompletion {
             chain_head,
             virtqueue: this,
+            data: Some(bytes),
         }
     }
 
     pub fn reclaim_used(&mut self) -> Option<u16> {
+        // See section 2.7.14 in Virtio PDF v 1.3.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         if self.next_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
@@ -566,20 +560,21 @@ impl Drop for Virtqueue {
     }
 }
 
-pub(crate) struct VqCompletion {
+pub(crate) struct VqCompletion<T: Unpin> {
     chain_head: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
+    data: Option<T>,
 }
 
-impl Future for VqCompletion {
-    type Output = Result<()>;
+impl<T: Unpin> Future for VqCompletion<T> {
+    type Output = (T, Result<()>);
 
     fn poll(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         // Works OK without spinning, but some tests show 3%-5% throughput upside.
-        const MAX_SPINS: u32 = 4;
+        const MAX_SPINS: u32 = 0; // 4;
         let mut spin_iter = 0;
         loop {
             spin_iter += 1;
@@ -589,13 +584,17 @@ impl Future for VqCompletion {
             if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
                 virtq.completion_waiters[self.chain_head as usize] = None;
                 let (_consumed, status) = virtq.get_result(self.chain_head);
+                drop(virtq);
+
+                let this = self.get_mut();
                 if status == 0 {
-                    return std::task::Poll::Ready(Ok(()));
+                    return std::task::Poll::Ready((this.data.take().unwrap(), Ok(())));
                 }
                 log::error!("Bad VirtQ status: {status}.");
-                return std::task::Poll::Ready(Err(std::io::Error::from(
-                    std::io::ErrorKind::InvalidData,
-                )));
+                return std::task::Poll::Ready((
+                    this.data.take().unwrap(),
+                    Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+                ));
             }
 
             let mut device_irq_waiter = Box::pin(virtq.wait_handle.as_future());
@@ -612,7 +611,6 @@ impl Future for VqCompletion {
                     if spin_iter < MAX_SPINS {
                         continue;
                     }
-                    virtq.notify();
                     virtq.completion_waiters[self.chain_head as usize] =
                         Some(cx.local_waker().clone());
                     return std::task::Poll::Pending;
@@ -622,7 +620,7 @@ impl Future for VqCompletion {
     }
 }
 
-impl Drop for VqCompletion {
+impl<T: Unpin> Drop for VqCompletion<T> {
     fn drop(&mut self) {
         let mut virtqueue = self.virtqueue.borrow_mut();
         let mut curr = self.chain_head;
@@ -653,13 +651,12 @@ impl Drop for VqCompletion {
     }
 }
 
-pub struct WriteCompletion<T: AsRef<[u8]>> {
-    pub(crate) vq_completion: VqCompletion,
-    pub(crate) bytes: T,
+pub struct WriteCompletion<T: AsRef<[u8]> + Unpin> {
+    pub(crate) vq_completion: VqCompletion<T>,
 }
 
-impl<T: AsRef<[u8]>> Future for WriteCompletion<T> {
-    type Output = Result<()>;
+impl<T: AsRef<[u8]> + Unpin> Future for WriteCompletion<T> {
+    type Output = (T, Result<()>);
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -671,13 +668,12 @@ impl<T: AsRef<[u8]>> Future for WriteCompletion<T> {
     }
 }
 
-pub struct ReadCompletion<T: AsMut<[u8]>> {
-    pub(crate) vq_completion: VqCompletion,
-    pub(crate) bytes: T,
+pub struct ReadCompletion<T: AsMut<[u8]> + Unpin> {
+    pub(crate) vq_completion: VqCompletion<T>,
 }
 
-impl<T: AsMut<[u8]>> Future for ReadCompletion<T> {
-    type Output = Result<()>;
+impl<T: AsMut<[u8]> + Unpin> Future for ReadCompletion<T> {
+    type Output = (T, Result<()>);
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
