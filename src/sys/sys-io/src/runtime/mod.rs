@@ -107,13 +107,9 @@ fn conn_name(handle: SysHandle) -> String {
 
 // ----------------------- Async Runtime ---------------------------- //
 struct Mapper {
-    virt_to_phys_map: std::sync::Mutex<BTreeMap<u64, u64>>,
-    map_requests: AtomicU64,
     next_irq_num: AtomicU8,
 }
 static MAPPER: Mapper = Mapper {
-    virt_to_phys_map: std::sync::Mutex::new(BTreeMap::new()),
-    map_requests: AtomicU64::new(0),
     next_irq_num: AtomicU8::new(64),
 };
 
@@ -121,26 +117,8 @@ impl virtio_async::KernelAdapter for Mapper {
     fn virt_to_phys(&self, virt_addr: u64) -> IoResult<u64> {
         let page_addr = virt_addr & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
         let offset = virt_addr & (moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
-        if let Some(phys_addr) = self.virt_to_phys_map.lock().unwrap().get(&page_addr) {
-            return Ok(offset + *phys_addr);
-        }
-
-        let requests = self
-            .map_requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // We don't want to do the syscall too often. But We also don't want
-        // to force copying data all the time: our flatfs adapter (fs_flatfs.rs)
-        // reads its bytes into a buffer and doesn't do any copying, and this
-        // is a good thing: it is faster to call virt_to_phys() than to
-        // copy 512 bytes. So the number below should be not too small, not too
-        // large.
-        assert!(requests < 1_000_000);
 
         let phys_addr = moto_sys::SysMem::virt_to_phys(page_addr).unwrap();
-        self.virt_to_phys_map
-            .lock()
-            .unwrap()
-            .insert(page_addr, phys_addr);
 
         Ok(offset + phys_addr)
     }
