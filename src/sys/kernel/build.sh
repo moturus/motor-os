@@ -12,11 +12,11 @@ if [[ $# == 0 ]] ; then
    echo "kernel debug build"
 
    RUSTFLAGS="-C force-frame-pointers=yes " \
-   cargo build --target kernel.json \
+   cargo build --target kernel.json -Zjson-target-spec \
       -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
       --no-default-features
 
-   cargo clippy --target kernel.json \
+   cargo clippy --target kernel.json -Zjson-target-spec \
       -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
       --no-default-features
 
@@ -37,11 +37,11 @@ elif [[ "$1" != "--release" ]] ; then
    echo "kernel release build"
 
    RUSTFLAGS="-C force-frame-pointers=yes " \
-   cargo build --release --target kernel.json \
+   cargo build --release --target kernel.json -Zjson-target-spec \
       -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
       --no-default-features
 
-   cargo clippy --release --target kernel.json \
+   cargo clippy --release --target kernel.json -Zjson-target-spec \
       -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
       --no-default-features
 

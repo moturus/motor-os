@@ -12,11 +12,11 @@ if [[ $# == 0 ]] ; then
 echo "kloader debug build"
 
 RUSTFLAGS="-C force-frame-pointers=yes " \
-cargo build --target kloader.json \
+cargo build --target kloader.json -Zjson-target-spec \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --color=always 2>&1
 
-cargo clippy --target kloader.json \
+cargo clippy --target kloader.json -Zjson-target-spec \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --color=always 2>&1
 
@@ -42,11 +42,11 @@ else
 echo "kloader release build"
 
 
-cargo build --release --no-default-features --target kloader.json \
+cargo build --release --no-default-features --target kloader.json -Zjson-target-spec \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --color=always 2>&1
 
-cargo clippy --release --no-default-features --target kloader.json \
+cargo clippy --release --no-default-features --target kloader.json -Zjson-target-spec \
     -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem \
     --color=always 2>&1
 

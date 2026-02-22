@@ -2,10 +2,10 @@
 
 set -e
 
-cargo build --release -Zbuild-std=core --target mbr.json \
+cargo build --release -Zbuild-std=core --target mbr.json -Zjson-target-spec \
     -Zbuild-std-features=compiler-builtins-mem
 
-cargo clippy --release -Zbuild-std=core --target mbr.json \
+cargo clippy --release -Zbuild-std=core --target mbr.json -Zjson-target-spec \
     -Zbuild-std-features=compiler-builtins-mem
 
 objcopy -I elf32-i386 -O binary "${CARGO_TARGET_DIR}/mbr/release/mbr" \
