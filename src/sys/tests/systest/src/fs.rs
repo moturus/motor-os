@@ -68,17 +68,21 @@ pub fn smoke_test() {
     let bytes = std::fs::read("/foo").expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
-    let mut bytes = vec![0_u8; 1024 * 1024 * 11 + 1001];
-    // let mut bytes = vec![0_u8; 1024 * 1024 * 2 + 1001];
+    // const LEN: usize = 1024 * 1024 * 11 + 1001;
+    const LEN: usize = 1024 * 1024 + 1001;
+    let mut bytes = Vec::with_capacity(LEN);
+    bytes.resize(LEN, 0);
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
 
     let ts0 = std::time::Instant::now();
     std::fs::write("/bar", bytes.as_slice()).unwrap();
+    let cpu_usage_write = crate::mpmc::get_cpu_usage();
     let ts1 = std::time::Instant::now();
     let bytes_back = std::fs::read("/bar").unwrap();
     let dur_read = ts1.elapsed();
+    let cpu_usage_read = crate::mpmc::get_cpu_usage();
     let dur_write = ts1 - ts0;
 
     assert_eq!(
@@ -93,6 +97,16 @@ pub fn smoke_test() {
         write_mbps, read_mbps
     );
 
+    print!("\tcpu usage writing: ");
+    for n in &cpu_usage_write {
+        print!("{: >5.1}% ", (*n) * 100.0);
+    }
+    println!();
+    print!("\tcpu usage reading: ");
+    for n in &cpu_usage_read {
+        print!("{: >5.1}% ", (*n) * 100.0);
+    }
+    println!();
     let metadata = std::fs::metadata("/bar").unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.len(), bytes.len() as u64);
