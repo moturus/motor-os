@@ -135,7 +135,6 @@ impl TxnLogger {
                 )
                 .await?;
         }
-        // block_cache.start_flushing().await; // REMOVE
 
         // Write to the main data area.
         for idx in 0..blocks_in_txn {

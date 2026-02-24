@@ -11,23 +11,29 @@ use crate::Result;
 use crate::{AsyncBlockDevice, Block};
 
 #[cfg(feature = "std")]
+use std::collections::BTreeMap;
+#[cfg(feature = "std")]
 use std::rc::Rc;
-
-#[cfg(not(feature = "std"))]
-use alloc::rc::Rc;
+#[cfg(feature = "std")]
+use std::rc::Weak;
 
 use core::cell::RefCell;
-use core::mem::ManuallyDrop;
 use core::num::NonZero;
 use lru::LruCache;
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+use alloc::rc::Rc;
+#[cfg(not(feature = "std"))]
+use alloc::rc::Weak;
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 #[cfg(feature = "moto-rt")]
-const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
+const MAX_COMPLETIONS_IN_FLIGHT: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockState {
@@ -40,11 +46,8 @@ struct InnerCachedBlock {
     block_no: u64,
     state: BlockState,
 
-    block: ManuallyDrop<Box<Block>>,
-
-    // A "clean" copy of the mutable block in case we need to
-    // roll back the transaction (see "discard_dirty_block").
-    prev_clean_block: Option<Box<Block>>,
+    dirty_block: Option<Box<Block>>,
+    clean_block: Rc<Box<Block>>,
 
     supporting_caches: Rc<RefCell<SupportingCaches>>,
 }
@@ -65,58 +68,67 @@ impl Drop for InnerCachedBlock {
             self.block_no,
             self.state
         );
-        assert!(self.prev_clean_block.is_none());
+        assert!(self.dirty_block.is_none());
 
-        // SAFETY: safe as we are in Self::drop().
-        let block = unsafe { ManuallyDrop::take(&mut self.block) };
-        self.supporting_caches.borrow_mut().push_free_block(block);
-    }
-}
-
-/// When a block is flushing to block dev, it may be read but not written to.
-pub struct FlushingBlock {
-    inner: Rc<RefCell<InnerCachedBlock>>,
-
-    // Use an addr instead of Box<Block> so that compiler does not assume
-    // anything, as we pass the addr to virtio.
-    flushing_block_addr: usize,
-}
-
-impl AsRef<[u8]> for FlushingBlock {
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: safe by construction.
-        unsafe {
-            core::slice::from_raw_parts(self.flushing_block_addr as *const u8, crate::BLOCK_SIZE)
+        if Rc::strong_count(&self.clean_block) == 1 {
+            let mut caches = self.supporting_caches.borrow_mut();
+            caches.push_free_block(self.clean_block.clone());
+            // caches.clear_expiring_block(self.block_no);
+        } else {
+            todo!("push expiring block")
+            // self.supporting_caches
+            //     .borrow_mut()
+            //     .push_expiring_block(self.block_no, &self.clean_block);
         }
     }
 }
 
-impl FlushingBlock {
-    fn new(inner: Rc<RefCell<InnerCachedBlock>>) -> Self {
-        let mut inner_ref = inner.borrow_mut();
+/// Holder of a block to be written to BD.
+pub struct FlushingBlock {
+    block: Rc<Box<Block>>,
+    supporting_caches: Rc<RefCell<SupportingCaches>>,
+}
 
-        inner_ref.state = BlockState::Clean;
-        let mut flushing = inner_ref
-            .prev_clean_block
-            .take()
-            .unwrap_or_else(|| inner_ref.supporting_caches.borrow_mut().pop_free_block());
-        *flushing = **inner_ref.block;
-        drop(inner_ref);
+impl AsRef<[u8]> for FlushingBlock {
+    fn as_ref(&self) -> &[u8] {
+        self.block.as_bytes()
+    }
+}
+
+impl FlushingBlock {
+    fn new(cached_block: &CachedBlock) -> Self {
+        let mut inner_ref = cached_block.inner.borrow_mut();
+
+        let block = if let Some(dirty) = inner_ref.dirty_block.take() {
+            inner_ref.state = BlockState::Clean;
+            let dirty = Rc::new(dirty);
+            let mut clean = dirty.clone();
+            core::mem::swap(&mut clean, &mut inner_ref.clean_block);
+            if Rc::strong_count(&clean) == 1 {
+                inner_ref
+                    .supporting_caches
+                    .borrow_mut()
+                    .push_free_block(clean);
+            }
+            dirty
+        } else {
+            inner_ref.clean_block.clone()
+        };
+
         Self {
-            inner,
-            flushing_block_addr: Box::into_raw(flushing) as usize,
+            block,
+            supporting_caches: inner_ref.supporting_caches.clone(),
         }
     }
 }
 
 impl Drop for FlushingBlock {
     fn drop(&mut self) {
-        let block = unsafe { Box::from_raw(self.flushing_block_addr as *mut Block) };
-        self.inner
-            .borrow()
-            .supporting_caches
-            .borrow_mut()
-            .push_free_block(block);
+        if Rc::strong_count(&self.block) == 1 {
+            self.supporting_caches
+                .borrow_mut()
+                .push_free_block(self.block.clone());
+        }
     }
 }
 
@@ -129,14 +141,16 @@ pub struct CachedBlock {
 const _: () = assert!(size_of::<CachedBlock>() <= 32);
 
 impl CachedBlock {
-    fn new(block_no: u64, supporting_caches: Rc<RefCell<SupportingCaches>>) -> Self {
-        let block = supporting_caches.borrow_mut().pop_free_block();
-
+    fn new(
+        block_no: u64,
+        clean_block: Rc<Box<Block>>,
+        supporting_caches: Rc<RefCell<SupportingCaches>>,
+    ) -> Self {
         Self {
             inner: Rc::new(RefCell::new(InnerCachedBlock {
-                state: BlockState::Dirty,
-                block: ManuallyDrop::new(block),
-                prev_clean_block: None,
+                state: BlockState::Clean,
+                dirty_block: None,
+                clean_block,
                 supporting_caches,
                 block_no,
             })),
@@ -151,7 +165,13 @@ impl CachedBlock {
     /// modify dirty/clean state.
     #[inline]
     pub fn block(&self) -> core::cell::Ref<'_, Block> {
-        core::cell::Ref::map(self.inner.borrow(), |inner| Box::as_ref(&inner.block))
+        core::cell::Ref::map(self.inner.borrow(), |inner| {
+            if let Some(dirty) = inner.dirty_block.as_ref() {
+                dirty.as_ref()
+            } else {
+                inner.clean_block.as_ref()
+            }
+        })
     }
 
     /// Get a read/write reference to the underlying data. Marks the block dirty.
@@ -161,13 +181,19 @@ impl CachedBlock {
 
         // This is important: do copy-on-write.
         if block_ref.state == BlockState::Clean {
-            let mut copy = block_ref.supporting_caches.borrow_mut().pop_free_block();
-            *copy = **block_ref.block;
-            block_ref.prev_clean_block = Some(copy);
+            assert!(block_ref.dirty_block.is_none());
+            let rc_copy = block_ref.supporting_caches.borrow_mut().pop_free_block();
+            let Ok(mut box_copy) = Rc::try_unwrap(rc_copy) else {
+                panic!();
+            };
+            *box_copy = **block_ref.clean_block;
+            block_ref.dirty_block = Some(box_copy);
             block_ref.state = BlockState::Dirty;
         }
 
-        core::cell::RefMut::map(block_ref, |inner| inner.block.as_mut())
+        core::cell::RefMut::map(block_ref, |inner| {
+            inner.dirty_block.as_mut().unwrap().as_mut()
+        })
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -182,19 +208,37 @@ enum BackgroundMessage {
 }
 
 struct SupportingCaches {
-    free_blocks: Vec<Box<Block>>,
+    free_blocks: Vec<Rc<Box<Block>>>,
+    // expiring_blocks: BTreeMap<u64, Weak<Box<Block>>>,
 }
 
 impl SupportingCaches {
-    fn push_free_block(&mut self, block: Box<Block>) {
+    fn push_free_block(&mut self, block: Rc<Box<Block>>) {
         self.free_blocks.push(block);
     }
 
-    fn pop_free_block(&mut self) -> Box<Block> {
+    fn pop_free_block(&mut self) -> Rc<Box<Block>> {
         self.free_blocks
             .pop()
-            .unwrap_or_else(|| Box::new(Block::new_zeroed()))
+            .unwrap_or_else(|| Rc::new(Box::new(Block::new_zeroed())))
     }
+
+    /*
+    fn push_expiring_block(&mut self, block_no: u64, block: &Rc<Box<Block>>) {
+        self.expiring_blocks.insert(block_no, Rc::downgrade(block));
+    }
+
+    fn pop_expiring_block(&mut self, block_no: u64) -> Option<Rc<Box<Block>>> {
+        self.expiring_blocks
+            .remove(&block_no)
+            .map(|weak| weak.upgrade())
+            .flatten()
+    }
+
+    fn clear_expiring_block(&mut self, block_no: u64) {
+        self.expiring_blocks.remove(&block_no);
+    }
+    */
 }
 
 /// LRU-based block cache.
@@ -262,17 +306,24 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         let supporting_caches = Rc::new(RefCell::new(SupportingCaches {
             free_blocks: Vec::new(),
+            // expiring_blocks: BTreeMap::new(),
         }));
 
         let mut pinned_blocks = Vec::with_capacity(pinned_blocks_num);
         for idx in 0..pinned_blocks_num {
             let block_no = pinned_blocks_start + idx as u64;
-            let mut block = CachedBlock::new(block_no, supporting_caches.clone());
+            let mut block = Box::new(Block::new_zeroed());
             block_dev
-                .read_block(block_no, &mut block.block_mut())
-                .await?;
-            block.inner.borrow_mut().state = BlockState::Clean; // We just read it. It's clean.
-            pinned_blocks.push(block);
+                .read_block(block_no, &mut block)
+                .await
+                .inspect_err(|err| {
+                    log::error!("Error reading block 0x{block_no:x}: {err:?}.");
+                })?;
+            pinned_blocks.push(CachedBlock::new(
+                block_no,
+                Rc::new(block),
+                supporting_caches.clone(),
+            ));
         }
 
         Ok(Self {
@@ -305,21 +356,10 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         // InnerRef::drop() will panic.
         block_ref.state = BlockState::Clean;
 
-        if let Some(mut prev_clean) = block_ref.prev_clean_block.take() {
-            core::mem::swap(&mut prev_clean, &mut *block_ref.block);
-            block_ref
-                .supporting_caches
-                .borrow_mut()
-                .push_free_block(prev_clean);
-        } else {
-            // No clean copy, so we must remove the block from the cache.
-            let existing = self.lru_cache.pop(&block_no).unwrap();
-            assert_eq!(
-                Rc::as_ptr(&existing.inner) as usize,
-                Rc::as_ptr(&block.inner) as usize
-            );
-            assert_eq!(2, Rc::strong_count(&block.inner)); // block + existing.
-        }
+        let dirty = block_ref.dirty_block.take().unwrap();
+        self.supporting_caches
+            .borrow_mut()
+            .push_free_block(Rc::new(dirty));
     }
 
     pub fn total_blocks(&self) -> u64 {
@@ -339,7 +379,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             assert_eq!(1, Rc::strong_count(&prev_block.inner));
             let prev_ref = prev_block.inner.borrow();
             assert_eq!(prev_ref.state, BlockState::Clean);
-            assert!(prev_ref.prev_clean_block.is_none());
+            assert!(prev_ref.dirty_block.is_none());
         };
     }
 
@@ -352,20 +392,32 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             return Ok(block.clone());
         }
 
-        self.cache_misses += 1;
-        let mut block = CachedBlock::new(block_no, self.supporting_caches.clone());
+        /*
+        let expiring_block = self
+            .supporting_caches
+            .borrow_mut()
+            .pop_expiring_block(block_no);
 
-        self.block_dev
-            .read_block(block_no, &mut block.block_mut())
-            .await?;
-        {
-            let mut block_ref = block.inner.borrow_mut();
-            block_ref.state = BlockState::Clean;
-            assert!(block_ref.prev_clean_block.is_none());
+        if let Some(block) = expiring_block {
+            let cached_block = CachedBlock::new(block_no, block, self.supporting_caches.clone());
+            self.push_block(block_no, cached_block.clone());
+            return Ok(cached_block);
         }
+        */
 
-        self.push_block(block_no, block.clone());
-        Ok(block)
+        self.cache_misses += 1;
+        let rc_block = self.supporting_caches.borrow_mut().pop_free_block();
+        let Ok(mut box_block) = Rc::try_unwrap(rc_block) else {
+            panic!()
+        };
+
+        self.block_dev.read_block(block_no, &mut box_block).await?;
+        let cached_block =
+            CachedBlock::new(block_no, Rc::new(box_block), self.supporting_caches.clone());
+
+        self.push_block(block_no, cached_block.clone());
+
+        Ok(cached_block)
     }
 
     /// Get an empty block. Use with caution: any previously stored
@@ -374,20 +426,14 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         assert!(!self.is_pinned(block_no));
 
         if let Some(block) = self.lru_cache.get(&block_no) {
-            let mut block_ref = block.inner.borrow_mut();
-            // This is important: do copy-on-write.
-            assert_eq!(block_ref.state, BlockState::Clean);
-            assert!(block_ref.prev_clean_block.is_none());
-            let mut copy = self.supporting_caches.borrow_mut().pop_free_block();
-            copy.clear();
-            core::mem::swap(&mut copy, &mut block_ref.block);
-            block_ref.prev_clean_block = Some(copy);
-
-            block_ref.state = BlockState::Dirty;
-            return block.clone();
+            let mut clone = block.clone();
+            clone.block_mut().clear();
+            return clone;
         }
 
-        let mut block = CachedBlock::new(block_no, self.supporting_caches.clone());
+        let mut block = self.supporting_caches.borrow_mut().pop_free_block();
+        Rc::get_mut(&mut block).unwrap().clear();
+        let mut block = CachedBlock::new(block_no, block, self.supporting_caches.clone());
         block.block_mut().clear();
         self.push_block(block_no, block.clone());
         block
@@ -395,7 +441,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
     /// Write CachedBlock to block_no. Note that block_no may not be equal to block.block_no();
     pub async fn write_block(&mut self, block_no: u64, block: CachedBlock) -> Result<()> {
-        let flusher = FlushingBlock::new(block.inner.clone());
+        let flusher = FlushingBlock::new(&block);
 
         #[cfg(feature = "moto-rt")]
         self.completion_sink
