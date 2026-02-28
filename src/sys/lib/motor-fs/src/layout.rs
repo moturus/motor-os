@@ -32,12 +32,10 @@ use bytemuck::Pod;
 use std::io::Result;
 
 pub const MAX_FILENAME_LEN: usize = 255;
-pub const RESERVED_BLOCKS: usize = MAX_TXNS_IN_LOG * MAX_BLOCKS_IN_TXN + 2;
+pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG as usize + 2;
 
-/// The max number of transactions in the log.
-pub(crate) const MAX_TXNS_IN_LOG: usize = 8;
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 8;
-pub(crate) const BLOCKS_IN_TXN_LOG: u64 = (MAX_TXNS_IN_LOG * MAX_BLOCKS_IN_TXN) as u64;
+pub(crate) const MAX_BLOCKS_IN_TXN_LOG: usize = 32; // 64 is faster with qemu, but chv hangs
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod)]
 #[repr(transparent)]
@@ -119,10 +117,20 @@ pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 #[derive(Pod, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct TxnLogData {
-    pub(crate) txn_blocks: [BlockNo; MAX_BLOCKS_IN_TXN],
+    pub(crate) txn_id: u64,
+    pub(crate) num_blocks: u64,
+    pub(crate) txn_blocks: [u64; MAX_BLOCKS_IN_TXN_LOG],
 }
 
 unsafe impl bytemuck::Zeroable for TxnLogData {}
+
+impl TxnLogData {
+    pub(crate) fn clear(&mut self) {
+        use bytemuck::Zeroable;
+
+        *self = Self::zeroed();
+    }
+}
 
 /// Superblock (block #0).
 #[derive(Pod, Clone, Copy)]
@@ -137,8 +145,7 @@ pub(crate) struct Superblock {
     empty_area_start: u64,  // All blocks after this one are unused.
     _reserved: u64,
 
-    pub(crate) last_checkpointed_txn_id: u128,
-    pub(crate) txn_log_data: [TxnLogData; MAX_TXNS_IN_LOG],
+    pub(crate) txn_log_data: TxnLogData,
 }
 const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
 unsafe impl bytemuck::Zeroable for Superblock {}
@@ -160,8 +167,7 @@ impl Superblock {
             empty_area_start: 2,
             generation: 1,
             freelist_head: BlockNo::null(),
-            last_checkpointed_txn_id: 0,
-            txn_log_data: [TxnLogData::zeroed(); MAX_TXNS_IN_LOG],
+            txn_log_data: TxnLogData::zeroed(),
             _reserved: 0,
         };
 
@@ -194,22 +200,18 @@ impl Superblock {
         self.free_blocks
     }
 
-    pub(crate) fn last_checkpointed_txn_id(&self) -> u128 {
-        self.last_checkpointed_txn_id
-    }
-
     #[inline]
     pub(crate) fn check_accounting(&self) -> Result<()> {
         if !self.freelist_head.is_null() {
             Ok(())
         } else {
             if self.num_blocks
-                == self.empty_area_start + self.free_blocks + BLOCKS_IN_TXN_LOG as u64
+                == self.empty_area_start + self.free_blocks + MAX_BLOCKS_IN_TXN_LOG as u64
             {
                 Ok(())
             } else {
                 let mut error_count: i64 = (self.num_blocks as i64)
-                    - ((self.empty_area_start + self.free_blocks + BLOCKS_IN_TXN_LOG as u64)
+                    - ((self.empty_area_start + self.free_blocks + MAX_BLOCKS_IN_TXN_LOG as u64)
                         as i64);
                 let verb = if error_count > 0 {
                     "deficit"
@@ -361,7 +363,7 @@ impl Superblock {
         let mut sb_mut_ref = sb_block.block_mut();
         let this = sb_mut_ref.get_mut_at_offset::<Self>(0);
 
-        assert!(block_no.as_u64() < (this.num_blocks - BLOCKS_IN_TXN_LOG as u64));
+        assert!(block_no.as_u64() < (this.num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64));
 
         if block_no.as_u64() == (this.empty_area_start - 1) {
             this.free_blocks += 1;

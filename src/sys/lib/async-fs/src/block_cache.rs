@@ -6,6 +6,7 @@
 
 // TODO: investigate is clippy here should be listened to.
 #![allow(clippy::await_holding_refcell_ref)]
+#![allow(clippy::redundant_allocation)]
 
 use crate::Result;
 use crate::{AsyncBlockDevice, Block};
@@ -73,9 +74,9 @@ impl Drop for InnerCachedBlock {
         if Rc::strong_count(&self.clean_block) == 1 {
             let mut caches = self.supporting_caches.borrow_mut();
             caches.push_free_block(self.clean_block.clone());
-            // caches.clear_expiring_block(self.block_no);
+            caches.clear_expiring_block(self.block_no);
         } else {
-            todo!("push expiring block")
+            todo!()
             // self.supporting_caches
             //     .borrow_mut()
             //     .push_expiring_block(self.block_no, &self.clean_block);
@@ -85,6 +86,7 @@ impl Drop for InnerCachedBlock {
 
 /// Holder of a block to be written to BD.
 pub struct FlushingBlock {
+    block_no: u64,
     block: Rc<Box<Block>>,
     supporting_caches: Rc<RefCell<SupportingCaches>>,
 }
@@ -97,8 +99,12 @@ impl AsRef<[u8]> for FlushingBlock {
 
 impl FlushingBlock {
     fn new(cached_block: &CachedBlock) -> Self {
-        let mut inner_ref = cached_block.inner.borrow_mut();
+        let inner_ref = cached_block.inner.borrow();
+        let block_no = inner_ref.block_no;
 
+        assert!(inner_ref.dirty_block.is_none());
+
+        /*
         let block = if let Some(dirty) = inner_ref.dirty_block.take() {
             inner_ref.state = BlockState::Clean;
             let dirty = Rc::new(dirty);
@@ -114,9 +120,11 @@ impl FlushingBlock {
         } else {
             inner_ref.clean_block.clone()
         };
+        */
 
         Self {
-            block,
+            block_no,
+            block: inner_ref.clean_block.clone(),
             supporting_caches: inner_ref.supporting_caches.clone(),
         }
     }
@@ -125,9 +133,9 @@ impl FlushingBlock {
 impl Drop for FlushingBlock {
     fn drop(&mut self) {
         if Rc::strong_count(&self.block) == 1 {
-            self.supporting_caches
-                .borrow_mut()
-                .push_free_block(self.block.clone());
+            let mut caches = self.supporting_caches.borrow_mut();
+            caches.push_free_block(self.block.clone());
+            caches.clear_expiring_block(self.block_no);
         }
     }
 }
@@ -199,6 +207,28 @@ impl CachedBlock {
     pub fn is_dirty(&self) -> bool {
         self.inner.borrow().state == BlockState::Dirty
     }
+
+    #[inline(always)]
+    pub fn unique_id(&self) -> usize {
+        Rc::as_ptr(&self.inner) as usize
+    }
+
+    pub fn consume_dirty(&self) {
+        let mut inner_ref = self.inner.borrow_mut();
+        assert_eq!(inner_ref.state, BlockState::Dirty);
+
+        let dirty = inner_ref.dirty_block.take().unwrap();
+        inner_ref.state = BlockState::Clean;
+        let dirty = Rc::new(dirty);
+        let mut clean = dirty.clone();
+        core::mem::swap(&mut clean, &mut inner_ref.clean_block);
+        if Rc::strong_count(&clean) == 1 {
+            inner_ref
+                .supporting_caches
+                .borrow_mut()
+                .push_free_block(clean);
+        }
+    }
 }
 
 #[cfg(feature = "moto-rt")]
@@ -209,7 +239,7 @@ enum BackgroundMessage {
 
 struct SupportingCaches {
     free_blocks: Vec<Rc<Box<Block>>>,
-    // expiring_blocks: BTreeMap<u64, Weak<Box<Block>>>,
+    expiring_blocks: BTreeMap<u64, Weak<RefCell<InnerCachedBlock>>>,
 }
 
 impl SupportingCaches {
@@ -223,22 +253,19 @@ impl SupportingCaches {
             .unwrap_or_else(|| Rc::new(Box::new(Block::new_zeroed())))
     }
 
-    /*
-    fn push_expiring_block(&mut self, block_no: u64, block: &Rc<Box<Block>>) {
+    fn push_expiring_block(&mut self, block_no: u64, block: &Rc<RefCell<InnerCachedBlock>>) {
         self.expiring_blocks.insert(block_no, Rc::downgrade(block));
     }
 
-    fn pop_expiring_block(&mut self, block_no: u64) -> Option<Rc<Box<Block>>> {
+    fn pop_expiring_block(&mut self, block_no: u64) -> Option<Rc<RefCell<InnerCachedBlock>>> {
         self.expiring_blocks
             .remove(&block_no)
-            .map(|weak| weak.upgrade())
-            .flatten()
+            .and_then(|weak| weak.upgrade())
     }
 
     fn clear_expiring_block(&mut self, block_no: u64) {
         self.expiring_blocks.remove(&block_no);
     }
-    */
 }
 
 /// LRU-based block cache.
@@ -306,7 +333,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         let supporting_caches = Rc::new(RefCell::new(SupportingCaches {
             free_blocks: Vec::new(),
-            // expiring_blocks: BTreeMap::new(),
+            expiring_blocks: BTreeMap::new(),
         }));
 
         let mut pinned_blocks = Vec::with_capacity(pinned_blocks_num);
@@ -375,11 +402,17 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     }
 
     fn push_block(&mut self, block_no: u64, block: CachedBlock) {
-        if let Some((_prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
-            assert_eq!(1, Rc::strong_count(&prev_block.inner));
+        if let Some((prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
             let prev_ref = prev_block.inner.borrow();
             assert_eq!(prev_ref.state, BlockState::Clean);
-            assert!(prev_ref.dirty_block.is_none());
+            if 1 == Rc::strong_count(&prev_block.inner) {
+                assert!(prev_ref.dirty_block.is_none());
+            } else {
+                drop(prev_ref);
+                self.supporting_caches
+                    .borrow_mut()
+                    .push_expiring_block(prev_block_no, &prev_block.inner);
+            }
         };
     }
 
@@ -392,18 +425,16 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             return Ok(block.clone());
         }
 
-        /*
         let expiring_block = self
             .supporting_caches
             .borrow_mut()
             .pop_expiring_block(block_no);
 
         if let Some(block) = expiring_block {
-            let cached_block = CachedBlock::new(block_no, block, self.supporting_caches.clone());
+            let cached_block = CachedBlock { inner: block };
             self.push_block(block_no, cached_block.clone());
             return Ok(cached_block);
         }
-        */
 
         self.cache_misses += 1;
         let rc_block = self.supporting_caches.borrow_mut().pop_free_block();
@@ -429,6 +460,18 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             let mut clone = block.clone();
             clone.block_mut().clear();
             return clone;
+        }
+
+        let expiring_block = self
+            .supporting_caches
+            .borrow_mut()
+            .pop_expiring_block(block_no);
+
+        if let Some(block) = expiring_block {
+            let mut cached_block = CachedBlock { inner: block };
+            cached_block.block_mut().clear();
+            self.push_block(block_no, cached_block.clone());
+            return cached_block;
         }
 
         let mut block = self.supporting_caches.borrow_mut().pop_free_block();

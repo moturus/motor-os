@@ -450,12 +450,25 @@ async fn midsize_file_test() -> Result<()> {
     Ok(())
 }
 
+async fn assert_empty(fs: &mut MotorFs) {
+    let root = crate::ROOT_DIR_ID;
+    assert_eq!(0, fs.metadata(root).await.unwrap().size);
+    let num_blocks = fs.num_blocks();
+    assert_eq!(
+        num_blocks - RESERVED_BLOCKS as u64,
+        fs.empty_blocks().await.unwrap()
+    );
+}
+
 async fn delete_reopen_test() -> Result<()> {
     const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
     const FS_TAG: &str = "motor_fs_delete_reopen_test";
     let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
 
     let root = crate::ROOT_DIR_ID;
+
+    assert_eq!(NUM_BLOCKS, fs.num_blocks());
+    assert_empty(&mut fs).await;
 
     let foo_id = fs.create_entry(root, EntryKind::File, "foo").await.unwrap();
     fs.write(foo_id, 0, b"foobar").await.unwrap();
@@ -472,6 +485,8 @@ async fn delete_reopen_test() -> Result<()> {
     );
 
     fs.flush().await?;
+
+    println!("will reopen");
 
     let mut fs = open_fs(FS_TAG).await?;
     assert_eq!(
@@ -503,12 +518,9 @@ async fn delete_reopen_test() -> Result<()> {
     assert!(fs.stat(root, "bar").await.unwrap().is_none());
     fs.delete_entry(baz_id).await.unwrap();
     assert!(fs.delete_entry(baz_id).await.is_err());
+    fs.flush().await?;
 
-    assert_eq!(0, fs.metadata(root).await.unwrap().size);
-    assert_eq!(
-        NUM_BLOCKS - RESERVED_BLOCKS as u64,
-        fs.empty_blocks().await?
-    );
+    assert_empty(&mut fs).await;
 
     println!("delete_reopen_test PASS");
     Ok(())

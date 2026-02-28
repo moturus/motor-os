@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 use crate::{
-    BLOCKS_IN_TXN_LOG, DirEntryBlock, EntryIdInternal, RESERVED_BLOCKS, ROOT_DIR_ID,
+    DirEntryBlock, EntryIdInternal, MAX_BLOCKS_IN_TXN_LOG, RESERVED_BLOCKS, ROOT_DIR_ID,
     ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry, validate_filename,
 };
 
@@ -52,12 +52,12 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         let mut block_cache = BlockCache::new(
             dev,
             CACHE_SIZE,
-            num_blocks - BLOCKS_IN_TXN_LOG as u64,
-            BLOCKS_IN_TXN_LOG as usize,
+            num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64,
+            MAX_BLOCKS_IN_TXN_LOG as usize,
         )
         .await?;
 
-        let txn_logger = crate::txn_log::TxnLogger::new(&mut block_cache);
+        let txn_logger = crate::txn_log::TxnLogger::new(&mut block_cache).await?;
 
         Ok(Self {
             block_cache,
@@ -80,8 +80,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         let mut block_cache = BlockCache::new(
             dev,
             CACHE_SIZE,
-            num_blocks - BLOCKS_IN_TXN_LOG as u64,
-            BLOCKS_IN_TXN_LOG as usize,
+            num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64,
+            MAX_BLOCKS_IN_TXN_LOG as usize,
         )
         .await?;
 
@@ -529,7 +529,12 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        self.block_cache.flush().await
+        let Self {
+            block_cache,
+            txn_logger,
+            ..
+        } = self;
+        txn_logger.flush(block_cache).await
     }
 
     fn num_blocks(&self) -> u64 {

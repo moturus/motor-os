@@ -4,66 +4,80 @@
 //! to the txn log. TXN is checkpointed when the blocks
 //! it modified are copied out of the txn log into the
 //! main filesystem block area.
+//!
+//! Algorithm:
+//! (1) batch txns in-memory until reached BLOCKS_IN_TXN_LOG
+//! (2) prepare superblock
+//! (3) write all blocks in the txn log to the txn log on BD
+//! (4) write block 0 in the txn log #0
+//! (5) copy blocks from the txn log to the main block area
+//! (6) writhe block 0
 
-use crate::BLOCKS_IN_TXN_LOG;
 use crate::BlockNo;
 use crate::MAX_BLOCKS_IN_TXN;
-use crate::MAX_TXNS_IN_LOG;
+use crate::MAX_BLOCKS_IN_TXN_LOG;
 use crate::Superblock;
 use async_fs::AsyncBlockDevice;
 use async_fs::block_cache::BlockCache;
 use async_fs::block_cache::CachedBlock;
+use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::io::Result;
 
 // In-memory.
 pub(crate) struct TxnLogger {
-    last_checkpointed_txn_id: u128, // Committed to the main area.
-    next_txn_id: u128,              // A future txn.
-    next_txn_idx: u64,              // Where to put the future txn in the log area.
+    last_checkpointed_txn_id: u64, // Committed to the main area.
+    next_txn_id: u64,              // A future txn.
     txn_log_start: u64,
+
+    superblock: CachedBlock,
+    txn_batch: HashMap<u64, CachedBlock>,
 }
 
 impl TxnLogger {
-    pub(crate) fn new<BD: AsyncBlockDevice + 'static>(block_cache: &mut BlockCache<BD>) -> Self {
+    pub(crate) async fn new<BD: AsyncBlockDevice + 'static>(
+        block_cache: &mut BlockCache<BD>,
+    ) -> Result<Self> {
         let num_blocks = block_cache.total_blocks();
-        let txn_log_start = num_blocks - BLOCKS_IN_TXN_LOG;
+        let txn_log_start = num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64;
 
-        Self {
+        Ok(Self {
             last_checkpointed_txn_id: 0,
             next_txn_id: 1,
-            next_txn_idx: 0,
+            superblock: block_cache.get_block(0).await?,
             txn_log_start,
-        }
+            txn_batch: HashMap::new(),
+        })
     }
 
     pub(crate) async fn open<BD: AsyncBlockDevice + 'static>(
         block_cache: &mut BlockCache<BD>,
     ) -> Result<Self> {
         let num_blocks = block_cache.total_blocks();
-        let txn_log_start = num_blocks - BLOCKS_IN_TXN_LOG;
+        let txn_log_start = num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64;
 
         let sb_block = block_cache.get_block(0).await?;
         let superblock_ref = sb_block.block();
         let superblock = superblock_ref.get_at_offset::<Superblock>(0);
-        let last_checkpointed_txn_id = superblock.last_checkpointed_txn_id();
+        let last_checkpointed_txn_id = superblock.txn_log_data.txn_id;
+        drop(superblock_ref);
 
         let mut this = Self {
             last_checkpointed_txn_id,
             next_txn_id: last_checkpointed_txn_id + 1,
-            next_txn_idx: 0,
+            superblock: sb_block,
             txn_log_start,
+            txn_batch: HashMap::new(),
         };
-
-        drop(superblock_ref);
 
         this.replay_txn_log(block_cache).await?;
 
         Ok(this)
     }
 
-    fn new_txn_id(&mut self) -> u128 {
+    fn new_txn_id(&mut self) -> u64 {
         let result = self.next_txn_id;
-        debug_assert!(self.last_checkpointed_txn_id < result);
+        debug_assert_eq!(self.last_checkpointed_txn_id, result - 1);
         self.next_txn_id += 1;
         result
     }
@@ -73,82 +87,42 @@ impl TxnLogger {
     pub(crate) async fn log_txn<BD: AsyncBlockDevice + 'static>(
         &mut self,
         block_cache: &mut BlockCache<BD>,
-        mut txn_blocks: [Option<(BlockNo, CachedBlock)>; MAX_BLOCKS_IN_TXN],
+        txn_blocks: [Option<(BlockNo, CachedBlock)>; MAX_BLOCKS_IN_TXN],
     ) -> Result<()> {
         let mut blocks_in_txn = 0;
-        let mut superblock_index = usize::MAX;
 
+        // First, check if we need to flush the log.
         for entry in &txn_blocks {
-            let Some((block_no, _)) = entry else {
+            let Some((block_no, block)) = entry else {
                 break;
             };
 
+            block.consume_dirty();
             if block_no.as_u64() == 0 {
-                superblock_index = blocks_in_txn;
+                continue;
             }
             blocks_in_txn += 1;
         }
 
-        // Make sure the superblock is the last written ("commits" the transaction).
-        if superblock_index == usize::MAX {
-            superblock_index = blocks_in_txn;
-            assert!(blocks_in_txn < MAX_BLOCKS_IN_TXN);
-            blocks_in_txn += 1;
-
-            let superblock = block_cache.get_block(0).await.unwrap();
-            txn_blocks[superblock_index] = Some((BlockNo::from_u64(0), superblock));
-        } else if superblock_index < (blocks_in_txn - 1) {
-            // Make it last.
-            txn_blocks.swap(superblock_index, blocks_in_txn - 1);
-            superblock_index = blocks_in_txn - 1;
+        if blocks_in_txn + self.txn_batch.len() >= MAX_BLOCKS_IN_TXN_LOG {
+            self.flush_txn_batch(block_cache).await?;
+            assert!(self.txn_batch.is_empty());
         }
 
-        let this_txn_id = self.new_txn_id();
-        let this_txn_idx = self.next_txn_idx % MAX_TXNS_IN_LOG as u64;
-        self.next_txn_idx += 1;
-        if self.next_txn_idx >= (MAX_TXNS_IN_LOG as u64) {
-            self.next_txn_idx = 0;
+        for entry in &txn_blocks {
+            let Some((block_no, block)) = entry else {
+                break;
+            };
+
+            if block_no.as_u64() == 0 {
+                assert_eq!(self.superblock.unique_id(), block.unique_id());
+                continue;
+            }
+
+            if let Some(prev) = self.txn_batch.insert(block_no.as_u64(), block.clone()) {
+                assert_eq!(prev.unique_id(), block.unique_id());
+            }
         }
-
-        let txn_area_start = self.txn_log_start + this_txn_idx * MAX_BLOCKS_IN_TXN as u64;
-
-        // Prepare the superblock.
-        let mut sb_block = txn_blocks[superblock_index].as_ref().unwrap().1.clone();
-        let mut superblock_ref = sb_block.block_mut();
-        let superblock = superblock_ref.get_mut_at_offset::<Superblock>(0);
-        superblock.last_checkpointed_txn_id = this_txn_id;
-
-        // Prepare txn log data and write blocks to the txn log.
-        let txn_log_data = &mut superblock.txn_log_data[this_txn_idx as usize];
-        for idx in 0..blocks_in_txn {
-            txn_log_data.txn_blocks[idx] = txn_blocks[idx].as_ref().unwrap().0;
-        }
-
-        drop(superblock_ref);
-
-        // Write to the txn log.
-        for idx in 0..blocks_in_txn {
-            block_cache
-                .write_block(
-                    txn_area_start + idx as u64,
-                    txn_blocks[idx].as_ref().unwrap().1.clone(),
-                )
-                .await?;
-        }
-
-        // Write to the main data area.
-        for idx in 0..blocks_in_txn {
-            let (block_no, block) = txn_blocks[idx].take().unwrap();
-            block_cache.write_block(block_no.as_u64(), block).await?;
-        }
-        block_cache.start_flushing().await; // REMOVE
-
-        // if self.next_txn_idx == 0 {
-        //     block_cache.start_flushing().await;
-        // }
-
-        #[cfg(debug_assertions)]
-        block_cache.debug_check_clean();
 
         Ok(())
     }
@@ -157,41 +131,88 @@ impl TxnLogger {
         &mut self,
         block_cache: &mut BlockCache<BD>,
     ) -> Result<()> {
-        let mut txns_to_replay = Vec::new();
+        let sb_main = block_cache.get_block(0).await?;
+        let sb_in_log = block_cache.get_block(self.txn_log_start).await?;
+        let sb_main_ref = sb_main.block();
+        let sb_in_log_ref = sb_in_log.block();
+        let superblock_main = sb_main_ref.get_at_offset::<Superblock>(0);
+        let superblock_in_log = sb_in_log_ref.get_at_offset::<Superblock>(0);
 
-        // First, find txns we need to replay.
-        for idx in 0..MAX_TXNS_IN_LOG {
-            let txn_area_start = self.txn_log_start + MAX_BLOCKS_IN_TXN as u64 * idx as u64;
-            for block_idx in 0..MAX_BLOCKS_IN_TXN {
-                let block = block_cache
-                    .get_block(txn_area_start + block_idx as u64)
-                    .await?;
-                if block.block_no() != 0 {
-                    continue;
-                }
-
-                let superblock_ref = block.block();
-                let superblock = superblock_ref.get_at_offset::<Superblock>(0);
-                let last_checkpointed_txn_id = superblock.last_checkpointed_txn_id();
-                if last_checkpointed_txn_id <= self.last_checkpointed_txn_id {
-                    break;
-                }
-
-                txns_to_replay.push((idx, last_checkpointed_txn_id));
-                break;
-            }
+        if superblock_main.txn_log_data.txn_id > superblock_in_log.txn_log_data.txn_id {
+            log::error!("Motor FS: corrupted TXN log.");
+            return Err(ErrorKind::InvalidData.into());
         }
-
-        if txns_to_replay.is_empty() {
+        if superblock_main.txn_log_data.txn_id == superblock_in_log.txn_log_data.txn_id {
+            log::warn!("Motor FS: empty TXN log: some data may be lost.");
             return Ok(());
         }
+        if superblock_main.txn_log_data.txn_id + 1 != superblock_in_log.txn_log_data.txn_id {
+            log::error!("Motor FS: corrupted TXN log.");
+            return Err(ErrorKind::InvalidData.into());
+        }
 
-        log::info!(
-            "Motor FS txn log: {} transactions to replay.",
-            txns_to_replay.len()
-        );
+        todo!("")
+    }
 
-        todo!()
-        // Ok(())
+    async fn flush_txn_batch<BD: AsyncBlockDevice + 'static>(
+        &mut self,
+        block_cache: &mut BlockCache<BD>,
+    ) -> Result<()> {
+        assert!(self.txn_batch.len() < MAX_BLOCKS_IN_TXN_LOG);
+
+        // First, flush the log.
+        let txn_id = self.new_txn_id();
+        let mut txn_batch = HashMap::new();
+        core::mem::swap(&mut txn_batch, &mut self.txn_batch);
+        let txn_log_start = self.txn_log_start;
+
+        let mut sb_ref = self.superblock.block_mut();
+        let sb = sb_ref.get_mut_at_offset::<Superblock>(0);
+        sb.txn_log_data.clear();
+        sb.txn_log_data.txn_id = txn_id;
+        sb.txn_log_data.num_blocks = txn_batch.len() as u64;
+
+        let mut idx = 1; // Start with "1" because "0" is for the superblock.
+        for (block_no, block) in txn_batch.iter() {
+            sb.txn_log_data.txn_blocks[idx] = *block_no;
+            block_cache
+                .write_block(txn_log_start + idx as u64, block.clone())
+                .await?;
+
+            idx += 1;
+        }
+        block_cache.start_flushing().await;
+        drop(sb_ref);
+        self.superblock.consume_dirty();
+
+        // Commit the log.
+        block_cache
+            .write_block(txn_log_start, self.superblock.clone())
+            .await?;
+        block_cache.start_flushing().await;
+
+        // Then flush blocks to the main area.
+        for (block_no, block) in txn_batch.drain() {
+            block_cache.write_block(block_no, block).await?;
+        }
+
+        block_cache.start_flushing().await;
+
+        block_cache.write_block(0, self.superblock.clone()).await?;
+        block_cache.start_flushing().await;
+
+        self.last_checkpointed_txn_id = txn_id;
+
+        Ok(())
+    }
+
+    pub(crate) async fn flush<BD: AsyncBlockDevice + 'static>(
+        &mut self,
+        block_cache: &mut BlockCache<BD>,
+    ) -> Result<()> {
+        self.flush_txn_batch(block_cache).await?;
+        block_cache.flush().await?;
+        Ok(())
+        // todo!()
     }
 }
