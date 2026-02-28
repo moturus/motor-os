@@ -68,8 +68,7 @@ pub fn smoke_test() {
     let bytes = std::fs::read("/foo").expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
-    // const LEN: usize = 1024 * 1024 * 11 + 1001;
-    const LEN: usize = 1024 * 1024 + 1001;
+    const LEN: usize = 1024 * 1024 * 19 + 1001;
     let mut bytes = Vec::with_capacity(LEN);
     bytes.resize(LEN, 0);
     for byte in &mut bytes {
