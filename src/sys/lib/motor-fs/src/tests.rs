@@ -40,9 +40,7 @@ async fn open_fs(tag: &str) -> Result<MotorFs> {
 #[test]
 fn basic() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(basic_test()).unwrap();
 }
@@ -50,9 +48,7 @@ fn basic() {
 #[test]
 fn readdir() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(readdir_test()).unwrap();
 }
@@ -60,9 +56,7 @@ fn readdir() {
 #[test]
 fn midsize_file() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(midsize_file_test()).unwrap();
 }
@@ -70,9 +64,7 @@ fn midsize_file() {
 #[test]
 fn delete_reopen() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(delete_reopen_test()).unwrap();
 }
@@ -80,9 +72,7 @@ fn delete_reopen() {
 #[test]
 fn random_file() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(random_file_test()).unwrap();
 }
@@ -91,9 +81,7 @@ fn random_file() {
 #[ignore]
 fn write_speed() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(write_speed_test()).unwrap();
 }
@@ -102,9 +90,7 @@ fn write_speed() {
 #[ignore]
 fn native_write_speed() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(native_write_speed_test()).unwrap();
 }
@@ -113,9 +99,7 @@ fn native_write_speed() {
 #[ignore]
 fn native_write_speed_async() {
     init_logger();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(native_write_speed_async_test()).unwrap();
 }
@@ -485,8 +469,6 @@ async fn delete_reopen_test() -> Result<()> {
     );
 
     fs.flush().await?;
-
-    println!("will reopen");
 
     let mut fs = open_fs(FS_TAG).await?;
     assert_eq!(

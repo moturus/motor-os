@@ -6,10 +6,13 @@
 #[cfg(feature = "file-dev")]
 pub mod file_block_device;
 
+#[cfg(any(feature = "file-dev", feature = "moto-rt"))]
 pub mod block_cache;
+#[cfg(any(feature = "file-dev", feature = "moto-rt"))]
 mod block_device;
 mod filesystem;
 
+#[cfg(any(feature = "file-dev", feature = "moto-rt"))]
 pub use block_device::*;
 pub use filesystem::*;
 

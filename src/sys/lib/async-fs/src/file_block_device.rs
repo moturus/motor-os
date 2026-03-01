@@ -8,7 +8,7 @@ use std::io::ErrorKind;
 use std::io::Result;
 
 pub struct AsyncFileBlockDevice {
-    file: std::cell::RefCell<tokio::fs::File>,
+    file: tokio::sync::Mutex<tokio::fs::File>,
     num_blocks: u64,
 }
 
@@ -26,7 +26,7 @@ impl AsyncFileBlockDevice {
         }
 
         Ok(Self {
-            file: std::cell::RefCell::new(file),
+            file: tokio::sync::Mutex::new(file),
             num_blocks: len >> BLOCK_SIZE.ilog2(),
         })
     }
@@ -42,7 +42,7 @@ impl AsyncFileBlockDevice {
         file.set_len(num_blocks << BLOCK_SIZE.ilog2()).await?;
 
         Ok(Self {
-            file: std::cell::RefCell::new(file),
+            file: tokio::sync::Mutex::new(file),
             num_blocks,
         })
     }
@@ -65,7 +65,7 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        let mut file = self.file.borrow_mut();
+        let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
             .await?;
 
@@ -82,7 +82,7 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
             return Err(ErrorKind::InvalidInput.into());
         }
 
-        let mut file = self.file.borrow_mut();
+        let mut file = self.file.lock().await;
         file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
             .await?;
 
@@ -100,7 +100,7 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
 
     async fn flush(&self) -> Result<()> {
         use tokio::io::AsyncWriteExt;
-        self.file.borrow_mut().flush().await
+        self.file.lock().await.flush().await
     }
 
     fn notify(&self) {}

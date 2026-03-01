@@ -7,7 +7,7 @@ edition = "2024"
 
 [features]
 default  = ["std"]
-file-dev = ["camino", "tokio/rt", "tokio/time", "tokio/fs", "tokio/io-util"]
+file-dev = ["camino", "tokio/rt", "tokio/sync", "tokio/time", "tokio/fs", "tokio/io-util"]
 moto-rt  = ["dep:moto-async", "dep:moto-rt"]
 std = []
 

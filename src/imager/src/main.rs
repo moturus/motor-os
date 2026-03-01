@@ -129,9 +129,7 @@ fn create_motorfs_partition(
     files: &BTreeMap<PathBuf, String>,
     data_partition_size_mb: u64,
 ) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(create_motorfs_partition_async(
         result_path,

@@ -21,7 +21,7 @@ pub async fn motor_fs_create_dir_all(
             continue;
         }
 
-        let stat_result = fs.stat(parent_id, filename).await.unwrap();
+        let stat_result = fs.stat(parent_id, filename).await.unwrap_or(None);
         parent_id = if let Some((entry_id, _)) = stat_result {
             entry_id
         } else {

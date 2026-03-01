@@ -138,16 +138,23 @@ impl TxnLogger {
         let superblock_main = sb_main_ref.get_at_offset::<Superblock>(0);
         let superblock_in_log = sb_in_log_ref.get_at_offset::<Superblock>(0);
 
-        if superblock_main.txn_log_data.txn_id > superblock_in_log.txn_log_data.txn_id {
-            log::error!("Motor FS: corrupted TXN log.");
+        let main_txn_id = superblock_main.txn_log_data.txn_id;
+        let last_logged_txn_id = superblock_in_log.txn_log_data.txn_id;
+
+        if main_txn_id > last_logged_txn_id {
+            log::error!(
+                "Motor FS: corrupted TXN log:\n\tmain txn id {main_txn_id} vs last logged txn id {last_logged_txn_id}."
+            );
             return Err(ErrorKind::InvalidData.into());
         }
-        if superblock_main.txn_log_data.txn_id == superblock_in_log.txn_log_data.txn_id {
+        if main_txn_id == last_logged_txn_id {
             log::warn!("Motor FS: empty TXN log: some data may be lost.");
             return Ok(());
         }
-        if superblock_main.txn_log_data.txn_id + 1 != superblock_in_log.txn_log_data.txn_id {
-            log::error!("Motor FS: corrupted TXN log.");
+        if main_txn_id + 1 != last_logged_txn_id {
+            log::error!(
+                "Motor FS: corrupted TXN log:\n\tmain txn id {main_txn_id} vs last logged txn id {last_logged_txn_id}."
+            );
             return Err(ErrorKind::InvalidData.into());
         }
 
@@ -172,34 +179,42 @@ impl TxnLogger {
         sb.txn_log_data.txn_id = txn_id;
         sb.txn_log_data.num_blocks = txn_batch.len() as u64;
 
+        sb.txn_log_data.txn_blocks[0] = 0;
+
+        // Loop twice, to avoid holding superblock borrow across write/await.
         let mut idx = 1; // Start with "1" because "0" is for the superblock.
-        for (block_no, block) in txn_batch.iter() {
+        for (block_no, _) in txn_batch.iter() {
             sb.txn_log_data.txn_blocks[idx] = *block_no;
+            idx += 1;
+        }
+        drop(sb_ref);
+
+        idx = 1;
+        for (_, block) in txn_batch.iter() {
             block_cache
                 .write_block(txn_log_start + idx as u64, block.clone())
                 .await?;
 
             idx += 1;
         }
-        block_cache.start_flushing().await;
-        drop(sb_ref);
+        block_cache.commit().await;
         self.superblock.consume_dirty();
 
         // Commit the log.
         block_cache
             .write_block(txn_log_start, self.superblock.clone())
             .await?;
-        block_cache.start_flushing().await;
+        block_cache.commit().await;
 
         // Then flush blocks to the main area.
         for (block_no, block) in txn_batch.drain() {
             block_cache.write_block(block_no, block).await?;
         }
 
-        block_cache.start_flushing().await;
+        block_cache.commit().await;
 
         block_cache.write_block(0, self.superblock.clone()).await?;
-        block_cache.start_flushing().await;
+        block_cache.commit().await;
 
         self.last_checkpointed_txn_id = txn_id;
 

@@ -212,5 +212,6 @@ pub trait FileSystem {
 
     async fn empty_blocks(&mut self) -> Result<u64>;
 
+    /// Flush all in-memory blocks to the underlying block device.
     async fn flush(&mut self) -> Result<()>;
 }

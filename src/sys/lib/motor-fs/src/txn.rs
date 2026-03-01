@@ -48,7 +48,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Drop for Txn<'a, BD> {
             if block.is_dirty() {
                 assert!(!self.read_only);
                 log::warn!("Dirty block {} on txn drop.", block_no.as_u64());
-                self.fs.block_cache().discard_dirty_block(block);
+                block.discard_dirty();
             }
         }
 
