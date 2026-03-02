@@ -1,7 +1,7 @@
 use crate::AsyncBlockDevice;
 use crate::BLOCK_SIZE;
 use crate::Block;
-use crate::block_cache::FlushingBlock;
+use crate::block_cache::CheckpointedBlock;
 use async_trait::async_trait;
 use camino::Utf8Path;
 use std::io::ErrorKind;
@@ -50,7 +50,7 @@ impl AsyncFileBlockDevice {
 
 #[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
-    type Completion = core::future::Ready<(FlushingBlock, Result<()>)>;
+    type Completion = core::future::Ready<(CheckpointedBlock, Result<()>)>;
 
     fn num_blocks(&self) -> u64 {
         self.num_blocks
@@ -92,7 +92,7 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
     async fn write_block_with_completion(
         &self,
         block_no: u64,
-        block: FlushingBlock,
+        block: CheckpointedBlock,
     ) -> Result<Self::Completion> {
         self.write_block(block_no, block.as_ref()).await?;
         Ok(core::future::ready((block, Ok(()))))

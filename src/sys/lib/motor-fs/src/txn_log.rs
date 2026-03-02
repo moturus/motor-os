@@ -22,7 +22,7 @@ use crate::TxnLogData;
 use async_fs::AsyncBlockDevice;
 use async_fs::block_cache::BlockCache;
 use async_fs::block_cache::CachedBlock;
-use async_fs::block_cache::FlushingBlock;
+use async_fs::block_cache::CheckpointedBlock;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -42,7 +42,7 @@ pub(crate) struct TxnLogger {
     txn_log_start: u64,
 
     superblock: CachedBlock,
-    txn_batch: Rc<LocalMutex<HashMap<u64, FlushingBlock>>>,
+    txn_batch: Rc<LocalMutex<HashMap<u64, CheckpointedBlock>>>,
 
     block_cache_stub: async_fs::block_cache::AsyncStub,
 }
@@ -173,9 +173,9 @@ impl TxnLogger {
                 continue;
             }
 
-            txn_batch.insert(block_no.as_u64(), FlushingBlock::new(block));
+            txn_batch.insert(block_no.as_u64(), CheckpointedBlock::new(block));
         }
-        txn_batch.insert(0, FlushingBlock::new(&self.superblock));
+        txn_batch.insert(0, CheckpointedBlock::new(&self.superblock));
 
         Ok(())
     }

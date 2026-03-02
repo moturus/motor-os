@@ -64,7 +64,7 @@ impl Drop for InnerCachedBlock {
 
 /// Holder of a block to be written to BD.
 #[derive(Clone)]
-pub struct FlushingBlock {
+pub struct CheckpointedBlock {
     block: Rc<Box<Block>>, // This is what we are writing.
 
     // Need to keep a reference of the cached block, otherwise
@@ -73,13 +73,13 @@ pub struct FlushingBlock {
     caches: Rc<RefCell<SupportingCaches>>,
 }
 
-impl AsRef<[u8]> for FlushingBlock {
+impl AsRef<[u8]> for CheckpointedBlock {
     fn as_ref(&self) -> &[u8] {
         self.block.as_bytes()
     }
 }
 
-impl FlushingBlock {
+impl CheckpointedBlock {
     pub fn new(cached_block: &CachedBlock) -> Self {
         debug_assert!(!cached_block.is_dirty());
 
@@ -104,7 +104,7 @@ impl FlushingBlock {
     }
 }
 
-impl Drop for FlushingBlock {
+impl Drop for CheckpointedBlock {
     fn drop(&mut self) {
         if Rc::strong_count(&self.block) == 1 {
             let mut caches = self.caches.borrow_mut();
@@ -208,7 +208,7 @@ impl CachedBlock {
 }
 
 enum BackgroundMessage {
-    WriteBlock((u64, FlushingBlock)),
+    WriteBlock((u64, CheckpointedBlock)),
     Commit,
 
     #[cfg(target_os = "motor")]
@@ -268,7 +268,7 @@ pub struct AsyncStub {
 }
 
 impl AsyncStub {
-    pub async fn write_block(&self, block_no: u64, block: FlushingBlock) -> Result<()> {
+    pub async fn write_block(&self, block_no: u64, block: CheckpointedBlock) -> Result<()> {
         self.completion_sink
             .send(BackgroundMessage::WriteBlock((block_no, block)))
             .await

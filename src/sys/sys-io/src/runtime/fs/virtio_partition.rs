@@ -41,7 +41,7 @@ impl VirtioPartition {
 
 #[async_trait(?Send)]
 impl async_fs::AsyncBlockDevice for VirtioPartition {
-    type Completion = virtio_async::WriteCompletion<async_fs::block_cache::FlushingBlock>;
+    type Completion = virtio_async::WriteCompletion<async_fs::block_cache::CheckpointedBlock>;
 
     fn num_blocks(&self) -> u64 {
         self.virtio_blocks >> 3
@@ -75,7 +75,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
     async fn write_block_with_completion(
         &self,
         block_no: u64,
-        block: async_fs::block_cache::FlushingBlock,
+        block: async_fs::block_cache::CheckpointedBlock,
     ) -> Result<Self::Completion> {
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
