@@ -124,14 +124,6 @@ pub(crate) struct TxnLogData {
 
 unsafe impl bytemuck::Zeroable for TxnLogData {}
 
-impl TxnLogData {
-    pub(crate) fn clear(&mut self) {
-        use bytemuck::Zeroable;
-
-        *self = Self::zeroed();
-    }
-}
-
 /// Superblock (block #0).
 #[derive(Pod, Clone, Copy)]
 #[repr(C)]

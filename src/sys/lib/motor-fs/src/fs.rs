@@ -20,6 +20,12 @@ pub const PARTITION_ID: u8 = 0x2e;
 
 const CACHE_SIZE: usize = 512; // 2MB.
 
+#[cfg(test)]
+pub const MAX_FLUSH_DELAY_MS: u64 = 50;
+
+#[cfg(not(test))]
+pub const MAX_FLUSH_DELAY_MS: u64 = 500;
+
 pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
     block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
@@ -157,13 +163,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         txn_blocks: [Option<(crate::BlockNo, async_fs::block_cache::CachedBlock)>;
             crate::MAX_BLOCKS_IN_TXN],
     ) -> Result<()> {
-        let Self {
-            block_cache,
-            txn_logger,
-            ..
-        } = self;
-
-        if let Err(err) = txn_logger.log_txn(block_cache, txn_blocks).await {
+        if let Err(err) = self.txn_logger.log_txn(txn_blocks).await {
             log::error!("FS error: {err:?}.");
             let kind = err.kind();
             self.error = Err(err);
@@ -529,12 +529,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn flush(&mut self) -> Result<()> {
-        let Self {
-            block_cache,
-            txn_logger,
-            ..
-        } = self;
-        txn_logger.flush(block_cache).await
+        self.txn_logger.flush().await
     }
 
     fn num_blocks(&self) -> u64 {

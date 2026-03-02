@@ -7,7 +7,7 @@ edition = "2024"
 
 [dependencies]
 # Internal.
-async-fs         = { path = "../lib/async-fs", features = ["moto-rt"] }
+async-fs         = { path = "../lib/async-fs"         }
 flatfs           = { path = "../lib/flatfs"           }
 moto-async       = { path = "../lib/moto-async"       }
 moto-io-internal = { path = "../lib/moto-io-internal" }

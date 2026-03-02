@@ -6,10 +6,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-fs = { path = "../sys/lib/async-fs", features = ["file-dev"] }
-flatfs   = { path = "../sys/lib/flatfs"  }
-motor-fs = { path = "../sys/lib/motor-fs"}
-srfs     = { path = "../sys/lib/srfs"    }
+async-fs = { path = "../sys/lib/async-fs" }
+flatfs   = { path = "../sys/lib/flatfs"   }
+motor-fs = { path = "../sys/lib/motor-fs" }
+srfs     = { path = "../sys/lib/srfs"     }
 
 env_logger = "0.11"
 camino     = "1.1.10"

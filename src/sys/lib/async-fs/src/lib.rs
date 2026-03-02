@@ -3,24 +3,18 @@
 #![allow(async_fn_in_trait)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(feature = "file-dev")]
+#[cfg(not(target_os = "motor"))]
 pub mod file_block_device;
 
-#[cfg(any(feature = "file-dev", feature = "moto-rt"))]
 pub mod block_cache;
-#[cfg(any(feature = "file-dev", feature = "moto-rt"))]
 mod block_device;
 mod filesystem;
 
-#[cfg(any(feature = "file-dev", feature = "moto-rt"))]
 pub use block_device::*;
 pub use filesystem::*;
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
-
-#[cfg(all(not(feature = "std"), not(feature = "moto-rt")))]
-compile_error!("async-fs must have either 'std' or 'moto-rt' feature.");
 
 #[cfg(feature = "std")]
 pub type Result<T> = std::io::Result<T>;

@@ -948,6 +948,8 @@ dependencies = [
  "env_logger",
  "log",
  "micromap",
+ "moto-async",
+ "moto-rt 0.16.0",
  "rand 0.8.5",
  "tokio",
 ]

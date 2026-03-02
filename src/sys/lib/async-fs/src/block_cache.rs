@@ -63,8 +63,8 @@ impl Drop for InnerCachedBlock {
 }
 
 /// Holder of a block to be written to BD.
+#[derive(Clone)]
 pub struct FlushingBlock {
-    block_no: u64,
     block: Rc<Box<Block>>, // This is what we are writing.
 
     // Need to keep a reference of the cached block, otherwise
@@ -80,16 +80,27 @@ impl AsRef<[u8]> for FlushingBlock {
 }
 
 impl FlushingBlock {
-    fn new(cached_block: &CachedBlock) -> Self {
-        let block = cached_block.inner.borrow().clean_block.clone();
-        let block_no = cached_block.inner.borrow().block_no;
+    pub fn new(cached_block: &CachedBlock) -> Self {
+        debug_assert!(!cached_block.is_dirty());
 
+        let block = cached_block.inner.borrow().clean_block.clone();
         Self {
-            block_no,
             block,
             inner: cached_block.inner.clone(),
             caches: cached_block.inner.borrow().supporting_caches.clone(),
         }
+    }
+
+    pub fn block_mut(&mut self) -> &mut Block {
+        if Rc::strong_count(&self.block) > 1 {
+            let mut block = self.caches.borrow_mut().pop_free_block();
+            {
+                let block_ref: &mut Block = Rc::get_mut(&mut block).unwrap().as_mut();
+                *block_ref = **self.block;
+            }
+            core::mem::swap(&mut block, &mut self.block);
+        }
+        Rc::get_mut(&mut self.block).unwrap().as_mut()
     }
 }
 
@@ -98,7 +109,6 @@ impl Drop for FlushingBlock {
         if Rc::strong_count(&self.block) == 1 {
             let mut caches = self.caches.borrow_mut();
             caches.push_free_block(self.block.clone());
-            caches.clear_expiring_block(self.block_no);
         }
     }
 }
@@ -201,10 +211,10 @@ enum BackgroundMessage {
     WriteBlock((u64, FlushingBlock)),
     Commit,
 
-    #[cfg(feature = "moto-rt")]
+    #[cfg(target_os = "motor")]
     Flush(moto_async::oneshot::Sender<()>),
 
-    #[cfg(not(feature = "moto-rt"))]
+    #[cfg(not(target_os = "motor"))]
     Flush(tokio::sync::oneshot::Sender<()>),
 }
 
@@ -249,19 +259,60 @@ impl SupportingCaches {
     }
 }
 
+#[derive(Clone)]
+pub struct AsyncStub {
+    #[cfg(target_os = "motor")]
+    completion_sink: moto_async::channel::Sender<BackgroundMessage>,
+    #[cfg(not(target_os = "motor"))]
+    completion_sink: tokio::sync::mpsc::Sender<BackgroundMessage>,
+}
+
+impl AsyncStub {
+    pub async fn write_block(&self, block_no: u64, block: FlushingBlock) -> Result<()> {
+        self.completion_sink
+            .send(BackgroundMessage::WriteBlock((block_no, block)))
+            .await
+            .unwrap();
+        Ok(())
+    }
+
+    pub async fn commit(&self) {
+        self.completion_sink
+            .send(BackgroundMessage::Commit)
+            .await
+            .unwrap_or_else(|_e| panic!()); // Impossible; but we can't just unwrap().
+    }
+
+    pub async fn flush(&self) -> Result<()> {
+        #[cfg(target_os = "motor")]
+        let (sender, receiver) = moto_async::oneshot();
+
+        #[cfg(not(target_os = "motor"))]
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        self.completion_sink
+            .send(BackgroundMessage::Flush(sender))
+            .await
+            .unwrap();
+
+        // We need to wait for flush to complete.
+        receiver.await.unwrap();
+
+        Ok(())
+    }
+}
+
 /// LRU-based block cache.
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Rc<BD>,
+    #[allow(unused)]
     cache_size: usize,
 
     // The main cache.
     lru_cache: LruCache<u64, CachedBlock>,
     supporting_caches: Rc<RefCell<SupportingCaches>>,
 
-    #[cfg(feature = "moto-rt")]
-    completion_sink: moto_async::channel::Sender<BackgroundMessage>,
-    #[cfg(not(feature = "moto-rt"))]
-    completion_sink: tokio::sync::mpsc::Sender<BackgroundMessage>,
+    async_stub: AsyncStub,
 
     #[allow(unused)]
     cache_misses: u64,
@@ -285,10 +336,10 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         let block_dev: Rc<BD> = Rc::from(block_dev);
 
         let sender = {
-            #[cfg(feature = "moto-rt")]
+            #[cfg(target_os = "motor")]
             let (sender, mut receiver) = moto_async::channel(MAX_COMPLETIONS_IN_FLIGHT);
 
-            #[cfg(not(feature = "moto-rt"))]
+            #[cfg(not(target_os = "motor"))]
             let (sender, mut receiver) = tokio::sync::mpsc::channel(MAX_COMPLETIONS_IN_FLIGHT);
 
             let bd = block_dev.clone();
@@ -328,10 +379,10 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                 }
             };
 
-            #[cfg(feature = "moto-rt")]
+            #[cfg(target_os = "motor")]
             let _handle = moto_async::LocalRuntime::spawn(background_task);
 
-            #[cfg(not(feature = "moto-rt"))]
+            #[cfg(not(target_os = "motor"))]
             let _handle = tokio::task::spawn_local(background_task);
 
             sender
@@ -368,18 +419,26 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             })?;
         let superblock = CachedBlock::new(0, Rc::new(block), supporting_caches.clone());
 
+        let async_stub = AsyncStub {
+            completion_sink: sender,
+        };
+
         Ok(Self {
             block_dev,
             cache_size,
             lru_cache: LruCache::new(NonZero::new(cache_size).unwrap()),
             supporting_caches,
-            completion_sink: sender,
+            async_stub,
             cache_misses: 0,
             pinned_blocks_start,
             pinned_blocks_num,
             pinned_blocks,
             superblock,
         })
+    }
+
+    pub fn async_stub(&self) -> AsyncStub {
+        self.async_stub.clone()
     }
 
     fn is_pinned(&self, block_no: u64) -> bool {
@@ -484,47 +543,6 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         block.block_mut().clear();
         self.push_block(block_no, block.clone());
         block
-    }
-
-    /// Write CachedBlock to block_no. Note that block_no may not be equal to block.block_no();
-    pub async fn write_block(&mut self, block_no: u64, block: CachedBlock) -> Result<()> {
-        let flusher = FlushingBlock::new(&block);
-
-        self.completion_sink
-            .send(BackgroundMessage::WriteBlock((block_no, flusher)))
-            .await
-            .unwrap();
-        Ok(())
-    }
-
-    pub async fn commit(&mut self) {
-        assert!(self.supporting_caches.borrow().free_blocks.len() < self.cache_size);
-
-        self.completion_sink
-            .send(BackgroundMessage::Commit)
-            .await
-            .unwrap_or_else(|_e| panic!()); // Impossible; but we can't just unwrap().
-    }
-
-    pub async fn flush(&mut self) -> Result<()> {
-        #[cfg(debug_assertions)]
-        self.debug_check_clean();
-
-        #[cfg(feature = "moto-rt")]
-        let (sender, receiver) = moto_async::oneshot();
-
-        #[cfg(not(feature = "moto-rt"))]
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-
-        self.completion_sink
-            .send(BackgroundMessage::Flush(sender))
-            .await
-            .unwrap();
-
-        // We need to wait for flush to complete.
-        receiver.await.unwrap();
-
-        Ok(())
     }
 
     #[cfg(debug_assertions)]

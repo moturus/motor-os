@@ -9,7 +9,7 @@ categories = ["no-std"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-async-fs    = { path = "../async-fs"         , default-features = false, features = ["moto-rt"] }
+async-fs    = { path = "../async-fs"         , default-features = false }
 moto-async  = { path = "../../lib/moto-async" }
 moto-ipc    = { path = "../moto-ipc"          }
 moto-rt     = { path = "../moto-rt"           }

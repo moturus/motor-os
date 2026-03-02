@@ -9,15 +9,21 @@ readme = "README.md"
 
 [dependencies]
 async-trait = "0.1.88"
-crc = "3.0"
-log = "0.4.28"
-async-fs = { path = "../async-fs" }
-bytemuck = { version = "1.24", features = ["latest_stable_rust"] }
-micromap = "0.1.0"
+crc         = "3.0"
+log         = "0.4.28"
+async-fs    = { path = "../async-fs" }
+bytemuck    = { version = "1.24", features = ["latest_stable_rust"] }
+micromap    = "0.1.0"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-rt    = { path = "../moto-rt"    }
+moto-async = { path = "../moto-async" }
+
+[target.'cfg(not(target_os = "motor"))'.dependencies]
+tokio      = { version = "1.44.2", default-features = false, features = ["fs", "io-util", "rt", "sync", "time"] }
+
 
 [dev-dependencies]
-async-fs = { path = "../async-fs", features = ["file-dev"] }
-camino = "1.1.10"
+camino     = "1.1.10"
 env_logger = "0.11"
-rand = "0.8"
-tokio = { version = "1.44.2", default-features = false, features = ["rt"] }
+rand       = "0.8"
