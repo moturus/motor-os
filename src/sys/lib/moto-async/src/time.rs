@@ -48,3 +48,7 @@ impl Future for Sleep {
 pub fn sleep(duration: Duration) -> Sleep {
     Sleep::new_timeout(Instant::now() + duration)
 }
+
+pub fn sleep_until(deadline: Instant) -> Sleep {
+    Sleep::new_timeout(deadline)
+}

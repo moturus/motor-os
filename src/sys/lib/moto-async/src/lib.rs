@@ -36,4 +36,4 @@ pub use channel::channel;
 pub use local_runtime::*;
 pub use mutex::{LocalMutex, LocalMutexGuard};
 pub use oneshot::oneshot;
-pub use time::{Instant, Sleep, sleep};
+pub use time::{Instant, Sleep, sleep, sleep_until};
