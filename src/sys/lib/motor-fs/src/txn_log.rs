@@ -23,17 +23,12 @@ use async_fs::AsyncBlockDevice;
 use async_fs::block_cache::BlockCache;
 use async_fs::block_cache::CachedBlock;
 use async_fs::block_cache::CheckpointedBlock;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
 // use std::time::Instant;
-
-#[cfg(target_os = "motor")]
-type LocalMutex<T> = moto_async::LocalMutex<T>;
-
-#[cfg(not(target_os = "motor"))]
-type LocalMutex<T> = tokio::sync::Mutex<T>;
 
 // In-memory.
 pub(crate) struct TxnLogger {
@@ -42,7 +37,7 @@ pub(crate) struct TxnLogger {
     txn_log_start: u64,
 
     superblock: CachedBlock,
-    txn_batch: Rc<LocalMutex<HashMap<u64, CheckpointedBlock>>>,
+    txn_batch: Rc<RefCell<HashMap<u64, CheckpointedBlock>>>,
 
     block_cache_stub: async_fs::block_cache::AsyncStub,
 }
@@ -54,7 +49,7 @@ impl TxnLogger {
         let num_blocks = block_cache.total_blocks();
         let txn_log_start = num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64;
 
-        let txn_batch = Rc::new(LocalMutex::new(HashMap::new()));
+        let txn_batch = Rc::new(RefCell::new(HashMap::new()));
 
         Ok(Self {
             last_checkpointed_txn_id: 0,
@@ -78,7 +73,7 @@ impl TxnLogger {
         let last_checkpointed_txn_id = superblock.txn_log_data.txn_id;
         drop(superblock_ref);
 
-        let txn_batch = Rc::new(LocalMutex::new(HashMap::new()));
+        let txn_batch = Rc::new(RefCell::new(HashMap::new()));
 
         let mut this = Self {
             last_checkpointed_txn_id,
@@ -156,12 +151,12 @@ impl TxnLogger {
             blocks_in_txn += 1;
         }
 
-        if blocks_in_txn + self.txn_batch.lock().await.len() >= MAX_BLOCKS_IN_TXN_LOG {
+        if blocks_in_txn + self.txn_batch.borrow().len() >= MAX_BLOCKS_IN_TXN_LOG {
             self.flush_txn_batch().await?;
-            debug_assert!(self.txn_batch.lock().await.is_empty());
+            debug_assert!(self.txn_batch.borrow().is_empty());
         }
 
-        let mut txn_batch = self.txn_batch.lock().await;
+        let mut txn_batch = self.txn_batch.borrow_mut();
 
         for entry in &txn_blocks {
             let Some((block_no, block)) = entry else {
@@ -169,7 +164,7 @@ impl TxnLogger {
             };
 
             if block_no.as_u64() == 0 {
-                assert_eq!(self.superblock.unique_id(), block.unique_id());
+                debug_assert_eq!(self.superblock.unique_id(), block.unique_id());
                 continue;
             }
 
@@ -186,7 +181,7 @@ impl TxnLogger {
         // First, flush the log.
         let txn_id = self.new_txn_id();
         let mut txn_batch = HashMap::new();
-        core::mem::swap(&mut txn_batch, &mut *self.txn_batch.lock().await);
+        core::mem::swap(&mut txn_batch, &mut *self.txn_batch.borrow_mut());
         assert!(txn_batch.len() < MAX_BLOCKS_IN_TXN_LOG);
 
         let txn_log_start = self.txn_log_start;
@@ -194,9 +189,6 @@ impl TxnLogger {
         let mut sb = txn_batch.remove(&0).unwrap();
         let mut txn_log_data = TxnLogData::zeroed();
 
-        // let mut sb_ref = self.superblock.block_mut();
-        // let sb = sb_ref.get_mut_at_offset::<Superblock>(0);
-        // sb.txn_log_data.clear();
         txn_log_data.txn_id = txn_id;
         txn_log_data.num_blocks = txn_batch.len() as u64;
         txn_log_data.txn_blocks[0] = 0;
