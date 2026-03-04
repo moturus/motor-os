@@ -34,6 +34,7 @@ pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
 }
 
 impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
+    #[inline(always)]
     pub fn check_err(&self) -> Result<()> {
         match &self.error {
             Ok(_) => Ok(()),
@@ -93,69 +94,11 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 
         let txn_logger = crate::txn_log::TxnLogger::open(&mut block_cache).await?;
 
-        let mut self_ = Self {
+        Ok(Self {
             block_cache,
             txn_logger,
             error: Ok(()),
-        };
-
-        self_
-            .do_on_open_checks()
-            .await
-            .inspect_err(|err| log::error!("Motor FS: open checks failed: {err:?}."))?;
-
-        Ok(self_)
-    }
-
-    async fn do_on_open_checks(&mut self) -> Result<()> {
-        // TODO: do we need to do any kind of (superficial) validation?
-        // On the one hand, it could be useful; on the other, it will
-        // slow down the bootup, which is a priority. So for now
-        // no explicit validation other than the num blocks check above.
-
-        /*
-        {
-            // Test writing blocks.
-            let num_blocks = 1024 * 1024 * 32 / 4096;
-
-            let started = std::time::Instant::now();
-            for idx in 0..num_blocks {
-                let block = self.block_cache.get_empty_block(idx + 10);
-                self.block_cache
-                    .write_block_if_dirty(idx + 10)
-                    .await
-                    .unwrap();
-            }
-            let elapsed = started.elapsed();
-            let write_mbps =
-                ((num_blocks * 4096) as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
-            log::info!("do_on_open_checks: write speed {:.3} MB/sec", write_mbps);
-
-            panic!("we just killed the volume");
-        }
-
-        {
-            // Test large file write.
-            let file_id = self
-                .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "__test__")
-                .await?;
-            let block = async_fs::Block::new_zeroed();
-
-            let num_blocks = 1024 * 1024 * 32 / 4096;
-
-            let started = std::time::Instant::now();
-            for idx in 0..num_blocks {
-                self.write(file_id, idx * 4096, block.as_bytes()).await?;
-            }
-            let elapsed = started.elapsed();
-            let write_mbps =
-                ((num_blocks * 4096) as f64) / elapsed.as_secs_f64() / (1024.0 * 1024.0);
-            log::info!("do_on_open_checks: write speed {:.3} MB/sec", write_mbps);
-            self.delete_entry(file_id).await?;
-        }
-        */
-
-        Ok(())
+        })
     }
 
     pub(crate) async fn log_txn(
@@ -191,6 +134,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         parent_id: EntryId,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>> {
+        self.check_err()?;
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
         log::debug!("stat: {parent_id:x} '{filename}'");
@@ -256,6 +200,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
     ) -> Result<EntryId> {
+        self.check_err()?;
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
         } else {
@@ -273,6 +218,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
+        self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
         }
@@ -287,6 +233,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()> {
+        self.check_err()?;
         let new_parent_id = if new_parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
         } else {
@@ -334,6 +281,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     /// Get the first entry in a directory.
     #[allow(clippy::await_holding_refcell_ref)]
     async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+        self.check_err()?;
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
         } else {
@@ -366,6 +314,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     /// Get the next entry in a directory.
     #[allow(clippy::await_holding_refcell_ref)]
     async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Ok(None);
         }
@@ -410,6 +359,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        self.check_err()?;
         let id: EntryIdInternal = entry_id.into();
         if id == ROOT_DIR_ID_INTERNAL || id == async_fs::ROOT_ID.into() {
             return Ok(None);
@@ -423,6 +373,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn name(&mut self, entry_id: EntryId) -> Result<String> {
+        self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
         } else {
@@ -437,6 +388,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn metadata(&mut self, entry_id: EntryId) -> Result<async_fs::Metadata> {
+        self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
         } else {
@@ -451,6 +403,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        self.check_err()?;
         let file_id: EntryIdInternal = file_id.into();
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
         dir_entry!(entry_block).validate_entry(file_id)?;
@@ -507,6 +460,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+        self.check_err()?;
         log::trace!(
             "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
             buf.len()
@@ -515,6 +469,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
+        self.check_err()?;
         Txn::do_resize_txn(self, file_id.into(), new_size).await
     }
 
@@ -529,6 +484,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn flush(&mut self) -> Result<()> {
+        self.check_err()?;
         self.txn_logger.flush().await
     }
 
