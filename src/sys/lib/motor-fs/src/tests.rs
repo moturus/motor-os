@@ -70,6 +70,14 @@ fn delete_reopen() {
 }
 
 #[test]
+fn no_lost_commits() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(no_lost_commits_test()).unwrap();
+}
+
+#[test]
 fn random_file() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -508,6 +516,33 @@ async fn delete_reopen_test() -> Result<()> {
     Ok(())
 }
 
+async fn no_lost_commits_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 4 / 4096;
+    const FS_TAG: &str = "motor_fs_no_lost_commits_test";
+    let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID;
+    let foo_id = fs.create_entry(root, EntryKind::File, "foo").await.unwrap();
+
+    // Wait for flush timeout.
+    tokio::time::sleep(std::time::Duration::from_millis(
+        crate::fs::MAX_FLUSH_DELAY_MS + 10,
+    ))
+    .await;
+
+    // Note: no explicit flushing.
+    core::mem::drop(fs);
+
+    let mut fs = open_fs(FS_TAG).await?;
+    assert_eq!(
+        fs.stat(root, "foo").await.unwrap().unwrap(),
+        (foo_id, EntryKind::File)
+    );
+
+    println!("no_lost_commits_test PASS");
+    Ok(())
+}
+
 #[test]
 fn test_hash_debug() {
     #[cfg(debug_assertions)]
@@ -585,7 +620,7 @@ async fn random_file_test() -> Result<()> {
         bytes.insert(block_no, block);
     }
 
-    assert_eq!(0, fs.empty_blocks().await.unwrap());
+    assert!(fs.empty_blocks().await.unwrap() < 1);
     let file_sz = fs.metadata(file_id).await?.size;
     log::debug!("file size: {file_sz}; blocks: {}", file_sz / 4096);
     assert_eq!((file_sz / 4096) as usize, bytes.len());

@@ -22,7 +22,7 @@
 use crate::BlockNo;
 use crate::MAX_BLOCKS_IN_TXN;
 use crate::MAX_BLOCKS_IN_TXN_LOG;
-// use crate::MAX_FLUSH_DELAY_MS;
+use crate::MAX_FLUSH_DELAY_MS;
 use crate::Superblock;
 use crate::TxnLogData;
 use async_fs::AsyncBlockDevice;
@@ -34,7 +34,11 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
-use std::time::Instant;
+
+#[cfg(target_os = "motor")]
+use moto_async::Instant;
+#[cfg(not(target_os = "motor"))]
+use tokio::time::Instant;
 
 struct TxnBatch {
     block_map: HashMap<u64, CheckpointedBlock>,
@@ -84,12 +88,6 @@ type TxnBatchSender = moto_async::channel::Sender<CommitterMessage>;
 #[cfg(not(target_os = "motor"))]
 type TxnBatchSender = tokio::sync::mpsc::Sender<CommitterMessage>;
 
-#[cfg(target_os = "motor")]
-type TxnBatchReceiver = moto_async::channel::Receiver<CommitterMessage>;
-
-#[cfg(not(target_os = "motor"))]
-type TxnBatchReceiver = tokio::sync::mpsc::Receiver<CommitterMessage>;
-
 // In-memory.
 pub(crate) struct TxnLogger {
     superblock: CachedBlock,
@@ -102,6 +100,41 @@ pub(crate) struct TxnLogger {
 impl TxnLogger {
     fn txn_log_start(block_cache_stub: &async_fs::block_cache::AsyncStub) -> u64 {
         block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
+    }
+
+    fn spawn_timeout_flusher(txn_batch_holder: TxnBatchHolder, sender: TxnBatchSender) {
+        let holder_lock = txn_batch_holder.borrow();
+
+        let timeout = holder_lock.started + std::time::Duration::from_millis(MAX_FLUSH_DELAY_MS);
+        let txn_id = holder_lock.txn_id;
+        drop(holder_lock);
+
+        let timeout_task = async move {
+            #[cfg(target_os = "motor")]
+            moto_async::sleep_until(timeout).await;
+
+            #[cfg(not(target_os = "motor"))]
+            tokio::time::sleep_until(timeout).await;
+
+            let mut holder_lock = txn_batch_holder.borrow_mut();
+            if holder_lock.txn_id != txn_id {
+                return;
+            }
+
+            if !holder_lock.block_map.is_empty() {
+                let txn_batch = holder_lock.renew();
+                drop(holder_lock);
+
+                log::debug!("commiting batch {txn_id} on timeout");
+                let _ = sender.send(CommitterMessage::TxnBatch(txn_batch)).await;
+            }
+        };
+
+        #[cfg(target_os = "motor")]
+        let _handle = moto_async::LocalRuntime::spawn(timeout_task);
+
+        #[cfg(not(target_os = "motor"))]
+        let _handle = tokio::task::spawn_local(timeout_task);
     }
 
     fn spawn_txn_committer_task(
@@ -260,6 +293,7 @@ impl TxnLogger {
         }
 
         let mut txn_batch = self.txn_batch_holder.borrow_mut();
+        let need_to_spawn_watcher = txn_batch.block_map.is_empty();
 
         for entry in &txn_blocks {
             let Some((block_no, block)) = entry else {
@@ -278,6 +312,12 @@ impl TxnLogger {
         txn_batch
             .block_map
             .insert(0, CheckpointedBlock::new(&self.superblock));
+
+        drop(txn_batch);
+
+        if need_to_spawn_watcher {
+            Self::spawn_timeout_flusher(self.txn_batch_holder.clone(), self.txn_batch_sink.clone());
+        }
 
         Ok(())
     }
