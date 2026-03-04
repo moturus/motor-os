@@ -261,6 +261,8 @@ impl SupportingCaches {
 
 #[derive(Clone)]
 pub struct AsyncStub {
+    num_blocks: u64,
+
     #[cfg(target_os = "motor")]
     completion_sink: moto_async::channel::Sender<BackgroundMessage>,
     #[cfg(not(target_os = "motor"))]
@@ -299,6 +301,10 @@ impl AsyncStub {
         receiver.await.unwrap();
 
         Ok(())
+    }
+
+    pub fn num_blocks(&self) -> u64 {
+        self.num_blocks
     }
 }
 
@@ -373,6 +379,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                         }
                         BackgroundMessage::Flush(sender) => {
                             let _ = bd.flush().await;
+                            log::debug!("BD: flushed.");
                             sender.send(()).unwrap();
                         }
                     }
@@ -420,6 +427,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         let superblock = CachedBlock::new(0, Rc::new(block), supporting_caches.clone());
 
         let async_stub = AsyncStub {
+            num_blocks: block_dev.num_blocks(),
             completion_sink: sender,
         };
 

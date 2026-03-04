@@ -12,6 +12,12 @@
 //! (4) write block 0 in the txn log #0
 //! (5) copy blocks from the txn log to the main block area
 //! (6) writhe block 0
+//!
+//! We also need a single long-running task to checkpoint
+//! (= write to disk) tnx batches asynchronously:
+//! - asynchronously because of timeouts
+//! - a single task to serialize batch writing (to avoid
+//!   out of order writes)
 
 use crate::BlockNo;
 use crate::MAX_BLOCKS_IN_TXN;
@@ -28,35 +34,143 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
-// use std::time::Instant;
+use std::time::Instant;
+
+struct TxnBatch {
+    block_map: HashMap<u64, CheckpointedBlock>,
+    txn_id: u64,
+    started: Instant,
+}
+
+impl TxnBatch {
+    fn new(txn_id: u64) -> Self {
+        Self {
+            block_map: HashMap::new(),
+            txn_id,
+            started: Instant::now(),
+        }
+    }
+
+    fn renew(&mut self) -> Self {
+        let mut taken = HashMap::new();
+        core::mem::swap(&mut taken, &mut self.block_map);
+        self.txn_id += 1;
+        let started = self.started;
+        self.started = Instant::now();
+
+        Self {
+            block_map: taken,
+            txn_id: self.txn_id - 1,
+            started,
+        }
+    }
+}
+
+type TxnBatchHolder = Rc<RefCell<TxnBatch>>;
+
+enum CommitterMessage {
+    TxnBatch(TxnBatch),
+
+    #[cfg(target_os = "motor")]
+    Flush(moto_async::oneshot::Sender<()>),
+
+    #[cfg(not(target_os = "motor"))]
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
+#[cfg(target_os = "motor")]
+type TxnBatchSender = moto_async::channel::Sender<CommitterMessage>;
+
+#[cfg(not(target_os = "motor"))]
+type TxnBatchSender = tokio::sync::mpsc::Sender<CommitterMessage>;
+
+#[cfg(target_os = "motor")]
+type TxnBatchReceiver = moto_async::channel::Receiver<CommitterMessage>;
+
+#[cfg(not(target_os = "motor"))]
+type TxnBatchReceiver = tokio::sync::mpsc::Receiver<CommitterMessage>;
 
 // In-memory.
 pub(crate) struct TxnLogger {
-    last_checkpointed_txn_id: u64, // Committed to the main area.
-    next_txn_id: u64,              // A future txn.
-    txn_log_start: u64,
-
     superblock: CachedBlock,
-    txn_batch: Rc<RefCell<HashMap<u64, CheckpointedBlock>>>,
+    txn_batch_holder: TxnBatchHolder,
 
+    txn_batch_sink: TxnBatchSender,
     block_cache_stub: async_fs::block_cache::AsyncStub,
 }
 
 impl TxnLogger {
+    fn txn_log_start(block_cache_stub: &async_fs::block_cache::AsyncStub) -> u64 {
+        block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
+    }
+
+    fn spawn_txn_committer_task(
+        block_cache_stub: async_fs::block_cache::AsyncStub,
+        txn_batch_holder: TxnBatchHolder,
+    ) -> TxnBatchSender {
+        let sender = {
+            #[cfg(target_os = "motor")]
+            let (sender, mut receiver) = moto_async::channel(2);
+
+            #[cfg(not(target_os = "motor"))]
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+
+            let committer_task = async move {
+                while let Some(msg) = receiver.recv().await {
+                    match msg {
+                        CommitterMessage::TxnBatch(txn_batch) => {
+                            if let Err(err) =
+                                Self::commit_txn_batch(txn_batch, block_cache_stub.clone()).await
+                            {
+                                log::error!("FS error: {err:?}.");
+                                return;
+                            }
+                        }
+
+                        CommitterMessage::Flush(sender) => {
+                            let mut holder_lock = txn_batch_holder.borrow_mut();
+                            if !holder_lock.block_map.is_empty() {
+                                let txn_batch = holder_lock.renew();
+                                drop(holder_lock);
+
+                                if let Err(err) =
+                                    Self::commit_txn_batch(txn_batch, block_cache_stub.clone())
+                                        .await
+                                {
+                                    log::error!("FS error: {err:?}.");
+                                    return;
+                                }
+                            }
+                            log::debug!("Motor FS: flushing the Block Device.");
+                            let _ = block_cache_stub.flush().await;
+                            sender.send(()).unwrap();
+                        }
+                    }
+                }
+            };
+
+            #[cfg(target_os = "motor")]
+            let _handle = moto_async::LocalRuntime::spawn(committer_task);
+
+            #[cfg(not(target_os = "motor"))]
+            let _handle = tokio::task::spawn_local(committer_task);
+
+            sender
+        };
+
+        sender
+    }
+
     pub(crate) async fn new<BD: AsyncBlockDevice + 'static>(
         block_cache: &mut BlockCache<BD>,
     ) -> Result<Self> {
-        let num_blocks = block_cache.total_blocks();
-        let txn_log_start = num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64;
-
-        let txn_batch = Rc::new(RefCell::new(HashMap::new()));
+        let txn_batch_holder = Rc::new(RefCell::new(TxnBatch::new(1)));
+        let holder_clone = txn_batch_holder.clone();
 
         Ok(Self {
-            last_checkpointed_txn_id: 0,
-            next_txn_id: 1,
             superblock: block_cache.get_block(0).await?,
-            txn_log_start,
-            txn_batch,
+            txn_batch_holder,
+            txn_batch_sink: Self::spawn_txn_committer_task(block_cache.async_stub(), holder_clone),
             block_cache_stub: block_cache.async_stub(),
         })
     }
@@ -64,23 +178,19 @@ impl TxnLogger {
     pub(crate) async fn open<BD: AsyncBlockDevice + 'static>(
         block_cache: &mut BlockCache<BD>,
     ) -> Result<Self> {
-        let num_blocks = block_cache.total_blocks();
-        let txn_log_start = num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64;
-
         let sb_block = block_cache.get_block(0).await?;
         let superblock_ref = sb_block.block();
         let superblock = superblock_ref.get_at_offset::<Superblock>(0);
         let last_checkpointed_txn_id = superblock.txn_log_data.txn_id;
         drop(superblock_ref);
 
-        let txn_batch = Rc::new(RefCell::new(HashMap::new()));
+        let txn_batch_holder = Rc::new(RefCell::new(TxnBatch::new(last_checkpointed_txn_id + 1)));
+        let holder_clone = txn_batch_holder.clone();
 
         let mut this = Self {
-            last_checkpointed_txn_id,
-            next_txn_id: last_checkpointed_txn_id + 1,
             superblock: sb_block,
-            txn_log_start,
-            txn_batch,
+            txn_batch_holder,
+            txn_batch_sink: Self::spawn_txn_committer_task(block_cache.async_stub(), holder_clone),
             block_cache_stub: block_cache.async_stub(),
         };
 
@@ -93,8 +203,9 @@ impl TxnLogger {
         &mut self,
         block_cache: &mut BlockCache<BD>,
     ) -> Result<()> {
+        let txn_log_start = Self::txn_log_start(&self.block_cache_stub);
         let sb_main = block_cache.get_block(0).await?;
-        let sb_in_log = block_cache.get_block(self.txn_log_start).await?;
+        let sb_in_log = block_cache.get_block(txn_log_start).await?;
         let sb_main_ref = sb_main.block();
         let sb_in_log_ref = sb_in_log.block();
         let superblock_main = sb_main_ref.get_at_offset::<Superblock>(0);
@@ -103,16 +214,11 @@ impl TxnLogger {
         let main_txn_id = superblock_main.txn_log_data.txn_id;
         let last_logged_txn_id = superblock_in_log.txn_log_data.txn_id;
 
-        if main_txn_id > last_logged_txn_id {
-            log::error!(
-                "Motor FS: corrupted TXN log:\n\tmain txn id {main_txn_id} vs last logged txn id {last_logged_txn_id}."
-            );
-            return Err(ErrorKind::InvalidData.into());
-        }
         if main_txn_id == last_logged_txn_id {
-            log::warn!("Motor FS: empty TXN log: some data may be lost.");
+            // Everything was properly flushed.
             return Ok(());
         }
+
         if main_txn_id + 1 != last_logged_txn_id {
             log::error!(
                 "Motor FS: corrupted TXN log:\n\tmain txn id {main_txn_id} vs last logged txn id {last_logged_txn_id}."
@@ -121,13 +227,6 @@ impl TxnLogger {
         }
 
         todo!("")
-    }
-
-    fn new_txn_id(&mut self) -> u64 {
-        let result = self.next_txn_id;
-        debug_assert_eq!(self.last_checkpointed_txn_id, result - 1);
-        self.next_txn_id += 1;
-        result
     }
 
     // Write each txn twice: once into the txn log, and then into the
@@ -151,12 +250,16 @@ impl TxnLogger {
             blocks_in_txn += 1;
         }
 
-        if blocks_in_txn + self.txn_batch.borrow().len() >= MAX_BLOCKS_IN_TXN_LOG {
-            self.flush_txn_batch().await?;
-            debug_assert!(self.txn_batch.borrow().is_empty());
+        if blocks_in_txn + self.txn_batch_holder.borrow().block_map.len() >= MAX_BLOCKS_IN_TXN_LOG {
+            // Create a new txn batch, send the old one to be committed to disk.
+            let prev = self.txn_batch_holder.borrow_mut().renew();
+            self.txn_batch_sink
+                .send(CommitterMessage::TxnBatch(prev))
+                .await
+                .map_err(|_err| std::io::Error::from(ErrorKind::NotConnected))?;
         }
 
-        let mut txn_batch = self.txn_batch.borrow_mut();
+        let mut txn_batch = self.txn_batch_holder.borrow_mut();
 
         for entry in &txn_blocks {
             let Some((block_no, block)) = entry else {
@@ -168,67 +271,83 @@ impl TxnLogger {
                 continue;
             }
 
-            txn_batch.insert(block_no.as_u64(), CheckpointedBlock::new(block));
+            txn_batch
+                .block_map
+                .insert(block_no.as_u64(), CheckpointedBlock::new(block));
         }
-        txn_batch.insert(0, CheckpointedBlock::new(&self.superblock));
+        txn_batch
+            .block_map
+            .insert(0, CheckpointedBlock::new(&self.superblock));
 
         Ok(())
     }
 
-    async fn flush_txn_batch(&mut self) -> Result<()> {
+    async fn commit_txn_batch(
+        mut txn_batch: TxnBatch,
+        block_cache_stub: async_fs::block_cache::AsyncStub,
+    ) -> Result<()> {
         use bytemuck::Zeroable;
 
         // First, flush the log.
-        let txn_id = self.new_txn_id();
-        let mut txn_batch = HashMap::new();
-        core::mem::swap(&mut txn_batch, &mut *self.txn_batch.borrow_mut());
-        assert!(txn_batch.len() < MAX_BLOCKS_IN_TXN_LOG);
+        assert!(txn_batch.block_map.len() < MAX_BLOCKS_IN_TXN_LOG);
+        assert!(!txn_batch.block_map.is_empty());
 
-        let txn_log_start = self.txn_log_start;
+        let txn_log_start = Self::txn_log_start(&block_cache_stub);
 
-        let mut sb = txn_batch.remove(&0).unwrap();
         let mut txn_log_data = TxnLogData::zeroed();
 
-        txn_log_data.txn_id = txn_id;
-        txn_log_data.num_blocks = txn_batch.len() as u64;
+        txn_log_data.txn_id = txn_batch.txn_id;
+        txn_log_data.num_blocks = txn_batch.block_map.len() as u64;
         txn_log_data.txn_blocks[0] = 0;
 
+        let mut sb = txn_batch.block_map.remove(&0).unwrap();
+
         let mut idx = 1; // Start with "1" because "0" is for the superblock.
-        for (block_no, block) in txn_batch.iter() {
+        for (block_no, block) in txn_batch.block_map.iter() {
             txn_log_data.txn_blocks[idx] = *block_no;
-            self.block_cache_stub
+            block_cache_stub
                 .write_block(txn_log_start + idx as u64, block.clone())
                 .await?;
             idx += 1;
         }
-        self.block_cache_stub.commit().await;
+        block_cache_stub.commit().await;
         sb.block_mut()
             .get_mut_at_offset::<Superblock>(0)
             .txn_log_data = txn_log_data;
 
         // Commit the log.
-        self.block_cache_stub
+        block_cache_stub
             .write_block(txn_log_start, sb.clone())
             .await?;
-        self.block_cache_stub.commit().await;
+        block_cache_stub.commit().await;
 
         // Then flush blocks to the main area.
-        for (block_no, block) in txn_batch.drain() {
-            self.block_cache_stub.write_block(block_no, block).await?;
+        for (block_no, block) in txn_batch.block_map.drain() {
+            block_cache_stub.write_block(block_no, block).await?;
         }
 
-        self.block_cache_stub.commit().await;
-        self.block_cache_stub.write_block(0, sb).await?;
-        self.block_cache_stub.commit().await;
-
-        self.last_checkpointed_txn_id = txn_id;
+        block_cache_stub.commit().await;
+        block_cache_stub.write_block(0, sb).await?;
+        block_cache_stub.commit().await;
 
         Ok(())
     }
 
     pub(crate) async fn flush(&mut self) -> Result<()> {
-        self.flush_txn_batch().await?;
-        self.block_cache_stub.flush().await?;
-        Ok(())
+        #[cfg(target_os = "motor")]
+        let (sender, receiver) = moto_async::oneshot();
+
+        #[cfg(not(target_os = "motor"))]
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        self.txn_batch_sink
+            .send(CommitterMessage::Flush(sender))
+            .await
+            .map_err(|_err| std::io::Error::from(ErrorKind::NotConnected))?;
+
+        // Need to wait for flush to complete.
+        receiver
+            .await
+            .map_err(|_err| std::io::Error::from(ErrorKind::NotConnected))
     }
 }
