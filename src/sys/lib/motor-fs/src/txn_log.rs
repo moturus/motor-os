@@ -80,6 +80,9 @@ enum CommitterMessage {
 
     #[cfg(not(target_os = "motor"))]
     Flush(tokio::sync::oneshot::Sender<()>),
+
+    #[cfg(test)]
+    SetErrorPct(u8),
 }
 
 #[cfg(target_os = "motor")]
@@ -88,6 +91,26 @@ type TxnBatchSender = moto_async::channel::Sender<CommitterMessage>;
 #[cfg(not(target_os = "motor"))]
 type TxnBatchSender = tokio::sync::mpsc::Sender<CommitterMessage>;
 
+#[cfg(test)]
+fn maybe_inject_test_error(error_pct: u8) -> Result<()> {
+    use rand::RngCore;
+    use rand::thread_rng;
+
+    if error_pct == 0 {
+        return Ok(());
+    }
+
+    let mut rng = thread_rng();
+
+    let rng_val: u32 = rng.next_u32();
+    if rng_val as f64 / (u32::MAX as f64) < (error_pct as f64) * 0.01 {
+        log::warn!("MOTOR FS: Injecting an error.");
+        Err(std::io::Error::from(ErrorKind::InvalidData))
+    } else {
+        Ok(())
+    }
+}
+
 // In-memory.
 pub(crate) struct TxnLogger {
     superblock: CachedBlock,
@@ -95,9 +118,22 @@ pub(crate) struct TxnLogger {
 
     txn_batch_sink: TxnBatchSender,
     block_cache_stub: async_fs::block_cache::AsyncStub,
+    replayed_log_on_open: bool,
 }
 
 impl TxnLogger {
+    #[cfg(test)]
+    pub(crate) async fn set_error_pct(&mut self, error_pct: u8) {
+        self.txn_batch_sink
+            .send(CommitterMessage::SetErrorPct(error_pct))
+            .await
+            .unwrap();
+    }
+
+    pub(crate) fn replayed_txn_log_on_open(&self) -> bool {
+        self.replayed_log_on_open
+    }
+
     fn txn_log_start(block_cache_stub: &async_fs::block_cache::AsyncStub) -> u64 {
         block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
     }
@@ -149,11 +185,19 @@ impl TxnLogger {
             let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
 
             let committer_task = async move {
+                #[cfg(test)]
+                let mut error_pct = 0;
+
                 while let Some(msg) = receiver.recv().await {
                     match msg {
                         CommitterMessage::TxnBatch(txn_batch) => {
-                            if let Err(err) =
-                                Self::commit_txn_batch(txn_batch, block_cache_stub.clone()).await
+                            if let Err(err) = Self::commit_txn_batch(
+                                txn_batch,
+                                block_cache_stub.clone(),
+                                #[cfg(test)]
+                                error_pct,
+                            )
+                            .await
                             {
                                 log::error!("FS error: {err:?}.");
                                 return;
@@ -166,9 +210,13 @@ impl TxnLogger {
                                 let txn_batch = holder_lock.renew();
                                 drop(holder_lock);
 
-                                if let Err(err) =
-                                    Self::commit_txn_batch(txn_batch, block_cache_stub.clone())
-                                        .await
+                                if let Err(err) = Self::commit_txn_batch(
+                                    txn_batch,
+                                    block_cache_stub.clone(),
+                                    #[cfg(test)]
+                                    error_pct,
+                                )
+                                .await
                                 {
                                     log::error!("FS error: {err:?}.");
                                     return;
@@ -178,6 +226,9 @@ impl TxnLogger {
                             let _ = block_cache_stub.flush().await;
                             sender.send(()).unwrap();
                         }
+
+                        #[cfg(test)]
+                        CommitterMessage::SetErrorPct(val) => error_pct = val,
                     }
                 }
             };
@@ -205,6 +256,7 @@ impl TxnLogger {
             txn_batch_holder,
             txn_batch_sink: Self::spawn_txn_committer_task(block_cache.async_stub(), holder_clone),
             block_cache_stub: block_cache.async_stub(),
+            replayed_log_on_open: false,
         })
     }
 
@@ -225,14 +277,15 @@ impl TxnLogger {
             txn_batch_holder,
             txn_batch_sink: Self::spawn_txn_committer_task(block_cache.async_stub(), holder_clone),
             block_cache_stub: block_cache.async_stub(),
+            replayed_log_on_open: false,
         };
 
-        this.replay_txn_log(block_cache).await?;
+        this.replay_txn_log_if_needed(block_cache).await?;
 
         Ok(this)
     }
 
-    async fn replay_txn_log<BD: AsyncBlockDevice + 'static>(
+    async fn replay_txn_log_if_needed<BD: AsyncBlockDevice + 'static>(
         &mut self,
         block_cache: &mut BlockCache<BD>,
     ) -> Result<()> {
@@ -248,7 +301,8 @@ impl TxnLogger {
         let last_logged_txn_id = superblock_in_log.txn_log_data.txn_id;
 
         if main_txn_id == last_logged_txn_id {
-            // Everything was properly flushed.
+            // There could be something in txn log, but we can't recover it.
+            // The main area is clean.
             return Ok(());
         }
 
@@ -259,7 +313,41 @@ impl TxnLogger {
             return Err(ErrorKind::InvalidData.into());
         }
 
-        todo!("")
+        // The last TXN was committed to the txn log, but not to the main block area.
+        // We must replay the txn, otherwise the main block area may contain partial
+        // transacitons.
+        log::info!("Motor FS: replaying TXN log.");
+        self.replayed_log_on_open = true;
+
+        let txn_log_data = superblock_in_log.txn_log_data;
+        drop(sb_main_ref);
+        drop(sb_in_log_ref);
+
+        let mut txn_batch = self.txn_batch_holder.borrow_mut().renew();
+        assert_eq!(txn_batch.txn_id, last_logged_txn_id);
+        assert!(txn_batch.block_map.is_empty());
+        let num_blocks = txn_log_data.num_blocks;
+        if num_blocks > MAX_BLOCKS_IN_TXN_LOG as u64 {
+            log::error!("Motor FS: corrupted TXN log:\n\ttoo many blocks: {num_blocks}.");
+            return Err(ErrorKind::InvalidData.into());
+        }
+
+        for idx in 0..num_blocks {
+            let block_no = txn_log_data.txn_blocks[idx as usize];
+            let block_in_txn_log = block_cache.get_block(txn_log_start + idx).await?;
+            let mut block_in_main = block_cache.get_block(block_no).await?;
+            *block_in_main.block_mut() = *block_in_txn_log.block();
+            block_in_main.consume_dirty();
+
+            txn_batch
+                .block_map
+                .insert(block_no, CheckpointedBlock::new(&block_in_main));
+        }
+
+        self.txn_batch_sink
+            .send(CommitterMessage::TxnBatch(txn_batch))
+            .await
+            .map_err(|_err| std::io::Error::from(ErrorKind::NotConnected))
     }
 
     // Write each txn twice: once into the txn log, and then into the
@@ -325,6 +413,7 @@ impl TxnLogger {
     async fn commit_txn_batch(
         mut txn_batch: TxnBatch,
         block_cache_stub: async_fs::block_cache::AsyncStub,
+        #[cfg(test)] error_pct: u8,
     ) -> Result<()> {
         use bytemuck::Zeroable;
 
@@ -345,29 +434,54 @@ impl TxnLogger {
         let mut idx = 1; // Start with "1" because "0" is for the superblock.
         for (block_no, block) in txn_batch.block_map.iter() {
             txn_log_data.txn_blocks[idx] = *block_no;
+
+            #[cfg(test)]
+            maybe_inject_test_error(error_pct)?;
+
             block_cache_stub
                 .write_block(txn_log_start + idx as u64, block.clone())
                 .await?;
             idx += 1;
         }
+
+        #[cfg(test)]
+        maybe_inject_test_error(error_pct)?;
+
         block_cache_stub.commit().await;
         sb.block_mut()
             .get_mut_at_offset::<Superblock>(0)
             .txn_log_data = txn_log_data;
 
+        #[cfg(test)]
+        maybe_inject_test_error(error_pct)?;
+
         // Commit the log.
         block_cache_stub
             .write_block(txn_log_start, sb.clone())
             .await?;
+
+        #[cfg(test)]
+        maybe_inject_test_error(error_pct)?;
+
         block_cache_stub.commit().await;
 
         // Then flush blocks to the main area.
         for (block_no, block) in txn_batch.block_map.drain() {
+            #[cfg(test)]
+            maybe_inject_test_error(error_pct)?;
+
             block_cache_stub.write_block(block_no, block).await?;
         }
 
+        #[cfg(test)]
+        maybe_inject_test_error(error_pct)?;
+
         block_cache_stub.commit().await;
         block_cache_stub.write_block(0, sb).await?;
+
+        #[cfg(test)]
+        maybe_inject_test_error(error_pct)?;
+
         block_cache_stub.commit().await;
 
         Ok(())

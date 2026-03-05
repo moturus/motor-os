@@ -46,6 +46,15 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         &mut self.block_cache
     }
 
+    #[cfg(test)]
+    pub(crate) async fn set_error_pct(&mut self, error_pct: u8) {
+        self.txn_logger.set_error_pct(error_pct).await;
+    }
+
+    pub fn replayed_txn_log_on_open(&self) -> bool {
+        self.txn_logger.replayed_txn_log_on_open()
+    }
+
     pub async fn format(dev: Box<BD>) -> Result<Self> {
         let num_blocks = dev.num_blocks();
         if num_blocks <= RESERVED_BLOCKS as u64 {

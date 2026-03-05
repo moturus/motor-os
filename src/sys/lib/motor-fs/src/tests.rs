@@ -112,6 +112,14 @@ fn native_write_speed_async() {
     rt.block_on(native_write_speed_async_test()).unwrap();
 }
 
+#[test]
+fn txn_log_replay() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(txn_log_replay_test()).unwrap();
+}
+
 async fn basic_test() -> Result<()> {
     const NUM_BLOCKS: u64 = 256;
 
@@ -541,6 +549,61 @@ async fn no_lost_commits_test() -> Result<()> {
 
     println!("no_lost_commits_test PASS");
     Ok(())
+}
+
+async fn txn_log_replay_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 4 / 4096;
+    const FS_TAG: &str = "motor_fs_txn_log_replay_test";
+
+    let mut replay_cnt = 0;
+    for _ in 0..100 {
+        let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+        fs.set_error_pct(0).await;
+
+        let foo_id = fs
+            .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "foo")
+            .await
+            .unwrap();
+
+        let bar_id = fs
+            .create_entry(crate::ROOT_DIR_ID, EntryKind::File, "bar")
+            .await
+            .unwrap();
+
+        fs.set_error_pct(20).await;
+
+        // Wait for flush timeout.
+        tokio::time::sleep(std::time::Duration::from_millis(
+            crate::fs::MAX_FLUSH_DELAY_MS + 10,
+        ))
+        .await;
+
+        // Note: no explicit flushing.
+        core::mem::drop(fs);
+
+        let mut fs = open_fs(FS_TAG).await?;
+        if let Some(maybe_stat) = fs.stat(crate::ROOT_DIR_ID, "foo").await.unwrap() {
+            assert_eq!(maybe_stat, (foo_id, EntryKind::File));
+            fs.delete_entry(foo_id).await.unwrap();
+        }
+        if let Some(maybe_stat) = fs.stat(crate::ROOT_DIR_ID, "bar").await.unwrap() {
+            assert_eq!(maybe_stat, (bar_id, EntryKind::File));
+            fs.delete_entry(bar_id).await.unwrap();
+        }
+
+        if fs.replayed_txn_log_on_open() {
+            replay_cnt += 1;
+            if replay_cnt >= 3 {
+                break;
+            }
+        }
+    }
+    if replay_cnt >= 3 {
+        println!("txn_log_replay_test PASS");
+        Ok(())
+    } else {
+        Err(std::io::Error::from(ErrorKind::InvalidData))
+    }
 }
 
 #[test]
