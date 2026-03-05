@@ -106,10 +106,17 @@ mdbg:
 	cd src/sys/tools/mdbg && CARGO_TARGET_DIR="$(OBJ_DIR)/mdbg" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/mdbg" "$(OBJ_DIR)/mdbg/$(SUB_DIR)/mdbg"
 
+ifeq ($(MOTOR_FS), true)
+systest:
+	mkdir -p $(BIN_DIR)
+	cd src/sys/tests/systest && CARGO_TARGET_DIR="$(OBJ_DIR)/systest" $(DO_BUILD) --features motor-fs
+	strip -o "$(BIN_DIR)/systest" "$(OBJ_DIR)/systest/$(SUB_DIR)/systest"
+else
 systest:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/tests/systest && CARGO_TARGET_DIR="$(OBJ_DIR)/systest" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/systest" "$(OBJ_DIR)/systest/$(SUB_DIR)/systest"
+endif
 
 crossbench:
 	mkdir -p $(BIN_DIR)

@@ -1,11 +1,14 @@
+#[cfg(feature = "motor-fs")]
 use std::path::PathBuf;
 
+#[cfg(feature = "motor-fs")]
 fn temp_dir() -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push("systest");
     path
 }
 
+#[cfg(feature = "motor-fs")]
 fn create_dir_with_children(root: &std::path::Path, depth: u8) {
     assert!(!std::fs::exists(root).unwrap());
     std::fs::create_dir_all(root).unwrap();
@@ -31,6 +34,7 @@ fn create_dir_with_children(root: &std::path::Path, depth: u8) {
     }
 }
 
+#[cfg(feature = "motor-fs")]
 fn remove_dir_all_test() {
     let root = temp_dir();
     let _ = std::fs::remove_dir_all(&root);
@@ -68,7 +72,12 @@ pub fn smoke_test() {
     let bytes = std::fs::read("/foo").expect("async read failed");
     assert_eq!(bytes.as_slice(), "bar".as_bytes());
 
+    #[cfg(feature = "motor-fs")]
     const LEN: usize = 1024 * 1024 * 19 + 1001;
+
+    #[cfg(not(feature = "motor-fs"))]
+    const LEN: usize = 1024 * 1024 + 1001;
+
     let mut bytes = Vec::with_capacity(LEN);
     bytes.resize(LEN, 0);
     for byte in &mut bytes {
@@ -128,6 +137,9 @@ pub fn smoke_test() {
 pub fn run_tests() {
     println!("running FS tests ...");
     smoke_test();
+
+    #[cfg(feature = "motor-fs")]
     remove_dir_all_test();
+
     println!("FS tests PASS");
 }
