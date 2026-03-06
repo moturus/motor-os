@@ -197,6 +197,9 @@ async fn async_runtime(q_handle: SysHandle, started: moto_async::oneshot::Sender
                 );
                 block_device = Some(bd);
             }
+            virtio_async::Device::Net(_net) => {
+                log::error!("sys-io: got an async NET device");
+            }
         }
     }
 

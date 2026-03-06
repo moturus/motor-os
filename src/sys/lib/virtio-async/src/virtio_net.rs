@@ -1,5 +1,9 @@
 use core::mem::offset_of;
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::io::ErrorKind;
+use std::io::Result;
+use std::rc::Rc;
 
 use super::le16;
 use super::pci::PciBar;
@@ -82,7 +86,7 @@ impl TxPacket {
 }
 
 pub struct NetDev {
-    dev: Box<VirtioDevice>,
+    dev: Rc<RefCell<VirtioDevice>>,
     mac: [u8; 6],
     mtu: Option<u16>,
 
@@ -93,15 +97,15 @@ pub struct NetDev {
 
     rx_bufs_phys_addr: u64,
     tx_bufs_phys_addr: u64,
-
-    notify_bar: *const PciBar,
-    txq_notify_offset: u64,
-    rxq_notify_offset: u64,
+    // notify_bar: *const PciBar,
+    // txq_notify_offset: u64,
+    // rxq_notify_offset: u64,
 }
 
 impl Drop for NetDev {
     fn drop(&mut self) {
-        panic!("VirtIO NetDev must not be dropped: RxPackets reference it statically.")
+        // panic!("VirtIO NetDev must not be dropped: RxPackets reference it statically.")
+        log::error!("VirtIO NetDev must not be dropped: RxPackets reference it statically.");
     }
 }
 
@@ -118,31 +122,13 @@ impl NetDev {
         &self.mac
     }
 
-    fn self_init(&mut self) -> Result<(), ()> {
-        self.dev.acknowledge_driver(); // Step 3
-        self.negotiate_features()?; // Steps 4, 5, 6
-        self.dev.init_virtqueues(2, 2)?; // Step 7
-        self.dev.driver_ok(); // Step 8
-
-        let notify_cap = self.dev.notify_cfg.unwrap();
-        let notify_bar = self.dev.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap() as *const PciBar;
-        let txq_notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64
-                * self.dev.virtqueues[Self::VIRTQ_TX].queue_notify_off as u64);
-        let rxq_notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64
-                * self.dev.virtqueues[Self::VIRTQ_RX].queue_notify_off as u64);
-        self.notify_bar = notify_bar;
-        self.txq_notify_offset = txq_notify_offset;
-        self.rxq_notify_offset = rxq_notify_offset;
-
-        Ok(())
-    }
-
     pub(super) fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<Self>> {
         let mut dev_mut = dev.borrow_mut();
+
+        dev_mut.acknowledge_driver(); // Step 3
+        let (mac, mtu) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
+        dev_mut.init_virtqueues(2, 2)?; // Step 7
+        dev_mut.driver_ok(); // Step 8
 
         if dev_mut.device_cfg.is_none() {
             log::warn!("Skiping Virtio NET device without device configuration.");
@@ -167,34 +153,26 @@ impl NetDev {
             tx_buf_freelist.push_back(idx)
         }
 
-        let mut net = NetDev {
+        drop(dev_mut);
+
+        Ok(Rc::new(NetDev {
             dev,
-            mac: [0; 6],
-            mtu: None,
+            mac,
+            mtu,
             rx_bufs,
             tx_bufs,
             tx_buf_freelist,
             rx_bufs_phys_addr,
             tx_bufs_phys_addr,
-            notify_bar: core::ptr::null(),
-            txq_notify_offset: 0,
-            rxq_notify_offset: 0,
-        };
-
-        if net.self_init().is_ok() {
-            log::debug!("Initialized Virtio NET device {:?}.", net.dev.pci_device.id,);
-            #[cfg(debug_assertions)]
-            moto_sys::SysRay::log("Initialized Virtio NET device.").ok();
-            NET_DEVICES.lock().push(net);
-        } else {
-            moto_sys::SysRay::log("Failed to initialize Virtio NET device.").ok();
-            net.dev.mark_failed();
-        }
+            // notify_bar: core::ptr::null(),
+            // txq_notify_offset: 0,
+            // rxq_notify_offset: 0,
+        }))
     }
 
-    // Step 4
-    fn negotiate_features(&mut self) -> Result<(), ()> {
-        let features_available = self.dev.get_available_features();
+    // Step 4. Returns mac, mtu
+    fn negotiate_features(dev: &mut VirtioDevice) -> Result<([u8; 6], Option<u16>)> {
+        let features_available = dev.get_available_features();
         let mut features_acked = 0_u64;
 
         // NOTE: neither CHV nor QEMU have VIRTIO_F_IN_ORDER available.
@@ -204,10 +182,10 @@ impl NetDev {
         if (features_available & super::virtio_device::VIRTIO_F_VERSION_1) == 0 {
             log::warn!(
                 "Virtio NET device {:?}: VIRTIO_F_VERSION_1 feature not available; features: 0x{:x}.",
-                self.dev.pci_device.id,
+                dev.pci_device.id,
                 features_available
             );
-            return Err(());
+            return Err(ErrorKind::Other.into());
         }
 
         if (features_available & VIRTIO_NET_F_MTU) != 0 {
@@ -217,19 +195,19 @@ impl NetDev {
         if (features_available & VIRTIO_NET_F_MAC) == 0 {
             log::warn!(
                 "Virtio NET device {:?}: VIRTIO_NET_F_MAC feature not available; features: 0x{:x}.",
-                self.dev.pci_device.id,
+                dev.pci_device.id,
                 features_available
             );
-            return Err(());
+            return Err(ErrorKind::Other.into());
         }
 
         if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) == 0 {
             log::warn!(
                 "Virtio NET device {:?}: VIRTIO_F_RING_EVENT_IDX feature not available; features: 0x{:x}.",
-                self.dev.pci_device.id,
+                dev.pci_device.id,
                 features_available
             );
-            return Err(());
+            return Err(ErrorKind::Other.into());
         }
 
         /*
@@ -267,53 +245,55 @@ impl NetDev {
             log::debug!("{}:{} - VIRTIO_NET_F_CSUM.", file!(), line!());
         }
 
-        self.dev.write_enabled_features(features_acked);
-        self.dev.confirm_features()?;
+        dev.write_enabled_features(features_acked);
+        dev.confirm_features()?;
 
-        let device_cfg = self.dev.device_cfg.as_ref().unwrap();
-        let cfg_bar: &PciBar = self.dev.pci_device.bars[device_cfg.bar as usize]
+        let device_cfg = dev.device_cfg.as_ref().unwrap();
+        let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]
             .as_ref()
             .unwrap();
 
-        for (index, b) in self.mac.iter_mut().enumerate() {
+        let mut mac: [u8; 6] = [0; 6];
+        for (index, b) in mac.iter_mut().enumerate() {
             *b = cfg_bar.readb(device_cfg.offset as u64 + index as u64);
         }
 
-        log::debug!("NET MAC: {:02x?}", self.mac);
+        log::debug!("NET MAC: {:02x?}", mac);
 
-        if (features_acked & VIRTIO_NET_F_MTU) != 0 {
+        let mtu = if (features_acked & VIRTIO_NET_F_MTU) != 0 {
             let mtu = cfg_bar
                 .read_u16(device_cfg.offset as u64 + offset_of!(VirtioNetConfig, mtu) as u64);
             if mtu < 68 {
-                log::warn!(
+                log::error!(
                     "Virtio NET device {:?}: bad MTU: {}.",
-                    self.dev.pci_device.id,
+                    dev.pci_device.id,
                     mtu
                 );
-                return Err(());
+                return Err(ErrorKind::Other.into());
             }
 
-            self.mtu = Some(mtu);
-        }
+            Some(mtu)
+        } else {
+            None
+        };
 
-        Ok(())
+        Ok((mac, mtu))
     }
 
     pub fn mtu(&self) -> Option<u16> {
         self.mtu
     }
 
-    pub fn wait_handles(&self) -> Vec<crate::WaitHandle> {
+    pub fn wait_handles(&self) -> Vec<moto_sys::SysHandle> {
         let mut result = Vec::new();
-        for q in &self.dev.virtqueues {
-            for h in q.wait_handles() {
-                result.push(*h);
-            }
+        for q in &self.dev.borrow().virtqueues {
+            result.push(q.borrow().wait_handle());
         }
 
         result
     }
 
+    /*
     pub fn start_receiving(&mut self) {
         use super::virtio_queue::UserData;
 
@@ -399,12 +379,25 @@ impl NetDev {
     fn release_tx_packet(&mut self, idx: u8) {
         self.tx_buf_freelist.push_back(idx);
     }
+    */
+    fn send_tx_packet(&mut self, idx: u8, len: u16) {
+        todo!()
+    }
+
+    fn release_rx_packet(&mut self, idx: u8) {
+        todo!()
+    }
+
+    fn release_tx_packet(&mut self, idx: u8) {
+        self.tx_buf_freelist.push_back(idx);
+    }
 }
 
 pub const fn header_len() -> usize {
     core::mem::size_of::<Header>()
 }
 
+/*
 pub fn take_by_mac(mac: &[u8; 6]) -> Option<NetDev> {
     let devices = &mut *NET_DEVICES.lock();
     for idx in 0..devices.len() {
@@ -415,3 +408,4 @@ pub fn take_by_mac(mac: &[u8; 6]) -> Option<NetDev> {
 
     None
 }
+*/

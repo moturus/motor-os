@@ -734,13 +734,19 @@ pub fn init_virtio_devices(
                 device.kind
             };
 
+            let dev_clone = device.clone();
+
             match kind {
-                VirtioDeviceKind::Block => {
-                    devices.push(Device::Block(super::virtio_blk::BlockDevice::init(device)?));
-                }
-                // VirtioDeviceKind::Net => {
-                //     devices.push(Device::Block(super::virtio_net::NetDev::init(device)?));
-                // }
+                VirtioDeviceKind::Block => devices.push(Device::Block(
+                    super::virtio_blk::BlockDevice::init(device)
+                        .inspect_err(|_| dev_clone.borrow().mark_failed())?,
+                )),
+
+                VirtioDeviceKind::Net => devices.push(Device::Net(
+                    super::virtio_net::NetDev::init(device)
+                        .inspect_err(|_| dev_clone.borrow().mark_failed())?,
+                )),
+
                 // VirtioDeviceKind::Rng => {
                 //     // We are not using Rng for now, so let's not waste resources on it.
                 //     continue;
@@ -757,5 +763,6 @@ pub fn init_virtio_devices(
 
 pub enum Device {
     Block(Rc<crate::virtio_blk::BlockDevice>),
+    Net(Rc<crate::virtio_net::NetDev>),
     // Rng(crate::virtio_rng::Rng),
 }

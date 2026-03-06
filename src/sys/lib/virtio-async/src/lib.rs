@@ -9,7 +9,7 @@ use std::io::Result;
 mod pci;
 mod virtio_blk;
 mod virtio_device;
-// pub mod virtio_net;
+pub mod virtio_net;
 mod virtio_queue;
 // mod virtio_rng;
 
