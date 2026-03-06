@@ -141,10 +141,12 @@ impl NetDev {
         Ok(())
     }
 
-    pub(super) fn init(dev: Box<VirtioDevice>) {
-        if dev.device_cfg.is_none() {
+    pub(super) fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<Self>> {
+        let mut dev_mut = dev.borrow_mut();
+
+        if dev_mut.device_cfg.is_none() {
             log::warn!("Skiping Virtio NET device without device configuration.");
-            return;
+            return Err(ErrorKind::Other.into());
         }
 
         let bufs = crate::mapper()

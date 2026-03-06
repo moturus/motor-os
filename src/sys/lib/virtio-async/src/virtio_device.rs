@@ -663,6 +663,16 @@ impl VirtioDevice {
                 1,
             );
 
+            // Sert VirtQ notify params.
+            let notify_cap = self.notify_cfg.unwrap();
+            let notify_bar = self.pci_device.bars[notify_cap.bar as usize]
+                .as_ref()
+                .unwrap() as *const PciBar;
+            let notify_offset = notify_cap.offset as u64
+                + (notify_cap.notify_off_multiplier as u64
+                    * virtq_borrowed.queue_notify_off as u64);
+            virtq_borrowed.set_notify_params(notify_bar, notify_offset);
+
             core::mem::drop(virtq_borrowed);
             virtqueues.push(virtqueue);
             queue_num += 1;
@@ -728,17 +738,15 @@ pub fn init_virtio_devices(
                 VirtioDeviceKind::Block => {
                     devices.push(Device::Block(super::virtio_blk::BlockDevice::init(device)?));
                 }
-                /*
-                VirtioDeviceKind::Net => {
-                    super::virtio_net::NetDev::init(device);
-                }
-                */
-                VirtioDeviceKind::Rng => {
-                    // We are not using Rng for now, so let's not waste resources on it.
-                    continue;
-                    // devices.push(Device::Rng(super::virtio_rng::Rng::init(device)?));
-                }
-                _ => {}
+                // VirtioDeviceKind::Net => {
+                //     devices.push(Device::Block(super::virtio_net::NetDev::init(device)?));
+                // }
+                // VirtioDeviceKind::Rng => {
+                //     // We are not using Rng for now, so let's not waste resources on it.
+                //     continue;
+                //     // devices.push(Device::Rng(super::virtio_rng::Rng::init(device)?));
+                // }
+                _ => log::info!("Skipping unsupported VirtIO device {kind:?}."),
             }
         }
     }

@@ -90,18 +90,6 @@ impl BlockDevice {
 
         let virtqueue = dev_mut.virtqueues[0].clone();
 
-        let notify_cap = dev_mut.notify_cfg.unwrap();
-        let notify_bar = dev_mut.pci_device.bars[notify_cap.bar as usize]
-            .as_ref()
-            .unwrap() as *const PciBar;
-        let notify_offset = notify_cap.offset as u64
-            + (notify_cap.notify_off_multiplier as u64
-                * virtqueue.borrow().queue_notify_off as u64);
-
-        virtqueue
-            .borrow_mut()
-            .set_notify_params(notify_bar, notify_offset);
-
         log::debug!(
             "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
             dev_mut.pci_device.id,
