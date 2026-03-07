@@ -44,7 +44,7 @@ type IoBuf = [u8; 2048];
 pub struct RxPacket {
     idx: u8,
     len: u16,
-    netdev: *mut NetDev,
+    netdev: *mut NetDevice,
 }
 
 impl Drop for RxPacket {
@@ -56,14 +56,14 @@ impl Drop for RxPacket {
 impl RxPacket {
     #[allow(clippy::mut_from_ref)]
     pub fn bytes_mut(&self) -> &mut [u8] {
-        let netdev: &'static mut NetDev = unsafe { &mut *self.netdev };
+        let netdev: &'static mut NetDevice = unsafe { &mut *self.netdev };
         &mut netdev.rx_bufs[self.idx as usize][NET_HEADER_LEN..(self.len as usize)]
     }
 }
 
 pub struct TxPacket {
     idx: u8,
-    netdev: *mut NetDev,
+    netdev: *mut NetDevice,
 }
 
 impl Drop for TxPacket {
@@ -75,7 +75,7 @@ impl Drop for TxPacket {
 impl TxPacket {
     #[allow(clippy::mut_from_ref)]
     pub fn bytes_mut(&self) -> &mut [u8] {
-        let netdev: &'static mut NetDev = unsafe { &mut *self.netdev };
+        let netdev: &'static mut NetDevice = unsafe { &mut *self.netdev };
         &mut netdev.tx_bufs[self.idx as usize][NET_HEADER_LEN..2048]
     }
 
@@ -85,7 +85,7 @@ impl TxPacket {
     }
 }
 
-pub struct NetDev {
+pub struct NetDevice {
     dev: Rc<RefCell<VirtioDevice>>,
     mac: [u8; 6],
     mtu: Option<u16>,
@@ -102,19 +102,19 @@ pub struct NetDev {
     // rxq_notify_offset: u64,
 }
 
-impl Drop for NetDev {
+impl Drop for NetDevice {
     fn drop(&mut self) {
         // panic!("VirtIO NetDev must not be dropped: RxPackets reference it statically.")
         log::error!("VirtIO NetDev must not be dropped: RxPackets reference it statically.");
     }
 }
 
-unsafe impl Send for NetDev {}
+unsafe impl Send for NetDevice {}
 
-static NET_DEVICES: moto_rt::spinlock::SpinLock<Vec<NetDev>> =
+static NET_DEVICES: moto_rt::spinlock::SpinLock<Vec<NetDevice>> =
     moto_rt::spinlock::SpinLock::new(Vec::new());
 
-impl NetDev {
+impl NetDevice {
     const VIRTQ_RX: usize = 0;
     const VIRTQ_TX: usize = 1;
 
@@ -155,7 +155,7 @@ impl NetDev {
 
         drop(dev_mut);
 
-        Ok(Rc::new(NetDev {
+        Ok(Rc::new(NetDevice {
             dev,
             mac,
             mtu,

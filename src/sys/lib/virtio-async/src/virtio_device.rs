@@ -743,7 +743,7 @@ pub fn init_virtio_devices(
                 )),
 
                 VirtioDeviceKind::Net => devices.push(Device::Net(
-                    super::virtio_net::NetDev::init(device)
+                    super::virtio_net::NetDevice::init(device)
                         .inspect_err(|_| dev_clone.borrow().mark_failed())?,
                 )),
 
@@ -763,6 +763,6 @@ pub fn init_virtio_devices(
 
 pub enum Device {
     Block(Rc<crate::virtio_blk::BlockDevice>),
-    Net(Rc<crate::virtio_net::NetDev>),
+    Net(Rc<crate::virtio_net::NetDevice>),
     // Rng(crate::virtio_rng::Rng),
 }
