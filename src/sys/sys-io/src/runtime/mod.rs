@@ -149,18 +149,9 @@ impl virtio_async::KernelAdapter for Mapper {
 }
 
 // ----------------------- Async Runtime ---------------------------- //
-enum RuntimeMsg {}
-
-static RUNTIME_QUEUE: std::sync::Mutex<VecDeque<RuntimeMsg>> =
-    std::sync::Mutex::new(VecDeque::new());
-static RUNTIME_IPC_HANDLE: AtomicU64 = AtomicU64::new(0);
 
 /// Spawn the async runtime.
 pub fn spawn_async() {
-    let (handle_here, handle_there) =
-        moto_sys::SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
-    RUNTIME_IPC_HANDLE.store(handle_here.as_u64(), std::sync::atomic::Ordering::Release);
-
     let (tx, rx) = moto_async::oneshot();
 
     let _runtime_thread = std::thread::Builder::new()
@@ -169,7 +160,7 @@ pub fn spawn_async() {
             // I/O IRQs are affined to CPU 0.
             moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
             moto_async::LocalRuntime::new().block_on(async move {
-                async_runtime(handle_there, tx).await;
+                async_runtime(tx).await;
             });
         });
 
@@ -178,9 +169,8 @@ pub fn spawn_async() {
     });
 }
 
-async fn async_runtime(q_handle: SysHandle, started: moto_async::oneshot::Sender<()>) {
+async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
     log::debug!("async runtime starting");
-    let queue_joiner = moto_async::LocalRuntime::spawn(global_queue_listener(q_handle));
 
     let Ok(devices) = virtio_async::init_virtio_devices(&MAPPER) else {
         panic!("VirtIO initialization failed.");
@@ -214,36 +204,11 @@ async fn async_runtime(q_handle: SysHandle, started: moto_async::oneshot::Sender
     log::debug!("Runtime initialized.");
     let _ = started.send(());
 
-    queue_joiner.await; // Never actually returns.
+    // Sleep forever, so that the current thread has a live async runtime.
+    loop {
+        moto_async::sleep(std::time::Duration::from_secs(60 * 60 * 24 * 365)).await;
+        log::warn!("sys-io async runtime slept for a full year?");
+    }
+
     unreachable!()
 }
-
-async fn global_queue_listener(queue_handle: SysHandle) {
-    use moto_async::AsFuture;
-
-    loop {
-        queue_handle.as_future().await.unwrap();
-        let Some(msg) = RUNTIME_QUEUE.lock().unwrap().pop_back() else {
-            continue;
-        };
-
-        match msg {}
-    }
-}
-
-/*
-async fn block_device_listener(
-    bd: Rc<moto_async::LocalMutex<virtio_async::BlockDevice>>,
-    started_futex: Arc<AtomicU32>,
-) {
-    use moto_async::AsFuture;
-
-    let wait_handle = bd.lock().await.wait_handle();
-    started_futex.store(RUNTIME_STARTED, Ordering::Release);
-    let _ = moto_rt::futex_wake(std::ops::Deref::deref(&started_futex));
-    loop {
-        wait_handle.as_future().await.unwrap();
-        todo!("Block device interrupt!")
-    }
-}
-*/
