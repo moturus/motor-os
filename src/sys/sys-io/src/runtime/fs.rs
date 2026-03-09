@@ -19,7 +19,12 @@ mod virtio_partition;
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
 
-enum FS {
+// We allow(private_interfaces) to hide a warning that VirtioPartition
+// has less visibility than enum FS, which is by design: the enum
+// has crate visibility to allow internal/async FS access, but
+// VirtioPartition is an internal detail of mod fs.
+#[allow(private_interfaces)]
+pub(crate) enum FS {
     MotorFs(motor_fs::MotorFs<VirtioPartition>),
 }
 
@@ -145,7 +150,7 @@ impl FileSystem for FS {
     }
 }
 
-pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<()> {
+pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalMutex<FS>>> {
     let block_device = virtio_async::BlockDevice::from(block_device)?;
 
     use zerocopy::FromZeros;
@@ -208,8 +213,8 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<()>
         return Err(std::io::Error::from(ErrorKind::InvalidData));
     };
 
-    spawn_fs_listeners(fs).await;
-    Ok(())
+    spawn_fs_listeners(fs.clone()).await;
+    Ok(fs)
 }
 
 async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {

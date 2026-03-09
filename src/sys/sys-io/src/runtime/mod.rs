@@ -198,11 +198,11 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
         panic!("No block devices found")
     };
 
-    let Ok(()) = fs::init(block_device).await else {
+    let Ok(fs) = fs::init(block_device).await else {
         panic!("Cannot proceed without a filesystem.");
     };
 
-    if let Err(err) = net::init(net_devices).await {
+    if let Err(err) = net::init(net_devices, fs).await {
         log::error!("Network initialization failed: {err:?}.");
     }
 
