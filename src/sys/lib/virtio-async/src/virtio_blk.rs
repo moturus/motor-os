@@ -75,8 +75,21 @@ impl BlockDevice {
         self.virtqueue.borrow().wait_handle()
     }
 
-    pub(super) fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<BlockDevice>> {
+    pub fn from(dev: VirtioDevice) -> Result<Rc<Self>> {
+        let dev = Rc::new(RefCell::new(dev));
+        let dev_clone = dev.clone();
+
+        Self::init(dev).inspect_err(|err| {
+            dev_clone.borrow_mut().mark_failed();
+            log::error!("Failed initializing VirtIO Block device");
+        })
+    }
+
+    fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<BlockDevice>> {
         let mut dev_mut = dev.borrow_mut();
+        dev_mut.init();
+        dev_mut.reset();
+        dev_mut.acknowledge_device();
 
         if dev_mut.device_cfg.is_none() {
             log::warn!("Skiping VirtioBlk device without device configuration.");

@@ -122,8 +122,21 @@ impl NetDevice {
         &self.mac
     }
 
-    pub(super) fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<Self>> {
+    pub fn from(dev: VirtioDevice) -> Result<Rc<Self>> {
+        let dev = Rc::new(RefCell::new(dev));
+        let dev_clone = dev.clone();
+
+        Self::init(dev).inspect_err(|err| {
+            dev_clone.borrow_mut().mark_failed();
+            log::error!("Failed initializing VirtIO Net device");
+        })
+    }
+
+    fn init(dev: Rc<RefCell<VirtioDevice>>) -> Result<Rc<Self>> {
         let mut dev_mut = dev.borrow_mut();
+        dev_mut.init();
+        dev_mut.reset();
+        dev_mut.acknowledge_device();
 
         dev_mut.acknowledge_driver(); // Step 3
         let (mac, mtu) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6

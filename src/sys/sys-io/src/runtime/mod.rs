@@ -18,6 +18,7 @@ mod fs;
 pub mod internal_queue;
 pub mod io_stats;
 mod io_thread;
+mod net;
 // pub use fs::smoke_test as fs_smoke_test;
 
 pub struct PendingCompletion {
@@ -172,24 +173,24 @@ pub fn spawn_async() {
 async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
     log::debug!("async runtime starting");
 
-    let Ok(devices) = virtio_async::init_virtio_devices(&MAPPER) else {
+    let Ok(devices) = virtio_async::discover_virtio_devices(&MAPPER) else {
         panic!("VirtIO initialization failed.");
     };
 
     let mut block_device = None;
+    let mut net_devices = vec![];
 
     for device in devices {
-        match device {
-            virtio_async::Device::Block(bd) => {
+        match device.kind() {
+            virtio_async::VirtioDeviceKind::Block => {
                 assert!(
                     block_device.is_none(),
                     "Multiple block devices are not supported yet."
                 );
-                block_device = Some(bd);
+                block_device = Some(device);
             }
-            virtio_async::Device::Net(_net) => {
-                log::error!("sys-io: got an async NET device");
-            }
+            virtio_async::VirtioDeviceKind::Net => net_devices.push(device),
+            _ => log::warn!("Unsupported VirtIO device {:?}", device.kind()),
         }
     }
 
@@ -197,9 +198,13 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
         panic!("No block devices found")
     };
 
-    let Ok(filesystem) = fs::init(block_device).await else {
+    let Ok(()) = fs::init(block_device).await else {
         panic!("Cannot proceed without a filesystem.");
     };
+
+    if let Err(err) = net::init(net_devices).await {
+        log::error!("Network initialization failed: {err:?}.");
+    }
 
     log::debug!("Runtime initialized.");
     let _ = started.send(());

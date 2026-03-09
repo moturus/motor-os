@@ -135,7 +135,7 @@ pub(super) struct Msix {
 }
 
 #[allow(dead_code)]
-pub(super) struct VirtioDevice {
+pub struct VirtioDevice {
     pub(super) pci_device: PciDevice,
     pub(super) kind: VirtioDeviceKind,
     pub(super) common_cfg: VirtioPciCap,
@@ -149,6 +149,10 @@ pub(super) struct VirtioDevice {
 }
 
 impl VirtioDevice {
+    pub fn kind(&self) -> VirtioDeviceKind {
+        self.kind
+    }
+
     // VirtIO device initialization steps, see osv virtio.cc, virtio-rng.cc,
     // and section 3.1.1 in VirtIO 1.1. spec:
     //   step 0 parse/init
@@ -160,7 +164,7 @@ impl VirtioDevice {
     //   step 6 re-read dev status to ensure FEATURES_OK
     //   step 7 generic init of virtqueues
     //   step 8 confirm drive ok
-    fn parse(device_id: PciDeviceID) -> Result<Rc<RefCell<Self>>> {
+    fn parse(device_id: PciDeviceID) -> Result<Self> {
         // Step 0: init.
         if device_id.vendor_id() != 0x1af4 {
             log::debug!(
@@ -258,7 +262,7 @@ impl VirtioDevice {
             }
         }
 
-        Ok(Rc::new(RefCell::new(VirtioDevice {
+        Ok(VirtioDevice {
             pci_device,
             kind,
             common_cfg: *common_cfg,
@@ -266,11 +270,11 @@ impl VirtioDevice {
             notify_cfg,
             msix: None,
             virtqueues: Vec::new(),
-        })))
+        })
     }
 
     // Step 0: see virtio_pci_device::init() in osv.
-    fn init(&mut self) {
+    pub(crate) fn init(&mut self) {
         // Set bus master, enable I/O and memory space.
         let mut command = self.pci_device.id.read_config_u16(pci::PCI_CFG_COMMAND);
         command |= pci::PCI_COMMAND_BUS_MASTER | pci::PCI_COMMAND_BUS_IO | pci::PCI_COMMAND_BUS_MEM;
@@ -415,7 +419,7 @@ impl VirtioDevice {
     }
 
     // Step 1
-    fn reset(&self) {
+    pub(crate) fn reset(&self) {
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
@@ -427,7 +431,7 @@ impl VirtioDevice {
     }
 
     // Step 2
-    fn acknowledge_device(&self) {
+    pub(crate) fn acknowledge_device(&self) {
         let cfg_bar: &PciBar = self.pci_device.bars[self.common_cfg.bar as usize]
             .as_ref()
             .unwrap();
@@ -710,9 +714,9 @@ pub(super) fn mapper() -> &'static dyn super::KernelAdapter {
     unsafe { MAPPER.unwrap() }
 }
 
-pub fn init_virtio_devices(
+pub fn discover_virtio_devices(
     mapper: &'static dyn super::KernelAdapter,
-) -> std::io::Result<Vec<Device>> {
+) -> std::io::Result<Vec<VirtioDevice>> {
     static ONCE: AtomicBool = AtomicBool::new(false);
     assert!(
         ONCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -726,43 +730,10 @@ pub fn init_virtio_devices(
 
     for dev in &pci_devices {
         if let Ok(device) = VirtioDevice::parse(*dev) {
-            let kind = {
-                let mut device = device.borrow_mut();
-                device.init();
-                device.reset();
-                device.acknowledge_device();
-                device.kind
-            };
-
-            let dev_clone = device.clone();
-
-            match kind {
-                VirtioDeviceKind::Block => devices.push(Device::Block(
-                    super::virtio_blk::BlockDevice::init(device)
-                        .inspect_err(|_| dev_clone.borrow().mark_failed())?,
-                )),
-
-                VirtioDeviceKind::Net => devices.push(Device::Net(
-                    super::virtio_net::NetDevice::init(device)
-                        .inspect_err(|_| dev_clone.borrow().mark_failed())?,
-                )),
-
-                // VirtioDeviceKind::Rng => {
-                //     // We are not using Rng for now, so let's not waste resources on it.
-                //     continue;
-                //     // devices.push(Device::Rng(super::virtio_rng::Rng::init(device)?));
-                // }
-                _ => log::info!("Skipping unsupported VirtIO device {kind:?}."),
-            }
+            devices.push(device);
         }
     }
     #[cfg(debug_assertions)]
     log::debug!("done initializing VirtIO");
     Ok(devices)
-}
-
-pub enum Device {
-    Block(Rc<crate::virtio_blk::BlockDevice>),
-    Net(Rc<crate::virtio_net::NetDevice>),
-    // Rng(crate::virtio_rng::Rng),
 }

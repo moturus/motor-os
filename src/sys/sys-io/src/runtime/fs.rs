@@ -145,7 +145,9 @@ impl FileSystem for FS {
     }
 }
 
-pub(super) async fn init(block_device: Rc<virtio_async::BlockDevice>) -> Result<()> {
+pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<()> {
+    let block_device = virtio_async::BlockDevice::from(block_device)?;
+
     use zerocopy::FromZeros;
 
     let mut first_block = async_fs::Block::new_zeroed();
