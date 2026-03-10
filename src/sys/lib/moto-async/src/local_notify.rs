@@ -1,4 +1,4 @@
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::LocalWaker;
@@ -7,7 +7,7 @@ use core::task::{Context, Poll};
 /// A single-threaded, local version of tokio::sync::Notify.
 pub struct LocalNotify {
     notified: Cell<bool>,
-    waker: RefCell<Option<LocalWaker>>,
+    waker: Cell<Option<LocalWaker>>,
 }
 
 impl Default for LocalNotify {
@@ -20,7 +20,7 @@ impl LocalNotify {
     pub const fn new() -> Self {
         Self {
             notified: Cell::new(false),
-            waker: RefCell::new(None),
+            waker: Cell::new(None),
         }
     }
 
@@ -28,7 +28,7 @@ impl LocalNotify {
     pub fn notify_one(&self) {
         self.notified.set(true);
         // If a task is waiting on this notify, wake it up!
-        if let Some(waker) = self.waker.borrow_mut().take() {
+        if let Some(waker) = self.waker.take() {
             waker.wake();
         }
     }
@@ -55,7 +55,7 @@ impl<'a> Future for NotifiedFuture<'a> {
         } else {
             // We haven't been notified yet. Store the current task's waker
             // so `notify_one()` knows who to wake up later.
-            *self.notify.waker.borrow_mut() = Some(cx.local_waker().clone());
+            self.notify.waker.set(Some(cx.local_waker().clone()));
             Poll::Pending
         }
     }
