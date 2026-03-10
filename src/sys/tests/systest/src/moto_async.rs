@@ -469,6 +469,54 @@ fn test_futures_channel_multithreaded() {
     println!("----- moto_async::test_futures_channel_multithreaded PASS");
 }
 
+fn test_local_notify_eager() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let notify = moto_async::LocalNotify::new();
+
+        // 1. We notify BEFORE we await.
+        notify.notify_one();
+
+        // 2. This should resolve instantly without yielding to the executor,
+        // because `notified` was already set to true.
+        notify.notified().await;
+    });
+    println!("----- moto_async::test_local_notify_eager PASS");
+}
+
+fn test_local_notify_deferred() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let notify = std::rc::Rc::new(moto_async::LocalNotify::new());
+        let notify_clone = notify.clone();
+
+        let task_completed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let task_completed_clone = task_completed.clone();
+
+        // 1. Spawn a background task that sleeps until notified
+        moto_async::LocalRuntime::spawn(async move {
+            notify_clone.notified().await;
+            task_completed_clone.set(true);
+        });
+
+        // 2. Yield the current thread. The background task will start,
+        // poll `notified()`, receive `Poll::Pending`, and store its Waker.
+        moto_async::yield_now().await;
+
+        // Ensure the task is actually asleep and hasn't completed yet
+        assert!(!task_completed.get());
+
+        // 3. Fire the notification! This extracts the Waker and calls wake()
+        notify.notify_one();
+
+        // 4. Yield again. The executor sees the task was woken up,
+        // runs it, and the task completes.
+        moto_async::yield_now().await;
+
+        // Verify the background task finished
+        assert!(task_completed.get());
+    });
+    println!("----- moto_async::test_local_notify_deferred PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -484,6 +532,8 @@ pub fn run_all_tests() {
     test_channel_basic();
     test_moto_channel_multithreaded();
     test_futures_channel_multithreaded();
+    test_local_notify_eager();
+    test_local_notify_deferred();
 
     println!("moto_async all PASS");
 }

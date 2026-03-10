@@ -613,3 +613,33 @@ impl Future for SysHandleFuture {
         self.do_poll(cx)
     }
 }
+
+/// Yields execution back to the `LocalRuntime`.
+///
+/// This function returns a future that completes after yielding once,
+/// allowing other tasks multiplexed on the current thread to progress.
+pub async fn yield_now() {
+    struct YieldNow {
+        yielded: bool,
+    }
+
+    impl Future for YieldNow {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.yielded {
+                return Poll::Ready(());
+            }
+
+            self.yielded = true;
+
+            // Wake the current task immediately.
+            // This ensures the `LocalRuntime` puts the task back into its run queue.
+            cx.local_waker().wake_by_ref();
+
+            Poll::Pending
+        }
+    }
+
+    YieldNow { yielded: false }.await
+}
