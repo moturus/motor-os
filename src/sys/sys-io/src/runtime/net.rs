@@ -1,4 +1,5 @@
 use ipnetwork::IpNetwork;
+use moto_sys_io::api_net::NetCmd;
 use smoltcp::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use std::cell::RefCell;
 use std::net::SocketAddr;
@@ -267,6 +268,8 @@ async fn net_listener(
         .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?;
     let _ = connected_tx.send(());
 
+    log::debug!("new NET connection 0x{:x}", sender.remote_handle().as_u64());
+
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
     //
@@ -298,7 +301,13 @@ async fn net_listener(
                     let _ = ticket_tx.send(()).await;
                 });
             }
-            Err(err) => return Err(std::io::Error::from_raw_os_error(err as u16 as i32)),
+            Err(err) => {
+                log::debug!(
+                    "NET connection 0x{:x} done.",
+                    sender.remote_handle().as_u64()
+                );
+                return Err(std::io::Error::from_raw_os_error(err as u16 as i32));
+            }
         }
     }
 }
@@ -308,32 +317,33 @@ async fn on_msg(
     sender: moto_ipc::io_channel::Sender,
     devices: Vec<Rc<RefCell<NetDev<'static>>>>,
 ) {
-    todo!()
-    /*
-    if let Err(err) = match msg.command {
-        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => on_cmd_get_first_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => on_cmd_get_next_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
+    let Ok(net_cmd) = NetCmd::try_from(msg.command) else {
+        let remote_handle = sender.remote_handle();
 
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "unrecognized command {} from endpoint 0x{:x}.",
+            msg.command,
+            remote_handle.as_u64()
+        );
+
+        let _ = moto_sys::SysCpu::kill_remote(remote_handle);
+        return;
+    };
+
+    match net_cmd {
+        NetCmd::UdpSocketBind => todo!(),
+
+        // moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
         cmd => {
-            log::warn!("Unrecognized FS command: {cmd}.");
-            Err(std::io::Error::from(ErrorKind::InvalidData))
+            log::warn!(
+                "Unrecognized NET command: {cmd:?} from endpoint 0x{:x}.",
+                sender.remote_handle().as_u64()
+            );
+            let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
+            return;
         }
-    } {
-        let resp = api_fs::empty_resp_encode(msg.id, Err(map_err_into_native(err)));
-        let _ = sender.send(resp).await;
     }
-    */
 }
 
 async fn smoke_test(devices: Vec<Rc<RefCell<NetDev<'static>>>>) {

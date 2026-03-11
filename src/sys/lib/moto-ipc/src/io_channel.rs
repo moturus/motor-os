@@ -1020,6 +1020,10 @@ impl Sender {
         self.inner.raw_channel()
     }
 
+    pub fn remote_handle(&self) -> SysHandle {
+        self.inner.remote_handle
+    }
+
     // See enqueue() in mpmc.cc.
     fn try_send(&self, msg: Msg) -> Result<()> {
         let raw_channel = self.raw_channel();
