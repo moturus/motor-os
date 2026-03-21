@@ -1,4 +1,8 @@
-use std::{net::IpAddr, rc::Rc};
+use std::{
+    io::ErrorKind,
+    net::{IpAddr, SocketAddr},
+    rc::Rc,
+};
 
 use super::config;
 use virtio_async::virtio_net::NetDevice;
@@ -29,6 +33,7 @@ pub(super) struct NetDev<'a> {
 
     // tcp_ports_in_use: std::collections::HashSet<u16>,
     udp_ports_in_use: std::collections::HashSet<u16>,
+    udp_addresses_in_use: std::collections::HashSet<SocketAddr>,
 
     pub(super) notify: Rc<moto_async::LocalNotify>,
 }
@@ -88,6 +93,7 @@ impl<'a> NetDev<'a> {
             sockets: smoltcp::iface::SocketSet::new(vec![]),
             // tcp_ports_in_use: std::collections::HashSet::new(),
             udp_ports_in_use: std::collections::HashSet::new(),
+            udp_addresses_in_use: std::collections::HashSet::new(),
             notify: Rc::new(moto_async::LocalNotify::default()),
         }
     }
@@ -105,6 +111,7 @@ impl<'a> NetDev<'a> {
             sockets,
             // tcp_ports_in_use,
             udp_ports_in_use,
+            udp_addresses_in_use,
             notify,
         } = self;
         match device {
@@ -114,7 +121,17 @@ impl<'a> NetDev<'a> {
         }
     }
 
-    pub fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
+    pub(super) fn ip_addesses(&self) -> Vec<IpAddr> {
+        let cidrs = self.iface.ip_addrs();
+        let mut addresses = Vec::with_capacity(cidrs.len());
+        for cidr in cidrs {
+            addresses.push(cidr.address().into());
+        }
+
+        addresses
+    }
+
+    pub(super) fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {
         // See https://en.wikipedia.org/wiki/Ephemeral_port.
         const EPHEMERAL_PORT_MIN: u16 = 49152;
         const EPHEMERAL_PORT_MAX: u16 = 65535;
@@ -130,7 +147,20 @@ impl<'a> NetDev<'a> {
         None
     }
 
-    pub fn free_ephemeral_udp_port(&mut self, port: u16) {
+    pub(super) fn free_ephemeral_udp_port(&mut self, port: u16) {
         self.udp_ports_in_use.remove(&port);
+    }
+
+    pub(super) fn add_udp_addr_in_use(&mut self, addr: SocketAddr) -> std::io::Result<()> {
+        if self.udp_addresses_in_use.insert(addr) {
+            Ok(())
+        } else {
+            Err(std::io::Error::from(ErrorKind::AddrInUse))
+        }
+    }
+
+    pub(super) fn remove_udp_addr_in_use(&mut self, addr: &SocketAddr) {
+        assert!(self.udp_addresses_in_use.remove(addr));
+        log::debug!("{}: removed udp addr in use {addr:?}", self.name);
     }
 }

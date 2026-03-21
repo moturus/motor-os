@@ -78,6 +78,7 @@ impl Drop for MotoSocket {
 
         let runtime = self.base.runtime.clone();
         let device_idx = self.base.device_idx;
+        let socket_addr = self.base.socket_addr;
         let smoltcp_handle = self.base.smoltcp_handle;
 
         // There could be bytes stuck in the socket. Wait for them to clear.
@@ -92,6 +93,7 @@ impl Drop for MotoSocket {
                     == 0
                 {
                     sockets.remove(smoltcp_handle);
+                    inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
                     log::error!("Stale socket cleared.");
                     return;
                 }
