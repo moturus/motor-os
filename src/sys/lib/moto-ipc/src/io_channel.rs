@@ -602,6 +602,7 @@ impl ClientConnection {
     // See enqueue() in mpmc.cc.
     pub fn send(&self, msg: Msg) -> Result<()> {
         let raw_channel = self.raw_channel();
+        raw_channel.clear_client_waiting();
 
         let mut slot: &MsgSlot;
         let mut pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
@@ -622,7 +623,10 @@ impl ClientConnection {
                     }
                 }
                 // The queue is full.
-                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady),
+                core::cmp::Ordering::Less => {
+                    raw_channel.set_client_waiting(WaitType::WaitingToSend);
+                    return Err(moto_rt::Error::NotReady);
+                }
                 // We lost the race - continue.
                 core::cmp::Ordering::Greater => {
                     pos = raw_channel.client_queue_head.load(Ordering::Relaxed)
@@ -640,6 +644,7 @@ impl ClientConnection {
     // See dequeue() in mpmc.cc.
     pub fn recv(&self) -> Result<Msg> {
         let raw_channel = self.raw_channel();
+        raw_channel.clear_client_waiting();
 
         let mut slot: &MsgSlot;
         let mut pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
@@ -660,7 +665,10 @@ impl ClientConnection {
                         Err(tail) => pos = tail, // continue
                     }
                 }
-                core::cmp::Ordering::Less => return Err(moto_rt::Error::NotReady), // The queue is empty.
+                core::cmp::Ordering::Less => {
+                    raw_channel.set_client_waiting(WaitType::WaitingToRecv);
+                    return Err(moto_rt::Error::NotReady); // The queue is empty.
+                }
                 core::cmp::Ordering::Greater => {
                     // We lost the race - continue.
                     pos = raw_channel.server_queue_tail.load(Ordering::Relaxed)
@@ -679,12 +687,14 @@ impl ClientConnection {
             .raw_channel()
             .alloc_page(SubChannel::Client(subchannel_mask))
         {
+            self.raw_channel().clear_client_waiting();
             Ok(IoPage {
                 raw_page,
                 raw_channel: self.raw_channel(),
                 remote_handle: SysHandle::NONE,
             })
         } else {
+            self.raw_channel().set_client_page_wait(subchannel_mask);
             Err(moto_rt::Error::NotReady)
         }
     }
