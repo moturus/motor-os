@@ -1,8 +1,8 @@
 use ipnetwork::IpNetwork;
-use moto_sys_io::api_net::NetCmd;
+use moto_sys_io::api_net::{self, NetCmd};
 use smoltcp::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::{
     io::{ErrorKind, Result},
@@ -10,8 +10,11 @@ use std::{
     rc::Rc,
 };
 
+use crate::util::map_err_into_native;
+
 mod config;
 mod device;
+mod socket;
 mod udp;
 
 /// Net Runtime. Contains (owns) sockets, devices, client connections.
@@ -21,7 +24,7 @@ mod udp;
 struct NetRuntimeInner {
     config: config::NetConfig,
     next_socket_id: u64,
-    udp_sockets: HashMap<u64, udp::RawUdpSocket>,
+    sockets: HashMap<u64, socket::MotoSocket>,
 
     // In the future, Motor OS may use Vec<Option<NetDev>>, but at the moment
     // Motor OS does not support device hot (un)plug.
@@ -29,6 +32,11 @@ struct NetRuntimeInner {
 
     // Dev name => Dev idx in Self::devices.
     device_map: HashMap<String, usize>,
+
+    // IP => Dev idx.
+    ip_addresses: HashMap<IpAddr, usize>,
+
+    udp_addresses_in_use: HashSet<SocketAddr>,
 }
 
 impl NetRuntimeInner {
@@ -191,8 +199,8 @@ impl NetRuntime {
             return;
         };
 
-        match net_cmd {
-            NetCmd::UdpSocketBind => todo!(),
+        if let Err(err) = match net_cmd {
+            NetCmd::UdpSocketBind => self.udp_socket_bind(msg, &sender),
 
             // moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
             cmd => {
@@ -203,7 +211,106 @@ impl NetRuntime {
                 let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
                 return;
             }
+        } {
+            let resp =
+                moto_sys_io::api_fs::empty_resp_encode(msg.id, Err(map_err_into_native(err)));
+            let _ = sender.send(resp).await;
         }
+    }
+
+    fn udp_socket_bind(
+        &self,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> Result<Option<moto_ipc::io_channel::Msg>> {
+        todo!()
+        /*
+        let mut socket_addr = api_net::get_socket_addr(&msg.payload);
+        let inner = self.inner.borrow_mut();
+        let mut resp = msg;
+
+        if inner.udp_addresses_in_use.contains(&socket_addr) {
+            resp.status = moto_rt::E_ALREADY_IN_USE;
+            return Ok(Some(resp));
+        }
+
+        // Verify that the IP is valid (if present) before the socket is created.
+        let ip_addr = socket_addr.ip();
+
+        if ip_addr.is_unspecified() {
+            // We don't allow binding to an unspecified addr (yet?).
+            resp.status = moto_rt::E_INVALID_ARGUMENT;
+            return Ok(Some(resp));
+        }
+        let device_idx = {
+            match inner.ip_addresses.get(&ip_addr) {
+                Some(idx) => *idx,
+                None => {
+                    #[cfg(debug_assertions)]
+                    log::debug!("IP addr {ip_addr:?} not found");
+
+                    resp.status = moto_rt::E_INVALID_ARGUMENT;
+                    return Ok(Some(resp));
+                }
+            }
+        };
+
+        // Allocate/assign port, if needed.
+        let mut allocated_port = None;
+        if socket_addr.port() == 0 {
+            let local_port = match inner.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
+                Some(port) => port,
+                None => {
+                    log::warn!("get_ephemeral_udp_port({ip_addr:?}) failed");
+
+                    resp.status = moto_rt::E_OUT_OF_MEMORY;
+                    return Ok(Some(resp));
+                }
+            };
+            socket_addr.set_port(local_port);
+            api_net::put_socket_addr(&mut resp.payload, &socket_addr);
+            allocated_port = Some(local_port);
+        }
+
+        let Ok(udp_socket) = self.new_udp_socket_for_device(
+            device_idx,
+            conn.clone(),
+            socket_addr,
+            api_net::io_subchannel_mask(sqe.payload.args_8()[23]),
+        ) else {
+            if let Some(port) = allocated_port {
+                inner.devices[device_idx].free_ephemeral_udp_port(port);
+            }
+            resp.status = moto_rt::E_INVALID_ARGUMENT;
+            return Ok(Some(resp));
+        };
+
+        let udp_socket_id = udp_socket.id;
+        self.socket_ids.insert(udp_socket.id);
+        self.udp_addresses_in_use.insert(socket_addr);
+        self.udp_sockets.insert(udp_socket.id, udp_socket);
+
+        let conn_udp_sockets = match self.conn_udp_sockets.get_mut(&conn.wait_handle()) {
+            Some(val) => val,
+            None => {
+                self.conn_udp_sockets
+                    .insert(conn.wait_handle(), HashSet::new());
+                self.conn_udp_sockets.get_mut(&conn.wait_handle()).unwrap()
+            }
+        };
+        assert!(conn_udp_sockets.insert(udp_socket_id));
+
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "sys-io: new udp socket on {:?}, conn: 0x{:x}",
+            socket_addr,
+            conn.wait_handle().as_u64()
+        );
+
+        sqe.handle = udp_socket_id.into();
+        sqe.status = moto_rt::E_OK;
+        sqe
+        */
     }
 
     #[cfg(debug_assertions)]
@@ -211,30 +318,32 @@ impl NetRuntime {
         log::info!("NET smoke test starting.");
 
         let loopback_idx = *self.inner.borrow_mut().device_map.get("loopback").unwrap();
-        let server_socket = udp::RawUdpSocket::bind(self, loopback_idx, 8000);
+        let server_socket =
+            udp::UdpSocket::bind(self, loopback_idx, "127.0.0.1:8000".parse().unwrap());
 
         moto_async::LocalRuntime::spawn(async move {
             let mut buf = [0u8; 1024];
-            let (len, endpoint) = server_socket.recv_from(&mut buf).await.unwrap();
+            let (len, endpoint) = server_socket.udp_recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..len], b"PING");
-            server_socket.send_to(b"PONG", endpoint).await.unwrap();
+            server_socket.udp_send_to(b"PONG", endpoint).await.unwrap();
         });
 
         // Yield to ensure the host server is actively listening before we send.
         // moto_async::yield_now().await;
 
         // 3. Setup Motor OS as the Client
-        let client_socket = udp::RawUdpSocket::bind(self, loopback_idx, 9000);
+        let client_socket =
+            udp::UdpSocket::bind(self, loopback_idx, "127.0.0.1:9000".parse().unwrap());
         let server_endpoint =
             smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), 8000);
 
         client_socket
-            .send_to(b"PING", server_endpoint)
+            .udp_send_to(b"PING", server_endpoint)
             .await
             .unwrap();
 
         let mut motor_buf = [0u8; 1024];
-        let (len, _src) = client_socket.recv_from(&mut motor_buf).await.unwrap();
+        let (len, _src) = client_socket.udp_recv_from(&mut motor_buf).await.unwrap();
 
         assert_eq!(&motor_buf[..len], b"PONG");
         log::info!("NET smoke test PASS.");
@@ -286,9 +395,11 @@ pub(super) async fn init(
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             config,
             next_socket_id: 1,
-            udp_sockets: HashMap::new(),
+            sockets: HashMap::new(),
             devices,
             device_map,
+            ip_addresses: Default::default(),
+            udp_addresses_in_use: Default::default(),
         })),
     };
 
