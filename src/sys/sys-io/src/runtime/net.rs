@@ -16,7 +16,6 @@ use crate::util::map_err_into_native;
 mod config;
 mod device;
 mod socket;
-mod udp;
 
 struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
@@ -244,7 +243,8 @@ impl NetRuntime {
         };
 
         if let Err(err) = match net_cmd {
-            NetCmd::UdpSocketBind => udp::bind(self, msg, &sender).await,
+            NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
+            // NetCmd::UdpSocketTxRx => udp::tx(self, msg, &sender).await,
 
             // moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
             cmd => {
@@ -271,8 +271,14 @@ impl NetRuntime {
         log::info!("NET smoke test starting.");
 
         let loopback_idx = *self.inner.borrow_mut().device_map.get("loopback").unwrap();
-        let server_socket =
-            udp::UdpSocket::bind(self, loopback_idx, "127.0.0.1:8000".parse().unwrap()).unwrap();
+        let server_socket = socket::MotoSocket::create_udp_socket(
+            self,
+            loopback_idx,
+            "127.0.0.1:8000".parse().unwrap(),
+            0.into(),
+            0,
+        )
+        .unwrap();
 
         moto_async::LocalRuntime::spawn(async move {
             let mut buf = [0u8; 1024];
@@ -285,8 +291,14 @@ impl NetRuntime {
         // moto_async::yield_now().await;
 
         // 3. Setup Motor OS as the Client
-        let client_socket =
-            udp::UdpSocket::bind(self, loopback_idx, "127.0.0.1:9000".parse().unwrap()).unwrap();
+        let client_socket = socket::MotoSocket::create_udp_socket(
+            self,
+            loopback_idx,
+            "127.0.0.1:9000".parse().unwrap(),
+            0.into(),
+            0,
+        )
+        .unwrap();
         let server_endpoint =
             smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), 8000);
 

@@ -1,4 +1,6 @@
-use std::{net::SocketAddr, rc::Rc};
+use std::{io::ErrorKind, net::SocketAddr, rc::Rc};
+
+use moto_sys::SysHandle;
 
 /// Common socket stuff. We (have to) mimic smoltcp structure, which
 /// is mostly sockets partitioned by interfaces/devices. While technically
@@ -11,9 +13,10 @@ use std::{net::SocketAddr, rc::Rc};
 /// - efficiency: partitioned socket sets will work faster than one fat bucket
 /// - API precision: it's better to define a strict API and then relax it
 ///   vs define a loose API and then deal with weird edge cases and Hyrum's law
+mod udp;
 
 pub(super) enum SocketKind {
-    Udp(super::udp::UdpSocket),
+    Udp(udp::UdpSocket),
     // Tcp,
 }
 
@@ -24,6 +27,7 @@ pub(super) struct BaseSocket {
     smoltcp_handle: smoltcp::iface::SocketHandle,
 
     pub socket_addr: SocketAddr,
+    client: SysHandle, // Denormalized for quick validation.
 }
 
 impl BaseSocket {
@@ -33,6 +37,7 @@ impl BaseSocket {
         device_idx: usize,
         smoltcp_handle: smoltcp::iface::SocketHandle,
         socket_addr: SocketAddr,
+        client: SysHandle,
     ) -> Self {
         Self {
             socket_id,
@@ -40,7 +45,16 @@ impl BaseSocket {
             device_idx,
             smoltcp_handle,
             socket_addr,
+            client,
         }
+    }
+
+    pub(super) fn socket_id(&self) -> u64 {
+        self.socket_id
+    }
+
+    pub(super) fn client(&self) -> SysHandle {
+        self.client
     }
 
     pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
@@ -113,30 +127,48 @@ impl MotoSocket {
         Self { base, kind }
     }
 
-    pub(super) async fn udp_send_to(
-        &self,
-        buf: &[u8],
-        endpoint: smoltcp::wire::IpEndpoint,
-    ) -> std::io::Result<usize> {
-        let Self { base, kind } = self;
+    /*
+    pub(super) async fn udp_tx(
+        runtime: &super::NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+
+        let mut inner = runtime.inner.borrow_mut();
+        let Some(mut socket) = inner.sockets.get_mut(&socket_id) else {
+            let page_idx = msg.payload.shared_pages()[11];
+            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        let Self { base, kind } = socket;
+
+        if base.client() != sender.remote_handle() {
+            log::debug!("UDP TX: wrong client for socket");
+            let page_idx = msg.payload.shared_pages()[11];
+            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
+            return Err(ErrorKind::NotFound.into());
+        }
 
         #[allow(irrefutable_let_patterns)]
         let SocketKind::Udp(udp_socket) = kind else {
-            panic!();
+            log::debug!("UDP TX: bad socket kind");
+            let page_idx = msg.payload.shared_pages()[11];
+            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
+            return Err(ErrorKind::InvalidInput.into());
         };
-        udp_socket.send_to(base, buf, endpoint).await
-    }
 
-    pub(super) async fn udp_recv_from(
-        &self,
-        buf: &mut [u8],
-    ) -> std::io::Result<(usize, smoltcp::wire::IpEndpoint)> {
-        let Self { base, kind } = self;
-
-        #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
-            panic!();
-        };
-        udp_socket.recv_from(base, buf).await
+        xx // TODO: udp_socket.tx needs access to base, inner, self... how to decompose?
+        udp_socket.tx(base, msg, sender).await
     }
+    */
+
+    // pub(super) fn with_base_kind<F, T>(&mut self, f: F) -> T
+    // where
+    //     F: FnOnce(&mut BaseSocket, &mut SocketKind) -> T,
+    // {
+    //     let Self { base, kind } = self;
+    //     f(base, kind)
+    // }
 }
