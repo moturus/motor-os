@@ -411,11 +411,14 @@ impl RawChannel {
             .fetch_or(subchannel_mask, Ordering::AcqRel);
     }
 
-    // We clear all waits upon wakeup. Can we do better?
-    fn clear_server_waiting(&self) {
+    fn clear_server_page_wait(&self, subchannel_mask: u64) {
+        self.server_page_waits
+            .fetch_and(!subchannel_mask, Ordering::AcqRel);
+    }
+
+    fn clear_server_wait(&self, wait_type: WaitType) {
         self.server_waits
-            .store(WaitType::NoWait as u64, Ordering::Release);
-        self.server_page_waits.store(0, Ordering::Release);
+            .fetch_and(!(wait_type as u64), Ordering::AcqRel);
     }
 
     fn set_client_waiting(&self, wait_type: WaitType) {
@@ -426,16 +429,20 @@ impl RawChannel {
     fn is_client_waiting(&self, wait_type: WaitType) -> bool {
         (self.client_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
     }
+
     fn set_client_page_wait(&self, subchannel_mask: u64) {
         self.client_page_waits
             .fetch_or(subchannel_mask, Ordering::AcqRel);
     }
 
-    // We clear all waits upon wakeup. Can we do better?
-    fn clear_client_waiting(&self) {
+    fn clear_client_page_wait(&self, subchannel_mask: u64) {
+        self.client_page_waits
+            .fetch_and(!subchannel_mask, Ordering::AcqRel);
+    }
+
+    fn clear_client_wait(&self, wait_type: WaitType) {
         self.client_waits
-            .store(WaitType::NoWait as u64, Ordering::Release);
-        self.client_page_waits.store(0, Ordering::Release);
+            .fetch_and(!(wait_type as u64), Ordering::AcqRel);
     }
 }
 
@@ -602,10 +609,11 @@ impl ClientConnection {
     // See enqueue() in mpmc.cc.
     pub fn send(&self, msg: Msg) -> Result<()> {
         let raw_channel = self.raw_channel();
-        raw_channel.clear_client_waiting();
+        raw_channel.clear_client_wait(WaitType::WaitingToSend);
 
         let mut slot: &MsgSlot;
         let mut pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
+        let mut first_attempt = true;
         loop {
             slot = &raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
@@ -624,8 +632,12 @@ impl ClientConnection {
                 }
                 // The queue is full.
                 core::cmp::Ordering::Less => {
-                    raw_channel.set_client_waiting(WaitType::WaitingToSend);
-                    return Err(moto_rt::Error::NotReady);
+                    if first_attempt {
+                        raw_channel.set_client_waiting(WaitType::WaitingToSend);
+                        first_attempt = false;
+                    } else {
+                        return Err(moto_rt::Error::NotReady);
+                    }
                 }
                 // We lost the race - continue.
                 core::cmp::Ordering::Greater => {
@@ -634,6 +646,9 @@ impl ClientConnection {
             }
         }
 
+        if !first_attempt {
+            raw_channel.clear_client_wait(WaitType::WaitingToSend);
+        }
         // Safety: the loop above guarantees that this thread accesses
         // the slot exclusively.
         unsafe { *slot.msg.get() = msg };
@@ -644,11 +659,12 @@ impl ClientConnection {
     // See dequeue() in mpmc.cc.
     pub fn recv(&self) -> Result<Msg> {
         let raw_channel = self.raw_channel();
-        raw_channel.clear_client_waiting();
+        raw_channel.clear_client_wait(WaitType::WaitingToRecv);
 
         let mut slot: &MsgSlot;
         let mut pos = raw_channel.server_queue_tail.load(Ordering::Relaxed);
 
+        let mut first_attempt = true;
         loop {
             slot = &raw_channel.server_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
@@ -666,8 +682,12 @@ impl ClientConnection {
                     }
                 }
                 core::cmp::Ordering::Less => {
-                    raw_channel.set_client_waiting(WaitType::WaitingToRecv);
-                    return Err(moto_rt::Error::NotReady); // The queue is empty.
+                    if first_attempt {
+                        raw_channel.set_client_waiting(WaitType::WaitingToRecv);
+                        first_attempt = false;
+                    } else {
+                        return Err(moto_rt::Error::NotReady); // The queue is empty.
+                    }
                 }
                 core::cmp::Ordering::Greater => {
                     // We lost the race - continue.
@@ -676,6 +696,9 @@ impl ClientConnection {
             }
         }
 
+        if !first_attempt {
+            raw_channel.clear_client_wait(WaitType::WaitingToRecv);
+        }
         // Safety: the loop above ensures that only this thread access the slot.
         let msg = unsafe { *slot.msg.get() };
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
@@ -683,19 +706,27 @@ impl ClientConnection {
     }
 
     pub fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
-        if let Ok(raw_page) = self
-            .raw_channel()
-            .alloc_page(SubChannel::Client(subchannel_mask))
-        {
-            self.raw_channel().clear_client_waiting();
-            Ok(IoPage {
-                raw_page,
-                raw_channel: self.raw_channel(),
-                remote_handle: SysHandle::NONE,
-            })
-        } else {
-            self.raw_channel().set_client_page_wait(subchannel_mask);
-            Err(moto_rt::Error::NotReady)
+        let mut first_attempt = true;
+
+        loop {
+            if let Ok(raw_page) = self
+                .raw_channel()
+                .alloc_page(SubChannel::Client(subchannel_mask))
+            {
+                self.raw_channel().clear_client_page_wait(subchannel_mask);
+                return Ok(IoPage {
+                    raw_page,
+                    raw_channel: self.raw_channel(),
+                    remote_handle: SysHandle::NONE,
+                });
+            } else {
+                if first_attempt {
+                    self.raw_channel().set_client_page_wait(subchannel_mask);
+                    first_attempt = false;
+                } else {
+                    return Err(moto_rt::Error::NotReady);
+                }
+            }
         }
     }
 
@@ -1098,8 +1129,12 @@ impl Sender {
                     self.inner.remote_handle.as_future().await?;
                     // We clear all wait flags on wakeup. Can we do better?
                     match self.inner.endpoint_type {
-                        EndpointType::Client => self.raw_channel().clear_client_waiting(),
-                        EndpointType::Server => self.raw_channel().clear_server_waiting(),
+                        EndpointType::Client => self
+                            .raw_channel()
+                            .clear_client_wait(WaitType::WaitingToSend),
+                        EndpointType::Server => self
+                            .raw_channel()
+                            .clear_server_wait(WaitType::WaitingToSend),
                     }
                     wait_flag_set = false;
                 }
@@ -1162,8 +1197,12 @@ impl Sender {
                         self.inner.remote_handle.as_future().await?;
                         // We clear all wait flags on wakeup. Can we do better?
                         match self.inner.endpoint_type {
-                            EndpointType::Client => self.raw_channel().clear_client_waiting(),
-                            EndpointType::Server => self.raw_channel().clear_server_waiting(),
+                            EndpointType::Client => {
+                                self.raw_channel().clear_client_page_wait(subchannel_mask)
+                            }
+                            EndpointType::Server => {
+                                self.raw_channel().clear_server_page_wait(subchannel_mask)
+                            }
                         }
                         wait_flag_set = false;
                     }
@@ -1272,10 +1311,13 @@ impl Receiver {
                             core::task::Poll::Pending => return core::task::Poll::Pending,
                         }
 
-                        // Wakeup; we clear all wait flags on wakeup. Can we do better?
                         match self.inner.endpoint_type {
-                            EndpointType::Client => self.raw_channel().clear_client_waiting(),
-                            EndpointType::Server => self.raw_channel().clear_server_waiting(),
+                            EndpointType::Client => self
+                                .raw_channel()
+                                .clear_client_wait(WaitType::WaitingToSend),
+                            EndpointType::Server => self
+                                .raw_channel()
+                                .clear_server_wait(WaitType::WaitingToSend),
                         }
                         wait_flag_set = false;
                     }
