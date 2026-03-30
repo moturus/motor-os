@@ -256,13 +256,10 @@ impl NetRuntime {
                 return;
             }
         } {
-            log::info!("sending error...");
             let mut resp = msg;
             resp.status = map_err_into_native(err).into();
-            if let Err(err) = sender.send(resp).await {
-                log::error!("Error sending error response: {err:?}.");
-                todo!("disconnect? drop sender?");
-            }
+            // Ignore errors below because it will be handled when the caller calls recv() next.
+            let _ = sender.send(resp).await;
         }
     }
 
