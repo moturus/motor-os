@@ -24,6 +24,7 @@ impl Drop for UdpFragmentingQueue {
     }
 }
 
+pub trait AsyncPageAllocator = async FnOnce(u64) -> Result<io_channel::IoPage, ErrorCode>;
 pub trait PageAllocator = FnOnce(u64) -> Result<io_channel::IoPage, ErrorCode>;
 pub trait PageGetter = FnOnce(u16) -> Result<io_channel::IoPage, ErrorCode>;
 
@@ -71,6 +72,26 @@ impl UdpFragmentingQueue {
 
         let udp_datagram = self.queue.front_mut()?;
         let msg = udp_datagram.next_msg(self.socket_id, self.subchannel_mask, page_allocator)?;
+
+        if udp_datagram.is_done() {
+            self.queue.pop_front().unwrap();
+        }
+
+        Some(msg)
+    }
+
+    pub async fn pop_front_async<F>(&mut self, page_allocator: F) -> Option<io_channel::Msg>
+    where
+        F: AsyncPageAllocator,
+    {
+        if let Some(msg) = self.msg.take() {
+            return Some(msg);
+        }
+
+        let udp_datagram = self.queue.front_mut()?;
+        let msg = udp_datagram
+            .next_msg_async(self.socket_id, self.subchannel_mask, page_allocator)
+            .await?;
 
         if udp_datagram.is_done() {
             self.queue.pop_front().unwrap();
@@ -278,6 +299,54 @@ impl UdpDatagram {
         };
 
         let Ok(io_page) = page_allocator(subchannel_mask) else {
+            return None;
+        };
+
+        io_page.bytes_mut()[0..next_sz]
+            .copy_from_slice(&self.bytes[self.consumed..(self.consumed + next_sz)]);
+        let msg = moto_sys_io::api_net::udp_socket_tx_rx_msg(
+            socket_id,
+            io_page,
+            fragment_id,
+            next_sz as u16,
+            &self.addr,
+        );
+
+        self.consumed += next_sz;
+
+        Some(msg)
+    }
+
+    async fn next_msg_async<F>(
+        &mut self,
+        socket_id: u64,
+        subchannel_mask: u64,
+        page_allocator: F,
+    ) -> Option<io_channel::Msg>
+    where
+        F: AsyncPageAllocator,
+    {
+        if self.bytes.is_empty() {
+            return Some(moto_sys_io::api_net::udp_socket_tx_rx_empty_msg(
+                socket_id, &self.addr,
+            ));
+        }
+
+        assert!(self.consumed < self.bytes.len());
+        debug_assert_eq!(0, self.consumed & (io_channel::PAGE_SIZE - 1));
+        let remains = self.bytes.len() - self.consumed;
+        let next_sz = io_channel::PAGE_SIZE.min(remains);
+
+        let fragment_id = if self.bytes.len() <= io_channel::PAGE_SIZE {
+            0
+        } else if next_sz == remains {
+            // The last fragment.
+            u16::MAX
+        } else {
+            (1 + (self.consumed / io_channel::PAGE_SIZE)) as u16
+        };
+
+        let Ok(io_page) = page_allocator(subchannel_mask).await else {
             return None;
         };
 
