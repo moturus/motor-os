@@ -107,8 +107,30 @@ impl Drop for MotoSocket {
                 panic!()
             };
         }
+
+        // UDP sockets don't linger.
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            let sockets = &mut inner.devices[device_idx].sockets;
+
+            #[cfg(debug_assertions)]
+            if sockets
+                .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
+                .send_queue()
+                != 0
+            {
+                log::debug!("Dropped UDP socket 0x{socket_id:x} with unsent bytes.");
+            } else {
+                log::debug!("Dropped UDP socket 0x{socket_id:x}.");
+            }
+
+            sockets.remove(smoltcp_handle);
+            inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
+        }
+
         // There could be bytes stuck in the socket. Wait for them to clear.
         // Async Rust really shines here!
+        /*
         moto_async::LocalRuntime::spawn(async move {
             loop {
                 let mut inner = runtime.inner.borrow_mut();
@@ -127,6 +149,7 @@ impl Drop for MotoSocket {
                 moto_async::sleep(std::time::Duration::from_millis(10)).await;
             }
         });
+        */
     }
 }
 
@@ -145,7 +168,6 @@ impl MotoSocket {
 
         let socket_id = base.socket_id;
         let client_handle = base.client;
-        log::info!("dropping socket 0x{socket_id:x}");
 
         let mut runtime_ref = base.runtime.inner.borrow_mut();
         let client = runtime_ref.clients.get_mut(&client_handle).unwrap();
