@@ -1,4 +1,5 @@
 use std::io::ErrorKind;
+use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
 use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
@@ -13,114 +14,38 @@ use super::SocketKind;
 pub struct UdpSocket {
     ephemeral_port: Option<u16>,
     tx_queue: UdpDefragmentingQueue,
-    rx_queue: UdpFragmentingQueue,
+    rx_queue: Rc<RefCell<UdpFragmentingQueue>>,
+}
+
+impl UdpSocket {
+    pub(super) fn on_drop(&mut self, runtime: &NetRuntime, client: SysHandle) {
+        /*
+        if let Some(msg) = self.rx_queue.borrow_mut().take_msg() {
+            panic!(); // We never push messages back to rx queue.
+            /*
+            // Need to free the stranded page.
+            let sz = msg.payload.args_16()[10];
+            if sz != 0 {
+                let page_idx = msg.payload.shared_pages()[11];
+                let mut inner = runtime.inner.borrow_mut();
+                if let Some(client) = inner.clients.get(&client) {
+                    let _page = client.sender.get_page(page_idx).unwrap();
+                }
+            }
+            */
+        }
+        */
+    }
 }
 
 impl MotoSocket {
-    pub async fn udp_bind(
-        runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
-    ) -> std::io::Result<()> {
-        let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
-        let mut inner = runtime.inner.borrow_mut();
-        let mut resp = msg;
-
-        // Verify that the IP is valid (if present) before the socket is created.
-        let ip_addr = socket_addr.ip();
-
-        if ip_addr.is_unspecified() {
-            // We don't allow binding to an unspecified addr (yet?).
-            return Err(ErrorKind::InvalidInput.into());
-        }
-        let device_idx = {
-            match inner.ip_addresses.get(&ip_addr) {
-                Some(idx) => *idx,
-                None => {
-                    #[cfg(debug_assertions)]
-                    log::debug!("IP addr {ip_addr:?} not found");
-
-                    return Err(ErrorKind::InvalidInput.into());
-                }
-            }
-        };
-
-        // Allocate/assign port, if needed.
-        let mut allocated_port = None;
-        if socket_addr.port() == 0 {
-            let local_port = match inner.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
-                Some(port) => port,
-                None => {
-                    log::warn!("get_ephemeral_udp_port({ip_addr:?}) failed");
-
-                    return Err(ErrorKind::OutOfMemory.into());
-                }
-            };
-            socket_addr.set_port(local_port);
-            api_net::put_socket_addr(&mut resp.payload, &socket_addr);
-            allocated_port = Some(local_port);
-        }
-
-        drop(inner);
-        let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
-
-        let udp_socket = Self::create_udp_socket(
-            runtime,
-            device_idx,
-            socket_addr,
-            sender.remote_handle(),
-            subchannel_mask,
-        )?;
-
-        let socket_id = udp_socket.socket_id();
-        {
-            let mut inner = runtime.inner.borrow_mut();
-            inner.sockets.insert(socket_id, udp_socket);
-            inner
-                .clients
-                .get_mut(&sender.remote_handle())
-                .unwrap()
-                .sockets
-                .insert(socket_id);
-        }
-        /*
-        let udp_socket_id = udp_socket.id;
-        self.socket_ids.insert(udp_socket.id);
-        self.udp_addresses_in_use.insert(socket_addr);
-        self.udp_sockets.insert(udp_socket.id, udp_socket);
-
-        let conn_udp_sockets = match self.conn_udp_sockets.get_mut(&conn.wait_handle()) {
-            Some(val) => val,
-            None => {
-                self.conn_udp_sockets
-                    .insert(conn.wait_handle(), HashSet::new());
-                self.conn_udp_sockets.get_mut(&conn.wait_handle()).unwrap()
-            }
-        };
-        assert!(conn_udp_sockets.insert(udp_socket_id));
-        */
-
-        #[cfg(debug_assertions)]
-        log::debug!(
-            "sys-io: new udp socket on {:?}, conn: 0x{:x}",
-            socket_addr,
-            sender.remote_handle().as_u64()
-        );
-
-        let mut resp = msg;
-        resp.handle = socket_id;
-        resp.status = moto_rt::E_OK;
-        let _ = sender.send(resp).await;
-        Ok(())
-    }
-
     pub fn create_udp_socket(
         runtime: &NetRuntime,
         device_idx: usize,
         socket_addr: SocketAddr,
         client: SysHandle,
         subchannel_mask: u64,
-    ) -> std::io::Result<MotoSocket> {
+    ) -> Rc<RefCell<MotoSocket>> {
         let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
             vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 10],
             vec![0; 8192],
@@ -136,7 +61,6 @@ impl MotoSocket {
 
         let (socket_id, smoltcp_handle) = {
             let mut inner = runtime.inner.borrow_mut();
-            inner.devices[device_idx].add_udp_addr_in_use(socket_addr)?;
             (
                 inner.next_socket_id(),
                 inner.devices[device_idx].sockets.add(smoltcp_socket),
@@ -151,14 +75,17 @@ impl MotoSocket {
             socket_addr,
             client,
         );
-        Ok(MotoSocket::new(
+        Rc::new(RefCell::new(MotoSocket::new(
             base,
             SocketKind::Udp(UdpSocket {
                 ephemeral_port: None,
                 tx_queue: UdpDefragmentingQueue::new(),
-                rx_queue: UdpFragmentingQueue::new(socket_id, subchannel_mask),
+                rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
+                    socket_id,
+                    subchannel_mask,
+                ))),
             }),
-        ))
+        )))
     }
 
     pub async fn udp_send_to(
@@ -217,53 +144,257 @@ impl MotoSocket {
         .await
     }
 
-    /*
-    async fn tx_ack(sender: &moto_ipc::io_channel::Sender, socket_id: u64) {
+    async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) {
+        let weak_clone = weak_socket.clone();
+
+        // Poll for packet.
+        let cont = std::future::poll_fn(move |cx| {
+            let Some(socket) = weak_clone.upgrade() else {
+                return Poll::Ready(false); // The socket is gone.
+            };
+            let mut socket_ref = socket.borrow_mut();
+            let socket_mut = &mut *socket_ref;
+            let Self { base, kind } = socket_mut;
+
+            #[allow(irrefutable_let_patterns)]
+            let SocketKind::Udp(udp_socket) = kind else {
+                panic!();
+            };
+
+            let socket_id = base.socket_id();
+            base.with_smoltcp_socket::<_, smoltcp::socket::udp::Socket, _>(|smoltcp_socket| {
+                if smoltcp_socket.can_recv() {
+                    let (buf, metadata) = smoltcp_socket.recv().unwrap();
+                    let addr: SocketAddr =
+                        crate::runtime::net::config::socket_addr_from_endpoint(metadata.endpoint);
+                    log::debug!(
+                        "UDP socket 0x{:x} got {} bytes from {:?}",
+                        u64::from(socket_id),
+                        buf.len(),
+                        addr
+                    );
+                    udp_socket.rx_queue.borrow_mut().push_back(buf, addr);
+                    Poll::Ready(true)
+                } else {
+                    smoltcp_socket.register_recv_waker(cx.waker());
+                    Poll::Pending
+                }
+            })
+        })
+        .await;
+
+        if !cont {
+            return;
+        }
+
+        let Some(socket) = weak_socket.upgrade() else {
+            return; // The socket is gone.
+        };
+        let mut socket_ref = socket.borrow_mut();
+        let socket_mut = &mut *socket_ref;
+        let Self { base, kind } = socket_mut;
+
+        let sender = {
+            if let Some(conn) = base.runtime.inner.borrow().clients.get(&base.client) {
+                conn.sender.clone()
+            } else {
+                return;
+            }
+        };
+
+        let page_allocator = async |subchannel_mask| {
+            sender
+                .alloc_page(subchannel_mask)
+                .await
+                .map_err(|err| err as u16)
+        };
+
+        #[allow(irrefutable_let_patterns)]
+        let SocketKind::Udp(udp_socket) = kind else {
+            panic!();
+        };
+
+        let rx_queue = udp_socket.rx_queue.clone();
+        let socket_id = base.socket_id();
+        drop(socket_ref);
+
+        // Note: rx_queue is only used in this fn, so we can safely keep the borrow.
+        while let Some(mut msg) = rx_queue.borrow_mut().pop_front_async(page_allocator).await {
+            msg.status = moto_rt::E_OK;
+
+            log::debug!("RX msg for UDP socket 0x{socket_id:x}");
+            let _ = sender.send(msg).await;
+        }
+
+        Self::spawn_udp_rx_task(weak_socket);
+    }
+
+    fn spawn_udp_rx_task(weak_socket: Weak<RefCell<MotoSocket>>) {
+        let _ = moto_async::LocalRuntime::spawn(async move {
+            Self::udp_rx(weak_socket).await;
+        });
+    }
+
+    // TODO: this message was used before async channel was a thing. Maybe we don't need it now?
+    async fn udp_tx_ack(sender: &moto_ipc::io_channel::Sender, socket_id: u64) {
         let mut msg = moto_ipc::io_channel::Msg::new();
         msg.command = api_net::NetCmd::UdpSocketTxRxAck.as_u16();
         msg.handle = socket_id;
         let _ = sender.send(msg).await;
     }
 
-    pub(super) async fn tx(
-        &mut self,
-        base: &mut super::socket::BaseSocket,
+    /* ----------------------------------- API calls ------------------------------------ */
+    pub async fn udp_bind(
+        runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
+        let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
+        let mut inner = runtime.inner.borrow_mut();
+        let mut resp = msg;
+
+        // Verify that the IP is valid (if present) before the socket is created.
+        let ip_addr = socket_addr.ip();
+
+        if ip_addr.is_unspecified() {
+            // We don't allow binding to an unspecified addr (yet?).
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let device_idx = {
+            match inner.ip_addresses.get(&ip_addr) {
+                Some(idx) => *idx,
+                None => {
+                    #[cfg(debug_assertions)]
+                    log::debug!("IP addr {ip_addr:?} not found");
+
+                    return Err(ErrorKind::InvalidInput.into());
+                }
+            }
+        };
+
+        // Allocate/assign port, if needed.
+        let mut allocated_port = None;
+        if socket_addr.port() == 0 {
+            let local_port = match inner.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
+                Some(port) => port,
+                None => {
+                    log::warn!("get_ephemeral_udp_port({ip_addr:?}) failed");
+
+                    return Err(ErrorKind::OutOfMemory.into());
+                }
+            };
+            socket_addr.set_port(local_port);
+            api_net::put_socket_addr(&mut resp.payload, &socket_addr);
+            allocated_port = Some(local_port);
+        }
+
+        inner.devices[device_idx].add_udp_addr_in_use(socket_addr)?;
+        drop(inner);
+
+        let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
+
+        let udp_socket = Self::create_udp_socket(
+            runtime,
+            device_idx,
+            socket_addr,
+            sender.remote_handle(),
+            subchannel_mask,
+        );
+
+        let socket_id = udp_socket.borrow().socket_id();
+        let weak_socket = Rc::downgrade(&udp_socket);
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            inner.sockets.insert(socket_id, udp_socket);
+            inner
+                .clients
+                .get_mut(&sender.remote_handle())
+                .unwrap()
+                .sockets
+                .insert(socket_id);
+        }
+
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "sys-io: new udp socket on {:?}, conn: 0x{:x}",
+            socket_addr,
+            sender.remote_handle().as_u64()
+        );
+
+        let mut resp = msg;
+        resp.handle = socket_id;
+        resp.status = moto_rt::E_OK;
+        let _ = sender.send(resp).await;
+
+        Self::spawn_udp_rx_task(weak_socket);
+
+        Ok(())
+    }
+
+    pub async fn udp_tx(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+
+        let Some(mut socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            let page_idx = msg.payload.shared_pages()[11];
+            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        let mut socket_ref = socket.borrow_mut();
+        let socket_mut = &mut *socket_ref;
+        let Self { base, kind } = socket_mut;
+
+        if base.client() != sender.remote_handle() {
+            log::debug!("UDP TX: wrong client for socket");
+            let page_idx = msg.payload.shared_pages()[11];
+            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
+            return Err(ErrorKind::NotFound.into());
+        }
+
+        #[allow(irrefutable_let_patterns)]
+        let SocketKind::Udp(udp_socket) = kind else {
+            log::debug!("UDP TX: bad socket kind");
+            let page_idx = msg.payload.shared_pages()[11];
+            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
+            return Err(ErrorKind::InvalidInput.into());
+        };
+
         let fragment_id = msg.payload.args_16()[9];
-        if self
+        if udp_socket
             .tx_queue
             .push_back(msg, |idx| sender.get_page(idx).map_err(|err| err.into()))
             .is_err()
         {
-            let Ok(pid) = moto_sys::SysObj::get_pid(sender.remote_handle()) else {
+            if let Ok(pid) = moto_sys::SysObj::get_pid(sender.remote_handle()) {
+                log::info!("Killing process 0x{:x} due to bad UDP fragment", pid);
+            } else {
                 log::warn!("UDP TX: can't determine client PID.");
-                return Err(ErrorKind::InvalidData.into());
             };
-            log::info!("Killing process 0x{:x} due to bad UDP fragment", pid);
             let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
             return Ok(());
         }
 
-        if fragment_id != 0 {
-            // Notify the client that we've consumed the io page.
-            Self::tx_ack(sender, base.socket_id());
-        }
+        let mut need_udp_tx_ack = fragment_id != 0;
 
-        let smol_socket = self.devices[moto_socket.device_idx]
+        let mut inner_ref = runtime.inner.borrow_mut();
+        let mut inner = &mut *inner_ref;
+        let smol_socket = inner.devices[base.device_idx]
             .sockets
-            .get_mut::<smoltcp::socket::udp::Socket>(moto_socket.handle);
+            .get_mut::<smoltcp::socket::udp::Socket>(base.smoltcp_handle);
 
-        let mut did_send = false;
         loop {
-            let Ok(datagram) = moto_socket.tx_queue.next_datagram() else {
-                log::info!(
-                    "Killing process 0x{:x} due to bad UDP fragment",
-                    moto_socket.pid
-                );
-                let _ = moto_sys::SysCpu::kill_remote(conn.wait_handle());
-                return;
+            let Ok(datagram) = udp_socket.tx_queue.next_datagram() else {
+                if let Ok(pid) = moto_sys::SysObj::get_pid(sender.remote_handle()) {
+                    log::info!("Killing process 0x{:x} due to bad UDP fragment", pid);
+                } else {
+                    log::warn!("UDP TX: can't determine client PID.");
+                };
+                let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
+                return Ok(());
             };
 
             let Some(datagram) = datagram else {
@@ -279,36 +410,67 @@ impl MotoSocket {
                     }
                     smoltcp::socket::udp::SendError::BufferFull => {
                         // Can't send the packet: re-insert it into the pending queue.
-                        moto_socket.tx_queue.push_front(datagram);
+                        udp_socket.tx_queue.push_front(datagram);
                         break;
                     }
                 }
             } else {
-                did_send = true;
+                need_udp_tx_ack = true;
                 log::debug!(
                     "UDP: socket 0x{:x} sent {} bytes to {:?}",
                     u64::from(socket_id),
                     datagram.slice().len(),
                     datagram.addr
                 );
+                base.device_notify.notify_one();
             }
         }
 
-        if did_send {
-            Self::tx_ack(sender, base.socket_id());
+        core::mem::drop(inner_ref);
+
+        if need_udp_tx_ack {
+            // Notify the client that we've consumed the io page.
+            Self::udp_tx_ack(sender, socket_id).await;
         }
+        Ok(())
+    }
+
+    pub async fn udp_socket_drop(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+
+        let Some(mut socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        let mut socket_ref = socket.borrow_mut();
+        let socket_mut = &mut *socket_ref;
+        let Self { base, kind } = socket_mut;
+
+        if base.client() != sender.remote_handle() {
+            log::debug!("UDP TX: wrong client for socket");
+            return Err(ErrorKind::NotFound.into());
+        }
+
+        #[allow(irrefutable_let_patterns)]
+        let SocketKind::Udp(udp_socket) = kind else {
+            log::debug!("UDP Drop: bad socket kind");
+            return Err(ErrorKind::InvalidInput.into());
+        };
+
+        drop(socket_ref);
+        let socket = runtime
+            .inner
+            .borrow_mut()
+            .sockets
+            .remove(&socket_id)
+            .unwrap();
+
+        Self::on_drop(socket);
 
         Ok(())
     }
-    */
 }
-
-/*
-pub(crate) async fn tx(
-    runtime: &NetRuntime,
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
-) -> std::io::Result<()> {
-    MotoSocket::udp_tx(runtime, msg, sender).await
-}
-*/

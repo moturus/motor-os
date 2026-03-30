@@ -184,7 +184,7 @@ impl NetConfig {
     }
 }
 
-fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
+pub(super) fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
     let addr: IpAddr = endpoint.addr.into();
     SocketAddr::new(addr, endpoint.port)
 }

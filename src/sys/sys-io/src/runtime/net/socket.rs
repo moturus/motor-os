@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, net::SocketAddr, rc::Rc};
+use std::{cell::RefCell, io::ErrorKind, net::SocketAddr, rc::Rc};
 
 use moto_sys::SysHandle;
 
@@ -25,8 +25,10 @@ pub(super) struct BaseSocket {
     runtime: super::NetRuntime,
     device_idx: usize,
     smoltcp_handle: smoltcp::iface::SocketHandle,
+    device_notify: Rc<moto_async::LocalNotify>,
 
     pub socket_addr: SocketAddr,
+
     client: SysHandle, // Denormalized for quick validation.
 }
 
@@ -39,11 +41,14 @@ impl BaseSocket {
         socket_addr: SocketAddr,
         client: SysHandle,
     ) -> Self {
+        let device_notify = runtime.inner.borrow().devices[device_idx].notify.clone();
+
         Self {
             socket_id,
             runtime,
             device_idx,
             smoltcp_handle,
+            device_notify,
             socket_addr,
             client,
         }
@@ -58,9 +63,7 @@ impl BaseSocket {
     }
 
     pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
-        self.runtime.inner.borrow().devices[self.device_idx]
-            .notify
-            .clone()
+        self.device_notify.clone()
     }
 
     pub(super) fn with_smoltcp_socket<F, S: smoltcp::socket::AnySocket<'static>, T>(
@@ -94,7 +97,16 @@ impl Drop for MotoSocket {
         let device_idx = self.base.device_idx;
         let socket_addr = self.base.socket_addr;
         let smoltcp_handle = self.base.smoltcp_handle;
+        let socket_id = self.base.socket_id;
 
+        {
+            #[allow(irrefutable_let_patterns)]
+            if let SocketKind::Udp(udp_socket) = &mut self.kind {
+                udp_socket.on_drop(&runtime, self.base.client);
+            } else {
+                panic!()
+            };
+        }
         // There could be bytes stuck in the socket. Wait for them to clear.
         // Async Rust really shines here!
         moto_async::LocalRuntime::spawn(async move {
@@ -108,7 +120,7 @@ impl Drop for MotoSocket {
                 {
                     sockets.remove(smoltcp_handle);
                     inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
-                    log::error!("Stale socket cleared.");
+                    log::debug!("Stale UDP socket 0x{socket_id:x} cleared.");
                     return;
                 }
 
@@ -127,48 +139,18 @@ impl MotoSocket {
         Self { base, kind }
     }
 
-    /*
-    pub(super) async fn udp_tx(
-        runtime: &super::NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
-    ) -> std::io::Result<()> {
-        let socket_id = msg.handle;
+    fn on_drop(this: Rc<RefCell<Self>>) {
+        let this_ref = this.borrow();
+        let Self { base, kind } = &*this_ref;
 
-        let mut inner = runtime.inner.borrow_mut();
-        let Some(mut socket) = inner.sockets.get_mut(&socket_id) else {
-            let page_idx = msg.payload.shared_pages()[11];
-            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
-            return Err(ErrorKind::NotFound.into());
-        };
+        let socket_id = base.socket_id;
+        let client_handle = base.client;
+        log::info!("dropping socket 0x{socket_id:x}");
 
-        let Self { base, kind } = socket;
+        let mut runtime_ref = base.runtime.inner.borrow_mut();
+        let client = runtime_ref.clients.get_mut(&client_handle).unwrap();
+        assert!(client.sockets.remove(&socket_id));
 
-        if base.client() != sender.remote_handle() {
-            log::debug!("UDP TX: wrong client for socket");
-            let page_idx = msg.payload.shared_pages()[11];
-            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
-            return Err(ErrorKind::NotFound.into());
-        }
-
-        #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
-            log::debug!("UDP TX: bad socket kind");
-            let page_idx = msg.payload.shared_pages()[11];
-            let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
-            return Err(ErrorKind::InvalidInput.into());
-        };
-
-        xx // TODO: udp_socket.tx needs access to base, inner, self... how to decompose?
-        udp_socket.tx(base, msg, sender).await
+        // Don't remove from devices as some bytes may need to get out.
     }
-    */
-
-    // pub(super) fn with_base_kind<F, T>(&mut self, f: F) -> T
-    // where
-    //     F: FnOnce(&mut BaseSocket, &mut SocketKind) -> T,
-    // {
-    //     let Self { base, kind } = self;
-    //     f(base, kind)
-    // }
 }

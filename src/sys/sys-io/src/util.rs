@@ -8,7 +8,7 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
         std::io::ErrorKind::NetworkUnreachable => moto_rt::Error::NotConnected,
         std::io::ErrorKind::ConnectionAborted => moto_rt::Error::NotConnected,
         std::io::ErrorKind::NotConnected => moto_rt::Error::NotConnected,
-        std::io::ErrorKind::AddrInUse => todo!(),
+        std::io::ErrorKind::AddrInUse => moto_rt::Error::AlreadyInUse,
         std::io::ErrorKind::AddrNotAvailable => todo!(),
         std::io::ErrorKind::NetworkDown => moto_rt::Error::NotConnected,
         std::io::ErrorKind::BrokenPipe => moto_rt::Error::NotConnected,
