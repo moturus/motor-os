@@ -636,14 +636,26 @@ impl NetChannel {
             received_messages += 1;
 
             #[cfg(debug_assertions)]
-            crate::moto_log!(
-                "{}:{} got msg {}:0x{:x}:{}",
-                file!(),
-                line!(),
-                msg.id,
-                msg.handle,
-                msg.command
-            );
+            {
+                if let Ok(cmd) = api_net::NetCmd::try_from(msg.command) {
+                    crate::moto_log!(
+                        "{}:{} got msg {}:0x{:x}:{cmd:?}",
+                        file!(),
+                        line!(),
+                        msg.id,
+                        msg.handle,
+                    );
+                } else {
+                    crate::moto_log!(
+                        "{}:{} got msg {}:0x{:x}:{}",
+                        file!(),
+                        line!(),
+                        msg.id,
+                        msg.handle,
+                        msg.command
+                    );
+                }
+            }
 
             let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
 
