@@ -161,7 +161,7 @@ impl TxnLogger {
                 let txn_batch = holder_lock.renew();
                 drop(holder_lock);
 
-                log::debug!("commiting batch {txn_id} on timeout");
+                log::debug!("committing batch {txn_id} on timeout");
                 let _ = sender.send(CommitterMessage::TxnBatch(txn_batch)).await;
             }
         };
