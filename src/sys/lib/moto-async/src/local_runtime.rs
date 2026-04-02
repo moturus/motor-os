@@ -21,7 +21,6 @@
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
-use alloc::collections::btree_set::BTreeSet;
 use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -187,7 +186,7 @@ struct LocalRuntimeInner {
     runqueue: RefCell<VecDeque<TaskId>>,
 
     // Tasks waiting on specific sys handles.
-    sys_waiters: RefCell<BTreeMap<SysHandle, BTreeSet<TaskId>>>,
+    sys_waiters: RefCell<BTreeMap<SysHandle, VecDeque<TaskId>>>,
 
     // Timers. Can be added to at runtime.
     timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
@@ -202,7 +201,7 @@ struct LocalRuntimeInner {
     next_task_id: RefCell<u64>,
 
     // Wakes from wait_handles are stored here.
-    sys_wakes: RefCell<BTreeMap<SysHandle, moto_rt::Error>>,
+    sys_wakes: RefCell<BTreeMap<SysHandle, (VecDeque<TaskId>, moto_rt::Error)>>,
 
     // Task IDs of wakes coming from wakers (!= LocalWaker).
     nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
@@ -253,12 +252,18 @@ impl LocalRuntimeInner {
     fn add_sys_waiter(&self, handle: SysHandle, task_id: TaskId) {
         let mut sys_waiters = self.sys_waiters.borrow_mut();
 
-        if let Some(entry) = sys_waiters.get_mut(&handle) {
-            entry.insert(task_id);
+        if let Some(tasks) = sys_waiters.get_mut(&handle) {
+            // Avoid dup adds.
+            for task in tasks.iter() {
+                if task_id == *task {
+                    return; // Already.
+                }
+            }
+            tasks.push_back(task_id);
         } else {
-            let mut entry = BTreeSet::new();
-            entry.insert(task_id);
-            sys_waiters.insert(handle, entry);
+            let mut tasks = VecDeque::new();
+            tasks.push_back(task_id);
+            sys_waiters.insert(handle, tasks);
         }
     }
 
@@ -313,12 +318,12 @@ impl LocalRuntimeInner {
                     }
                     let tasks = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
                     let mut runqueue = self.runqueue.borrow_mut();
-                    for task_id in tasks {
-                        runqueue.push_back(task_id);
+                    for task_id in &tasks {
+                        runqueue.push_back(*task_id);
                     }
                     self.sys_wakes
                         .borrow_mut()
-                        .insert(handle, moto_rt::Error::Ok);
+                        .insert(handle, (tasks, moto_rt::Error::Ok));
                 }
             }
             Err(moto_rt::E_TIMED_OUT) => {}
@@ -330,12 +335,12 @@ impl LocalRuntimeInner {
 
                     let tasks = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
                     let mut runqueue = self.runqueue.borrow_mut();
-                    for task_id in tasks {
-                        runqueue.push_back(task_id);
+                    for task_id in &tasks {
+                        runqueue.push_back(*task_id);
                     }
                     self.sys_wakes
                         .borrow_mut()
-                        .insert(handle, moto_rt::Error::BadHandle);
+                        .insert(handle, (tasks, moto_rt::Error::BadHandle));
                 }
             }
             Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
@@ -593,16 +598,24 @@ impl SysHandleFuture {
             return Poll::Pending;
         };
 
-        if let Some(wait_result) = inner.sys_wakes.borrow_mut().remove(&self.handle) {
-            Poll::Ready(if wait_result == moto_rt::Error::Ok {
-                Ok(())
-            } else {
-                Err(wait_result)
-            })
-        } else {
-            inner.add_sys_waiter(self.handle, *task_id);
-            Poll::Pending
+        // if let Some(wait_result) = inner.sys_wakes.borrow_mut().remove(&self.handle) {
+        if let Some((tasks, wait_result)) = inner.sys_wakes.borrow_mut().get_mut(&self.handle) {
+            // Find/remove self.task_id. If it is kept in the list, the task will never sleep
+            // (if it waits on the handle).
+            for idx in 0..tasks.len() {
+                if tasks[idx] == *task_id {
+                    tasks.remove(idx);
+                    return Poll::Ready(if *wait_result == moto_rt::Error::Ok {
+                        Ok(())
+                    } else {
+                        Err(*wait_result)
+                    });
+                };
+            }
         }
+
+        inner.add_sys_waiter(self.handle, *task_id);
+        Poll::Pending
     }
 }
 
