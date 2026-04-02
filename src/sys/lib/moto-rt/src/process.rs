@@ -364,7 +364,7 @@ fn encode_env(keys: Vec<String>, vals: Vec<String>) -> (u64, Option<core::alloc:
     assert_ne!(result_addr, 0);
 
     unsafe {
-        let mut pos = result_addr as usize;
+        let mut pos = result_addr;
         *((pos as *mut u32).as_mut().unwrap()) = num_args;
         pos += 4;
 
