@@ -210,6 +210,7 @@ struct RawIoPage {
 
 #[repr(u64)]
 enum WaitType {
+    #[allow(unused)]
     NoWait = 0,
     WaitingToSend = 1,
     WaitingToRecv = 2,
@@ -653,6 +654,9 @@ impl ClientConnection {
         // the slot exclusively.
         unsafe { *slot.msg.get() = msg };
         slot.stamp.store(pos + 1, Ordering::Release);
+        if raw_channel.is_server_waiting(WaitType::WaitingToRecv) {
+            let _ = moto_sys::SysCpu::wake(self.server_handle);
+        }
         Ok(())
     }
 
@@ -702,6 +706,9 @@ impl ClientConnection {
         // Safety: the loop above ensures that only this thread access the slot.
         let msg = unsafe { *slot.msg.get() };
         slot.stamp.store(pos + QUEUE_SIZE, Ordering::Release);
+        if raw_channel.is_server_waiting(WaitType::WaitingToSend) {
+            let _ = moto_sys::SysCpu::wake(self.server_handle);
+        }
         Ok(msg)
     }
 
@@ -742,7 +749,7 @@ impl ClientConnection {
             Ok(IoPage::from_u16(
                 page_idx,
                 self.raw_channel(),
-                SysHandle::NONE,
+                self.server_handle(),
             ))
         }
     }
@@ -1127,7 +1134,6 @@ impl Sender {
                     }
 
                     self.inner.remote_handle.as_future().await?;
-                    // We clear all wait flags on wakeup. Can we do better?
                     match self.inner.endpoint_type {
                         EndpointType::Client => self
                             .raw_channel()
@@ -1167,7 +1173,7 @@ impl Sender {
             Ok(IoPage {
                 raw_page,
                 raw_channel: self.raw_channel(),
-                remote_handle: self.inner.remote_handle,
+                remote_handle: SysHandle::NONE,
             })
         } else {
             Err(moto_rt::Error::NotReady)
@@ -1195,7 +1201,6 @@ impl Sender {
                         continue; // Try one more alloc() before waiting.
                     } else {
                         self.inner.remote_handle.as_future().await?;
-                        // We clear all wait flags on wakeup. Can we do better?
                         match self.inner.endpoint_type {
                             EndpointType::Client => {
                                 self.raw_channel().clear_client_page_wait(subchannel_mask)

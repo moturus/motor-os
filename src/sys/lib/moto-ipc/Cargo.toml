@@ -14,5 +14,7 @@ moto-async = { path = "../moto-async" }
 moto-rt    = { path = "../moto-rt"    }
 moto-sys   = { path = "../moto-sys"   }
 
+# log          = "0.4.28"
+
 [features]
 stdio-pipe = []
