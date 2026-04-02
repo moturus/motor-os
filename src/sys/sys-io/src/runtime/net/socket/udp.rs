@@ -47,12 +47,12 @@ impl MotoSocket {
         subchannel_mask: u64,
     ) -> Rc<RefCell<MotoSocket>> {
         let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 10],
-            vec![0; 8192],
+            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
+            vec![0; 65536],
         );
         let tx_buffer = smoltcp::socket::udp::PacketBuffer::new(
-            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 10],
-            vec![0; 8192],
+            vec![smoltcp::socket::udp::PacketMetadata::EMPTY; 64],
+            vec![0; 65536],
         );
 
         let mut smoltcp_socket = smoltcp::socket::udp::Socket::new(rx_buffer, tx_buffer);
@@ -88,6 +88,7 @@ impl MotoSocket {
         )))
     }
 
+    /*
     pub async fn udp_send_to(
         &self,
         buf: &[u8],
@@ -143,6 +144,7 @@ impl MotoSocket {
         })
         .await
     }
+    */
 
     async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) {
         let weak_clone = weak_socket.clone();
@@ -411,6 +413,7 @@ impl MotoSocket {
                     smoltcp::socket::udp::SendError::BufferFull => {
                         // Can't send the packet: re-insert it into the pending queue.
                         udp_socket.tx_queue.push_front(datagram);
+                        log::debug!("reinserting UDP dgram");
                         break;
                     }
                 }

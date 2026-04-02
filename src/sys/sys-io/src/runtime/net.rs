@@ -242,6 +242,8 @@ impl NetRuntime {
             return;
         };
 
+        log::debug!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
+
         if let Err(err) = match net_cmd {
             NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
