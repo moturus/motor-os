@@ -323,7 +323,6 @@ impl MotoSocket {
             sender.remote_handle().as_u64()
         );
 
-        let mut resp = msg;
         resp.handle = socket_id;
         resp.status = moto_rt::E_OK;
         let _ = sender.send(resp).await;

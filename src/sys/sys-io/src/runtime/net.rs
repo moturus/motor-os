@@ -375,7 +375,7 @@ pub(super) async fn init(
     };
 
     runtime.spawn_net_runtime().await;
-    log::info!("NET runtime started");
+    log::debug!("NET runtime started");
 
     Ok(())
 }
