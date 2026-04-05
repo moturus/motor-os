@@ -198,16 +198,6 @@ fn sys_handle_get(
                 Err(moto_rt::E_INVALID_ARGUMENT)
             }
         }
-        "serial_console" => {
-            if parent != SysHandle::KERNEL {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-            let res = super::serial_console::get_for_process(&thread.owner())?;
-
-            #[cfg(debug_assertions)]
-            log::trace!("Delegated serial console to {}", thread.debug_name());
-            Ok(thread.owner().add_object(res))
-        }
         _ => {
             if let Some((prefix, suffix)) = url.split_once(':') {
                 match prefix {
@@ -229,6 +219,16 @@ fn sys_handle_get(
                     }
                     "shared" => {
                         return sys_handle_shared(SysObj::OP_GET, thread, parent, suffix);
+                    }
+                    "serial_console" => {
+                        if parent != SysHandle::KERNEL {
+                            return Err(moto_rt::E_INVALID_ARGUMENT);
+                        }
+                        let res = super::serial_console::get_for_process(&thread.owner(), suffix)?;
+
+                        #[cfg(debug_assertions)]
+                        log::trace!("Delegated serial console to {}", thread.debug_name());
+                        return Ok(thread.owner().add_object(res));
                     }
                     _ => {}
                 }

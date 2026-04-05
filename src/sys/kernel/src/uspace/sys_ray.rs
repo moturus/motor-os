@@ -117,7 +117,9 @@ fn sys_log(
     use core::str;
     match str::from_utf8(bytes.as_slice()) {
         Ok(str) => {
-            crate::xray::logger::log_user(curr_thread, str);
+            if !super::serial_console::log_to_uspace(str) {
+                crate::xray::logger::log_user(curr_thread, str);
+            }
         }
         Err(_) => return ResultBuilder::result(moto_rt::E_INVALID_ARGUMENT),
     };

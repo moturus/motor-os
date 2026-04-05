@@ -1,11 +1,15 @@
+#![feature(box_as_ptr)]
+use core::slice;
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 use moto_sys::SysObj;
+use moto_sys::SysRay;
 
 use crate::serial::write_serial_raw;
 
@@ -43,8 +47,21 @@ fn main() {
         fname
     );
 
-    let console_wait_handle =
-        moto_sys::SysObj::get(SysHandle::KERNEL, 0, "serial_console").unwrap();
+    let buf_addr = moto_sys::SysMem::alloc(4096, (SysRay::CONSOLE_SHARED_BUF_SZ / 4096) as u64)
+        .unwrap() as usize;
+    let kernel_log_buf =
+        unsafe { slice::from_raw_parts_mut(buf_addr as *mut u8, SysRay::CONSOLE_SHARED_BUF_SZ) };
+
+    let mut kernel_log_buf_offset: Box<AtomicUsize> = Box::new(AtomicUsize::new(0));
+    let offset_addr = Box::as_mut_ptr(&mut kernel_log_buf_offset) as usize;
+
+    let console_wait_handle = moto_sys::SysObj::get(
+        SysHandle::KERNEL,
+        0,
+        format!("serial_console:{buf_addr}:{offset_addr}").as_str(),
+    )
+    .unwrap();
+
     let mut command = std::process::Command::new(fname);
     command.env_clear();
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
@@ -69,6 +86,7 @@ fn main() {
 
             let mut child_stdin = child.stdin.take().unwrap();
             let stdin_thread = std::thread::spawn(move || {
+                let mut prev_offset = 0;
                 loop {
                     if exit1.load(Ordering::Relaxed) {
                         break;
@@ -86,6 +104,12 @@ fn main() {
                             // Insert newline.
                             child_stdin.write_all(&[c, 10]).ok();
                         }
+                    }
+
+                    let offset = kernel_log_buf_offset.load(Ordering::Acquire);
+                    if prev_offset != offset {
+                        process_kernel_log(kernel_log_buf, prev_offset, offset);
+                        prev_offset = offset;
                     }
                 }
 
@@ -143,4 +167,22 @@ fn main() {
         }
         Err(err) => write_serial!("Error spawning '{}': {:?}\n", fname, err),
     }
+}
+
+fn process_kernel_log(kernel_log_buf: &[u8], prev_offset: usize, offset: usize) {
+    assert!(offset > prev_offset);
+    assert_eq!(kernel_log_buf.len(), SysRay::CONSOLE_SHARED_BUF_SZ);
+
+    let len = offset - prev_offset;
+    let start = prev_offset & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
+    let end = start + len;
+
+    if end <= SysRay::CONSOLE_SHARED_BUF_SZ {
+        write_serial_raw(&kernel_log_buf[start..end]);
+        return;
+    }
+
+    write_serial_raw(&kernel_log_buf[start..]);
+    let end = end & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
+    write_serial_raw(&kernel_log_buf[..end]);
 }

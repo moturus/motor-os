@@ -1829,15 +1829,19 @@ impl Thread {
             .drop_stacks(&self.user_stack, &self.kernel_stack_segment);
     }
 
+    #[cfg(debug_assertions)]
     fn print_backtrace(&self) {
         let backtrace = self
             .owner()
             .address_space
             .get_backtrace(self.tcb.rip(), self.tcb.rbp());
-        crate::raw_log!("\n{}: backtrace:", self.debug_name());
+
+        let mut log_msg = alloc::format!("\nKILLED: {}: backtrace:\n", self.debug_name());
         for val in backtrace {
-            crate::raw_log!("\t0x{:x} \\", val);
+            log_msg.push_str(alloc::format!("\t0x{val:x} \\\n").as_str());
         }
+
+        log::debug!("{log_msg}");
     }
 
     fn on_pagefault(&self) {
@@ -1980,6 +1984,7 @@ impl Thread {
             }
             ThreadOffCpuReason::KilledGpf => {
                 {
+                    #[cfg(debug_assertions)]
                     self.print_backtrace();
                     let mut status = self.status.lock(line!());
                     log::debug!("Thread killed (#GPF): {:?}", *status);

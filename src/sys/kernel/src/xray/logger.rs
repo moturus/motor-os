@@ -26,6 +26,24 @@ impl log::Log for Logger {
 
             let cpu = crate::arch::current_cpu();
 
+            if crate::uspace::serial_console::logging_to_uspace() {
+                let msg = alloc::format!(
+                    "{:3}:{:03} {:2}: {:6} {}:{} - {}\n\r",
+                    secs,
+                    millis,
+                    cpu,
+                    record.level(),
+                    target,
+                    line,
+                    record.args()
+                );
+
+                // log_to_uspace() may return false if logging is nested.
+                if crate::uspace::serial_console::log_to_uspace_protected(msg.as_str()) {
+                    return;
+                }
+            }
+
             crate::arch::arch_write_serial!(
                 "{:3}:{:03} {:2}: {:6} {}:{} - {}\n\r",
                 secs,
