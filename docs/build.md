@@ -58,7 +58,7 @@ Create `bootstrap.toml` file in $MOTORH/rust, as shown below:
 
 ```sh
 cat > $MOTORH/rust/bootstrap.toml << EOF
-change-id = 146458
+change-id = "ignore"
 
 profile = "library"
 
