@@ -5,8 +5,6 @@
 #![allow(internal_features)]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
-#![feature(allocator_api)]
-#![feature(btreemap_alloc)]
 #![feature(core_intrinsics)]
 #![feature(get_mut_unchecked)]
 

@@ -1,5 +1,4 @@
 //! AsyncBlockDevice and AsyncFs traits.
-#![feature(box_as_ptr)]
 #![allow(async_fn_in_trait)]
 #![cfg_attr(not(feature = "std"), no_std)]
 

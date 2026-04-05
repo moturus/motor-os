@@ -19,8 +19,6 @@
 //!
 //! Contributions are welcome.
 
-#![feature(io_error_more)]
-
 extern crate alloc;
 
 pub use srfs_core::BLOCK_SIZE;

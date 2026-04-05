@@ -24,7 +24,7 @@
 //!   Motor OS, which is based on Rust, does not support dynamic libraries,
 //!   as Rust does not support them "natively" (as in rdylib).
 #![no_std]
-#![feature(linkage)]
+#![cfg_attr(feature = "libc", feature(linkage))]
 
 // Mod error is the only one currently shared b/w the kernel and the userspace.
 #[macro_use]

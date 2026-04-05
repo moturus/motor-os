@@ -145,7 +145,7 @@ fn enable_kvm_system_time() {
 
     const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b564d01;
     // Addr + 1 to enable.
-    super::wrmsr(MSR_KVM_SYSTEM_TIME_NEW, addr_ti as u64 + 1);
+    super::wrmsr(MSR_KVM_SYSTEM_TIME_NEW, addr_ti + 1);
 }
 
 fn update_globals() {
@@ -154,7 +154,7 @@ fn update_globals() {
     assert_eq!(addr_wc % 4, 0);
 
     const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b564d00;
-    super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc as u64);
+    super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc);
 
     // From https://www.kernel.org/doc/Documentation/virt/kvm/msr.rst:
     //     KVM is only guaranteed to update PvClockWallClock at the moment of MSR write.
@@ -168,7 +168,7 @@ fn update_globals() {
             panic!("PvClockWallClock update looping.");
         }
         if iters.is_multiple_of(10_000) {
-            super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc as u64);
+            super::wrmsr(MSR_KVM_WALL_CLOCK_NEW, addr_wc);
             if iters > 0 {
                 // If we don't trigger a VM exit, the host KVM sometimes
                 // does not update system time. Which is a bug on their side, as
