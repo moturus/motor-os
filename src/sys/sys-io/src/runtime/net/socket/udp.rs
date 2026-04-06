@@ -318,7 +318,7 @@ impl MotoSocket {
 
         #[cfg(debug_assertions)]
         log::debug!(
-            "sys-io: new udp socket on {:?}, conn: 0x{:x}",
+            "sys-io: new udp socket 0x{socket_id:x} on {:?}, conn: 0x{:x}",
             socket_addr,
             sender.remote_handle().as_u64()
         );

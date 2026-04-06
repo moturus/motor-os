@@ -182,7 +182,10 @@ fn process_kernel_log(kernel_log_buf: &[u8], prev_offset: usize, offset: usize) 
         return;
     }
 
-    write_serial_raw(&kernel_log_buf[start..]);
     let end = end & (SysRay::CONSOLE_SHARED_BUF_SZ - 1);
-    write_serial_raw(&kernel_log_buf[..end]);
+    write_serial!(
+        "{}:{}",
+        str::from_utf8(&kernel_log_buf[start..]).unwrap(),
+        str::from_utf8(&kernel_log_buf[..end]).unwrap()
+    );
 }

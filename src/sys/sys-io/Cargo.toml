@@ -29,7 +29,7 @@ ipnetwork    = "0.20.0"
 log          = "0.4.28"
 rand         = { version = "0.9.0", features = ["small_rng"], default-features = false }
 serde        = { version = "1.0.*", features = ["derive"] }
-smoltcp      = "0.12.0"
+smoltcp      = "0.13.0"
 toml         = "0.9.0"
 zerocopy     = { version = "0.8", features = ["std", "derive"] }
 

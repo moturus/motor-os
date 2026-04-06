@@ -119,11 +119,9 @@ impl UdpSocket {
         udp_socket.channel().udp_socket_created(&udp_socket);
         crate::net::rt_net::stats_udp_socket_created();
 
-        #[cfg(debug_assertions)]
-        crate::moto_log!(
-            "{}:{} new UdpSocket {:?}",
-            file!(),
-            line!(),
+        log::debug!(
+            "new UdpSocket 0x{:x} addr {:?}",
+            resp.handle,
             udp_socket.local_addr
         );
 

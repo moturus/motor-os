@@ -89,8 +89,7 @@ impl NetRuntime {
         #[cfg(debug_assertions)]
         self.smoke_test().await;
 
-        // Note: we must not return until there is a started listener,
-        //       otherwise the FS is not yet functional.
+        // Note: we must not return until there is a started listener.
     }
 
     fn spawn_device_runtime(&self, device_idx: usize) {
@@ -103,10 +102,6 @@ impl NetRuntime {
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
                 match activity {
                     smoltcp::iface::PollResult::None => {
-                        // futures::select! {
-                        //     _ = device.wait_readable() => {}
-                        //     _ = notify.notified() => {}
-                        // }
                         notify.notified().await;
                     }
                     smoltcp::iface::PollResult::SocketStateChanged => {

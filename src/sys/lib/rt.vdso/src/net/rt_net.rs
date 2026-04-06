@@ -13,7 +13,6 @@ use core::time::Duration;
 use crossbeam::utils::CachePadded;
 use moto_ipc::io_channel;
 use moto_rt::RtFd;
-use moto_rt::moto_log;
 use moto_rt::mutex::Mutex;
 use moto_rt::netc;
 use moto_rt::poll::Interests;
@@ -49,7 +48,7 @@ pub unsafe extern "C" fn dns_lookup(
         } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
             SocketAddrV4::new(addr_v4, port)
         } else {
-            crate::moto_log!("dns_lookup: {}:{}: not implemented", host, port);
+            log::warn!("dns_lookup: {}:{}: not implemented", host, port);
             return moto_rt::E_NOT_IMPLEMENTED;
         };
 
@@ -638,22 +637,9 @@ impl NetChannel {
             #[cfg(debug_assertions)]
             {
                 if let Ok(cmd) = api_net::NetCmd::try_from(msg.command) {
-                    crate::moto_log!(
-                        "{}:{} got msg {}:0x{:x}:{cmd:?}",
-                        file!(),
-                        line!(),
-                        msg.id,
-                        msg.handle,
-                    );
+                    log::debug!("got msg {}:0x{:x}:{cmd:?}", msg.id, msg.handle,);
                 } else {
-                    crate::moto_log!(
-                        "{}:{} got msg {}:0x{:x}:{}",
-                        file!(),
-                        line!(),
-                        msg.id,
-                        msg.handle,
-                        msg.command
-                    );
+                    log::debug!("got msg {}:0x{:x}:{}", msg.id, msg.handle, msg.command);
                 }
             }
 
@@ -1015,10 +1001,8 @@ impl NetChannel {
         let Ok(cmd) = api_net::NetCmd::try_from(msg.command) else {
             // This is logged always because if a new incoming message is added that
             // has to be handled but is not, we may have a problem.
-            moto_log!(
-                "{}:{} orphan incoming message {} for 0x{:x}; release i/o page?",
-                file!(),
-                line!(),
+            log::warn!(
+                "orphan incoming message {} for 0x{:x}; release i/o page?",
                 msg.command,
                 msg.handle
             );
@@ -1048,10 +1032,8 @@ impl NetChannel {
             _ => {
                 // This is logged always because if a new incoming message is added that
                 // has to be handled but is not, we may have a problem.
-                moto_log!(
-                    "{}:{} orphan incoming message {:?} for 0x{:x}; release i/o page?",
-                    file!(),
-                    line!(),
+                log::warn!(
+                    "orphan incoming message {:?} for 0x{:x}; release i/o page?",
                     cmd,
                     msg.handle
                 );
