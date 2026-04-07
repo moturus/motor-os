@@ -656,3 +656,17 @@ pub async fn yield_now() {
 
     YieldNow { yielded: false }.await
 }
+
+#[cfg(debug_assertions)]
+pub fn task_id(cx: &mut Context<'_>) -> u64 {
+    let waker = unsafe {
+        (cx.waker().data() as usize as *const MotoWaker)
+            .as_ref()
+            .unwrap_unchecked()
+    };
+    let task_id_global = waker.task_id.0;
+    let task_id_local = cx.local_waker().data() as usize as u64;
+    assert_eq!(task_id_global, task_id_local);
+
+    task_id_local
+}

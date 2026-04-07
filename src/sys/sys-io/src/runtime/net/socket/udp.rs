@@ -178,6 +178,9 @@ impl MotoSocket {
                     udp_socket.rx_queue.borrow_mut().push_back(buf, addr);
                     Poll::Ready(true)
                 } else {
+                    #[cfg(debug_assertions)]
+                    log::debug!("rx empty/pending: task id: {}", moto_async::task_id(cx));
+
                     smoltcp_socket.register_recv_waker(cx.waker());
                     Poll::Pending
                 }

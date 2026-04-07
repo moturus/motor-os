@@ -121,6 +121,25 @@ impl<'a> NetDev<'a> {
         }
     }
 
+    pub(super) fn poll_delay(&mut self) -> Option<std::time::Duration> {
+        let NetDev {
+            name,
+            config,
+            device,
+            iface,
+            sockets,
+            // tcp_ports_in_use,
+            udp_ports_in_use,
+            udp_addresses_in_use,
+            notify,
+        } = self;
+        match device {
+            SmoltcpDevice::Loopback(loopback) => iface
+                .poll_delay(smoltcp::time::Instant::now(), sockets)
+                .map(|d| d.into()),
+        }
+    }
+
     pub(super) fn ip_addesses(&self) -> Vec<IpAddr> {
         let cidrs = self.iface.ip_addrs();
         let mut addresses = Vec::with_capacity(cidrs.len());

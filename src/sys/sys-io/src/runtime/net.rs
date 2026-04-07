@@ -102,7 +102,18 @@ impl NetRuntime {
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
                 match activity {
                     smoltcp::iface::PollResult::None => {
-                        notify.notified().await;
+                        if let Some(delay) =
+                            this.inner.borrow_mut().devices[device_idx].poll_delay()
+                        {
+                            use futures::FutureExt;
+
+                            futures::select! {
+                            _ = notify.notified().fuse() => (),
+                            _ = moto_async::sleep(delay).fuse() => (),
+                            }
+                        } else {
+                            notify.notified().await;
+                        }
                     }
                     smoltcp::iface::PollResult::SocketStateChanged => {
                         // Yield back to the executor: this allows the awakened socket tasks

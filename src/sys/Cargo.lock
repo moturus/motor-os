@@ -1410,6 +1410,7 @@ dependencies = [
  "crossbeam",
  "elfloader",
  "flatfs",
+ "futures",
  "ipnetwork",
  "log",
  "moto-async",
