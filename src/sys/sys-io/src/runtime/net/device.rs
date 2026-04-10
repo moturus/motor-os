@@ -45,6 +45,7 @@ impl<'a> NetDev<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|dur| dur.as_nanos() as u64)
             .unwrap_or(1234);
+        config.discovery_silent_time = smoltcp::time::Duration::from_millis(5);
 
         let mut iface = match &mut device {
             // SmoltcpDevice::VirtIo(dev) => {

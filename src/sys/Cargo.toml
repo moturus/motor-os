@@ -54,6 +54,7 @@ mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
 
 getrandom    = { path = "../third_party/getrandom-0.2.16" }
+smoltcp      = { git = "https://github.com/moturus/smoltcp.git", branch = "arp_delay_configurable" }
 
 [profile.dev]
 panic = "abort"
