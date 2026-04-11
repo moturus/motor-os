@@ -99,15 +99,6 @@ impl Drop for MotoSocket {
         let smoltcp_handle = self.base.smoltcp_handle;
         let socket_id = self.base.socket_id;
 
-        {
-            #[allow(irrefutable_let_patterns)]
-            if let SocketState::Udp(udp_socket) = &mut self.state {
-                udp_socket.on_drop(&runtime, self.base.client);
-            } else {
-                panic!()
-            };
-        }
-
         // UDP sockets don't linger.
         {
             let mut inner = runtime.inner.borrow_mut();

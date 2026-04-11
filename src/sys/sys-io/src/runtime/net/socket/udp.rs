@@ -17,27 +17,6 @@ pub struct UdpState {
     rx_queue: Rc<RefCell<UdpFragmentingQueue>>,
 }
 
-impl UdpState {
-    pub(super) fn on_drop(&mut self, runtime: &NetRuntime, client: SysHandle) {
-        /*
-        if let Some(msg) = self.rx_queue.borrow_mut().take_msg() {
-            panic!(); // We never push messages back to rx queue.
-            /*
-            // Need to free the stranded page.
-            let sz = msg.payload.args_16()[10];
-            if sz != 0 {
-                let page_idx = msg.payload.shared_pages()[11];
-                let mut inner = runtime.inner.borrow_mut();
-                if let Some(client) = inner.clients.get(&client) {
-                    let _page = client.sender.get_page(page_idx).unwrap();
-                }
-            }
-            */
-        }
-        */
-    }
-}
-
 impl MotoSocket {
     pub fn create_udp_socket(
         runtime: &NetRuntime,
@@ -156,10 +135,10 @@ impl MotoSocket {
             };
             let mut socket_ref = socket.borrow_mut();
             let socket_mut = &mut *socket_ref;
-            let Self { base, state: kind } = socket_mut;
+            let Self { base, state } = socket_mut;
 
             #[allow(irrefutable_let_patterns)]
-            let SocketState::Udp(udp_socket) = kind else {
+            let SocketState::Udp(udp_state) = state else {
                 panic!();
             };
 
@@ -175,7 +154,7 @@ impl MotoSocket {
                         buf.len(),
                         addr
                     );
-                    udp_socket.rx_queue.borrow_mut().push_back(buf, addr);
+                    udp_state.rx_queue.borrow_mut().push_back(buf, addr);
                     Poll::Ready(true)
                 } else {
                     #[cfg(debug_assertions)]
@@ -197,7 +176,7 @@ impl MotoSocket {
         };
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
-        let Self { base, state: kind } = socket_mut;
+        let Self { base, state } = socket_mut;
 
         let sender = {
             if let Some(conn) = base.runtime.inner.borrow().clients.get(&base.client) {
@@ -215,11 +194,11 @@ impl MotoSocket {
         };
 
         #[allow(irrefutable_let_patterns)]
-        let SocketState::Udp(udp_socket) = kind else {
+        let SocketState::Udp(udp_state) = state else {
             panic!();
         };
 
-        let rx_queue = udp_socket.rx_queue.clone();
+        let rx_queue = udp_state.rx_queue.clone();
         let socket_id = base.socket_id();
         drop(socket_ref);
 
@@ -350,7 +329,7 @@ impl MotoSocket {
 
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
-        let Self { base, state: kind } = socket_mut;
+        let Self { base, state } = socket_mut;
 
         if base.client() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
@@ -360,7 +339,7 @@ impl MotoSocket {
         }
 
         #[allow(irrefutable_let_patterns)]
-        let SocketState::Udp(udp_socket) = kind else {
+        let SocketState::Udp(udp_state) = state else {
             log::debug!("UDP TX: bad socket kind");
             let page_idx = msg.payload.shared_pages()[11];
             let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
@@ -368,7 +347,7 @@ impl MotoSocket {
         };
 
         let fragment_id = msg.payload.args_16()[9];
-        if udp_socket
+        if udp_state
             .tx_queue
             .push_back(msg, |idx| sender.get_page(idx).map_err(|err| err.into()))
             .is_err()
@@ -391,7 +370,7 @@ impl MotoSocket {
             .get_mut::<smoltcp::socket::udp::Socket>(base.smoltcp_handle);
 
         loop {
-            let Ok(datagram) = udp_socket.tx_queue.next_datagram() else {
+            let Ok(datagram) = udp_state.tx_queue.next_datagram() else {
                 if let Ok(pid) = moto_sys::SysObj::get_pid(sender.remote_handle()) {
                     log::info!("Killing process 0x{:x} due to bad UDP fragment", pid);
                 } else {
@@ -414,7 +393,7 @@ impl MotoSocket {
                     }
                     smoltcp::socket::udp::SendError::BufferFull => {
                         // Can't send the packet: re-insert it into the pending queue.
-                        udp_socket.tx_queue.push_front(datagram);
+                        udp_state.tx_queue.push_front(datagram);
                         log::debug!("reinserting UDP dgram");
                         break;
                     }
@@ -453,7 +432,7 @@ impl MotoSocket {
 
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
-        let Self { base, state: kind } = socket_mut;
+        let Self { base, state } = socket_mut;
 
         if base.client() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
@@ -461,7 +440,7 @@ impl MotoSocket {
         }
 
         #[allow(irrefutable_let_patterns)]
-        let SocketState::Udp(udp_socket) = kind else {
+        let SocketState::Udp(_) = state else {
             log::debug!("UDP Drop: bad socket kind");
             return Err(ErrorKind::InvalidInput.into());
         };
