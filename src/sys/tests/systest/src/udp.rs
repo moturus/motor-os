@@ -45,6 +45,7 @@ fn test_udp_large_packets() {
     #[cfg(not(debug_assertions))]
     const NUM_PACKETS: i32 = 100;
 
+    let started = std::time::Instant::now();
     for idx in 0..NUM_PACKETS {
         buf1[4097] = (idx % 255) as u8;
         assert_eq!(buf1.len(), s1.send_to(&buf1, a2).unwrap());
@@ -54,8 +55,12 @@ fn test_udp_large_packets() {
         assert_eq!(src, a1);
         assert_eq!(buf2[4097], (idx % 255) as u8);
     }
+    let elapsed = started.elapsed();
 
-    println!("-- test_udp_large_packets() PASS");
+    println!(
+        "-- test_udp_large_packets() PASS: {} usec/roundtrip",
+        elapsed.as_micros() / (NUM_PACKETS as u128)
+    );
 }
 
 fn test_udp_double_bind() {
