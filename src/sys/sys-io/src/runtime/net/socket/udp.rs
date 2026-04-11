@@ -7,17 +7,17 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 
 use super::super::NetRuntime;
-use super::BaseSocket;
 use super::MotoSocket;
-use super::SocketKind;
+use super::SocketBase;
+use super::SocketState;
 
-pub struct UdpSocket {
+pub struct UdpState {
     ephemeral_port: Option<u16>,
     tx_queue: UdpDefragmentingQueue,
     rx_queue: Rc<RefCell<UdpFragmentingQueue>>,
 }
 
-impl UdpSocket {
+impl UdpState {
     pub(super) fn on_drop(&mut self, runtime: &NetRuntime, client: SysHandle) {
         /*
         if let Some(msg) = self.rx_queue.borrow_mut().take_msg() {
@@ -67,7 +67,7 @@ impl MotoSocket {
             )
         };
 
-        let base = BaseSocket::new(
+        let base = SocketBase::new(
             socket_id,
             runtime,
             device_idx,
@@ -77,7 +77,7 @@ impl MotoSocket {
         );
         Rc::new(RefCell::new(MotoSocket::new(
             base,
-            SocketKind::Udp(UdpSocket {
+            SocketState::Udp(UdpState {
                 ephemeral_port: None,
                 tx_queue: UdpDefragmentingQueue::new(),
                 rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
@@ -156,10 +156,10 @@ impl MotoSocket {
             };
             let mut socket_ref = socket.borrow_mut();
             let socket_mut = &mut *socket_ref;
-            let Self { base, kind } = socket_mut;
+            let Self { base, state: kind } = socket_mut;
 
             #[allow(irrefutable_let_patterns)]
-            let SocketKind::Udp(udp_socket) = kind else {
+            let SocketState::Udp(udp_socket) = kind else {
                 panic!();
             };
 
@@ -197,7 +197,7 @@ impl MotoSocket {
         };
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
-        let Self { base, kind } = socket_mut;
+        let Self { base, state: kind } = socket_mut;
 
         let sender = {
             if let Some(conn) = base.runtime.inner.borrow().clients.get(&base.client) {
@@ -215,7 +215,7 @@ impl MotoSocket {
         };
 
         #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
+        let SocketState::Udp(udp_socket) = kind else {
             panic!();
         };
 
@@ -350,7 +350,7 @@ impl MotoSocket {
 
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
-        let Self { base, kind } = socket_mut;
+        let Self { base, state: kind } = socket_mut;
 
         if base.client() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
@@ -360,7 +360,7 @@ impl MotoSocket {
         }
 
         #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
+        let SocketState::Udp(udp_socket) = kind else {
             log::debug!("UDP TX: bad socket kind");
             let page_idx = msg.payload.shared_pages()[11];
             let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
@@ -453,7 +453,7 @@ impl MotoSocket {
 
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
-        let Self { base, kind } = socket_mut;
+        let Self { base, state: kind } = socket_mut;
 
         if base.client() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
@@ -461,7 +461,7 @@ impl MotoSocket {
         }
 
         #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
+        let SocketState::Udp(udp_socket) = kind else {
             log::debug!("UDP Drop: bad socket kind");
             return Err(ErrorKind::InvalidInput.into());
         };

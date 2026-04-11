@@ -15,12 +15,12 @@ use moto_sys::SysHandle;
 ///   vs define a loose API and then deal with weird edge cases and Hyrum's law
 mod udp;
 
-pub(super) enum SocketKind {
-    Udp(udp::UdpSocket),
+pub(super) enum SocketState {
+    Udp(udp::UdpState),
     // Tcp,
 }
 
-pub(super) struct BaseSocket {
+pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
     device_idx: usize,
@@ -32,7 +32,7 @@ pub(super) struct BaseSocket {
     client: SysHandle, // Denormalized for quick validation.
 }
 
-impl BaseSocket {
+impl SocketBase {
     pub(super) fn new(
         socket_id: u64,
         runtime: super::NetRuntime,
@@ -81,8 +81,8 @@ impl BaseSocket {
 }
 
 pub(super) struct MotoSocket {
-    base: BaseSocket,
-    kind: SocketKind,
+    base: SocketBase,
+    state: SocketState,
 }
 
 impl Drop for MotoSocket {
@@ -101,7 +101,7 @@ impl Drop for MotoSocket {
 
         {
             #[allow(irrefutable_let_patterns)]
-            if let SocketKind::Udp(udp_socket) = &mut self.kind {
+            if let SocketState::Udp(udp_socket) = &mut self.state {
                 udp_socket.on_drop(&runtime, self.base.client);
             } else {
                 panic!()
@@ -158,13 +158,13 @@ impl MotoSocket {
         self.base.socket_id
     }
 
-    pub(super) fn new(base: BaseSocket, kind: SocketKind) -> Self {
-        Self { base, kind }
+    pub(super) fn new(base: SocketBase, kind: SocketState) -> Self {
+        Self { base, state: kind }
     }
 
     fn on_drop(this: Rc<RefCell<Self>>) {
         let this_ref = this.borrow();
-        let Self { base, kind } = &*this_ref;
+        let Self { base, state: kind } = &*this_ref;
 
         let socket_id = base.socket_id;
         let client_handle = base.client;
