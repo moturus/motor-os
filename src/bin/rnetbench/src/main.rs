@@ -1,7 +1,5 @@
 // Pure rust network performance benchmark.
 
-#![feature(io_error_more)]
-
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpStream;

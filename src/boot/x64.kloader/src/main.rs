@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(unused_features)]
 #![allow(internal_features)]
 #![feature(alloc_error_handler)]
 #![feature(stmt_expr_attributes)]

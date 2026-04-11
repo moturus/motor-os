@@ -2,6 +2,7 @@
 
 #![no_std]
 #![no_main]
+#![allow(unused_features)]
 #![allow(internal_features)]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]

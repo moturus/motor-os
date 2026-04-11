@@ -1,11 +1,7 @@
 #![allow(internal_features)]
-#![feature(addr_parse_ascii)]
-#![feature(async_iterator)]
 #![feature(core_intrinsics)]
 #![feature(io_error_more)]
-#![feature(local_waker)]
 #![feature(motor_ext)]
-#![feature(random)]
 
 #[cfg(not(feature = "motor-fs"))]
 mod fs;

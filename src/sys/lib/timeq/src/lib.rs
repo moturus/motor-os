@@ -1,5 +1,3 @@
-#![feature(box_as_ptr)]
-
 /// A queue of timers, i.e. a map of Instant -> FnOnce().
 ///
 /// Uses alloc::BinaryHeap.

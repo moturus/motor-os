@@ -6,6 +6,7 @@
 //! and is returned back via an explicit reclaim() call (if not in use).
 
 #![no_std]
+#![allow(unused_features)]
 #![feature(test)]
 #![allow(clippy::ptr_eq)]
 
@@ -384,6 +385,7 @@ impl<const SLABS: usize> Frusa<SLABS> {
             let mut curr_used_bit = 2_u64;
 
             let mut entry_sz_log2 = Self::MIN_SIZE.ilog2();
+            #[allow(clippy::explicit_counter_loop)]
             for slab in slabs {
                 slab.entry_sz_log2 = entry_sz_log2;
                 slab.bytes_total.store(0, Ordering::Relaxed);
