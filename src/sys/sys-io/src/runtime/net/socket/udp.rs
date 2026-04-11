@@ -67,64 +67,6 @@ impl MotoSocket {
         )))
     }
 
-    /*
-    pub async fn udp_send_to(
-        &self,
-        buf: &[u8],
-        endpoint: smoltcp::wire::IpEndpoint,
-    ) -> std::io::Result<usize> {
-        let Self { base, kind } = self;
-
-        #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
-            panic!();
-        };
-        std::future::poll_fn(|cx| {
-            let notify = base.device_notify();
-
-            base.with_smoltcp_socket::<_, smoltcp::socket::udp::Socket, _>(|smoltcp_socket| {
-                if smoltcp_socket.can_send() {
-                    let max_payload = smoltcp_socket.payload_send_capacity().min(buf.len());
-                    smoltcp_socket
-                        .send_slice(&buf[..max_payload], endpoint)
-                        .unwrap();
-                    notify.notify_one();
-                    Poll::Ready(Ok(max_payload))
-                } else {
-                    smoltcp_socket.register_send_waker(cx.waker());
-                    Poll::Pending
-                }
-            })
-        })
-        .await
-    }
-
-    pub async fn udp_recv_from(
-        &self,
-        buf: &mut [u8],
-    ) -> std::io::Result<(usize, smoltcp::wire::IpEndpoint)> {
-        let Self { base, kind } = self;
-
-        #[allow(irrefutable_let_patterns)]
-        let SocketKind::Udp(udp_socket) = kind else {
-            panic!();
-        };
-
-        std::future::poll_fn(move |cx| {
-            base.with_smoltcp_socket::<_, smoltcp::socket::udp::Socket, _>(|smoltcp_socket| {
-                if smoltcp_socket.can_recv() {
-                    let (len, metadata) = smoltcp_socket.recv_slice(buf).unwrap();
-                    Poll::Ready(Ok((len, metadata.endpoint)))
-                } else {
-                    smoltcp_socket.register_recv_waker(cx.waker());
-                    Poll::Pending
-                }
-            })
-        })
-        .await
-    }
-    */
-
     async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) {
         let weak_clone = weak_socket.clone();
 
@@ -143,7 +85,7 @@ impl MotoSocket {
             };
 
             let socket_id = base.socket_id();
-            base.with_smoltcp_socket::<_, smoltcp::socket::udp::Socket, _>(|smoltcp_socket| {
+            base.with_udp_smoltcp_socket(|smoltcp_socket| {
                 if smoltcp_socket.can_recv() {
                     let (buf, metadata) = smoltcp_socket.recv().unwrap();
                     let addr: SocketAddr =
@@ -411,6 +353,7 @@ impl MotoSocket {
         }
 
         core::mem::drop(inner_ref);
+        core::mem::drop(socket_ref);
 
         if need_udp_tx_ack {
             // Notify the client that we've consumed the io page.

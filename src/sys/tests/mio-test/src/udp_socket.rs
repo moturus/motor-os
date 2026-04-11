@@ -777,6 +777,13 @@ fn send_packets(
             barrier.wait();
             checked_write!(socket.send_to(DATA1, address));
         }
+
+        // Outgoing packets may get delayed due to ARP throttling, but
+        // tests in this module assume that UDP packets sent above are
+        // delivered; so we need to sleep a bit before dropping the socket,
+        // otherwise delayed packets will be dropped, as UDP sockets
+        // don't linger.
+        std::thread::sleep(std::time::Duration::from_millis(10));
     })
 }
 

@@ -78,6 +78,13 @@ impl SocketBase {
         let smoltcp_socket = device.sockets.get_mut::<S>(self.smoltcp_handle);
         f(smoltcp_socket)
     }
+
+    pub(super) fn with_udp_smoltcp_socket<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&mut smoltcp::socket::udp::Socket<'static>) -> T,
+    {
+        Self::with_smoltcp_socket::<F, _, T>(&self, f)
+    }
 }
 
 pub(super) struct MotoSocket {
