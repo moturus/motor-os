@@ -16,6 +16,7 @@ use crate::util::map_err_into_native;
 mod config;
 mod device;
 mod socket;
+mod tcp_listener;
 
 struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
@@ -44,7 +45,9 @@ impl ClientConnection {
 struct NetRuntimeInner {
     config: config::NetConfig,
     next_socket_id: u64,
+
     sockets: HashMap<u64, Rc<RefCell<socket::MotoSocket>>>,
+    tcp_listeners: HashMap<u64, Rc<RefCell<tcp_listener::TcpListener>>>,
 
     // In the future, Motor OS may use Vec<Option<NetDev>>, but at the moment
     // Motor OS does not support device hot (un)plug.
@@ -251,6 +254,8 @@ impl NetRuntime {
         log::debug!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
 
         if let Err(err) = match net_cmd {
+            NetCmd::TcpListenerBind => tcp_listener::TcpListener::bind(self, msg, &sender).await,
+
             NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
             NetCmd::UdpSocketDrop => socket::MotoSocket::udp_socket_drop(self, msg, &sender).await,
@@ -373,6 +378,7 @@ pub(super) async fn init(
             config,
             next_socket_id: 1,
             sockets: HashMap::new(),
+            tcp_listeners: HashMap::new(),
             devices,
             device_map,
             ip_addresses,
@@ -384,4 +390,17 @@ pub(super) async fn init(
     log::debug!("NET runtime started");
 
     Ok(())
+}
+
+struct EphemeralTcpPort {
+    pub dev_idx: usize,
+    pub port: u16,
+    runtime: NetRuntime,
+}
+
+impl Drop for EphemeralTcpPort {
+    fn drop(&mut self) {
+        let mut inner = self.runtime.inner.borrow_mut();
+        inner.devices[self.dev_idx].free_ephemeral_tcp_port(self.port);
+    }
 }

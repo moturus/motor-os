@@ -1,6 +1,5 @@
-use std::{cell::RefCell, io::ErrorKind, net::SocketAddr, rc::Rc};
-
 use moto_sys::SysHandle;
+use std::{cell::RefCell, io::ErrorKind, net::SocketAddr, rc::Rc};
 
 /// Common socket stuff. We (have to) mimic smoltcp structure, which
 /// is mostly sockets partitioned by interfaces/devices. While technically
@@ -13,11 +12,12 @@ use moto_sys::SysHandle;
 /// - efficiency: partitioned socket sets will work faster than one fat bucket
 /// - API precision: it's better to define a strict API and then relax it
 ///   vs define a loose API and then deal with weird edge cases and Hyrum's law
+mod tcp;
 mod udp;
 
 pub(super) enum SocketState {
     Udp(udp::UdpState),
-    // Tcp,
+    Tcp(tcp::TcpState),
 }
 
 pub(super) struct SocketBase {
@@ -26,9 +26,7 @@ pub(super) struct SocketBase {
     device_idx: usize,
     smoltcp_handle: smoltcp::iface::SocketHandle,
     device_notify: Rc<moto_async::LocalNotify>,
-
-    pub socket_addr: SocketAddr,
-
+    socket_addr: SocketAddr,
     client: SysHandle, // Denormalized for quick validation.
 }
 
@@ -100,30 +98,11 @@ impl Drop for MotoSocket {
             assert!(inner.sockets.get(&self.base.socket_id).is_none());
         }
 
-        let runtime = self.base.runtime.clone();
-        let device_idx = self.base.device_idx;
-        let socket_addr = self.base.socket_addr;
-        let smoltcp_handle = self.base.smoltcp_handle;
-        let socket_id = self.base.socket_id;
+        let Self { base, state } = self;
 
-        // UDP sockets don't linger.
-        {
-            let mut inner = runtime.inner.borrow_mut();
-            let sockets = &mut inner.devices[device_idx].sockets;
-
-            #[cfg(debug_assertions)]
-            if sockets
-                .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
-                .send_queue()
-                != 0
-            {
-                log::debug!("Dropped UDP socket 0x{socket_id:x} with unsent bytes.");
-            } else {
-                log::debug!("Dropped UDP socket 0x{socket_id:x}.");
-            }
-
-            sockets.remove(smoltcp_handle);
-            inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
+        match state {
+            SocketState::Udp(udp_state) => Self::on_udp_socket_drop(base, udp_state),
+            SocketState::Tcp(tcp_state) => todo!(),
         }
 
         // There could be bytes stuck in the socket. Wait for them to clear.

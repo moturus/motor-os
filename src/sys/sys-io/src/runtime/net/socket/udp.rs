@@ -169,6 +169,37 @@ impl MotoSocket {
         let _ = sender.send(msg).await;
     }
 
+    pub(super) fn on_udp_socket_drop(base: &mut super::SocketBase, state: &mut UdpState) {
+        // UDP sockets don't linger.
+        let runtime = base.runtime.clone();
+        let device_idx = base.device_idx;
+        let socket_addr = base.socket_addr;
+        let smoltcp_handle = base.smoltcp_handle;
+        let socket_id = base.socket_id;
+
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            let sockets = &mut inner.devices[device_idx].sockets;
+
+            #[cfg(debug_assertions)]
+            if sockets
+                .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
+                .send_queue()
+                != 0
+            {
+                log::debug!("Dropped UDP socket 0x{socket_id:x} with unsent bytes.");
+            } else {
+                log::debug!("Dropped UDP socket 0x{socket_id:x}.");
+            }
+
+            sockets.remove(smoltcp_handle);
+            inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
+            if let Some(port) = state.ephemeral_port {
+                inner.devices[device_idx].free_ephemeral_udp_port(port);
+            }
+        }
+    }
+
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn udp_bind(
         runtime: &NetRuntime,
