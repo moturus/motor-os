@@ -21,6 +21,7 @@ mod tcp_listener;
 struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
     sockets: HashSet<u64>,
+    tcp_listeners: HashSet<u64>,
 }
 
 impl Drop for ClientConnection {
@@ -34,6 +35,7 @@ impl ClientConnection {
         Self {
             sender,
             sockets: HashSet::new(),
+            tcp_listeners: HashSet::new(),
         }
     }
 }
@@ -395,7 +397,7 @@ pub(super) async fn init(
 struct EphemeralTcpPort {
     pub dev_idx: usize,
     pub port: u16,
-    runtime: NetRuntime,
+    pub runtime: NetRuntime,
 }
 
 impl Drop for EphemeralTcpPort {

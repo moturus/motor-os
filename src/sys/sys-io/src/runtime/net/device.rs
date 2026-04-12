@@ -104,6 +104,10 @@ impl<'a> NetDev<'a> {
         &self.name
     }
 
+    pub(super) fn config(&self) -> &config::DeviceCfg {
+        &self.config
+    }
+
     pub(super) fn poll(&mut self) -> smoltcp::iface::PollResult {
         let NetDev {
             name,

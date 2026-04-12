@@ -207,7 +207,7 @@ impl MotoSocket {
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
-        let mut inner = runtime.inner.borrow_mut();
+        let mut runtime_mut = runtime.inner.borrow_mut();
         let mut resp = msg;
 
         // Verify that the IP is valid (if present) before the socket is created.
@@ -218,7 +218,7 @@ impl MotoSocket {
             return Err(ErrorKind::InvalidInput.into());
         }
         let device_idx = {
-            match inner.ip_addresses.get(&ip_addr) {
+            match runtime_mut.ip_addresses.get(&ip_addr) {
                 Some(idx) => *idx,
                 None => {
                     #[cfg(debug_assertions)]
@@ -232,7 +232,8 @@ impl MotoSocket {
         // Allocate/assign port, if needed.
         let mut allocated_port = None;
         if socket_addr.port() == 0 {
-            let local_port = match inner.devices[device_idx].get_ephemeral_udp_port(&ip_addr) {
+            let local_port = match runtime_mut.devices[device_idx].get_ephemeral_udp_port(&ip_addr)
+            {
                 Some(port) => port,
                 None => {
                     log::warn!("get_ephemeral_udp_port({ip_addr:?}) failed");
@@ -245,8 +246,8 @@ impl MotoSocket {
             allocated_port = Some(local_port);
         }
 
-        inner.devices[device_idx].add_udp_addr_in_use(socket_addr)?;
-        drop(inner);
+        runtime_mut.devices[device_idx].add_udp_addr_in_use(socket_addr)?;
+        drop(runtime_mut);
 
         let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
 
