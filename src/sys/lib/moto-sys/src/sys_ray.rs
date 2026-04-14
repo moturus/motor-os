@@ -13,6 +13,13 @@ impl SysRay {
     pub const OP_DBG: u8 = 2;
     pub const OP_LOG: u8 = 3;
 
+    // When a driver (sys-io) panics, it takes down the whole VM.
+    // It may try to log something useful to the serial console on the way
+    // out, so it notifies the kernel that it is panic-ing, so that
+    // the kernel won't redirect logs to sys-tty, as sys-tty may have
+    // no time to process and display the logs before the VM exits.
+    pub const OP_SYS_PANIC_NOTIFY: u8 = 4;
+
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
     pub const F_QUERY_LIST_CHILDREN: u32 = 3;
@@ -284,5 +291,18 @@ impl SysRay {
         } else {
             Err(res.error_code())
         }
+    }
+
+    #[cfg(feature = "userspace")]
+    pub fn sys_panic_notify() {
+        let _ = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_SYS_PANIC_NOTIFY, 0, 0),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
     }
 }

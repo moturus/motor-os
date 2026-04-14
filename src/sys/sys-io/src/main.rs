@@ -50,6 +50,7 @@ pub extern "C" fn motor_runtime_start() {
 
     // As we don't have stderr, install a custom panic hook to log to kernel.
     std::panic::set_hook(Box::new(|info| {
+        moto_sys::SysRay::sys_panic_notify();
         std::thread::sleep(std::time::Duration::from_millis(10));
         log::error!("{info}");
         moto_rt::error::log_backtrace(-1);

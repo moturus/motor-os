@@ -182,3 +182,11 @@ pub fn log_to_uspace_protected(msg: &str) -> bool {
 
     log_to_uspace(msg)
 }
+
+pub fn sys_panic_notify() {
+    // Force raw serial writes, as the VM is going bye-bye, and logs via
+    // sys-tty are likely to get lost.
+    CONSOLE
+        .uspace_log_buf_offset_addr
+        .store(0, Ordering::SeqCst)
+}

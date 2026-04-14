@@ -138,17 +138,24 @@ pub(super) fn sys_ray_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
             _ => ResultBuilder::invalid_argument(),
         },
+
         SysRay::OP_LOG => {
             if args.args[2] != 0 || args.args[3] != 0 || args.args[4] != 0 || args.args[5] != 0 {
                 return ResultBuilder::invalid_argument();
             }
-            return sys_log(
+            sys_log(
                 thread,
                 args.flags,
                 args.args[0], // virt_addr
                 args.args[1], // sz
-            );
+            )
         }
+
+        SysRay::OP_SYS_PANIC_NOTIFY => {
+            super::serial_console::sys_panic_notify();
+            ResultBuilder::ok()
+        }
+
         _ => ResultBuilder::invalid_argument(),
     }
 }
