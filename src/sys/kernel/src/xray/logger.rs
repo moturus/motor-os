@@ -72,7 +72,7 @@ pub fn log_user(thread: &crate::uspace::process::Thread, msg: &str) {
     let cpu = crate::arch::current_cpu();
 
     crate::arch::arch_write_serial!(
-        "{:3}:{:03} {:2}: {:6} {}: {}\n\r",
+        "{:3}:{:03} {:2}: {:6} {}: {}",
         secs,
         millis,
         cpu,

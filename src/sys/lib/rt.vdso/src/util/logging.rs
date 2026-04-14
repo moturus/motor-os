@@ -10,8 +10,16 @@ impl log::Log for MotoLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
+            let now =
+                moto_rt::time::Instant::now().duration_since(moto_rt::time::Instant::from_u64(0));
+            let millis = now.as_millis();
+            let secs = millis / 1000;
+            let millis = millis % 1000;
+
             crate::moto_log!(
-                "{} {}:{}: {}\n",
+                "{:3}:{:03}: {} {}:{}: {}\n",
+                secs,
+                millis,
                 record.level(),
                 record.file().unwrap_or("-"),
                 record.line().unwrap_or(0),
