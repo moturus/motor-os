@@ -18,6 +18,26 @@ pub struct UdpState {
 }
 
 impl MotoSocket {
+    pub(super) fn with_udp_smoltcp_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
+    where
+        F: FnOnce(u64, &mut smoltcp::socket::udp::Socket<'static>, &mut UdpState) -> T,
+    {
+        let mut socket_ref = socket.borrow_mut();
+        let socket_mut = &mut *socket_ref;
+        let Self { base, state } = socket_mut;
+
+        let SocketState::Udp(udp_state) = state else {
+            panic!()
+        };
+
+        let mut inner = base.runtime.inner.borrow_mut();
+        let device = &mut inner.devices[base.device_idx];
+        let smoltcp_socket = device
+            .sockets
+            .get_mut::<smoltcp::socket::udp::Socket<'static>>(base.smoltcp_handle);
+        f(base.socket_id(), smoltcp_socket, udp_state)
+    }
+
     pub fn create_udp_socket(
         runtime: &NetRuntime,
         device_idx: usize,
@@ -75,17 +95,8 @@ impl MotoSocket {
             let Some(socket) = weak_clone.upgrade() else {
                 return Poll::Ready(false); // The socket is gone.
             };
-            let mut socket_ref = socket.borrow_mut();
-            let socket_mut = &mut *socket_ref;
-            let Self { base, state } = socket_mut;
 
-            #[allow(irrefutable_let_patterns)]
-            let SocketState::Udp(udp_state) = state else {
-                panic!();
-            };
-
-            let socket_id = base.socket_id();
-            base.with_udp_smoltcp_socket(|smoltcp_socket| {
+            Self::with_udp_smoltcp_socket(&socket, |socket_id, smoltcp_socket, udp_state| {
                 if smoltcp_socket.can_recv() {
                     let (buf, metadata) = smoltcp_socket.recv().unwrap();
                     let addr: SocketAddr =

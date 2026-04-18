@@ -63,26 +63,6 @@ impl SocketBase {
     pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
         self.device_notify.clone()
     }
-
-    pub(super) fn with_smoltcp_socket<F, S: smoltcp::socket::AnySocket<'static>, T>(
-        &self,
-        f: F,
-    ) -> T
-    where
-        F: FnOnce(&mut S) -> T,
-    {
-        let mut inner = self.runtime.inner.borrow_mut();
-        let device = &mut inner.devices[self.device_idx];
-        let smoltcp_socket = device.sockets.get_mut::<S>(self.smoltcp_handle);
-        f(smoltcp_socket)
-    }
-
-    pub(super) fn with_udp_smoltcp_socket<F, T>(&self, f: F) -> T
-    where
-        F: FnOnce(&mut smoltcp::socket::udp::Socket<'static>) -> T,
-    {
-        Self::with_smoltcp_socket::<F, _, T>(&self, f)
-    }
 }
 
 pub(super) struct MotoSocket {
