@@ -132,10 +132,10 @@ impl NetRuntime {
 
     async fn spawn_new_listener(&self) {
         let (started_tx, started_rx) = moto_async::oneshot();
-        let (connected_tx, connected_rx) = moto_async::oneshot();
 
         let this = self.clone();
         moto_async::LocalRuntime::spawn(async move {
+            let (connected_tx, connected_rx) = moto_async::oneshot();
             let _ = this.net_listener(started_tx, connected_tx).await;
             // Spawn an extra one once the previous one is connected.
             let _ = connected_rx.await;

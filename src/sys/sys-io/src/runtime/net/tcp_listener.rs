@@ -1,3 +1,4 @@
+use super::socket::MotoSocket;
 use moto_sys::SysHandle;
 use std::{
     cell::RefCell,
@@ -74,6 +75,18 @@ impl TcpListener {
         }
     }
 
+    pub(super) fn runtime(&self) -> &super::NetRuntime {
+        &self.runtime
+    }
+
+    pub(super) fn client(&self) -> SysHandle {
+        self.client
+    }
+
+    pub(super) fn ephemeral_port(&self) -> Option<Rc<super::EphemeralTcpPort>> {
+        self.ephemeral_tcp_port.clone()
+    }
+
     fn resolve_bind_addresses(
         runtime: &super::NetRuntime,
         socket_addr: &mut SocketAddr,
@@ -130,6 +143,24 @@ impl TcpListener {
         Ok((l, p))
     }
 
+    async fn spawn_listening_sockets(listener: Rc<RefCell<Self>>) -> std::io::Result<()> {
+        let (runtime, listening_on) = {
+            let this = listener.borrow();
+            (this.runtime.clone(), this.listening_on.clone())
+        };
+
+        for (addr, device_idx) in listening_on {
+            MotoSocket::create_tcp_listening_socket(Rc::downgrade(&listener), device_idx, addr)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn add_listening_socket(&mut self, socket_id: u64) {
+        self.listening_sockets.insert(socket_id);
+    }
+
     /* ----------------------------------- API calls ------------------------------------ */
     pub(super) async fn bind(
         runtime: &super::NetRuntime,
@@ -183,7 +214,9 @@ impl TcpListener {
             ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
         }));
 
-        runtime_mut.tcp_listeners.insert(listener_id, listener);
+        runtime_mut
+            .tcp_listeners
+            .insert(listener_id, listener.clone());
         assert!(
             runtime_mut
                 .clients
@@ -192,6 +225,7 @@ impl TcpListener {
                 .tcp_listeners
                 .insert(listener_id)
         );
+        drop(runtime_mut);
 
         #[cfg(debug_assertions)]
         log::debug!(
@@ -201,8 +235,7 @@ impl TcpListener {
         );
 
         // Start listening.
-        log::error!("start listening");
-        return Err(ErrorKind::Unsupported.into());
+        Self::spawn_listening_sockets(listener);
 
         resp.handle = listener_id;
         resp.status = moto_rt::E_OK;

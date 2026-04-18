@@ -156,6 +156,8 @@ impl MotoSocket {
     }
 
     fn spawn_udp_rx_task(weak_socket: Weak<RefCell<MotoSocket>>) {
+        // Note: because the socket has been created, there is no need to sync this
+        // task, as no RX packets will be losts.
         let _ = moto_async::LocalRuntime::spawn(async move {
             Self::udp_rx(weak_socket).await;
         });
@@ -274,7 +276,7 @@ impl MotoSocket {
 
         #[cfg(debug_assertions)]
         log::debug!(
-            "sys-io: new udp socket 0x{socket_id:x} on {:?}, conn: 0x{:x}",
+            "new udp socket 0x{socket_id:x} on {:?}, conn: 0x{:x}",
             socket_addr,
             sender.remote_handle().as_u64()
         );
