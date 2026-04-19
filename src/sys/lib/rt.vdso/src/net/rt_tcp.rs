@@ -229,13 +229,7 @@ impl TcpListener {
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
         crate::net::rt_net::stats_tcp_listener_created();
 
-        #[cfg(debug_assertions)]
-        moto_log!(
-            "{}:{} new TcpListener {:?}",
-            file!(),
-            line!(),
-            tcp_listener.socket_addr
-        );
+        log::debug!("new TcpListener {:?}", tcp_listener.socket_addr);
 
         Ok(tcp_listener)
     }
