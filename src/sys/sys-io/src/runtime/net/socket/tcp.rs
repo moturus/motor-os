@@ -17,6 +17,7 @@ pub struct TcpState {
     ephemeral_port: Option<Rc<EphemeralTcpPort>>,
     subchannel_mask: u64,
     tcp_listener: Option<Weak<RefCell<TcpListener>>>,
+    connect_req: Option<moto_ipc::io_channel::Msg>,
 }
 
 impl MotoSocket {
@@ -70,6 +71,7 @@ impl MotoSocket {
                 ephemeral_port: None,
                 subchannel_mask,
                 tcp_listener: None,
+                connect_req: None,
             }),
         )));
 
@@ -151,6 +153,15 @@ impl MotoSocket {
         connected_tx: moto_async::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
     ) {
+        let socket_id = {
+            let Some(moto_socket) = weak_socket.upgrade() else {
+                return;
+            };
+            moto_socket.borrow().socket_id()
+        };
+
+        log::debug!("listen task for 0x{socket_id:x}");
+
         // First, wait for a state change.
         let weak_clone = weak_socket.clone();
         let socket_state = std::future::poll_fn(move |cx| {
@@ -173,8 +184,11 @@ impl MotoSocket {
         connected_tx.send(());
 
         let Some(socket_state) = socket_state else {
+            log::debug!("tcp: listen: socket gone.");
             return;
         };
+
+        log::debug!("tcp: listen: {socket_state:?}");
 
         if socket_state == smoltcp::socket::tcp::State::Established {
             Self::on_incoming_connection(weak_socket);
@@ -225,5 +239,153 @@ impl MotoSocket {
 
     fn on_incoming_connection(weak_socket: Weak<RefCell<Self>>) {
         todo!()
+    }
+
+    async fn socket_task(weak_socket: Weak<RefCell<Self>>) {
+        use smoltcp::socket::tcp::State;
+
+        let socket_id = {
+            let Some(moto_socket) = weak_socket.upgrade() else {
+                return;
+            };
+            moto_socket.borrow().socket_id()
+        };
+        log::debug!("socket task for 0x{socket_id:x}");
+
+        let mut prev_state = State::SynSent;
+        loop {
+            let weak_clone = weak_socket.clone();
+            let new_state = std::future::poll_fn(move |cx| {
+                let Some(moto_socket) = weak_clone.upgrade() else {
+                    return Poll::Ready(None);
+                };
+
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+                    match smoltcp_socket.state() {
+                        State::Closed => Poll::Ready(Some(State::Closed)),
+                        State::Listen => {
+                            panic!()
+                        }
+
+                        smoltcp::socket::tcp::State::SynSent => {
+                            smoltcp_socket.register_recv_waker(cx.waker());
+                            Poll::Pending
+                        }
+
+                        State::SynReceived => todo!(),
+                        State::Established => todo!(),
+                        State::FinWait1 => todo!(),
+                        State::FinWait2 => todo!(),
+                        State::CloseWait => todo!(),
+                        State::Closing => todo!(),
+                        State::LastAck => todo!(),
+                        State::TimeWait => todo!(),
+                    }
+                })
+            })
+            .await;
+
+            let Some(new_state) = new_state else {
+                return;
+            };
+
+            if prev_state != new_state {
+                log::debug!("TCP socket {prev_state:?} => {new_state:?}");
+                prev_state = new_state;
+            }
+        }
+    }
+
+    /* ----------------------------------- API calls ------------------------------------ */
+    pub async fn tcp_connect(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let remote_addr = api_net::get_socket_addr(&msg.payload);
+
+        log::debug!(
+            "sys-io: 0x{:x}: tcp connect to {:?}",
+            sender.remote_handle().as_u64(),
+            remote_addr
+        );
+
+        let Some((device_idx, local_ip_addr)) = runtime.find_route(&remote_addr.ip()) else {
+            log::debug!(
+                "sys-io: 0x{:x}: tcp connect to {:?}: route not found",
+                sender.remote_handle().as_u64(),
+                remote_addr
+            );
+
+            return Err(ErrorKind::NetworkUnreachable.into());
+        };
+
+        let local_port = runtime
+            .get_ephemeral_tcp_port(device_idx, local_ip_addr)
+            .ok_or_else(|| {
+                log::warn!("Failed to allocate local port for {local_ip_addr:?}.");
+                std::io::Error::from(ErrorKind::OutOfMemory)
+            })?;
+
+        let local_addr = SocketAddr::new(local_ip_addr, local_port.port);
+        let subchannel_mask = api_net::io_subchannel_mask(msg.payload.args_8()[23]);
+
+        // Create the socket.
+        let weak_socket = {
+            let moto_socket = Self::create_tcp_socket(
+                runtime,
+                device_idx,
+                local_addr,
+                sender.remote_handle(),
+                subchannel_mask,
+            );
+
+            // Set timeout, if needed.
+            if let Some(timeout) = api_net::tcp_stream_connect_timeout(&msg) {
+                Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket| {
+                    let now = moto_rt::time::Instant::now();
+                    if timeout <= now {
+                        // We check this upon receiving sqe; the thread got preempted or something.
+                        // Just use an arbitrary small timeout.
+                        smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_micros(10)));
+                    } else {
+                        smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_micros(
+                            timeout.duration_since(now).as_micros() as u64,
+                        )));
+                    }
+                });
+            }
+
+            // Issue smoltcp connect request.
+            {
+                let mut socket_ref = moto_socket.borrow_mut();
+                let socket_mut = &mut *socket_ref;
+                let Self { base, state } = socket_mut;
+                let SocketState::Tcp(state) = state else {
+                    panic!()
+                };
+
+                state.ephemeral_port = Some(local_port);
+                state.connect_req = Some(msg);
+
+                base.runtime.inner.borrow_mut().devices[base.device_idx]
+                    .tcp_connect(base.smoltcp_handle, local_addr, remote_addr)
+                    .map_err(|err| {
+                        log::error!("Unexpected smoltcp connect error: {err:?}.");
+
+                        std::io::Error::from(ErrorKind::ConnectionRefused)
+                    })?;
+            }
+
+            Rc::downgrade(&moto_socket)
+        };
+
+        // Spawn the socket task.
+
+        moto_async::LocalRuntime::spawn(async move {
+            Self::socket_task(weak_socket).await;
+        });
+
+        Ok(())
     }
 }

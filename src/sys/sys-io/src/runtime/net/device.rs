@@ -21,6 +21,10 @@ impl SmoltcpDevice {
             }
         }
     }
+
+    fn is_loopback(&self) -> bool {
+        matches!(self, Self::Loopback(_))
+    }
 }
 
 pub(super) struct NetDev<'a> {
@@ -106,6 +110,24 @@ impl<'a> NetDev<'a> {
 
     pub(super) fn config(&self) -> &config::DeviceCfg {
         &self.config
+    }
+
+    // Have to have this as a method here because it borrows self twice: for the socket and for the iface.
+    pub(super) fn tcp_connect(
+        &mut self,
+        handle: smoltcp::iface::SocketHandle,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+    ) -> Result<(), ()> {
+        let smol_socket = self.sockets.get_mut::<smoltcp::socket::tcp::Socket>(handle);
+        smol_socket
+            .connect(self.iface.context(), remote_addr, local_addr)
+            .map_err(|_err| {
+                log::warn!("Connect {local_addr:?} => {remote_addr:?} failed: {_err:?}");
+            })?;
+
+        self.notify.notify_one();
+        Ok(())
     }
 
     pub(super) fn poll(&mut self) -> smoltcp::iface::PollResult {

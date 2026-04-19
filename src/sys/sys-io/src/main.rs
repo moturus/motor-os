@@ -51,6 +51,14 @@ pub extern "C" fn motor_runtime_start() {
     // As we don't have stderr, install a custom panic hook to log to kernel.
     std::panic::set_hook(Box::new(|info| {
         moto_sys::SysRay::sys_panic_notify();
+
+        static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if PANICKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            // Here we protect from concurrent panics: if we end up here, another
+            // panic is being processed, so we just chill.
+            std::thread::sleep(std::time::Duration::from_secs(100_000));
+        }
+
         std::thread::sleep(std::time::Duration::from_millis(10));
         log::error!("{info}");
         moto_rt::error::log_backtrace(-1);

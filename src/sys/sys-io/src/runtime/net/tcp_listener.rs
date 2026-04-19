@@ -119,20 +119,13 @@ impl TcpListener {
                 }
             };
             if socket_addr.port() == 0 {
-                let local_port =
-                    match runtime_mut.devices[device_idx].get_ephemeral_tcp_port(&ip_addr) {
-                        Some(port) => port,
-                        None => {
-                            log::info!("get_ephemeral_port({ip_addr:?}) failed");
-                            return Err(ErrorKind::OutOfMemory.into());
-                        }
-                    };
-                socket_addr.set_port(local_port);
-                let ephemeral_tcp_port = Rc::new(super::EphemeralTcpPort {
-                    dev_idx: device_idx,
-                    port: local_port,
-                    runtime: runtime.clone(),
-                });
+                let ephemeral_tcp_port = runtime_mut
+                    .get_ephemeral_tcp_port(&runtime, device_idx, ip_addr)
+                    .ok_or_else(|| {
+                        log::info!("get_ephemeral_port({ip_addr:?}) failed");
+                        std::io::Error::from(ErrorKind::OutOfMemory)
+                    })?;
+                socket_addr.set_port(ephemeral_tcp_port.port);
 
                 (vec![(*socket_addr, device_idx)], Some(ephemeral_tcp_port))
             } else {
@@ -143,15 +136,20 @@ impl TcpListener {
         Ok((l, p))
     }
 
-    async fn spawn_listening_sockets(listener: Rc<RefCell<Self>>) -> std::io::Result<()> {
+    async fn spawn_listening_sockets(
+        listener: Rc<RefCell<Self>>,
+        num_listeners: usize,
+    ) -> std::io::Result<()> {
         let (runtime, listening_on) = {
             let this = listener.borrow();
             (this.runtime.clone(), this.listening_on.clone())
         };
 
         for (addr, device_idx) in listening_on {
-            MotoSocket::create_tcp_listening_socket(Rc::downgrade(&listener), device_idx, addr)
-                .await?;
+            for _ in 0..num_listeners {
+                MotoSocket::create_tcp_listening_socket(Rc::downgrade(&listener), device_idx, addr)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -235,12 +233,22 @@ impl TcpListener {
         );
 
         // Start listening.
-        Self::spawn_listening_sockets(listener);
+        Self::spawn_listening_sockets(listener, num_listeners).await;
 
         resp.handle = listener_id;
         resp.status = moto_rt::E_OK;
         let _ = sender.send(resp).await;
 
         Ok(())
+    }
+
+    pub(super) async fn accept(
+        runtime: &super::NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        moto_async::sleep(std::time::Duration::from_millis(1000)).await;
+        log::error!("TcpListener::accept(): not implemented");
+        Err(ErrorKind::Unsupported.into())
     }
 }

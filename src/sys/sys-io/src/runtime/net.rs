@@ -70,6 +70,20 @@ impl NetRuntimeInner {
         self.next_socket_id += 1;
         result
     }
+
+    fn get_ephemeral_tcp_port(
+        &mut self,
+        runtime: &NetRuntime,
+        device_idx: usize,
+        ip_addr: IpAddr,
+    ) -> Option<Rc<EphemeralTcpPort>> {
+        let local_port = self.devices[device_idx].get_ephemeral_tcp_port(&ip_addr)?;
+        Some(Rc::new(EphemeralTcpPort {
+            dev_idx: device_idx,
+            port: local_port,
+            runtime: runtime.clone(),
+        }))
+    }
 }
 
 #[derive(Clone)]
@@ -90,9 +104,6 @@ impl NetRuntime {
         for _ in 0..NUM_LISTENERS {
             self.spawn_new_listener().await;
         }
-
-        #[cfg(debug_assertions)]
-        self.smoke_test().await;
 
         // Note: we must not return until there is a started listener.
     }
@@ -238,6 +249,39 @@ impl NetRuntime {
         );
     }
 
+    // Find the device to route through.
+    fn find_route(&self, ip_addr: &IpAddr) -> Option<(usize, IpAddr)> {
+        let inner = self.inner.borrow();
+
+        // First, look through local addresses.
+        if let Some(device_idx) = inner.ip_addresses.get(ip_addr) {
+            return Some((*device_idx, *ip_addr));
+        }
+
+        // If not found, look through routes.
+        let (dev_name, ip_addr) = inner.config.find_route(ip_addr)?;
+
+        inner
+            .devices
+            .iter()
+            .position(|dev| dev.name() == dev_name)
+            .map(|dev_idx| (dev_idx, ip_addr))
+    }
+
+    fn get_ephemeral_tcp_port(
+        &self,
+        device_idx: usize,
+        ip_addr: IpAddr,
+    ) -> Option<Rc<EphemeralTcpPort>> {
+        let local_port =
+            self.inner.borrow_mut().devices[device_idx].get_ephemeral_tcp_port(&ip_addr)?;
+        Some(Rc::new(EphemeralTcpPort {
+            dev_idx: device_idx,
+            port: local_port,
+            runtime: self.clone(),
+        }))
+    }
+
     async fn on_msg(&self, msg: moto_ipc::io_channel::Msg, sender: moto_ipc::io_channel::Sender) {
         let Ok(net_cmd) = NetCmd::try_from(msg.command) else {
             let remote_handle = sender.remote_handle();
@@ -257,6 +301,11 @@ impl NetRuntime {
 
         if let Err(err) = match net_cmd {
             NetCmd::TcpListenerBind => tcp_listener::TcpListener::bind(self, msg, &sender).await,
+            NetCmd::TcpListenerAccept => {
+                tcp_listener::TcpListener::accept(self, msg, &sender).await
+            }
+
+            NetCmd::TcpStreamConnect => socket::MotoSocket::tcp_connect(self, msg, &sender).await,
 
             NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
@@ -271,58 +320,15 @@ impl NetRuntime {
                 return;
             }
         } {
+            log::debug!(
+                "Cmd {net_cmd:?} for conn 0x{:x} failed: {err:?}.",
+                sender.remote_handle().as_u64()
+            );
             let mut resp = msg;
             resp.status = map_err_into_native(err).into();
             // Ignore errors below because it will be handled when the caller calls recv() next.
             let _ = sender.send(resp).await;
         }
-    }
-
-    #[cfg(debug_assertions)]
-    async fn smoke_test(&self) {
-        log::info!("NET smoke test SKIPPED.");
-        /*
-        log::info!("NET smoke test starting.");
-
-        let loopback_idx = *self.inner.borrow_mut().device_map.get("loopback").unwrap();
-        let server_addr = "127.0.0.1:8000".parse().unwrap();
-        self.inner.borrow_mut().devices[loopback_idx]
-            .add_udp_addr_in_use(server_addr)
-            .unwrap();
-        let server_socket =
-            socket::MotoSocket::create_udp_socket(self, loopback_idx, server_addr, 0.into(), 0);
-
-        moto_async::LocalRuntime::spawn(async move {
-            let mut buf = [0u8; 1024];
-            let (len, endpoint) = server_socket.udp_recv_from(&mut buf).await.unwrap();
-            assert_eq!(&buf[..len], b"PING");
-            server_socket.udp_send_to(b"PONG", endpoint).await.unwrap();
-        });
-
-        // Yield to ensure the host server is actively listening before we send.
-        // moto_async::yield_now().await;
-
-        // 3. Setup Motor OS as the Client
-        let client_addr = "127.0.0.1:9000".parse().unwrap();
-        self.inner.borrow_mut().devices[loopback_idx]
-            .add_udp_addr_in_use(client_addr)
-            .unwrap();
-        let client_socket =
-            socket::MotoSocket::create_udp_socket(self, loopback_idx, client_addr, 0.into(), 0);
-        let server_endpoint =
-            smoltcp::wire::IpEndpoint::new(smoltcp::wire::IpAddress::v4(127, 0, 0, 1), 8000);
-
-        client_socket
-            .udp_send_to(b"PING", server_endpoint)
-            .await
-            .unwrap();
-
-        let mut motor_buf = [0u8; 1024];
-        let (len, _src) = client_socket.udp_recv_from(&mut motor_buf).await.unwrap();
-
-        assert_eq!(&motor_buf[..len], b"PONG");
-        log::info!("NET smoke test PASS.");
-        */
     }
 }
 
