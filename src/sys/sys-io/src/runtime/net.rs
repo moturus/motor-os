@@ -118,9 +118,11 @@ impl NetRuntime {
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
                 match activity {
                     smoltcp::iface::PollResult::None => {
-                        if let Some(delay) =
-                            this.inner.borrow_mut().devices[device_idx].poll_delay()
-                        {
+                        let delay = this.inner.borrow_mut().devices[device_idx].poll_delay();
+                        // Note: we cannot move the op from the previous line into the if
+                        // condition below, because Rust will keep this.inner borrowed for
+                        // the duration of the 'if'.
+                        if let Some(delay) = delay {
                             use futures::FutureExt;
 
                             futures::select! {
@@ -230,6 +232,11 @@ impl NetRuntime {
                 }
             }
         }
+    }
+
+    fn get_sender(&self, conn_id: SysHandle) -> Option<moto_ipc::io_channel::Sender> {
+        let mut inner = self.inner.borrow();
+        inner.clients.get(&conn_id).map(|conn| conn.sender.clone())
     }
 
     fn on_connection_done(&self, conn_id: SysHandle) {

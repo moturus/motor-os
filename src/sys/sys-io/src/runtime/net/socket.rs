@@ -20,13 +20,30 @@ pub(super) enum SocketState {
     Tcp(tcp::TcpState),
 }
 
+impl SocketState {
+    pub(super) fn unwrap_tcp(&mut self) -> &mut tcp::TcpState {
+        if let Self::Tcp(tcp_state) = self {
+            tcp_state
+        } else {
+            panic!()
+        }
+    }
+    pub(super) fn unwrap_udp(&mut self) -> &mut udp::UdpState {
+        if let Self::Udp(udp_state) = self {
+            udp_state
+        } else {
+            panic!()
+        }
+    }
+}
+
 pub(super) struct SocketBase {
     socket_id: u64,
     runtime: super::NetRuntime,
     device_idx: usize,
     smoltcp_handle: smoltcp::iface::SocketHandle,
     device_notify: Rc<moto_async::LocalNotify>,
-    socket_addr: SocketAddr,
+    local_addr: SocketAddr,
     client: SysHandle, // Denormalized for quick validation.
 }
 
@@ -47,7 +64,7 @@ impl SocketBase {
             device_idx,
             smoltcp_handle,
             device_notify,
-            socket_addr,
+            local_addr: socket_addr,
             client,
         }
     }
@@ -58,6 +75,10 @@ impl SocketBase {
 
     pub(super) fn client(&self) -> SysHandle {
         self.client
+    }
+
+    pub(super) fn sender(&self) -> Option<moto_ipc::io_channel::Sender> {
+        self.runtime.get_sender(self.client)
     }
 
     pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {

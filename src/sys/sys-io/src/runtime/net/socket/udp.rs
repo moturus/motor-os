@@ -26,9 +26,7 @@ impl MotoSocket {
         let socket_mut = &mut *socket_ref;
         let Self { base, state } = socket_mut;
 
-        let SocketState::Udp(udp_state) = state else {
-            panic!()
-        };
+        let udp_state = state.unwrap_udp();
 
         let mut inner = base.runtime.inner.borrow_mut();
         let device = &mut inner.devices[base.device_idx];
@@ -130,6 +128,7 @@ impl MotoSocket {
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
         let Self { base, state } = socket_mut;
+        let udp_state = state.unwrap_udp();
 
         let sender = {
             if let Some(conn) = base.runtime.inner.borrow().clients.get(&base.client) {
@@ -144,11 +143,6 @@ impl MotoSocket {
                 .alloc_page(subchannel_mask)
                 .await
                 .map_err(|err| err as u16)
-        };
-
-        #[allow(irrefutable_let_patterns)]
-        let SocketState::Udp(udp_state) = state else {
-            panic!();
         };
 
         let rx_queue = udp_state.rx_queue.clone();
@@ -186,7 +180,7 @@ impl MotoSocket {
         // UDP sockets don't linger.
         let runtime = base.runtime.clone();
         let device_idx = base.device_idx;
-        let socket_addr = base.socket_addr;
+        let socket_addr = base.local_addr;
         let smoltcp_handle = base.smoltcp_handle;
         let socket_id = base.socket_id;
 

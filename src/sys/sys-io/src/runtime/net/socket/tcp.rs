@@ -18,6 +18,8 @@ pub struct TcpState {
     subchannel_mask: u64,
     tcp_listener: Option<Weak<RefCell<TcpListener>>>,
     connect_req: Option<moto_ipc::io_channel::Msg>,
+
+    remote_addr: Option<SocketAddr>,
 }
 
 impl MotoSocket {
@@ -38,7 +40,7 @@ impl MotoSocket {
     fn create_tcp_socket(
         runtime: &NetRuntime,
         device_idx: usize,
-        socket_addr: SocketAddr,
+        local_addr: SocketAddr,
         client: SysHandle,
         subchannel_mask: u64,
     ) -> Rc<RefCell<MotoSocket>> {
@@ -61,7 +63,7 @@ impl MotoSocket {
             runtime.clone(),
             device_idx,
             smoltcp_handle,
-            socket_addr,
+            local_addr,
             client,
         );
 
@@ -72,6 +74,7 @@ impl MotoSocket {
                 subchannel_mask,
                 tcp_listener: None,
                 connect_req: None,
+                remote_addr: None,
             }),
         )));
 
@@ -115,9 +118,7 @@ impl MotoSocket {
                 let mut socket_ref = moto_socket.borrow_mut();
                 let socket_mut = &mut *socket_ref;
                 let Self { base, state } = socket_mut;
-                let SocketState::Tcp(state) = state else {
-                    panic!()
-                };
+                let state = state.unwrap_tcp();
 
                 tcp_listener_mut.add_listening_socket(base.socket_id());
                 state.ephemeral_port = tcp_listener_mut.ephemeral_port();
@@ -139,7 +140,7 @@ impl MotoSocket {
 
         moto_async::LocalRuntime::spawn(async move {
             let (connected_tx, connected_rx) = moto_async::oneshot();
-            Self::listen(connected_tx, weak_socket).await;
+            Self::tcp_listen_task(connected_tx, weak_socket).await;
 
             // Spawn an extra one once the previous one is connected.
             let _ = connected_rx.await;
@@ -149,7 +150,7 @@ impl MotoSocket {
         Ok(())
     }
 
-    async fn listen(
+    async fn tcp_listen_task(
         connected_tx: moto_async::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
     ) {
@@ -241,7 +242,7 @@ impl MotoSocket {
         todo!()
     }
 
-    async fn socket_task(weak_socket: Weak<RefCell<Self>>) {
+    async fn tcp_connect_task(weak_socket: Weak<RefCell<Self>>) {
         use smoltcp::socket::tcp::State;
 
         let socket_id = {
@@ -250,7 +251,6 @@ impl MotoSocket {
             };
             moto_socket.borrow().socket_id()
         };
-        log::debug!("socket task for 0x{socket_id:x}");
 
         let mut prev_state = State::SynSent;
         loop {
@@ -263,8 +263,8 @@ impl MotoSocket {
                 Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
                     match smoltcp_socket.state() {
                         State::Closed => Poll::Ready(Some(State::Closed)),
-                        State::Listen => {
-                            panic!()
+                        State::Listen | State::SynReceived => {
+                            panic!("Unexpected state {:?}", smoltcp_socket.state())
                         }
 
                         smoltcp::socket::tcp::State::SynSent => {
@@ -272,8 +272,7 @@ impl MotoSocket {
                             Poll::Pending
                         }
 
-                        State::SynReceived => todo!(),
-                        State::Established => todo!(),
+                        State::Established => Poll::Ready(Some(State::Established)),
                         State::FinWait1 => todo!(),
                         State::FinWait2 => todo!(),
                         State::CloseWait => todo!(),
@@ -290,10 +289,74 @@ impl MotoSocket {
             };
 
             if prev_state != new_state {
-                log::debug!("TCP socket {prev_state:?} => {new_state:?}");
+                log::debug!("TCP socket 0x{socket_id:x}: {prev_state:?} => {new_state:?}");
+
+                match new_state {
+                    State::Closed => todo!(),
+                    State::Listen => todo!(),
+                    State::SynSent => todo!(),
+                    State::SynReceived => todo!(),
+                    State::Established => {
+                        Self::on_socket_connected(weak_socket);
+                        return;
+                    }
+                    State::FinWait1 => todo!(),
+                    State::FinWait2 => todo!(),
+                    State::CloseWait => todo!(),
+                    State::Closing => todo!(),
+                    State::LastAck => todo!(),
+                    State::TimeWait => todo!(),
+                }
+
                 prev_state = new_state;
             }
         }
+    }
+
+    async fn on_socket_connected(weak_socket: Weak<RefCell<Self>>) {
+        let Some(moto_socket) = weak_socket.upgrade() else {
+            return;
+        };
+
+        Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket| {
+            // Without these, remotely dropped sockets may hang around indefinitely.
+            smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
+            smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
+            smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
+            smoltcp_socket.set_ack_delay(None);
+        });
+
+        let (sender, msg) = {
+            let mut socket_ref = moto_socket.borrow_mut();
+            let socket_mut = &mut *socket_ref;
+            let Self { base, state } = socket_mut;
+
+            let tcp_state = state.unwrap_tcp();
+            let mut msg = tcp_state.connect_req.take().unwrap();
+            msg.handle = base.socket_id;
+            api_net::put_socket_addr(&mut msg.payload, &base.local_addr);
+            msg.status = moto_rt::E_OK;
+
+            let Some(sender) = base.sender() else {
+                log::debug!(
+                    "No client for newly connected socket 0x{:x}",
+                    base.socket_id
+                );
+                return;
+            };
+
+            log::debug!("Socket 0x{:x} connected.", base.socket_id);
+
+            (sender, msg)
+        };
+
+        let _ = sender.send(msg).await;
+
+        Self::tcp_main_loop(weak_socket).await
+    }
+
+    async fn tcp_main_loop(weak_socket: Weak<RefCell<Self>>) {
+        todo!()
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
@@ -361,12 +424,11 @@ impl MotoSocket {
                 let mut socket_ref = moto_socket.borrow_mut();
                 let socket_mut = &mut *socket_ref;
                 let Self { base, state } = socket_mut;
-                let SocketState::Tcp(state) = state else {
-                    panic!()
-                };
+                let state = state.unwrap_tcp();
 
                 state.ephemeral_port = Some(local_port);
                 state.connect_req = Some(msg);
+                state.remote_addr = Some(remote_addr);
 
                 base.runtime.inner.borrow_mut().devices[base.device_idx]
                     .tcp_connect(base.smoltcp_handle, local_addr, remote_addr)
@@ -383,7 +445,7 @@ impl MotoSocket {
         // Spawn the socket task.
 
         moto_async::LocalRuntime::spawn(async move {
-            Self::socket_task(weak_socket).await;
+            Self::tcp_connect_task(weak_socket).await;
         });
 
         Ok(())
