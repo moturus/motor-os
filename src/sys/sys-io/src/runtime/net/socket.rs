@@ -21,13 +21,21 @@ pub(super) enum SocketState {
 }
 
 impl SocketState {
-    pub(super) fn unwrap_tcp(&mut self) -> &mut tcp::TcpState {
+    pub(super) fn unwrap_tcp_mut(&mut self) -> &mut tcp::TcpState {
         if let Self::Tcp(tcp_state) = self {
             tcp_state
         } else {
             panic!()
         }
     }
+    pub(super) fn unwrap_tcp(&self) -> &tcp::TcpState {
+        if let Self::Tcp(tcp_state) = self {
+            tcp_state
+        } else {
+            panic!()
+        }
+    }
+
     pub(super) fn unwrap_udp(&mut self) -> &mut udp::UdpState {
         if let Self::Udp(udp_state) = self {
             udp_state
@@ -152,5 +160,12 @@ impl MotoSocket {
         assert!(client.sockets.remove(&socket_id));
 
         // Don't remove from devices as some bytes may need to get out.
+    }
+
+    pub(super) fn unwrap_tcp(&self) -> &tcp::TcpState {
+        self.state.unwrap_tcp()
+    }
+    pub(super) fn unwrap_tcp_mut(&mut self) -> &mut tcp::TcpState {
+        self.state.unwrap_tcp_mut()
     }
 }

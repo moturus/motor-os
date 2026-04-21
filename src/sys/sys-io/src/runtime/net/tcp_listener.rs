@@ -27,8 +27,8 @@ pub(super) struct TcpListener {
     pending_accepts: VecDeque<moto_ipc::io_channel::Msg>,
 
     // Connected sockets that did not yet emit the accept QE.
-    // Note: connected_sockets below may contain dropped sockets.
-    pending_sockets: VecDeque<(u64, SocketAddr)>,
+    // When the socket is accepted, the oneshot should be fired.
+    pending_sockets: VecDeque<(u64, SocketAddr, moto_async::oneshot::Sender<()>)>,
 
     // Pure listening sockets. We need to track them to drop when the listener is dropped.
     listening_sockets: HashSet<u64>,
@@ -55,26 +55,6 @@ impl Drop for TcpListener {
 }
 
 impl TcpListener {
-    fn new(
-        listener_id: u64,
-        runtime: super::NetRuntime,
-        client: SysHandle,
-        socket_addr: SocketAddr,
-    ) -> Self {
-        Self {
-            listener_id,
-            runtime,
-            client,
-            socket_addr,
-            pending_accepts: VecDeque::new(),
-            pending_sockets: VecDeque::new(),
-            listening_sockets: HashSet::new(),
-            listening_on: Vec::new(),
-            ephemeral_tcp_port: None,
-            ttl: 64, // https://www.iana.org/assignments/ip-parameters/ip-parameters.xhtml
-        }
-    }
-
     pub(super) fn runtime(&self) -> &super::NetRuntime {
         &self.runtime
     }
@@ -157,6 +137,82 @@ impl TcpListener {
 
     pub(super) fn add_listening_socket(&mut self, socket_id: u64) {
         self.listening_sockets.insert(socket_id);
+    }
+
+    pub(super) async fn on_socket_connected(
+        this: Rc<RefCell<Self>>,
+        moto_socket: Rc<RefCell<MotoSocket>>,
+        accepted_tx: moto_async::oneshot::Sender<()>,
+    ) {
+        let (socket_id, remote_addr) = {
+            let socket_ref = moto_socket.borrow();
+            (
+                socket_ref.socket_id(),
+                socket_ref.unwrap_tcp().remote_addr().unwrap(),
+            )
+        };
+
+        let accepted = {
+            let mut this_ref = this.borrow_mut();
+            assert!(this_ref.listening_sockets.remove(&socket_id));
+            MotoSocket::set_ttl(&moto_socket, this_ref.ttl);
+
+            if let Some(msg) = this_ref.pending_accepts.pop_front() {
+                Some((msg, accepted_tx))
+            } else {
+                this_ref
+                    .pending_sockets
+                    .push_back((socket_id, remote_addr, accepted_tx));
+                None
+            }
+        };
+
+        if let Some((accept_req, accepted_tx)) = accepted {
+            Self::process_matched_accept(this, socket_id, remote_addr, accepted_tx, accept_req)
+                .await
+        }
+    }
+
+    async fn process_matched_accept(
+        this: Rc<RefCell<Self>>,
+        socket_id: u64,
+        remote_addr: SocketAddr,
+        accepted_tx: moto_async::oneshot::Sender<()>,
+        accept_req: moto_ipc::io_channel::Msg,
+    ) {
+        let (sender, moto_socket) = {
+            let mut this_ref = this.borrow_mut();
+            let mut runtime_ref = this_ref.runtime.inner.borrow_mut();
+
+            let sender = runtime_ref
+                .clients
+                .get(&this_ref.client)
+                .unwrap()
+                .sender
+                .clone();
+            let moto_socket = runtime_ref.sockets.get(&socket_id).cloned();
+            (sender, moto_socket)
+        };
+
+        let Some(moto_socket) = moto_socket else {
+            this.borrow_mut().pending_accepts.push_front(accept_req);
+            return;
+        };
+
+        {
+            moto_socket
+                .borrow_mut()
+                .unwrap_tcp_mut()
+                .set_subchannel_mask(accept_req.payload.args_64()[0]);
+        }
+
+        let mut resp = accept_req;
+        resp.handle = socket_id;
+        moto_sys_io::api_net::put_socket_addr(&mut resp.payload, &remote_addr);
+        resp.status = moto_rt::E_OK;
+
+        let _ = sender.send(resp).await;
+        accepted_tx.send(()).unwrap();
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
@@ -247,8 +303,40 @@ impl TcpListener {
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
-        moto_async::sleep(std::time::Duration::from_millis(1000)).await;
-        log::error!("TcpListener::accept(): not implemented");
-        Err(ErrorKind::Unsupported.into())
+        let listener_id = msg.handle;
+        let tcp_listener = runtime
+            .inner
+            .borrow()
+            .tcp_listeners
+            .get(&listener_id)
+            .cloned()
+            .ok_or_else(|| {
+                log::debug!("TCP listener 0x{listener_id:x} not found.");
+                std::io::Error::from(ErrorKind::InvalidData)
+            })?;
+
+        if tcp_listener.borrow().client != sender.remote_handle() {
+            // Validate that the listener and the connection belong to the same process.
+            let pid1 = moto_sys::SysObj::get_pid(tcp_listener.borrow().client).unwrap();
+            let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();
+            if pid1 != pid2 {
+                log::debug!(
+                    "Accept: wrong process 0x{pid1:x} vs 0x{pid2:x} for Listener ID 0x{listener_id:x}"
+                );
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        if let Some((socket_id, remote_addr, accepted_tx)) =
+            { tcp_listener.borrow_mut().pending_sockets.pop_front() }
+        {
+            Self::process_matched_accept(tcp_listener, socket_id, remote_addr, accepted_tx, msg)
+                .await;
+        } else {
+            log::debug!("Pending accept request for TCP listener 0x{listener_id:x}.");
+            tcp_listener.borrow_mut().pending_accepts.push_back(msg);
+        }
+
+        Ok(())
     }
 }
