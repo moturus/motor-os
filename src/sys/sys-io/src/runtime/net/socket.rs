@@ -148,6 +148,11 @@ impl MotoSocket {
         Self { base, state: kind }
     }
 
+    // Listening TCP sockets on accept change their clients.
+    pub(super) fn set_client(&mut self, client: SysHandle) {
+        self.base.client = client;
+    }
+
     fn on_drop(this: Rc<RefCell<Self>>) {
         let this_ref = this.borrow();
         let Self { base, state: kind } = &*this_ref;

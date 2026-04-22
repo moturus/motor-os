@@ -374,7 +374,7 @@ impl MotoSocket {
         let _ = moto_async::LocalRuntime::spawn(async move {
             // We don't do I/O on the socket until it is accepted by the client.
             accepted_rx.await;
-            Self::tcp_main_loop(weak_socket).await
+            Self::tcp_read_task(weak_socket).await
         });
     }
 
@@ -488,11 +488,94 @@ impl MotoSocket {
 
         let _ = sender.send(msg).await;
         let _ =
-            moto_async::LocalRuntime::spawn(async move { Self::tcp_main_loop(weak_socket).await });
+            moto_async::LocalRuntime::spawn(async move { Self::tcp_read_task(weak_socket).await });
     }
 
-    async fn tcp_main_loop(weak_socket: Weak<RefCell<Self>>) {
-        todo!()
+    async fn tcp_read_task(weak_socket: Weak<RefCell<Self>>) {
+        let weak_socket_cloned = weak_socket.clone();
+        let _ = moto_async::LocalRuntime::spawn(async move {
+            Self::tcp_write_task(weak_socket_cloned).await
+        });
+
+        loop {
+            let socket_state = std::future::poll_fn(|cx| {
+                let Some(moto_socket) = weak_socket.upgrade() else {
+                    return Poll::Ready(None);
+                };
+
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+                    let (state, recv_queue) = (smoltcp_socket.state(), smoltcp_socket.recv_queue());
+
+                    if recv_queue == 0 {
+                        match state {
+                            // These states should happen before the receive task is spawned.
+                            smoltcp::socket::tcp::State::Listen
+                            | smoltcp::socket::tcp::State::SynSent
+                            | smoltcp::socket::tcp::State::SynReceived => {
+                                panic!("Unexpected socket state {state:?}.");
+                            }
+
+                            // These states may still receive data from the remote endpoint.
+                            smoltcp::socket::tcp::State::Established
+                            | smoltcp::socket::tcp::State::FinWait1
+                            | smoltcp::socket::tcp::State::FinWait2 => {
+                                smoltcp_socket.register_recv_waker(cx.waker());
+                                Poll::Pending
+                            }
+
+                            // These states happen after we received FIN from the remote,
+                            // and so we should not expect any data.
+                            smoltcp::socket::tcp::State::CloseWait
+                            | smoltcp::socket::tcp::State::Closing
+                            | smoltcp::socket::tcp::State::LastAck
+                            | smoltcp::socket::tcp::State::TimeWait
+                            | smoltcp::socket::tcp::State::Closed => {
+                                Poll::Ready(Some((state, recv_queue)))
+                            }
+                        }
+                    } else {
+                        Poll::Ready(Some((state, recv_queue)))
+                    }
+                })
+            })
+            .await;
+
+            let Some((state, recv_queue)) = socket_state else {
+                return; // The socket is no more.
+            };
+
+            todo!()
+        } // loop
+    }
+
+    async fn tcp_write_task(weak_socket: Weak<RefCell<Self>>) {
+        loop {
+            let socket_state = std::future::poll_fn(|cx| {
+                let Some(moto_socket) = weak_socket.upgrade() else {
+                    return Poll::Ready(None);
+                };
+
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+                    if smoltcp_socket.can_send() {
+                        // Has space in the TX buffer.
+                        Poll::Ready(Some(true))
+                    } else if !(smoltcp_socket.may_send()) {
+                        Poll::Ready(Some(false))
+                    } else {
+                        // Have to wait.
+                        smoltcp_socket.register_send_waker(cx.waker());
+                        Poll::Pending
+                    }
+                })
+            })
+            .await;
+
+            let Some(can_send) = socket_state else {
+                return; // THe socket is no more.
+            };
+
+            todo!()
+        } // loop
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
@@ -585,5 +668,46 @@ impl MotoSocket {
         });
 
         Ok(())
+    }
+}
+
+struct TcpRxBuf {
+    page: moto_ipc::io_channel::IoPage,
+    consumed: usize,
+}
+
+impl TcpRxBuf {
+    fn new(page: moto_ipc::io_channel::IoPage) -> Self {
+        Self { page, consumed: 0 }
+    }
+
+    fn consume(&mut self, sz: usize) {
+        self.consumed += sz;
+        assert!(self.consumed <= moto_ipc::io_channel::PAGE_SIZE);
+    }
+
+    fn bytes_mut(&self) -> &mut [u8] {
+        &mut self.page.bytes_mut()[self.consumed..]
+    }
+}
+
+struct TcpTxBuf {
+    page: moto_ipc::io_channel::IoPage,
+    len: usize,
+    consumed: usize,
+}
+
+impl TcpTxBuf {
+    fn bytes(&self) -> &[u8] {
+        &self.page.bytes()[self.consumed..self.len]
+    }
+
+    fn consume(&mut self, sz: usize) {
+        self.consumed += sz;
+        assert!(self.consumed <= self.len);
+    }
+
+    fn is_consumed(&self) -> bool {
+        self.consumed == self.len
     }
 }

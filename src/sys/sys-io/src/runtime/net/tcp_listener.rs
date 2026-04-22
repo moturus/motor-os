@@ -24,7 +24,7 @@ pub(super) struct TcpListener {
 
     // If listener::accept() is called first, it's sqe will be added
     // to pending_accepts.
-    pending_accepts: VecDeque<moto_ipc::io_channel::Msg>,
+    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, SysHandle)>,
 
     // Connected sockets that did not yet emit the accept QE.
     // When the socket is accepted, the oneshot should be fired.
@@ -157,8 +157,8 @@ impl TcpListener {
             assert!(this_ref.listening_sockets.remove(&socket_id));
             MotoSocket::set_ttl(&moto_socket, this_ref.ttl);
 
-            if let Some(msg) = this_ref.pending_accepts.pop_front() {
-                Some((msg, accepted_tx))
+            if let Some((msg, client)) = this_ref.pending_accepts.pop_front() {
+                Some((msg, accepted_tx, client))
             } else {
                 this_ref
                     .pending_sockets
@@ -167,9 +167,16 @@ impl TcpListener {
             }
         };
 
-        if let Some((accept_req, accepted_tx)) = accepted {
-            Self::process_matched_accept(this, socket_id, remote_addr, accepted_tx, accept_req)
-                .await
+        if let Some((accept_req, accepted_tx, client)) = accepted {
+            Self::process_matched_accept(
+                this,
+                socket_id,
+                remote_addr,
+                accepted_tx,
+                accept_req,
+                client,
+            )
+            .await
         }
     }
 
@@ -179,31 +186,30 @@ impl TcpListener {
         remote_addr: SocketAddr,
         accepted_tx: moto_async::oneshot::Sender<()>,
         accept_req: moto_ipc::io_channel::Msg,
+        client: SysHandle,
     ) {
         let (sender, moto_socket) = {
             let mut this_ref = this.borrow_mut();
             let mut runtime_ref = this_ref.runtime.inner.borrow_mut();
 
-            let sender = runtime_ref
-                .clients
-                .get(&this_ref.client)
-                .unwrap()
-                .sender
-                .clone();
+            let sender = runtime_ref.clients.get(&client).unwrap().sender.clone();
             let moto_socket = runtime_ref.sockets.get(&socket_id).cloned();
             (sender, moto_socket)
         };
 
         let Some(moto_socket) = moto_socket else {
-            this.borrow_mut().pending_accepts.push_front(accept_req);
+            this.borrow_mut()
+                .pending_accepts
+                .push_front((accept_req, client));
             return;
         };
 
         {
-            moto_socket
-                .borrow_mut()
+            let mut socket_ref = moto_socket.borrow_mut();
+            socket_ref
                 .unwrap_tcp_mut()
                 .set_subchannel_mask(accept_req.payload.args_64()[0]);
+            socket_ref.set_client(client);
         }
 
         let mut resp = accept_req;
@@ -330,11 +336,21 @@ impl TcpListener {
         if let Some((socket_id, remote_addr, accepted_tx)) =
             { tcp_listener.borrow_mut().pending_sockets.pop_front() }
         {
-            Self::process_matched_accept(tcp_listener, socket_id, remote_addr, accepted_tx, msg)
-                .await;
+            Self::process_matched_accept(
+                tcp_listener,
+                socket_id,
+                remote_addr,
+                accepted_tx,
+                msg,
+                sender.remote_handle(),
+            )
+            .await;
         } else {
             log::debug!("Pending accept request for TCP listener 0x{listener_id:x}.");
-            tcp_listener.borrow_mut().pending_accepts.push_back(msg);
+            tcp_listener
+                .borrow_mut()
+                .pending_accepts
+                .push_back((msg, sender.remote_handle()));
         }
 
         Ok(())
