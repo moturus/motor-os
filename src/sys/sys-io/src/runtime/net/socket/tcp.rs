@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 /*
   RFC 793: https://datatracker.ietf.org/doc/html/rfc793
 
@@ -103,6 +104,11 @@ pub struct TcpState {
     connect_req: Option<moto_ipc::io_channel::Msg>,
 
     remote_addr: Option<SocketAddr>,
+
+    tx_queue: VecDeque<TcpTxBuf>,
+    tx_notify: Rc<moto_async::LocalNotify>,
+
+    stat_tx_bytes: u64,
 }
 
 impl TcpState {
@@ -174,6 +180,9 @@ impl MotoSocket {
                 tcp_listener: None,
                 connect_req: None,
                 remote_addr: None,
+                tx_queue: VecDeque::new(),
+                tx_notify: Rc::new(moto_async::LocalNotify::new()),
+                stat_tx_bytes: 0,
             }),
         )));
 
@@ -498,6 +507,7 @@ impl MotoSocket {
         });
 
         loop {
+            // Step 1: wait for the socket to become writable.
             let socket_state = std::future::poll_fn(|cx| {
                 let Some(moto_socket) = weak_socket.upgrade() else {
                     return Poll::Ready(None);
@@ -544,6 +554,32 @@ impl MotoSocket {
                 return; // The socket is no more.
             };
 
+            if recv_queue == 0 {
+                // The socket is no longer writable (we received FIN).
+                // TODO: drop queued TX bytes?
+                return;
+            }
+
+            // Step 2: wait for bytes to TX.
+            loop {
+                let tx_notify = {
+                    let Some(moto_socket) = weak_socket.upgrade() else {
+                        return;
+                    };
+
+                    let socket_ref = moto_socket.borrow();
+                    let tcp_state = socket_ref.unwrap_tcp();
+                    if !tcp_state.tx_queue.is_empty() {
+                        break;
+                    }
+
+                    tcp_state.tx_notify.clone()
+                };
+
+                tx_notify.notified().await
+            } // loop
+
+            // Step 3: write bytes into the socket.
             todo!()
         } // loop
     }
@@ -666,6 +702,56 @@ impl MotoSocket {
         moto_async::LocalRuntime::spawn(async move {
             Self::tcp_connect_task(weak_socket).await;
         });
+
+        Ok(())
+    }
+
+    pub async fn tcp_tx(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        // Note: we need to get the page so that it is freed.
+        let page_idx = msg.payload.shared_pages()[0];
+        let page = if let Ok(page) = sender.get_page(page_idx) {
+            page
+        } else {
+            return Err(ErrorKind::InvalidData.into());
+        };
+
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            if socket_ref.base.client != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+
+            let sz = msg.payload.args_64()[1] as usize;
+            if sz > moto_ipc::io_channel::PAGE_SIZE {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidData.into());
+            }
+
+            // Check that the socket is indeed tcp before unwrapping.
+            if !matches!(socket_ref.state, SocketState::Tcp(_)) {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidData.into());
+            }
+
+            let tcp_state = socket_ref.unwrap_tcp_mut();
+            tcp_state.stat_tx_bytes += sz as u64;
+            tcp_state.tx_queue.push_back(TcpTxBuf {
+                page,
+                len: sz,
+                consumed: 0,
+            });
+
+            tcp_state.tx_notify.notify_one();
+        }
 
         Ok(())
     }

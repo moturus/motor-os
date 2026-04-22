@@ -302,7 +302,7 @@ impl MotoSocket {
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
 
-        let Some(mut socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+        let Some(socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
             let page_idx = msg.payload.shared_pages()[11];
             let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
             return Err(ErrorKind::NotFound.into());
