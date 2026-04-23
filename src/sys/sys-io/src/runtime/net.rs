@@ -314,6 +314,9 @@ impl NetRuntime {
 
             NetCmd::TcpStreamConnect => socket::MotoSocket::tcp_connect(self, msg, &sender).await,
             NetCmd::TcpStreamTx => socket::MotoSocket::tcp_tx(self, msg, &sender).await,
+            NetCmd::TcpStreamRxAck => {
+                socket::MotoSocket::tcp_rx_ack_received(self, msg, &sender).await
+            }
 
             NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,

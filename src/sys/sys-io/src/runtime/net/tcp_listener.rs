@@ -152,6 +152,8 @@ impl TcpListener {
             )
         };
 
+        log::debug!("TCP Listener: incoming conn {remote_addr:?} on socket 0x{socket_id:x}");
+
         let accepted = {
             let mut this_ref = this.borrow_mut();
             assert!(this_ref.listening_sockets.remove(&socket_id));
@@ -211,6 +213,8 @@ impl TcpListener {
                 .set_subchannel_mask(accept_req.payload.args_64()[0]);
             socket_ref.set_client(client);
         }
+
+        log::debug!("Incoming TCP conn 0x{socket_id:x} <= {remote_addr:?} accepted.");
 
         let mut resp = accept_req;
         resp.handle = socket_id;

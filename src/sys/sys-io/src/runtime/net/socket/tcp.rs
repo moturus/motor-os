@@ -123,23 +123,28 @@ impl TcpState {
 
 impl MotoSocket {
     pub fn set_ttl(moto_socket: &Rc<RefCell<Self>>, ttl: u8) {
-        Self::with_tcp_smoltcp_socket(moto_socket, |_socket_id, smoltcp_socket| {
+        Self::with_tcp_smoltcp_socket(moto_socket, |_socket_id, smoltcp_socket, _state| {
             smoltcp_socket.set_hop_limit(Some(ttl));
         });
     }
 
+    #[inline]
     pub(super) fn with_tcp_smoltcp_socket<F, T>(socket: &Rc<RefCell<Self>>, f: F) -> T
     where
-        F: FnOnce(u64, &mut smoltcp::socket::tcp::Socket<'static>) -> T,
+        F: FnOnce(u64, &mut smoltcp::socket::tcp::Socket<'static>, &mut TcpState) -> T,
     {
-        let socket_ref = socket.borrow_mut();
+        let mut socket_ref = socket.borrow_mut();
+        let socket_mut = &mut *socket_ref;
+        let Self { base, state } = socket_mut;
 
-        let mut inner = socket_ref.base.runtime.inner.borrow_mut();
-        let device = &mut inner.devices[socket_ref.base.device_idx];
+        let tcp_state = state.unwrap_tcp_mut();
+
+        let mut inner = base.runtime.inner.borrow_mut();
+        let device = &mut inner.devices[base.device_idx];
         let smoltcp_socket = device
             .sockets
-            .get_mut::<smoltcp::socket::tcp::Socket<'static>>(socket_ref.base.smoltcp_handle);
-        f(socket_ref.socket_id(), smoltcp_socket)
+            .get_mut::<smoltcp::socket::tcp::Socket<'static>>(base.smoltcp_handle);
+        f(base.socket_id, smoltcp_socket, tcp_state)
     }
 
     fn create_tcp_socket(
@@ -233,7 +238,7 @@ impl MotoSocket {
                 state.tcp_listener = Some(weak_listener.clone());
             }
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket| {
+            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
                 smoltcp_socket.listen(socket_addr).unwrap();
                 log::debug!(
                     "new TCP socket 0x{socket_id:x} listening on {socket_addr:?} for conn 0x{:x}",
@@ -278,7 +283,7 @@ impl MotoSocket {
                 return Poll::Ready(None);
             };
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket| {
+            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
                 match smoltcp_socket.state() {
                     smoltcp::socket::tcp::State::Listen => {
                         smoltcp_socket.register_recv_waker(cx.waker());
@@ -312,7 +317,7 @@ impl MotoSocket {
                 return Poll::Ready(None);
             };
 
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
                 match smoltcp_socket.state() {
                     smoltcp::socket::tcp::State::Listen | smoltcp::socket::tcp::State::SynSent => {
                         panic!()
@@ -352,7 +357,7 @@ impl MotoSocket {
             return;
         };
         let remote_addr = {
-            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
                 assert_eq!(
                     smoltcp_socket.state(),
                     smoltcp::socket::tcp::State::Established
@@ -405,7 +410,7 @@ impl MotoSocket {
                     return Poll::Ready(None);
                 };
 
-                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
                     match smoltcp_socket.state() {
                         State::Closed => Poll::Ready(Some(State::Closed)),
                         State::Listen | State::SynReceived => {
@@ -442,7 +447,7 @@ impl MotoSocket {
                     State::SynSent => todo!(),
                     State::SynReceived => todo!(),
                     State::Established => {
-                        Self::on_socket_connected(weak_socket);
+                        Self::on_socket_connected(weak_socket).await;
                         return;
                     }
                     State::FinWait1 => todo!(),
@@ -463,7 +468,8 @@ impl MotoSocket {
             return;
         };
 
-        Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket| {
+        Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
+            log::debug!("Socket 0x{socket_id:x} connected.");
             // Without these, remotely dropped sockets may hang around indefinitely.
             smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
             smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
@@ -491,7 +497,6 @@ impl MotoSocket {
             };
 
             log::debug!("Socket 0x{:x} connected.", base.socket_id);
-
             (sender, msg)
         };
 
@@ -506,17 +511,26 @@ impl MotoSocket {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
+        let socket_id = {
+            let Some(moto_socket) = weak_socket.upgrade() else {
+                return;
+            };
+            moto_socket.borrow().socket_id()
+        };
+        log::debug!("TCP RX task for socekt 0x{socket_id:x}");
+
         loop {
-            // Step 1: wait for the socket to become writable.
+            // Step 1: wait for the socket to become readable.
             let socket_state = std::future::poll_fn(|cx| {
                 let Some(moto_socket) = weak_socket.upgrade() else {
                     return Poll::Ready(None);
                 };
 
-                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
-                    let (state, recv_queue) = (smoltcp_socket.state(), smoltcp_socket.recv_queue());
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+                    let (state, can_recv) = (smoltcp_socket.state(), smoltcp_socket.can_recv());
+                    log::debug!("RX: socket 0x{_socket_id:x} can_recv: {can_recv} in {state:?}");
 
-                    if recv_queue == 0 {
+                    if !can_recv {
                         match state {
                             // These states should happen before the receive task is spawned.
                             smoltcp::socket::tcp::State::Listen
@@ -540,46 +554,28 @@ impl MotoSocket {
                             | smoltcp::socket::tcp::State::LastAck
                             | smoltcp::socket::tcp::State::TimeWait
                             | smoltcp::socket::tcp::State::Closed => {
-                                Poll::Ready(Some((state, recv_queue)))
+                                Poll::Ready(Some((state, can_recv)))
                             }
                         }
                     } else {
-                        Poll::Ready(Some((state, recv_queue)))
+                        Poll::Ready(Some((state, can_recv)))
                     }
                 })
             })
             .await;
 
-            let Some((state, recv_queue)) = socket_state else {
+            let Some((state, can_recv)) = socket_state else {
+                log::debug!("Socket 0x{socket_id:x}: RX task done.");
                 return; // The socket is no more.
             };
 
-            if recv_queue == 0 {
-                // The socket is no longer writable (we received FIN).
-                // TODO: drop queued TX bytes?
+            if !can_recv {
+                // The socket is no longer readable (we received FIN).
+                log::debug!("Socket 0x{socket_id:x}: RX task done.");
                 return;
             }
 
-            // Step 2: wait for bytes to TX.
-            loop {
-                let tx_notify = {
-                    let Some(moto_socket) = weak_socket.upgrade() else {
-                        return;
-                    };
-
-                    let socket_ref = moto_socket.borrow();
-                    let tcp_state = socket_ref.unwrap_tcp();
-                    if !tcp_state.tx_queue.is_empty() {
-                        break;
-                    }
-
-                    tcp_state.tx_notify.clone()
-                };
-
-                tx_notify.notified().await
-            } // loop
-
-            // Step 3: write bytes into the socket.
+            // Step 3: read bytes from the socket and send them to the client.
             todo!()
         } // loop
     }
@@ -591,7 +587,7 @@ impl MotoSocket {
                     return Poll::Ready(None);
                 };
 
-                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket| {
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
                     if smoltcp_socket.can_send() {
                         // Has space in the TX buffer.
                         Poll::Ready(Some(true))
@@ -606,11 +602,75 @@ impl MotoSocket {
             })
             .await;
 
-            let Some(can_send) = socket_state else {
+            let Some(may_send) = socket_state else {
                 return; // THe socket is no more.
             };
 
-            todo!()
+            // Step 2: wait for bytes to TX.
+            loop {
+                let tx_notify = {
+                    let Some(moto_socket) = weak_socket.upgrade() else {
+                        return;
+                    };
+
+                    let socket_ref = moto_socket.borrow();
+                    let tcp_state = socket_ref.unwrap_tcp();
+
+                    if tcp_state.tx_queue.is_empty() {
+                        if !may_send {
+                            return; // We shut down TX pipe.
+                        }
+                    } else {
+                        break;
+                    }
+
+                    tcp_state.tx_notify.clone()
+                };
+
+                tx_notify.notified().await
+            } // loop
+
+            // Step 3: TX bytes out.
+            {
+                let Some(moto_socket) = weak_socket.upgrade() else {
+                    return;
+                };
+
+                Self::with_tcp_smoltcp_socket(
+                    &moto_socket,
+                    |socket_id, smoltcp_socket, tcp_state| {
+                        while smoltcp_socket.can_send() {
+                            let mut tx_buf = if let Some(x) = tcp_state.tx_queue.pop_front() {
+                                x
+                            } else {
+                                break;
+                            };
+
+                            match smoltcp_socket.send_slice(tx_buf.bytes()) {
+                                Ok(sz) => {
+                                    tx_buf.consume(sz);
+                                    log::debug!(
+                                        "TCP TX: enqueued {sz} bytes into socket 0x{socket_id:x}."
+                                    );
+                                    if tx_buf.is_consumed() {
+                                        // Client writes are completed in tcp_stream_write,
+                                        // actual socket writes happen later/asynchronously.
+                                        continue;
+                                    } else {
+                                        // moto_socket.
+                                        tcp_state.tx_queue.push_front(tx_buf);
+                                        continue;
+                                    }
+                                }
+                                Err(_err) => todo!(),
+                            }
+                        }
+                    },
+                );
+
+                log::debug!("TX: device notify");
+                moto_socket.borrow().base.device_notify.notify_one();
+            } // loop
         } // loop
     }
 
@@ -660,7 +720,7 @@ impl MotoSocket {
 
             // Set timeout, if needed.
             if let Some(timeout) = api_net::tcp_stream_connect_timeout(&msg) {
-                Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket| {
+                Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
                     let now = moto_rt::time::Instant::now();
                     if timeout <= now {
                         // We check this upon receiving sqe; the thread got preempted or something.
@@ -752,6 +812,16 @@ impl MotoSocket {
 
             tcp_state.tx_notify.notify_one();
         }
+
+        Ok(())
+    }
+
+    pub async fn tcp_rx_ack_received(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        log::debug!("TCP RX ACK: should we do anything here?");
 
         Ok(())
     }
