@@ -353,10 +353,8 @@ impl TcpListener {
         new_stream.on_accepted();
 
         #[cfg(debug_assertions)]
-        moto_log!(
-            "{}:{} new incoming TcpStream {:?} <- {:?} 0x{:x} mask: 0x{:x}",
-            file!(),
-            line!(),
+        log::debug!(
+            "New incoming TcpStream {:?} <- {:?} 0x{:x} mask: 0x{:x}",
             new_stream.local_addr.lock().unwrap(),
             new_stream.remote_addr,
             new_stream.handle(),
