@@ -67,6 +67,7 @@ host = ["x86_64-unknown-linux-gnu"]
 target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
 
 [rust]
+# std-features = ["debug_refcell"]
 deny-warnings = false
 incremental = true
 # debug = true
