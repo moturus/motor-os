@@ -106,9 +106,10 @@ pub struct TcpState {
     remote_addr: Option<SocketAddr>,
 
     tx_queue: VecDeque<TcpTxBuf>,
-    tx_notify: Rc<moto_async::LocalNotify>,
+    tx_queue_notify: Rc<moto_async::LocalNotify>,
 
     stat_tx_bytes: u64,
+    stat_rx_bytes: u64,
 }
 
 impl TcpState {
@@ -186,8 +187,9 @@ impl MotoSocket {
                 connect_req: None,
                 remote_addr: None,
                 tx_queue: VecDeque::new(),
-                tx_notify: Rc::new(moto_async::LocalNotify::new()),
+                tx_queue_notify: Rc::new(moto_async::LocalNotify::new()),
                 stat_tx_bytes: 0,
+                stat_rx_bytes: 0,
             }),
         )));
 
@@ -511,13 +513,18 @@ impl MotoSocket {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
-        let socket_id = {
+        let (socket_id, sender, subchannel_mask) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
             };
-            moto_socket.borrow().socket_id()
+            let socket_ref = moto_socket.borrow();
+            (
+                socket_ref.base.socket_id,
+                socket_ref.base.sender().unwrap(),
+                socket_ref.unwrap_tcp().subchannel_mask,
+            )
         };
-        log::debug!("TCP RX task for socekt 0x{socket_id:x}");
+        log::debug!("TCP RX task for socket 0x{socket_id:x}");
 
         loop {
             // Step 1: wait for the socket to become readable.
@@ -575,12 +582,58 @@ impl MotoSocket {
                 return;
             }
 
-            // Step 3: read bytes from the socket and send them to the client.
-            todo!()
+            // Step 3: allocate a page.
+            let page = sender.alloc_page(subchannel_mask).await.unwrap();
+
+            // Step 4: read bytes from the socket. Note that we read at most one page,
+            // because to read more, we need to check if the socket has more bytes to read,
+            // which is done in step 1 above.
+            let mut rx_buf = TcpRxBuf::new(page);
+            {
+                let Some(moto_socket) = weak_socket.upgrade() else {
+                    return;
+                };
+
+                Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, tcp_state| {
+                    match smoltcp_socket.recv_slice(rx_buf.bytes_mut()) {
+                        Ok(len) => {
+                            rx_buf.consume(len);
+                            tcp_state.stat_rx_bytes += len as u64;
+                            log::debug!("TCP socket 0x{socket_id:x} RX {len} bytes.");
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "Unexpected error {err:?} reading bytes from socket 0x{socket_id:x}"
+                            );
+                        }
+                    }
+                });
+            }
+            if rx_buf.consumed == 0 {
+                continue; // An error occurred: stop processing?
+            }
+
+            // Step 5. Send bytes to the client.
+            {
+                let (io_page, sz) = (rx_buf.page, rx_buf.consumed);
+                let mut msg = moto_sys_io::api_net::tcp_stream_rx_msg(socket_id, io_page, sz, 0);
+                msg.status = moto_rt::E_OK;
+                let _ = sender.send(msg).await;
+            }
         } // loop
     }
 
     async fn tcp_write_task(weak_socket: Weak<RefCell<Self>>) {
+        let tx_queue_notify = {
+            let Some(moto_socket) = weak_socket.upgrade() else {
+                return;
+            };
+
+            let socket_ref = moto_socket.borrow();
+            let tcp_state = socket_ref.unwrap_tcp();
+            tcp_state.tx_queue_notify.clone()
+        };
+
         loop {
             let socket_state = std::future::poll_fn(|cx| {
                 let Some(moto_socket) = weak_socket.upgrade() else {
@@ -608,7 +661,7 @@ impl MotoSocket {
 
             // Step 2: wait for bytes to TX.
             loop {
-                let tx_notify = {
+                {
                     let Some(moto_socket) = weak_socket.upgrade() else {
                         return;
                     };
@@ -623,11 +676,10 @@ impl MotoSocket {
                     } else {
                         break;
                     }
+                }
 
-                    tcp_state.tx_notify.clone()
-                };
-
-                tx_notify.notified().await
+                // We must wait inside the loop, otherwise the loop will busyloop.
+                tx_queue_notify.notified().await;
             } // loop
 
             // Step 3: TX bytes out.
@@ -668,7 +720,6 @@ impl MotoSocket {
                     },
                 );
 
-                log::debug!("TX: device notify");
                 moto_socket.borrow().base.device_notify.notify_one();
             } // loop
         } // loop
@@ -810,7 +861,7 @@ impl MotoSocket {
                 consumed: 0,
             });
 
-            tcp_state.tx_notify.notify_one();
+            tcp_state.tx_queue_notify.notify_one();
         }
 
         Ok(())

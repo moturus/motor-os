@@ -1125,7 +1125,14 @@ impl TcpStream {
         assert_ne!(0, sz_read);
         let rx_seq_incoming = msg.payload.args_64()[2];
         let rx_seq = self.next_rx_seq.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(rx_seq, rx_seq_incoming);
+
+        // Note: rx_seq was used in the legacy TCP stack implementation
+        //       to manage backpressure (I assume). It appears it is
+        //       no longer needed to do so with the new async TCP stack.
+        //
+        //       We should be careful: maybe there is a corner case
+        //       where this is needed (at least in the legacy case).
+        // assert_eq!(rx_seq, rx_seq_incoming);
 
         let io_page = self
             .channel()
