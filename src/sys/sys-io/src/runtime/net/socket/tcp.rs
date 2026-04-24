@@ -876,6 +876,14 @@ impl MotoSocket {
 
         Ok(())
     }
+
+    pub async fn tcp_close(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        todo!()
+    }
 }
 
 struct TcpRxBuf {
