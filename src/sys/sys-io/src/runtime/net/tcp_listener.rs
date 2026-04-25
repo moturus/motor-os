@@ -366,4 +366,65 @@ impl TcpListener {
 
         Ok(())
     }
+
+    pub(super) async fn drop_from_client(
+        runtime: &super::NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let listener_id = msg.handle;
+        let tcp_listener = runtime
+            .inner
+            .borrow()
+            .tcp_listeners
+            .get(&listener_id)
+            .cloned()
+            .ok_or_else(|| {
+                log::debug!("TCP listener 0x{listener_id:x} not found.");
+                std::io::Error::from(ErrorKind::InvalidData)
+            })?;
+
+        if tcp_listener.borrow().client != sender.remote_handle() {
+            // Validate that the listener and the connection belong to the same process.
+            let pid1 = moto_sys::SysObj::get_pid(tcp_listener.borrow().client).unwrap();
+            let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();
+            if pid1 != pid2 {
+                log::debug!(
+                    "Drop: wrong process 0x{pid1:x} vs 0x{pid2:x} for Listener ID 0x{listener_id:x}"
+                );
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        let mut socket_ids = {
+            let mut listener = tcp_listener.borrow_mut();
+
+            listener.pending_accepts.clear();
+            let mut socket_ids = Vec::with_capacity(
+                listener.pending_sockets.len() + listener.listening_sockets.len(),
+            );
+
+            for entry in listener.pending_sockets.drain(..) {
+                socket_ids.push(entry.0);
+            }
+            for id in listener.listening_sockets.drain() {
+                socket_ids.push(id);
+            }
+
+            socket_ids
+        };
+
+        for socket_id in socket_ids {
+            let moto_socket = runtime
+                .inner
+                .borrow()
+                .sockets
+                .get(&socket_id)
+                .unwrap()
+                .clone();
+            super::socket::MotoSocket::drop_tcp_socket(moto_socket);
+        }
+
+        Ok(())
+    }
 }

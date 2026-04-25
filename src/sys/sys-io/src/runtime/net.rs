@@ -324,6 +324,9 @@ impl NetRuntime {
             NetCmd::TcpListenerAccept => {
                 tcp_listener::TcpListener::accept(self, msg, &sender).await
             }
+            NetCmd::TcpListenerDrop => {
+                tcp_listener::TcpListener::drop_from_client(self, msg, &sender).await
+            }
 
             NetCmd::TcpStreamConnect => socket::MotoSocket::tcp_connect(self, msg, &sender).await,
             NetCmd::TcpStreamTx => socket::MotoSocket::tcp_tx(self, msg, &sender).await,

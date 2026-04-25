@@ -444,7 +444,10 @@ impl MotoSocket {
                 log::debug!("TCP socket 0x{socket_id:x}: {prev_state:?} => {new_state:?}");
 
                 match new_state {
-                    State::Closed => todo!(),
+                    State::Closed => {
+                        Self::on_connect_failed(weak_socket).await;
+                        return;
+                    }
                     State::Listen => todo!(),
                     State::SynSent => todo!(),
                     State::SynReceived => todo!(),
@@ -463,6 +466,34 @@ impl MotoSocket {
                 prev_state = new_state;
             }
         }
+    }
+
+    async fn on_connect_failed(weak_socket: Weak<RefCell<Self>>) {
+        let Some(moto_socket) = weak_socket.upgrade() else {
+            return;
+        };
+
+        Self::drop_tcp_socket(moto_socket.clone());
+
+        let (sender, msg) = {
+            let mut socket_ref = moto_socket.borrow_mut();
+            let socket_mut = &mut *socket_ref;
+            let Self { base, state } = socket_mut;
+
+            let tcp_state = state.unwrap_tcp_mut();
+            let mut msg = tcp_state.connect_req.take().unwrap();
+            msg.handle = base.socket_id;
+            msg.status = moto_rt::E_TIMED_OUT;
+
+            let Some(sender) = base.sender() else {
+                log::debug!("TCP socket 0x{:x} connect failed.", base.socket_id);
+                return;
+            };
+
+            (sender, msg)
+        };
+
+        let _ = sender.send(msg).await;
     }
 
     async fn on_socket_connected(weak_socket: Weak<RefCell<Self>>) {
@@ -498,7 +529,6 @@ impl MotoSocket {
                 return;
             };
 
-            log::debug!("Socket 0x{:x} connected.", base.socket_id);
             (sender, msg)
         };
 
@@ -779,6 +809,26 @@ impl MotoSocket {
         */
     }
 
+    pub fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
+        // Abort all ops.
+        let socket_id =
+            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _tcp_state| {
+                log::debug!("Dropping TCP socket 0x{socket_id:x}.");
+                smoltcp_socket.abort();
+                socket_id
+            });
+
+        // let tcp_state = socket_ref.unwrap_tcp_mut();
+        // tcp_state.tx_queue_notify.notify_one();
+        //
+
+        let runtime = moto_socket.borrow().base.runtime.clone();
+
+        // Drop the socket.
+        runtime.inner.borrow_mut().sockets.remove(&socket_id);
+        Self::on_drop(moto_socket);
+    }
+
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn tcp_connect(
         runtime: &NetRuntime,
@@ -955,18 +1005,7 @@ impl MotoSocket {
             }
         }
 
-        // Abort all ops.
-        Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _tcp_state| {
-            log::debug!("TCP socket 0x{socket_id:x} closed by user.");
-            smoltcp_socket.abort();
-        });
-
-        // let tcp_state = socket_ref.unwrap_tcp_mut();
-        // tcp_state.tx_queue_notify.notify_one();
-
-        // Drop the socket.
-        runtime.inner.borrow_mut().sockets.remove(&socket_id);
-        Self::on_drop(moto_socket);
+        Self::drop_tcp_socket(moto_socket);
 
         let mut resp = msg;
         resp.status = moto_rt::E_OK;
