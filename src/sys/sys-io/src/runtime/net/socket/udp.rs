@@ -184,6 +184,8 @@ impl MotoSocket {
         let smoltcp_handle = base.smoltcp_handle;
         let socket_id = base.socket_id;
 
+        log::debug!("UDP socket 0x{socket_id:x} dropped.");
+
         {
             let mut inner = runtime.inner.borrow_mut();
             let sockets = &mut inner.devices[device_idx].sockets;

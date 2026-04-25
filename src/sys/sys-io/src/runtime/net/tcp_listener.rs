@@ -422,7 +422,7 @@ impl TcpListener {
                 .get(&socket_id)
                 .unwrap()
                 .clone();
-            super::socket::MotoSocket::drop_tcp_socket(moto_socket);
+            super::socket::MotoSocket::drop_tcp_socket(moto_socket).await;
         }
 
         Ok(())

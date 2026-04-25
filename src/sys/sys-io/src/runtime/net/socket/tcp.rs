@@ -110,6 +110,12 @@ pub struct TcpState {
 
     stat_tx_bytes: u64,
     stat_rx_bytes: u64,
+
+    // TX closing happens via calling smoltcp Socket::close().
+    // RX closing has to be handled locally. In other words,
+    // TCP the networking protocol does not support shutting
+    // down RX; but posix does, and Rust is about posix... :(
+    rx_closed: bool,
 }
 
 impl TcpState {
@@ -190,6 +196,7 @@ impl MotoSocket {
                 tx_queue_notify: Rc::new(moto_async::LocalNotify::new()),
                 stat_tx_bytes: 0,
                 stat_rx_bytes: 0,
+                rx_closed: false,
             }),
         )));
 
@@ -288,6 +295,11 @@ impl MotoSocket {
             Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
                 match smoltcp_socket.state() {
                     smoltcp::socket::tcp::State::Listen => {
+                        #[cfg(debug_assertions)]
+                        log::debug!(
+                            "Socket 0x{socket_id:x} in state Listen: task_id: {}",
+                            moto_async::task_id(cx)
+                        );
                         smoltcp_socket.register_recv_waker(cx.waker());
                         Poll::Pending
                     }
@@ -304,7 +316,7 @@ impl MotoSocket {
             return;
         };
 
-        log::debug!("tcp: listen: {socket_state:?}");
+        log::debug!("tcp: listen: socket 0x{socket_id:x}: {socket_state:?}");
 
         if socket_state == smoltcp::socket::tcp::State::Established {
             Self::on_incoming_connection(weak_socket).await;
@@ -403,6 +415,7 @@ impl MotoSocket {
             };
             moto_socket.borrow().socket_id()
         };
+        log::debug!("tcp_connect_task for socket 0x{socket_id:x}.");
 
         let mut prev_state = State::SynSent;
         loop {
@@ -473,7 +486,7 @@ impl MotoSocket {
             return;
         };
 
-        Self::drop_tcp_socket(moto_socket.clone());
+        Self::drop_tcp_socket(moto_socket.clone()).await;
 
         let (sender, msg) = {
             let mut socket_ref = moto_socket.borrow_mut();
@@ -627,24 +640,27 @@ impl MotoSocket {
                 };
 
                 Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, tcp_state| {
-                    match smoltcp_socket.recv_slice(rx_buf.bytes_mut()) {
-                        Ok(len) => {
-                            rx_buf.consume(len);
-                            tcp_state.stat_rx_bytes += len as u64;
-                            log::debug!("TCP socket 0x{socket_id:x} RX {len} bytes.");
-                        }
-                        Err(err) => {
-                            if smoltcp_socket.may_recv() {
-                                log::warn!(
-                                    "Unexpected error {err:?} reading bytes from socket 0x{socket_id:x}"
-                                );
+                    if !tcp_state.rx_closed {
+                        match smoltcp_socket.recv_slice(rx_buf.bytes_mut()) {
+                            Ok(len) => {
+                                rx_buf.consume(len);
+                                tcp_state.stat_rx_bytes += len as u64;
+                                log::debug!("TCP socket 0x{socket_id:x} RX {len} bytes.");
+                            }
+                            Err(err) => {
+                                if smoltcp_socket.may_recv() {
+                                    log::warn!(
+                                        "Unexpected error {err:?} reading bytes from socket 0x{socket_id:x}"
+                                    );
+                                }
                             }
                         }
                     }
                 });
             }
             if rx_buf.consumed == 0 {
-                continue; // An error occurred: stop processing?
+                log::debug!("TCP socket 0x{socket_id:x}: RX done.");
+                return;
             }
 
             // Step 5. Send bytes to the client.
@@ -766,6 +782,8 @@ impl MotoSocket {
         let smoltcp_handle = base.smoltcp_handle;
         let socket_id = base.socket_id;
 
+        log::debug!("TCP socket 0x{socket_id:x} dropped.");
+
         {
             let mut inner = runtime.inner.borrow_mut();
             let sockets = &mut inner.devices[device_idx].sockets;
@@ -809,10 +827,10 @@ impl MotoSocket {
         */
     }
 
-    pub fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
+    pub async fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
         // Abort all ops.
         let socket_id =
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _tcp_state| {
+            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, tcp_state| {
                 log::debug!("Dropping TCP socket 0x{socket_id:x}.");
                 smoltcp_socket.abort();
                 socket_id
@@ -822,12 +840,33 @@ impl MotoSocket {
         // tcp_state.tx_queue_notify.notify_one();
         //
 
+        moto_socket.borrow().base.device_notify.notify_one();
+        // Yield so that the device can process the abort() above.
+        moto_async::yield_now().await;
+
         let runtime = moto_socket.borrow().base.runtime.clone();
 
         // Drop the socket.
         runtime.inner.borrow_mut().sockets.remove(&socket_id);
         Self::on_drop(moto_socket);
     }
+
+    /*
+    fn notify_socket_state_changed(&mut self, socket_id: SocketId) {
+        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+
+        let mut msg = io_channel::Msg::new();
+        msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+        msg.handle = moto_socket.id.into();
+        msg.payload.args_32_mut()[0] = moto_socket.state.into();
+        msg.status = moto_rt::E_OK;
+
+        self.pending_completions.push_back(PendingCompletion {
+            msg,
+            endpoint_handle: moto_socket.conn.wait_handle(),
+        });
+    }
+    */
 
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn tcp_connect(
@@ -900,6 +939,10 @@ impl MotoSocket {
                 state.connect_req = Some(msg);
                 state.remote_addr = Some(remote_addr);
 
+                log::debug!(
+                    "TCP connect: socket 0x{:x} {local_addr:?} => {remote_addr:?}.",
+                    base.socket_id
+                );
                 base.runtime.inner.borrow_mut().devices[base.device_idx]
                     .tcp_connect(base.smoltcp_handle, local_addr, remote_addr)
                     .map_err(|err| {
@@ -981,6 +1024,83 @@ impl MotoSocket {
         Ok(())
     }
 
+    pub async fn tcp_setsockopt(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            if socket_ref.base.client != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+            // Check that the socket is indeed tcp before unwrapping.
+            if !matches!(socket_ref.state, SocketState::Tcp(_)) {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        let mut options = msg.payload.args_64()[0];
+        if options == 0 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        log::debug!("TCP setsockopt 0x{options:x} for socket 0x{socket_id:x}.");
+
+        if options == api_net::TCP_OPTION_NODELAY {
+            let nodelay_u64 = msg.payload.args_64()[1];
+            let nodelay = match nodelay_u64 {
+                1 => true,
+                0 => false,
+                _ => {
+                    return Err(ErrorKind::InvalidInput.into());
+                }
+            };
+
+            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+                smoltcp_socket.set_nagle_enabled(!nodelay);
+            });
+        } else if options == api_net::TCP_OPTION_TTL {
+            let ttl = msg.payload.args_32()[2];
+            if ttl == 0 || ttl > 255 {
+                return Err(ErrorKind::InvalidInput.into());
+            };
+        } else {
+            let shut_rd = options & api_net::TCP_OPTION_SHUT_RD != 0;
+            options ^= api_net::TCP_OPTION_SHUT_RD;
+
+            let shut_wr = options & api_net::TCP_OPTION_SHUT_WR != 0;
+            options ^= api_net::TCP_OPTION_SHUT_WR;
+
+            if options != 0 {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+
+            Self::with_tcp_smoltcp_socket(
+                &moto_socket,
+                |_socket_id, smoltcp_socket, state| -> () {
+                    if shut_wr {
+                        smoltcp_socket.close();
+                    }
+                    if shut_rd {
+                        state.rx_closed = true;
+                    }
+                },
+            );
+        }
+
+        let mut resp = msg;
+        resp.status = moto_rt::E_OK;
+        let _ = sender.send(resp).await;
+        Ok(())
+    }
+
     pub async fn tcp_close(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
@@ -1005,7 +1125,7 @@ impl MotoSocket {
             }
         }
 
-        Self::drop_tcp_socket(moto_socket);
+        Self::drop_tcp_socket(moto_socket).await;
 
         let mut resp = msg;
         resp.status = moto_rt::E_OK;
