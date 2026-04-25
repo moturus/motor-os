@@ -27,6 +27,7 @@ struct ClientConnection {
 impl Drop for ClientConnection {
     fn drop(&mut self) {
         assert!(self.sockets.is_empty());
+        assert!(self.tcp_listeners.is_empty());
     }
 }
 

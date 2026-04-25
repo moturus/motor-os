@@ -111,31 +111,8 @@ impl Drop for MotoSocket {
 
         match state {
             SocketState::Udp(udp_state) => Self::on_udp_socket_drop(base, udp_state),
-            SocketState::Tcp(tcp_state) => todo!(),
+            SocketState::Tcp(tcp_state) => Self::on_tcp_socket_drop(base, tcp_state),
         }
-
-        // There could be bytes stuck in the socket. Wait for them to clear.
-        // Async Rust really shines here!
-        /*
-        moto_async::LocalRuntime::spawn(async move {
-            loop {
-                let mut inner = runtime.inner.borrow_mut();
-                let sockets = &mut inner.devices[device_idx].sockets;
-                if sockets
-                    .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
-                    .send_queue()
-                    == 0
-                {
-                    sockets.remove(smoltcp_handle);
-                    inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
-                    log::debug!("Stale UDP socket 0x{socket_id:x} cleared.");
-                    return;
-                }
-
-                moto_async::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        });
-        */
     }
 }
 

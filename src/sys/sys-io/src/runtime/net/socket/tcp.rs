@@ -559,10 +559,12 @@ impl MotoSocket {
                             smoltcp::socket::tcp::State::CloseWait
                             | smoltcp::socket::tcp::State::Closing
                             | smoltcp::socket::tcp::State::LastAck
-                            | smoltcp::socket::tcp::State::TimeWait
-                            | smoltcp::socket::tcp::State::Closed => {
+                            | smoltcp::socket::tcp::State::TimeWait => {
                                 Poll::Ready(Some((state, can_recv)))
                             }
+
+                            // The socket is closed: exit unconditionally.
+                            smoltcp::socket::tcp::State::Closed => Poll::Ready(None),
                         }
                     } else {
                         Poll::Ready(Some((state, can_recv)))
@@ -602,9 +604,11 @@ impl MotoSocket {
                             log::debug!("TCP socket 0x{socket_id:x} RX {len} bytes.");
                         }
                         Err(err) => {
-                            log::warn!(
-                                "Unexpected error {err:?} reading bytes from socket 0x{socket_id:x}"
-                            );
+                            if smoltcp_socket.may_recv() {
+                                log::warn!(
+                                    "Unexpected error {err:?} reading bytes from socket 0x{socket_id:x}"
+                                );
+                            }
                         }
                     }
                 });
@@ -723,6 +727,60 @@ impl MotoSocket {
                 moto_socket.borrow().base.device_notify.notify_one();
             } // loop
         } // loop
+    }
+
+    pub(super) fn on_tcp_socket_drop(base: &mut super::SocketBase, state: &mut TcpState) {
+        let runtime = base.runtime.clone();
+        let device_idx = base.device_idx;
+        let socket_addr = base.local_addr;
+        let smoltcp_handle = base.smoltcp_handle;
+        let socket_id = base.socket_id;
+
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            let sockets = &mut inner.devices[device_idx].sockets;
+
+            #[cfg(debug_assertions)]
+            if sockets
+                .get_mut::<smoltcp::socket::tcp::Socket>(smoltcp_handle)
+                .send_queue()
+                != 0
+            {
+                log::debug!("Dropped TCP socket 0x{socket_id:x} with unsent bytes.");
+            } else {
+                log::debug!("Dropped TCP socket 0x{socket_id:x}.");
+            }
+
+            sockets.remove(smoltcp_handle);
+
+            if let Some(client) = inner.clients.get_mut(&base.client) {
+                client.sockets.remove(&socket_id);
+            }
+        }
+
+        // TCP sockets may linger.
+        // There could be bytes stuck in the socket. Wait for them to clear.
+        // Async Rust really shines here!
+        /*
+        moto_async::LocalRuntime::spawn(async move {
+            loop {
+                let mut inner = runtime.inner.borrow_mut();
+                let sockets = &mut inner.devices[device_idx].sockets;
+                if sockets
+                    .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
+                    .send_queue()
+                    == 0
+                {
+                    sockets.remove(smoltcp_handle);
+                    inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
+                    log::debug!("Stale UDP socket 0x{socket_id:x} cleared.");
+                    return;
+                }
+
+                moto_async::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        */
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
@@ -882,7 +940,42 @@ impl MotoSocket {
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
-        todo!()
+        // We respond OK immediately (if the socket is found, etc.),
+        // and do all the cleanup work later/asynchronously.
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            if socket_ref.base.client != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+            // Check that the socket is indeed tcp before unwrapping.
+            if !matches!(socket_ref.state, SocketState::Tcp(_)) {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        // Abort all ops.
+        Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _tcp_state| {
+            log::debug!("TCP socket 0x{socket_id:x} closed by user.");
+            smoltcp_socket.abort();
+        });
+
+        // let tcp_state = socket_ref.unwrap_tcp_mut();
+        // tcp_state.tx_queue_notify.notify_one();
+
+        // Drop the socket.
+        runtime.inner.borrow_mut().sockets.remove(&socket_id);
+
+        let mut resp = msg;
+        resp.status = moto_rt::E_OK;
+        let _ = sender.send(resp).await;
+
+        Ok(())
     }
 }
 
