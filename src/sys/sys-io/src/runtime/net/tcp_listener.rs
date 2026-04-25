@@ -67,6 +67,13 @@ impl TcpListener {
         self.ephemeral_tcp_port.clone()
     }
 
+    // Called on conn drop.
+    pub(super) fn hard_reset(&mut self) {
+        self.pending_accepts.clear();
+        self.pending_sockets.clear();
+        self.listening_sockets.clear();
+    }
+
     fn resolve_bind_addresses(
         runtime: &super::NetRuntime,
         socket_addr: &mut SocketAddr,

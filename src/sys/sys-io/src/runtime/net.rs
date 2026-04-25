@@ -241,20 +241,32 @@ impl NetRuntime {
     }
 
     fn on_connection_done(&self, conn_id: SysHandle) {
-        let mut inner = self.inner.borrow_mut();
-        let mut client = inner.clients.remove(&conn_id).unwrap();
+        let (sockets, mut tcp_listeners) = {
+            let mut inner = self.inner.borrow_mut();
+            let mut client = inner.clients.remove(&conn_id).unwrap();
 
-        let mut sockets = Vec::with_capacity(client.sockets.len());
-        for socket_id in client.sockets.drain() {
-            sockets.push(inner.sockets.remove(&socket_id).unwrap());
-        }
-        drop(inner);
+            let mut sockets = Vec::with_capacity(client.sockets.len());
+            for socket_id in client.sockets.drain() {
+                sockets.push(inner.sockets.remove(&socket_id).unwrap());
+            }
+
+            let mut listeners = Vec::with_capacity(client.tcp_listeners.len());
+            for listener_id in client.tcp_listeners.drain() {
+                listeners.push(inner.tcp_listeners.remove(&listener_id).unwrap());
+            }
+            (sockets, listeners)
+        };
 
         log::debug!(
-            "NET conn {} dropped with {} sockets.",
+            "NET conn {} dropped with {} sockets and {} tcp listeners.",
             conn_id.as_u64(),
-            sockets.len()
+            sockets.len(),
+            tcp_listeners.len()
         );
+
+        for mut tcp_listener in tcp_listeners {
+            tcp_listener.borrow_mut().hard_reset();
+        }
     }
 
     // Find the device to route through.
