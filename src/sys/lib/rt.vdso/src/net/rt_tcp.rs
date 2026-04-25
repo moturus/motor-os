@@ -860,13 +860,7 @@ impl TcpStream {
 
     fn on_connect_response(&self, resp: io_channel::Msg) -> Result<(), ErrorCode> {
         if resp.status().is_err() {
-            #[cfg(debug_assertions)]
-            moto_log!(
-                "{}:{} TcpStream::connect {:?} failed",
-                file!(),
-                line!(),
-                self.remote_addr,
-            );
+            log::debug!("TcpStream::connect {:?} failed", self.remote_addr,);
 
             let prev = self
                 .tcp_state_driver
@@ -896,11 +890,8 @@ impl TcpStream {
 
         self.ack_rx();
 
-        #[cfg(debug_assertions)]
-        moto_log!(
-            "{}:{} new outgoing TcpStream {:?} -> {:?} 0x{:x}, mask: 0x{:x}",
-            file!(),
-            line!(),
+        log::debug!(
+            "new outgoing TcpStream {:?} -> {:?} 0x{:x}, mask: 0x{:x}",
             self.local_addr.lock().unwrap(),
             self.remote_addr,
             self.handle(),
