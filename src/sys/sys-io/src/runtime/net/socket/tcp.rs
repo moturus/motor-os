@@ -1024,6 +1024,67 @@ impl MotoSocket {
         Ok(())
     }
 
+    pub async fn tcp_getsockopt(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            if socket_ref.base.client != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+            // Check that the socket is indeed tcp before unwrapping.
+            if !matches!(socket_ref.state, SocketState::Tcp(_)) {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        let options = msg.payload.args_64()[0];
+        if options == 0 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        let mut resp = msg;
+        match options {
+            api_net::TCP_OPTION_NODELAY => {
+                let nagle_enabled = Self::with_tcp_smoltcp_socket(
+                    &moto_socket,
+                    |_socket_id, smoltcp_socket, _state| smoltcp_socket.nagle_enabled(),
+                );
+                let nodelay = !nagle_enabled;
+                resp.payload.args_64_mut()[0] = if nodelay { 1 } else { 0 };
+            }
+            api_net::TCP_OPTION_TTL => {
+                let hop_limit = Self::with_tcp_smoltcp_socket(
+                    &moto_socket,
+                    |_socket_id, smoltcp_socket, _state| smoltcp_socket.hop_limit(),
+                );
+                let ttl = if let Some(hop_limit) = hop_limit {
+                    hop_limit as u32
+                } else {
+                    64 // This is what smoltcp documentation implies.
+                };
+                resp.payload.args_32_mut()[0] = ttl;
+            }
+            _ => {
+                log::debug!("Invalid option 0x{options}");
+                return Err(ErrorKind::InvalidInput.into());
+            }
+        }
+
+        resp.status = moto_rt::E_OK;
+        let _ = sender.send(resp).await;
+
+        Ok(())
+    }
+
     pub async fn tcp_setsockopt(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
@@ -1071,6 +1132,10 @@ impl MotoSocket {
             if ttl == 0 || ttl > 255 {
                 return Err(ErrorKind::InvalidInput.into());
             };
+
+            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+                smoltcp_socket.set_hop_limit(Some(ttl as u8));
+            });
         } else {
             let shut_rd = options & api_net::TCP_OPTION_SHUT_RD != 0;
             options ^= api_net::TCP_OPTION_SHUT_RD;

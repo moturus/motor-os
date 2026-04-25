@@ -329,6 +329,9 @@ impl NetRuntime {
             }
 
             NetCmd::TcpStreamConnect => socket::MotoSocket::tcp_connect(self, msg, &sender).await,
+            NetCmd::TcpStreamGetOption => {
+                socket::MotoSocket::tcp_getsockopt(self, msg, &sender).await
+            }
             NetCmd::TcpStreamSetOption => {
                 socket::MotoSocket::tcp_setsockopt(self, msg, &sender).await
             }
