@@ -408,34 +408,29 @@ impl MotoSocket {
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
 
-        let Some(mut socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
             return Err(ErrorKind::NotFound.into());
         };
 
-        let mut socket_ref = socket.borrow_mut();
-        let socket_mut = &mut *socket_ref;
-        let Self { base, state } = socket_mut;
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            let socket_mut = &mut *socket_ref;
+            let Self { base, state } = socket_mut;
 
-        if base.client() != sender.remote_handle() {
-            log::debug!("UDP TX: wrong client for socket");
-            return Err(ErrorKind::NotFound.into());
+            if base.client() != sender.remote_handle() {
+                log::debug!("UDP TX: wrong client for socket");
+                return Err(ErrorKind::NotFound.into());
+            }
+
+            #[allow(irrefutable_let_patterns)]
+            let SocketState::Udp(_) = state else {
+                log::debug!("UDP Drop: bad socket kind");
+                return Err(ErrorKind::InvalidInput.into());
+            };
         }
 
-        #[allow(irrefutable_let_patterns)]
-        let SocketState::Udp(_) = state else {
-            log::debug!("UDP Drop: bad socket kind");
-            return Err(ErrorKind::InvalidInput.into());
-        };
-
-        drop(socket_ref);
-        let socket = runtime
-            .inner
-            .borrow_mut()
-            .sockets
-            .remove(&socket_id)
-            .unwrap();
-
-        Self::on_drop(socket);
+        runtime.inner.borrow_mut().sockets.remove(&socket_id);
+        Self::on_drop(moto_socket);
 
         Ok(())
     }

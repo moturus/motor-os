@@ -752,10 +752,6 @@ impl MotoSocket {
             }
 
             sockets.remove(smoltcp_handle);
-
-            if let Some(client) = inner.clients.get_mut(&base.client) {
-                client.sockets.remove(&socket_id);
-            }
         }
 
         // TCP sockets may linger.
@@ -970,6 +966,7 @@ impl MotoSocket {
 
         // Drop the socket.
         runtime.inner.borrow_mut().sockets.remove(&socket_id);
+        Self::on_drop(moto_socket);
 
         let mut resp = msg;
         resp.status = moto_rt::E_OK;
