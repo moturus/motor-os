@@ -878,6 +878,7 @@ dependencies = [
 name = "moto-ipc"
 version = "0.2.6"
 dependencies = [
+ "log",
  "moto-async",
  "moto-rt",
  "moto-sys",

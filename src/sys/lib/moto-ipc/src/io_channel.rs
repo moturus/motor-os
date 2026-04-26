@@ -387,7 +387,7 @@ impl RawChannel {
     }
 
     fn dump_state(&self) {
-        crate::moto_log!(
+        log::info!(
             "RawChannel: sqh: {} sqt: {} cqh: {} cqt: {} client pages: 0x{:x} server pages: 0x{:x}",
             self.client_queue_head.load(Ordering::Relaxed),
             self.client_queue_tail.load(Ordering::Relaxed),
@@ -451,6 +451,21 @@ pub struct IoPage {
     raw_page: RawIoPage,
     raw_channel: &'static RawChannel,
     remote_handle: SysHandle,
+}
+
+#[cfg(debug_assertions)]
+impl Debug for IoPage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let bitmap = match self.raw_page.s_type {
+            EndpointType::Client => self.raw_channel.client_pages_in_use.load(Ordering::Acquire),
+            EndpointType::Server => self.raw_channel.server_pages_in_use.load(Ordering::Acquire),
+        };
+
+        f.write_fmt(format_args!(
+            "IoPage : {:?} channel 0x{:x} pages in use: 0x{bitmap:x}",
+            self.raw_page, self.raw_channel as *const _ as usize
+        ))
+    }
 }
 
 impl Drop for IoPage {
