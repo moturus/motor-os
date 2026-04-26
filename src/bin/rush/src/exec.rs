@@ -1,29 +1,5 @@
 use std::{path::Path, process::Stdio};
 
-fn is_var(token: &str) -> bool {
-    if token.is_empty() || token.len() != token.trim().len() {
-        return false;
-    }
-
-    if !token.is_ascii() {
-        return false;
-    }
-
-    let first: char = token.as_bytes()[0].into();
-    if !first.is_alphabetic() {
-        return false;
-    }
-
-    for b in &token.as_bytes()[1..] {
-        let c: char = (*b).into();
-        if !c.is_alphanumeric() {
-            return false;
-        }
-    }
-
-    true
-}
-
 fn take_env(command: &[String]) -> Option<(&str, &str)> {
     if command.is_empty() {
         return None;
@@ -31,7 +7,7 @@ fn take_env(command: &[String]) -> Option<(&str, &str)> {
 
     let cmd = command[0].as_str().trim();
     if let Some((k, v)) = cmd.split_once('=') {
-        if is_var(k) {
+        if super::is_valid_var_name(k) {
             Some((k, v))
         } else {
             None

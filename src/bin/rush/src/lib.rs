@@ -8,6 +8,19 @@ mod term;
 #[cfg(unix)]
 mod term_impl_unix;
 
+fn is_valid_var_name(name: &str) -> bool {
+    if name.is_empty() || !name.is_ascii() {
+        return false;
+    }
+    let first: char = name.as_bytes()[0].into();
+    if !(first.is_alphabetic() || first == '_') {
+        return false;
+    }
+    name[1..]
+        .bytes()
+        .all(|b| (b as char).is_alphanumeric() || b == b'_')
+}
+
 struct Cleanup {}
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -92,6 +105,15 @@ pub fn parse_args(args_raw: Vec<String>) -> (Vec<String>, Option<String>) {
         }
 
         if script.is_none() && *MODE.lock().unwrap() != Mode::Command {
+            // If the first positional arg looks like VAR=val, treat all
+            // args as a command rather than interpreting it as a script name.
+            if let Some((k, _)) = arg.split_once('=') {
+                if is_valid_var_name(k) {
+                    *MODE.lock().unwrap() = Mode::Command;
+                    args.push(arg);
+                    continue;
+                }
+            }
             script = Some(arg.clone());
         }
         args.push(arg);
