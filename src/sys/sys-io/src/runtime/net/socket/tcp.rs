@@ -619,16 +619,9 @@ impl MotoSocket {
             })
             .await;
 
-            let Some((state, can_recv)) = socket_state else {
-                log::debug!("Socket 0x{socket_id:x}: RX task done.");
-                return; // The socket is no more.
+            let Some((state, true)) = socket_state else {
+                break; // The socket is no more.
             };
-
-            if !can_recv {
-                // The socket is no longer readable (we received FIN).
-                log::debug!("Socket 0x{socket_id:x}: RX task done.");
-                return;
-            }
 
             // Step 3: allocate a page.
             let page = sender.alloc_page(subchannel_mask).await.unwrap();
@@ -639,7 +632,7 @@ impl MotoSocket {
             let mut rx_buf = TcpRxBuf::new(page);
             {
                 let Some(moto_socket) = weak_socket.upgrade() else {
-                    return;
+                    break;
                 };
 
                 Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, tcp_state| {
@@ -662,8 +655,7 @@ impl MotoSocket {
                 });
             }
             if rx_buf.consumed == 0 {
-                log::debug!("TCP socket 0x{socket_id:x}: RX done.");
-                return;
+                break;
             }
 
             // Step 5. Send bytes to the client.
@@ -674,20 +666,24 @@ impl MotoSocket {
                 let _ = sender.send(msg).await;
             }
         } // loop
+
+        log::debug!("Socket 0x{socket_id:x}: RX task done.");
+        Self::tcp_state_change_notify(weak_socket, api_net::TcpState::WriteOnly).await
     }
 
     async fn tcp_write_task(weak_socket: Weak<RefCell<Self>>) {
-        let tx_queue_notify = {
+        let (tx_queue_notify, socket_id) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
             };
 
             let socket_ref = moto_socket.borrow();
+            let socket_id = socket_ref.base.socket_id;
             let tcp_state = socket_ref.unwrap_tcp();
-            tcp_state.tx_queue_notify.clone()
+            (tcp_state.tx_queue_notify.clone(), socket_id)
         };
 
-        loop {
+        'outer: loop {
             let socket_state = std::future::poll_fn(|cx| {
                 let Some(moto_socket) = weak_socket.upgrade() else {
                     return Poll::Ready(None);
@@ -709,7 +705,7 @@ impl MotoSocket {
             .await;
 
             let Some(may_send) = socket_state else {
-                return; // THe socket is no more.
+                break; // THe socket is no more.
             };
 
             // Step 2: wait for bytes to TX.
@@ -724,7 +720,7 @@ impl MotoSocket {
 
                     if tcp_state.tx_queue.is_empty() {
                         if !may_send {
-                            return; // We shut down TX pipe.
+                            break 'outer; // We shut down TX pipe.
                         }
                     } else {
                         break;
@@ -738,7 +734,7 @@ impl MotoSocket {
             // Step 3: TX bytes out.
             {
                 let Some(moto_socket) = weak_socket.upgrade() else {
-                    return;
+                    break 'outer;
                 };
 
                 Self::with_tcp_smoltcp_socket(
@@ -776,6 +772,35 @@ impl MotoSocket {
                 moto_socket.borrow().base.device_notify.notify_one();
             } // loop
         } // loop
+
+        log::debug!("Socket 0x{socket_id:x} TX task done.");
+        Self::tcp_state_change_notify(weak_socket, api_net::TcpState::ReadOnly).await
+    }
+
+    async fn tcp_state_change_notify(
+        weak_socket: Weak<RefCell<Self>>,
+        new_state: api_net::TcpState,
+    ) {
+        let Some(moto_socket) = weak_socket.upgrade() else {
+            return;
+        };
+
+        let (socket_id, sender) = {
+            let socket_ref = moto_socket.borrow();
+            (socket_ref.base.socket_id, socket_ref.base.sender())
+        };
+
+        let Some(sender) = sender else {
+            return;
+        };
+
+        let mut msg = moto_ipc::io_channel::Msg::new();
+        msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+        msg.handle = socket_id;
+        msg.payload.args_32_mut()[0] = new_state.into();
+
+        msg.status = moto_rt::E_OK;
+        let _ = sender.send(msg).await;
     }
 
     pub(super) fn on_tcp_socket_drop(base: &mut super::SocketBase, state: &mut TcpState) {
@@ -784,8 +809,6 @@ impl MotoSocket {
         let socket_addr = base.local_addr;
         let smoltcp_handle = base.smoltcp_handle;
         let socket_id = base.socket_id;
-
-        log::debug!("TCP socket 0x{socket_id:x} dropped.");
 
         {
             let mut inner = runtime.inner.borrow_mut();
@@ -797,9 +820,9 @@ impl MotoSocket {
                 .send_queue()
                 != 0
             {
-                log::debug!("Dropped TCP socket 0x{socket_id:x} with unsent bytes.");
+                log::debug!("TCP socket 0x{socket_id:x} dropped with unsent bytes.");
             } else {
-                log::debug!("Dropped TCP socket 0x{socket_id:x}.");
+                log::debug!("TCP socket 0x{socket_id:x} dropped.");
             }
 
             sockets.remove(smoltcp_handle);
