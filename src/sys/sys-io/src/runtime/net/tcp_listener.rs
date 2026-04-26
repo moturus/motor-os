@@ -333,6 +333,11 @@ impl TcpListener {
             })?;
 
         if tcp_listener.borrow().client != sender.remote_handle() {
+            log::debug!(
+                "TCP Listener: accept: different clients: 0x{:x} vs 0x{:x}",
+                tcp_listener.borrow().client.as_u64(),
+                sender.remote_handle().as_u64()
+            );
             // Validate that the listener and the connection belong to the same process.
             let pid1 = moto_sys::SysObj::get_pid(tcp_listener.borrow().client).unwrap();
             let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();

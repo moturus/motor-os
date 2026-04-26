@@ -567,7 +567,10 @@ impl MotoSocket {
                 socket_ref.unwrap_tcp().subchannel_mask,
             )
         };
-        log::debug!("TCP RX task for socket 0x{socket_id:x}");
+        log::debug!(
+            "TCP RX task for socket 0x{socket_id:x} conn 0x{:x}",
+            sender.remote_handle().as_u64()
+        );
 
         loop {
             // Step 1: wait for the socket to become readable.
