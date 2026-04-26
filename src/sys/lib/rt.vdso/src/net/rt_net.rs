@@ -630,7 +630,7 @@ impl NetChannel {
     fn io_thread_poll_messages(&self) -> bool {
         let mut received_messages = 0;
 
-        while let Ok(msg) = self.conn.recv() {
+        'outer: while let Ok(msg) = self.conn.recv() {
             fence(Ordering::SeqCst);
             received_messages += 1;
 
@@ -668,7 +668,7 @@ impl NetChannel {
                             if let Some(listener) = listener.upgrade()
                                 && listener.add_to_pending_queue(msg)
                             {
-                                continue;
+                                continue 'outer;
                             }
                         }
                         None
@@ -1016,6 +1016,7 @@ impl NetChannel {
                 assert_ne!(0, sz_read);
                 // crate::moto_log!("orphan RX");
                 // Get the page so that it is properly dropped.
+                log::debug!("Orphan RX for socket 0x{:x}", msg.handle);
                 let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
             }
             api_net::NetCmd::EvtTcpStreamStateChanged => {}
