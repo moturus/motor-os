@@ -1164,12 +1164,17 @@ impl MotoSocket {
             });
         } else {
             let shut_rd = options & api_net::TCP_OPTION_SHUT_RD != 0;
-            options ^= api_net::TCP_OPTION_SHUT_RD;
+            if shut_rd {
+                options ^= api_net::TCP_OPTION_SHUT_RD;
+            }
 
             let shut_wr = options & api_net::TCP_OPTION_SHUT_WR != 0;
-            options ^= api_net::TCP_OPTION_SHUT_WR;
+            if shut_wr {
+                options ^= api_net::TCP_OPTION_SHUT_WR;
+            }
 
             if options != 0 {
+                log::debug!("Unknown TCP option 0x{options:x}.");
                 return Err(ErrorKind::InvalidInput.into());
             }
 
@@ -1177,9 +1182,12 @@ impl MotoSocket {
                 &moto_socket,
                 |_socket_id, smoltcp_socket, state| -> () {
                     if shut_wr {
+                        log::debug!("Closing TX for socket 0x{socket_id:x}.");
                         smoltcp_socket.close();
+                        state.tx_queue_notify.notify_one();
                     }
                     if shut_rd {
+                        log::warn!("Closing RX for socket 0x{socket_id:x} - TODO.");
                         state.rx_closed = true;
                     }
                 },
