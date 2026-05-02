@@ -11,6 +11,7 @@ use std::{
     rc::Rc,
 };
 
+use crate::runtime::net::socket::MotoSocket;
 use crate::util::map_err_into_native;
 
 mod config;
@@ -223,7 +224,7 @@ impl NetRuntime {
                     });
                 }
                 Err(err) => {
-                    self.on_connection_done(sender.remote_handle());
+                    self.on_connection_done(sender.remote_handle()).await;
                     log::debug!(
                         "NET connection 0x{:x} done.",
                         sender.remote_handle().as_u64()
@@ -235,38 +236,84 @@ impl NetRuntime {
         }
     }
 
-    fn get_sender(&self, conn_id: SysHandle) -> Option<moto_ipc::io_channel::Sender> {
-        let mut inner = self.inner.borrow();
-        inner.clients.get(&conn_id).map(|conn| conn.sender.clone())
-    }
-
-    fn on_connection_done(&self, conn_id: SysHandle) {
-        let (sockets, mut tcp_listeners) = {
+    async fn on_connection_done(&self, conn_id: SysHandle) {
+        // First remove listeners, otherwise dropped listening sockets will spawn new ones.
+        let mut tcp_listeners = {
             let mut inner = self.inner.borrow_mut();
-            let mut client = inner.clients.remove(&conn_id).unwrap();
+            let client = inner.clients.get_mut(&conn_id).unwrap();
+            let mut listener_ids = HashSet::new();
+            core::mem::swap(&mut listener_ids, &mut client.tcp_listeners);
 
-            let mut sockets = Vec::with_capacity(client.sockets.len());
-            for socket_id in client.sockets.drain() {
-                sockets.push(inner.sockets.remove(&socket_id).unwrap());
-            }
-
-            let mut listeners = Vec::with_capacity(client.tcp_listeners.len());
-            for listener_id in client.tcp_listeners.drain() {
+            let mut listeners = Vec::with_capacity(listener_ids.len());
+            for listener_id in listener_ids.drain() {
                 listeners.push(inner.tcp_listeners.remove(&listener_id).unwrap());
             }
-            (sockets, listeners)
+            listeners
         };
+
+        let listener_cnt = tcp_listeners.len();
+        for mut tcp_listener in tcp_listeners {
+            tcp_listener.borrow_mut().hard_reset();
+        }
+        // All listeners should be dropped by now.
+
+        // Then remove sockets. Some may linger.
+        let socket_cnt = {
+            let mut socket_ids = {
+                let mut inner = self.inner.borrow_mut();
+                let client = inner.clients.get_mut(&conn_id).unwrap();
+
+                let mut socket_ids = Vec::with_capacity(client.sockets.len());
+                for socket_id in client.sockets.drain() {
+                    socket_ids.push(socket_id);
+                }
+
+                socket_ids
+            };
+
+            // #[cfg(debug_assertions)]
+            for socket_id in &socket_ids {
+                assert!(self.inner.borrow().sockets.get(socket_id).is_some());
+            }
+
+            for socket_id in &socket_ids {
+                // Because the loop below is asynchronous, removing one socket may trigger
+                // another terminating/quitting, so not every client socket may be present.
+                let maybe_tcp_socket = {
+                    self.inner
+                        .borrow()
+                        .sockets
+                        .get(socket_id)
+                        .cloned()
+                        .and_then(|moto_socket| {
+                            if moto_socket.borrow().is_tcp() {
+                                Some(moto_socket)
+                            } else {
+                                assert!(
+                                    self.inner.borrow_mut().sockets.remove(socket_id).is_some()
+                                );
+                                None
+                            }
+                        })
+                };
+                if let Some(moto_socket) = maybe_tcp_socket {
+                    MotoSocket::close_tcp_socket_inner(moto_socket, None).await;
+                }
+            }
+
+            socket_ids.len()
+        };
+
+        // Finally, drop the client.
+        let _ = self.inner.borrow_mut().clients.remove(&conn_id);
 
         log::debug!(
             "NET conn {} dropped with {} sockets and {} tcp listeners.",
             conn_id.as_u64(),
-            sockets.len(),
-            tcp_listeners.len()
+            socket_cnt,
+            listener_cnt
         );
-
-        for mut tcp_listener in tcp_listeners {
-            tcp_listener.borrow_mut().hard_reset();
-        }
+        // Note: client will drop here.
     }
 
     // Find the device to route through.

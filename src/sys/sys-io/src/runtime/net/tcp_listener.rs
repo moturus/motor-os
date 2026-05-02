@@ -20,11 +20,11 @@ pub(super) struct TcpListener {
     // - or 0.0.0.0:PORT.
     // - or, if the user gave us IPADDR:0, this will have IPADDR:EPHEMERAL_PORT.
     socket_addr: SocketAddr,
-    client: SysHandle, // Denormalized for quick validation.
+    client_sender: moto_ipc::io_channel::Sender,
 
     // If listener::accept() is called first, it's sqe will be added
     // to pending_accepts.
-    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, SysHandle)>,
+    pending_accepts: VecDeque<(moto_ipc::io_channel::Msg, moto_ipc::io_channel::Sender)>,
 
     // Connected sockets that did not yet emit the accept QE.
     // When the socket is accepted, the oneshot should be fired.
@@ -59,8 +59,8 @@ impl TcpListener {
         &self.runtime
     }
 
-    pub(super) fn client(&self) -> SysHandle {
-        self.client
+    pub(super) fn client_sender(&self) -> &moto_ipc::io_channel::Sender {
+        &self.client_sender
     }
 
     pub(super) fn ephemeral_port(&self) -> Option<Rc<super::EphemeralTcpPort>> {
@@ -195,21 +195,21 @@ impl TcpListener {
         remote_addr: SocketAddr,
         accepted_tx: moto_async::oneshot::Sender<()>,
         accept_req: moto_ipc::io_channel::Msg,
-        client: SysHandle,
+        client_sender: moto_ipc::io_channel::Sender,
     ) {
-        let (sender, moto_socket) = {
-            let mut this_ref = this.borrow_mut();
-            let mut runtime_ref = this_ref.runtime.inner.borrow_mut();
-
-            let sender = runtime_ref.clients.get(&client).unwrap().sender.clone();
-            let moto_socket = runtime_ref.sockets.get(&socket_id).cloned();
-            (sender, moto_socket)
-        };
+        let moto_socket = this
+            .borrow()
+            .runtime
+            .inner
+            .borrow()
+            .sockets
+            .get(&socket_id)
+            .cloned();
 
         let Some(moto_socket) = moto_socket else {
             this.borrow_mut()
                 .pending_accepts
-                .push_front((accept_req, client));
+                .push_front((accept_req, client_sender));
             return;
         };
 
@@ -218,7 +218,7 @@ impl TcpListener {
             socket_ref
                 .unwrap_tcp_mut()
                 .set_subchannel_mask(accept_req.payload.args_64()[0]);
-            socket_ref.set_client(client);
+            socket_ref.set_client_sender(&client_sender);
         }
 
         log::debug!("Incoming TCP conn 0x{socket_id:x} <= {remote_addr:?} accepted.");
@@ -228,7 +228,7 @@ impl TcpListener {
         moto_sys_io::api_net::put_socket_addr(&mut resp.payload, &remote_addr);
         resp.status = moto_rt::E_OK;
 
-        let _ = sender.send(resp).await;
+        let _ = client_sender.send(resp).await;
         accepted_tx.send(()).unwrap();
     }
 
@@ -236,7 +236,7 @@ impl TcpListener {
     pub(super) async fn bind(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        client_sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let mut resp = msg;
         let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
@@ -276,7 +276,7 @@ impl TcpListener {
             listener_id,
             runtime: runtime.clone(),
             socket_addr,
-            client: sender.remote_handle(),
+            client_sender: client_sender.clone(),
             pending_accepts: Default::default(),
             pending_sockets: Default::default(),
             listening_sockets: Default::default(),
@@ -291,7 +291,7 @@ impl TcpListener {
         assert!(
             runtime_mut
                 .clients
-                .get_mut(&sender.remote_handle())
+                .get_mut(&client_sender.remote_handle())
                 .unwrap()
                 .tcp_listeners
                 .insert(listener_id)
@@ -302,7 +302,7 @@ impl TcpListener {
         log::debug!(
             "sys-io: new tcp listener on {:?}, conn: 0x{:x}",
             socket_addr,
-            sender.remote_handle().as_u64()
+            client_sender.remote_handle().as_u64()
         );
 
         // Start listening.
@@ -310,7 +310,7 @@ impl TcpListener {
 
         resp.handle = listener_id;
         resp.status = moto_rt::E_OK;
-        let _ = sender.send(resp).await;
+        let _ = client_sender.send(resp).await;
 
         Ok(())
     }
@@ -332,14 +332,16 @@ impl TcpListener {
                 std::io::Error::from(ErrorKind::InvalidData)
             })?;
 
-        if tcp_listener.borrow().client != sender.remote_handle() {
+        if tcp_listener.borrow().client_sender.remote_handle() != sender.remote_handle() {
             log::debug!(
                 "TCP Listener: accept: different clients: 0x{:x} vs 0x{:x}",
-                tcp_listener.borrow().client.as_u64(),
+                tcp_listener.borrow().client_sender.remote_handle().as_u64(),
                 sender.remote_handle().as_u64()
             );
             // Validate that the listener and the connection belong to the same process.
-            let pid1 = moto_sys::SysObj::get_pid(tcp_listener.borrow().client).unwrap();
+            let pid1 =
+                moto_sys::SysObj::get_pid(tcp_listener.borrow().client_sender.remote_handle())
+                    .unwrap();
             let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();
             if pid1 != pid2 {
                 log::debug!(
@@ -358,7 +360,7 @@ impl TcpListener {
                 remote_addr,
                 accepted_tx,
                 msg,
-                sender.remote_handle(),
+                sender.clone(),
             )
             .await;
         } else {
@@ -366,7 +368,7 @@ impl TcpListener {
             tcp_listener
                 .borrow_mut()
                 .pending_accepts
-                .push_back((msg, sender.remote_handle()));
+                .push_back((msg, sender.clone()));
         }
 
         Ok(())
@@ -389,9 +391,11 @@ impl TcpListener {
                 std::io::Error::from(ErrorKind::InvalidData)
             })?;
 
-        if tcp_listener.borrow().client != sender.remote_handle() {
+        if tcp_listener.borrow().client_sender.remote_handle() != sender.remote_handle() {
             // Validate that the listener and the connection belong to the same process.
-            let pid1 = moto_sys::SysObj::get_pid(tcp_listener.borrow().client).unwrap();
+            let pid1 =
+                moto_sys::SysObj::get_pid(tcp_listener.borrow().client_sender.remote_handle())
+                    .unwrap();
             let pid2 = moto_sys::SysObj::get_pid(sender.remote_handle()).unwrap();
             if pid1 != pid2 {
                 log::debug!(

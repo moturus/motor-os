@@ -40,7 +40,7 @@ impl MotoSocket {
         runtime: &NetRuntime,
         device_idx: usize,
         socket_addr: SocketAddr,
-        client: SysHandle,
+        client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
     ) -> Rc<RefCell<MotoSocket>> {
         let rx_buffer = smoltcp::socket::udp::PacketBuffer::new(
@@ -70,9 +70,9 @@ impl MotoSocket {
             device_idx,
             smoltcp_handle,
             socket_addr,
-            client,
+            client_sender,
         );
-        Rc::new(RefCell::new(MotoSocket::new(
+        MotoSocket::new(
             base,
             SocketState::Udp(UdpState {
                 ephemeral_port: None,
@@ -82,7 +82,7 @@ impl MotoSocket {
                     subchannel_mask,
                 ))),
             }),
-        )))
+        )
     }
 
     async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) {
@@ -130,14 +130,7 @@ impl MotoSocket {
         let Self { base, state } = socket_mut;
         let udp_state = state.unwrap_udp();
 
-        let sender = {
-            if let Some(conn) = base.runtime.inner.borrow().clients.get(&base.client) {
-                conn.sender.clone()
-            } else {
-                return;
-            }
-        };
-
+        let sender = base.client_sender.clone();
         let page_allocator = async |subchannel_mask| {
             sender
                 .alloc_page(subchannel_mask)
@@ -188,20 +181,22 @@ impl MotoSocket {
 
         {
             let mut inner = runtime.inner.borrow_mut();
-            let sockets = &mut inner.devices[device_idx].sockets;
 
             #[cfg(debug_assertions)]
-            if sockets
-                .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
-                .send_queue()
-                != 0
             {
-                log::debug!("Dropped UDP socket 0x{socket_id:x} with unsent bytes.");
-            } else {
-                log::debug!("Dropped UDP socket 0x{socket_id:x}.");
+                let sockets = &mut inner.devices[device_idx].sockets;
+                if sockets
+                    .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
+                    .send_queue()
+                    != 0
+                {
+                    // TODO: linger? UDP sockets don't linger, but we may?
+                    log::debug!("Dropped UDP socket 0x{socket_id:x} with unsent bytes.");
+                } else {
+                    log::debug!("Dropped UDP socket 0x{socket_id:x}.");
+                }
             }
 
-            sockets.remove(smoltcp_handle);
             inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
             if let Some(port) = state.ephemeral_port {
                 inner.devices[device_idx].free_ephemeral_udp_port(port);
@@ -264,22 +259,12 @@ impl MotoSocket {
             runtime,
             device_idx,
             socket_addr,
-            sender.remote_handle(),
+            sender.clone(),
             subchannel_mask,
         );
 
         let socket_id = udp_socket.borrow().socket_id();
         let weak_socket = Rc::downgrade(&udp_socket);
-        {
-            let mut inner = runtime.inner.borrow_mut();
-            inner.sockets.insert(socket_id, udp_socket);
-            inner
-                .clients
-                .get_mut(&sender.remote_handle())
-                .unwrap()
-                .sockets
-                .insert(socket_id);
-        }
 
         #[cfg(debug_assertions)]
         log::debug!(
@@ -314,7 +299,7 @@ impl MotoSocket {
         let socket_mut = &mut *socket_ref;
         let Self { base, state } = socket_mut;
 
-        if base.client() != sender.remote_handle() {
+        if base.sender().remote_handle() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
             let page_idx = msg.payload.shared_pages()[11];
             let _io_page = sender.get_page(page_idx); // Get the page out to deallocate.
@@ -419,7 +404,7 @@ impl MotoSocket {
             let socket_mut = &mut *socket_ref;
             let Self { base, state } = socket_mut;
 
-            if base.client() != sender.remote_handle() {
+            if base.sender().remote_handle() != sender.remote_handle() {
                 log::debug!("UDP TX: wrong client for socket");
                 return Err(ErrorKind::NotFound.into());
             }
@@ -431,9 +416,20 @@ impl MotoSocket {
             };
         }
 
-        runtime.inner.borrow_mut().sockets.remove(&socket_id);
-        Self::on_drop(moto_socket);
+        // UDP sockets are simple: just drop. TCP sockets may linger, which is a pain...
+        {
+            let mut runtime_ref = runtime.inner.borrow_mut();
+            assert!(
+                runtime_ref
+                    .clients
+                    .get_mut(&sender.remote_handle())
+                    .unwrap()
+                    .sockets
+                    .remove(&socket_id)
+            );
 
+            runtime_ref.sockets.remove(&socket_id);
+        }
         Ok(())
     }
 }

@@ -97,6 +97,9 @@ use super::MotoSocket;
 use super::SocketBase;
 use super::SocketState;
 
+/// For how long sockets linger upon close.
+const DEFAULT_LINGER_SECS: u32 = 60;
+
 pub struct TcpState {
     ephemeral_port: Option<Rc<EphemeralTcpPort>>,
     subchannel_mask: u64,
@@ -111,11 +114,26 @@ pub struct TcpState {
     stat_tx_bytes: u64,
     stat_rx_bytes: u64,
 
-    // TX closing happens via calling smoltcp Socket::close().
-    // RX closing has to be handled locally. In other words,
-    // TCP the networking protocol does not support shutting
-    // down RX; but posix does, and Rust is about posix... :(
+    // The client has closed its RX (in posix sense).
+    // The underlying smoltcp socket can't have its RX closed.
     rx_closed: bool,
+
+    // We cannot send RX bytes/messages to clients until
+    // they are ready to process; otherwise if we start sending
+    // RX bytes immediately after a listening socket accepted
+    // a remote connection, and the client delays processing
+    // the accept, the client won't know which connection the
+    // incoming RX bytes should be routed to...
+    rx_ready: Rc<moto_async::LocalNotify>,
+
+    // The client has closed its TX (in posix sense).
+    // The TX queue above may still have bytes to send.
+    // The underlying smoltcp socket may still have bytes to send.
+    tx_closed: bool,
+
+    // See SO_LINGER in Linux and TcpStream::set_linger() in Rust.
+    linger_secs: Option<u32>,
+    lingerer: Option<moto_async::oneshot::Sender<()>>,
 }
 
 impl TcpState {
@@ -158,7 +176,7 @@ impl MotoSocket {
         runtime: &NetRuntime,
         device_idx: usize,
         local_addr: SocketAddr,
-        client: SysHandle,
+        client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
     ) -> Rc<RefCell<MotoSocket>> {
         let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 16384 * 2]);
@@ -181,10 +199,10 @@ impl MotoSocket {
             device_idx,
             smoltcp_handle,
             local_addr,
-            client,
+            client_sender,
         );
 
-        let tcp_socket = Rc::new(RefCell::new(MotoSocket::new(
+        MotoSocket::new(
             base,
             SocketState::Tcp(TcpState {
                 ephemeral_port: None,
@@ -194,25 +212,15 @@ impl MotoSocket {
                 remote_addr: None,
                 tx_queue: VecDeque::new(),
                 tx_queue_notify: Rc::new(moto_async::LocalNotify::new()),
+                rx_ready: Rc::new(moto_async::LocalNotify::new()),
                 stat_tx_bytes: 0,
                 stat_rx_bytes: 0,
                 rx_closed: false,
+                tx_closed: false,
+                linger_secs: None,
+                lingerer: None,
             }),
-        )));
-
-        let socket_id = tcp_socket.borrow().socket_id();
-        {
-            let mut inner = runtime.inner.borrow_mut();
-            inner.sockets.insert(socket_id, tcp_socket.clone());
-            inner
-                .clients
-                .get_mut(&client)
-                .unwrap()
-                .sockets
-                .insert(socket_id);
-        }
-
-        tcp_socket
+        )
     }
 
     pub async fn create_tcp_listening_socket(
@@ -232,7 +240,7 @@ impl MotoSocket {
                 tcp_listener_mut.runtime(),
                 device_idx,
                 socket_addr,
-                tcp_listener_mut.client(),
+                tcp_listener_mut.client_sender().clone(),
                 0,
             );
 
@@ -251,7 +259,7 @@ impl MotoSocket {
                 smoltcp_socket.listen(socket_addr).unwrap();
                 log::debug!(
                     "new TCP socket 0x{socket_id:x} listening on {socket_addr:?} for conn 0x{:x}",
-                    tcp_listener_mut.client().as_u64(),
+                    tcp_listener_mut.client_sender().remote_handle().as_u64(),
                 );
             });
 
@@ -498,12 +506,7 @@ impl MotoSocket {
             msg.handle = base.socket_id;
             msg.status = moto_rt::E_TIMED_OUT;
 
-            let Some(sender) = base.sender() else {
-                log::debug!("TCP socket 0x{:x} connect failed.", base.socket_id);
-                return;
-            };
-
-            (sender, msg)
+            (base.client_sender.clone(), msg)
         };
 
         let _ = sender.send(msg).await;
@@ -534,15 +537,7 @@ impl MotoSocket {
             api_net::put_socket_addr(&mut msg.payload, &base.local_addr);
             msg.status = moto_rt::E_OK;
 
-            let Some(sender) = base.sender() else {
-                log::debug!(
-                    "No client for newly connected socket 0x{:x}",
-                    base.socket_id
-                );
-                return;
-            };
-
-            (sender, msg)
+            (base.client_sender.clone(), msg)
         };
 
         let _ = sender.send(msg).await;
@@ -556,17 +551,20 @@ impl MotoSocket {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
-        let (socket_id, sender, subchannel_mask) = {
+        let (socket_id, sender, subchannel_mask, rx_ready) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
             };
             let socket_ref = moto_socket.borrow();
             (
                 socket_ref.base.socket_id,
-                socket_ref.base.sender().unwrap(),
+                socket_ref.base.sender().clone(),
                 socket_ref.unwrap_tcp().subchannel_mask,
+                socket_ref.unwrap_tcp().rx_ready.clone(),
             )
         };
+        rx_ready.notified().await;
+
         log::debug!(
             "TCP RX task for socket 0x{socket_id:x} conn 0x{:x}",
             sender.remote_handle().as_u64()
@@ -574,54 +572,42 @@ impl MotoSocket {
 
         loop {
             // Step 1: wait for the socket to become readable.
-            let socket_state = std::future::poll_fn(|cx| {
+            let can_recv = std::future::poll_fn(|cx| {
                 let Some(moto_socket) = weak_socket.upgrade() else {
-                    return Poll::Ready(None);
+                    log::debug!("RX: socket 0x{socket_id:x} gone.");
+                    return Poll::Ready(false);
                 };
 
                 Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
-                    let (state, can_recv) = (smoltcp_socket.state(), smoltcp_socket.can_recv());
-                    log::debug!("RX: socket 0x{_socket_id:x} can_recv: {can_recv} in {state:?}");
-
-                    if !can_recv {
-                        match state {
-                            // These states should happen before the receive task is spawned.
-                            smoltcp::socket::tcp::State::Listen
-                            | smoltcp::socket::tcp::State::SynSent
-                            | smoltcp::socket::tcp::State::SynReceived => {
-                                panic!("Unexpected socket state {state:?}.");
-                            }
-
-                            // These states may still receive data from the remote endpoint.
-                            smoltcp::socket::tcp::State::Established
-                            | smoltcp::socket::tcp::State::FinWait1
-                            | smoltcp::socket::tcp::State::FinWait2 => {
-                                smoltcp_socket.register_recv_waker(cx.waker());
-                                Poll::Pending
-                            }
-
-                            // These states happen after we received FIN from the remote,
-                            // and so we should not expect any data.
-                            smoltcp::socket::tcp::State::CloseWait
-                            | smoltcp::socket::tcp::State::Closing
-                            | smoltcp::socket::tcp::State::LastAck
-                            | smoltcp::socket::tcp::State::TimeWait => {
-                                Poll::Ready(Some((state, can_recv)))
-                            }
-
-                            // The socket is closed: exit unconditionally.
-                            smoltcp::socket::tcp::State::Closed => Poll::Ready(None),
-                        }
-                    } else {
-                        Poll::Ready(Some((state, can_recv)))
+                    if smoltcp_socket.can_recv() {
+                        log::debug!("RX: socket 0x{socket_id:x} can_recv.");
+                        return Poll::Ready(true);
                     }
+                    if !smoltcp_socket.may_recv() {
+                        log::debug!(
+                            "RX: socket 0x{socket_id:x} !may_recv: {:?}.",
+                            smoltcp_socket.state()
+                        );
+                        return Poll::Ready(false);
+                    }
+
+                    #[cfg(debug_assertions)]
+                    {
+                        let (state, can_recv) = (smoltcp_socket.state(), smoltcp_socket.can_recv());
+                        log::debug!(
+                            "RX: socket 0x{_socket_id:x} can_recv: {can_recv} in {state:?}"
+                        );
+                    }
+
+                    smoltcp_socket.register_recv_waker(cx.waker());
+                    Poll::Pending
                 })
             })
             .await;
 
-            let Some((state, true)) = socket_state else {
-                break; // The socket is no more.
-            };
+            if !can_recv {
+                break;
+            }
 
             // Step 3: allocate a page.
             let page = sender.alloc_page(subchannel_mask).await.unwrap();
@@ -690,6 +676,10 @@ impl MotoSocket {
                 };
 
                 Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+                    log::debug!(
+                        "TX polling socket 0x{socket_id:x} in {:?}",
+                        smoltcp_socket.state()
+                    );
                     if smoltcp_socket.can_send() {
                         // Has space in the TX buffer.
                         Poll::Ready(Some(true))
@@ -704,26 +694,42 @@ impl MotoSocket {
             })
             .await;
 
-            let Some(may_send) = socket_state else {
-                break; // THe socket is no more.
+            let Some(true) = socket_state else {
+                break; // The socket is no more.
             };
 
             // Step 2: wait for bytes to TX.
+            log::debug!("TX task for socket 0x{socket_id:x}: waiting for bytes to send.");
             loop {
                 {
                     let Some(moto_socket) = weak_socket.upgrade() else {
-                        return;
+                        break 'outer;
                     };
 
-                    let socket_ref = moto_socket.borrow();
-                    let tcp_state = socket_ref.unwrap_tcp();
+                    {
+                        let socket_ref = moto_socket.borrow();
+                        let tcp_state = socket_ref.unwrap_tcp();
 
-                    if tcp_state.tx_queue.is_empty() {
-                        if !may_send {
-                            break 'outer; // We shut down TX pipe.
+                        if tcp_state.tx_closed {
+                            if tcp_state.tx_queue.is_empty() {
+                                break 'outer;
+                            } else {
+                                break;
+                            }
                         }
-                    } else {
-                        break;
+
+                        if !tcp_state.tx_queue.is_empty() {
+                            break;
+                        }
+                    }
+
+                    let may_send = Self::with_tcp_smoltcp_socket(
+                        &moto_socket,
+                        |_socket_id, smoltcp_socket, _state| smoltcp_socket.may_send(),
+                    );
+
+                    if !may_send {
+                        break 'outer;
                     }
                 }
 
@@ -732,6 +738,7 @@ impl MotoSocket {
             } // loop
 
             // Step 3: TX bytes out.
+            log::debug!("TX task for socket 0x{socket_id:x}: maybe got bytes to send.");
             {
                 let Some(moto_socket) = weak_socket.upgrade() else {
                     break 'outer;
@@ -774,6 +781,30 @@ impl MotoSocket {
         } // loop
 
         log::debug!("Socket 0x{socket_id:x} TX task done.");
+        {
+            if let Some(moto_socket) = weak_socket.upgrade() {
+                let device_notify = Self::with_tcp_smoltcp_socket(
+                    &moto_socket,
+                    |socket_id, smoltcp_socket, state| {
+                        let device_notify = if smoltcp_socket.may_send() {
+                            smoltcp_socket.close();
+                            true
+                        } else {
+                            false
+                        };
+                        state.tx_queue.clear();
+                        if let Some(lingerer) = state.lingerer.take() {
+                            lingerer.send(());
+                        }
+
+                        device_notify
+                    },
+                );
+                if device_notify {
+                    moto_socket.borrow().base.device_notify.notify_one();
+                }
+            }
+        }
         Self::tcp_state_change_notify(weak_socket, api_net::TcpState::ReadOnly).await
     }
 
@@ -787,11 +818,10 @@ impl MotoSocket {
 
         let (socket_id, sender) = {
             let socket_ref = moto_socket.borrow();
-            (socket_ref.base.socket_id, socket_ref.base.sender())
-        };
-
-        let Some(sender) = sender else {
-            return;
+            if socket_ref.base.lingering {
+                return;
+            }
+            (socket_ref.base.socket_id, socket_ref.base.sender().clone())
         };
 
         let mut msg = moto_ipc::io_channel::Msg::new();
@@ -804,95 +834,169 @@ impl MotoSocket {
     }
 
     pub(super) fn on_tcp_socket_drop(base: &mut super::SocketBase, state: &mut TcpState) {
-        let runtime = base.runtime.clone();
-        let device_idx = base.device_idx;
-        let socket_addr = base.local_addr;
-        let smoltcp_handle = base.smoltcp_handle;
-        let socket_id = base.socket_id;
-
-        {
-            let mut inner = runtime.inner.borrow_mut();
-            let sockets = &mut inner.devices[device_idx].sockets;
-
-            #[cfg(debug_assertions)]
-            if sockets
-                .get_mut::<smoltcp::socket::tcp::Socket>(smoltcp_handle)
-                .send_queue()
-                != 0
-            {
-                log::debug!("TCP socket 0x{socket_id:x} dropped with unsent bytes.");
-            } else {
-                log::debug!("TCP socket 0x{socket_id:x} dropped.");
-            }
-
-            sockets.remove(smoltcp_handle);
-        }
-
-        // TCP sockets may linger.
-        // There could be bytes stuck in the socket. Wait for them to clear.
-        // Async Rust really shines here!
-        /*
-        moto_async::LocalRuntime::spawn(async move {
-            loop {
-                let mut inner = runtime.inner.borrow_mut();
-                let sockets = &mut inner.devices[device_idx].sockets;
-                if sockets
-                    .get_mut::<smoltcp::socket::udp::Socket>(smoltcp_handle)
-                    .send_queue()
-                    == 0
-                {
-                    sockets.remove(smoltcp_handle);
-                    inner.devices[device_idx].remove_udp_addr_in_use(&socket_addr);
-                    log::debug!("Stale UDP socket 0x{socket_id:x} cleared.");
-                    return;
-                }
-
-                moto_async::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        });
-        */
+        assert!(!base.lingering);
+        assert!(state.tx_closed);
+        assert!(state.rx_closed);
+        assert!(state.tx_queue.is_empty());
     }
 
+    // Drop the socket fully.
     pub async fn drop_tcp_socket(moto_socket: Rc<RefCell<Self>>) {
         // Abort all ops.
         let socket_id =
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, tcp_state| {
-                log::debug!("Dropping TCP socket 0x{socket_id:x}.");
+            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, state| {
                 smoltcp_socket.abort();
+                state.rx_closed = true;
+                state.tx_closed = true;
                 socket_id
             });
-
-        // let tcp_state = socket_ref.unwrap_tcp_mut();
-        // tcp_state.tx_queue_notify.notify_one();
-        //
-
-        moto_socket.borrow().base.device_notify.notify_one();
-        // Yield so that the device can process the abort() above.
-        moto_async::yield_now().await;
+        log::debug!("Dropping TCP socket 0x{socket_id:x}.");
+        moto_socket.borrow().base.device_notify().notify_one();
+        moto_async::yield_now().await; // Let the device process the abort above (send RST out).
 
         let runtime = moto_socket.borrow().base.runtime.clone();
 
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
+
+            // Sockets can linger long after their clients are gone.
+            if let Some(client) = runtime_ref
+                .clients
+                .get_mut(&socket_ref.base.sender().remote_handle())
+            {
+                let _ = client.sockets.remove(&socket_ref.base.socket_id);
+            }
+        }
+
         // Drop the socket.
         runtime.inner.borrow_mut().sockets.remove(&socket_id);
-        Self::on_drop(moto_socket);
     }
 
-    /*
-    fn notify_socket_state_changed(&mut self, socket_id: SocketId) {
-        let moto_socket = self.tcp_sockets.get_mut(&socket_id).unwrap();
+    // The socket may become detached.
+    pub async fn close_tcp_socket_inner(
+        moto_socket: Rc<RefCell<MotoSocket>>,
+        mut close_req: Option<moto_ipc::io_channel::Msg>,
+    ) {
+        let socket_id = moto_socket.borrow().socket_id();
 
-        let mut msg = io_channel::Msg::new();
-        msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
-        msg.handle = moto_socket.id.into();
-        msg.payload.args_32_mut()[0] = moto_socket.state.into();
-        msg.status = moto_rt::E_OK;
+        // Need to determine when to abort and when to notify. The logic is convoluted.
+        // Can it be made more clear?
+        let abort =
+            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, state| {
+                let abort = if smoltcp_socket.may_send() {
+                    if state.tx_queue.is_empty() && smoltcp_socket.send_queue() == 0 {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
 
-        self.pending_completions.push_back(PendingCompletion {
-            msg,
-            endpoint_handle: moto_socket.conn.wait_handle(),
-        });
+                if abort || Some(0) == state.linger_secs {
+                    true
+                } else {
+                    false
+                }
+            });
+
+        let (linger_secs, delayed_notify) = {
+            let mut socket_ref = moto_socket.borrow_mut();
+            let state = socket_ref.unwrap_tcp_mut();
+            let linger_secs = state.linger_secs.take();
+
+            state.tx_closed = true;
+            state.rx_closed = true;
+            state.tx_queue_notify.notify_one();
+
+            if abort {
+                (0, false)
+            } else if let Some(secs) = linger_secs {
+                (secs, true)
+            } else {
+                (DEFAULT_LINGER_SECS, false)
+            }
+        };
+
+        let socket_clone = moto_socket.clone();
+        if linger_secs > 0 {
+            let lingerer = {
+                let mut socket_ref = moto_socket.borrow_mut();
+                socket_ref.base.lingering = true;
+                let (sender, receiver) = moto_async::oneshot();
+                socket_ref.unwrap_tcp_mut().lingerer = Some(sender);
+
+                let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
+                assert!(
+                    runtime_ref
+                        .clients
+                        .get_mut(&socket_ref.base.sender().remote_handle())
+                        .unwrap()
+                        .sockets
+                        .remove(&socket_ref.base.socket_id)
+                );
+
+                receiver
+            };
+
+            let close_req = if delayed_notify {
+                close_req.take()
+            } else {
+                None
+            };
+
+            log::debug!("TCP socket 0x{socket_id:x}: lingering for {linger_secs} seconds.");
+            let deadline =
+                moto_async::Instant::now() + std::time::Duration::from_secs(linger_secs as u64);
+            moto_async::LocalRuntime::spawn(async move {
+                Self::tcp_linger_task(socket_clone, deadline, lingerer).await
+            });
+        } else {
+            log::debug!("TCP socket 0x{socket_id:x}: not lingering.");
+            Self::drop_tcp_socket(socket_clone).await;
+        }
+
+        if !delayed_notify && let Some(msg) = close_req.take() {
+            let sender = moto_socket.borrow().base.sender().clone();
+            let mut resp = msg;
+            resp.status = moto_rt::E_OK;
+            let _ = sender.send(resp).await;
+        }
     }
-    */
+
+    async fn tcp_linger_task(
+        moto_socket: Rc<RefCell<Self>>,
+        deadline: moto_async::Instant,
+        lingerer: moto_async::oneshot::Receiver<()>,
+    ) {
+        use futures::FutureExt;
+
+        let socket_id = moto_socket.borrow().socket_id();
+
+        futures::select! {
+        _ = lingerer.fuse() => {
+            log::debug!("Lingering socket 0x{socket_id:x}: TX done.");
+        },
+        _ = moto_async::sleep_until(deadline.into()).fuse() => {
+            log::debug!("Lingering socket 0x{socket_id:x}: timed out.");
+        },
+        }
+
+        while moto_async::Instant::now() < deadline {
+            if Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, _| {
+                smoltcp_socket.is_open()
+            }) {
+                log::debug!("Lingering socket 0x{socket_id:x}: lingering a bit more.");
+                moto_async::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+                break;
+            }
+        }
+
+        moto_socket.borrow_mut().base.lingering = false;
+        Self::drop_tcp_socket(moto_socket).await;
+    }
 
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn tcp_connect(
@@ -934,7 +1038,7 @@ impl MotoSocket {
                 runtime,
                 device_idx,
                 local_addr,
-                sender.remote_handle(),
+                sender.clone(),
                 subchannel_mask,
             );
 
@@ -1000,7 +1104,7 @@ impl MotoSocket {
         let page = if let Ok(page) = sender.get_page(page_idx) {
             page
         } else {
-            return Err(ErrorKind::InvalidData.into());
+            return Err(ErrorKind::InvalidInput.into());
         };
 
         let socket_id = msg.handle;
@@ -1010,23 +1114,29 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client != sender.remote_handle() {
+            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
 
             let sz = msg.payload.args_64()[1] as usize;
             if sz > moto_ipc::io_channel::PAGE_SIZE {
                 // TODO: drop the connection?
-                return Err(ErrorKind::InvalidData.into());
+                return Err(ErrorKind::InvalidInput.into());
             }
 
             // Check that the socket is indeed tcp before unwrapping.
             if !matches!(socket_ref.state, SocketState::Tcp(_)) {
                 // TODO: drop the connection?
-                return Err(ErrorKind::InvalidData.into());
+                return Err(ErrorKind::InvalidInput.into());
             }
 
             let tcp_state = socket_ref.unwrap_tcp_mut();
+
+            if tcp_state.tx_closed {
+                log::debug!("TCP socket {socket_id:x}: TX with tx_closed.");
+                return Err(ErrorKind::InvalidInput.into());
+            }
+
             tcp_state.stat_tx_bytes += sz as u64;
             tcp_state.tx_queue.push_back(TcpTxBuf {
                 page,
@@ -1045,7 +1155,25 @@ impl MotoSocket {
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
-        log::debug!("TCP RX ACK: should we do anything here?");
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let mut socket_ref = moto_socket.borrow_mut();
+            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+
+            // Check that the socket is indeed tcp before unwrapping.
+            if !matches!(socket_ref.state, SocketState::Tcp(_)) {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidInput.into());
+            }
+
+            let tcp_state = socket_ref.unwrap_tcp().rx_ready.notify_one();
+        }
 
         Ok(())
     }
@@ -1062,7 +1190,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client != sender.remote_handle() {
+            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             // Check that the socket is indeed tcp before unwrapping.
@@ -1086,6 +1214,15 @@ impl MotoSocket {
                 );
                 let nodelay = !nagle_enabled;
                 resp.payload.args_64_mut()[0] = if nodelay { 1 } else { 0 };
+            }
+            api_net::TCP_OPTION_LINGER => {
+                let linger = moto_socket.borrow().unwrap_tcp().linger_secs.clone();
+                if let Some(secs) = linger {
+                    resp.payload.args_32_mut()[2] = 1;
+                    resp.payload.args_32_mut()[3] = secs;
+                } else {
+                    resp.payload.args_32_mut()[2] = 0;
+                }
             }
             api_net::TCP_OPTION_TTL => {
                 let hop_limit = Self::with_tcp_smoltcp_socket(
@@ -1123,7 +1260,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client != sender.remote_handle() {
+            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             // Check that the socket is indeed tcp before unwrapping.
@@ -1150,9 +1287,19 @@ impl MotoSocket {
                 }
             };
 
+            log::debug!("TCP setsockopt NODELAY({nodelay}) for socket 0x{socket_id:x}.");
             Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
                 smoltcp_socket.set_nagle_enabled(!nodelay);
             });
+        } else if options == api_net::TCP_OPTION_LINGER {
+            let linger_secs = if msg.payload.args_32()[2] == 0 {
+                None
+            } else {
+                Some(msg.payload.args_32()[3])
+            };
+
+            log::debug!("TCP setsockopt LINGER({linger_secs:?}) for socket 0x{socket_id:x}.");
+            moto_socket.borrow_mut().unwrap_tcp_mut().linger_secs = linger_secs;
         } else if options == api_net::TCP_OPTION_TTL {
             let ttl = msg.payload.args_32()[2];
             if ttl == 0 || ttl > 255 {
@@ -1171,6 +1318,7 @@ impl MotoSocket {
             let shut_wr = options & api_net::TCP_OPTION_SHUT_WR != 0;
             if shut_wr {
                 options ^= api_net::TCP_OPTION_SHUT_WR;
+                log::error!("implement linger logic");
             }
 
             if options != 0 {
@@ -1178,17 +1326,18 @@ impl MotoSocket {
                 return Err(ErrorKind::InvalidInput.into());
             }
 
+            log::debug!(
+                "TCP setsockopt SHUTDOWN(rd: {shut_rd}, wr: {shut_wr}) for socket 0x{socket_id:x}."
+            );
             Self::with_tcp_smoltcp_socket(
                 &moto_socket,
                 |_socket_id, smoltcp_socket, state| -> () {
-                    if shut_wr {
-                        log::debug!("Closing TX for socket 0x{socket_id:x}.");
-                        smoltcp_socket.close();
-                        state.tx_queue_notify.notify_one();
-                    }
                     if shut_rd {
-                        log::warn!("Closing RX for socket 0x{socket_id:x} - TODO.");
                         state.rx_closed = true;
+                    }
+                    if shut_wr {
+                        state.tx_closed = true;
+                        state.tx_queue_notify.notify_one();
                     }
                 },
             );
@@ -1214,7 +1363,7 @@ impl MotoSocket {
 
         {
             let mut socket_ref = moto_socket.borrow_mut();
-            if socket_ref.base.client != sender.remote_handle() {
+            if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             // Check that the socket is indeed tcp before unwrapping.
@@ -1224,12 +1373,7 @@ impl MotoSocket {
             }
         }
 
-        Self::drop_tcp_socket(moto_socket).await;
-
-        let mut resp = msg;
-        resp.status = moto_rt::E_OK;
-        let _ = sender.send(resp).await;
-
+        Self::close_tcp_socket_inner(moto_socket, Some(msg)).await;
         Ok(())
     }
 }
