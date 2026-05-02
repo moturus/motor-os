@@ -705,16 +705,12 @@ impl TcpStream {
     // Note: this is called from the IO thread, so must not sleep.
     pub fn process_incoming_msg(&self, msg: io_channel::Msg) -> SysHandle {
         let mut rx_lock = self.rx_waiter.lock();
-        /*
         #[cfg(debug_assertions)]
-        crate::moto_log!(
-            "{}:{} incoming msg {:?} for stream 0x{:x}",
-            file!(),
-            line!(),
+        log::debug!(
+            "incoming msg {:?} for stream 0x{:x}",
             api_net::NetCmd::try_from(msg.command).unwrap(),
             msg.handle
         );
-        */
 
         // The main challenge/nuance here is that sometimes we need to raise
         // poll events here, and sometimes we have to delay them. For example,
@@ -1492,22 +1488,37 @@ impl TcpStream {
         resp.status
     }
 
-    fn set_linger(&self, dur: Option<Duration>) -> Result<(), ErrorCode> {
-        if let Some(dur) = dur
-            && dur == Duration::ZERO
-        {
-            return Ok(());
+    fn set_linger(&self, dur: Option<Duration>) -> ErrorCode {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+        if let Some(dur) = dur {
+            req.payload.args_32_mut()[2] = 1;
+            req.payload.args_32_mut()[3] = u32::try_from(dur.as_secs()).unwrap_or(u32::MAX);
+        } else {
+            req.payload.args_32_mut()[2] = 0;
         }
-
-        // At the moment, socket shutdown or drop drops all unsent bytes, which
-        // corresponds to SO_LINGER(0). This may or may not be what the user
-        // wants, but anything different requires changing sys-io code/logic,
-        // at there are higher-priority work to do.
-        Err(moto_rt::E_NOT_IMPLEMENTED)
+        self.channel().send_receive(req).status
     }
 
     fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
-        Ok(Some(Duration::ZERO)) // see set_linger() above.
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+        let resp = self.channel().send_receive(req);
+
+        if resp.status().is_ok() {
+            if resp.payload.args_32()[2] == 0 {
+                Ok(None)
+            } else {
+                let secs = resp.payload.args_32()[3];
+                Ok(Some(Duration::from_secs(secs as u64)))
+            }
+        } else {
+            Err(resp.status)
+        }
     }
 
     fn set_nodelay(&self, nodelay: u8) -> ErrorCode {
