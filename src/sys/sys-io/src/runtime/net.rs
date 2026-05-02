@@ -371,6 +371,12 @@ impl NetRuntime {
             NetCmd::TcpListenerAccept => {
                 tcp_listener::TcpListener::accept(self, msg, &sender).await
             }
+            NetCmd::TcpListenerGetOption => {
+                tcp_listener::TcpListener::get_option(self, msg, &sender).await
+            }
+            NetCmd::TcpListenerSetOption => {
+                tcp_listener::TcpListener::set_option(self, msg, &sender).await
+            }
             NetCmd::TcpListenerDrop => {
                 tcp_listener::TcpListener::drop_from_client(self, msg, &sender).await
             }

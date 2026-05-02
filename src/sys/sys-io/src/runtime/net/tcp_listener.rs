@@ -374,6 +374,80 @@ impl TcpListener {
         Ok(())
     }
 
+    pub(super) async fn get_option(
+        runtime: &super::NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let listener_id = msg.handle;
+        let tcp_listener = runtime
+            .inner
+            .borrow()
+            .tcp_listeners
+            .get(&listener_id)
+            .cloned()
+            .ok_or_else(|| {
+                log::debug!("TCP listener 0x{listener_id:x} not found.");
+                std::io::Error::from(ErrorKind::NotFound)
+            })?;
+
+        if tcp_listener.borrow().client_sender.remote_handle() != sender.remote_handle() {
+            log::debug!("TCP listener 0x{listener_id:x} not found.");
+            return Err(ErrorKind::NotFound.into());
+        }
+
+        let options = msg.payload.args_64()[0];
+        if options != moto_sys_io::api_net::TCP_OPTION_TTL {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        let mut resp = msg;
+        resp.payload.args_8_mut()[23] = tcp_listener.borrow().ttl;
+        resp.status = moto_rt::E_OK;
+
+        let _ = sender.send(resp).await;
+        Ok(())
+    }
+
+    pub(super) async fn set_option(
+        runtime: &super::NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let listener_id = msg.handle;
+        let tcp_listener = runtime
+            .inner
+            .borrow()
+            .tcp_listeners
+            .get(&listener_id)
+            .cloned()
+            .ok_or_else(|| {
+                log::debug!("TCP listener 0x{listener_id:x} not found.");
+                std::io::Error::from(ErrorKind::NotFound)
+            })?;
+
+        if tcp_listener.borrow().client_sender.remote_handle() != sender.remote_handle() {
+            log::debug!("TCP listener 0x{listener_id:x} not found.");
+            return Err(ErrorKind::NotFound.into());
+        }
+
+        let options = msg.payload.args_64()[0];
+        if options != moto_sys_io::api_net::TCP_OPTION_TTL {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let ttl = msg.payload.args_8()[23];
+        if ttl == 0 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        tcp_listener.borrow_mut().ttl = ttl;
+
+        let mut resp = msg;
+        resp.status = moto_rt::E_OK;
+
+        let _ = sender.send(resp).await;
+        Ok(())
+    }
+
     pub(super) async fn drop_from_client(
         runtime: &super::NetRuntime,
         msg: moto_ipc::io_channel::Msg,
