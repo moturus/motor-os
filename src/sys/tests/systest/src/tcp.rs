@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::{atomic::*, Arc};
+use std::sync::{Arc, atomic::*};
 use std::time::Duration;
 
 fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
@@ -269,6 +269,9 @@ pub fn test_zero_port_listen() {
         assert_eq!(buf, BYE);
         response_received.store(true, Ordering::Relaxed);
     });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    println!("test_zero_port_listen() PASS");
+    std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
 fn test_peek() {
