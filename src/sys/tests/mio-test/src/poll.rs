@@ -373,11 +373,10 @@ fn test_register_during_poll() {
 // - `reregister` can use the same token as `register`
 // - `reregister` can use different token from `register`
 // - multiple `reregister` are ok
-/* Motor OS: commented out because we don't have UdpSocket yet.
 fn test_reregister_interest_token_usage() {
     let (mut poll, mut events) = init_with_poll();
 
-    let mut udp_socket = UdpSocket::bind(any_local_address()).unwrap();
+    let mut udp_socket = mio::net::UdpSocket::bind(any_local_address()).unwrap();
 
     poll.registry()
         .register(&mut udp_socket, ID1, Interest::READABLE)
@@ -398,7 +397,6 @@ fn test_reregister_interest_token_usage() {
     );
     println!("poll::test_reregister_interest_token_usage PASS");
 }
-*/
 
 // This test checks the following register constraint:
 // The event source must **not** have been previously registered with this
@@ -681,7 +679,7 @@ pub fn run_all_tests() {
     test_registry_behind_arc();
     test_registry_operations_are_thread_safe();
     test_register_during_poll();
-    // test_reregister_interest_token_usage(); // No UdpSockets yet.
+    test_reregister_interest_token_usage(); // No UdpSockets yet.
     test_poll_ok_after_cancelling_pending_ops();
     test_poll_registration();
     test_poll_erroneous_registration();
