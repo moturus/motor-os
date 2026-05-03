@@ -654,7 +654,19 @@ impl MotoSocket {
         } // loop
 
         log::debug!("Socket 0x{socket_id:x}: RX task done.");
-        Self::tcp_state_change_notify(weak_socket, api_net::TcpState::WriteOnly).await
+
+        // The RX task here waits on the socket, so any socket changes are detected.
+        // But the TX task mostly waits on the user to send bytes, so socket changes
+        // must be propagated.
+        if let Some(moto_socket) = weak_socket.upgrade() {
+            Self::with_tcp_smoltcp_socket(&moto_socket, |_, smoltcp_socket, tcp_state| {
+                if !smoltcp_socket.may_send() {
+                    tcp_state.tx_queue_notify.notify_one();
+                }
+            });
+        }
+
+        Self::tcp_state_change_notify(weak_socket, api_net::TcpState::WriteOnly).await;
     }
 
     async fn tcp_write_task(weak_socket: Weak<RefCell<Self>>) {
@@ -805,7 +817,7 @@ impl MotoSocket {
                 }
             }
         }
-        Self::tcp_state_change_notify(weak_socket, api_net::TcpState::ReadOnly).await
+        Self::tcp_state_change_notify(weak_socket, api_net::TcpState::ReadOnly).await;
     }
 
     async fn tcp_state_change_notify(
