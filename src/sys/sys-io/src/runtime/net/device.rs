@@ -1,4 +1,7 @@
+//! This is mostly plumbing smoltcp into our async runtime.
 use std::{
+    cell::RefCell,
+    collections::VecDeque,
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
     rc::Rc,
@@ -7,24 +10,92 @@ use std::{
 use super::config;
 use virtio_async::virtio_net::NetDevice;
 
-pub(super) enum SmoltcpDevice {
-    // VirtIo(VirtioSmoltcpDevice),
-    Loopback(smoltcp::phy::Loopback),
+pub(super) struct VirtioDevice {
+    inner: Rc<NetDevice>,
+    rx_queue: VecDeque<Vec<u8>>,
+    tx_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
 }
 
-impl SmoltcpDevice {
-    fn ethernet_address(&self) -> smoltcp::wire::EthernetAddress {
-        match self {
-            // Self::VirtIo(dev) => smoltcp::wire::EthernetAddress::from_bytes(dev.virtio_dev.mac()),
-            Self::Loopback(_) => {
-                smoltcp::wire::EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
-            }
+impl VirtioDevice {
+    pub(super) fn new(inner: Rc<NetDevice>) -> Self {
+        log::error!("spawn RX and TX tasks");
+        Self {
+            inner,
+            rx_queue: Default::default(),
+            tx_queue: Default::default(),
         }
     }
+}
 
-    fn is_loopback(&self) -> bool {
-        matches!(self, Self::Loopback(_))
+pub struct VirtioRxToken(Vec<u8>);
+
+impl smoltcp::phy::RxToken for VirtioRxToken {
+    fn consume<R, F>(mut self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(&mut self.0)
     }
+}
+
+pub struct VirtioTxToken {
+    tx_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+impl smoltcp::phy::TxToken for VirtioTxToken {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buffer = vec![0; len];
+        let result = f(&mut buffer);
+        self.tx_queue.borrow_mut().push_back(buffer);
+        result
+    }
+}
+
+impl smoltcp::phy::Device for VirtioDevice {
+    type RxToken<'a>
+        = VirtioRxToken
+    where
+        Self: 'a;
+
+    type TxToken<'a>
+        = VirtioTxToken
+    where
+        Self: 'a;
+
+    fn receive(
+        &mut self,
+        timestamp: smoltcp::time::Instant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        self.rx_queue.pop_front().map(|buf| {
+            (
+                VirtioRxToken(buf),
+                VirtioTxToken {
+                    tx_queue: Rc::clone(&self.tx_queue),
+                },
+            )
+        })
+    }
+
+    fn transmit(&mut self, timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
+        Some(VirtioTxToken {
+            tx_queue: Rc::clone(&self.tx_queue),
+        })
+    }
+
+    fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
+        let mut caps = smoltcp::phy::DeviceCapabilities::default();
+        caps.medium = smoltcp::phy::Medium::Ethernet;
+        caps.max_transmission_unit = self.inner.mtu().map(|mtu| mtu as usize).unwrap_or(1536);
+        caps
+    }
+}
+
+pub(super) enum SmoltcpDevice {
+    VirtIo(VirtioDevice),
+    Loopback(smoltcp::phy::Loopback),
 }
 
 pub(super) struct NetDev<'a> {
@@ -45,7 +116,9 @@ pub(super) struct NetDev<'a> {
 
 impl<'a> NetDev<'a> {
     pub(super) fn new(name: &str, dev_cfg: &config::DeviceCfg, mut device: SmoltcpDevice) -> Self {
-        let mut config = smoltcp::iface::Config::new(device.ethernet_address().into());
+        let mut config = smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ethernet(
+            smoltcp::wire::EthernetAddress::from_bytes(&dev_cfg.mac.raw()),
+        ));
         config.random_seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|dur| dur.as_nanos() as u64)
@@ -53,9 +126,9 @@ impl<'a> NetDev<'a> {
         config.discovery_silent_time = smoltcp::time::Duration::from_millis(5);
 
         let mut iface = match &mut device {
-            // SmoltcpDevice::VirtIo(dev) => {
-            //     smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now())
-            // }
+            SmoltcpDevice::VirtIo(dev) => {
+                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now())
+            }
             SmoltcpDevice::Loopback(dev) => {
                 smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now())
             }
@@ -90,6 +163,8 @@ impl<'a> NetDev<'a> {
                 storage.push(rt).unwrap();
             }
         });
+
+        log::debug!("New NET device {name}.");
 
         Self {
             name: name.to_owned(),
@@ -146,6 +221,9 @@ impl<'a> NetDev<'a> {
             SmoltcpDevice::Loopback(loopback) => {
                 iface.poll(smoltcp::time::Instant::now(), loopback, sockets)
             }
+            SmoltcpDevice::VirtIo(virtio_device) => {
+                iface.poll(smoltcp::time::Instant::now(), virtio_device, sockets)
+            }
         }
     }
 
@@ -163,6 +241,9 @@ impl<'a> NetDev<'a> {
         } = self;
         match device {
             SmoltcpDevice::Loopback(loopback) => iface
+                .poll_delay(smoltcp::time::Instant::now(), sockets)
+                .map(|d| d.into()),
+            SmoltcpDevice::VirtIo(virtio_device) => iface
                 .poll_delay(smoltcp::time::Instant::now(), sockets)
                 .map(|d| d.into()),
         }

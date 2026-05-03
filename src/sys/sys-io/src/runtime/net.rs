@@ -422,7 +422,7 @@ impl NetRuntime {
 /// Initialize NetRuntime (and spawn runtime tasks in the current local executor).
 /// Takes filesystem parameter to read net config.
 pub(super) async fn init(
-    devices: Vec<virtio_async::VirtioDevice>,
+    mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
     fs: Rc<moto_async::LocalMutex<super::fs::FS>>,
 ) -> Result<()> {
     let config = config::load(fs).await?;
@@ -447,7 +447,25 @@ pub(super) async fn init(
         devices.push(dev);
     }
 
-    log::warn!("TODO: initialize virtio devices");
+    for (device_name, device_cfg) in &config.devices {
+        if let Some(pos) = virtio_devices
+            .iter()
+            .position(|dev| dev.mac() == &device_cfg.mac.raw())
+        {
+            let dev = virtio_devices.remove(pos);
+            devices.push(device::NetDev::new(
+                device_name,
+                device_cfg,
+                device::SmoltcpDevice::VirtIo(device::VirtioDevice::new(dev)),
+            ));
+        } else {
+            log::warn!("Cannot find NET device {device_cfg:?}.");
+        }
+    }
+
+    for device in &virtio_devices {
+        log::warn!("VirtioNET device {:?} not configured.", device.mac());
+    }
 
     if devices.is_empty() {
         return Ok(());

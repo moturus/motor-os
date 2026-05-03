@@ -189,7 +189,12 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
                 );
                 block_device = Some(device);
             }
-            virtio_async::VirtioDeviceKind::Net => net_devices.push(device),
+            virtio_async::VirtioDeviceKind::Net => {
+                match virtio_async::virtio_net::NetDevice::from(device) {
+                    Ok(device) => net_devices.push(device),
+                    Err(err) => log::error!("Failed to initialize VirtioNet device: {err:?}."),
+                }
+            }
             _ => log::warn!("Unsupported VirtIO device {:?}", device.kind()),
         }
     }

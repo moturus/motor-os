@@ -8,6 +8,7 @@ use std::rc::Rc;
 use super::le16;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
+use crate::virtio_queue::Virtqueue;
 
 // Feature bits.
 const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
@@ -39,72 +40,16 @@ pub struct Header {
 
 pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<Header>();
 
-type IoBuf = [u8; 2048];
-
-pub struct RxPacket {
-    idx: u8,
-    len: u16,
-    netdev: *mut NetDevice,
-}
-
-impl Drop for RxPacket {
-    fn drop(&mut self) {
-        unsafe { (*self.netdev).release_rx_packet(self.idx) }
-    }
-}
-
-impl RxPacket {
-    #[allow(clippy::mut_from_ref)]
-    pub fn bytes_mut(&self) -> &mut [u8] {
-        let netdev: &'static mut NetDevice = unsafe { &mut *self.netdev };
-        &mut netdev.rx_bufs[self.idx as usize][NET_HEADER_LEN..(self.len as usize)]
-    }
-}
-
-pub struct TxPacket {
-    idx: u8,
-    netdev: *mut NetDevice,
-}
-
-impl Drop for TxPacket {
-    fn drop(&mut self) {
-        unsafe { (*self.netdev).release_tx_packet(self.idx) }
-    }
-}
-
-impl TxPacket {
-    #[allow(clippy::mut_from_ref)]
-    pub fn bytes_mut(&self) -> &mut [u8] {
-        let netdev: &'static mut NetDevice = unsafe { &mut *self.netdev };
-        &mut netdev.tx_bufs[self.idx as usize][NET_HEADER_LEN..2048]
-    }
-
-    pub fn consume(self, len: u16) {
-        unsafe { (*self.netdev).send_tx_packet(self.idx, len) }
-        core::mem::forget(self);
-    }
-}
-
 pub struct NetDevice {
     dev: Rc<RefCell<VirtioDevice>>,
     mac: [u8; 6],
     mtu: Option<u16>,
-
-    rx_bufs: &'static mut [IoBuf; 256],
-    tx_bufs: &'static mut [IoBuf; 128], // A single TX buf consumes two descriptors in virtqueue.
-
-    tx_buf_freelist: VecDeque<u8>,
-
-    rx_bufs_phys_addr: u64,
-    tx_bufs_phys_addr: u64,
-    // notify_bar: *const PciBar,
-    // txq_notify_offset: u64,
-    // rxq_notify_offset: u64,
+    virtq_tx: Rc<RefCell<Virtqueue>>,
+    virtq_rx: Rc<RefCell<Virtqueue>>,
 }
 
 impl Drop for NetDevice {
     fn drop(&mut self) {
-        // panic!("VirtIO NetDev must not be dropped: RxPackets reference it statically.")
         log::error!("VirtIO NetDev must not be dropped: RxPackets reference it statically.");
     }
 }
@@ -148,23 +93,8 @@ impl NetDevice {
             return Err(ErrorKind::Other.into());
         }
 
-        let bufs = crate::mapper()
-            .alloc_contiguous_pages(2048 * 256)
-            .expect("Failed to allocate RX buffers.");
-        let rx_bufs = unsafe { (bufs as usize as *mut [IoBuf; 256]).as_mut().unwrap() };
-        let rx_bufs_phys_addr = crate::mapper().virt_to_phys(bufs).unwrap();
-
-        let bufs = crate::mapper()
-            .alloc_contiguous_pages(2048 * 128)
-            .expect("Failed to allocate RX buffers.");
-        let tx_bufs = unsafe { (bufs as usize as *mut [IoBuf; 128]).as_mut().unwrap() };
-        let tx_bufs_phys_addr = crate::mapper().virt_to_phys(bufs).unwrap();
-
-        let mut tx_buf_freelist = VecDeque::new();
-        tx_buf_freelist.reserve_exact(256);
-        for idx in 0..128 {
-            tx_buf_freelist.push_back(idx)
-        }
+        let virtq_rx = dev_mut.virtqueues[Self::VIRTQ_RX].clone();
+        let virtq_tx = dev_mut.virtqueues[Self::VIRTQ_TX].clone();
 
         drop(dev_mut);
 
@@ -172,14 +102,8 @@ impl NetDevice {
             dev,
             mac,
             mtu,
-            rx_bufs,
-            tx_bufs,
-            tx_buf_freelist,
-            rx_bufs_phys_addr,
-            tx_bufs_phys_addr,
-            // notify_bar: core::ptr::null(),
-            // txq_notify_offset: 0,
-            // rxq_notify_offset: 0,
+            virtq_rx,
+            virtq_tx,
         }))
     }
 
@@ -305,120 +229,8 @@ impl NetDevice {
 
         result
     }
-
-    /*
-    pub fn start_receiving(&mut self) {
-        use super::virtio_queue::UserData;
-
-        let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
-        assert_eq!(rxq.queue_size as usize, self.rx_bufs.len());
-
-        for pos in 0..self.rx_bufs.len() {
-            let buf = &mut self.rx_bufs[pos];
-            let user_data = UserData {
-                addr: buf.as_mut_ptr() as usize as u64,
-                len: buf.len() as u32,
-            };
-
-            assert_eq!(pos as u16, rxq.add_buf(&[user_data], 0, 1));
-        }
-
-        // Kick unconditionally: it's done only once, so let's not complicate things.
-        unsafe { (*self.notify_bar).write_u16(self.rxq_notify_offset, rxq.queue_num) };
-    }
-
-    // Get incoming bytes, if any, with an id of the buffer.
-    pub fn rx_get(&mut self) -> Option<RxPacket> {
-        let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
-        if let Some((idx, len)) = rxq.get_completed_rx_buf() {
-            Some(RxPacket {
-                idx: idx as u8,
-                len: len as u16,
-                netdev: self as *mut _,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn tx_get(&mut self) -> Option<TxPacket> {
-        if let Some(idx) = self.tx_buf_freelist.pop_front() {
-            Some(TxPacket {
-                idx,
-                netdev: self as *mut _,
-            })
-        } else {
-            let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
-            while let Some(idx) = txq.get_completed_tx_buf() {
-                self.tx_buf_freelist.push_back(idx as u8);
-            }
-            self.tx_buf_freelist.pop_front().map(|idx| TxPacket {
-                idx,
-                netdev: self as *mut _,
-            })
-        }
-    }
-
-    fn send_tx_packet(&mut self, idx: u8, len: u16) {
-        let pos = idx as usize;
-        let buf = &mut self.tx_bufs[pos];
-
-        let header = buf.as_ptr() as usize as *mut Header;
-        unsafe { *header = Header::default() };
-
-        let phys_addr = self.tx_bufs_phys_addr + ((idx as u64) << 11);
-
-        let txq = &mut self.dev.virtqueues[Self::VIRTQ_TX];
-        let should_notify = txq.add_tx_buf(phys_addr, idx as u16, len as u32);
-
-        if should_notify {
-            // unsafe { (*self.notify_bar).write_u16_unfenced(self.txq_notify_offset, txq.queue_num) };
-            unsafe { (*self.notify_bar).write_u16(self.txq_notify_offset, txq.queue_num) };
-        }
-    }
-
-    fn release_rx_packet(&mut self, idx: u8) {
-        let phys_addr = self.rx_bufs_phys_addr + ((idx as u64) << 11);
-
-        let rxq = &mut self.dev.virtqueues[Self::VIRTQ_RX];
-        let should_notify = rxq.add_rx_buf(phys_addr, 2048, idx as u16);
-
-        if should_notify {
-            // unsafe { (*self.notify_bar).write_u16_unfenced(self.rxq_notify_offset, rxq.queue_num) };
-            unsafe { (*self.notify_bar).write_u16(self.rxq_notify_offset, rxq.queue_num) };
-        }
-    }
-
-    fn release_tx_packet(&mut self, idx: u8) {
-        self.tx_buf_freelist.push_back(idx);
-    }
-    */
-    fn send_tx_packet(&mut self, idx: u8, len: u16) {
-        todo!()
-    }
-
-    fn release_rx_packet(&mut self, idx: u8) {
-        todo!()
-    }
-
-    fn release_tx_packet(&mut self, idx: u8) {
-        self.tx_buf_freelist.push_back(idx);
-    }
 }
 
 pub const fn header_len() -> usize {
     core::mem::size_of::<Header>()
 }
-
-/*
-pub fn take_by_mac(mac: &[u8; 6]) -> Option<NetDev> {
-    let devices = &mut *NET_DEVICES.lock();
-    for idx in 0..devices.len() {
-        if devices[idx].mac == *mac {
-            return Some(devices.remove(idx));
-        }
-    }
-
-    None
-}
-*/
