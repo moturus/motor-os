@@ -804,6 +804,7 @@ impl MotoSocket {
                         } else {
                             false
                         };
+                        state.tx_closed = true;
                         state.tx_queue.clear();
                         if let Some(lingerer) = state.lingerer.take() {
                             lingerer.send(());
@@ -1146,7 +1147,7 @@ impl MotoSocket {
 
             if tcp_state.tx_closed {
                 log::debug!("TCP socket {socket_id:x}: TX with tx_closed.");
-                return Err(ErrorKind::InvalidInput.into());
+                return Err(ErrorKind::NotConnected.into());
             }
 
             tcp_state.stat_tx_bytes += sz as u64;

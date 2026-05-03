@@ -740,6 +740,10 @@ impl TcpStream {
             drop(recv_q);
             // The RXQ was empty, this is a new (edge) event.
             self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+        } else if msg.command == (api_net::NetCmd::TcpStreamTx as u16) {
+            // TX closed. The driver was supposed to clear IO Pages.
+            drop(recv_q);
+            log::debug!("TX reply for stream 0x{:x}", msg.handle);
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             drop(recv_q);
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();

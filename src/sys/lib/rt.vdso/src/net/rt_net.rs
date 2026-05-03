@@ -1010,6 +1010,10 @@ impl NetChannel {
         };
 
         match cmd {
+            api_net::NetCmd::TcpStreamTx => {
+                // TX didn't complete. The driver cleared the page.
+                log::debug!("Orphan TX reply for socket 0x{:x}", msg.handle);
+            }
             api_net::NetCmd::TcpStreamRx => {
                 // RX raced with the client dropping the sream. Need to get page to free it.
                 let sz_read = msg.payload.args_64()[1];
