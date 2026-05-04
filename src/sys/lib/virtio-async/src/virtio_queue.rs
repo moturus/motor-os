@@ -567,7 +567,7 @@ pub(crate) struct VqCompletion<T: Unpin> {
 }
 
 impl<T: Unpin> Future for VqCompletion<T> {
-    type Output = (T, Result<()>);
+    type Output = (T, Result<u32>);
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
@@ -583,12 +583,12 @@ impl<T: Unpin> Future for VqCompletion<T> {
 
             if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
                 virtq.completion_waiters[self.chain_head as usize] = None;
-                let (_consumed, status) = virtq.get_result(self.chain_head);
+                let (consumed, status) = virtq.get_result(self.chain_head);
                 drop(virtq);
 
                 let this = self.get_mut();
                 if status == 0 {
-                    return std::task::Poll::Ready((this.data.take().unwrap(), Ok(())));
+                    return std::task::Poll::Ready((this.data.take().unwrap(), Ok(consumed)));
                 }
                 log::error!("Bad VirtQ status: {status}.");
                 return std::task::Poll::Ready((
@@ -656,7 +656,7 @@ pub struct WriteCompletion<T: AsRef<[u8]> + Unpin> {
 }
 
 impl<T: AsRef<[u8]> + Unpin> Future for WriteCompletion<T> {
-    type Output = (T, Result<()>);
+    type Output = (T, Result<u32>);
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -673,7 +673,7 @@ pub struct ReadCompletion<T: AsMut<[u8]> + Unpin> {
 }
 
 impl<T: AsMut<[u8]> + Unpin> Future for ReadCompletion<T> {
-    type Output = (T, Result<()>);
+    type Output = (T, Result<u32>);
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,

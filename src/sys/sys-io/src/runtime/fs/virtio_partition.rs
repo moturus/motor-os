@@ -39,9 +39,40 @@ impl VirtioPartition {
     }
 }
 
+pub struct WrapperCompletion {
+    inner: virtio_async::WriteCompletion<async_fs::block_cache::CheckpointedBlock>,
+}
+
+impl Future for WrapperCompletion {
+    type Output = (async_fs::block_cache::CheckpointedBlock, Result<()>);
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: We are manually projecting the Pin.
+        let pinned = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        match pinned.poll(cx) {
+            std::task::Poll::Ready((block, res)) => std::task::Poll::Ready((
+                block,
+                res.map(|_sz| {
+                    // Cloud Hypervisor returns 4096, Qemu returns 1.
+                    // "1" is correct: the device wrote a single byte of status.
+                    #[cfg(debug_assertions)]
+                    if _sz != 4096 && _sz != 1 {
+                        panic!("Unexpected read block sz: {_sz}.");
+                    }
+                    ()
+                }),
+            )),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
 #[async_trait(?Send)]
 impl async_fs::AsyncBlockDevice for VirtioPartition {
-    type Completion = virtio_async::WriteCompletion<async_fs::block_cache::CheckpointedBlock>;
+    type Completion = WrapperCompletion;
 
     fn num_blocks(&self) -> u64 {
         self.virtio_blocks >> 3
@@ -57,7 +88,15 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
             block.as_bytes_mut(),
         )
         .await;
-        completion.await.1
+        completion.await.1.map(|_sz| {
+            // Cloud Hypervisor returns 4096, Qemu returns 4097.
+            // "4097" is correct: the device wrote 4096 + 1 byte status.
+            #[cfg(debug_assertions)]
+            if _sz != 4096 && _sz != 4097 {
+                panic!("Unexpected read block sz: {_sz}.");
+            }
+            ()
+        })
     }
 
     /// Write a single block.
@@ -80,10 +119,14 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
-        Ok(
-            virtio_async::BlockDevice::post_write(self.virtio_bd.clone(), first_sector_no, block)
-                .await,
-        )
+        Ok(WrapperCompletion {
+            inner: virtio_async::BlockDevice::post_write(
+                self.virtio_bd.clone(),
+                first_sector_no,
+                block,
+            )
+            .await,
+        })
     }
 
     /// Flush dirty blocks to the underlying storage.

@@ -301,6 +301,7 @@ impl BlockDevice {
         Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ())
             .await
             .1
+            .map(|_| ())
     }
 
     pub fn notify(&self) {
