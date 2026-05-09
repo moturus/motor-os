@@ -114,7 +114,10 @@ impl NetRuntime {
         let this = self.clone();
 
         let _ = moto_async::LocalRuntime::spawn(async move {
-            let notify = this.inner.borrow().devices[device_idx].notify.clone();
+            let notify = this.inner.borrow().devices[device_idx]
+                .device_runtime_notify
+                .clone();
+            let name = this.inner.borrow().devices[device_idx].name().to_owned();
 
             loop {
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
@@ -426,7 +429,7 @@ pub(super) async fn init(
     fs: Rc<moto_async::LocalMutex<super::fs::FS>>,
 ) -> Result<()> {
     let config = config::load(fs).await?;
-    log::debug!("NET cfg loaded OK.");
+    log::debug!("NET cfg loaded:\n{config:#?}.");
 
     let mut devices = vec![];
 

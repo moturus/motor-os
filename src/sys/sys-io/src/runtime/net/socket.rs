@@ -71,7 +71,9 @@ impl SocketBase {
         socket_addr: SocketAddr,
         client_sender: moto_ipc::io_channel::Sender,
     ) -> Self {
-        let device_notify = runtime.inner.borrow().devices[device_idx].notify.clone();
+        let device_notify = runtime.inner.borrow().devices[device_idx]
+            .device_runtime_notify
+            .clone();
 
         Self {
             socket_id,

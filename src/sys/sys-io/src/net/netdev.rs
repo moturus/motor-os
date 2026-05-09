@@ -263,6 +263,7 @@ impl NetDev {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|dur| dur.as_nanos() as u64)
             .unwrap_or(1234);
+        config.discovery_silent_time = smoltcp::time::Duration::from_millis(5);
 
         let mut iface = match &mut device {
             SmoltcpDevice::VirtIo(dev) => {
@@ -299,6 +300,7 @@ impl NetDev {
                     preferred_until: None,
                     expires_at: None,
                 };
+                log::debug!("adding route \n{route:#?} to {name}");
                 storage.push(rt).unwrap();
             }
         });

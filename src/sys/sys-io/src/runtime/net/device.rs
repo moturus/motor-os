@@ -10,20 +10,132 @@ use std::{
 use super::config;
 use virtio_async::virtio_net::NetDevice;
 
+type RxQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+type TxQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+
 pub(super) struct VirtioDevice {
     inner: Rc<NetDevice>,
-    rx_queue: VecDeque<Vec<u8>>,
-    tx_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    rx_queue: RxQueue,
+    tx_queue: TxQueue,
+
+    // The device will notify rx_notify when it updates rx_queue.
+    rx_notify: Rc<moto_async::LocalNotify>,
+    // The device will listen on tx_notify for tx_queue updates.
+    tx_notify: Rc<moto_async::LocalNotify>,
+    mtu: u16,
 }
 
 impl VirtioDevice {
     pub(super) fn new(inner: Rc<NetDevice>) -> Self {
-        log::error!("spawn RX and TX tasks");
-        Self {
+        let mtu = inner.mtu().unwrap_or(1536);
+        let this = Self {
             inner,
             rx_queue: Default::default(),
             tx_queue: Default::default(),
+            rx_notify: Default::default(),
+            tx_notify: Default::default(),
+            mtu,
+        };
+
+        let _ = moto_async::LocalRuntime::spawn(Self::rx_task(
+            this.inner.clone(),
+            this.rx_queue.clone(),
+            this.rx_notify.clone(),
+        ));
+        let _ = moto_async::LocalRuntime::spawn(Self::tx_task(
+            this.inner.clone(),
+            this.tx_queue.clone(),
+            this.tx_notify.clone(),
+        ));
+
+        this
+    }
+
+    async fn rx_task(
+        net_dev: Rc<NetDevice>,
+        rx_queue: RxQueue,
+        rx_notify: Rc<moto_async::LocalNotify>,
+    ) {
+        // Submit RX buffers to net_dev. Wait. Once RX happens, push
+        // the buffer into rx_queue, notify. Once RX buffer is consumed,
+        // push it again into net_dev.
+
+        // TODO: optimize.
+
+        let rxq_sz = net_dev.rxq_sz() as usize;
+
+        // Pre-submit blocks.
+        let mut completions = VecDeque::with_capacity(rxq_sz);
+        for _ in 0..rxq_sz / 2 {
+            completions.push_back(
+                net_dev
+                    .clone()
+                    .post_read(async_fs::Block::new_zeroed())
+                    .await,
+            );
         }
+
+        const HEADER_LEN: usize = virtio_async::virtio_net::header_len();
+
+        loop {
+            let completion = completions.pop_front().unwrap();
+            let (block, result) = completion.await;
+            let sz_read = result.unwrap() as usize;
+
+            log::debug!("NET: RX {sz_read} bytes.");
+            let rx_vec = block.as_bytes()[HEADER_LEN..sz_read].to_vec();
+            rx_queue.borrow_mut().push_back(rx_vec);
+            rx_notify.notify_one();
+
+            completions.push_back(
+                net_dev
+                    .clone()
+                    .post_read(async_fs::Block::new_zeroed())
+                    .await,
+            );
+        }
+    }
+
+    async fn tx_task(
+        net_dev: Rc<NetDevice>,
+        tx_queue: RxQueue,
+        tx_notify: Rc<moto_async::LocalNotify>,
+    ) {
+        let mut completions = VecDeque::new();
+        let txq_sz = net_dev.txq_sz() as usize;
+
+        loop {
+            if completions.len() == txq_sz {
+                let completion = completions.pop_front().unwrap();
+                let _ = completion.await;
+            }
+            let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
+
+            if let Some(tx_vec) = maybe_tx_vec {
+                // TODO: optimize
+                let mut block = BlockWrapper {
+                    block: Box::new(async_fs::Block::new_zeroed()),
+                    len: 0,
+                };
+                block.block.as_bytes_mut()[..tx_vec.len()].clone_from_slice(&tx_vec);
+                block.len = tx_vec.len();
+                log::debug!("NET TX {} bytes", tx_vec.len());
+                completions.push_back(net_dev.clone().post_write(block).await);
+            } else {
+                tx_notify.notified().await;
+            }
+        }
+    }
+}
+
+struct BlockWrapper {
+    block: Box<async_fs::Block>,
+    len: usize,
+}
+
+impl AsRef<[u8]> for BlockWrapper {
+    fn as_ref(&self) -> &[u8] {
+        &self.block.as_bytes()[..self.len]
     }
 }
 
@@ -34,12 +146,14 @@ impl smoltcp::phy::RxToken for VirtioRxToken {
     where
         F: FnOnce(&[u8]) -> R,
     {
+        log::debug!("RxToken: consume {}", self.0.len());
         f(&mut self.0)
     }
 }
 
 pub struct VirtioTxToken {
-    tx_queue: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    tx_queue: TxQueue,
+    tx_notify: Rc<moto_async::LocalNotify>,
 }
 
 impl smoltcp::phy::TxToken for VirtioTxToken {
@@ -47,9 +161,12 @@ impl smoltcp::phy::TxToken for VirtioTxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
+        log::debug!("TxToken: consume {len}.");
         let mut buffer = vec![0; len];
         let result = f(&mut buffer);
         self.tx_queue.borrow_mut().push_back(buffer);
+        self.tx_notify.notify_one();
+        log::debug!("TxToken: consume {len}.");
         result
     }
 }
@@ -69,26 +186,31 @@ impl smoltcp::phy::Device for VirtioDevice {
         &mut self,
         timestamp: smoltcp::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        self.rx_queue.pop_front().map(|buf| {
+        log::debug!("VirtioDevice::receive()");
+        self.rx_queue.borrow_mut().pop_front().map(|buf| {
+            log::debug!("VirtioDevice::receive(): have {} bytes.", buf.len());
             (
                 VirtioRxToken(buf),
                 VirtioTxToken {
-                    tx_queue: Rc::clone(&self.tx_queue),
+                    tx_queue: self.tx_queue.clone(),
+                    tx_notify: self.tx_notify.clone(),
                 },
             )
         })
     }
 
     fn transmit(&mut self, timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
+        log::debug!("VirtioDevice::transmit()");
         Some(VirtioTxToken {
-            tx_queue: Rc::clone(&self.tx_queue),
+            tx_queue: self.tx_queue.clone(),
+            tx_notify: self.tx_notify.clone(),
         })
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
         let mut caps = smoltcp::phy::DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ethernet;
-        caps.max_transmission_unit = self.inner.mtu().map(|mtu| mtu as usize).unwrap_or(1536);
+        caps.max_transmission_unit = self.mtu as usize;
         caps
     }
 }
@@ -111,7 +233,8 @@ pub(super) struct NetDev<'a> {
 
     tcp_ports_in_use: std::collections::HashSet<u16>,
 
-    pub(super) notify: Rc<moto_async::LocalNotify>,
+    // This is the notify that drives smoltcp device runtime in net.rs.
+    pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
 }
 
 impl<'a> NetDev<'a> {
@@ -124,25 +247,30 @@ impl<'a> NetDev<'a> {
             .map(|dur| dur.as_nanos() as u64)
             .unwrap_or(1234);
         config.discovery_silent_time = smoltcp::time::Duration::from_millis(5);
+        log::debug!(
+            "Initializing net device {name} with\nmac {:x?}",
+            dev_cfg.mac
+        );
 
-        let mut iface = match &mut device {
-            SmoltcpDevice::VirtIo(dev) => {
-                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now())
-            }
-            SmoltcpDevice::Loopback(dev) => {
-                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now())
-            }
+        let (mut iface, notify) = match &mut device {
+            SmoltcpDevice::VirtIo(dev) => (
+                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now()),
+                // Smoltcp interfaces have a single poll() that does both RX and TX.
+                // RX is driven by VirtioNET device; TX is driven by user sockets.
+                //
+                // A better stack would have these separate.
+                dev.rx_notify.clone(),
+            ),
+            SmoltcpDevice::Loopback(dev) => (
+                smoltcp::iface::Interface::new(config, dev, smoltcp::time::Instant::now()),
+                // The loopback device has a self-contained runtime notify.
+                Rc::new(moto_async::LocalNotify::default()),
+            ),
         };
 
         iface.update_ip_addrs(|ip_addrs| {
             for cidr in &dev_cfg.cidrs {
-                log::debug!(
-                    "{}:{} added IP {:?} to {}",
-                    file!(),
-                    line!(),
-                    cidr.ip(),
-                    name
-                );
+                log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
                 ip_addrs
                     .push(smoltcp::wire::IpCidr::new(
                         <smoltcp::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
@@ -160,6 +288,7 @@ impl<'a> NetDev<'a> {
                     preferred_until: None,
                     expires_at: None,
                 };
+                log::debug!("adding route \n{route:#?} to {name}");
                 storage.push(rt).unwrap();
             }
         });
@@ -175,7 +304,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
             tcp_ports_in_use: std::collections::HashSet::new(),
-            notify: Rc::new(moto_async::LocalNotify::default()),
+            device_runtime_notify: notify,
         }
     }
 
@@ -201,7 +330,7 @@ impl<'a> NetDev<'a> {
                 log::warn!("Connect {local_addr:?} => {remote_addr:?} failed: {_err:?}");
             })?;
 
-        self.notify.notify_one();
+        self.device_runtime_notify.notify_one();
         Ok(())
     }
 
@@ -215,7 +344,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
-            notify,
+            device_runtime_notify: notify,
         } = self;
         match device {
             SmoltcpDevice::Loopback(loopback) => {
@@ -237,7 +366,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
-            notify,
+            device_runtime_notify: notify,
         } = self;
         match device {
             SmoltcpDevice::Loopback(loopback) => iface
