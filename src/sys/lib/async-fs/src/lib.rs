@@ -65,3 +65,9 @@ impl AsRef<[u8]> for Block {
         self.as_bytes()
     }
 }
+
+impl AsMut<[u8]> for Block {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.as_bytes_mut()
+    }
+}
