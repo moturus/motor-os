@@ -133,8 +133,4 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
     async fn flush(&self) -> Result<()> {
         virtio_async::BlockDevice::post_flush(self.virtio_bd.clone()).await
     }
-
-    fn notify(&self) {
-        self.virtio_bd.notify();
-    }
 }

@@ -102,6 +102,4 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         use tokio::io::AsyncWriteExt;
         self.file.lock().await.flush().await
     }
-
-    fn notify(&self) {}
 }

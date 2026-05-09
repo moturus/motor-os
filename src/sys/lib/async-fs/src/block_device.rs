@@ -28,7 +28,4 @@ pub trait AsyncBlockDevice {
 
     /// Flush dirty blocks to the underlying storage.
     async fn flush(&self) -> Result<()>;
-
-    /// Notify the device that there is work to do.
-    fn notify(&self);
 }
