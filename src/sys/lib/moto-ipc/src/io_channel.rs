@@ -1248,7 +1248,7 @@ impl Sender {
 
 pub struct Receiver {
     inner: Arc<IoChannelImpl>,
-    recv_future: moto_async::SysHandleFuture,
+    recv_future: Option<moto_async::SysHandleFuture>,
 }
 
 impl !Sync for Receiver {}
@@ -1322,12 +1322,23 @@ impl Receiver {
                         wait_flag_set = true;
                         continue; // Do one more recv() before waiting.
                     } else {
-                        match self.recv_future.do_poll(cx) {
+                        let recv_future = if let Some(future) = self.recv_future.as_ref() {
+                            future.clone()
+                        } else {
+                            let future = self.inner.remote_handle.as_future();
+                            self.recv_future = Some(future.clone());
+                            future
+                        };
+
+                        match recv_future.do_poll(cx) {
                             core::task::Poll::Ready(Err(err)) => {
                                 wait_error = err;
                                 continue; // Do one more recv() before returning.
                             }
-                            core::task::Poll::Ready(Ok(())) => {}
+                            core::task::Poll::Ready(Ok(())) => {
+                                // We must not poll the same future after it is ready.
+                                self.recv_future = None;
+                            }
                             core::task::Poll::Pending => return core::task::Poll::Pending,
                         }
 
@@ -1422,7 +1433,7 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
     };
     let receiver = Receiver {
         inner: sender.inner.clone(),
-        recv_future: sender.inner.remote_handle.as_future(),
+        recv_future: None,
     };
 
     Ok((sender, receiver))
@@ -1476,7 +1487,7 @@ pub async fn listen(url: &str) -> Result<(Sender, Receiver)> {
     };
     let receiver = Receiver {
         inner: sender.inner.clone(),
-        recv_future: sender.inner.remote_handle.as_future(),
+        recv_future: None,
     };
 
     Ok((sender, receiver))
