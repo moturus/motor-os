@@ -27,7 +27,7 @@ const _: () = assert!(core::mem::size_of::<VirtqDesc>() == 16);
 
 // Updated by the driver (here, in this file).
 struct VirtqAvail {
-    _flags: &'static mut le16,     // Ignored/never used.
+    flags: &'static mut le16,
     next_available_idx: *mut le16, // "idx" in VirtIO spec.
     ring: &'static mut [le16],
     used_event: *mut le16,
@@ -52,7 +52,7 @@ impl VirtqAvail {
 
         unsafe {
             VirtqAvail {
-                _flags: &mut *(flags_addr as *mut le16),
+                flags: &mut *(flags_addr as *mut le16),
                 next_available_idx: idx_addr as *mut le16,
                 ring,
                 used_event: used_event_addr as *mut le16,
@@ -69,7 +69,7 @@ struct VirtqUsedElem {
 
 // Updated by the "device" (the VMM).
 struct VirtqUsed {
-    _flags: &'static mut le16, // Ignored/never used.
+    flags: &'static mut le16,
     idx: *const le16,
     ring: &'static mut [VirtqUsedElem],
     avail_event: *const le16,
@@ -93,7 +93,7 @@ impl VirtqUsed {
         let avail_event_addr = flags_addr + 4 + 8 * queue_size;
 
         VirtqUsed {
-            _flags: unsafe { &mut *(flags_addr as *mut le16) },
+            flags: unsafe { &mut *(flags_addr as *mut le16) },
             idx: idx_addr as *const le16,
             ring,
             avail_event: avail_event_addr as *const le16,
@@ -188,6 +188,8 @@ pub(super) struct Virtqueue {
 
     // For each slot we may have a waker.
     completion_waiters: Vec<Option<std::task::LocalWaker>>,
+
+    virtio_f_event_idx_negotiated: bool,
 }
 
 impl Virtqueue {
@@ -273,6 +275,8 @@ impl Virtqueue {
             queue_size_mask: queue_size - 1,
             alloc_waiters: VecDeque::new(),
             completion_waiters,
+
+            virtio_f_event_idx_negotiated: false,
         }));
         // Self::spawn_monitoring(self_.clone());
         Ok(self_)
@@ -286,9 +290,49 @@ impl Virtqueue {
         self.wait_handle = handle;
     }
 
-    pub fn notify(&self) {
+    pub fn set_f_event_idx_negotiated(&mut self) {
+        self.virtio_f_event_idx_negotiated = true;
+    }
+
+    fn notify_device_if_needed(&self, avail_idx: u16) {
         // Safety: safe by construction.
-        unsafe { (*self.notify_bar).write_u16(self.notify_offset, 0) };
+        unsafe {
+            if self.virtio_f_event_idx_negotiated
+                && avail_idx == self.used_ring.avail_event.read_volatile()
+                || *self.used_ring.flags == 0
+            {
+                (*self.notify_bar).write_u16(self.notify_offset, 0);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn disable_irq(&mut self) {
+        unsafe {
+            if self.virtio_f_event_idx_negotiated {
+                self.available_ring
+                    .used_event
+                    .write_volatile(self.next_used_idx.wrapping_sub(1));
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            } else {
+                *self.available_ring.flags = 1;
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn enable_irq(&mut self) {
+        unsafe {
+            if self.virtio_f_event_idx_negotiated {
+                self.available_ring
+                    .used_event
+                    .write_volatile(self.next_used_idx);
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            } else {
+                *self.available_ring.flags = 0;
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            }
+        }
     }
 
     pub fn set_notify_params(&mut self, notify_bar: *const PciBar, notify_offset: u64) {
@@ -304,20 +348,23 @@ impl Virtqueue {
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        unsafe {
+        let prev_idx = unsafe {
             let idx = *self.available_ring.next_available_idx;
             ((&mut self.available_ring.ring[(idx & self.queue_size_mask) as usize]) as *mut u16)
                 .write_volatile(head);
             core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
+            let prev_idx = idx;
             // Note: we must wrap around at u16::MAX, not at queue_size, otherwise
             // both CHV and Qemu misbehave.
             let next_idx = idx.wrapping_add(1);
             self.available_ring
                 .next_available_idx
                 .write_volatile(next_idx);
-        }
+            prev_idx
+        };
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.notify_device_if_needed(prev_idx);
     }
 
     pub fn alloc_descriptor_chain(&mut self, chain_len: u16) -> Option<u16> {
@@ -364,7 +411,10 @@ impl Virtqueue {
     fn free_descriptor_chain(&mut self, chain_head: u16) {
         let mut curr = chain_head;
         let free_head_idx = self.free_head_idx;
-        debug_assert_ne!(curr, free_head_idx);
+
+        // Note: if all descriptors have been allocated, and this one is the first
+        // one, curr will be equal to free_head_idx.
+        // debug_assert_ne!(curr, free_head_idx);
 
         loop {
             debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_device);
@@ -462,9 +512,16 @@ impl Virtqueue {
         }
     }
 
-    pub fn reclaim_used(&mut self) -> Option<u16> {
+    fn has_new_used(&self) -> bool {
+        // SAFETY: safe by construction.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.next_used_idx != unsafe { self.used_ring.idx.read_volatile() }
+    }
+
+    fn reclaim_used(&mut self) -> Option<u16> {
         // See section 2.7.14 in Virtio PDF v 1.3.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        // SAFETY: safe by construction.
         if self.next_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
         }
@@ -544,7 +601,10 @@ impl Virtqueue {
                 }
 
                 if alloc_waiters + completion_waiters > 0 {
-                    log::error!("vq: aw: {alloc_waiters} cw: {completion_waiters}",);
+                    log::error!(
+                        "vq: aw: {alloc_waiters} cw: {completion_waiters} has_used: {}",
+                        vq.has_new_used()
+                    );
                 } else {
                     log::error!("vq: emty");
                 }
@@ -573,51 +633,54 @@ impl<T: Unpin> Future for VqCompletion<T> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // Works OK without spinning, but some tests show 3%-5% throughput upside.
-        const MAX_SPINS: u32 = 0; // 4;
-        let mut spin_iter = 0;
-        loop {
-            spin_iter += 1;
-            let mut virtq = self.virtqueue.borrow_mut();
+        let mut virtq = self.virtqueue.borrow_mut();
+
+        'outer: loop {
+            virtq.disable_irq();
             while let Some(_chain_head) = virtq.reclaim_used() {}
 
             if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
                 virtq.completion_waiters[self.chain_head as usize] = None;
                 let (consumed, status) = virtq.get_result(self.chain_head);
-                drop(virtq);
 
-                let this = self.get_mut();
                 if status == 0 {
+                    // log::debug!("completion done: OK: {consumed}");
+                    drop(virtq);
+                    let this = self.get_mut();
                     return std::task::Poll::Ready((this.data.take().unwrap(), Ok(consumed)));
+                } else {
+                    log::error!("Bad VirtQ status: {status}.");
+                    virtq.enable_irq();
+                    drop(virtq);
+                    let this = self.get_mut();
+                    return std::task::Poll::Ready((
+                        this.data.take().unwrap(),
+                        Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+                    ));
                 }
-                log::error!("Bad VirtQ status: {status}.");
-                return std::task::Poll::Ready((
-                    this.data.take().unwrap(),
-                    Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
-                ));
             }
 
+            // Always enable, as it may change the event_idx based on work done above.
+            virtq.enable_irq();
+
+            // Register the IRQ as waker for this task (by polling irq_waiter).
             let mut device_irq_waiter = Box::pin(virtq.wait_handle.as_future());
             match device_irq_waiter.as_mut().poll(cx) {
                 std::task::Poll::Ready(_) => {
                     virtq.completion_waiters[self.chain_head as usize] = None;
-                    spin_iter = 0;
                     continue;
                 }
                 std::task::Poll::Pending => {
-                    if spin_iter == 1 {
-                        virtq.notify();
+                    if !virtq.has_new_used() {
+                        break 'outer;
                     }
-                    if spin_iter < MAX_SPINS {
-                        continue;
-                    }
-                    virtq.completion_waiters[self.chain_head as usize] =
-                        Some(cx.local_waker().clone());
-                    return std::task::Poll::Pending;
                 }
             }
-        }
-    }
+        } // 'outer loop
+
+        virtq.completion_waiters[self.chain_head as usize] = Some(cx.local_waker().clone());
+        return std::task::Poll::Pending;
+    } // fn poll()
 }
 
 impl<T: Unpin> Drop for VqCompletion<T> {

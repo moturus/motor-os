@@ -5,10 +5,15 @@ use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
 
+use moto_sys::sys_mem::PAGE_SIZE_SMALL;
+
 use super::le16;
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
+use crate::WriteCompletion;
+use crate::virtio_queue::ReadCompletion;
 use crate::virtio_queue::Virtqueue;
+use crate::virtio_queue::VqAlloc;
 
 // Feature bits.
 const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
@@ -28,7 +33,7 @@ struct VirtioNetConfig {
 
 #[repr(C, packed)]
 #[derive(Debug, Default, Copy, Clone)]
-pub struct Header {
+pub struct NetHeader {
     flags: u8,
     gso_type: u8,
     hdr_len: u16,
@@ -38,7 +43,7 @@ pub struct Header {
     num_buffers: u16,
 }
 
-pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<Header>();
+pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<NetHeader>();
 
 pub struct NetDevice {
     dev: Rc<RefCell<VirtioDevice>>,
@@ -65,6 +70,15 @@ impl NetDevice {
 
     pub fn mac(&self) -> &[u8; 6] {
         &self.mac
+    }
+
+    pub fn rxq_sz(&self) -> u16 {
+        self.virtq_rx.borrow().queue_size()
+    }
+
+    pub fn txq_sz(&self) -> u16 {
+        // We consume two slots on tx, so for outsiders txq size is half of virtq sz.
+        self.virtq_tx.borrow().queue_size() / 2
     }
 
     pub fn from(dev: VirtioDevice) -> Result<Rc<Self>> {
@@ -146,6 +160,8 @@ impl NetDevice {
             );
             return Err(ErrorKind::Other.into());
         }
+
+        dev.virtio_f_event_idx_negotiated = true;
 
         /*
         if (features_available & VIRTIO_NET_F_STATUS) == 0 {
@@ -229,8 +245,79 @@ impl NetDevice {
 
         result
     }
+    #[inline(never)]
+    pub async fn post_read<T: AsMut<[u8]> + Unpin>(
+        self: Rc<Self>,
+        mut bytes: T,
+    ) -> ReadCompletion<T> {
+        let chain_head = VqAlloc::new(self.virtq_rx.clone(), 1).await;
+        let mut virtqueue = self.virtq_rx.borrow_mut();
+
+        let buf = bytes.as_mut();
+        assert!(buf.len() <= PAGE_SIZE_SMALL as usize);
+
+        // Make sure the buffer stays in the same page.
+        assert_eq!((buf.as_ptr() as usize) & (PAGE_SIZE_SMALL as usize - 1), 0);
+        // assert_eq!(
+        //     (buf.as_ptr() as usize) & !(PAGE_SIZE_SMALL as usize - 1),
+        //     (buf.as_ptr() as usize + buf.len()) & !(PAGE_SIZE_SMALL as usize - 1),
+        // );
+
+        use super::virtio_queue::UserData;
+        let buffs = [UserData {
+            addr: buf.as_mut_ptr() as usize as u64,
+            len: buf.len() as u32,
+        }];
+        drop(virtqueue);
+        let vq_completion =
+            Virtqueue::add_buffs(self.virtq_rx.clone(), &buffs, 0, 1, chain_head, bytes);
+
+        ReadCompletion { vq_completion }
+    }
+
+    #[inline(never)]
+    pub async fn post_write<T: AsRef<[u8]> + Unpin>(
+        self: Rc<Self>,
+        bytes: T,
+    ) -> WriteCompletion<T> {
+        let chain_head = VqAlloc::new(self.virtq_tx.clone(), 2).await;
+        let mut virtqueue = self.virtq_tx.borrow_mut();
+
+        let (header, next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
+
+        // SAFETY: we just got the pointer above, with all safety checks done inside.
+        unsafe { *header = NetHeader::default() };
+        let (_, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
+        let buf: &[u8] = bytes.as_ref();
+        assert!(buf.len() <= PAGE_SIZE_SMALL as usize);
+
+        // Make sure the buffer stays in the same page.
+        assert_eq!((buf.as_ptr() as usize) & (PAGE_SIZE_SMALL as usize - 1), 0);
+        // assert_eq!(
+        //     (buf.as_ptr() as usize) & !(PAGE_SIZE_SMALL as usize - 1),
+        //     (buf.as_ptr() as usize + buf.len()) & !(PAGE_SIZE_SMALL as usize - 1),
+        // );
+
+        use super::virtio_queue::UserData;
+        let buffs: [UserData; 2] = [
+            UserData {
+                addr: header as *mut _ as usize as u64,
+                len: core::mem::size_of::<NetHeader>() as u32,
+            },
+            UserData {
+                addr: buf.as_ptr() as usize as u64,
+                len: buf.len() as u32,
+            },
+        ];
+
+        drop(virtqueue);
+        let vq_completion =
+            Virtqueue::add_buffs(self.virtq_tx.clone(), &buffs, 2, 0, chain_head, bytes);
+
+        WriteCompletion { vq_completion }
+    }
 }
 
 pub const fn header_len() -> usize {
-    core::mem::size_of::<Header>()
+    core::mem::size_of::<NetHeader>()
 }
