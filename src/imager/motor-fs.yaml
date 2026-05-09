@@ -1,7 +1,7 @@
 input_files:
   - "/bin/httpd"
   - "/bin/httpd-axum"
-#  - "/bin/russhd"
+  - "/bin/russhd"
   - "/bin/kibim"
   - "/bin/rush"
   - "/sys/mdbg"
