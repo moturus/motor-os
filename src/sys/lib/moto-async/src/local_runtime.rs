@@ -185,8 +185,8 @@ struct LocalRuntimeInner {
     // The main (local) runqueue. Runnable tasks live there.
     runqueue: RefCell<VecDeque<TaskId>>,
 
-    // Tasks waiting on specific sys handles.
-    sys_waiters: RefCell<BTreeMap<SysHandle, VecDeque<TaskId>>>,
+    // SysHandle futures.
+    sys_handle_futures: RefCell<BTreeMap<SysHandle, VecDeque<SysHandleFuture>>>,
 
     // Timers. Can be added to at runtime.
     timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
@@ -200,9 +200,6 @@ struct LocalRuntimeInner {
     tasks: RefCell<BTreeMap<TaskId, Task>>,
     next_task_id: RefCell<u64>,
 
-    // Wakes from wait_handles are stored here.
-    sys_wakes: RefCell<BTreeMap<SysHandle, (VecDeque<TaskId>, moto_rt::Error)>>,
-
     // Task IDs of wakes coming from wakers (!= LocalWaker).
     nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
 }
@@ -211,12 +208,11 @@ impl LocalRuntimeInner {
     fn new() -> Self {
         Self {
             runqueue: Default::default(),
-            sys_waiters: Default::default(),
+            sys_handle_futures: Default::default(),
             timeq: Default::default(),
             incoming: Default::default(),
             tasks: Default::default(),
             next_task_id: RefCell::new(1),
-            sys_wakes: Default::default(),
             nonlocal_wakes: Default::default(),
         }
     }
@@ -241,29 +237,21 @@ impl LocalRuntimeInner {
         TaskId(result)
     }
 
+    fn add_sys_handle_future(&self, future: SysHandleFuture) {
+        let sys_handle = future.inner.borrow().handle;
+
+        self.sys_handle_futures
+            .borrow_mut()
+            .entry(sys_handle)
+            .or_default()
+            .push_back(future);
+    }
+
     fn current<'a>() -> &'a Self {
         if let Some(this) = unsafe { get_local_runtime_context().as_ref() } {
             this
         } else {
             panic!("No runtime.");
-        }
-    }
-
-    fn add_sys_waiter(&self, handle: SysHandle, task_id: TaskId) {
-        let mut sys_waiters = self.sys_waiters.borrow_mut();
-
-        if let Some(tasks) = sys_waiters.get_mut(&handle) {
-            // Avoid dup adds.
-            for task in tasks.iter() {
-                if task_id == *task {
-                    return; // Already.
-                }
-            }
-            tasks.push_back(task_id);
-        } else {
-            let mut tasks = VecDeque::new();
-            tasks.push_back(task_id);
-            sys_waiters.insert(handle, tasks);
         }
     }
 
@@ -287,9 +275,7 @@ impl LocalRuntimeInner {
     }
 
     fn wait(&self, timeo: Option<Instant>) {
-        self.sys_wakes.borrow_mut().clear(); // Cancelled futures can leave residue here.
-
-        let sys_waiters = self.sys_waiters.borrow();
+        let sys_waiters = self.sys_handle_futures.borrow();
         if sys_waiters.is_empty() {
             core::mem::drop(sys_waiters);
             let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
@@ -316,14 +302,20 @@ impl LocalRuntimeInner {
                     if handle.is_none() {
                         break;
                     }
-                    let tasks = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
-                    let mut runqueue = self.runqueue.borrow_mut();
-                    for task_id in &tasks {
-                        runqueue.push_back(*task_id);
-                    }
-                    self.sys_wakes
+                    let done_futures = self
+                        .sys_handle_futures
                         .borrow_mut()
-                        .insert(handle, (tasks, moto_rt::Error::Ok));
+                        .remove(&handle)
+                        .unwrap();
+                    let mut runqueue = self.runqueue.borrow_mut();
+                    for future in done_futures {
+                        let mut inner_future = future.inner.borrow_mut();
+                        if let Some(task_id) = inner_future.task_id.take() {
+                            runqueue.push_back(task_id);
+                        }
+
+                        inner_future.result = Some(Ok(()));
+                    }
                 }
             }
             Err(moto_rt::E_TIMED_OUT) => {}
@@ -333,14 +325,20 @@ impl LocalRuntimeInner {
                         break;
                     }
 
-                    let tasks = self.sys_waiters.borrow_mut().remove(&handle).unwrap();
-                    let mut runqueue = self.runqueue.borrow_mut();
-                    for task_id in &tasks {
-                        runqueue.push_back(*task_id);
-                    }
-                    self.sys_wakes
+                    let done_futures = self
+                        .sys_handle_futures
                         .borrow_mut()
-                        .insert(handle, (tasks, moto_rt::Error::BadHandle));
+                        .remove(&handle)
+                        .unwrap();
+                    let mut runqueue = self.runqueue.borrow_mut();
+                    for future in done_futures {
+                        let mut inner_future = future.inner.borrow_mut();
+                        if let Some(task_id) = inner_future.task_id.take() {
+                            runqueue.push_back(task_id);
+                        }
+
+                        inner_future.result = Some(Err(moto_rt::Error::BadHandle));
+                    }
                 }
             }
             Err(err) => panic!("Unexpected error {err} from SysCpu::wait()."),
@@ -569,9 +567,18 @@ pub trait AsFuture {
     fn as_future(&self) -> Self::AsFuture;
 }
 
-pub struct SysHandleFuture {
+struct SysHandleFutureInner {
     handle: SysHandle,
     task_id: Option<TaskId>,
+    result: Option<Result<()>>,
+
+    #[cfg(debug_assertions)]
+    debug_ready_done: bool,
+}
+
+#[derive(Clone)]
+pub struct SysHandleFuture {
+    inner: alloc::rc::Rc<RefCell<SysHandleFutureInner>>,
 }
 
 impl AsFuture for SysHandle {
@@ -580,41 +587,41 @@ impl AsFuture for SysHandle {
     type AsFuture = SysHandleFuture;
 
     fn as_future(&self) -> Self::AsFuture {
-        SysHandleFuture {
+        let inner = alloc::rc::Rc::new(RefCell::new(SysHandleFutureInner {
             handle: *self,
             task_id: None,
-        }
+            result: None,
+
+            #[cfg(debug_assertions)]
+            debug_ready_done: false,
+        }));
+
+        let this = SysHandleFuture { inner };
+        LocalRuntimeInner::current().add_sys_handle_future(this.clone());
+        this
     }
 }
 
 impl SysHandleFuture {
-    pub fn do_poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let inner = LocalRuntimeInner::current();
-
-        let Some(task_id) = self.task_id.as_ref() else {
-            let task_id = TaskId(cx.local_waker().data() as usize as u64);
-            self.task_id = Some(task_id);
-            inner.add_sys_waiter(self.handle, task_id);
-            return Poll::Pending;
-        };
-
-        // if let Some(wait_result) = inner.sys_wakes.borrow_mut().remove(&self.handle) {
-        if let Some((tasks, wait_result)) = inner.sys_wakes.borrow_mut().get_mut(&self.handle) {
-            // Find/remove self.task_id. If it is kept in the list, the task will never sleep
-            // (if it waits on the handle).
-            for idx in 0..tasks.len() {
-                if tasks[idx] == *task_id {
-                    tasks.remove(idx);
-                    return Poll::Ready(if *wait_result == moto_rt::Error::Ok {
-                        Ok(())
-                    } else {
-                        Err(*wait_result)
-                    });
-                };
-            }
+    pub fn do_poll(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        #[cfg(debug_assertions)]
+        if self.inner.borrow_mut().debug_ready_done {
+            panic!("SysHandleFuture polled after Poll::Ready() was returned.");
         }
 
-        inner.add_sys_waiter(self.handle, *task_id);
+        let mut inner = self.inner.borrow_mut();
+
+        if let Some(result) = inner.result.take() {
+            #[cfg(debug_assertions)]
+            {
+                inner.debug_ready_done = true;
+            }
+
+            return Poll::Ready(result);
+        }
+
+        let task_id = TaskId(cx.local_waker().data() as usize as u64);
+        inner.task_id = Some(task_id);
         Poll::Pending
     }
 }
@@ -622,7 +629,7 @@ impl SysHandleFuture {
 impl Future for SysHandleFuture {
     type Output = Result<()>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.do_poll(cx)
     }
 }
