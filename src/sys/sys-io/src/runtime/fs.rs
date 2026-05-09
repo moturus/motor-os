@@ -227,14 +227,11 @@ async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {
 }
 
 async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
+    use std::sync::atomic::*;
     let (started_tx, started_rx) = moto_async::oneshot();
-    let (connected_tx, connected_rx) = moto_async::oneshot();
 
     moto_async::LocalRuntime::spawn(async move {
-        let _ = fs_listener(fs.clone(), started_tx, connected_tx).await;
-        // Spawn an extra one once the previous one is connected.
-        let _ = connected_rx.await;
-        spawn_new_listener(fs).await;
+        let _ = fs_listener(fs.clone(), started_tx).await;
     });
 
     // Note: we must not return until there is a started listener,
@@ -245,26 +242,27 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
 async fn fs_listener(
     fs: Rc<LocalMutex<FS>>,
     started_tx: moto_async::oneshot::Sender<()>,
-    connected_tx: moto_async::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
 
     // Do a poll to ensure the listener has started listening.
-    let (sender, mut receiver) =
-        match core::future::poll_fn(|cx| match listener.as_mut().poll(cx) {
+    let (sender, mut receiver) = {
+        let first_poll = core::future::poll_fn(|cx| match listener.as_mut().poll(cx) {
             std::task::Poll::Ready(res) => std::task::Poll::Ready(Some(res)),
             std::task::Poll::Pending => std::task::Poll::Ready(None),
         })
-        .await
-        {
+        .await;
+
+        let _ = started_tx.send(());
+
+        match first_poll {
             Some(res) => res,
-            None => {
-                let _ = started_tx.send(());
-                listener.await
-            }
+            None => listener.await,
         }
-        .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?;
-    let _ = connected_tx.send(());
+        .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
+    };
+
+    spawn_new_listener(fs.clone()).await;
 
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
