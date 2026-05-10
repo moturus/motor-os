@@ -66,13 +66,8 @@ impl VirtioDevice {
 
         // Pre-submit blocks.
         let mut completions = VecDeque::with_capacity(rxq_sz);
-        for _ in 0..rxq_sz / 2 {
-            completions.push_back(
-                net_dev
-                    .clone()
-                    .post_read(async_fs::Block::new_zeroed())
-                    .await,
-            );
+        for _ in 0..rxq_sz {
+            completions.push_back(net_dev.clone().post_read(BlockWrapper::new_empty()).await);
         }
 
         const HEADER_LEN: usize = virtio_async::virtio_net::header_len();
@@ -83,16 +78,11 @@ impl VirtioDevice {
             let sz_read = result.unwrap() as usize;
 
             log::debug!("NET: RX {sz_read} bytes.");
-            let rx_vec = block.as_bytes()[HEADER_LEN..sz_read].to_vec();
+            let rx_vec = block.as_ref()[HEADER_LEN..sz_read].to_vec();
             rx_queue.borrow_mut().push_back(rx_vec);
             rx_notify.notify_one();
 
-            completions.push_back(
-                net_dev
-                    .clone()
-                    .post_read(async_fs::Block::new_zeroed())
-                    .await,
-            );
+            completions.push_back(net_dev.clone().post_read(BlockWrapper::new_empty()).await);
         }
     }
 
@@ -113,12 +103,7 @@ impl VirtioDevice {
 
             if let Some(tx_vec) = maybe_tx_vec {
                 // TODO: optimize
-                let mut block = BlockWrapper {
-                    block: Box::new(async_fs::Block::new_zeroed()),
-                    len: 0,
-                };
-                block.block.as_bytes_mut()[..tx_vec.len()].clone_from_slice(&tx_vec);
-                block.len = tx_vec.len();
+                let block = BlockWrapper::from_bytes(&tx_vec);
                 log::debug!("NET TX {} bytes", tx_vec.len());
                 completions.push_back(net_dev.clone().post_write(block).await);
             } else {
@@ -133,9 +118,31 @@ struct BlockWrapper {
     len: usize,
 }
 
+impl BlockWrapper {
+    fn new_empty() -> Self {
+        Self {
+            block: Box::new(async_fs::Block::new_zeroed()),
+            len: async_fs::BLOCK_SIZE,
+        }
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let mut this = Self::new_empty();
+        this.block.as_bytes_mut()[..bytes.len()].clone_from_slice(bytes);
+        this.len = bytes.len();
+        this
+    }
+}
+
 impl AsRef<[u8]> for BlockWrapper {
     fn as_ref(&self) -> &[u8] {
         &self.block.as_bytes()[..self.len]
+    }
+}
+
+impl AsMut<[u8]> for BlockWrapper {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.block.as_bytes_mut()[..self.len]
     }
 }
 
