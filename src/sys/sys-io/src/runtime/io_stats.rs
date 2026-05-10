@@ -16,13 +16,10 @@ fn stats_service_thread() -> ! {
     ) {
         Ok(s) => s,
         Err(err) => {
-            crate::moto_log!(
-                "{}:{} error starting IO stats service: {:?}.",
-                file!(),
-                line!(),
-                err
-            );
-            std::process::exit(-1)
+            log::error!("Error starting IO stats service: {err:?}.",);
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
+            }
         }
     };
 
