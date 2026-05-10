@@ -312,9 +312,8 @@ impl BlockDevice {
         ];
 
         core::mem::drop(virtqueue);
-        Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ())
-            .await
-            .1
-            .map(|_| ())
+        let vq_completion =
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, &[]);
+        WriteCompletion { vq_completion }.await.1.map(|_| ())
     }
 }

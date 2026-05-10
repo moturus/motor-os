@@ -626,13 +626,8 @@ pub(crate) struct VqCompletion<T: Unpin> {
     data: Option<T>,
 }
 
-impl<T: Unpin> Future for VqCompletion<T> {
-    type Output = (T, Result<u32>);
-
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
+impl<T: Unpin> VqCompletion<T> {
+    fn do_poll(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<(T, Result<u32>)> {
         let mut virtq = self.virtqueue.borrow_mut();
 
         'outer: loop {
@@ -646,15 +641,14 @@ impl<T: Unpin> Future for VqCompletion<T> {
                 if status == 0 {
                     // log::debug!("completion done: OK: {consumed}");
                     drop(virtq);
-                    let this = self.get_mut();
-                    return std::task::Poll::Ready((this.data.take().unwrap(), Ok(consumed)));
+                    return std::task::Poll::Ready((self.data.take().unwrap(), Ok(consumed)));
                 } else {
                     log::error!("Bad VirtQ status: {status}.");
                     virtq.enable_irq();
                     drop(virtq);
-                    let this = self.get_mut();
+                    // let this = self.get_mut();
                     return std::task::Poll::Ready((
-                        this.data.take().unwrap(),
+                        self.data.take().unwrap(),
                         Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
                     ));
                 }
@@ -722,12 +716,10 @@ impl<T: AsRef<[u8]> + Unpin> Future for WriteCompletion<T> {
     type Output = (T, Result<u32>);
 
     fn poll(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // SAFETY: We are manually projecting the Pin.
-        let pinned = unsafe { self.map_unchecked_mut(|s| &mut s.vq_completion) };
-        pinned.poll(cx)
+        self.as_mut().vq_completion.do_poll(cx)
     }
 }
 
@@ -742,8 +734,6 @@ impl<T: AsMut<[u8]> + Unpin> Future for ReadCompletion<T> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // SAFETY: We are manually projecting the Pin.
-        let pinned = unsafe { self.map_unchecked_mut(|s| &mut s.vq_completion) };
-        pinned.poll(cx)
+        self.as_mut().vq_completion.do_poll(cx)
     }
 }
