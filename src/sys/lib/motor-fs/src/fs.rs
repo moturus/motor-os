@@ -11,6 +11,11 @@ use async_trait::async_trait;
 use std::io::ErrorKind;
 use std::io::Result;
 
+#[cfg(not(target_os = "motor"))]
+use fittings::iobuf::IoBuf;
+#[cfg(target_os = "motor")]
+use moto_tooling::iobuf::IoBuf;
+
 use crate::{
     DirEntryBlock, EntryIdInternal, MAX_BLOCKS_IN_TXN_LOG, RESERVED_BLOCKS, ROOT_DIR_ID,
     ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry, validate_filename,
@@ -62,8 +67,14 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         }
         let (superblock, root_dir) = Superblock::format(dev.num_blocks());
 
-        dev.write_block(0, superblock.as_bytes()).await?;
-        dev.write_block(1, root_dir.as_bytes()).await?;
+        let mut iobuf = IoBuf::new_from_size_align(BLOCK_SIZE).unwrap();
+        AsMut::<[u8]>::as_mut(&mut iobuf).clone_from_slice(superblock.as_bytes());
+        let (mut iobuf, res) = dev.write_block(0, iobuf).await;
+        res?;
+
+        AsMut::<[u8]>::as_mut(&mut iobuf).clone_from_slice(root_dir.as_bytes());
+        let (_, res) = dev.write_block(1, iobuf).await;
+        res?;
 
         let mut block_cache = BlockCache::new(
             dev,
