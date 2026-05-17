@@ -1,9 +1,9 @@
 use crate::AsyncBlockDevice;
 use crate::BLOCK_SIZE;
-use crate::Block;
 use crate::block_cache::CheckpointedBlock;
 use async_trait::async_trait;
 use camino::Utf8Path;
+use fittings::iobuf::IoBuf;
 use std::io::ErrorKind;
 use std::io::Result;
 
@@ -56,37 +56,59 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         self.num_blocks
     }
 
-    async fn read_block(&self, block_no: u64, block: &mut Block) -> Result<()> {
+    async fn read_block<T: AsMut<IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        mut block: T,
+    ) -> (T, Result<()>) {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncSeekExt;
 
         if block_no >= self.num_blocks {
             log::debug!("Block number {block_no} out of range.");
-            return Err(ErrorKind::InvalidInput.into());
+            return (block, Err(ErrorKind::InvalidInput.into()));
         }
 
         let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
-            .await?;
+        if let Err(err) = file
+            .seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
+            .await
+        {
+            return (block, Err(err));
+        }
 
-        file.read_exact(block.as_bytes_mut()).await.map(|_| {})
+        let res = file
+            .read_exact(AsMut::<[u8]>::as_mut(block.as_mut()))
+            .await
+            .map(|_| {});
+
+        (block, res)
     }
 
-    async fn write_block(&self, block_no: u64, block: &[u8]) -> Result<()> {
+    async fn write_block<T: AsRef<IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
         use tokio::io::AsyncSeekExt;
         use tokio::io::AsyncWriteExt;
 
-        assert_eq!(block.len(), BLOCK_SIZE);
         if block_no >= self.num_blocks {
             log::debug!("Block number {block_no} out of range.");
-            return Err(ErrorKind::InvalidInput.into());
+            return (block, Err(ErrorKind::InvalidInput.into()));
         }
 
         let mut file = self.file.lock().await;
-        file.seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
-            .await?;
+        let res = file
+            .seek(std::io::SeekFrom::Start(block_no * (BLOCK_SIZE as u64)))
+            .await;
 
-        file.write_all(block).await
+        if let Err(err) = res {
+            return (block, Err(err));
+        }
+
+        let res = file.write_all(block.as_ref().as_ref()).await;
+        (block, res)
     }
 
     async fn write_block_with_completion(
@@ -94,8 +116,8 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         block_no: u64,
         block: CheckpointedBlock,
     ) -> Result<Self::Completion> {
-        self.write_block(block_no, block.as_ref()).await?;
-        Ok(core::future::ready((block, Ok(()))))
+        let (block, res) = self.write_block(block_no, block).await;
+        Ok(core::future::ready((block, res)))
     }
 
     async fn flush(&self) -> Result<()> {

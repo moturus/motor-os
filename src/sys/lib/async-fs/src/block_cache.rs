@@ -31,14 +31,80 @@ use alloc::rc::Weak;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+#[cfg(not(target_os = "motor"))]
+use fittings::iobuf::IoBuf;
+#[cfg(target_os = "motor")]
+use moto_tooling::iobuf::IoBuf;
+
 const MAX_COMPLETIONS_IN_FLIGHT: usize = 128;
+
+pub struct BlockHolder {
+    iobuf: IoBuf,
+}
+
+impl AsMut<IoBuf> for BlockHolder {
+    fn as_mut(&mut self) -> &mut IoBuf {
+        &mut self.iobuf
+    }
+}
+
+impl AsRef<IoBuf> for BlockHolder {
+    fn as_ref(&self) -> &IoBuf {
+        &self.iobuf
+    }
+}
+
+impl BlockHolder {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            iobuf: IoBuf::new_from_size_align(4096).unwrap(),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.iobuf.as_ref()
+    }
+
+    pub fn as_block_mut(&mut self) -> &mut Block {
+        let bytes_mut = self.iobuf.raw_ptr_mut();
+        debug_assert!(!bytes_mut.is_null());
+        debug_assert_eq!(0, (bytes_mut as usize) & 4095);
+        debug_assert_eq!(self.iobuf.len(), 4096);
+
+        // SAFETY: safe by construction.
+        unsafe {
+            (bytes_mut as *mut _ as usize as *mut Block)
+                .as_mut()
+                .unwrap_unchecked()
+        }
+    }
+
+    pub fn as_block(&self) -> &Block {
+        let bytes = self.iobuf.raw_ptr();
+        debug_assert!(!bytes.is_null());
+        debug_assert_eq!(0, (bytes as usize) & 4095);
+        debug_assert_eq!(self.iobuf.len(), 4096);
+
+        // SAFETY: safe by construction.
+        unsafe {
+            (bytes as *const _ as usize as *const Block)
+                .as_ref()
+                .unwrap_unchecked()
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.as_mut().clear();
+    }
+}
 
 // Panics if dropped when dirty (= dirty_block.is_some()).
 struct InnerCachedBlock {
     block_no: u64,
 
-    dirty_block: Option<Box<Block>>,
-    clean_block: Rc<Box<Block>>,
+    dirty_block: Option<BlockHolder>,
+    clean_block: Rc<BlockHolder>,
 
     supporting_caches: Rc<RefCell<SupportingCaches>>,
 }
@@ -65,7 +131,7 @@ impl Drop for InnerCachedBlock {
 /// Holder of a block to be written to BD.
 #[derive(Clone)]
 pub struct CheckpointedBlock {
-    block: Rc<Box<Block>>, // This is what we are writing.
+    block: Rc<BlockHolder>, // This is what we are writing.
 
     // Need to keep a reference of the cached block, otherwise
     // it may get dropped and a read will return old data.
@@ -76,6 +142,12 @@ pub struct CheckpointedBlock {
 impl AsRef<[u8]> for CheckpointedBlock {
     fn as_ref(&self) -> &[u8] {
         self.block.as_bytes()
+    }
+}
+
+impl AsRef<IoBuf> for CheckpointedBlock {
+    fn as_ref(&self) -> &IoBuf {
+        self.block.as_ref().as_ref()
     }
 }
 
@@ -95,12 +167,12 @@ impl CheckpointedBlock {
         if Rc::strong_count(&self.block) > 1 {
             let mut block = self.caches.borrow_mut().pop_free_block();
             {
-                let block_ref: &mut Block = Rc::get_mut(&mut block).unwrap().as_mut();
-                *block_ref = **self.block;
+                let block_ref: &mut Block = Rc::get_mut(&mut block).unwrap().as_block_mut();
+                *block_ref = *self.block.as_ref().as_block();
             }
             core::mem::swap(&mut block, &mut self.block);
         }
-        Rc::get_mut(&mut self.block).unwrap().as_mut()
+        Rc::get_mut(&mut self.block).unwrap().as_block_mut()
     }
 }
 
@@ -123,7 +195,7 @@ const _: () = assert!(size_of::<CachedBlock>() <= 32);
 impl CachedBlock {
     fn new(
         block_no: u64,
-        clean_block: Rc<Box<Block>>,
+        clean_block: Rc<BlockHolder>,
         supporting_caches: Rc<RefCell<SupportingCaches>>,
     ) -> Self {
         Self {
@@ -146,9 +218,9 @@ impl CachedBlock {
     pub fn block(&self) -> core::cell::Ref<'_, Block> {
         core::cell::Ref::map(self.inner.borrow(), |inner| {
             if let Some(dirty) = inner.dirty_block.as_ref() {
-                dirty.as_ref()
+                dirty.as_block()
             } else {
-                inner.clean_block.as_ref()
+                inner.clean_block.as_ref().as_block()
             }
         })
     }
@@ -164,12 +236,12 @@ impl CachedBlock {
             let Ok(mut box_copy) = Rc::try_unwrap(rc_copy) else {
                 panic!();
             };
-            *box_copy = **block_ref.clean_block;
+            *box_copy.as_block_mut() = *block_ref.clean_block.as_ref().as_block();
             block_ref.dirty_block = Some(box_copy);
         }
 
         core::cell::RefMut::map(block_ref, |inner| {
-            inner.dirty_block.as_mut().unwrap().as_mut()
+            inner.dirty_block.as_mut().unwrap().as_block_mut()
         })
     }
 
@@ -229,19 +301,19 @@ impl core::fmt::Debug for BackgroundMessage {
 }
 
 struct SupportingCaches {
-    free_blocks: Vec<Rc<Box<Block>>>,
+    free_blocks: Vec<Rc<BlockHolder>>,
     expiring_blocks: BTreeMap<u64, Weak<RefCell<InnerCachedBlock>>>,
 }
 
 impl SupportingCaches {
-    fn push_free_block(&mut self, block: Rc<Box<Block>>) {
+    fn push_free_block(&mut self, block: Rc<BlockHolder>) {
         self.free_blocks.push(block);
     }
 
-    fn pop_free_block(&mut self) -> Rc<Box<Block>> {
+    fn pop_free_block(&mut self) -> Rc<BlockHolder> {
         self.free_blocks
             .pop()
-            .unwrap_or_else(|| Rc::new(Box::new(Block::new_zeroed())))
+            .unwrap_or_else(|| Rc::new(BlockHolder::new()))
     }
 
     fn push_expiring_block(&mut self, block_no: u64, block: &Rc<RefCell<InnerCachedBlock>>) {
@@ -403,13 +475,12 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         let mut pinned_blocks = Vec::with_capacity(pinned_blocks_num);
         for idx in 0..pinned_blocks_num {
             let block_no = pinned_blocks_start + idx as u64;
-            let mut block = Box::new(Block::new_zeroed());
-            block_dev
-                .read_block(block_no, &mut block)
-                .await
-                .inspect_err(|err| {
-                    log::error!("Error reading block 0x{block_no:x}: {err:?}.");
-                })?;
+            let (block, result) = block_dev.read_block(block_no, BlockHolder::new()).await;
+
+            result.inspect_err(|err| {
+                log::error!("Error reading block 0x{block_no:x}: {err:?}.");
+            })?;
+
             pinned_blocks.push(CachedBlock::new(
                 block_no,
                 Rc::new(block),
@@ -417,13 +488,12 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             ));
         }
 
-        let mut block = Box::new(Block::new_zeroed());
-        block_dev
-            .read_block(0, &mut block)
-            .await
-            .inspect_err(|err| {
-                log::error!("Error reading superblock: {err:?}.");
-            })?;
+        let (block, result) = block_dev.read_block(0, BlockHolder::new()).await;
+
+        result.inspect_err(|err| {
+            log::error!("Error reading superblock: {err:?}.");
+        })?;
+
         let superblock = CachedBlock::new(0, Rc::new(block), supporting_caches.clone());
 
         let async_stub = AsyncStub {
@@ -508,13 +578,14 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
         self.cache_misses += 1;
         let rc_block = self.supporting_caches.borrow_mut().pop_free_block();
-        let Ok(mut box_block) = Rc::try_unwrap(rc_block) else {
+        let Ok(block) = Rc::try_unwrap(rc_block) else {
             panic!()
         };
 
-        self.block_dev.read_block(block_no, &mut box_block).await?;
+        let (block, result) = self.block_dev.read_block(block_no, block).await;
+        result?;
         let cached_block =
-            CachedBlock::new(block_no, Rc::new(box_block), self.supporting_caches.clone());
+            CachedBlock::new(block_no, Rc::new(block), self.supporting_caches.clone());
 
         self.push_block(block_no, cached_block.clone());
 

@@ -16,9 +16,11 @@ lru = "0.14.0"
 bytemuck = { version = "1.24", features = ["latest_stable_rust"] }
 
 [target.'cfg(target_os = "motor")'.dependencies]
-moto-rt    = { path = "../moto-rt"    }
-moto-async = { path = "../moto-async" }
+moto-async   = { path = "../moto-async"   }
+moto-rt      = { path = "../moto-rt"      }
+moto-tooling = { path = "../moto-tooling" }
 
 [target.'cfg(not(target_os = "motor"))'.dependencies]
-tokio  = { version = "1.44.2", default-features = false, features = ["fs", "io-util", "rt", "sync", "time"] }
-camino = { version = "1.1.10" }
+fittings = { path = "../fittings" }
+tokio    = { version = "1.44.2", default-features = false, features = ["fs", "io-util", "rt", "sync", "time"] }
+camino   = { version = "1.1.10" }
