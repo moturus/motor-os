@@ -1,0 +1,13 @@
+[package]
+name = "moto-tooling"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+std = []
+
+[dependencies]
+fittings = { path = "../fittings" }
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-sys = { path = "../moto-sys"    }
