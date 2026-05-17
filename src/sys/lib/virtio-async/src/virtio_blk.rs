@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use core::sync::atomic::*;
 use moto_rt::spinlock::SpinLock;
+use moto_tooling::iobuf::IoBuf;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::io::Result;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use zerocopy::FromZeros;
 
 use super::pci::PciBar;
 use super::virtio_device::VirtioDevice;
@@ -172,102 +172,102 @@ impl BlockDevice {
     }
 
     #[inline(never)]
-    pub async fn post_read<T: AsMut<[u8]> + Unpin>(
+    pub async fn post_read<T: AsMut<IoBuf> + Unpin>(
         self: Rc<Self>,
         sector: u64,
         mut bytes: T,
     ) -> ReadCompletion<T> {
+        use super::virtio_queue::UserData;
+
+        assert_eq!(bytes.as_mut().len(), 4096);
+
         let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
         let mut virtqueue = self.virtqueue.borrow_mut();
 
-        let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
-
+        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
         *header = BlkHeader {
             type_: 0, /* VIRTIO_BLK_T_IN */
             _reserved: 0,
             sector,
         };
 
-        const VIRTIO_BLK_S_OK: u8 = 0;
-        const VIRTIO_BLK_S_IOERR: u8 = 1;
-        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
-
-        let (_, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
-        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
-        let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
-        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
-
-        let buf = bytes.as_mut();
-        assert!(buf.len() <= BLOCK_SIZE);
-        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
-
-        use super::virtio_queue::UserData;
-        let buffs: [UserData; 3] = [
-            UserData {
-                addr: header as *mut _ as usize as u64,
-                len: core::mem::size_of::<BlkHeader>() as u32,
-            },
-            UserData {
-                addr: buf.as_mut_ptr() as usize as u64,
-                len: buf.len() as u32,
-            },
-            UserData {
-                addr: status as *mut _ as usize as u64,
-                len: 1,
-            },
-        ];
-
-        drop(virtqueue);
-        let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head, bytes);
-
-        ReadCompletion { vq_completion }
-    }
-
-    #[inline(never)]
-    pub async fn post_write<T: AsRef<[u8]> + Unpin>(
-        self: Rc<Self>,
-        sector: u64,
-        bytes: T,
-    ) -> WriteCompletion<T> {
-        let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
-        let mut virtqueue = self.virtqueue.borrow_mut();
-
-        let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
-
-        *header = BlkHeader {
-            type_: 1, /* VIRTIO_BLK_T_OUT */
-            _reserved: 0,
-            sector,
+        let header_data = UserData {
+            phys_addr,
+            len: core::mem::size_of::<BlkHeader>() as u32,
         };
 
         const VIRTIO_BLK_S_OK: u8 = 0;
         const VIRTIO_BLK_S_IOERR: u8 = 1;
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
-        let (_, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
+        let (_, _, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
         // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
-        let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
+        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
         *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
 
-        let buf: &[u8] = bytes.as_ref();
-        assert!(buf.len() <= BLOCK_SIZE);
-        assert_eq!(0, (buf.as_ptr() as usize) & (BLOCK_SIZE - 1));
-
-        use super::virtio_queue::UserData;
         let buffs: [UserData; 3] = [
+            header_data,
             UserData {
-                addr: header as *mut _ as usize as u64,
-                len: core::mem::size_of::<BlkHeader>() as u32,
+                phys_addr: bytes.as_mut().phys_addr() as u64,
+                len: 4096,
             },
+            UserData { phys_addr, len: 1 },
+        ];
+
+        drop(virtqueue);
+        let vq_completion =
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 2, chain_head, bytes);
+
+        // Status is often included. We hard-code block size for simplicity.
+        const READ_SIZE_ADJUSTOR: fn(u32) -> u32 = |_| 4096;
+
+        ReadCompletion {
+            vq_completion,
+            size_adjustor: READ_SIZE_ADJUSTOR,
+        }
+    }
+
+    #[inline(never)]
+    pub async fn post_write<T: AsRef<IoBuf> + Unpin>(
+        self: Rc<Self>,
+        sector: u64,
+        bytes: T,
+    ) -> WriteCompletion<T> {
+        use super::virtio_queue::UserData;
+
+        assert_eq!(bytes.as_ref().len(), 4096);
+
+        let chain_head = VqAlloc::new(self.virtqueue.clone(), 3).await;
+        let mut virtqueue = self.virtqueue.borrow_mut();
+
+        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
+        *header = BlkHeader {
+            type_: 1, /* VIRTIO_BLK_T_OUT */
+            _reserved: 0,
+            sector,
+        };
+
+        let header_data = UserData {
+            phys_addr,
+            len: core::mem::size_of::<BlkHeader>() as u32,
+        };
+
+        const VIRTIO_BLK_S_OK: u8 = 0;
+        const VIRTIO_BLK_S_IOERR: u8 = 1;
+        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
+
+        let (_, _, next_idx) = virtqueue.get_buffer::<u64>(next_idx); // Skip the second buffer (unused).
+        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
+        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
+        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
+
+        let buffs: [UserData; 3] = [
+            header_data,
             UserData {
-                addr: buf.as_ptr() as usize as u64,
-                len: buf.len() as u32,
+                phys_addr: bytes.as_ref().phys_addr() as u64,
+                len: 4096,
             },
-            UserData {
-                addr: status as *mut _ as usize as u64,
-                len: 1,
-            },
+            UserData { phys_addr, len: 1 },
         ];
 
         drop(virtqueue);
@@ -280,40 +280,37 @@ impl BlockDevice {
     /// Returns the ID of the submitted request.
     #[inline(never)]
     pub async fn post_flush(self: Rc<Self>) -> Result<()> {
+        use super::virtio_queue::UserData;
+
         let chain_head = VqAlloc::new(self.virtqueue.clone(), 2).await;
-
         let mut virtqueue = self.virtqueue.borrow_mut();
-        let (header, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
 
+        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
         *header = BlkHeader {
             type_: 4, /* VIRTIO_BLK_T_FLUSH */
             _reserved: 0,
             sector: 0,
         };
 
+        let header_data = UserData {
+            phys_addr,
+            len: core::mem::size_of::<BlkHeader>() as u32,
+        };
+
         const VIRTIO_BLK_S_OK: u8 = 0;
         const VIRTIO_BLK_S_IOERR: u8 = 1;
         const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
-        // If we use a single byte for status, CHV corrupts the stack (writes more than one byte).
-        let (status, _) = virtqueue.get_buffer::<u64>(next_idx);
+        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
         *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
 
-        use super::virtio_queue::UserData;
-        let buffs: [UserData; 2] = [
-            UserData {
-                addr: header as *mut _ as usize as u64,
-                len: core::mem::size_of::<BlkHeader>() as u32,
-            },
-            UserData {
-                addr: status as *mut _ as usize as u64,
-                len: 1,
-            },
-        ];
+        let buffs: [UserData; 2] = [header_data, UserData { phys_addr, len: 1 }];
 
         core::mem::drop(virtqueue);
+
         let vq_completion =
-            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, &[]);
+            Virtqueue::add_buffs(self.virtqueue.clone(), &buffs, 1, 1, chain_head, ());
+
         WriteCompletion { vq_completion }.await.1.map(|_| ())
     }
 }

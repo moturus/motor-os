@@ -3,14 +3,16 @@ use super::virtio_device::VirtioDevice;
 use super::{le16, le32, le64};
 use crate::pci::PciBar;
 use crate::virtio_device::mapper;
+
 use moto_async::AsFuture;
 use moto_sys::SysHandle;
+use moto_tooling::iobuf::IoBuf;
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Result};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use zerocopy::FromZeros;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -36,7 +38,7 @@ struct VirtqAvail {
 unsafe impl Send for VirtqAvail {}
 
 pub struct UserData {
-    pub addr: u64,
+    pub phys_addr: u64,
     pub len: u32,
 }
 
@@ -101,17 +103,12 @@ impl VirtqUsed {
     }
 }
 
-#[derive(FromZeros)]
-#[repr(C, align(8))]
 struct HeaderBuffer {
-    header: [u64; 2],
-    consumed: u32, // From the descriptor.
-    in_use_by_device: u8,
-    in_use_by_completion: u8,
-    _reserved: [u8; 2],
+    buf: IoBuf,
+    consumed: u32,
+    in_use_by_device: bool,
+    in_use_by_completion: bool,
 }
-
-static _A: () = assert!(core::mem::size_of::<HeaderBuffer>() == 24);
 
 pub(crate) struct VqAlloc {
     num_to_alloc: u16,
@@ -175,8 +172,7 @@ pub(super) struct Virtqueue {
     // on stack; so we either need to allocate/deallocate them on each request, ask
     // the user to provide the memory to us with each request, or pre-allocate them
     // here. We preallocate them here.
-    header_buffers: &'static mut [HeaderBuffer],
-    header_buffers_phys_addr: u64,
+    header_buffers: Vec<HeaderBuffer>,
 
     // These are actual parameters to use in `fn notify()`.
     notify_bar: *const PciBar,
@@ -242,16 +238,17 @@ impl Virtqueue {
         let available_ring = VirtqAvail::from_addr(virt_addr, queue_size);
         let used_ring = VirtqUsed::from_addr(virt_addr, queue_size);
 
-        let header_buffers_vaddr = super::mapper()
-            .alloc_contiguous_pages((core::mem::size_of::<HeaderBuffer>() as u64) * queue_sz)?;
-        let header_buffers = unsafe {
-            core::slice::from_raw_parts_mut(
-                header_buffers_vaddr as *mut HeaderBuffer,
-                queue_size as usize,
-            )
-        };
+        let mut header_buffers = Vec::with_capacity(queue_sz as usize);
+        for _ in 0..queue_sz {
+            let buffer = HeaderBuffer {
+                buf: IoBuf::new_from_size_align(16).unwrap(),
+                consumed: 0,
+                in_use_by_device: false,
+                in_use_by_completion: false,
+            };
+            header_buffers.push(buffer);
+        }
 
-        let header_buffers_phys_addr = super::mapper().virt_to_phys(header_buffers_vaddr)?;
         let mut completion_waiters = Vec::with_capacity(queue_size as usize);
         completion_waiters.resize(queue_size as usize, None);
 
@@ -269,7 +266,6 @@ impl Virtqueue {
             next_used_idx: 0,
             wait_handle: SysHandle::NONE,
             header_buffers,
-            header_buffers_phys_addr,
             notify_bar: core::ptr::null(),
             notify_offset: 0,
             queue_size_mask: queue_size - 1,
@@ -281,6 +277,33 @@ impl Virtqueue {
         // Self::spawn_monitoring(self_.clone());
         Ok(self_)
     }
+
+    /*
+    fn spawn_monitoring(this: Rc<RefCell<Self>>) {
+        moto_async::LocalRuntime::spawn(async move {
+            loop {
+                moto_async::sleep(std::time::Duration::from_secs(3)).await;
+                let vq = this.borrow();
+
+                let alloc_waiters = vq.alloc_waiters.len();
+                let mut completion_waiters = 0;
+                for cw in &vq.completion_waiters {
+                    if cw.is_some() {
+                        completion_waiters += 1;
+                    }
+                }
+
+                if alloc_waiters + completion_waiters > 0 {
+                    log::error!(
+                        "vq: aw: {alloc_waiters} cw: {completion_waiters} has_used: {}",
+                        vq.has_new_used()
+                    );
+                } else {
+                    log::error!("vq: emty");
+                }
+            }
+        });
+    }*/
 
     pub fn queue_size(&self) -> u16 {
         self.queue_size
@@ -376,10 +399,10 @@ impl Virtqueue {
             debug_assert!(curr < self.queue_size);
 
             let header_buffer = &mut self.header_buffers[curr as usize];
-            if header_buffer.in_use_by_device != 0 || header_buffer.in_use_by_completion != 0 {
+            if header_buffer.in_use_by_device || header_buffer.in_use_by_completion {
                 break;
             }
-            header_buffer.in_use_by_device = 1;
+            header_buffer.in_use_by_device = true;
 
             let descriptor = self.get_descriptor_mut(curr);
 
@@ -398,10 +421,10 @@ impl Virtqueue {
         // Allocation failed: clear "in_use".
         curr = chain_start;
         loop {
-            if self.header_buffers[curr as usize].in_use_by_device == 0 {
+            if !self.header_buffers[curr as usize].in_use_by_device {
                 break;
             }
-            self.header_buffers[curr as usize].in_use_by_device = 0;
+            self.header_buffers[curr as usize].in_use_by_device = false;
             curr = self.get_descriptor_mut(curr).next;
         }
 
@@ -417,8 +440,8 @@ impl Virtqueue {
         // debug_assert_ne!(curr, free_head_idx);
 
         loop {
-            debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_device);
-            debug_assert_eq!(0, self.header_buffers[curr as usize].in_use_by_completion);
+            debug_assert!(!self.header_buffers[curr as usize].in_use_by_device);
+            debug_assert!(!self.header_buffers[curr as usize].in_use_by_completion);
 
             let descriptor = self.get_descriptor_mut(curr);
             if descriptor.flags & VIRTQ_DESC_F_NEXT == 0 {
@@ -441,14 +464,19 @@ impl Virtqueue {
     }
 
     /// Get a buffer to use with descriptor at idx; return the buffer and the next idx.
-    pub fn get_buffer<T>(&mut self, idx: u16) -> (&'static mut T, u16) {
+    pub fn get_buffer<T>(&mut self, idx: u16) -> (&'static mut T, u64, u16) {
         debug_assert!(idx < self.queue_size);
         debug_assert!(core::mem::size_of::<T>() <= 16);
         let next = self.get_descriptor_mut(idx).next;
         // Safety: checked above that the inded and the size are Ok.
         unsafe {
-            let addr = (&mut self.header_buffers[idx as usize].header) as *mut _ as usize;
-            ((addr as *mut T).as_mut().unwrap(), next)
+            let pbuf = &mut self.header_buffers[idx as usize].buf;
+            let addr = pbuf.raw_ptr_mut() as usize;
+            (
+                (addr as *mut T).as_mut().unwrap(),
+                pbuf.phys_addr() as u64,
+                next,
+            )
         }
     }
 
@@ -464,7 +492,7 @@ impl Virtqueue {
         &self.descriptors[idx as usize]
     }
 
-    pub(crate) fn add_buffs<T: Unpin>(
+    pub(crate) fn add_buffs<T>(
         this: Rc<RefCell<Self>>,
         data: &[UserData],
         outgoing: u16,
@@ -480,12 +508,13 @@ impl Virtqueue {
 
         let elements = outgoing + incoming;
         for el_idx in 0..elements {
-            debug_assert_eq!(1, this_mut.header_buffers[curr as usize].in_use_by_device);
-            this_mut.header_buffers[curr as usize].in_use_by_completion = 1;
+            debug_assert!(this_mut.header_buffers[curr as usize].in_use_by_device);
+            this_mut.header_buffers[curr as usize].in_use_by_completion = true;
 
             let descriptor = this_mut.get_descriptor_mut(curr);
             let el = data.get(el_idx as usize).unwrap();
-            descriptor.addr = super::mapper().virt_to_phys(el.addr).unwrap();
+            // descriptor.addr = super::mapper().virt_to_phys(el.addr).unwrap();
+            descriptor.addr = el.phys_addr;
             descriptor.len = el.len;
 
             let mut flags: u16 = 0;
@@ -502,13 +531,13 @@ impl Virtqueue {
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
         this_mut.update_and_increment_available_idx(chain_head);
-        // this_mut.notify();
         core::mem::drop(this_mut);
 
         VqCompletion {
             chain_head,
             virtqueue: this,
             data: Some(bytes),
+            syshandle_future: None,
         }
     }
 
@@ -535,13 +564,13 @@ impl Virtqueue {
         let mut curr = chain_head;
         let mut chain_in_use = true;
         loop {
-            self.header_buffers[curr as usize].in_use_by_device = 0;
+            self.header_buffers[curr as usize].in_use_by_device = false;
             if curr == chain_head {
-                chain_in_use = self.header_buffers[curr as usize].in_use_by_completion == 1;
+                chain_in_use = self.header_buffers[curr as usize].in_use_by_completion;
             } else {
                 debug_assert_eq!(
                     chain_in_use,
-                    self.header_buffers[curr as usize].in_use_by_completion == 1
+                    self.header_buffers[curr as usize].in_use_by_completion
                 );
             }
 
@@ -565,14 +594,14 @@ impl Virtqueue {
         Some(chain_head)
     }
 
-    fn get_result(&self, chain_head: u16) -> (u32, u8) {
+    fn get_result(&self, chain_head: u16) -> u32 {
         let consumed = self.header_buffers[chain_head as usize].consumed;
 
         let mut curr = chain_head;
         loop {
             let header_buffer = &self.header_buffers[curr as usize];
-            debug_assert_eq!(0, header_buffer.in_use_by_device);
-            debug_assert_eq!(1, header_buffer.in_use_by_completion);
+            debug_assert!(!header_buffer.in_use_by_device);
+            debug_assert!(header_buffer.in_use_by_completion);
 
             let descriptor = self.get_descriptor(curr);
             if descriptor.flags & VIRTQ_DESC_F_NEXT != 0 {
@@ -580,38 +609,10 @@ impl Virtqueue {
                 continue;
             }
 
-            // This is the last descriptor, with status.
-            return (consumed, header_buffer.header[0] as u8);
+            // This is the last descriptor.
+            return consumed;
         }
     }
-
-    /*
-    fn spawn_monitoring(this: Rc<RefCell<Self>>) {
-        moto_async::LocalRuntime::spawn(async move {
-            loop {
-                moto_async::sleep(std::time::Duration::from_secs(3)).await;
-                let vq = this.borrow();
-
-                let alloc_waiters = vq.alloc_waiters.len();
-                let mut completion_waiters = 0;
-                for cw in &vq.completion_waiters {
-                    if cw.is_some() {
-                        completion_waiters += 1;
-                    }
-                }
-
-                if alloc_waiters + completion_waiters > 0 {
-                    log::error!(
-                        "vq: aw: {alloc_waiters} cw: {completion_waiters} has_used: {}",
-                        vq.has_new_used()
-                    );
-                } else {
-                    log::error!("vq: emty");
-                }
-            }
-        });
-    }
-    */
 }
 
 impl Drop for Virtqueue {
@@ -620,47 +621,48 @@ impl Drop for Virtqueue {
     }
 }
 
-pub(crate) struct VqCompletion<T: Unpin> {
+pub(crate) struct VqCompletion<T> {
     chain_head: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
-    data: Option<T>,
+    data: Option<T>, // Option because we need to take it out.
+    syshandle_future: Option<moto_async::SysHandleFuture>,
 }
 
-impl<T: Unpin> VqCompletion<T> {
-    fn do_poll(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<(T, Result<u32>)> {
+impl<T> VqCompletion<T> {
+    fn do_poll(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<(T, Result<(u32)>)> {
         let mut virtq = self.virtqueue.borrow_mut();
 
         'outer: loop {
             virtq.disable_irq();
             while let Some(_chain_head) = virtq.reclaim_used() {}
 
-            if virtq.header_buffers[self.chain_head as usize].in_use_by_device == 0 {
+            if !virtq.header_buffers[self.chain_head as usize].in_use_by_device {
                 virtq.completion_waiters[self.chain_head as usize] = None;
-                let (consumed, status) = virtq.get_result(self.chain_head);
+                let consumed = virtq.get_result(self.chain_head);
 
-                if status == 0 {
-                    // log::debug!("completion done: OK: {consumed}");
-                    drop(virtq);
-                    return std::task::Poll::Ready((self.data.take().unwrap(), Ok(consumed)));
-                } else {
-                    log::error!("Bad VirtQ status: {status}.");
-                    virtq.enable_irq();
-                    drop(virtq);
-                    // let this = self.get_mut();
-                    return std::task::Poll::Ready((
-                        self.data.take().unwrap(),
-                        Err(std::io::Error::from(std::io::ErrorKind::InvalidData)),
-                    ));
+                // log::debug!("completion done: OK: {consumed}");
+                drop(virtq);
+                self.syshandle_future = None;
+                return std::task::Poll::Ready((self.data.take().unwrap(), Ok(consumed)));
+            }
+
+            if self.syshandle_future.is_none() {
+                self.syshandle_future = Some(virtq.wait_handle.as_future());
+                #[cfg(debug_assertions)]
+                {
+                    if moto_async::current_task_id() == 14 {
+                        self.syshandle_future.as_ref().unwrap().set_debug_log(true);
+                    }
                 }
             }
 
             // Always enable, as it may change the event_idx based on work done above.
             virtq.enable_irq();
 
-            // Register the IRQ as waker for this task (by polling irq_waiter).
-            let mut device_irq_waiter = Box::pin(virtq.wait_handle.as_future());
-            match device_irq_waiter.as_mut().poll(cx) {
+            let pinned = core::pin::pin!(self.syshandle_future.as_mut().unwrap());
+            match pinned.poll(cx) {
                 std::task::Poll::Ready(_) => {
+                    self.syshandle_future = None;
                     virtq.completion_waiters[self.chain_head as usize] = None;
                     continue;
                 }
@@ -677,19 +679,19 @@ impl<T: Unpin> VqCompletion<T> {
     } // fn poll()
 }
 
-impl<T: Unpin> Drop for VqCompletion<T> {
+impl<T> Drop for VqCompletion<T> {
     fn drop(&mut self) {
         let mut virtqueue = self.virtqueue.borrow_mut();
         let mut curr = self.chain_head;
         let mut chain_in_use = true;
         loop {
-            virtqueue.header_buffers[curr as usize].in_use_by_completion = 0;
+            virtqueue.header_buffers[curr as usize].in_use_by_completion = false;
             if curr == self.chain_head {
-                chain_in_use = virtqueue.header_buffers[curr as usize].in_use_by_device == 1;
+                chain_in_use = virtqueue.header_buffers[curr as usize].in_use_by_device;
             } else {
                 debug_assert_eq!(
                     chain_in_use,
-                    virtqueue.header_buffers[curr as usize].in_use_by_device == 1
+                    virtqueue.header_buffers[curr as usize].in_use_by_device
                 );
             }
 
@@ -708,32 +710,48 @@ impl<T: Unpin> Drop for VqCompletion<T> {
     }
 }
 
-pub struct WriteCompletion<T: AsRef<[u8]> + Unpin> {
+pub struct WriteCompletion<T: Unpin> {
     pub(crate) vq_completion: VqCompletion<T>,
 }
 
-impl<T: AsRef<[u8]> + Unpin> Future for WriteCompletion<T> {
-    type Output = (T, Result<u32>);
+impl<T: Unpin> Future for WriteCompletion<T> {
+    type Output = (T, Result<()>);
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        self.as_mut().vq_completion.do_poll(cx)
+        self.as_mut()
+            .vq_completion
+            .do_poll(cx)
+            .map(|(val, res)| (val, res.map(|_| ())))
     }
 }
 
-pub struct ReadCompletion<T: AsMut<[u8]> + Unpin> {
+pub struct ReadCompletion<T: AsMut<IoBuf> + Unpin> {
     pub(crate) vq_completion: VqCompletion<T>,
+    pub(crate) size_adjustor: fn(u32) -> u32,
 }
 
-impl<T: AsMut<[u8]> + Unpin> Future for ReadCompletion<T> {
-    type Output = (T, Result<u32>);
+impl<T: AsMut<IoBuf> + Unpin> Future for ReadCompletion<T> {
+    type Output = (T, Result<()>);
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        self.as_mut().vq_completion.do_poll(cx)
+        self.as_mut()
+            .vq_completion
+            .do_poll(cx)
+            .map(|(mut val, res)| {
+                if let Ok(sz) = res {
+                    if sz != 4097 {
+                        log::debug!("ReadCompletion done: {sz}");
+                    }
+                    val.as_mut().set_len((self.size_adjustor)(sz) as usize);
+                }
+
+                (val, res.map(|_| ()))
+            })
     }
 }
