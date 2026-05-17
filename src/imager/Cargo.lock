@@ -89,10 +89,12 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "camino",
+ "fittings",
  "log",
  "lru",
  "moto-async",
  "moto-rt",
+ "moto-tooling",
  "tokio",
 ]
 
@@ -271,6 +273,10 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "fittings"
+version = "0.1.0"
 
 [[package]]
 name = "flatfs"
@@ -526,6 +532,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-tooling"
+version = "0.1.0"
+dependencies = [
+ "fittings",
+ "moto-sys",
+]
+
+[[package]]
 name = "motor-fs"
 version = "0.1.0"
 dependencies = [
@@ -533,10 +547,12 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "crc",
+ "fittings",
  "log",
  "micromap",
  "moto-async",
  "moto-rt",
+ "moto-tooling",
  "tokio",
 ]
 

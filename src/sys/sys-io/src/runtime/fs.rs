@@ -155,16 +155,14 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
 
     use zerocopy::FromZeros;
 
-    let mut first_block = async_fs::Block::new_zeroed();
-    virtio_async::BlockDevice::post_read(
-        block_device.clone(),
-        0,
-        &mut first_block.as_bytes_mut()[..512],
-    )
-    .await
-    .await;
+    let first_block = moto_tooling::iobuf::IoBuf::new_from_size_align(4096).unwrap();
+    let (first_block, res) =
+        virtio_async::BlockDevice::post_read(block_device.clone(), 0, first_block)
+            .await
+            .await;
+    res?;
 
-    let mbr = mbr::Mbr::parse(&first_block.as_bytes()[..512]).map_err(|err| {
+    let mbr = mbr::Mbr::parse(&AsRef::<[u8]>::as_ref(&first_block)[..512]).map_err(|err| {
         log::error!("Mbr::parse() failed: {err:?}.");
         std::io::Error::from(ErrorKind::InvalidData)
     })?;

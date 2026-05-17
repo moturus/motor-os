@@ -15,6 +15,7 @@ moto-ipc         = { path = "../lib/moto-ipc"         }
 moto-rt          = { path = "../lib/moto-rt"          }
 moto-sys         = { path = "../lib/moto-sys"         }
 moto-sys-io      = { path = "../lib/moto-sys-io", features = ["std"] }
+moto-tooling     = { path = "../lib/moto-tooling"     }
 moto-virtio      = { path = "../lib/virtio"           }
 motor-fs         = { path = "../lib/motor-fs"         }
 srfs             = { path = "../lib/srfs"             }

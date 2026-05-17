@@ -113,10 +113,12 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "camino",
+ "fittings",
  "log",
  "lru",
  "moto-async",
  "moto-rt",
+ "moto-tooling",
  "tokio",
 ]
 
@@ -481,6 +483,10 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "fittings"
+version = "0.1.0"
 
 [[package]]
 name = "flate2"
@@ -933,6 +939,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-tooling"
+version = "0.1.0"
+dependencies = [
+ "fittings",
+ "moto-sys",
+]
+
+[[package]]
 name = "moto-virtio"
 version = "0.3.0"
 dependencies = [
@@ -952,10 +966,12 @@ dependencies = [
  "camino",
  "crc",
  "env_logger",
+ "fittings",
  "log",
  "micromap",
  "moto-async",
  "moto-rt",
+ "moto-tooling",
  "rand 0.8.5",
  "tokio",
 ]
@@ -1419,6 +1435,7 @@ dependencies = [
  "moto-rt",
  "moto-sys",
  "moto-sys-io",
+ "moto-tooling",
  "moto-virtio",
  "motor-fs",
  "rand 0.9.2",
@@ -1671,7 +1688,7 @@ dependencies = [
  "moto-async",
  "moto-rt",
  "moto-sys",
- "zerocopy",
+ "moto-tooling",
 ]
 
 [[package]]

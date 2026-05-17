@@ -10,8 +10,14 @@ use std::{
 use super::config;
 use virtio_async::virtio_net::NetDevice;
 
-type RxQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
-type TxQueue = Rc<RefCell<VecDeque<Vec<u8>>>>;
+use moto_tooling::iobuf::IoBuf;
+
+type RxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
+type TxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
+
+fn new_packet_buf() -> IoBuf {
+    IoBuf::new_from_size_align(2048).unwrap()
+}
 
 pub(super) struct VirtioDevice {
     inner: Rc<NetDevice>,
@@ -67,22 +73,30 @@ impl VirtioDevice {
         // Pre-submit blocks.
         let mut completions = VecDeque::with_capacity(rxq_sz);
         for _ in 0..rxq_sz {
-            completions.push_back(net_dev.clone().post_read(BlockWrapper::new_empty()).await);
+            completions.push_back(net_dev.clone().post_read(new_packet_buf()).await);
         }
 
-        const HEADER_LEN: usize = virtio_async::virtio_net::header_len();
+        #[cfg(debug_assertions)]
+        {
+            log::debug!(
+                "\n\nNET: RX: current task: {}",
+                moto_async::current_task_id()
+            );
+            moto_async::debug_current_task(true);
+        }
 
         loop {
             let completion = completions.pop_front().unwrap();
-            let (block, result) = completion.await;
-            let sz_read = result.unwrap() as usize;
+            log::debug!("NET: RX: waiting for completion");
+            let (mut packet, result) = completion.await;
+            assert!(result.is_ok());
 
-            log::debug!("NET: RX {sz_read} bytes.");
-            let rx_vec = block.as_ref()[HEADER_LEN..sz_read].to_vec();
-            rx_queue.borrow_mut().push_back(rx_vec);
+            log::debug!("NET: RX {} bytes.", packet.len());
+            rx_queue.borrow_mut().push_back(packet);
             rx_notify.notify_one();
 
-            completions.push_back(net_dev.clone().post_read(BlockWrapper::new_empty()).await);
+            log::debug!("NET: RX: posting read");
+            completions.push_back(net_dev.clone().post_read(new_packet_buf()).await);
         }
     }
 
@@ -101,11 +115,9 @@ impl VirtioDevice {
             }
             let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
 
-            if let Some(tx_vec) = maybe_tx_vec {
-                // TODO: optimize
-                let block = BlockWrapper::from_bytes(&tx_vec);
-                log::debug!("NET TX {} bytes", tx_vec.len());
-                completions.push_back(net_dev.clone().post_write(block).await);
+            if let Some(packet) = maybe_tx_vec {
+                log::debug!("NET TX {} bytes", packet.len());
+                completions.push_back(net_dev.clone().post_write(packet).await);
             } else {
                 tx_notify.notified().await;
             }
@@ -113,40 +125,7 @@ impl VirtioDevice {
     }
 }
 
-struct BlockWrapper {
-    block: Box<async_fs::Block>,
-    len: usize,
-}
-
-impl BlockWrapper {
-    fn new_empty() -> Self {
-        Self {
-            block: Box::new(async_fs::Block::new_zeroed()),
-            len: async_fs::BLOCK_SIZE,
-        }
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut this = Self::new_empty();
-        this.block.as_bytes_mut()[..bytes.len()].clone_from_slice(bytes);
-        this.len = bytes.len();
-        this
-    }
-}
-
-impl AsRef<[u8]> for BlockWrapper {
-    fn as_ref(&self) -> &[u8] {
-        &self.block.as_bytes()[..self.len]
-    }
-}
-
-impl AsMut<[u8]> for BlockWrapper {
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.block.as_bytes_mut()[..self.len]
-    }
-}
-
-pub struct VirtioRxToken(Vec<u8>);
+pub struct VirtioRxToken(IoBuf);
 
 impl smoltcp::phy::RxToken for VirtioRxToken {
     fn consume<R, F>(mut self, f: F) -> R
@@ -154,7 +133,7 @@ impl smoltcp::phy::RxToken for VirtioRxToken {
         F: FnOnce(&[u8]) -> R,
     {
         log::debug!("RxToken: consume {}", self.0.len());
-        f(&mut self.0)
+        f(self.0.as_ref())
     }
 }
 
@@ -168,10 +147,10 @@ impl smoltcp::phy::TxToken for VirtioTxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        log::debug!("TxToken: consume {len}.");
-        let mut buffer = vec![0; len];
-        let result = f(&mut buffer);
-        self.tx_queue.borrow_mut().push_back(buffer);
+        let mut packet = new_packet_buf();
+        packet.set_len(len);
+        let result = f(packet.as_mut());
+        self.tx_queue.borrow_mut().push_back(packet);
         self.tx_notify.notify_one();
         log::debug!("TxToken: consume {len}.");
         result

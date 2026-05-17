@@ -23,6 +23,7 @@ struct ClientConnection {
     sender: moto_ipc::io_channel::Sender,
     sockets: HashSet<u64>,
     tcp_listeners: HashSet<u64>,
+    shutting_down: bool,
 }
 
 impl Drop for ClientConnection {
@@ -38,6 +39,7 @@ impl ClientConnection {
             sender,
             sockets: HashSet::new(),
             tcp_listeners: HashSet::new(),
+            shutting_down: false,
         }
     }
 }
@@ -244,6 +246,11 @@ impl NetRuntime {
         let mut tcp_listeners = {
             let mut inner = self.inner.borrow_mut();
             let client = inner.clients.get_mut(&conn_id).unwrap();
+            if client.shutting_down {
+                // Avoid concurrent shutdown routines.
+                return;
+            }
+            client.shutting_down = true;
             let mut listener_ids = HashSet::new();
             core::mem::swap(&mut listener_ids, &mut client.tcp_listeners);
 

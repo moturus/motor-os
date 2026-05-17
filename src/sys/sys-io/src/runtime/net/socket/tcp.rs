@@ -941,14 +941,14 @@ impl MotoSocket {
                 socket_ref.unwrap_tcp_mut().lingerer = Some(sender);
 
                 let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
-                assert!(
-                    runtime_ref
-                        .clients
-                        .get_mut(&socket_ref.base.sender().remote_handle())
-                        .unwrap()
-                        .sockets
-                        .remove(&socket_ref.base.socket_id)
-                );
+                // Note: if initiated from the client done handling in net.rs,
+                // the socket won't be with the client hashmap anymore.
+                runtime_ref
+                    .clients
+                    .get_mut(&socket_ref.base.sender().remote_handle())
+                    .unwrap()
+                    .sockets
+                    .remove(&socket_ref.base.socket_id);
 
                 receiver
             };

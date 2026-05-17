@@ -1,17 +1,13 @@
 [workspace]
 members = [
-  # system libraries
+  # system libraries (legacy, to be refactored)
   "lib/async-fs",
   "lib/flatfs",
-  "lib/frusa",
-  "lib/rt.vdso",
   "lib/moto-async",
   "lib/moto-io-internal",
   "lib/moto-ipc",
   "lib/moto-log",
   "lib/moto-mpmc",
-  "lib/moto-rt",
-  "lib/moto-sys",
   "lib/moto-sys-io",
   "lib/motor-fs",
   "lib/srfs",
@@ -19,6 +15,18 @@ members = [
   "lib/timeq",
   "lib/virtio",
   "lib/virtio-async",
+
+  # various generic tools (not Motor OS specific)
+  "lib/fittings",
+  "lib/frusa",
+
+  # system libraries
+  "lib/moto-rt",
+  "lib/moto-sys",
+  "lib/rt.vdso",
+
+  # various higher-level tools (Motor OS specific)
+  "lib/moto-tooling",
 
   # system binaries
   "kernel",
