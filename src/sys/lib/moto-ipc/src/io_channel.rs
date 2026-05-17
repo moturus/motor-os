@@ -1322,15 +1322,12 @@ impl Receiver {
                         wait_flag_set = true;
                         continue; // Do one more recv() before waiting.
                     } else {
-                        let recv_future = if let Some(future) = self.recv_future.as_ref() {
-                            future.clone()
-                        } else {
+                        if self.recv_future.is_none() {
                             let future = self.inner.remote_handle.as_future();
-                            self.recv_future = Some(future.clone());
-                            future
-                        };
+                            self.recv_future = Some(future);
+                        }
 
-                        match recv_future.do_poll(cx) {
+                        match self.recv_future.as_ref().unwrap().do_poll(cx) {
                             core::task::Poll::Ready(Err(err)) => {
                                 wait_error = err;
                                 continue; // Do one more recv() before returning.
