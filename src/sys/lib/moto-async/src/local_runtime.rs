@@ -22,6 +22,7 @@
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::collections::vec_deque::VecDeque;
+use alloc::rc::Rc;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -173,6 +174,9 @@ struct Task {
     id: TaskId,
     fut: LocalFutureObj<'static, ()>,
     join_handle_waker: alloc::rc::Weak<RefCell<Option<Waker>>>,
+
+    #[cfg(debug_assertions)]
+    debug_log: bool,
 }
 
 // When a task is polled, it should be pinned, therefore borrowed.
@@ -186,7 +190,7 @@ struct LocalRuntimeInner {
     runqueue: RefCell<VecDeque<TaskId>>,
 
     // SysHandle futures.
-    sys_handle_futures: RefCell<BTreeMap<SysHandle, VecDeque<SysHandleFuture>>>,
+    sys_handle_futures: RefCell<BTreeMap<SysHandle, VecDeque<Rc<RefCell<SysHandleFutureInner>>>>>,
 
     // Timers. Can be added to at runtime.
     timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
@@ -202,6 +206,8 @@ struct LocalRuntimeInner {
 
     // Task IDs of wakes coming from wakers (!= LocalWaker).
     nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
+
+    currently_running_task: core::cell::Cell<Option<TaskId>>,
 }
 
 impl LocalRuntimeInner {
@@ -214,6 +220,7 @@ impl LocalRuntimeInner {
             tasks: Default::default(),
             next_task_id: RefCell::new(1),
             nonlocal_wakes: Default::default(),
+            currently_running_task: Default::default(),
         }
     }
 
@@ -237,8 +244,8 @@ impl LocalRuntimeInner {
         TaskId(result)
     }
 
-    fn add_sys_handle_future(&self, future: SysHandleFuture) {
-        let sys_handle = future.inner.borrow().handle;
+    fn add_sys_handle_future(&self, future: Rc<RefCell<SysHandleFutureInner>>) {
+        let sys_handle = future.borrow().handle;
 
         self.sys_handle_futures
             .borrow_mut()
@@ -309,11 +316,17 @@ impl LocalRuntimeInner {
                         .unwrap();
                     let mut runqueue = self.runqueue.borrow_mut();
                     for future in done_futures {
-                        let mut inner_future = future.inner.borrow_mut();
-                        if let Some(task_id) = inner_future.task_id.take() {
-                            runqueue.push_back(task_id);
+                        let mut inner_future = future.borrow_mut();
+                        if inner_future.dropped {
+                            continue;
                         }
-
+                        #[cfg(debug_assertions)]
+                        {
+                            if inner_future.debug_log {
+                                log::debug!("{}: woke ok", inner_future.name());
+                            }
+                        }
+                        runqueue.push_back(inner_future.task_id);
                         inner_future.result = Some(Ok(()));
                     }
                 }
@@ -332,11 +345,17 @@ impl LocalRuntimeInner {
                         .unwrap();
                     let mut runqueue = self.runqueue.borrow_mut();
                     for future in done_futures {
-                        let mut inner_future = future.inner.borrow_mut();
-                        if let Some(task_id) = inner_future.task_id.take() {
-                            runqueue.push_back(task_id);
+                        let mut inner_future = future.borrow_mut();
+                        if inner_future.dropped {
+                            continue;
                         }
-
+                        #[cfg(debug_assertions)]
+                        {
+                            if inner_future.debug_log {
+                                log::debug!("{}: woke BAD_HANDLE", inner_future.name());
+                            }
+                        }
+                        runqueue.push_back(inner_future.task_id);
                         inner_future.result = Some(Err(moto_rt::Error::BadHandle));
                     }
                 }
@@ -420,7 +439,7 @@ impl LocalRuntime {
         let inner = LocalRuntimeInner::current();
         let (tx, rx) = oneshot::channel::<F::Output>();
 
-        let waker = alloc::rc::Rc::new(RefCell::new(None));
+        let waker = Rc::new(RefCell::new(None));
         let task_id = inner.next_task_id();
 
         let task = Task {
@@ -429,7 +448,10 @@ impl LocalRuntime {
                 let _ = tx.send(f.await);
             })
             .into(),
-            join_handle_waker: alloc::rc::Rc::downgrade(&waker),
+            join_handle_waker: Rc::downgrade(&waker),
+
+            #[cfg(debug_assertions)]
+            debug_log: false,
         };
 
         inner.runqueue.borrow_mut().push_back(task_id);
@@ -459,21 +481,27 @@ impl LocalRuntime {
         futures::pin_mut!(f);
         let _guard = self.enter();
         loop {
-            let waker = LocalRuntimeInner::current().new_waker(TaskId::default_root());
+            let runtime = LocalRuntimeInner::current();
+            let waker = runtime.new_waker(TaskId::default_root());
             let local_waker = new_local_waker(TaskId::default_root());
             let mut cx = core::task::ContextBuilder::from_waker(&waker)
                 .local_waker(&local_waker)
                 .build();
 
             {
+                runtime
+                    .currently_running_task
+                    .set(Some(TaskId::default_root()));
                 let result = f.as_mut().poll(&mut cx);
+                runtime.currently_running_task.set(None);
+
                 if let Poll::Ready(output) = result {
                     return output;
                 }
             }
 
             loop {
-                if Self::poll_pool().is_ready() {
+                if Self::poll_loop().is_ready() {
                     break;
                 } else {
                     Self::wait();
@@ -485,7 +513,7 @@ impl LocalRuntime {
     // Poll the runnable queue until there's nothing to do.
     // It is safe to sleep when poll_pool() returns.
     // Kinda like futures::LocalPool::poll_pool(), but much simpler.
-    fn poll_pool() -> Poll<()> {
+    fn poll_loop() -> Poll<()> {
         loop {
             let inner = LocalRuntimeInner::current();
 
@@ -514,10 +542,32 @@ impl LocalRuntime {
                 log::trace!("unknown task: {}", next_runnable.0);
                 continue;
             };
-            let pinned = Pin::new(&mut task.fut);
+            let current_task_id = task.id;
+            #[cfg(debug_assertions)]
+            {
+                if task.debug_log {
+                    log::debug!("Running task {}", current_task_id.0);
+                }
+            }
 
             // This may call spawn, or add a timer, which borrows inner.
-            if pinned.poll(&mut inner_cx).is_pending() {
+            inner.currently_running_task.set(Some(current_task_id));
+            let poll_result = {
+                let pinned = Pin::new(&mut task.fut);
+                // --------- RUN A TASK ------------------
+                pinned.poll(&mut inner_cx)
+                // --------- DONE RUNNING THE TASK -------
+            };
+            inner.currently_running_task.set(None);
+            #[cfg(debug_assertions)]
+            {
+                if task.debug_log {
+                    log::debug!("task {} stopped running", current_task_id.0);
+                }
+            }
+
+            if poll_result.is_pending() {
+                inner.currently_running_task.set(None);
                 continue;
             }
 
@@ -536,7 +586,7 @@ impl LocalRuntime {
 
 pub struct JoinHandle<T> {
     rx: oneshot::Receiver<T>,
-    waker: alloc::rc::Rc<RefCell<Option<Waker>>>,
+    waker: Rc<RefCell<Option<Waker>>>,
 }
 
 impl<T> Future for JoinHandle<T> {
@@ -569,16 +619,50 @@ pub trait AsFuture {
 
 struct SysHandleFutureInner {
     handle: SysHandle,
-    task_id: Option<TaskId>,
+    task_id: TaskId,
     result: Option<Result<()>>,
+    dropped: bool,
 
     #[cfg(debug_assertions)]
     debug_ready_done: bool,
+
+    #[cfg(debug_assertions)]
+    debug_log: bool,
 }
 
-#[derive(Clone)]
+#[cfg(debug_assertions)]
+impl SysHandleFutureInner {
+    fn name(&self) -> alloc::string::String {
+        alloc::format!(
+            "\n\tSysHandleFuture: [handle: 0x{:x} task: {}]",
+            self.handle.as_u64(),
+            self.task_id.0
+        )
+    }
+}
+
+// #[derive(Clone)]
 pub struct SysHandleFuture {
-    inner: alloc::rc::Rc<RefCell<SysHandleFutureInner>>,
+    inner: Rc<RefCell<SysHandleFutureInner>>,
+}
+
+impl Drop for SysHandleFuture {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.borrow();
+            if inner.debug_log && !inner.debug_ready_done {
+                log::debug!(
+                    "{}: dropping pending: woke: {}",
+                    inner.name(),
+                    inner.result.is_some()
+                );
+            } else if inner.debug_log {
+                log::debug!("{}: dropping done", inner.name());
+            }
+        }
+        self.inner.borrow_mut().dropped = true;
+    }
 }
 
 impl AsFuture for SysHandle {
@@ -587,23 +671,35 @@ impl AsFuture for SysHandle {
     type AsFuture = SysHandleFuture;
 
     fn as_future(&self) -> Self::AsFuture {
-        let inner = alloc::rc::Rc::new(RefCell::new(SysHandleFutureInner {
+        let inner = Rc::new(RefCell::new(SysHandleFutureInner {
             handle: *self,
-            task_id: None,
+            task_id: LocalRuntimeInner::current()
+                .currently_running_task
+                .get()
+                .unwrap(),
             result: None,
+            dropped: false,
 
             #[cfg(debug_assertions)]
             debug_ready_done: false,
+
+            #[cfg(debug_assertions)]
+            debug_log: false,
         }));
 
-        let this = SysHandleFuture { inner };
-        LocalRuntimeInner::current().add_sys_handle_future(this.clone());
-        this
+        LocalRuntimeInner::current().add_sys_handle_future(inner.clone());
+        SysHandleFuture { inner }
     }
 }
 
 impl SysHandleFuture {
-    pub fn do_poll(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+    #[cfg(debug_assertions)]
+    pub fn set_debug_log(&self, debug_log: bool) {
+        self.inner.borrow_mut().debug_log = debug_log;
+        log::debug!("debugging future {}", self.inner.borrow().name());
+    }
+
+    pub fn do_poll(&self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         #[cfg(debug_assertions)]
         if self.inner.borrow_mut().debug_ready_done {
             panic!("SysHandleFuture polled after Poll::Ready() was returned.");
@@ -615,13 +711,22 @@ impl SysHandleFuture {
             #[cfg(debug_assertions)]
             {
                 inner.debug_ready_done = true;
+                if inner.debug_log {
+                    log::debug!("{}: done", inner.name());
+                }
             }
 
             return Poll::Ready(result);
         }
 
-        let task_id = TaskId(cx.local_waker().data() as usize as u64);
-        inner.task_id = Some(task_id);
+        #[cfg(debug_assertions)]
+        {
+            let task_id = TaskId(_cx.local_waker().data() as usize as u64);
+            assert_eq!(inner.task_id, task_id);
+            if inner.debug_log {
+                log::debug!("{}: pending", inner.name());
+            }
+        }
         Poll::Pending
     }
 }
@@ -676,4 +781,36 @@ pub fn task_id(cx: &mut Context<'_>) -> u64 {
     assert_eq!(task_id_global, task_id_local);
 
     task_id_local
+}
+
+#[cfg(debug_assertions)]
+pub fn current_task_id() -> u64 {
+    LocalRuntimeInner::current()
+        .currently_running_task
+        .get()
+        .as_ref()
+        .unwrap()
+        .0
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_current_task(debug: bool) {
+    let current_task_id = TaskId(current_task_id());
+
+    let runtime = LocalRuntimeInner::current();
+
+    // TODO: refactor runtime so that runtime.tasks() is not borrowed
+    // and the unsafe {} below can be removed.
+    //
+    // SAFETY: runtime.tasks() is borrowed at the moment. But it is
+    // obviously safe to flip a bookean flag.
+    unsafe {
+        runtime
+            .tasks
+            .as_ptr()
+            .as_mut_unchecked()
+            .get_mut(&current_task_id)
+            .unwrap()
+            .debug_log = debug;
+    }
 }
