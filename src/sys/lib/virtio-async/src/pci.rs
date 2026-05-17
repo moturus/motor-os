@@ -135,7 +135,8 @@ impl PciDeviceID {
     }
 
     fn valid(&self) -> bool {
-        self.vendor_id() != 0xffff
+        let vendor_id = self.vendor_id();
+        vendor_id != 0xffff && vendor_id != 0
     }
 
     pub fn header_type(&self) -> u8 {

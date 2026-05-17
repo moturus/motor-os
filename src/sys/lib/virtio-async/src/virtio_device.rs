@@ -169,7 +169,7 @@ impl VirtioDevice {
         // Step 0: init.
         if device_id.vendor_id() != 0x1af4 {
             log::debug!(
-                "Skipping non-VirtIO device_id with vendor 0x{:x}",
+                "\n\tSkipping non-VirtIO device_id with vendor 0x{:x}",
                 device_id.vendor_id()
             );
             return Err(ErrorKind::Unsupported.into());
@@ -177,7 +177,7 @@ impl VirtioDevice {
 
         if device_id.header_type() & 0x7F != 0 {
             log::warn!(
-                "Skipping VirtIO device_id with wrong header type {}",
+                "\n\tSkipping VirtIO device_id with wrong header type {}",
                 device_id.header_type()
             );
             return Err(ErrorKind::InvalidData.into());
