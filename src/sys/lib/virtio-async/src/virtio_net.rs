@@ -157,18 +157,19 @@ impl NetDevice {
         features_acked |= VIRTIO_NET_F_MAC;
 
         /*
-        if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) == 0 {
-            log::warn!(
-                "Virtio NET device {:?}: VIRTIO_F_RING_EVENT_IDX feature not available; features: 0x{:x}.",
+        if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) != 0 {
+            log::debug!(
+                "Virtio NET device {:?}:\n\tVIRTIO_F_RING_EVENT_IDX feature IS available.",
                 dev.pci_device.id,
-                features_available
             );
-            return Err(ErrorKind::Other.into());
-        }
             features_acked |= super::virtio_device::VIRTIO_F_RING_EVENT_IDX;
+        } else {
+            log::debug!(
+                "Virtio NET device {:?}:\n\tVIRTIO_F_RING_EVENT_IDX feature is NOT available.",
+                dev.pci_device.id,
+            );
+        }
         */
-
-        dev.virtio_f_event_idx_negotiated = true;
 
         /*
         if (features_available & VIRTIO_NET_F_STATUS) == 0 {
@@ -203,6 +204,7 @@ impl NetDevice {
 
         dev.write_enabled_features(features_acked);
         dev.confirm_features()?;
+        dev.virtio_features_negotiated = features_acked;
 
         let device_cfg = dev.device_cfg.as_ref().unwrap();
         let cfg_bar: &PciBar = dev.pci_device.bars[device_cfg.bar as usize]

@@ -63,6 +63,7 @@ pub struct BlockDevice {
     virtqueue: Rc<RefCell<Virtqueue>>,
     capacity: u64, // The number of sectors of BLOCK_SIZE.
     read_only: bool,
+    flush_enabled: bool,
 }
 
 impl BlockDevice {
@@ -110,6 +111,8 @@ impl BlockDevice {
             read_only
         );
 
+        let flush_enabled = dev_mut.virtio_features_negotiated & VIRTIO_BLK_F_FLUSH != 0;
+
         drop(dev_mut);
 
         Ok(Rc::new(BlockDevice {
@@ -117,6 +120,7 @@ impl BlockDevice {
             capacity,
             read_only,
             virtqueue,
+            flush_enabled,
         }))
     }
 
@@ -134,19 +138,19 @@ impl BlockDevice {
             return Err(ErrorKind::Other.into());
         }
 
+        let mut features_acked = super::virtio_device::VIRTIO_F_VERSION_1;
         if (features_available & VIRTIO_BLK_F_FLUSH) == 0 {
-            log::error!("VirtioBLK: VIRTIO_BLK_F_FLUSH feature is not available");
-            return Err(ErrorKind::Other.into());
+            log::debug!("VirtioBLK: VIRTIO_BLK_F_FLUSH feature is not available");
+        } else {
+            features_acked |= VIRTIO_BLK_F_FLUSH;
         }
 
-        let mut features_acked = super::virtio_device::VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_FLUSH;
         if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) != 0 {
             log::debug!(
                 "Virtio BLK device {:?}:\n\tVIRTIO_F_RING_EVENT_IDX feature IS available.",
                 dev.pci_device.id,
             );
             features_acked |= super::virtio_device::VIRTIO_F_RING_EVENT_IDX;
-            dev.virtio_f_event_idx_negotiated = true;
         } else {
             log::debug!(
                 "Virtio BLK device {:?}:\n\tVIRTIO_F_RING_EVENT_IDX feature is NOT available.",
@@ -159,6 +163,7 @@ impl BlockDevice {
         //  | VIRTIO_BLK_F_RO);
         dev.write_enabled_features(features_acked);
         dev.confirm_features()?;
+        dev.virtio_features_negotiated = features_acked;
 
         let read_only = (features_acked & VIRTIO_BLK_F_RO) != 0;
 
@@ -281,6 +286,10 @@ impl BlockDevice {
     #[inline(never)]
     pub async fn post_flush(self: Rc<Self>) -> Result<()> {
         use super::virtio_queue::UserData;
+
+        if !self.flush_enabled {
+            return Err(ErrorKind::Unsupported.into());
+        }
 
         let chain_head = VqAlloc::new(self.virtqueue.clone(), 2).await;
         let mut virtqueue = self.virtqueue.borrow_mut();

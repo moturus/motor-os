@@ -146,7 +146,7 @@ pub struct VirtioDevice {
     // Each virtqueue is protected by a mutex so that the guest does not
     // access them concurrently.
     pub(super) virtqueues: Vec<Rc<RefCell<Virtqueue>>>,
-    pub(super) virtio_f_event_idx_negotiated: bool,
+    pub(super) virtio_features_negotiated: u64,
 }
 
 impl VirtioDevice {
@@ -271,7 +271,7 @@ impl VirtioDevice {
             notify_cfg,
             msix: None,
             virtqueues: Vec::new(),
-            virtio_f_event_idx_negotiated: false,
+            virtio_features_negotiated: 0,
         })
     }
 
@@ -658,7 +658,7 @@ impl VirtioDevice {
             let virtqueue = Virtqueue::allocate_virtqueue(self, queue_num, queue_size)?;
             let mut virtq_borrowed = virtqueue.borrow_mut();
 
-            if self.virtio_f_event_idx_negotiated {
+            if self.virtio_features_negotiated & VIRTIO_F_RING_EVENT_IDX != 0 {
                 virtq_borrowed.set_f_event_idx_negotiated();
             }
 
