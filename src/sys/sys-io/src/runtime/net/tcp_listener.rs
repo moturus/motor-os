@@ -146,6 +146,11 @@ impl TcpListener {
         self.listening_sockets.insert(socket_id);
     }
 
+    pub(super) async fn on_socket_dropped(this: Rc<RefCell<Self>>, socket_id: u64) {
+        log::error!("calling todo!() for socket 0x{socket_id:x}");
+        todo!()
+    }
+
     pub(super) async fn on_socket_connected(
         this: Rc<RefCell<Self>>,
         moto_socket: Rc<RefCell<MotoSocket>>,

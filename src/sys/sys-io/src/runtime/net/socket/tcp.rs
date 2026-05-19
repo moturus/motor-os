@@ -341,8 +341,21 @@ impl MotoSocket {
 
             Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
                 match smoltcp_socket.state() {
-                    smoltcp::socket::tcp::State::Listen | smoltcp::socket::tcp::State::SynSent => {
-                        panic!()
+                    smoltcp::socket::tcp::State::Listen => {
+                        // If SynReceived socket gets RST, smoltcp brings it back into Listen state.
+                        log::debug!(
+                            "tcp: listen: socket 0x{socket_id:x} was reset back to Listen; dropping"
+                        );
+                        Poll::Ready(Some(false))
+                    }
+
+                    smoltcp::socket::tcp::State::SynSent => {
+                        // This is totally unexpected.
+                        log::error!(
+                            "tcp: listen: socket 0x{socket_id:x}: bad state {:?}",
+                            smoltcp_socket.state()
+                        );
+                        Poll::Ready(Some(false))
                     }
 
                     smoltcp::socket::tcp::State::SynReceived => {
@@ -369,7 +382,8 @@ impl MotoSocket {
         };
         if established {
             Self::on_incoming_connection(weak_socket).await;
-            return;
+        } else if let Some(moto_socket) = weak_socket.upgrade() {
+            Self::drop_tcp_socket(moto_socket).await;
         }
     }
 
@@ -880,6 +894,28 @@ impl MotoSocket {
             {
                 let _ = client.sockets.remove(&socket_ref.base.socket_id);
             }
+
+            drop(runtime_ref);
+
+            let tcp_listener = socket_ref.unwrap_tcp_mut().tcp_listener.take();
+            log::debug!(
+                "dropping socket 0x{socket_id:x}: tcp_listener: {}",
+                tcp_listener.is_some()
+            );
+
+            if let Some(weak) = tcp_listener {
+                if let Some(strong) = weak.upgrade() {
+                    log::debug!("strong tcp_listener for socket 0x{socket_id:x}");
+                    TcpListener::on_socket_dropped(strong, socket_id);
+                } else {
+                    log::debug!("weak tcp_listener for socket 0x{socket_id:x}");
+                }
+            } else {
+                log::debug!("missing tcp_listener for socket 0x{socket_id:x}????");
+            }
+            // if let Some(tcp_listener) = tcp_listener.map(|weak| weak.upgrade()).flatten() {
+            //     TcpListener::on_socket_dropped(tcp_listener, socket_id);
+            // }
         }
 
         // Drop the socket.
