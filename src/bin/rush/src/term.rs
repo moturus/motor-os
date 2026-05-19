@@ -151,10 +151,10 @@ impl Term {
                     8 | 127 /* BS */ => {
                         ProcessByteResult::Escape(EscapesIn::Backspace)
                     },
-                    13 /* 13 | 10 */ /* CR/NL */ => {
+                    10 /* 13 | 10 */ /* CR/NL */ => {
                         ProcessByteResult::Newline
                     }
-                    10 => ProcessByteResult::Continue, // Avoid double newlines
+                    13 => ProcessByteResult::Continue, // Avoid double newlines
                     0x1b /* ESC */ => {
                         self.prev_mode = self.mode.clone();
                         self.mode = ProcessingMode::Escape(vec![0x1b]);

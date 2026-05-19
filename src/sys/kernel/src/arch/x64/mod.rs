@@ -81,18 +81,25 @@ pub fn kernel_exit() -> ! {
 
     crate::write_serial!("\n\r\n\rvm_exit: bye.\n\r");
     unsafe {
-        // First, try acpi_shutdown, which works in cloud-hypervisor.
+        // First, try Firecracker exit.
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") 0x64u16,
+            in("al") 0xFEu8,
+            options(nomem, nostack, preserves_flags)
+        );
 
+        // Then, try Qemu exit.
+        let mut port = Port::new(0xf4);
+        port.write(0x10_u32);
+
+        // Then try acpi_shutdown, which works in cloud-hypervisor.
         // Initially it worked with port 0x3c0.
         let mut port = Port::new(0x3c0);
         port.write(0x34_u8);
         // Later port number became 0x600, for some reason.
         let mut port = Port::new(0x600);
         port.write(0x34_u8);
-
-        // Then, try Qemu exit.
-        let mut port = Port::new(0xf4);
-        port.write(0x10_u32);
     }
 
     #[allow(clippy::empty_loop)]
