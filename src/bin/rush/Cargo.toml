@@ -2,7 +2,7 @@
 name = "moto-rush"
 description = "A posixy shell implemented in Rust with minimal external dependencies."
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["U. Lasiotus"]
 keywords = ["shell"]
 categories = ["shell"]

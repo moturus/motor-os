@@ -134,7 +134,7 @@ impl Term {
         }
     }
 
-    fn process_next_byte(&mut self, c: u8) -> ProcessByteResult {
+    fn process_next_byte(&mut self, c: u8, prev_byte: u8) -> ProcessByteResult {
         match &self.mode {
             ProcessingMode::Normal | ProcessingMode::History(_) => {
                 match c {
@@ -151,10 +151,21 @@ impl Term {
                     8 | 127 /* BS */ => {
                         ProcessByteResult::Escape(EscapesIn::Backspace)
                     },
-                    10 /* 13 | 10 */ /* CR/NL */ => {
-                        ProcessByteResult::Newline
+                    10 /* LF */  => {
+                        if prev_byte != 13 {
+                            ProcessByteResult::Newline
+                            } else {
+                                ProcessByteResult::Continue
+                            }
                     }
-                    13 => ProcessByteResult::Continue, // Avoid double newlines
+                    13 /* CR */  => {
+                        if prev_byte != 10 {
+                            ProcessByteResult::Newline
+                            } else {
+                                ProcessByteResult::Continue
+                            }
+                    }
+
                     0x1b /* ESC */ => {
                         self.prev_mode = self.mode.clone();
                         self.mode = ProcessingMode::Escape(vec![0x1b]);
@@ -235,9 +246,13 @@ impl Term {
             self.debug_log(msg.as_str());
         }
 
+        let mut prev_byte = 0;
         loop {
             let byte = self.next_byte();
-            match self.process_next_byte(byte) {
+            let processed_byte = self.process_next_byte(byte, prev_byte);
+            prev_byte = byte;
+
+            match processed_byte {
                 ProcessByteResult::Byte(c) => {
                     match self.mode {
                         ProcessingMode::Normal => {}

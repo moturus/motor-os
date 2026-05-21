@@ -107,12 +107,12 @@ pub fn parse_args(args_raw: Vec<String>) -> (Vec<String>, Option<String>) {
         if script.is_none() && *MODE.lock().unwrap() != Mode::Command {
             // If the first positional arg looks like VAR=val, treat all
             // args as a command rather than interpreting it as a script name.
-            if let Some((k, _)) = arg.split_once('=') {
-                if is_valid_var_name(k) {
-                    *MODE.lock().unwrap() = Mode::Command;
-                    args.push(arg);
-                    continue;
-                }
+            if let Some((k, _)) = arg.split_once('=')
+                && is_valid_var_name(k)
+            {
+                *MODE.lock().unwrap() = Mode::Command;
+                args.push(arg);
+                continue;
             }
             script = Some(arg.clone());
         }

@@ -19,7 +19,8 @@ fn take_env(command: &[String]) -> Option<(&str, &str)> {
 
 fn apply_global_env(env: &Vec<(&str, &str)>) {
     for (k, v) in env {
-        std::env::set_var(k, v);
+        // SAFETY: TBD.
+        unsafe { std::env::set_var(k, v) };
     }
 }
 
@@ -128,15 +129,15 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
                     .stdin(stdin)
                     .stdout(stdout)
                     .stderr(stderr)
-                    .envs(env.into_iter())
+                    .envs(env)
                     .spawn();
 
                 match child {
                     Ok(mut child) => {
-                        if let Some(mut redirect_to_file) = maybe_redirect {
-                            if let Some(child_stdout) = &mut child.stdout {
-                                redirect_to_file.consume_stdout(child_stdout);
-                            }
+                        if let Some(mut redirect_to_file) = maybe_redirect
+                            && let Some(child_stdout) = &mut child.stdout
+                        {
+                            redirect_to_file.consume_stdout(child_stdout);
                         }
                         prev_child = Some(child);
                     }
@@ -196,10 +197,10 @@ pub fn run_script(fname: &str, args: Vec<String>, global: bool) {
         if line.is_empty() || line.as_bytes()[0] == b'#' {
             continue;
         }
-        if let Some(commands) = parser.parse_line(line) {
-            if let Err(err) = run(commands, global, &args) {
-                std::process::exit(err);
-            }
+        if let Some(commands) = parser.parse_line(line)
+            && let Err(err) = run(commands, global, &args)
+        {
+            std::process::exit(err);
         }
     }
 }
