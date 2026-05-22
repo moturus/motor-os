@@ -303,7 +303,8 @@ impl Virtqueue {
                 }
             }
         });
-    }*/
+    }
+    */
 
     pub fn queue_size(&self) -> u16 {
         self.queue_size
@@ -684,6 +685,8 @@ impl<T> Drop for VqCompletion<T> {
         let mut virtqueue = self.virtqueue.borrow_mut();
         let mut curr = self.chain_head;
         let mut chain_in_use = true;
+        virtqueue.completion_waiters[self.chain_head as usize] = None;
+
         loop {
             virtqueue.header_buffers[curr as usize].in_use_by_completion = false;
             if curr == self.chain_head {

@@ -156,6 +156,7 @@ impl NetDevice {
         }
         features_acked |= VIRTIO_NET_F_MAC;
 
+        // NOTE: VIRTIO_F_RING_EVENT_IDX is disabled because wakeups are losts if it is ON.
         /*
         if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) != 0 {
             log::debug!(
