@@ -256,7 +256,8 @@ impl NetDevice {
         let chain_head = VqAlloc::new(self.virtq_rx.clone(), 2).await;
         let mut virtqueue = self.virtq_rx.borrow_mut();
 
-        let (_, phys_addr, next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
+        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
+        *header = NetHeader::default();
 
         use super::virtio_queue::UserData;
         let buffs: [UserData; 2] = [
