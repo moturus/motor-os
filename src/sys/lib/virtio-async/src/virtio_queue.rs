@@ -157,6 +157,8 @@ pub(super) struct Virtqueue {
     pub queue_num: u16,
     pub queue_notify_off: u16, // This is the cfg value.
 
+    device_kind: crate::VirtioDeviceKind,
+
     descriptors: &'static mut [VirtqDesc],
     available_ring: VirtqAvail,
     used_ring: VirtqUsed,
@@ -256,6 +258,7 @@ impl Virtqueue {
 
         let self_ = Rc::new(RefCell::new(Virtqueue {
             virt_addr,
+            device_kind: dev.kind(),
             queue_size,
             queue_num,
             queue_notify_off: 0,
@@ -274,37 +277,61 @@ impl Virtqueue {
 
             virtio_f_event_idx_negotiated: false,
         }));
-        // Self::spawn_monitoring(self_.clone());
+        Self::spawn_monitoring(self_.clone());
         Ok(self_)
     }
 
-    /*
     fn spawn_monitoring(this: Rc<RefCell<Self>>) {
         moto_async::LocalRuntime::spawn(async move {
+            log::warn!("VirtQ monitoring thread started");
+            let mut errors = 0;
+            let mut prev_used = 0;
             loop {
-                moto_async::sleep(std::time::Duration::from_secs(3)).await;
+                if errors == 0 {
+                    moto_async::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    moto_async::sleep(std::time::Duration::from_millis(10)).await;
+                }
                 let vq = this.borrow();
+
+                let driver_used_idx = vq.next_used_idx;
+                if prev_used != driver_used_idx {
+                    prev_used = driver_used_idx;
+                    errors = 0;
+                    continue;
+                }
 
                 let alloc_waiters = vq.alloc_waiters.len();
                 let mut completion_waiters = 0;
-                for cw in &vq.completion_waiters {
+                let mut cw_idx = 0;
+                for (idx, cw) in vq.completion_waiters.iter().enumerate() {
                     if cw.is_some() {
                         completion_waiters += 1;
+                        cw_idx = idx;
                     }
                 }
 
-                if alloc_waiters + completion_waiters > 0 {
+                let has_used = vq.has_new_used();
+                if has_used && (alloc_waiters + completion_waiters > 0) {
+                    errors += 1;
+                    if errors == 8 {
+                        // Note: this is for debugging only. It is perfectly cromulent to have waiters.
+                        panic!("Bad VirtQ status");
+                    }
+
+                    let device_used_idx = unsafe { vq.used_ring.idx.read_volatile() };
+
                     log::error!(
-                        "vq: aw: {alloc_waiters} cw: {completion_waiters} has_used: {}",
-                        vq.has_new_used()
+                        "vq {:?}:{}: aw: {alloc_waiters} cw: {completion_waiters} driver used: 0x{driver_used_idx:x} device used: 0x{device_used_idx:x} idx: 0x{cw_idx:x}",
+                        vq.device_kind,
+                        vq.queue_num
                     );
                 } else {
-                    log::error!("vq: emty");
+                    errors = 0;
                 }
             }
         });
     }
-    */
 
     pub fn queue_size(&self) -> u16 {
         self.queue_size
@@ -319,16 +346,22 @@ impl Virtqueue {
     }
 
     fn notify_device_if_needed(&self, avail_idx: u16) {
+        // {
+        //     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        //     unsafe { (*self.notify_bar).write_u16(self.notify_offset, 0) };
+        // }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         // Safety: safe by construction.
         unsafe {
-            if self.virtio_f_event_idx_negotiated
-                && avail_idx == self.used_ring.avail_event.read_volatile()
-                || *self.used_ring.flags == 0
-            {
+            if self.virtio_f_event_idx_negotiated {
+                if avail_idx == self.used_ring.avail_event.read_volatile() {
+                    (*self.notify_bar).write_u16(self.notify_offset, 0);
+                }
+            } else if (self.used_ring.flags as *const u16).read_volatile() == 0 {
                 (*self.notify_bar).write_u16(self.notify_offset, 0);
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
         }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     fn disable_irq(&mut self) {
@@ -339,7 +372,7 @@ impl Virtqueue {
                     .write_volatile(self.next_used_idx.wrapping_sub(1));
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             } else {
-                *self.available_ring.flags = 1;
+                (self.available_ring.flags as *mut u16).write_volatile(1);
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -353,7 +386,7 @@ impl Virtqueue {
                     .write_volatile(self.next_used_idx);
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             } else {
-                *self.available_ring.flags = 0;
+                (self.available_ring.flags as *mut u16).write_volatile(0);
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -387,7 +420,6 @@ impl Virtqueue {
                 .write_volatile(next_idx);
             prev_idx
         };
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         self.notify_device_if_needed(prev_idx);
     }
 
