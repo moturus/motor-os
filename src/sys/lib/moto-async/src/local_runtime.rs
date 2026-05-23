@@ -113,6 +113,13 @@ unsafe fn waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn waker_wake(data: *const ()) {
+    unsafe {
+        waker_wake_by_ref(data);
+        waker_drop(data);
+    }
+}
+
+unsafe fn waker_wake_by_ref(data: *const ()) {
     let waker = unsafe {
         (data as usize as *const MotoWaker)
             .as_ref()
@@ -121,10 +128,6 @@ unsafe fn waker_wake(data: *const ()) {
 
     waker.runqueue.push(waker.task_id);
     let _ = moto_sys::SysCpu::wake(waker.wake_handle);
-}
-
-unsafe fn waker_wake_by_ref(data: *const ()) {
-    unsafe { waker_wake(data) }
 }
 
 unsafe fn waker_drop(data: *const ()) {
