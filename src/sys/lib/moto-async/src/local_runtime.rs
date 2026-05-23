@@ -53,7 +53,7 @@ fn get_runtime_tls_key() -> moto_rt::tls::Key {
 
     let key = moto_rt::tls::create(None);
     assert_ne!(key, 0);
-    if let Err(prev) = RUNTIME_TLS_KEY.compare_exchange(key, 0, Ordering::AcqRel, Ordering::Relaxed)
+    if let Err(prev) = RUNTIME_TLS_KEY.compare_exchange(0, key, Ordering::AcqRel, Ordering::Relaxed)
     {
         // Safety: we just created the key, so it is safe.
         unsafe { moto_rt::tls::destroy(key) };
