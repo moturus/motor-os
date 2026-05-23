@@ -229,7 +229,10 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
     let (started_tx, started_rx) = moto_async::oneshot();
 
     moto_async::LocalRuntime::spawn(async move {
-        let _ = fs_listener(fs.clone(), started_tx).await;
+        if let Err(err) = fs_listener(fs.clone(), started_tx).await {
+            log::warn!("fs_listener() failed: {err:?}");
+            spawn_new_listener(fs).await;
+        }
     });
 
     // Note: we must not return until there is a started listener,
@@ -260,6 +263,9 @@ async fn fs_listener(
         .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
     };
 
+    // Note that if this function returns an error, it will be called again.
+    // Thus to avoid spawning extra listeners, it must NOT return an error below,
+    // after spawn_new_listener() is called.
     spawn_new_listener(fs.clone()).await;
 
     // We want to process more than one message at at time (due to I/O waits), but
@@ -292,7 +298,7 @@ async fn fs_listener(
                     let _ = ticket_tx.send(()).await;
                 });
             }
-            Err(err) => return Err(std::io::Error::from_raw_os_error(err as u16 as i32)),
+            Err(err) => return Ok(()), // The client dropped.
         }
     }
 }
