@@ -230,7 +230,7 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
 
     moto_async::LocalRuntime::spawn(async move {
         if let Err(err) = fs_listener(fs.clone(), started_tx).await {
-            log::warn!("fs_listener() failed: {err:?}");
+            log::debug!("fs_listener() failed: {err:?}");
             spawn_new_listener(fs).await;
         }
     });
