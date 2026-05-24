@@ -36,7 +36,7 @@ use fittings::iobuf::IoBuf;
 #[cfg(target_os = "motor")]
 use moto_tooling::iobuf::IoBuf;
 
-const MAX_COMPLETIONS_IN_FLIGHT: usize = 128;
+const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
 
 pub struct BlockHolder {
     iobuf: IoBuf,
