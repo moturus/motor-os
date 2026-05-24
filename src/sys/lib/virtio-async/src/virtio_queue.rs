@@ -349,14 +349,12 @@ impl Virtqueue {
             virtq.disable_irq();
             while let Some(_chain_head) = virtq.reclaim_used() {}
 
-            log::debug!("reclaim_task: enable irq");
             virtq.enable_irq();
             if virtq.has_new_used() {
                 continue;
             }
 
             drop(virtq);
-            log::debug!("reclaim_task: wait on 0x{:x}", wait_handle.as_u64());
             wait_handle.as_future().await.unwrap();
         }
     }
@@ -395,11 +393,12 @@ impl Virtqueue {
     fn disable_irq(&mut self) {
         unsafe {
             if self.virtio_f_event_idx_negotiated {
-                self.available_ring
-                    .used_event
-                    .write_volatile(self.next_used_idx.wrapping_sub(1));
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                // self.available_ring
+                //     .used_event
+                //     .write_volatile(self.next_used_idx.wrapping_sub(1));
+                // core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             } else {
+                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
                 (self.available_ring.flags as *mut u16).write_volatile(1);
                 core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
@@ -407,17 +406,17 @@ impl Virtqueue {
     }
 
     fn enable_irq(&mut self) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         unsafe {
             if self.virtio_f_event_idx_negotiated {
                 self.available_ring
                     .used_event
                     .write_volatile(self.next_used_idx);
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             } else {
                 (self.available_ring.flags as *mut u16).write_volatile(0);
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
             }
         }
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn set_notify_params(&mut self, notify_bar: *const PciBar, notify_offset: u64) {
