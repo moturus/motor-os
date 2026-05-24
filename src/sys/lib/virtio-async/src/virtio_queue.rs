@@ -277,11 +277,17 @@ impl Virtqueue {
 
             virtio_f_event_idx_negotiated: false,
         }));
-        Self::spawn_monitoring(self_.clone());
+
+        let self_clone = self_.clone();
+        moto_async::LocalRuntime::spawn(async move {
+            Self::reclaim_task(self_clone).await;
+        });
+
+        Self::spawn_monitoring_task(self_.clone());
         Ok(self_)
     }
 
-    fn spawn_monitoring(this: Rc<RefCell<Self>>) {
+    fn spawn_monitoring_task(this: Rc<RefCell<Self>>) {
         moto_async::LocalRuntime::spawn(async move {
             log::warn!("VirtQ monitoring thread started");
             let mut errors = 0;
@@ -290,7 +296,8 @@ impl Virtqueue {
                 if errors == 0 {
                     moto_async::sleep(std::time::Duration::from_secs(1)).await;
                 } else {
-                    moto_async::sleep(std::time::Duration::from_millis(10)).await;
+                    moto_async::sleep(std::time::Duration::from_secs(1)).await;
+                    // moto_async::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 let vq = this.borrow();
 
@@ -331,6 +338,27 @@ impl Virtqueue {
                 }
             }
         });
+    }
+
+    async fn reclaim_task(this: Rc<RefCell<Self>>) {
+        let wait_handle = this.borrow().wait_handle;
+
+        loop {
+            let mut virtq = this.borrow_mut();
+
+            virtq.disable_irq();
+            while let Some(_chain_head) = virtq.reclaim_used() {}
+
+            log::debug!("reclaim_task: enable irq");
+            virtq.enable_irq();
+            if virtq.has_new_used() {
+                continue;
+            }
+
+            drop(virtq);
+            log::debug!("reclaim_task: wait on 0x{:x}", wait_handle.as_u64());
+            wait_handle.as_future().await.unwrap();
+        }
     }
 
     pub fn queue_size(&self) -> u16 {
@@ -570,7 +598,6 @@ impl Virtqueue {
             chain_head,
             virtqueue: this,
             data: Some(bytes),
-            syshandle_future: None,
         }
     }
 
@@ -658,56 +685,22 @@ pub(crate) struct VqCompletion<T> {
     chain_head: u16,
     virtqueue: Rc<RefCell<Virtqueue>>,
     data: Option<T>, // Option because we need to take it out.
-    syshandle_future: Option<moto_async::SysHandleFuture>,
 }
 
 impl<T> VqCompletion<T> {
     fn do_poll(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<(T, Result<(u32)>)> {
         let mut virtq = self.virtqueue.borrow_mut();
-
-        'outer: loop {
-            virtq.disable_irq();
-            while let Some(_chain_head) = virtq.reclaim_used() {}
-
-            if !virtq.header_buffers[self.chain_head as usize].in_use_by_device {
-                virtq.completion_waiters[self.chain_head as usize] = None;
-                let consumed = virtq.get_result(self.chain_head);
-
-                // log::debug!("completion done: OK: {consumed}");
-                drop(virtq);
-                self.syshandle_future = None;
-                return std::task::Poll::Ready((self.data.take().unwrap(), Ok(consumed)));
-            }
-
-            if self.syshandle_future.is_none() {
-                self.syshandle_future = Some(virtq.wait_handle.as_future());
-                #[cfg(debug_assertions)]
-                {
-                    if moto_async::current_task_id() == 14 {
-                        self.syshandle_future.as_ref().unwrap().set_debug_log(true);
-                    }
-                }
-            }
-
-            // Always enable, as it may change the event_idx based on work done above.
-            virtq.enable_irq();
-
-            let pinned = core::pin::pin!(self.syshandle_future.as_mut().unwrap());
-            match pinned.poll(cx) {
-                std::task::Poll::Ready(_) => {
-                    self.syshandle_future = None;
-                    virtq.completion_waiters[self.chain_head as usize] = None;
-                    continue;
-                }
-                std::task::Poll::Pending => {
-                    if !virtq.has_new_used() {
-                        break 'outer;
-                    }
-                }
-            }
-        } // 'outer loop
-
         virtq.completion_waiters[self.chain_head as usize] = Some(cx.local_waker().clone());
+
+        if !virtq.header_buffers[self.chain_head as usize].in_use_by_device {
+            virtq.completion_waiters[self.chain_head as usize] = None;
+            let consumed = virtq.get_result(self.chain_head);
+
+            // log::debug!("completion done: OK: {consumed}");
+            drop(virtq);
+            return std::task::Poll::Ready((self.data.take().unwrap(), Ok(consumed)));
+        }
+
         return std::task::Poll::Pending;
     } // fn poll()
 }

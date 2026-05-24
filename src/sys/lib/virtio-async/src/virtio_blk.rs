@@ -145,10 +145,6 @@ impl BlockDevice {
             features_acked |= VIRTIO_BLK_F_FLUSH;
         }
 
-        // NOTE: VIRTIO_F_RING_EVENT_IDX is disabled because wakeups are losts if it is ON
-        //       (tested only with virtio-net, as neither qemu, nor chv, nor fc support
-        //        this feature for virtio-blk).
-        /*
         if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) != 0 {
             log::debug!(
                 "Virtio BLK device {:?}:\n\tVIRTIO_F_RING_EVENT_IDX feature IS available.",
@@ -161,7 +157,6 @@ impl BlockDevice {
                 dev.pci_device.id,
             );
         }
-        */
 
         // | VIRTIO_BLK_F_RO;
         // (VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_RO | VIRTIO_BLK_F_BLK_SIZE);
