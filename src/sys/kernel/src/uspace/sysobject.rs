@@ -12,6 +12,9 @@ use crate::util::SpinLock;
 use super::process::{Thread, ThreadId};
 use super::Process;
 
+/// Intrusive atomic queue.
+static WAKE_QUEUE: AtomicU64 = AtomicU64::new(0);
+
 // Represents a system object that SysHandle points to.
 #[repr(align(8))]
 pub struct SysObject {
@@ -19,8 +22,8 @@ pub struct SysObject {
     // of woken objects. As this is often done in the IRQ context,
     // we can't do mutexes/memory allocations/etc., so we we work
     // with a lock-free intrusive singly-linked-list. See Self::wake()
-    next_woken: AtomicU64,
-    wake_event_lock: AtomicBool,
+    wake_queue_intrusive_ptr: AtomicU64,
+    wake_queue_ptr_guard: AtomicBool,
 
     waiting_threads: SpinLock<BTreeMap<ThreadId, (Weak<Thread>, SysHandle)>>,
 
@@ -42,6 +45,7 @@ pub struct SysObject {
 
     // Some objects wake once and then always stay "woken", e.g. process completions.
     done: AtomicBool,
+    wake_pending: AtomicBool,
 }
 
 impl PartialEq for SysObject {
@@ -72,8 +76,8 @@ impl SysObject {
 
         Arc::new(Self {
             waiting_threads: SpinLock::new(BTreeMap::new()),
-            next_woken: AtomicU64::new(0),
-            wake_event_lock: AtomicBool::new(false),
+            wake_queue_intrusive_ptr: AtomicU64::new(0),
+            wake_queue_ptr_guard: AtomicBool::new(false),
             url,
             owner,
             process_owner,
@@ -81,6 +85,7 @@ impl SysObject {
             wake_counter: AtomicU64::new(0),
             sibling_dropped: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            wake_pending: AtomicBool::new(false),
         })
     }
 
@@ -122,15 +127,8 @@ impl SysObject {
     }
 
     #[inline(always)]
-    pub fn is_woken(&self) -> bool {
-        self.next_woken.load(Ordering::Acquire) != 0
-    }
-
-    #[inline(always)]
-    pub fn set_next_woken(&self, next: u64) {
-        debug_assert!(self.wake_event_lock.load(Ordering::Acquire));
-        // Use +1 to indicate self is woken even if next is zero.
-        self.next_woken.store(next + 1, Ordering::Release);
+    fn is_woken(&self) -> bool {
+        self.wake_queue_intrusive_ptr.load(Ordering::Acquire) != 0
     }
 
     #[inline(always)]
@@ -144,28 +142,22 @@ impl SysObject {
         self.waiting_threads.lock(line!()).remove(&thread.tid());
     }
 
-    pub fn take_woken(&self) -> (u64, BTreeMap<ThreadId, (Weak<Thread>, SysHandle)>) {
+    fn dequeue_woken_head(&self) -> u64 {
         loop {
-            let prev = self.wake_event_lock.swap(true, Ordering::AcqRel);
+            let prev = self.wake_queue_ptr_guard.swap(true, Ordering::AcqRel);
             if !prev {
                 break;
             }
         }
         // Use -1 because we did a +1 in set_next_woken.
-        let next = self.next_woken.swap(0, Ordering::AcqRel) - 1;
-        let threads = core::mem::take(&mut *self.waiting_threads.lock(line!()));
-        self.wake_event_lock.store(false, Ordering::Release);
+        let next = self.wake_queue_intrusive_ptr.swap(0, Ordering::AcqRel) - 1;
+        self.wake_queue_ptr_guard.store(false, Ordering::Release);
 
-        (next, threads)
+        next
     }
 
-    pub fn get_single_waiter(&self) -> Option<Arc<Thread>> {
-        let waiters = self.waiting_threads.lock(line!());
-        if let Some((_, (t, _))) = waiters.iter().next() {
-            t.upgrade()
-        } else {
-            None
-        }
+    fn take_waiting_threads(&self) -> BTreeMap<ThreadId, (Weak<Thread>, SysHandle)> {
+        core::mem::take(&mut *self.waiting_threads.lock(line!()))
     }
 
     // May be called from IRQ.
@@ -173,16 +165,17 @@ impl SysObject {
     pub fn wake_irq(self_: &Arc<Self>) {
         self_.wake_counter.fetch_add(1, Ordering::AcqRel);
         // Protect against concurrent attempts to add this object to the woken list.
-        let prev = self_.wake_event_lock.swap(true, Ordering::AcqRel);
+        let prev = self_.wake_queue_ptr_guard.swap(true, Ordering::AcqRel);
         if prev {
+            self_.wake_pending.store(true, Ordering::Release);
             return;
         }
 
         if !self_.is_woken() {
-            on_object_woke(self_);
+            add_object_to_wake_queue(self_);
         }
 
-        self_.wake_event_lock.store(false, Ordering::Release);
+        self_.wake_queue_ptr_guard.store(false, Ordering::Release);
     }
 
     #[allow(clippy::result_unit_err)]
@@ -203,22 +196,22 @@ impl SysObject {
     pub fn wake(&self, this_cpu: bool) {
         self.wake_counter.fetch_add(1, Ordering::AcqRel);
         // Protect against concurrent attempts to add this object to the woken list.
-        let prev = self.wake_event_lock.swap(true, Ordering::AcqRel);
+        let prev = self.wake_queue_ptr_guard.swap(true, Ordering::AcqRel);
         if prev {
+            self.wake_pending.store(true, Ordering::Release);
             return;
         }
 
         if self.is_woken() {
-            self.wake_event_lock.store(false, Ordering::Release);
+            // Already on the wake queue.
+            self.wake_queue_ptr_guard.store(false, Ordering::Release);
             return;
         }
 
-        self.set_next_woken(0); // Mark woken.
-        self.wake_event_lock.store(false, Ordering::Release);
+        self.wake_queue_ptr_guard.store(false, Ordering::Release);
 
         // See process_wake_events.
-        let (next, threads_and_handles) = self.take_woken();
-        assert_eq!(next, 0);
+        let threads_and_handles = self.take_waiting_threads();
         for (_, (thread, handle)) in threads_and_handles {
             if let Some(thread) = thread.upgrade() {
                 thread.wake_by_object(handle, this_cpu);
@@ -245,9 +238,7 @@ pub fn object_from_sysobject<T: Any + Send + Sync>(sys_object: &Arc<SysObject>) 
     Arc::downcast::<T>(sys_object.owner.clone()).ok()
 }
 
-static WOKEN_OBJECTS: AtomicU64 = AtomicU64::new(0);
-
-fn on_object_woke(woken: &Arc<SysObject>) {
+fn add_object_to_wake_queue(woken: &Arc<SysObject>) {
     // NOTE: this is often called from an IRQ, be very careful what you do here:
     // no taking of locks, no memory allocations.
     debug_assert!(!woken.is_woken());
@@ -258,14 +249,17 @@ fn on_object_woke(woken: &Arc<SysObject>) {
         if iters > 1_000_000 {
             panic!("{}:{} - loop inside IRQ", file!(), line!());
         }
-        let prev_head = WOKEN_OBJECTS.load(Ordering::Acquire);
-        woken.set_next_woken(prev_head);
+        let prev_head = WAKE_QUEUE.load(Ordering::Acquire);
+        // Use +1 to indicate self is woken even if next is zero.
+        woken
+            .wake_queue_intrusive_ptr
+            .store(prev_head + 1, Ordering::Release);
 
         // Do Arc::into_raw + clone to keep the refcount up.
         // Increase the refcount.
         let next_head = Arc::into_raw(woken.clone()) as usize as u64;
 
-        if WOKEN_OBJECTS
+        if WAKE_QUEUE
             .compare_exchange_weak(prev_head, next_head, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
@@ -279,16 +273,24 @@ fn on_object_woke(woken: &Arc<SysObject>) {
 }
 
 pub fn process_wake_events() {
-    let mut next = WOKEN_OBJECTS.swap(0, Ordering::AcqRel);
+    let mut next = WAKE_QUEUE.swap(0, Ordering::AcqRel);
 
     while next != 0 {
         let obj = unsafe { Arc::from_raw(next as usize as *const SysObject) };
         // See SysObject::wake().
-        let (next_, threads_and_handles) = obj.take_woken();
+        let next_ = obj.dequeue_woken_head();
         next = next_;
-        for (_, (thread, handle)) in threads_and_handles {
-            if let Some(thread) = thread.upgrade() {
-                thread.wake_by_object(handle, false);
+
+        loop {
+            let threads_and_handles = obj.take_waiting_threads();
+            for (_, (thread, handle)) in threads_and_handles {
+                if let Some(thread) = thread.upgrade() {
+                    thread.wake_by_object(handle, false);
+                }
+            }
+
+            if !obj.wake_pending.swap(false, Ordering::AcqRel) {
+                break;
             }
         }
     }
