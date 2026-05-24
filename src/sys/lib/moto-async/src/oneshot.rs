@@ -119,6 +119,7 @@ impl<T> Future for Receiver<T> {
         if state == CHANNEL_FULL {
             // Safety: state is FULL, data is initialized and memory valid via Acquire.
             let val = unsafe { self.channel.data.get().read().assume_init() };
+            self.channel.state.store(CHANNEL_CLOSED, Ordering::Release);
             return Poll::Ready(Ok(val));
         }
 
