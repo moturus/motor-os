@@ -1,3 +1,4 @@
+//! This module handles SysObj syscalls. For SysObject, go to sysobject.rs.
 use crate::mm::PageType;
 
 use super::syscall::*;

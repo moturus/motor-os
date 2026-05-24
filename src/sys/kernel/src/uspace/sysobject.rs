@@ -1,3 +1,4 @@
+//! This module defines SysObject. For SysObj syscall handling, go to sys_obj.rs.
 use core::any::Any;
 use core::sync::atomic::*;
 
