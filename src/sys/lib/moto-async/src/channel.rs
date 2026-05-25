@@ -60,15 +60,6 @@ pub struct Receiver<T> {
     shared: Arc<SharedChannelData>,
 }
 
-impl<T> Receiver<T> {
-    fn private_clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            shared: self.shared.clone(),
-        }
-    }
-}
-
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let (sender, receiver) = moto_mpmc::bounded(capacity);
     let (receiver_tx, receiver_rx) = moto_mpmc::bounded(1);
@@ -254,15 +245,13 @@ impl<T> Future for SendFuture<T> {
 }
 
 impl<T> Receiver<T> {
-    pub fn recv(&mut self) -> RecvFuture<T> {
+    pub fn recv<'a>(&'a mut self) -> RecvFuture<'a, T> {
         match self.inner.try_recv() {
             Ok(val) => {
                 self.shared.wake_one_sender();
                 RecvFuture(RecvFutureInner::Ready(Some(val)))
             }
-            Err(moto_mpmc::TryRecvError::Empty) => {
-                RecvFuture(RecvFutureInner::Pending(self.private_clone()))
-            }
+            Err(moto_mpmc::TryRecvError::Empty) => RecvFuture(RecvFutureInner::Pending(self)),
             Err(moto_mpmc::TryRecvError::Disconnected) => RecvFuture(RecvFutureInner::Ready(None)),
         }
     }
@@ -283,14 +272,17 @@ impl<T> Drop for Receiver<T> {
 
 // Has to be "inner" as the future is public, and we can't have a public enum
 // with private variants.
-enum RecvFutureInner<T> {
+enum RecvFutureInner<'a, T> {
     Ready(Option<T>),
-    Pending(Receiver<T>),
+    Pending(&'a mut Receiver<T>),
 }
 
-pub struct RecvFuture<T>(RecvFutureInner<T>);
+// RecvFuture must borrow the Receiver, otherwise two RecvFutures could be
+// constructed, which could be polled concurrently.
+pub struct RecvFuture<'a, T>(RecvFutureInner<'a, T>);
 
-impl<T> Future for RecvFuture<T> {
+#[allow(clippy::extra_unused_lifetimes)]
+impl<'a, T> Future for RecvFuture<'_, T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
