@@ -152,6 +152,7 @@ impl<T> Future for Receiver<T> {
             CHANNEL_FULL => {
                 // Safety: safe because state FULL acts as a sync edge.
                 let val = unsafe { self.channel.data.get().read().assume_init() };
+                self.channel.state.store(CHANNEL_CLOSED, Ordering::Release);
                 Poll::Ready(Ok(val))
             }
             CHANNEL_CLOSED => Poll::Ready(Err(moto_rt::Error::NotConnected)),
@@ -169,5 +170,15 @@ impl<T> Drop for Receiver<T> {
             Ordering::AcqRel,
             Ordering::Relaxed,
         );
+    }
+}
+
+impl<T> Drop for Channel<T> {
+    fn drop(&mut self) {
+        if *self.state.get_mut() == CHANNEL_FULL {
+            unsafe {
+                core::ptr::drop_in_place(self.data.get_mut().as_mut_ptr());
+            }
+        }
     }
 }
