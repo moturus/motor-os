@@ -6,6 +6,9 @@ use moto_rt::time::Instant;
 
 extern crate alloc;
 
+#[cfg(not(target_os = "motor"))]
+compile_error!("Only Motor OS targets supported.");
+
 struct QueueEntry<T> {
     at: Instant,
     what: T,
@@ -94,17 +97,17 @@ fn basic_timeq() {
     let at_2 = at + core::time::Duration::from_secs(2);
     let at_3 = at + core::time::Duration::from_secs(3);
 
-    assert!(timeq.next_at().is_none());
+    assert!(timeq.next().is_none());
 
-    timeq.add_after(core::time::Duration::from_secs(3), 3);
+    timeq.add_at(at_3, 3);
     timeq.add_at(at_2, 2);
     timeq.add_at(at_1, 1);
 
-    assert_eq!(timeq.next_at(), Some(at_1));
+    assert_eq!(timeq.next(), Some(at_1));
     assert_eq!(1, timeq.pop_at(at_1).unwrap());
 
     assert!(timeq.pop_at(at_1).is_none());
-    assert_eq!(timeq.next_at(), Some(at_2));
+    assert_eq!(timeq.next(), Some(at_2));
     assert!(
         timeq
             .pop_at(at_1 + core::time::Duration::from_millis(500))
@@ -125,5 +128,5 @@ fn basic_timeq() {
             .pop_at(at_3 + core::time::Duration::from_secs(100))
             .unwrap()
     );
-    assert!(timeq.next_at().is_none());
+    assert!(timeq.next().is_none());
 }
