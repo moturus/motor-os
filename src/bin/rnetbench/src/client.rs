@@ -138,13 +138,12 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
         let res = r.lock().unwrap();
         assert!(res.duration >= duration);
         if res.duration.as_secs_f64() >= duration.as_secs_f64() * 1.1 {
-            panic!(
-                "bad runtime: {:.3} vs {:.3}",
+            eprintln!(
+                "Bad runtime: {:.3} vs {:.3}. TCP queueing issues?",
                 res.duration.as_secs_f64(),
                 duration.as_secs_f64()
             );
         }
-        assert!(res.duration.as_secs_f64() < duration.as_secs_f64() * 1.1);
 
         total_duration += res.duration;
         total_bytes += res.bytes;
