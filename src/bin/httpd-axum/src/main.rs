@@ -3,7 +3,6 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use std::path::PathBuf;
 use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -47,9 +46,15 @@ async fn main() {
 
     let app = Router::new()
         .fallback_service(ServeDir::new(&args.dir))
-        .layer(TraceLayer::new_for_http().on_request(()).on_response(
-            |response: &http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
-                tracing::info!("{} ({}us)", response.status().as_u16(), latency.as_micros())
+        .layer(axum::middleware::from_fn(
+            |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let uri = req.uri().clone();
+                let method = req.method().clone();
+                let start = std::time::Instant::now();
+                let res = next.run(req).await;
+                let latency = start.elapsed();
+                tracing::info!("{} {} {} ({}us)", method, uri, res.status().as_u16(), latency.as_micros());
+                res
             },
         ));
 
