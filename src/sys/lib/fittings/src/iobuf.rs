@@ -70,8 +70,8 @@ impl IoBuf {
     pub fn set_len(&mut self, len: usize) {
         #[cfg(debug_assertions)]
         {
-            if len > self.len {
-                panic!("IoBuf::set_len: {len} > {}", self.len);
+            if len > self.layout_size_align {
+                panic!("IoBuf::set_len: {len} > {}", self.layout_size_align);
             }
         }
         assert!(len <= self.layout_size_align);
