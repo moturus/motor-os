@@ -30,7 +30,7 @@ impl BufCache {
                 buf.set_len(2048);
                 buf
             })
-            .unwrap_or(IoBuf::new_from_size_align(2048).unwrap())
+            .unwrap_or_else(|| IoBuf::new_from_size_align(2048).unwrap())
     }
 
     fn push_buf(&self, buf: IoBuf) {
@@ -135,6 +135,7 @@ impl VirtioDevice {
         let txq_sz = net_dev.txq_sz() as usize;
 
         loop {
+            // TODO: reap completions smarter.
             if completions.len() == txq_sz {
                 let completion = completions.pop_front().unwrap();
                 let (buf, _) = completion.await;
