@@ -3,6 +3,7 @@ use std::{
     cell::RefCell,
     collections::VecDeque,
     io::ErrorKind,
+    mem::ManuallyDrop,
     net::{IpAddr, SocketAddr},
     rc::Rc,
 };
@@ -15,8 +16,26 @@ use moto_tooling::iobuf::IoBuf;
 type RxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
 type TxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
 
-fn new_packet_buf() -> IoBuf {
-    IoBuf::new_from_size_align(2048).unwrap()
+#[derive(Default, Clone)]
+struct BufCache {
+    inner: Rc<RefCell<Vec<IoBuf>>>,
+}
+
+impl BufCache {
+    fn pop_buf(&self) -> IoBuf {
+        self.inner
+            .borrow_mut()
+            .pop()
+            .map(|mut buf| {
+                buf.set_len(2048);
+                buf
+            })
+            .unwrap_or(IoBuf::new_from_size_align(2048).unwrap())
+    }
+
+    fn push_buf(&self, buf: IoBuf) {
+        self.inner.borrow_mut().push(buf);
+    }
 }
 
 pub(super) struct VirtioDevice {
@@ -29,6 +48,8 @@ pub(super) struct VirtioDevice {
     // The device will listen on tx_notify for tx_queue updates.
     tx_notify: Rc<moto_async::LocalNotify>,
     mtu: u16,
+
+    buf_cache: BufCache,
 }
 
 impl VirtioDevice {
@@ -41,17 +62,20 @@ impl VirtioDevice {
             rx_notify: Default::default(),
             tx_notify: Default::default(),
             mtu,
+            buf_cache: Default::default(),
         };
 
         let _ = moto_async::LocalRuntime::spawn(Self::rx_task(
             this.inner.clone(),
             this.rx_queue.clone(),
             this.rx_notify.clone(),
+            this.buf_cache.clone(),
         ));
         let _ = moto_async::LocalRuntime::spawn(Self::tx_task(
             this.inner.clone(),
             this.tx_queue.clone(),
             this.tx_notify.clone(),
+            this.buf_cache.clone(),
         ));
 
         this
@@ -61,6 +85,7 @@ impl VirtioDevice {
         net_dev: Rc<NetDevice>,
         rx_queue: RxQueue,
         rx_notify: Rc<moto_async::LocalNotify>,
+        buf_cache: BufCache,
     ) {
         // Submit RX buffers to net_dev. Wait. Once RX happens, push
         // the buffer into rx_queue, notify. Once RX buffer is consumed,
@@ -73,7 +98,7 @@ impl VirtioDevice {
         // Pre-submit blocks.
         let mut completions = VecDeque::with_capacity(rxq_sz);
         for _ in 0..rxq_sz {
-            completions.push_back(net_dev.clone().post_read(new_packet_buf()).await);
+            completions.push_back(net_dev.clone().post_read(buf_cache.pop_buf()).await);
         }
 
         #[cfg(debug_assertions)]
@@ -96,7 +121,7 @@ impl VirtioDevice {
             rx_notify.notify_one();
 
             log::debug!("NET: RX: posting read");
-            completions.push_back(net_dev.clone().post_read(new_packet_buf()).await);
+            completions.push_back(net_dev.clone().post_read(buf_cache.pop_buf()).await);
         }
     }
 
@@ -104,6 +129,7 @@ impl VirtioDevice {
         net_dev: Rc<NetDevice>,
         tx_queue: RxQueue,
         tx_notify: Rc<moto_async::LocalNotify>,
+        buf_cache: BufCache,
     ) {
         let mut completions = VecDeque::new();
         let txq_sz = net_dev.txq_sz() as usize;
@@ -111,7 +137,8 @@ impl VirtioDevice {
         loop {
             if completions.len() == txq_sz {
                 let completion = completions.pop_front().unwrap();
-                let _ = completion.await;
+                let (buf, _) = completion.await;
+                buf_cache.push_buf(buf);
             }
             let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
 
@@ -125,21 +152,33 @@ impl VirtioDevice {
     }
 }
 
-pub struct VirtioRxToken(IoBuf);
+pub struct VirtioRxToken {
+    buf: ManuallyDrop<IoBuf>,
+    buf_cache: BufCache,
+}
+
+impl Drop for VirtioRxToken {
+    fn drop(&mut self) {
+        // SAFETY: safe as self.buf will never be accessed again.
+        let buf = unsafe { ManuallyDrop::take(&mut self.buf) };
+        self.buf_cache.push_buf(buf);
+    }
+}
 
 impl smoltcp::phy::RxToken for VirtioRxToken {
     fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        log::debug!("RxToken: consume {}", self.0.len());
-        f(self.0.as_ref())
+        log::debug!("RxToken: consume {}", self.buf.len());
+        f(self.buf.as_ref())
     }
 }
 
 pub struct VirtioTxToken {
     tx_queue: TxQueue,
     tx_notify: Rc<moto_async::LocalNotify>,
+    buf_cache: BufCache,
 }
 
 impl smoltcp::phy::TxToken for VirtioTxToken {
@@ -147,7 +186,7 @@ impl smoltcp::phy::TxToken for VirtioTxToken {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut packet = new_packet_buf();
+        let mut packet = self.buf_cache.pop_buf();
         packet.set_len(len);
         let result = f(packet.as_mut());
         self.tx_queue.borrow_mut().push_back(packet);
@@ -176,10 +215,14 @@ impl smoltcp::phy::Device for VirtioDevice {
         self.rx_queue.borrow_mut().pop_front().map(|buf| {
             log::debug!("VirtioDevice::receive(): have {} bytes.", buf.len());
             (
-                VirtioRxToken(buf),
+                VirtioRxToken {
+                    buf: ManuallyDrop::new(buf),
+                    buf_cache: self.buf_cache.clone(),
+                },
                 VirtioTxToken {
                     tx_queue: self.tx_queue.clone(),
                     tx_notify: self.tx_notify.clone(),
+                    buf_cache: self.buf_cache.clone(),
                 },
             )
         })
@@ -190,6 +233,7 @@ impl smoltcp::phy::Device for VirtioDevice {
         Some(VirtioTxToken {
             tx_queue: self.tx_queue.clone(),
             tx_notify: self.tx_notify.clone(),
+            buf_cache: self.buf_cache.clone(),
         })
     }
 
