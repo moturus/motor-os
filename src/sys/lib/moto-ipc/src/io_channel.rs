@@ -1130,7 +1130,16 @@ impl Sender {
     pub async fn send(&self, msg: Msg) -> Result<()> {
         use moto_async::AsFuture;
 
+        match self.inner.endpoint_type {
+            EndpointType::Client => self
+                .raw_channel()
+                .clear_client_wait(WaitType::WaitingToSend),
+            EndpointType::Server => self
+                .raw_channel()
+                .clear_server_wait(WaitType::WaitingToSend),
+        }
         let mut wait_flag_set = false;
+
         loop {
             match self.try_send(msg) {
                 Err(moto_rt::Error::NotReady) => {
@@ -1198,6 +1207,10 @@ impl Sender {
     pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         use moto_async::AsFuture;
 
+        match self.inner.endpoint_type {
+            EndpointType::Client => self.raw_channel().clear_client_page_wait(subchannel_mask),
+            EndpointType::Server => self.raw_channel().clear_server_page_wait(subchannel_mask),
+        }
         let mut wait_flag_set = false;
         loop {
             match self.try_alloc_page(subchannel_mask) {
