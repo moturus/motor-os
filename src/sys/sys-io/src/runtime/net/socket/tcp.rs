@@ -623,7 +623,7 @@ impl MotoSocket {
                 break;
             }
 
-            // Step 3: allocate a page.
+            // Step 3: allocate a page. This is where backpressure happens.
             let page = sender.alloc_page(subchannel_mask).await.unwrap();
 
             // Step 4: read bytes from the socket. Note that we read at most one page,
