@@ -1302,6 +1302,15 @@ impl Receiver {
     }
 
     pub fn poll_recv(&mut self, cx: &mut core::task::Context<'_>) -> core::task::Poll<Result<Msg>> {
+        match self.inner.endpoint_type {
+            EndpointType::Client => self
+                .raw_channel()
+                .clear_client_wait(WaitType::WaitingToRecv),
+            EndpointType::Server => self
+                .raw_channel()
+                .clear_server_wait(WaitType::WaitingToRecv),
+        }
+
         let mut wait_flag_set = false;
         let mut wait_error = moto_rt::Error::Ok;
         loop {
