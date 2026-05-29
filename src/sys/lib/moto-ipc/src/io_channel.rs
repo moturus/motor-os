@@ -1342,10 +1342,10 @@ impl Receiver {
                         match self.inner.endpoint_type {
                             EndpointType::Client => self
                                 .raw_channel()
-                                .clear_client_wait(WaitType::WaitingToSend),
+                                .clear_client_wait(WaitType::WaitingToRecv),
                             EndpointType::Server => self
                                 .raw_channel()
-                                .clear_server_wait(WaitType::WaitingToSend),
+                                .clear_server_wait(WaitType::WaitingToRecv),
                         }
                         wait_flag_set = false;
                     }
