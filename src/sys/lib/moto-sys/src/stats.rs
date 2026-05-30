@@ -31,6 +31,7 @@ pub struct ProcessStatsV1 {
     pub debug_name_len: u8,
     pub active: u8,         // 0 => zombie; 1 => active.
     pub system_process: u8, // 1 => system; 0 => normal.
+    pub metrics: [u64; MetricType::TotalMetricTypes as usize],
 }
 
 #[cfg(feature = "userspace")]
@@ -198,5 +199,85 @@ impl ThreadDataV1 {
     pub fn thread_name(&self) -> &str {
         assert!(self.name_len as usize <= crate::MAX_THREAD_NAME_LEN);
         core::str::from_utf8(&self.name_bytes[0..(self.name_len as usize)]).unwrap()
+    }
+}
+
+// --------------------- metrics -----------------------
+// Metrics are u64 numbers identified by a pair of u64 numbers.
+// A full metric ID: (u64, u64): metric type id, scope id.
+// Metric type ID: see below (e.g. METRIC_MEM_USAGE).
+//
+// Metric scope id: process ID (with 0 for total/global, 1 for
+// kernel, 2 for sys-io, etc.).
+
+/// Defines metric types exported by the kernel.
+#[repr(usize)]
+#[derive(Clone, Copy, Debug)]
+pub enum MetricType {
+    /// Memory usage in bytes.
+    MemoryUsage = 0,
+    /// CPU usage in tsc.
+    CpuUsage = 1,
+
+    ThreadsCreated = 2,
+    ActiveThreads = 3,
+
+    /// Total SysMem calls.
+    SysMemCalls = 4,
+    /// Memory allocations.
+    SysMemMaps = 5,
+    /// Memory deallocations.
+    SysMemUnmaps = 6,
+
+    /// Total SysCpu calls.
+    SysCpuCalls = 7,
+    /// SysCpu::wait() calls.
+    SysCpuWaits = 8,
+    /// SysCpu::wake() calls.
+    SysCpuWakes = 9,
+
+    /// Total SysObj calls.
+    SysObjCalls = 10,
+    /// Active system objects.
+    SysObjects = 11,
+    /// Active shared objects.
+    SharedObjects = 12,
+    /// Total objects created.
+    TotalObjects = 13,
+
+    /// Total SysRay calls.
+    SysRayCalls = 14,
+
+    TlbInvp = 15,
+
+    IrqFired = 16, // Total.
+    IrqTimerFired = 17,
+    IrqWakeupFired = 18,
+    IrqTlbShootdownFired = 19,
+    IrqPfFired = 20,
+
+    IrqCustom0Fired = 21,
+    IrqCustom1Fired = 22,
+    IrqCustom2Fired = 23,
+    IrqCustom3Fired = 24,
+    IrqCustom4Fired = 25,
+    IrqCustom5Fired = 26,
+    IrqCustom6Fired = 27,
+    IrqCustom7Fired = 28,
+
+    TotalMetricTypes = 29,
+}
+
+impl MetricType {
+    pub fn from_custom_irq(irq_num: u8) -> Self {
+        assert!(irq_num <= 8);
+        // SAFETY: safe by construction.
+        unsafe { core::mem::transmute(Self::IrqCustom0Fired as usize + (irq_num as usize)) }
+    }
+
+    pub fn from_idx(idx: usize) -> Self {
+        assert!(idx < Self::TotalMetricTypes as usize);
+        // SAFETY: safe by construction.
+        unsafe { core::mem::transmute(idx) }
     }
 }

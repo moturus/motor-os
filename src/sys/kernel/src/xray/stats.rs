@@ -86,16 +86,20 @@ impl MemStats {
     }
 }
 
+const PCPU_STATS_CNT: usize = 36; // 8 * N + 4: see below.
+
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
     pub cpu_kernel: AtomicU64, // as TSC
     pub cpu_uspace: AtomicU64, // as TSC
     pub started_k: AtomicU64,  // if running, indicates when cpu_kernel started, otherwise zero
     pub started_u: AtomicU64,  // if running, indicates when cpu_uspace started, otherwise zero
-    _pad: [u64; 4],
+    metrics: [AtomicU64; PCPU_STATS_CNT],
 }
 
-const _: () = assert!(64 == core::mem::size_of::<PerCpuStatsEntry>());
+const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
+
+const _: () = assert!(320 == core::mem::size_of::<PerCpuStatsEntry>()); // 40 * 8
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {
@@ -104,7 +108,7 @@ impl PerCpuStatsEntry {
             cpu_kernel: AtomicU64::new(0),
             started_k: AtomicU64::new(0),
             started_u: AtomicU64::new(0),
-            _pad: [0; 4],
+            metrics: [const { AtomicU64::new(0) }; PCPU_STATS_CNT],
         }
     }
 
@@ -142,6 +146,15 @@ impl PerCpuStats {
         }
 
         Self { data }
+    }
+
+    fn get_metric(&self, metric_idx: usize) -> u64 {
+        let mut result = 0;
+        for cpu in 0..num_cpus() {
+            result += self.data[cpu as usize].metrics[metric_idx].load(Ordering::Relaxed);
+        }
+
+        result
     }
 }
 
@@ -350,6 +363,10 @@ impl KProcessStats {
         } else {
             0
         };
+
+        for metric_idx in 0..(MetricType::TotalMetricTypes as usize) {
+            dest.metrics[metric_idx] = self.per_cpu_stats.get_metric(metric_idx)
+        }
     }
 
     pub fn iterate<F>(start: ProcessId, flat: bool, mut func: F)
@@ -484,6 +501,18 @@ impl KProcessStats {
         self.start_cpu_usage_kernel();
         CpuUsageScopeKernel {
             stats: self.clone(),
+        }
+    }
+
+    #[inline]
+    pub fn adjust_metric(&self, metric: MetricType, val: i64) {
+        let cpu = current_cpu() as usize;
+        let entry = &self.per_cpu_stats.data[cpu];
+
+        if val > 0 {
+            entry.metrics[metric as usize].fetch_add(val as u64, Ordering::Relaxed);
+        } else {
+            entry.metrics[metric as usize].fetch_sub(-val as u64, Ordering::Relaxed);
         }
     }
 }

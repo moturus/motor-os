@@ -6,6 +6,7 @@ use crate::util::StaticRef;
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::arch::naked_asm;
+use moto_sys::stats::MetricType;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 // Note: we use super::serial::write_serial_!() below instead of raw_log!()
@@ -511,6 +512,7 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
     let uspace = irq_stack.cs & 0x3 == 3;
     let swapgs = super::slow_swapgs();
 
+    crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqFired, 1);
     if uspace {
         crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 1);
     } else {
@@ -544,6 +546,10 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
             eoi();
         }
         64..=79 => {
+            crate::xray::stats::kernel_stats().adjust_metric(
+                MetricType::from_custom_irq((irq_num as u8) - IRQ_CUSTOM_START),
+                1,
+            );
             crate::sched::on_custom_irq(irq_num as u8);
             if uspace {
                 // These are I/O IRQs, make sure the driver is running.
@@ -554,6 +560,7 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
             eoi();
         }
         IRQ_APIC_TIMER => {
+            crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqTimerFired, 1);
             // Timer.
             crate::sched::local_wake();
             if uspace {
@@ -567,11 +574,13 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
             }
         }
         IRQ_WAKEUP => {
+            crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqWakeupFired, 1);
             crate::sched::local_wake(); // Wakeup.
             crate::xray::tracing::trace_irq(irq_num, irq_stack.rip, 2);
             eoi();
         }
         IRQ_TLB_SHOOTDOWN => {
+            crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqTlbShootdownFired, 1);
             // Must be called before shoot_from_irq(), otherwise
             // we will have a deadlock.
             super::tlb::shoot_from_irq();
@@ -655,6 +664,9 @@ pub extern "C" fn page_fault_handler_inner(rsp: u64) {
     let uspace = (irq_stack.error_code & 4) != 0;
     let uspace_alternative = irq_stack.cs & 0x3 == 3;
     super::slow_swapgs();
+
+    crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqPfFired, 1);
+    crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqFired, 1);
 
     use x86_64::registers::control::Cr2;
     let rip = irq_stack.rip;

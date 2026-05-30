@@ -9,6 +9,7 @@ pub mod mkdir;
 pub mod mv;
 pub mod printenv;
 pub mod ps;
+pub mod pstat;
 pub mod pwd;
 pub mod rm;
 pub mod rmdir;
