@@ -40,6 +40,10 @@ fn sys_map(
     page_size: u64,
     num_pages: u64,
 ) -> SyscallResult {
+    curr_thread
+        .process_stats
+        .adjust_metric(stats::MetricType::SysMemMaps, 1);
+
     // Protect against bad numbers.
     let (new_bytes, overflow) = page_size.overflowing_mul(num_pages);
     if overflow || new_bytes > (1 << 40) {
@@ -237,12 +241,16 @@ fn sys_map(
 }
 
 fn sys_unmap(
-    _curr_thread: &super::process::Thread,
+    curr_thread: &super::process::Thread,
     address_space: &UserAddressSpace,
     flags: u32,
     phys_addr: u64,
     virt_addr: u64,
 ) -> SyscallResult {
+    curr_thread
+        .process_stats
+        .adjust_metric(stats::MetricType::SysMemUnmaps, 1);
+
     if flags != 0 {
         log::debug!("sys_unmap: unrecognized flags 0x{flags:x}");
         return ResultBuilder::invalid_argument();
@@ -327,8 +335,11 @@ fn sys_reclaim() -> SyscallResult {
 }
 
 pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
-    let version = args.version;
+    thread
+        .process_stats
+        .adjust_metric(stats::MetricType::SysMemCalls, 1);
 
+    let version = args.version;
     if version > 0 {
         return ResultBuilder::version_too_high();
     }

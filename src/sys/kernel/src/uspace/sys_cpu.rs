@@ -187,6 +187,9 @@ fn process_wake_handles(
 }
 
 pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
+    curr.process_stats
+        .adjust_metric(stats::MetricType::SysCpuWaits, 1);
+
     if args.version < 1 {
         return ResultBuilder::version_too_low();
     }
@@ -318,6 +321,10 @@ pub(super) fn do_wake(
 }
 
 fn sys_wake_impl(waker: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
+    waker
+        .process_stats
+        .adjust_metric(stats::MetricType::SysCpuWakes, 1);
+
     if args.version > 0 {
         return ResultBuilder::version_too_high();
     }
@@ -545,6 +552,9 @@ fn sys_query_percpu_stats(curr: &super::process::Thread, args: &mut SyscallArgs)
 }
 
 pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs) -> SyscallResult {
+    curr.process_stats
+        .adjust_metric(stats::MetricType::SysCpuCalls, 1);
+
     match args.operation {
         SysCpu::OP_WAIT => sys_wait_impl(curr, args),
         SysCpu::OP_WAKE => sys_wake_impl(curr, args),
