@@ -134,7 +134,13 @@ impl Term {
         }
     }
 
-    fn process_next_byte(&mut self, c: u8, prev_byte: u8) -> ProcessByteResult {
+    fn process_next_byte(&mut self, c: u8) -> ProcessByteResult {
+        use std::sync::atomic::*;
+
+        // Complication: some terminals use only \n, some ony \r, some both.
+        // We dynamically figure this out.
+        static NEWLINE_CHAR: AtomicU8 = AtomicU8::new(0);
+
         match &self.mode {
             ProcessingMode::Normal | ProcessingMode::History(_) => {
                 match c {
@@ -152,19 +158,27 @@ impl Term {
                         ProcessByteResult::Escape(EscapesIn::Backspace)
                     },
                     10 /* LF */  => {
-                        if prev_byte != 13 {
+                        let n_c = NEWLINE_CHAR.load(Ordering::Relaxed);
+                        if n_c == 0 {
+                            NEWLINE_CHAR.store(10, Ordering::Relaxed);
                             ProcessByteResult::Newline
-                            } else {
-                                ProcessByteResult::Continue
-                            }
+                        } else if n_c == 10 {
+                            ProcessByteResult::Newline
+                        } else {
+                            ProcessByteResult::Continue
+                        }
                     }
                     13 /* CR */  => {
-                        if prev_byte != 10 {
+                        let n_c = NEWLINE_CHAR.load(Ordering::Relaxed);
+                        if n_c == 0 {
+                            NEWLINE_CHAR.store(13, Ordering::Relaxed);
                             ProcessByteResult::Newline
-                            } else {
-                                ProcessByteResult::Continue
-                            }
-                    }
+                        } else if n_c == 13 {
+                            ProcessByteResult::Newline
+                        } else {
+                            ProcessByteResult::Continue
+                        }
+                     }
 
                     0x1b /* ESC */ => {
                         self.prev_mode = self.mode.clone();
@@ -246,11 +260,9 @@ impl Term {
             self.debug_log(msg.as_str());
         }
 
-        let mut prev_byte = 0;
         loop {
             let byte = self.next_byte();
-            let processed_byte = self.process_next_byte(byte, prev_byte);
-            prev_byte = byte;
+            let processed_byte = self.process_next_byte(byte);
 
             match processed_byte {
                 ProcessByteResult::Byte(c) => {
@@ -292,14 +304,16 @@ impl Term {
                     }
                     .to_owned();
                     if cmd.is_empty() {
-                        self.write("\r\n".as_bytes());
+                        // self.write("\r\n".as_bytes());
+                        self.write("\n".as_bytes());
                         self.start_line();
                         break;
                     }
                     if self.process_locally(cmd.as_str()) {
                         break;
                     } else {
-                        self.write("\r\n".as_bytes());
+                        // self.write("\r\n".as_bytes());
+                        self.write("\n".as_bytes());
                         self.term_impl.make_cooked();
                         self.maybe_add_to_history(cmd.as_str());
                         return Some(cmd);
