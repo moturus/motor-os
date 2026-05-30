@@ -502,6 +502,16 @@ impl NetRuntime {
 
         // moto_log!("{}:{} drop empty channels", file!(), line!());
     }
+
+    #[cfg(feature = "netdev")]
+    fn print_stats(&self) {
+        log::info!(
+            "NET runtime: {} TCP Listeners; {} TCP sockets; {} UDP sockets.",
+            self.num_tcp_listeners.load(Ordering::Relaxed),
+            self.num_tcp_streams.load(Ordering::Relaxed),
+            self.num_udp_sockets.load(Ordering::Relaxed)
+        );
+    }
 }
 
 /// A communication channel between the current process and sys-io.
@@ -572,7 +582,19 @@ impl NetChannel {
 
     fn io_thread(&self) -> ! {
         let mut maybe_msg = None;
+
+        #[cfg(feature = "netdev")]
+        let mut loop_counter = 0_u64;
+
         loop {
+            #[cfg(feature = "netdev")]
+            {
+                loop_counter += 1;
+                if loop_counter.is_multiple_of(1_000_000) {
+                    NET.lock().print_stats();
+                }
+            }
+
             self.io_thread_running.store(true, Ordering::Release);
             let mut should_sleep = self.io_thread_poll_messages();
             let (sleep, msg) = self.io_thread_send_messages(maybe_msg);
