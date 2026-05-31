@@ -1,3 +1,6 @@
+use async_fs::FileSystem;
+use std::rc::Rc;
+
 pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
     match err.kind() {
         std::io::ErrorKind::NotFound => moto_rt::Error::NotFound,
@@ -46,4 +49,58 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
 
 pub fn map_native_error(err: moto_rt::Error) -> std::io::Error {
     std::io::Error::from_raw_os_error(err as u16 as i32)
+}
+
+pub async fn stat(
+    fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
+    filename: &str,
+) -> std::io::Result<Option<(async_fs::EntryId, async_fs::EntryKind)>> {
+    if !filename.starts_with('/') {
+        return Err(std::io::ErrorKind::InvalidFilename.into());
+    }
+    let paths: Vec<&str> = filename.split('/').collect();
+    assert!(paths[0].is_empty());
+
+    let mut fs_mut = fs.lock().await;
+
+    let mut parent_id = async_fs::ROOT_ID;
+    let mut entry_kind = async_fs::EntryKind::File;
+
+    for &path in &paths[1..] {
+        let trimmed = path.trim();
+        if trimmed != path || trimmed.is_empty() {
+            return Err(std::io::ErrorKind::InvalidFilename.into());
+        }
+
+        let Some((entry_id, kind)) = fs_mut.stat(parent_id, path).await? else {
+            return Ok(None);
+        };
+
+        parent_id = entry_id;
+        entry_kind = kind;
+    }
+
+    Ok(Some((parent_id, entry_kind)))
+}
+
+pub async fn create_file(
+    fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
+    filename: &str,
+) -> std::io::Result<async_fs::EntryId> {
+    let Some((dir, file)) = filename.rsplit_once('/') else {
+        return Err(std::io::ErrorKind::InvalidFilename.into());
+    };
+
+    let Ok(Some((dir_id, entry_kind))) = stat(fs.clone(), dir).await else {
+        return Err(std::io::ErrorKind::InvalidFilename.into());
+    };
+
+    if !matches!(entry_kind, async_fs::EntryKind::Directory) {
+        return Err(std::io::ErrorKind::InvalidFilename.into());
+    };
+
+    let mut fs_mut = fs.lock().await;
+    fs_mut
+        .create_entry(dir_id, async_fs::EntryKind::File, file)
+        .await
 }

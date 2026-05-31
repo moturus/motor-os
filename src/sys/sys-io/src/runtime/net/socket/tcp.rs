@@ -202,6 +202,11 @@ impl MotoSocket {
             client_sender,
         );
 
+        base.runtime
+            .stats
+            .tcp_sockets
+            .set(base.runtime.stats.tcp_sockets.get() + 1);
+
         MotoSocket::new(
             base,
             SocketState::Tcp(TcpState {
@@ -865,6 +870,11 @@ impl MotoSocket {
         assert!(state.tx_closed);
         assert!(state.rx_closed);
         assert!(state.tx_queue.is_empty());
+
+        base.runtime
+            .stats
+            .tcp_sockets
+            .set(base.runtime.stats.tcp_sockets.get() - 1);
     }
 
     // Drop the socket fully.

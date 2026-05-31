@@ -17,6 +17,7 @@ use crate::util::map_err_into_native;
 mod config;
 mod device;
 mod socket;
+mod stats;
 mod tcp_listener;
 
 struct ClientConnection {
@@ -93,6 +94,11 @@ impl NetRuntimeInner {
 #[derive(Clone)]
 struct NetRuntime {
     inner: Rc<RefCell<NetRuntimeInner>>,
+
+    stats: Rc<stats::NetStats>,
+
+    // Filesystem is used to write log/stats.
+    fs: Rc<moto_async::LocalMutex<super::fs::FS>>,
 }
 
 impl NetRuntime {
@@ -195,6 +201,15 @@ impl NetRuntime {
             sender.remote_handle(),
             ClientConnection::new(sender.clone()),
         );
+
+        self.stats
+            .active_clients
+            .set(self.stats.active_clients.get() + 1);
+
+        self.stats
+            .total_clients
+            .set(self.stats.active_clients.get() + 1);
+
         log::debug!("new NET connection 0x{:x}", sender.remote_handle().as_u64());
 
         // We want to process more than one message at at time (due to I/O waits), but
@@ -317,6 +332,10 @@ impl NetRuntime {
         // Finally, drop the client.
         let _ = self.inner.borrow_mut().clients.remove(&conn_id);
 
+        self.stats
+            .active_clients
+            .set(self.stats.active_clients.get() - 1);
+
         log::debug!(
             "NET conn {} dropped with {} sockets and {} tcp listeners.",
             conn_id.as_u64(),
@@ -435,7 +454,7 @@ pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
     fs: Rc<moto_async::LocalMutex<super::fs::FS>>,
 ) -> Result<()> {
-    let config = config::load(fs).await?;
+    let config = config::load(&fs).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
     let mut devices = vec![];
@@ -496,6 +515,9 @@ pub(super) async fn init(
         device_idx += 1;
     }
 
+    let log_interval = config.stat_log_interval_secs;
+    let log_filename = config.stat_log_filename.clone();
+
     let runtime = NetRuntime {
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             config,
@@ -507,7 +529,18 @@ pub(super) async fn init(
             ip_addresses,
             clients: HashMap::new(),
         })),
+        stats: Default::default(),
+        fs: fs.clone(),
     };
+
+    if log_interval > 0 {
+        let stats = runtime.stats.clone();
+        let _ = moto_async::LocalRuntime::spawn(async move {
+            stats::stat_logging_task(stats, fs, log_filename, log_interval).await
+        });
+    } else {
+        log::info!("net stats logging disabled");
+    }
 
     runtime.spawn_net_runtime().await;
     log::debug!("NET runtime started");

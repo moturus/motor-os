@@ -1,4 +1,5 @@
 loopback = false
+stat_log_interval_secs = 0
 
 [devices.net0]
 mac = "a4:a1:c2:00:00:01"

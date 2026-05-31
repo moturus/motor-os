@@ -104,14 +104,46 @@ impl DeviceCfg {
 
 #[derive(Deserialize, Debug)]
 pub(super) struct NetConfig {
-    #[allow(unused)]
     pub loopback: bool,
     pub devices: BTreeMap<String, DeviceCfg>,
+
+    #[serde(default = "NetConfig::default_log_interval")]
+    pub stat_log_interval_secs: u32,
+
+    #[serde(default = "NetConfig::default_log_filename")]
+    pub stat_log_filename: String,
+}
+
+// Find the device name and the local IP address to route to dst.
+impl NetConfig {
+    fn default_log_interval() -> u32 {
+        60
+    }
+
+    fn default_log_filename() -> String {
+        "/sys/logs/sys-io.log".to_owned()
+    }
+
+    pub(super) fn find_route(&self, dst: &IpAddr) -> Option<(String, IpAddr)> {
+        for (dev_name, dev_cfg) in &self.devices {
+            for route in &dev_cfg.routes {
+                if route.ip_network.contains(*dst) {
+                    for cidr in &dev_cfg.cidrs {
+                        if cidr.contains(*dst) && route.ip_network.contains(cidr.ip()) {
+                            return Some((dev_name.to_owned(), cidr.ip()));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
 }
 
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
 pub(super) async fn load(
-    fs: Rc<moto_async::LocalMutex<super::super::fs::FS>>,
+    fs: &Rc<moto_async::LocalMutex<super::super::fs::FS>>,
 ) -> std::io::Result<NetConfig> {
     const CFG_PATH: &str = "/sys/cfg/sys-net.toml";
 
@@ -163,25 +195,6 @@ pub(super) async fn load(
         );
         std::io::Error::from(ErrorKind::InvalidInput)
     })
-}
-
-// Find the device name and the local IP address to route to dst.
-impl NetConfig {
-    pub(super) fn find_route(&self, dst: &IpAddr) -> Option<(String, IpAddr)> {
-        for (dev_name, dev_cfg) in &self.devices {
-            for route in &dev_cfg.routes {
-                if route.ip_network.contains(*dst) {
-                    for cidr in &dev_cfg.cidrs {
-                        if cidr.contains(*dst) && route.ip_network.contains(cidr.ip()) {
-                            return Some((dev_name.to_owned(), cidr.ip()));
-                        }
-                    }
-                }
-            }
-        }
-
-        None
-    }
 }
 
 pub(super) fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
