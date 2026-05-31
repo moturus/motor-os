@@ -104,3 +104,37 @@ pub async fn create_file(
         .create_entry(dir_id, async_fs::EntryKind::File, file)
         .await
 }
+
+pub async fn write_file(
+    fs: &Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
+    file_id: async_fs::EntryId,
+    offset: u64,
+    bytes: &[u8],
+) -> std::io::Result<usize> {
+    assert!(bytes.len() <= 4096);
+    // We need to split the write in two if it writes across a block.
+
+    let total_len = bytes.len() as u64;
+    let first_len = total_len.min(((offset + 4095) & !4095) - offset);
+
+    let mut fs_mut = fs.lock().await;
+
+    assert_eq!(
+        first_len as usize,
+        fs_mut
+            .write(file_id, offset, &bytes[..(first_len as usize)])
+            .await?
+    );
+
+    let second_len = total_len - first_len;
+    if second_len > 0 {
+        assert_eq!(
+            second_len as usize,
+            fs_mut
+                .write(file_id, offset + first_len, &bytes[(first_len as usize)..])
+                .await?
+        );
+    }
+
+    Ok(total_len as usize)
+}

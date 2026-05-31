@@ -533,6 +533,8 @@ pub(super) async fn init(
         fs: fs.clone(),
     };
 
+    runtime.stats.num_devices.set(device_idx as u64);
+
     if log_interval > 0 {
         let stats = runtime.stats.clone();
         let _ = moto_async::LocalRuntime::spawn(async move {

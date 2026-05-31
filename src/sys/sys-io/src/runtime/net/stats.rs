@@ -11,7 +11,7 @@ pub(super) struct NetStats {
     pub total_clients: Rc<Cell<u64>>,
     pub tcp_sockets: Rc<Cell<u64>>,
     pub total_tcp_sockets: Rc<Cell<u64>>,
-    // pub tcp_listeners: Rc<Cell<u64>>,
+    pub tcp_listening_sockets: Rc<Cell<u64>>,
     // pub udp_sockets: Rc<Cell<u64>>,
     // pub total_udp_sockets: Rc<Cell<u64>>,
 }
@@ -25,16 +25,24 @@ impl NetStats {
         );
 
         result.push_str(
-            format!("{:>20}: {}\n", "active_clients", self.active_clients.get()).as_str(),
+            format!("{:>25}: {}\n", "active_clients", self.active_clients.get()).as_str(),
         );
         result
-            .push_str(format!("{:>20}: {}\n", "total_clients", self.total_clients.get()).as_str());
-        result.push_str(format!("{:>20}: {}\n", "tcp_sockets", self.tcp_sockets.get()).as_str());
+            .push_str(format!("{:>25}: {}\n", "total_clients", self.total_clients.get()).as_str());
+        result.push_str(format!("{:>25}: {}\n", "tcp_sockets", self.tcp_sockets.get()).as_str());
         result.push_str(
             format!(
-                "{:>20}: {}\n",
+                "{:>25}: {}\n",
                 "total_tcp_sockets",
                 self.total_tcp_sockets.get()
+            )
+            .as_str(),
+        );
+        result.push_str(
+            format!(
+                "{:>25}: {}\n",
+                "tcp_listening_sockets",
+                self.tcp_listening_sockets.get()
             )
             .as_str(),
         );
@@ -78,17 +86,15 @@ pub(super) async fn stat_logging_task(
     let mut offset = 0;
     loop {
         let line = stats.log();
-        let mut fs_mut = fs.lock().await;
+
         assert_eq!(
             line.len(),
-            fs_mut
-                .write(log_file, offset, line.as_bytes())
+            crate::util::write_file(&fs, log_file, offset, line.as_bytes())
                 .await
                 .unwrap()
         );
 
         offset += line.len() as u64;
-        drop(fs_mut);
 
         moto_async::sleep(std::time::Duration::from_secs(log_interval_secs as u64)).await;
     }

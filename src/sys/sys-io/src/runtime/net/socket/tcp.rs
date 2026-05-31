@@ -206,6 +206,10 @@ impl MotoSocket {
             .stats
             .tcp_sockets
             .set(base.runtime.stats.tcp_sockets.get() + 1);
+        base.runtime
+            .stats
+            .total_tcp_sockets
+            .set(base.runtime.stats.total_tcp_sockets.get() + 1);
 
         MotoSocket::new(
             base,
@@ -249,6 +253,12 @@ impl MotoSocket {
                 0,
             );
 
+            tcp_listener_mut
+                .runtime()
+                .stats
+                .tcp_listening_sockets
+                .set(tcp_listener_mut.runtime().stats.tcp_listening_sockets.get() + 1);
+
             {
                 let mut socket_ref = moto_socket.borrow_mut();
                 let socket_mut = &mut *socket_ref;
@@ -289,11 +299,14 @@ impl MotoSocket {
         connected_tx: moto_async::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
     ) {
-        let socket_id = {
+        let (socket_id, runtime) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
             };
-            moto_socket.borrow().socket_id()
+            (
+                moto_socket.borrow().socket_id(),
+                moto_socket.borrow().base.runtime.clone(),
+            )
         };
 
         log::debug!("listen task for 0x{socket_id:x}");
@@ -323,6 +336,10 @@ impl MotoSocket {
         .await;
 
         connected_tx.send(());
+        runtime
+            .stats
+            .tcp_listening_sockets
+            .set(runtime.stats.tcp_listening_sockets.get() - 1);
 
         let Some(socket_state) = socket_state else {
             log::debug!("tcp: listen: socket gone.");
