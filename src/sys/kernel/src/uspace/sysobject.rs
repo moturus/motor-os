@@ -278,8 +278,7 @@ pub fn process_wake_events() {
     while next != 0 {
         let obj = unsafe { Arc::from_raw(next as usize as *const SysObject) };
         // See SysObject::wake().
-        let next_ = obj.dequeue_woken_head();
-        next = next_;
+        next = obj.dequeue_woken_head();
 
         loop {
             let threads_and_handles = obj.take_waiting_threads();
