@@ -307,7 +307,7 @@ impl LocalRuntimeInner {
         );
 
         match result {
-            Ok(()) => {
+            Ok(()) | Err(moto_rt::E_TIMED_OUT) => {
                 for handle in wait_handles {
                     if handle.is_none() {
                         break;
@@ -334,7 +334,6 @@ impl LocalRuntimeInner {
                     }
                 }
             }
-            Err(moto_rt::E_TIMED_OUT) => {}
             Err(moto_rt::E_BAD_HANDLE) => {
                 for handle in wait_handles {
                     if handle.is_none() {

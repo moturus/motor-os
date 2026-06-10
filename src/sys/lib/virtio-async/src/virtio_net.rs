@@ -156,7 +156,6 @@ impl NetDevice {
         }
         features_acked |= VIRTIO_NET_F_MAC;
 
-        /*
         if (features_available & super::virtio_device::VIRTIO_F_RING_EVENT_IDX) != 0 {
             log::debug!(
                 "Virtio NET device {:?}:\n\tVIRTIO_F_RING_EVENT_IDX feature IS available.",
@@ -169,7 +168,6 @@ impl NetDevice {
                 dev.pci_device.id,
             );
         }
-        */
 
         /*
         if (features_available & VIRTIO_NET_F_STATUS) == 0 {
