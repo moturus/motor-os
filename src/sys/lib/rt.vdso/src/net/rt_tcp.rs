@@ -1022,12 +1022,12 @@ impl TcpStream {
             self.rx_closed.store(true, Ordering::Relaxed);
         }
         if !new_state.can_write() {
-            self.rx_closed.store(true, Ordering::Relaxed);
+            self.tx_closed.store(true, Ordering::Relaxed);
         }
 
         loop {
             let can_read = prev_state.can_read() && new_state.can_read();
-            let can_write = prev_state.can_read() && new_state.can_write();
+            let can_write = prev_state.can_write() && new_state.can_write();
             if can_read {
                 new_state = TcpState::ReadOnly;
             } else if can_write {
