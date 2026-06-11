@@ -17,6 +17,15 @@ use std::rc::Rc;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
+fn mfence() {
+    // SAFETY: there's nothing unsafe about mfence on x64.
+    unsafe {
+        core::arch::x86_64::_mm_mfence();
+    }
+
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 #[repr(C, align(8))]
 struct VirtqDesc {
     addr: le64,
@@ -296,8 +305,7 @@ impl Virtqueue {
                 if errors == 0 {
                     moto_async::sleep(std::time::Duration::from_secs(1)).await;
                 } else {
-                    moto_async::sleep(std::time::Duration::from_secs(1)).await;
-                    // moto_async::sleep(std::time::Duration::from_millis(10)).await;
+                    moto_async::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 let vq = this.borrow();
 
@@ -321,11 +329,6 @@ impl Virtqueue {
                 let has_used = vq.has_new_used();
                 if has_used && (alloc_waiters + completion_waiters > 0) {
                     errors += 1;
-                    if errors == 8 {
-                        // Note: this is for debugging only. It is perfectly cromulent to have waiters.
-                        panic!("Bad VirtQ status");
-                    }
-
                     let device_used_idx = unsafe { vq.used_ring.idx.read_volatile() };
 
                     log::error!(
@@ -333,6 +336,26 @@ impl Virtqueue {
                         vq.device_kind,
                         vq.queue_num
                     );
+
+                    if errors == 2 {
+                        drop(vq);
+                        let mut vq = this.borrow_mut();
+                        let mut reclaimed = 0;
+                        while let Some(_chain_head) = vq.reclaim_used() {
+                            reclaimed += 1;
+                        }
+
+                        for waiter in vq.completion_waiters.iter() {
+                            if let Some(waiter) = waiter {
+                                log::error!(
+                                    "waking a stalled completion waiter on {:?}; reclaimed: {reclaimed}",
+                                    vq.device_kind
+                                );
+                                waiter.wake_by_ref();
+                            }
+                        }
+                        errors = 0;
+                    }
                 } else {
                     errors = 0;
                 }
@@ -372,11 +395,7 @@ impl Virtqueue {
     }
 
     fn notify_device_if_needed(&self, avail_idx: u16) {
-        // {
-        //     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        //     unsafe { (*self.notify_bar).write_u16(self.notify_offset, 0) };
-        // }
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
         // Safety: safe by construction.
         unsafe {
             if self.virtio_f_event_idx_negotiated {
@@ -387,26 +406,23 @@ impl Virtqueue {
                 (*self.notify_bar).write_u16(self.notify_offset, 0);
             }
         }
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
     }
 
     fn disable_irq(&mut self) {
         unsafe {
             if self.virtio_f_event_idx_negotiated {
-                // self.available_ring
-                //     .used_event
-                //     .write_volatile(self.next_used_idx.wrapping_sub(1));
-                // core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                // NOOP: it's the way.
             } else {
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                mfence();
                 (self.available_ring.flags as *mut u16).write_volatile(1);
-                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                mfence();
             }
         }
     }
 
     fn enable_irq(&mut self) {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
         unsafe {
             if self.virtio_f_event_idx_negotiated {
                 self.available_ring
@@ -416,7 +432,7 @@ impl Virtqueue {
                 (self.available_ring.flags as *mut u16).write_volatile(0);
             }
         }
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
     }
 
     pub fn set_notify_params(&mut self, notify_bar: *const PciBar, notify_offset: u64) {
@@ -424,19 +440,15 @@ impl Virtqueue {
         self.notify_offset = notify_offset;
     }
 
-    pub fn wait_handle(&self) -> SysHandle {
-        self.wait_handle
-    }
-
     fn update_and_increment_available_idx(&mut self, head: u16) {
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
         let prev_idx = unsafe {
             let idx = *self.available_ring.next_available_idx;
             ((&mut self.available_ring.ring[(idx & self.queue_size_mask) as usize]) as *mut u16)
                 .write_volatile(head);
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            mfence();
 
             let prev_idx = idx;
             // Note: we must wrap around at u16::MAX, not at queue_size, otherwise
@@ -573,7 +585,6 @@ impl Virtqueue {
 
             let descriptor = this_mut.get_descriptor_mut(curr);
             let el = data.get(el_idx as usize).unwrap();
-            // descriptor.addr = super::mapper().virt_to_phys(el.addr).unwrap();
             descriptor.addr = el.phys_addr;
             descriptor.len = el.len;
 
@@ -601,14 +612,13 @@ impl Virtqueue {
     }
 
     fn has_new_used(&self) -> bool {
-        // SAFETY: safe by construction.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
         self.next_used_idx != unsafe { self.used_ring.idx.read_volatile() }
     }
 
     fn reclaim_used(&mut self) -> Option<u16> {
         // See section 2.7.14 in Virtio PDF v 1.3.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        mfence();
         // SAFETY: safe by construction.
         if self.next_used_idx == unsafe { self.used_ring.idx.read_volatile() } {
             return None;
