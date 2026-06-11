@@ -240,14 +240,6 @@ impl NetDevice {
         self.mtu
     }
 
-    pub fn wait_handles(&self) -> Vec<moto_sys::SysHandle> {
-        let mut result = Vec::new();
-        for q in &self.dev.borrow().virtqueues {
-            result.push(q.borrow().wait_handle());
-        }
-
-        result
-    }
     #[inline(never)]
     pub async fn post_read(self: Rc<Self>, mut bytes: IoBuf) -> ReadCompletion<IoBuf> {
         let chain_head = VqAlloc::new(self.virtq_rx.clone(), 2).await;

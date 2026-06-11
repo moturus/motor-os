@@ -72,10 +72,6 @@ impl BlockDevice {
         self.capacity
     }
 
-    pub fn wait_handle(&self) -> moto_sys::SysHandle {
-        self.virtqueue.borrow().wait_handle()
-    }
-
     pub fn from(dev: VirtioDevice) -> Result<Rc<Self>> {
         let dev = Rc::new(RefCell::new(dev));
         let dev_clone = dev.clone();
