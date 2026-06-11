@@ -105,7 +105,7 @@ fn process_wait_handles(
         obj.sys_object.add_waiting_thread(curr, *handle);
         if obj.wake_count < obj.sys_object.wake_count() || obj.sys_object.done() {
             // obj has unconsumed wakes, so queue it as a waker to the current thread.
-            curr.add_waker(*handle)
+            curr.wake_by_object(*handle, true);
         }
     }
 
