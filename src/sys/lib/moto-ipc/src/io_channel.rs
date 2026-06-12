@@ -630,7 +630,11 @@ impl ClientConnection {
         let mut slot: &MsgSlot;
         let mut pos = raw_channel.client_queue_head.load(Ordering::Relaxed);
         let mut first_attempt = true;
+
+        let mut loop_count = 0_u32;
         loop {
+            loop_count += 1;
+            assert!(loop_count < 1_000_000_000, "busy looping");
             slot = &raw_channel.client_queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
@@ -1098,7 +1102,10 @@ impl Sender {
 
         let mut slot: &MsgSlot;
         let mut pos = queue_head.load(Ordering::Relaxed);
+        let mut loop_count = 0_u32;
         loop {
+            loop_count += 1;
+            assert!(loop_count < 1_000_000_000, "busy looping");
             slot = &queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
@@ -1284,7 +1291,10 @@ impl Receiver {
 
         let mut pos = queue_tail.load(Ordering::Relaxed);
 
+        let mut loop_count = 0_u32;
         loop {
+            loop_count += 1;
+            assert!(loop_count < 1_000_000_000, "busy looping");
             slot = &queue[(pos & QUEUE_MASK) as usize];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
