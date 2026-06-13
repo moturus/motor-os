@@ -707,13 +707,13 @@ impl Term {
 fn prompt() -> usize {
     std::io::stderr().flush().unwrap();
     let prompt_str = crate::prompt();
-    let bytes = format!("\r\x1b[32mrush:\x1b[0m {prompt_str}$ ");
+    let bytes = format!("\r\x1b[1;32mrush\x1b[0m:\x1b[1;34m{prompt_str}\x1b[0m$ ");
 
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(bytes.as_bytes()).unwrap();
     stdout.flush().unwrap();
 
-    prompt_str.len() + 9 // "rush: <prompt>$ "
+    prompt_str.len() + 8 // "rush:<prompt>$ "
 }
 
 static TERM: Mutex<Option<Term>> = Mutex::new(None);
