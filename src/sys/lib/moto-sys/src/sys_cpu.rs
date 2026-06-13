@@ -9,7 +9,7 @@ use crate::ErrorCode;
 pub struct SysCpu;
 
 impl SysCpu {
-    pub const OP_EXIT: u8 = 1;
+    pub const OP_EXIT_PROCESS: u8 = 1;
     pub const OP_WAIT: u8 = 2;
     pub const OP_WAKE: u8 = 3;
     pub const OP_KILL: u8 = 4;
@@ -37,10 +37,14 @@ impl SysCpu {
     // If present, OP_KILL's arg is the PID.
     pub const F_KILL_PID: u32 = 2;
 
+    /// Exit the current process. To exit the current thread, call
+    /// ```
+    ///    let _ = moto_sys::SysObj::put(SysHandle::SELF);
+    /// ```
     #[cfg(feature = "userspace")]
-    pub fn exit(code: u64) -> ! {
+    pub fn exit_process(code: u64) -> ! {
         do_syscall(
-            pack_nr_ver(SYS_CPU, Self::OP_EXIT, 0, 0),
+            pack_nr_ver(SYS_CPU, Self::OP_EXIT_PROCESS, 0, 0),
             code,
             0,
             0,

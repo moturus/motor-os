@@ -135,7 +135,18 @@ fn do_command(cmd: String) {
         "exit" => {
             assert_eq!(2, words.len());
             let code = words[1].parse::<i32>().unwrap();
-            std::process::exit(code)
+
+            let mut bytes = [0];
+            moto_rt::fill_random_bytes(&mut bytes);
+
+            if bytes[0] & 1 == 1 {
+                std::process::exit(code)
+            } else {
+                // There was a bug when calling exit_process() from a non-main thread misbehaved.
+                let _ =
+                    std::thread::spawn(move || moto_sys::SysCpu::exit_process(code as u64)).join();
+                loop {}
+            }
         }
         "is_terminal" => {
             use std::io::IsTerminal;

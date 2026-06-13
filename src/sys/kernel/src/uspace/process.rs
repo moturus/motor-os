@@ -90,6 +90,15 @@ pub enum ProcessStatus {
     Killed,
 }
 
+impl ProcessStatus {
+    pub fn is_alive(&self) -> bool {
+        matches!(
+            self,
+            ProcessStatus::Created | ProcessStatus::Running | ProcessStatus::PausedDebuggee
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct WaitObject {
     pub sys_object: Arc<SysObject>,
@@ -529,18 +538,22 @@ impl Process {
 
     pub(super) fn die(&self) {
         let (target_mut, mut status_lock) = unsafe { self.get_mut() };
-        let do_kill = match *status_lock {
-            ProcessStatus::Created | ProcessStatus::Running | ProcessStatus::PausedDebuggee => true,
-            ProcessStatus::Exiting(_)
-            | ProcessStatus::Exited(_)
-            | ProcessStatus::Error(_)
-            | ProcessStatus::Killed => false,
-        };
 
-        if do_kill {
+        if status_lock.is_alive() {
             *status_lock = ProcessStatus::Exiting(u64::MAX);
             for thread in target_mut.threads.values() {
                 thread.post_kill(ThreadKilledReason::ProcessKilled);
+            }
+        }
+    }
+
+    fn exit(&self, exit_status: u64) {
+        let (target_mut, mut status_lock) = unsafe { self.get_mut() };
+
+        if status_lock.is_alive() {
+            *status_lock = ProcessStatus::Exiting(exit_status);
+            for thread in target_mut.threads.values() {
+                thread.post_kill(ThreadKilledReason::ProcessExited);
             }
         }
     }
@@ -611,45 +624,31 @@ impl Process {
                 // from the main thread, and we would rather not have nested locks.
                 exited = true;
             } else if self.main_thread.as_ref().unwrap().tid == tid {
-                if !matches!(*status_lock, ProcessStatus::Exiting(_)) {
+                if status_lock.is_alive() {
                     *status_lock = match thread_status {
                         ThreadStatus::Finished => ProcessStatus::Exiting(0),
-                        ThreadStatus::Exited(val) => ProcessStatus::Exiting(val),
                         ThreadStatus::Killed(_) | ThreadStatus::Error(_) => {
                             ProcessStatus::Exiting(u64::MAX)
                         }
                         // _ => ProcessStatus::Exiting(u64::MAX),
                         _ => panic!("Unexpected thread status {:?}.", thread_status),
                     };
-                }
-                #[cfg(debug_assertions)]
-                log::debug!(
-                    "process {} '{}' exiting: main thread exited.",
-                    self.pid().as_u64(),
-                    self.debug_name() // Process debug name, not locking.
-                );
-                for thread in self_mut.threads.values() {
-                    thread.post_kill(ThreadKilledReason::MainThreadExited);
+
+                    #[cfg(debug_assertions)]
+                    log::debug!(
+                        "process {} '{}' exiting: main thread exited.",
+                        self.pid().as_u64(),
+                        self.debug_name() // Process debug name, not locking.
+                    );
+                    for thread in self_mut.threads.values() {
+                        thread.post_kill(ThreadKilledReason::ProcessExited);
+                    }
                 }
             } else {
                 match thread_status {
                     ThreadStatus::Finished => {}
-                    ThreadStatus::Exited(val) => {
-                        // std::process::exit(val) was called: kill the process.
-                        if !matches!(*status_lock, ProcessStatus::Exiting(_)) {
-                            *status_lock = ProcessStatus::Exiting(val);
-                        }
-                        #[cfg(debug_assertions)]
-                        log::debug!(
-                            "process {} '{}' killed: thread {} exited with status {}.",
-                            self.pid().as_u64(),
-                            self.debug_name(), // Process debug name, not locking.
-                            tid.as_u64(),
-                            val
-                        );
-                        for thread in self_mut.threads.values() {
-                            thread.post_kill(ThreadKilledReason::ProcessKilled);
-                        }
+                    ThreadStatus::Exited(_) => {
+                        assert!(!status_lock.is_alive());
                     }
                     ThreadStatus::Killed(_) | ThreadStatus::Error(_) => {
                         if !matches!(*status_lock, ProcessStatus::Exiting(_)) {
@@ -780,7 +779,7 @@ pub enum ThreadKilledReason {
     GPF,
     PageFault,
     SegFault,
-    MainThreadExited,
+    ProcessExited,
     ProcessKilled,
     InternalError,
 }
@@ -1705,7 +1704,7 @@ impl Thread {
         }
     }
 
-    pub fn exit(&self, exit_status: u64) -> ! {
+    pub fn exit_process(&self, exit_status: u64) -> ! {
         self.trace("exit", exit_status, 0);
         {
             let mut status = self.status.lock(line!());
@@ -1717,6 +1716,7 @@ impl Thread {
                 _ => panic!("Thread::exit: unexpected thread status: {:?}", *status),
             }
         }
+        self.owner().exit(exit_status);
         self.tcb.exit()
     }
 
@@ -1729,7 +1729,7 @@ impl Thread {
                     *status = ThreadStatus::Finished;
                 }
                 ThreadStatus::Error(_) | ThreadStatus::Killed(_) | ThreadStatus::Exited(_) => {}
-                _ => panic!("Thread::exit: unexpected thread status: {:?}", *status),
+                _ => panic!("Thread::finish: unexpected thread status: {:?}", *status),
             }
         }
         self.tcb.exit()
@@ -1740,7 +1740,7 @@ impl Thread {
         // Note: must be called only by the currently running thread.
         match why {
             ThreadKilledReason::SegFault => self.tcb.die(TOCR_KILLED_SF, 0),
-            ThreadKilledReason::MainThreadExited => self.tcb.die(TOCR_KILLED_OTHER, 0),
+            ThreadKilledReason::ProcessExited => self.tcb.die(TOCR_KILLED_OTHER, 0),
             ThreadKilledReason::ProcessKilled => self.tcb.die(TOCR_KILLED_OTHER, 0),
             _ => {
                 panic!("Thread::die: unexpected reason: {:?}", why)

@@ -117,7 +117,7 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
 
 pub extern "C" fn exit(code: i32) -> ! {
     let code = i32::cast_unsigned(code) as u64;
-    moto_sys::SysCpu::exit(code)
+    moto_sys::SysCpu::exit_process(code)
 }
 
 fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {

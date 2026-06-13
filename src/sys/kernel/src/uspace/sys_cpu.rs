@@ -565,7 +565,7 @@ pub(super) fn sys_cpu_impl(curr: &super::process::Thread, args: &mut SyscallArgs
         SysCpu::OP_QUERY_PERCPU_STATS => sys_query_percpu_stats(curr, args),
         // Note: curr.exit() below does not return, and the compiler puts ud2 after call,
         //       so if we get INVALID_OPCODE interrupt, we screwed up in syscall_exit_asm().
-        SysCpu::OP_EXIT => curr.exit(args.args[0]),
+        SysCpu::OP_EXIT_PROCESS => curr.exit_process(args.args[0]),
         _ => {
             log::debug!("sys_cpu: bad op: {}", args.operation);
             ResultBuilder::invalid_argument()

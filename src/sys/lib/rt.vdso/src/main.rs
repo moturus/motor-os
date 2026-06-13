@@ -47,7 +47,7 @@ pub extern "C" fn motor_start(version: u64) {
     if version != RT_VERSION {
         // Doing an assert or panic will #PF, so we use lower-level API.
         moto_log!("VDSO: requested version: {version}; available: {RT_VERSION}.");
-        moto_sys::sys_cpu::SysCpu::exit(1)
+        moto_sys::sys_cpu::SysCpu::exit_process(1)
     }
 
     let vtable = RtVdsoVtable::get();

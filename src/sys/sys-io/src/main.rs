@@ -62,7 +62,7 @@ pub extern "C" fn motor_runtime_start() {
         std::thread::sleep(std::time::Duration::from_millis(10));
         log::error!("{info}");
         moto_rt::error::log_backtrace(-1);
-        moto_sys::SysCpu::exit(0xbadc0de)
+        moto_sys::SysCpu::exit_process(0xbadc0de)
     }));
 }
 

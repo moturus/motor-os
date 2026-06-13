@@ -281,7 +281,7 @@ pub(super) fn init(
     let maybe_addr = moto_sys::SysMem::alloc(PAGE_SIZE_SMALL, num_pages);
     if maybe_addr.is_err() {
         crate::moto_log!("sys-io: failed to allocate {} pages for FlatFS.", num_pages);
-        moto_sys::SysCpu::exit(1);
+        moto_sys::SysCpu::exit_process(1);
     }
 
     let buf: &mut [u8] = unsafe {
@@ -302,7 +302,7 @@ pub(super) fn init(
     let root_dir = flatfs::unpack(buf);
     if root_dir.is_err() {
         crate::moto_log!("sys-io: failed unpack FlatFS.");
-        moto_sys::SysCpu::exit(1);
+        moto_sys::SysCpu::exit_process(1);
     }
 
     Box::new(FileSystemFlatFS {

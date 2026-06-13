@@ -72,7 +72,7 @@ fn _panic(info: &core::panic::PanicInfo<'_>) -> ! {
         (moto_rt::time::Instant::now() + core::time::Duration::from_millis(100)).as_u64(),
     );
 
-    moto_sys::SysCpu::exit(u64::MAX)
+    moto_sys::SysCpu::exit_process(0xbadc0de)
 }
 
 const BT_DEPTH: usize = 64;

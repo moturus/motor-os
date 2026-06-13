@@ -439,6 +439,8 @@ fn main() {
         moto_rt::E_NOT_ALLOWED
     );
 
+    test_syscall();
+    threads::run_all_tests();
     moto_async::run_all_tests();
     io_channel::run_all_tests();
     test_thread_names();
@@ -466,8 +468,6 @@ fn main() {
     test_file_write();
 
     test_lazy_memory_map();
-    test_syscall();
-    threads::run_all_tests();
     test_ipc();
     stdio::run_all_tests();
     fs::run_tests();

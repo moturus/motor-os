@@ -102,7 +102,7 @@ pub fn load() {
             std::os::motor::rt_version(),
             moto_rt::RT_VERSION
         );
-        moto_sys::SysCpu::exit(0xbadc0de)
+        moto_sys::SysCpu::exit_process(0xbadc0de)
     }
 }
 
