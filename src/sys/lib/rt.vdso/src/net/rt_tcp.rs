@@ -543,15 +543,12 @@ impl Drop for TcpStream {
             return;
         }
 
-        if self.tcp_state() != TcpState::Closed {
-            let mut req = io_channel::Msg::new();
-            req.command = api_net::NetCmd::TcpStreamClose as u16;
-            req.handle = self.handle();
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamClose as u16;
+        req.handle = self.handle();
 
-            // TODO: is this unwrap OK?
-            self.channel().post_msg(req).unwrap();
-        }
-        // moto_log!("TcpStream dropped");
+        // TODO: is this unwrap OK?
+        self.channel().post_msg(req).unwrap();
 
         // Clear RX queue: basically, free up server-allocated pages.
         super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());
