@@ -4,7 +4,7 @@
 #![feature(motor_ext)]
 
 mod logger;
-mod net;
+// mod net;
 mod rt_vdso;
 mod runtime;
 mod util;

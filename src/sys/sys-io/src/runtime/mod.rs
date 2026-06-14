@@ -15,52 +15,7 @@ use moto_sys::SysHandle;
 use std::io::Result as IoResult;
 
 pub mod fs;
-pub mod internal_queue;
-pub mod io_stats;
-mod io_thread;
 mod net;
-// pub use fs::smoke_test as fs_smoke_test;
-
-pub struct PendingCompletion {
-    pub msg: io_channel::Msg,
-    pub endpoint_handle: SysHandle,
-}
-
-// Either net or (later) fs.
-pub trait IoSubsystem {
-    fn wait_handles(&self) -> Vec<SysHandle>;
-    fn process_wakeup(&mut self, handle: SysHandle);
-    fn process_sqe(
-        &mut self,
-        conn: &std::rc::Rc<io_channel::ServerConnection>,
-        sqe: io_channel::Msg,
-    ) -> Result<Option<io_channel::Msg>, ()>;
-
-    // Returns a completion for a process. If none, the device has nothing
-    // to do and the IO thread may sleep.
-    fn poll(&mut self) -> Option<PendingCompletion>;
-
-    fn on_connection_drop(&mut self, conn: SysHandle);
-
-    // For how long the IO thread may sleep without calling poll.
-    // This is particularly useful in networking, where TCP have various timers.
-    fn wait_timeout(&mut self) -> Option<core::time::Duration>;
-
-    fn get_stats(&mut self, msg: &internal_queue::Msg);
-
-    #[allow(unused)]
-    fn dump_state(&mut self);
-}
-
-pub static STARTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-pub fn start() {
-    io_thread::start();
-    while STARTED.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        moto_rt::futex::futex_wait(&STARTED, 0, None);
-    }
-    io_stats::spawn_stats_service();
-}
 
 // A single 2M page used for VirtIO/MMIO.
 // It's a hack, but we don't need anything more complicated for now.
