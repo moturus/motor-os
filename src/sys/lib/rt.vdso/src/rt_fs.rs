@@ -1058,3 +1058,50 @@ pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> moto_rt::Error
         .create_internal(&path, moto_io::fs::EntryKind::Directory)
         .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }
+
+pub extern "C" fn is_terminal(rt_fd: i32) -> i32 {
+    #[allow(clippy::manual_range_contains)]
+    if rt_fd < 0 || rt_fd > 2 {
+        return 0;
+    }
+
+    let Some(env_var) = moto_rt::process::getenv(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY)
+    else {
+        return 0;
+    };
+
+    if env_var == "TRUE" || env_var == "true" {
+        1
+    } else {
+        0
+    }
+}
+
+pub extern "C" fn fsync(rt_fd: i32) -> moto_rt::ErrorCode {
+    moto_rt::E_OK
+}
+
+pub extern "C" fn datasync(rt_fd: i32) -> moto_rt::ErrorCode {
+    moto_rt::E_OK
+}
+
+pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {
+    unlink(path_ptr, path_size)
+}
+
+pub extern "C" fn set_perm(path_ptr: *const u8, path_size: usize, perm: u64) -> moto_rt::ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn set_file_perm(_rt_fd: moto_rt::RtFd, _perm: u64) -> moto_rt::ErrorCode {
+    todo!()
+}
+
+pub extern "C" fn copy(
+    from_ptr: *const u8,
+    from_size: usize,
+    to_ptr: *const u8,
+    to_size: usize,
+) -> i64 {
+    todo!()
+}
