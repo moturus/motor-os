@@ -3,17 +3,11 @@
 #![feature(io_error_more)]
 #![feature(motor_ext)]
 
-#[cfg(not(feature = "motor-fs"))]
-mod fs;
-
 mod logger;
 mod net;
 mod rt_vdso;
 mod runtime;
 mod util;
-
-#[cfg(not(feature = "motor-fs"))]
-mod virtio;
 
 extern crate alloc;
 
@@ -68,18 +62,7 @@ pub extern "C" fn motor_runtime_start() {
 
 fn main() {
     runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
-
-    #[cfg(feature = "motor-fs")]
-    {
-        runtime::spawn_async();
-    }
-
-    #[cfg(not(feature = "motor-fs"))]
-    {
-        virtio::init();
-        fs::init();
-        runtime::start();
-    }
+    runtime::spawn_async();
 
     let mut cmd = std::process::Command::new("/sys/sys-init");
 

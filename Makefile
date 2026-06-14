@@ -1,7 +1,6 @@
 # Motor OS.
 
 BUILD ?= debug
-MOTOR_FS ?= false
 
 ifeq ($(BUILD), release)
 	CARGO_RELEASE := --release
@@ -70,16 +69,9 @@ vdso:
 		./build.sh $(CARGO_RELEASE)
 
 sys-io: vdso
-ifeq ($(MOTOR_FS), true)
-	mkdir -p $(BIN_DIR)
-	echo "making sys-io with motor-fs feature"
-	cd src/sys/sys-io && CARGO_TARGET_DIR="$(OBJ_DIR)/sys-io" $(DO_BUILD) --features motor-fs
-	strip -o "$(BIN_DIR)/sys-io" "$(OBJ_DIR)/sys-io/$(SUB_DIR)/sys-io"
-else
 	mkdir -p $(BIN_DIR)
 	cd src/sys/sys-io && CARGO_TARGET_DIR="$(OBJ_DIR)/sys-io" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/sys-io" "$(OBJ_DIR)/sys-io/$(SUB_DIR)/sys-io"
-endif
 
 sys-init:
 	mkdir -p $(BIN_DIR)
@@ -106,17 +98,10 @@ mdbg:
 	cd src/sys/tools/mdbg && CARGO_TARGET_DIR="$(OBJ_DIR)/mdbg" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/mdbg" "$(OBJ_DIR)/mdbg/$(SUB_DIR)/mdbg"
 
-ifeq ($(MOTOR_FS), true)
-systest:
-	mkdir -p $(BIN_DIR)
-	cd src/sys/tests/systest && CARGO_TARGET_DIR="$(OBJ_DIR)/systest" $(DO_BUILD) --features motor-fs
-	strip -o "$(BIN_DIR)/systest" "$(OBJ_DIR)/systest/$(SUB_DIR)/systest"
-else
 systest:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/tests/systest && CARGO_TARGET_DIR="$(OBJ_DIR)/systest" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/systest" "$(OBJ_DIR)/systest/$(SUB_DIR)/systest"
-endif
 
 crossbench:
 	mkdir -p $(BIN_DIR)
@@ -164,7 +149,6 @@ rnetbench:
 	strip -o "$(BIN_DIR)/rnetbench" "$(OBJ_DIR)/rnetbench/$(SUB_DIR)/rnetbench"
 
 img: boot core sys user
-ifeq ($(MOTOR_FS), true)
 	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	cd src/imager && \
@@ -173,18 +157,6 @@ ifeq ($(MOTOR_FS), true)
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
 	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
 	@echo "built Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
-else
-	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
-	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) full.yaml
-	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) web.yaml
-	cp "$(ROOT_DIR)/src/vm_scripts/"* \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
-	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
-	@echo "built Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
-endif
 
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)
