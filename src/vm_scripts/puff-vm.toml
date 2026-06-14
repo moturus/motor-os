@@ -2,7 +2,7 @@ pvh = "kloader"
 initramfs = "initrd"
 num_cpus = 4
 mem_size = "256M"
-blk = ["motor.full.img"]
+blk = ["motor-os.img"]
 log_file = "/tmp/puff.log"
 log_level = "info"
 

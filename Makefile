@@ -152,8 +152,8 @@ img: boot core sys user
 	rm -rf "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	cd src/imager && \
-		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-fs.yaml
-	cp "$(ROOT_DIR)/src/vm_scripts.motor-fs/"* \
+		cargo run $(CARGO_RELEASE) -- "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml
+	cp "$(ROOT_DIR)/src/vm_scripts/"* \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/"
 	chmod 400 "$(ROOT_DIR)/vm_images/$(IMG_CMD)/test.key"
 	@echo "built Motor OS image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"

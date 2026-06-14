@@ -18,7 +18,7 @@ cat <<EOF > /tmp/fc-config.json
   "drives": [
     {
       "drive_id": "disk0",
-      "path_on_host": "${ABS_WD}/motor.motor-fs.img",
+      "path_on_host": "${ABS_WD}/motor-os.img",
       "is_root_device": false,
       "is_read_only": false
     }

@@ -455,13 +455,7 @@ fn main() {
         &initrd,
         &fs_partition,
         Some(&config.filesystem),
-        &img_dir.join(
-            format!(
-                "motor.{}.img",
-                config_path.file_stem().unwrap().to_str().unwrap()
-            )
-            .as_str(),
-        ),
+        &img_dir.join("motor-os.img"),
     );
 
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");

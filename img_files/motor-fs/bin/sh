@@ -1,4 +1,0 @@
-#!/bin/rush
-
-/bin/rush -i /sys/cfg/rush.cfg
-
