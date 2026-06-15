@@ -81,25 +81,26 @@ pub fn kernel_exit() -> ! {
 
     crate::write_serial!("\n\r\n\rvm_exit: bye.\n\r");
     unsafe {
-        // First, try Firecracker exit.
+        // First, try ACPI shutdown (works in Cloud Hypervisor).
+        // SLEEP_CONTROL_REG: SLP_EN | (S5 << 2) == 0x34.
+        let mut port = Port::new(0x3c0);
+        port.write(0x34_u8);
+        let mut port = Port::new(0x600);
+        port.write(0x34_u8);
+
+        // Then try Qemu isa-debug-exit.
+        let mut port = Port::new(0xf4);
+        port.write(0x10_u32);
+
+        // Last resort: Firecracker i8042 reset.
+        // NOTE: Cloud Hypervisor also implements this command, but as a
+        // *reboot*, so it must come after the ACPI shutdown above.
         core::arch::asm!(
             "out dx, al",
             in("dx") 0x64u16,
             in("al") 0xFEu8,
             options(nomem, nostack, preserves_flags)
         );
-
-        // Then, try Qemu exit.
-        let mut port = Port::new(0xf4);
-        port.write(0x10_u32);
-
-        // Then try acpi_shutdown, which works in cloud-hypervisor.
-        // Initially it worked with port 0x3c0.
-        let mut port = Port::new(0x3c0);
-        port.write(0x34_u8);
-        // Later port number became 0x600, for some reason.
-        let mut port = Port::new(0x600);
-        port.write(0x34_u8);
     }
 
     #[allow(clippy::empty_loop)]
