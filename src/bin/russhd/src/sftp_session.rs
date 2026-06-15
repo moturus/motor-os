@@ -152,6 +152,19 @@ impl russh_sftp::server::Handler for SftpSession {
         Ok(russh_sftp::protocol::Data { id, data })
     }
 
+    /// Called on SSH_FXP_LSTAT
+    ///
+    /// Motor OS has no symlinks, so lstat is equivalent to stat. Older SFTP
+    /// clients (e.g. OpenSSH 8.9's scp) resolve the source path with LSTAT
+    /// rather than STAT, so we must handle it.
+    async fn lstat(
+        &mut self,
+        id: u32,
+        path: String,
+    ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+        self.stat(id, path).await
+    }
+
     /// Called on SSH_FXP_STAT
     async fn stat(
         &mut self,
