@@ -110,7 +110,7 @@ impl CanonicalPath {
         })
     }
 
-    fn parse(path: &str) -> Result<Self> {
+    fn parse(mut path: &str) -> Result<Self> {
         if path.is_empty() || (path.len() >= MAX_PATH_LEN) || (path.len() != path.trim().len()) {
             return Err(moto_rt::Error::InvalidFilename);
         }
@@ -122,8 +122,12 @@ impl CanonicalPath {
             });
         }
 
-        if path.trim_end_matches('/').len() != path.len() {
-            return Err(moto_rt::Error::InvalidFilename);
+        path = path.trim_end_matches('/');
+        if path.is_empty() {
+            return Ok(CanonicalPath {
+                abs_path: path.to_owned(),
+                fname_offset: 1, // Empty filename.
+            });
         }
 
         if path.starts_with('/') {
