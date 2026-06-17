@@ -8,7 +8,6 @@ edition = "2024"
 [dependencies]
 # Internal.
 async-fs         = { path = "../lib/async-fs"         }
-flatfs           = { path = "../lib/flatfs"           }
 moto-async       = { path = "../lib/moto-async"       }
 moto-io-internal = { path = "../lib/moto-io-internal" }
 moto-ipc         = { path = "../lib/moto-ipc"         }
@@ -16,9 +15,7 @@ moto-rt          = { path = "../lib/moto-rt"          }
 moto-sys         = { path = "../lib/moto-sys"         }
 moto-sys-io      = { path = "../lib/moto-sys-io", features = ["std"] }
 moto-tooling     = { path = "../lib/moto-tooling"     }
-moto-virtio      = { path = "../lib/virtio"           }
 motor-fs         = { path = "../lib/motor-fs"         }
-srfs             = { path = "../lib/srfs"             }
 timeq            = { path = "../lib/timeq"            }
 virtio-async     = { path = "../lib/virtio-async"     }
 

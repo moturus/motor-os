@@ -1,11 +1,11 @@
 use async_fs::{AsyncBlockDevice, Block};
 use async_trait::async_trait;
 use moto_tooling::iobuf::IoBuf;
-use moto_virtio::BLOCK_SIZE as VIRTIO_BLOCK_SIZE;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;
 
+const VIRTIO_BLOCK_SIZE: usize = 512;
 const FS_BLOCK_SIZE: usize = 4096;
 const VIRTIO_BLOCKS_IN_FS_BLOCK: usize = FS_BLOCK_SIZE / VIRTIO_BLOCK_SIZE; // 8
 

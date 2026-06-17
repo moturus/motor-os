@@ -59,8 +59,8 @@ More specifically, these things work:
   * * stacks are guarded
   * * page faults in the userspace work and are properly handled (only stack memory allocations are currently lazy)
 * I/O subsystem (in the userspace)
-  * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio">drivers</a>
-  * two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs">flatfs</a>)
+  * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio-async">drivers</a>
+  * a journaling filesystem
   * <a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking
     * max host-guest TCP throughput is about 10Gbps at the moment
 * the userspace:
@@ -82,8 +82,7 @@ More specifically, these things work:
 Most pieces are not yet ready for production use. No security audit has been made.
 More specifically:
 
-* Filesystem: most Rust std::fs APIs have been implemented as proof-of-concept,
-but are slow (synchronous) and will have to be reimplemented using Motor OS async I/O
+* Filesystem: some operations are missing; undertested
 * Networking:
   * DHCP not implemented: static IP addresses only at the moment
   * DNS lookup not implemented yet

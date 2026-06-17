@@ -27,8 +27,6 @@ impl PartitionType {
             0x83 => PartitionType::LinuxExt(tag),
             0x07 => PartitionType::NtfsExfat(tag),
             0xaf => PartitionType::HfsPlus(tag),
-            flatfs::PARTITION_ID => PartitionType::FlatFs, // 0x2c
-            srfs::PARTITION_ID => PartitionType::SrFs,     // 0x2d
             motor_fs::PARTITION_ID => PartitionType::MotorFs, // 0x2e
             _ => PartitionType::Unknown(tag),
         }

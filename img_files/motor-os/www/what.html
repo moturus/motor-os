@@ -68,8 +68,8 @@ More specifically, these things work:
 	</ul>
   <li>I/O subsystem (in the userspace)</li>
 	<ul>
-	   <li>VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio">drivers</a></li>
-       <li>two simple filesystems (<a href="https://crates.io/crates/srfs">srfs</a> and <a href="https://crates.io/crates/flatfs">flatfs</a>)</li>
+	   <li>VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio-async">drivers</a></li>
+       <li>a journaling filesystem</li>
 	   <li><a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking</li>
       <ul><li>max host-guest TCP throughput is about 10Gbps at the moment</li></ul>
 	</ul>
@@ -100,8 +100,7 @@ Most pieces are not yet ready for production use. No security audit has been mad
 More specifically:</p>
 
 <ul>
-<li>Filesystem: most Rust std::fs APIs have been implemented as proof-of-concept,
-but are slow (synchronous) and will have to be reimplemented using Motor OS async I/O</li>
+<li>Filesystem: some operations are missing yet; undertested</li>
 <li>Networking:</li>
    <ul>
       <li>DHCP not implemented: static IP addresses only at the moment</li>

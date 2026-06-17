@@ -31,42 +31,6 @@ struct Config {
     data_partition_size_mb: u64,
 }
 
-fn create_srfs_partition(
-    result_path: &Path,
-    files: &BTreeMap<PathBuf, String>,
-    data_partition_size_mb: u64,
-) {
-    let data_partition_size = data_partition_size_mb * 1024 * 1024;
-    srfs::FileSystem::create_volume(result_path, data_partition_size / srfs::BLOCK_SIZE as u64)
-        .unwrap();
-
-    let mut filesystem = srfs::FileSystem::open_volume(result_path).unwrap();
-
-    for (src, dst) in files {
-        let target_path = Path::new(dst);
-        // Create parent directories.
-        let parent = target_path.parent().unwrap().to_str().unwrap();
-        if !filesystem.exists(parent.into()).unwrap() {
-            filesystem.create_dir_all(parent.into()).unwrap();
-        }
-
-        let mut new_file = filesystem.create_file(dst.as_str().into()).unwrap();
-
-        let source_file = File::open(src).unwrap();
-        let mut buf_reader = BufReader::new(source_file);
-
-        let mut buf = [0_u8; 512];
-        while let Ok(sz) = buf_reader.read(&mut buf) {
-            if sz == 0 {
-                break;
-            }
-            new_file
-                .write(&buf[0..sz])
-                .expect("Failed to add a file to img.");
-        }
-    }
-}
-
 async fn create_motorfs_partition_async(
     result_path: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -94,7 +58,7 @@ async fn create_motorfs_partition_async(
             .await
             .unwrap();
         let new_file_id = fs
-            .create_entry(parent_id, srfs::EntryKind::File, filename)
+            .create_entry(parent_id, async_fs::EntryKind::File, filename)
             .await
             .unwrap();
 
@@ -136,28 +100,6 @@ fn create_motorfs_partition(
         files,
         data_partition_size_mb,
     ));
-}
-
-fn create_flatfs_partition(result: &Path, files: &BTreeMap<PathBuf, String>) {
-    let mut writer = flatfs::Writer::new();
-
-    for (src, dst) in files {
-        let mut source_file = File::open(src).unwrap();
-        let mut bytes: Vec<u8> = Vec::new();
-        source_file.read_to_end(&mut bytes).unwrap();
-        writer.add(dst, &bytes);
-    }
-
-    let o_bytes = writer.pack();
-    let mut o_file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(result)
-        .unwrap();
-    o_file.write_all(&o_bytes).unwrap();
-    o_file.flush().unwrap();
 }
 
 #[repr(C)]
@@ -270,8 +212,6 @@ fn set_partition(
         sectors,
         sys: match fs {
             Some("fat32") => 0xc,
-            Some("flatfs") => flatfs::PARTITION_ID,
-            Some("srfs") => srfs::PARTITION_ID,
             Some("motor-fs") => motor_fs::PARTITION_ID,
             Some(fs) => panic!("unknown partition '{fs}'"),
             None => 0x20,
@@ -441,11 +381,9 @@ fn main() {
 
     let fs_partition = tmp_img_dir.join("fs_part");
     match config.filesystem.as_str() {
-        "srfs" => create_srfs_partition(&fs_partition, &files, config.data_partition_size_mb),
         "motor-fs" => {
             create_motorfs_partition(&fs_partition, &files, config.data_partition_size_mb)
         }
-        "flatfs" => create_flatfs_partition(&fs_partition, &files),
         _ => panic!("Unknown filesystem: {}", config.filesystem),
     }
 

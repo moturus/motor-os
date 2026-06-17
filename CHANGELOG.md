@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-06-17
+
+* Motor OS now uses Motor FS by default.
+* sys-io runtime is now fully async.
+
 ## 2025-10-17
 
 Motor OS is now a [Tier-3 target in Rust](https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html)!

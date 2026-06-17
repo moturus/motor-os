@@ -2,7 +2,6 @@
 members = [
   # system libraries (legacy, to be refactored)
   "lib/async-fs",
-  "lib/flatfs",
   "lib/moto-async",
   "lib/moto-io-internal",
   "lib/moto-ipc",
@@ -10,10 +9,7 @@ members = [
   "lib/moto-mpmc",
   "lib/moto-sys-io",
   "lib/motor-fs",
-  "lib/srfs",
-  "lib/srfs-core",
   "lib/timeq",
-  "lib/virtio",
   "lib/virtio-async",
 
   # various generic tools (not Motor OS specific)
@@ -48,15 +44,11 @@ members = [
 resolver = "2"
 
 [patch.crates-io]
-flatfs       = { path = "lib/flatfs"          }
 moto-ipc     = { path = "lib/moto-ipc"        }
 moto-log     = { path = "lib/moto-log"        }
 moto-rt      = { path = "lib/moto-rt"         }
 moto-sys     = { path = "lib/moto-sys"        }
 moto-sys-io  = { path = "lib/moto-sys-io"     }
-moto-virtio  = { path = "lib/virtio"          }
-srfs-core    = { path = "lib/srfs-core"       }
-srfs         = { path = "lib/srfs"            }
 
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }

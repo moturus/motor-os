@@ -25,7 +25,7 @@ pub async fn motor_fs_create_dir_all(
         parent_id = if let Some((entry_id, _)) = stat_result {
             entry_id
         } else {
-            fs.create_entry(parent_id, srfs::EntryKind::Directory, filename)
+            fs.create_entry(parent_id, async_fs::EntryKind::Directory, filename)
                 .await
                 .unwrap()
         };

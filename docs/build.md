@@ -133,12 +133,3 @@ While Motor OS is running, you can ssh into it using
 ```sh
 ssh -p 2222 -o IdentitiesOnly=yes -i test.key motor@192.168.4.2
 ```
-
-## Test
-
-A test script is available:
-
-```sh
-cd $MOTORH/motor-os/vm_images/release
-./full-test.sh
-```
