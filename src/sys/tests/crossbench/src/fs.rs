@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::time::Instant;
 
+use rand::RngExt;
+
 const BLOCK_SIZE: usize = 4096;
 const TEST_FILE_SIZE: usize = 1024 * 1024 * 20;
 
@@ -33,7 +35,7 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
     }
     let buffer = unsafe { std::slice::from_raw_parts_mut(ptr, BLOCK_SIZE) };
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut histogram = hdrhistogram::Histogram::<u64>::new(3).unwrap();
 
     println!(
@@ -43,10 +45,8 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
 
     let start = Instant::now();
     for iter in 0..args.iters {
-        use rand::Rng;
-
         let max_offset = (TEST_FILE_SIZE - BLOCK_SIZE) as u64;
-        let random_offset = rng.gen_range(0..=max_offset);
+        let random_offset = rng.random_range(0..=max_offset);
         let aligned_offset = random_offset & !(BLOCK_SIZE as u64 - 1);
 
         let start = Instant::now();
@@ -129,10 +129,9 @@ pub fn run_benches(args: crate::Args) -> std::io::Result<()> {
 }
 
 fn create_test_file(path: &Path) -> std::io::Result<()> {
-    use rand::RngCore;
     use std::io::Write;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut buffer = vec![0u8; 1024 * 1024]; // Write in 1MB chunks.
     let chunk_count = (TEST_FILE_SIZE / buffer.len()) as u64;
 
@@ -145,7 +144,7 @@ fn create_test_file(path: &Path) -> std::io::Result<()> {
     assert_eq!(0, TEST_FILE_SIZE % buffer.len());
 
     for _ in 0..chunk_count {
-        rng.fill_bytes(&mut buffer);
+        rng.fill(&mut buffer);
         writer.write_all(&buffer)?;
     }
 
