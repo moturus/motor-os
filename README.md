@@ -60,7 +60,7 @@ More specifically, these things work:
   * * page faults in the userspace work and are properly handled (only stack memory allocations are currently lazy)
 * I/O subsystem (in the userspace)
   * VirtIO-BLK and VirtIO-NET <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/virtio-async">drivers</a>
-  * a journaling filesystem
+  * a <a href="https://github.com/moturus/motor-os/tree/main/src/sys/lib/motor-fs">journaling filesystem</a>
   * <a href="https://crates.io/crates/smoltcp">smoltcp</a>-based networking
     * max host-guest TCP throughput is about 10Gbps at the moment
 * the userspace:
