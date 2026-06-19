@@ -503,6 +503,51 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(res)
     }
 
+    /// Copies bytes from one file to another.
+    async fn copy_file_range(
+        &mut self,
+        from: EntryId,
+        from_offset: u64,
+        to: EntryId,
+        to_offset: u64,
+        size: u64,
+    ) -> Result<u64> {
+        self.check_err()?;
+
+        let mut buf = [0_u8; BLOCK_SIZE];
+        let mut from_offset = from_offset;
+        let mut to_offset = to_offset;
+        let mut remaining = size;
+        let mut copied = 0_u64;
+
+        while remaining > 0 {
+            // Cross-block reads/writes are not supported, so each chunk must
+            // stay within a single block on both the source and the dest side.
+            let src_room = BLOCK_SIZE as u64 - (from_offset % BLOCK_SIZE as u64);
+            let dst_room = BLOCK_SIZE as u64 - (to_offset % BLOCK_SIZE as u64);
+            let chunk = remaining.min(src_room).min(dst_room) as usize;
+
+            let read = self.read(from, from_offset, &mut buf[..chunk]).await?;
+            if read == 0 {
+                break; // Reached the end of the source file.
+            }
+
+            let mut written = 0;
+            while written < read {
+                written += self
+                    .write(to, to_offset + written as u64, &buf[written..read])
+                    .await?;
+            }
+
+            from_offset += read as u64;
+            to_offset += read as u64;
+            copied += read as u64;
+            remaining -= read as u64;
+        }
+
+        Ok(copied)
+    }
+
     async fn flush(&mut self) -> Result<()> {
         self.check_err()?;
         self.txn_logger.flush().await

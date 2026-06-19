@@ -212,6 +212,16 @@ pub trait FileSystem {
 
     async fn empty_blocks(&mut self) -> Result<u64>;
 
+    /// Copies bytes from one file to another.
+    async fn copy_file_range(
+        &mut self,
+        from: EntryId,
+        from_offset: u64,
+        to: EntryId,
+        to_offset: u64,
+        size: u64,
+    ) -> Result<u64>;
+
     /// Flush all in-memory blocks to the underlying block device.
     async fn flush(&mut self) -> Result<()>;
 }

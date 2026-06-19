@@ -86,6 +86,14 @@ fn random_file() {
 }
 
 #[test]
+fn copy_file() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(copy_file_test()).unwrap();
+}
+
+#[test]
 #[ignore]
 fn write_speed() {
     init_logger();
@@ -720,6 +728,129 @@ async fn random_file_test() -> Result<()> {
     );
 
     println!("random_file_test PASS");
+    Ok(())
+}
+
+async fn copy_file_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+
+    let mut fs = create_fs("motor_fs_copy_file_test", NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID;
+
+    // Source data spanning several blocks plus a partial tail.
+    let src_bytes: Vec<u8> = (0..(4096 * 3 + 777)).map(|idx| (idx % 251) as u8).collect();
+
+    let src = fs.create_entry(root, EntryKind::File, "src").await.unwrap();
+
+    // Write the source file, respecting block boundaries.
+    let mut off = 0;
+    while off < src_bytes.len() {
+        let len = 4096.min(src_bytes.len() - off);
+        let written = fs
+            .write(src, off as u64, &src_bytes[off..off + len])
+            .await
+            .unwrap();
+        assert_eq!(written, len);
+        off += written;
+    }
+
+    // Helper to read back a whole file into a Vec.
+    async fn read_all(fs: &mut MotorFs, file_id: EntryId, size: usize) -> Vec<u8> {
+        let mut out = vec![0_u8; size];
+        let mut off = 0;
+        while off < size {
+            let len = 4096.min(size - off);
+            let read = fs
+                .read(file_id, off as u64, &mut out[off..off + len])
+                .await
+                .unwrap();
+            assert_eq!(read, len);
+            off += read;
+        }
+        out
+    }
+
+    // 1. Full-file copy into a fresh, aligned destination.
+    let dst = fs.create_entry(root, EntryKind::File, "dst").await.unwrap();
+    let copied = fs
+        .copy_file_range(src, 0, dst, 0, src_bytes.len() as u64)
+        .await
+        .unwrap();
+    assert_eq!(copied, src_bytes.len() as u64);
+    assert_eq!(src_bytes.len() as u64, fs.metadata(dst).await?.size);
+    assert_eq!(src_bytes, read_all(&mut fs, dst, src_bytes.len()).await);
+
+    // 2. Copy a sub-range with unaligned source and dest offsets, crossing
+    //    block boundaries on both sides.
+    let from_offset = 100;
+    let to_offset = 5000; // Into the second block of the dest.
+    let range = 4096 * 2 + 33;
+    let dst2 = fs
+        .create_entry(root, EntryKind::File, "dst2")
+        .await
+        .unwrap();
+    let copied = fs
+        .copy_file_range(
+            src,
+            from_offset as u64,
+            dst2,
+            to_offset as u64,
+            range as u64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(copied, range as u64);
+
+    let dst2_back = read_all(&mut fs, dst2, to_offset + range).await;
+    // The skipped prefix in the dest is a hole, i.e. zeroes.
+    assert!(dst2_back[..to_offset].iter().all(|b| *b == 0));
+    assert_eq!(
+        &src_bytes[from_offset..from_offset + range],
+        &dst2_back[to_offset..to_offset + range]
+    );
+
+    // 3. Request more bytes than the source has: only the available bytes
+    //    are copied, and the returned count reflects that.
+    let dst3 = fs
+        .create_entry(root, EntryKind::File, "dst3")
+        .await
+        .unwrap();
+    let from_offset = src_bytes.len() - 500;
+    let copied = fs
+        .copy_file_range(src, from_offset as u64, dst3, 0, 100_000)
+        .await
+        .unwrap();
+    assert_eq!(copied, 500);
+    assert_eq!(
+        &src_bytes[from_offset..],
+        read_all(&mut fs, dst3, 500).await.as_slice()
+    );
+
+    // 4. Copying from an offset at or past the source EOF copies nothing.
+    let dst4 = fs
+        .create_entry(root, EntryKind::File, "dst4")
+        .await
+        .unwrap();
+    let copied = fs
+        .copy_file_range(src, src_bytes.len() as u64, dst4, 0, 4096)
+        .await
+        .unwrap();
+    assert_eq!(copied, 0);
+    assert_eq!(0, fs.metadata(dst4).await?.size);
+
+    // Clean up.
+    fs.delete_entry(src).await.unwrap();
+    fs.delete_entry(dst).await.unwrap();
+    fs.delete_entry(dst2).await.unwrap();
+    fs.delete_entry(dst3).await.unwrap();
+    fs.delete_entry(dst4).await.unwrap();
+    assert_eq!(
+        NUM_BLOCKS - RESERVED_BLOCKS as u64,
+        fs.empty_blocks().await.unwrap()
+    );
+
+    println!("copy_file_test PASS");
     Ok(())
 }
 
