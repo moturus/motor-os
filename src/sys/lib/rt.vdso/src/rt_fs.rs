@@ -474,6 +474,46 @@ impl AsyncFsClient {
         self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
     }
 
+    fn copy_file_range(
+        &self,
+        from: EntryId,
+        to: EntryId,
+        offset: u64,
+        size: u64,
+    ) -> Result<u64> {
+        self.blocking_run(move |fs_client| async move {
+            fs_client.copy_file_range(from, to, offset, size).await
+        })
+    }
+
+    /// Copy the contents of file `from` into file `to`, creating or truncating
+    /// the destination. Returns the number of bytes copied.
+    fn copy(&self, from: &str, to: &str) -> Result<u64> {
+        // Open the source: it must exist and be a regular file.
+        let src = self.file_open(from, moto_rt::fs::O_READ)?;
+
+        // Create the destination, truncating it if it already exists.
+        let dst = self.file_open(
+            to,
+            moto_rt::fs::O_CREATE | moto_rt::fs::O_WRITE | moto_rt::fs::O_TRUNCATE,
+        )?;
+
+        const CHUNK_SIZE: u64 = 64 * 1024;
+
+        // `offset` accumulates the total number of bytes copied so far, which
+        // is also the offset of the next chunk in both files.
+        let mut offset = 0_u64;
+        loop {
+            let copied = self.copy_file_range(src.entry_id, dst.entry_id, offset, CHUNK_SIZE)?;
+            if copied == 0 {
+                break; // Reached the end of the source file.
+            }
+            offset += copied;
+        }
+
+        Ok(offset)
+    }
+
     fn unlink(&self, path: &str) -> Result<()> {
         let path = CanonicalPath::parse(path)?;
         if path.is_root() {
@@ -1107,5 +1147,19 @@ pub extern "C" fn copy(
     to_ptr: *const u8,
     to_size: usize,
 ) -> i64 {
-    todo!()
+    let from_bytes = unsafe { core::slice::from_raw_parts(from_ptr, from_size) };
+    let from = unsafe { core::str::from_utf8_unchecked(from_bytes) };
+    let to_bytes = unsafe { core::slice::from_raw_parts(to_ptr, to_size) };
+    let to = unsafe { core::str::from_utf8_unchecked(to_bytes) };
+    log::debug!("copy('{from}', '{to}')");
+
+    let client = match AsyncFsClient::get() {
+        Ok(client) => client,
+        Err(err) => return -(err as u16 as i64),
+    };
+
+    match client.copy(from, to) {
+        Ok(copied) => copied as i64,
+        Err(err) => -(err as u16 as i64),
+    }
 }

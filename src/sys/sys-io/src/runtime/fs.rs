@@ -130,6 +130,24 @@ impl FileSystem for FS {
         }
     }
 
+    /// Copies bytes from one file to another.
+    async fn copy_file_range(
+        &mut self,
+        from: EntryId,
+        from_offset: u64,
+        to: EntryId,
+        to_offset: u64,
+        size: u64,
+    ) -> Result<u64> {
+        match self {
+            FS::MotorFs(motor_fs) => {
+                motor_fs
+                    .copy_file_range(from, from_offset, to, to_offset, size)
+                    .await
+            }
+        }
+    }
+
     /// The total number of blocks in the FS.
     fn num_blocks(&self) -> u64 {
         match self {
@@ -322,6 +340,7 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => on_cmd_get_next_entry(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, fs).await,
         moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => on_cmd_copy_file_range(msg, &sender, fs).await,
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -588,6 +607,24 @@ async fn on_cmd_move_entry(
     );
     core::mem::drop(fs);
 
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_copy_file_range(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalMutex<FS>>,
+) -> Result<()> {
+    let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
+
+    let mut fs = fs.lock().await;
+
+    // In this implementation, from_offset == to_offset.
+    let copied = fs.copy_file_range(from, offset, to, offset, size).await?;
+    core::mem::drop(fs);
+
+    let resp = api_fs::copy_file_range_resp_encode(msg.id, copied);
     let _ = sender.send(resp).await;
     Ok(())
 }

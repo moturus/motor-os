@@ -374,6 +374,23 @@ impl FsClient {
         }
     }
 
+    /// Copy up to `size` bytes from file `from` to file `to`, both at `offset`.
+    /// Returns the number of bytes actually copied, which may be less than
+    /// `size` if the end of the source file is reached.
+    pub async fn copy_file_range(
+        self: &Rc<Self>,
+        from: EntryId,
+        to: EntryId,
+        offset: u64,
+        size: u64,
+    ) -> Result<u64> {
+        let mut msg = api_fs::copy_file_range_req_encode(from, to, offset, size);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::copy_file_range_resp_decode(resp)
+    }
+
     /// The metadata of the directory entry.
     pub async fn metadata(self: &Rc<Self>, entry_id: EntryId) -> Result<Metadata> {
         let mut msg = api_fs::metadata_msg_encode(entry_id);

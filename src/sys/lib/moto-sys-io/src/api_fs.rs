@@ -21,6 +21,7 @@ pub const CMD_GET_FIRST_ENTRY: u16 = 10;
 pub const CMD_GET_NEXT_ENTRY: u16 = 11;
 pub const CMD_GET_NAME: u16 = 12;
 pub const CMD_MOVE_ENTRY: u16 = 13;
+pub const CMD_COPY_FILE_RANGE: u16 = 14;
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -401,4 +402,44 @@ pub fn move_entry_req_decode(msg: Msg, sender: &Sender) -> Result<(u128, u128, S
     })?;
 
     Ok((entry_id, new_parent_id, fname))
+}
+
+/// Copies `size` bytes from file `from` at `offset` to file `to` at `offset`.
+pub fn copy_file_range_req_encode(from: EntryId, to: EntryId, offset: u64, size: u64) -> Msg {
+    debug_assert!(size <= u32::MAX as u64);
+
+    let mut msg = Msg::new();
+    msg.command = CMD_COPY_FILE_RANGE;
+
+    msg.set_long_handle(from);
+    msg.payload.set_arg_128(to);
+    msg.payload.args_64_mut()[2] = offset;
+    msg.flags = size as u32;
+
+    msg
+}
+
+/// Returns (from, to, offset, size).
+pub fn copy_file_range_req_decode(msg: Msg) -> (u128, u128, u64, u64) {
+    let from = msg.get_long_handle();
+    let to = msg.payload.arg_128();
+    let offset = msg.payload.args_64()[2];
+    let size = msg.flags as u64;
+
+    (from, to, offset, size)
+}
+
+pub fn copy_file_range_resp_encode(msg_id: u64, copied: u64) -> Msg {
+    let mut msg = Msg::new();
+    msg.id = msg_id;
+    msg.command = CMD_COPY_FILE_RANGE;
+    msg.status = moto_rt::Error::Ok.into();
+
+    msg.payload.args_64_mut()[0] = copied;
+    msg
+}
+
+pub fn copy_file_range_resp_decode(msg: Msg) -> Result<u64> {
+    msg.status()?;
+    Ok(msg.payload.args_64()[0])
 }

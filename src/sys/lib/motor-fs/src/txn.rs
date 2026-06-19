@@ -391,7 +391,8 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             return txn.commit().await;
         }
 
-        todo!("do the complicated dance");
+        log::error!("do_resize_txn: not impl");
+        Err(ErrorKind::Interrupted.into())
     }
 
     #[cfg(test)]

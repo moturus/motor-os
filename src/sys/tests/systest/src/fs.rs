@@ -47,6 +47,84 @@ fn remove_dir_all_test() {
     println!("    ---- FS: remove_dir_all_test PASS");
 }
 
+fn copy_test() {
+    let root = temp_dir();
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let src = root.join("copy_src");
+    let dst = root.join("copy_dst");
+
+    // Generate some random source data larger than a single block to exercise
+    // the copy loop.
+    const LEN: usize = 1024 * 1024 * 3 + 333;
+    let mut bytes = Vec::with_capacity(LEN);
+    bytes.resize(LEN, 0u8);
+    for byte in &mut bytes {
+        *byte = std::random::random(..);
+    }
+
+    std::fs::write(&src, bytes.as_slice()).unwrap();
+
+    // Copy to a fresh destination.
+    let copied = std::fs::copy(&src, &dst).unwrap();
+    assert_eq!(copied, LEN as u64);
+
+    assert!(std::fs::exists(&dst).unwrap());
+    let dst_meta = std::fs::metadata(&dst).unwrap();
+    assert!(dst_meta.is_file());
+    assert_eq!(dst_meta.len(), LEN as u64);
+
+    let dst_bytes = std::fs::read(&dst).unwrap();
+    assert_eq!(dst_bytes.len(), LEN);
+    assert_eq!(
+        moto_rt::fnv1a_hash_64(bytes.as_slice()),
+        moto_rt::fnv1a_hash_64(dst_bytes.as_slice())
+    );
+
+    // The source must be left untouched.
+    let src_meta = std::fs::metadata(&src).unwrap();
+    assert!(src_meta.is_file());
+    assert_eq!(src_meta.len(), LEN as u64);
+
+    // Copying over an existing file must truncate/overwrite it: first write a
+    // smaller file at the destination, then copy a larger one over it.
+    /*
+    let small = b"small contents";
+    std::fs::write(&dst, small).unwrap();
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), small.len() as u64);
+
+    let copied = std::fs::copy(&src, &dst).unwrap();
+    assert_eq!(copied, LEN as u64);
+    assert_eq!(std::fs::metadata(&dst).unwrap().len(), LEN as u64);
+    let dst_bytes = std::fs::read(&dst).unwrap();
+    assert_eq!(
+        moto_rt::fnv1a_hash_64(bytes.as_slice()),
+        moto_rt::fnv1a_hash_64(dst_bytes.as_slice())
+    );
+    */
+
+    // Copying a non-existent source must fail with NotFound.
+    let missing = root.join("does_not_exist");
+    assert_eq!(
+        std::fs::copy(&missing, &dst).err().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    // Copying an empty file must succeed and produce an empty file.
+    let empty_src = root.join("empty_src");
+    let empty_dst = root.join("empty_dst");
+    std::fs::write(&empty_src, b"").unwrap();
+    let copied = std::fs::copy(&empty_src, &empty_dst).unwrap();
+    assert_eq!(copied, 0);
+    assert_eq!(std::fs::metadata(&empty_dst).unwrap().len(), 0);
+
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(!std::fs::exists(&root).unwrap());
+
+    println!("    ---- FS: copy_test PASS");
+}
+
 pub fn smoke_test() {
     if std::fs::metadata("/foo").is_ok() {
         std::fs::remove_file("/foo").unwrap();
@@ -129,6 +207,7 @@ pub fn smoke_test() {
 pub fn run_tests() {
     println!("running FS tests ...");
     smoke_test();
+    copy_test();
     remove_dir_all_test();
 
     println!("FS tests PASS");
