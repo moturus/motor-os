@@ -713,6 +713,23 @@ impl TcpStream {
         // poll events here, and sometimes we have to delay them. For example,
         // while there are messages in RXQ, we should not raise POLL_READ_CLOSED.
         let mut recv_q = self.recv_queue.lock();
+
+        // If the read half has been shut down locally (shutdown(SHUT_RD)), drop any
+        // RX bytes that were already in flight: the application has declared it will
+        // not read them, so we discard the data and return the server-allocated page
+        // to the channel instead of queueing it (which would spuriously raise
+        // POLL_READABLE after READ_CLOSED was already delivered). State-change events
+        // still flow through below.
+        if msg.command == (api_net::NetCmd::TcpStreamRx as u16)
+            && self.rx_closed.load(Ordering::Acquire)
+        {
+            let sz_read = msg.payload.args_64()[1];
+            if sz_read > 0 {
+                let _ = self.channel().get_page(msg.payload.shared_pages()[0]);
+            }
+            return rx_lock.take().unwrap_or(SysHandle::NONE);
+        }
+
         let have_rx_bytes = !recv_q.is_empty();
         if have_rx_bytes {
             recv_q.push_back(msg);
@@ -1467,8 +1484,9 @@ impl TcpStream {
     }
 
     fn shutdown(&self, read: bool, write: bool) -> ErrorCode {
-        // Note: we don't change tcp state here, we do that when we receive
-        // the appropriate event from sys-io.
+        // Note: for the write half we don't change tcp state here; we do that when
+        // we receive the appropriate event from sys-io. The read half is handled
+        // locally below (see the comment after send_receive).
         assert!(read || write);
         let mut option = 0_u64;
         if read {
@@ -1485,6 +1503,25 @@ impl TcpStream {
         req.handle = self.handle();
         req.payload.args_64_mut()[0] = option;
         let resp = self.channel().send_receive(req);
+
+        if read && resp.status().is_ok() {
+            // shutdown(SHUT_RD) is a local operation: the read half is closed
+            // immediately, independent of the remote. sys-io only flips an internal
+            // flag in response to TCP_OPTION_SHUT_RD and does not push a state change
+            // back to us, so we complete the read shutdown here rather than waiting
+            // for a state-change event (which would otherwise only arrive once the
+            // connection is torn down).
+            //
+            // Bytes already received from the remote but not yet read by the
+            // application are dropped: this matches POSIX shutdown(SHUT_RD) semantics,
+            // where queued receive data is discarded and subsequent reads return EOF.
+            // Dropping them here (before raising READ_CLOSED) also guarantees we never
+            // deliver READ_CLOSED ahead of bytes the application could still observe.
+            // Any RX bytes still in flight are dropped in process_incoming_msg() (see
+            // the rx_closed guard there).
+            super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());
+            self.set_tcp_state(TcpState::WriteOnly);
+        }
 
         resp.status
     }
