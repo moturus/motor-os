@@ -146,9 +146,14 @@ impl TcpListener {
         self.listening_sockets.insert(socket_id);
     }
 
-    pub(super) async fn on_socket_dropped(this: Rc<RefCell<Self>>, socket_id: u64) {
-        log::error!("calling todo!() for socket 0x{socket_id:x}");
-        todo!()
+    // Called when a socket still owned by this listener is dropped without being
+    // handed off to a client, e.g. a half-open handshake that timed out or was reset.
+    pub(super) fn on_socket_dropped(this: Rc<RefCell<Self>>, socket_id: u64) {
+        let mut this_ref = this.borrow_mut();
+        this_ref.listening_sockets.remove(&socket_id);
+        this_ref
+            .pending_sockets
+            .retain(|(id, _, _)| *id != socket_id);
     }
 
     pub(super) async fn on_socket_connected(

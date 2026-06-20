@@ -271,6 +271,9 @@ impl MotoSocket {
             }
 
             Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
+                // Smoltcp does not expire SYN_RECEIVED sockets without a timeout.
+                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
+                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
                 smoltcp_socket.listen(socket_addr).unwrap();
                 log::debug!(
                     "new TCP socket 0x{socket_id:x} listening on {socket_addr:?} for conn 0x{:x}",
