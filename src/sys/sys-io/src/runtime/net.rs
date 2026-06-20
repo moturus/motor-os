@@ -305,21 +305,16 @@ impl NetRuntime {
                 // Because the loop below is asynchronous, removing one socket may trigger
                 // another terminating/quitting, so not every client socket may be present.
                 let maybe_tcp_socket = {
-                    self.inner
-                        .borrow()
-                        .sockets
-                        .get(socket_id)
-                        .cloned()
-                        .and_then(|moto_socket| {
-                            if moto_socket.borrow().is_tcp() {
-                                Some(moto_socket)
-                            } else {
-                                assert!(
-                                    self.inner.borrow_mut().sockets.remove(socket_id).is_some()
-                                );
-                                None
-                            }
-                        })
+                    let socket = self.inner.borrow().sockets.get(socket_id).cloned();
+
+                    socket.and_then(|moto_socket| {
+                        if moto_socket.borrow().is_tcp() {
+                            Some(moto_socket)
+                        } else {
+                            assert!(self.inner.borrow_mut().sockets.remove(socket_id).is_some());
+                            None
+                        }
+                    })
                 };
                 if let Some(moto_socket) = maybe_tcp_socket {
                     MotoSocket::close_tcp_socket_inner(moto_socket, None).await;
