@@ -285,14 +285,17 @@ impl MotoSocket {
         };
 
         // Spawn the listening task.
-
         moto_async::LocalRuntime::spawn(async move {
             let (connected_tx, connected_rx) = moto_async::oneshot();
-            Self::tcp_listen_task(connected_tx, weak_socket).await;
 
-            // Spawn an extra one once the previous one is connected.
-            let _ = connected_rx.await;
-            Self::create_tcp_listening_socket(weak_listener, device_idx, socket_addr).await;
+            // Replenish the listening pool as soon as this socket leaves the Listen state.
+            moto_async::LocalRuntime::spawn(async move {
+                let _ = connected_rx.await;
+                let _ =
+                    Self::create_tcp_listening_socket(weak_listener, device_idx, socket_addr).await;
+            });
+
+            Self::tcp_listen_task(connected_tx, weak_socket).await;
         });
 
         Ok(())
