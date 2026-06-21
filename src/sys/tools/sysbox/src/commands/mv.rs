@@ -1,5 +1,5 @@
 fn print_usage_and_exit(exit_code: i32) -> ! {
-    eprintln!("usage:\n\tmv [$OLD_NAME] [$NEW_NAME]\n");
+    eprintln!("usage:\n\tmv $OLD_NAME $NEW_NAME\n");
     std::process::exit(exit_code);
 }
 
