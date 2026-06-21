@@ -138,6 +138,7 @@ impl TxnLogger {
         block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     fn spawn_timeout_flusher(txn_batch_holder: TxnBatchHolder, sender: TxnBatchSender) {
         let holder_lock = txn_batch_holder.borrow();
 
@@ -173,10 +174,12 @@ impl TxnLogger {
         let _handle = tokio::task::spawn_local(timeout_task);
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     fn spawn_txn_committer_task(
         block_cache_stub: async_fs::block_cache::AsyncStub,
         txn_batch_holder: TxnBatchHolder,
     ) -> TxnBatchSender {
+        #[warn(clippy::let_and_return)]
         let sender = {
             #[cfg(target_os = "motor")]
             let (sender, mut receiver) = moto_async::channel(2);
@@ -260,6 +263,7 @@ impl TxnLogger {
         })
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     pub(crate) async fn open<BD: AsyncBlockDevice + 'static>(
         block_cache: &mut BlockCache<BD>,
     ) -> Result<Self> {
@@ -285,6 +289,7 @@ impl TxnLogger {
         Ok(this)
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn replay_txn_log_if_needed<BD: AsyncBlockDevice + 'static>(
         &mut self,
         block_cache: &mut BlockCache<BD>,
@@ -432,6 +437,7 @@ impl TxnLogger {
         let mut sb = txn_batch.block_map.remove(&0).unwrap();
 
         let mut idx = 1; // Start with "1" because "0" is for the superblock.
+        #[allow(clippy::explicit_counter_loop)]
         for (block_no, block) in txn_batch.block_map.iter() {
             txn_log_data.txn_blocks[idx] = *block_no;
 

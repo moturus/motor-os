@@ -32,7 +32,7 @@ use bytemuck::Pod;
 use std::io::Result;
 
 pub const MAX_FILENAME_LEN: usize = 255;
-pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG as usize + 2;
+pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 8;
 pub(crate) const MAX_BLOCKS_IN_TXN_LOG: usize = 32; // 64 is faster with qemu, but chv hangs
@@ -837,8 +837,7 @@ impl DirEntryBlock {
             todo!("delete the entry from the list.");
         }
 
-        // We ignore the number of freed btree nodes.
-        let _ = Node::<BTREE_ROOT_ORDER>::root_delete_link(
+        Node::<BTREE_ROOT_ORDER>::root_delete_link(
             txn,
             parent_id.block_no,
             hash,

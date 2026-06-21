@@ -80,7 +80,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             dev,
             CACHE_SIZE,
             num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64,
-            MAX_BLOCKS_IN_TXN_LOG as usize,
+            MAX_BLOCKS_IN_TXN_LOG,
         )
         .await?;
 
@@ -108,7 +108,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             dev,
             CACHE_SIZE,
             num_blocks - MAX_BLOCKS_IN_TXN_LOG as u64,
-            MAX_BLOCKS_IN_TXN_LOG as usize,
+            MAX_BLOCKS_IN_TXN_LOG,
         )
         .await?;
 
@@ -388,6 +388,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
+        #[allow(clippy::let_and_return)]
         let res = Ok(Some(dir_entry!(block).parent_id().into()));
         res
     }
@@ -403,6 +404,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         let block = self.block_cache.get_block(id.block_no()).await?;
         dir_entry!(block).validate_entry(id)?;
 
+        #[allow(clippy::let_and_return)]
         let res = dir_entry!(block).name().map(|s| s.to_owned());
         res
     }

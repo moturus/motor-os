@@ -95,23 +95,27 @@ impl<const ORDER: usize> Node<ORDER> {
         this_block_no: BlockNo,
     ) -> Result<Option<KV>> {
         let block = txn.get_block(this_block_no).await?;
-        let block_ref = block.block();
-        let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if this.num_keys as usize > ORDER {
-            log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
-            return Err(ErrorKind::InvalidData.into());
-        }
+        let child_block_no = {
+            let block_ref = block.block();
+            let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
 
-        if this.num_keys == 0 {
-            return Ok(None);
-        }
+            if this.num_keys as usize > ORDER {
+                log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
 
-        if this.is_leaf() {
-            return Ok(Some(this.kv[0]));
-        }
+            if this.num_keys == 0 {
+                return Ok(None);
+            }
 
-        let child_block_no = this.kv[0].child_block_no;
+            if this.is_leaf() {
+                return Ok(Some(this.kv[0]));
+            }
+
+            this.kv[0].child_block_no
+        };
+
         // Recursive call (modulo ORDER).
         Box::pin(NonRootNode::first_child(txn, child_block_no)).await
     }
@@ -473,7 +477,7 @@ impl<const ORDER: usize> Node<ORDER> {
                 )
                 .await;
             }
-            return Ok(None);
+            Ok(None)
         } else {
             Ok(None)
         }
@@ -603,30 +607,37 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(false);
         }
 
-        let mut sibling_block = txn.get_block(left_sibling).await?;
-        let sibling_ref = sibling_block.block();
-        let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        if sibling.num_keys as usize <= BTREE_NODE_MIN_KEYS {
-            return Ok(false);
+        let (kv, new_key) = {
+            let mut sibling_block = txn.get_block(left_sibling).await?;
+            let sibling_ref = sibling_block.block();
+            let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+            if sibling.num_keys as usize <= BTREE_NODE_MIN_KEYS {
+                return Ok(false);
+            }
+
+            // Extract the last element from the left sibling.
+            let kv = sibling.kv[(sibling.num_keys as usize) - 1];
+            let new_key = kv.key;
+
+            drop(sibling_ref);
+            let mut sibling_ref = sibling_block.block_mut();
+            let sibling =
+                sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+            sibling.num_keys -= 1;
+
+            (kv, new_key)
+        };
+
+        {
+            // Insert it into _this_ node.
+            let mut child_block = txn.get_block(child_block_no).await?;
+            let mut block_ref = child_block.block_mut();
+            let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+            this.kv[this.num_keys as usize] = kv;
+
+            this.num_keys += 1;
+            this.kv[..(this.num_keys as usize)].rotate_right(1);
         }
-
-        // Extract the last element from the left sibling.
-        let kv = sibling.kv[(sibling.num_keys as usize) - 1];
-        let new_key = kv.key;
-
-        drop(sibling_ref);
-        let mut sibling_ref = sibling_block.block_mut();
-        let sibling = sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        sibling.num_keys -= 1;
-
-        // Insert it into _this_ node.
-        let mut child_block = txn.get_block(child_block_no).await?;
-        let mut block_ref = child_block.block_mut();
-        let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        this.kv[this.num_keys as usize] = kv;
-
-        this.num_keys += 1;
-        this.kv[..(this.num_keys as usize)].rotate_right(1);
 
         // Update this node's key in the parent.
         Self::set_child_key(txn, block_no, child_block_no, child_left_key, new_key).await?;
@@ -645,31 +656,38 @@ impl<const ORDER: usize> Node<ORDER> {
             return Ok(false);
         }
 
-        let mut sibling_block = txn.get_block(right_sibling).await?;
-        let sibling_ref = sibling_block.block();
-        let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        if sibling.num_keys as usize <= BTREE_NODE_MIN_KEYS {
-            return Ok(false);
+        let (kv, old_key, new_key) = {
+            let mut sibling_block = txn.get_block(right_sibling).await?;
+            let sibling_ref = sibling_block.block();
+            let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+            if sibling.num_keys as usize <= BTREE_NODE_MIN_KEYS {
+                return Ok(false);
+            }
+
+            // Extract the first element from the right sibling.
+            let kv = sibling.kv[0];
+            let old_key = kv.key;
+            let new_key = sibling.kv[1].key;
+
+            drop(sibling_ref);
+            let mut sibling_ref = sibling_block.block_mut();
+            let sibling =
+                sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+            sibling.kv[..(sibling.num_keys as usize)].rotate_left(1);
+            sibling.num_keys -= 1;
+
+            (kv, old_key, new_key)
+        };
+
+        {
+            // Insert it into _this_ node.
+            let mut child_block = txn.get_block(child_block_no).await?;
+            let mut block_ref = child_block.block_mut();
+            let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
+
+            this.kv[this.num_keys as usize] = kv;
+            this.num_keys += 1;
         }
-
-        // Extract the first element from the right sibling.
-        let kv = sibling.kv[0];
-        let old_key = kv.key;
-        let new_key = sibling.kv[1].key;
-
-        drop(sibling_ref);
-        let mut sibling_ref = sibling_block.block_mut();
-        let sibling = sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        sibling.kv[..(sibling.num_keys as usize)].rotate_left(1);
-        sibling.num_keys -= 1;
-
-        // Insert it into _this_ node.
-        let mut child_block = txn.get_block(child_block_no).await?;
-        let mut block_ref = child_block.block_mut();
-        let this = block_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-
-        this.kv[this.num_keys as usize] = kv;
-        this.num_keys += 1;
 
         // Update this node's key in the parent.
         Self::set_child_key(txn, block_no, right_sibling, old_key, new_key).await?;
@@ -778,6 +796,7 @@ impl<const ORDER: usize> Node<ORDER> {
         }
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn try_merge_left<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
@@ -833,6 +852,7 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(Some((child_left_key, child_block_no)))
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn try_merge_right<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         block_no: BlockNo,
@@ -1011,6 +1031,7 @@ impl RootNode {
         })
     }
 
+    #[allow(clippy::await_holding_refcell_ref)]
     async fn assimilate_single_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         root_block_no: BlockNo,
