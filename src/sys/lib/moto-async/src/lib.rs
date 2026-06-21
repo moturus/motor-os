@@ -21,7 +21,6 @@
 //! will be enough).
 
 #![no_std]
-#![feature(box_as_ptr)]
 #![feature(likely_unlikely)]
 #![feature(local_waker)]
 

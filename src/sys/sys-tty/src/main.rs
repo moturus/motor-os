@@ -1,4 +1,3 @@
-#![feature(box_as_ptr)]
 use core::slice;
 use std::io::Write;
 use std::sync::Arc;

@@ -164,7 +164,7 @@ fn is_elf(buf: &[u8]) -> bool {
 }
 
 fn is_script(buf: &[u8]) -> bool {
-    const SCRIPT_MAGIC: [u8; 3] = [b'#', b'!', b'/'];
+    const SCRIPT_MAGIC: [u8; 3] = *b"#!/";
     if buf.len() < 4 {
         return false;
     }
@@ -588,7 +588,7 @@ fn run_elf(
     // Create an address space for the new process.
     let full_url = alloc::format!(
         "address_space:debug_name={}",
-        &moto_sys::url_encode(debug_name.as_str())
+        moto_sys::url_encode(debug_name.as_str())
     );
     let address_space = moto_sys::syscalls::RaiiHandle::from(moto_sys::SysObj::create(
         moto_sys::SysHandle::NONE,

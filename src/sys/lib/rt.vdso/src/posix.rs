@@ -230,19 +230,16 @@ impl Descriptors {
     fn pop(&self, fd: RtFd) -> Option<Arc<dyn PosixFile>> {
         let val = {
             let mut descriptors = self.descriptors.lock();
-            if let Some(entry) = descriptors.get_mut(fd as usize) {
-                let mut val: Arc<dyn PosixFile> = Arc::new(Placeholder);
-                core::mem::swap(&mut val, entry);
-                if (val.as_ref() as &dyn Any)
-                    .downcast_ref::<Placeholder>()
-                    .is_some()
-                {
-                    None
-                } else {
-                    Some(val)
-                }
+            let entry = descriptors.get_mut(fd as usize)?;
+            let mut val: Arc<dyn PosixFile> = Arc::new(Placeholder);
+            core::mem::swap(&mut val, entry);
+            if (val.as_ref() as &dyn Any)
+                .downcast_ref::<Placeholder>()
+                .is_some()
+            {
+                None
             } else {
-                return None;
+                Some(val)
             }
         };
         if val.is_some() {
