@@ -1,4 +1,4 @@
-use moto_sys::stats::ProcessStatsV1;
+use moto_sys::stats::ProcessInfoV1;
 
 use crate::subcommand;
 
@@ -51,12 +51,12 @@ pub fn test_pid_kill() {
 
     const PS_BUF_SIZE: usize = 1024;
 
-    let mut processes: Vec<ProcessStatsV1> = Vec::with_capacity(PS_BUF_SIZE);
+    let mut processes: Vec<ProcessInfoV1> = Vec::with_capacity(PS_BUF_SIZE);
     for _ in 0..PS_BUF_SIZE {
-        processes.push(ProcessStatsV1::default());
+        processes.push(ProcessInfoV1::default());
     }
 
-    let cnt = match ProcessStatsV1::list(moto_sys::stats::PID_SYSTEM, &mut processes[..]) {
+    let cnt = match ProcessInfoV1::list(moto_sys::stats::PID_SYSTEM, &mut processes[..]) {
         Ok(cnt) => cnt,
         Err(err) => {
             eprintln!("PS failed.");

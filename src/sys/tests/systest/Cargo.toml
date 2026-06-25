@@ -12,6 +12,7 @@ moto-rt      = { path = "../../lib/moto-rt"     }
 moto-ipc     = { path = "../../lib/moto-ipc"    , features = ["stdio-pipe"]}
 moto-log     = { path = "../../lib/moto-log"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
+moto-stats   = { path = "../../lib/moto-stats"  }
 moto-mpmc    = { path = "../../lib/moto-mpmc"   }
 
 crossbeam = "0.8.4"

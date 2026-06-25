@@ -9,6 +9,7 @@ mod logging;
 mod moto_async;
 mod mpmc;
 mod spawn_wait_kill;
+mod stats;
 mod stdio;
 mod subcommand;
 mod tcp;
@@ -469,6 +470,7 @@ fn main() {
 
     test_lazy_memory_map();
     test_ipc();
+    stats::test_stats_provider();
     stdio::run_all_tests();
     fs::run_tests();
 
