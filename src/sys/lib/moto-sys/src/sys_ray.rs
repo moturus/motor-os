@@ -20,9 +20,20 @@ impl SysRay {
     // no time to process and display the logs before the VM exits.
     pub const OP_SYS_PANIC_NOTIFY: u8 = 4;
 
+    /// Federated-stats: describe (`F_STATS_DESCRIBE`) or read (`F_STATS_QUERY`)
+    /// the kernel's metrics, so the kernel acts as a dynamically-discoverable
+    /// stats provider (see moto-stats). The metric set is not hardcoded anywhere
+    /// in userspace; tools learn it from the describe op.
+    pub const OP_QUERY_STATS: u8 = 5;
+
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
     pub const F_QUERY_LIST_CHILDREN: u32 = 3;
+
+    /// `OP_QUERY_STATS`: describe the kernel's metric catalog (ids, names, units).
+    pub const F_STATS_DESCRIBE: u32 = 1;
+    /// `OP_QUERY_STATS`: read metric values for a given scope.
+    pub const F_STATS_QUERY: u32 = 2;
 
     /// Attach to a running process.
     pub const F_DBG_ATTACH: u32 = 1;
@@ -72,7 +83,7 @@ impl SysRay {
     pub fn list_processes_v1(
         pid: u64,
         flat_list: bool,
-        buf: &mut [super::stats::ProcessStatsV1],
+        buf: &mut [super::stats::ProcessInfoV1],
     ) -> Result<usize, ErrorCode> {
         if buf.is_empty() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -95,6 +106,53 @@ impl SysRay {
 
         if result.is_ok() {
             Ok(result.data[0] as usize)
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    /// Describe the kernel's metric catalog into `buf`. Returns
+    /// `(written, total)`: if `total > buf.len()`, retry with a larger buffer.
+    #[cfg(feature = "userspace")]
+    pub fn query_stats_describe(
+        buf: &mut [super::stats::MetricDescWire],
+    ) -> Result<(usize, usize), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_QUERY_STATS, Self::F_STATS_DESCRIBE, 1),
+            buf.as_mut_ptr() as usize as u64,
+            buf.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok((result.data[0] as usize, result.data[1] as usize))
+        } else {
+            Err(result.error_code())
+        }
+    }
+
+    /// Read the kernel's metric values for `scope` (a PID; 0 is the system-wide
+    /// aggregate) into `buf`. Returns `(written, total)`.
+    #[cfg(feature = "userspace")]
+    pub fn query_stats(
+        scope: u64, // PID
+        buf: &mut [super::stats::MetricEntry],
+    ) -> Result<(usize, usize), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_QUERY_STATS, Self::F_STATS_QUERY, 1),
+            scope,
+            buf.as_mut_ptr() as usize as u64,
+            buf.len() as u64,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok((result.data[0] as usize, result.data[1] as usize))
         } else {
             Err(result.error_code())
         }

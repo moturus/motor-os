@@ -100,6 +100,23 @@ pub(super) async fn stat_logging_task(
     }
 }
 
+/// Periodically publish a snapshot of the (single-threaded) net stats into the
+/// lock-free atomics read by the stats-server thread. Runs regardless of whether
+/// file logging is enabled.
+pub(super) async fn stat_publish_task(stats: Rc<NetStats>) {
+    loop {
+        crate::stats_server::NET.store(
+            stats.num_devices.get(),
+            stats.active_clients.get(),
+            stats.total_clients.get(),
+            stats.tcp_sockets.get(),
+            stats.total_tcp_sockets.get(),
+            stats.tcp_listening_sockets.get(),
+        );
+        moto_async::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 fn now_time() -> String {
     let now = moto_rt::time::Instant::now().duration_since(moto_rt::time::Instant::from_u64(0));
     let millis = now.as_millis();

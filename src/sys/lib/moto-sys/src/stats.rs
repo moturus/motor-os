@@ -13,49 +13,42 @@ pub const PID_SYS_IO: u64 = 2;
 
 pub const MAX_DEBUG_NAME_BYTES: usize = 32;
 
-// Instead of having a version field and mutate the struct,
-// which is unsafe/brittle, we will just be adding new structs.
+// Per-process identity. Only the descriptive, ABI-stable fields live here: pid,
+// parent_pid, the debug name, and the active/system flags. Counters and
+// measurements are intentionally NOT part of this struct — they are produced by
+// the kernel's metric catalog (the `MetricType` enum, which lives in the kernel)
+// and fetched per process via the federated stats query
+// (`SysRay::query_stats(scope == pid)`). That keeps the metric set growable
+// without changing this wire type or recompiling its consumers.
 #[repr(C)]
-#[derive(Default)]
-pub struct ProcessStatsV1 {
+#[derive(Clone, Copy, Default)]
+pub struct ProcessInfoV1 {
     pub pid: u64, // PID_SYSTEM, PID_KERNEL, or actual process ID.
     pub parent_pid: u64,
-    pub pages_user: u64,
-    pub pages_kernel: u64,
-    pub total_threads: u64,   // All threads created by this process.
-    pub total_children: u64,  // All direct child processes spawned.
-    pub active_threads: u64,  // Threads still running.
-    pub active_children: u64, // Children still running.
-    pub cpu_usage: u64,       // Total, in TSC.
     pub debug_name_bytes: [u8; MAX_DEBUG_NAME_BYTES],
     pub debug_name_len: u8,
     pub active: u8,         // 0 => zombie; 1 => active.
     pub system_process: u8, // 1 => system; 0 => normal.
-    pub metrics: [u64; MetricType::TotalMetricTypes as usize],
 }
 
 #[cfg(feature = "userspace")]
-impl ProcessStatsV1 {
+impl ProcessInfoV1 {
     pub const MAX_DEBUG_NAME_BYTES: usize = MAX_DEBUG_NAME_BYTES;
 
     // List processes, in PID order. Completed processes without running
     // descendants may not be listed. @start will be included, if present.
-    pub fn list(start: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
+    pub fn list(start: u64, buf: &mut [ProcessInfoV1]) -> Result<usize, ErrorCode> {
         crate::SysRay::list_processes_v1(start, true, buf)
     }
 
     // List direct children of the process. @parent will not be included.
-    pub fn list_children(parent: u64, buf: &mut [ProcessStatsV1]) -> Result<usize, ErrorCode> {
+    pub fn list_children(parent: u64, buf: &mut [ProcessInfoV1]) -> Result<usize, ErrorCode> {
         crate::SysRay::list_processes_v1(parent, false, buf)
     }
 
     pub fn debug_name(&self) -> &str {
         core::str::from_utf8(&self.debug_name_bytes[0..(self.debug_name_len as usize)])
             .unwrap_or("~")
-    }
-
-    pub fn total_bytes(&self) -> u64 {
-        (self.pages_user + self.pages_kernel) << sys_mem::PAGE_SIZE_SMALL_LOG2
     }
 }
 
@@ -202,82 +195,91 @@ impl ThreadDataV1 {
     }
 }
 
-// --------------------- metrics -----------------------
-// Metrics are u64 numbers identified by a pair of u64 numbers.
-// A full metric ID: (u64, u64): metric type id, scope id.
-// Metric type ID: see below (e.g. METRIC_MEM_USAGE).
+// ----------------- federated-stats wire types (shared) ----------------- //
 //
-// Metric scope id: process ID (with 0 for total/global, 1 for
-// kernel, 2 for sys-io, etc.).
+// These live in moto-sys (not moto-stats) because the kernel produces them
+// directly into user buffers via the SysRay stats op, and the kernel cannot
+// depend on moto-stats (which is a userspace/IPC crate). moto-stats re-exports
+// them so userspace providers (e.g. sys-io) and the collector share one type.
+//
+// NOTE: the kernel's metric *catalog* — the `MetricType` enum that drives the
+// per-cpu counters and is the source of truth for the kernel's metric set —
+// lives in the kernel, not here. Userspace never needs it: it discovers metric
+// ids and names dynamically via the SysRay describe op.
+//
+// All metric values are plain u64; there is no unit type — values are raw.
 
-/// Defines metric types exported by the kernel.
-#[repr(usize)]
-#[derive(Clone, Copy, Debug)]
-pub enum MetricType {
-    /// Memory usage in bytes.
-    MemoryUsage = 0,
-    /// CPU usage in tsc.
-    CpuUsage = 1,
+/// Maximum length of a metric/provider name on the wire (nul-padded).
+pub const MAX_METRIC_NAME_LEN: usize = 32;
 
-    ThreadsCreated = 2,
-    ActiveThreads = 3,
-
-    /// Total SysMem calls.
-    SysMemCalls = 4,
-    /// Memory allocations.
-    SysMemMaps = 5,
-    /// Memory deallocations.
-    SysMemUnmaps = 6,
-
-    /// Total SysCpu calls.
-    SysCpuCalls = 7,
-    /// SysCpu::wait() calls.
-    SysCpuWaits = 8,
-    /// SysCpu::wake() calls.
-    SysCpuWakes = 9,
-
-    /// Total SysObj calls.
-    SysObjCalls = 10,
-    /// Active system objects.
-    SysObjects = 11,
-    /// Active shared objects.
-    SharedObjects = 12,
-    /// Total objects created.
-    TotalObjects = 13,
-
-    /// Total SysRay calls.
-    SysRayCalls = 14,
-
-    TlbInvp = 15,
-
-    IrqFired = 16, // Total.
-    IrqTimerFired = 17,
-    IrqWakeupFired = 18,
-    IrqTlbShootdownFired = 19,
-    IrqPfFired = 20,
-
-    IrqCustom0Fired = 21,
-    IrqCustom1Fired = 22,
-    IrqCustom2Fired = 23,
-    IrqCustom3Fired = 24,
-    IrqCustom4Fired = 25,
-    IrqCustom5Fired = 26,
-    IrqCustom6Fired = 27,
-    IrqCustom7Fired = 28,
-
-    TotalMetricTypes = 29,
+/// A single metric sample, addressed by `(metric, scope)`. Plain-old-data: safe
+/// to copy across an IPC channel or fill from the kernel into a user buffer.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MetricEntry {
+    pub metric: u32,
+    pub _reserved: u32,
+    pub scope: u64,
+    pub value: u64,
 }
 
-impl MetricType {
-    pub fn from_custom_irq(irq_num: u8) -> Self {
-        assert!(irq_num <= 8);
-        // SAFETY: safe by construction.
-        unsafe { core::mem::transmute(Self::IrqCustom0Fired as usize + (irq_num as usize)) }
+const _: () = assert!(core::mem::size_of::<MetricEntry>() == 24);
+
+impl MetricEntry {
+    pub fn new(metric: u32, scope: u64, value: u64) -> Self {
+        Self {
+            metric,
+            _reserved: 0,
+            scope,
+            value,
+        }
     }
 
-    pub fn from_idx(idx: usize) -> Self {
-        assert!(idx < Self::TotalMetricTypes as usize);
-        // SAFETY: safe by construction.
-        unsafe { core::mem::transmute(idx) }
+    /// A provider-wide metric (scope == 0, the global/aggregate scope).
+    pub fn global(metric: u32, value: u64) -> Self {
+        Self::new(metric, 0, value)
     }
+}
+
+/// A metric descriptor as it travels over the wire (the response to a describe
+/// request): the metric's id and its name. `name` is nul-padded UTF-8.
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+pub struct MetricDescWire {
+    pub metric: u32,
+    pub _reserved: u32,
+    pub name: [u8; MAX_METRIC_NAME_LEN],
+}
+
+const _: () = assert!(core::mem::size_of::<MetricDescWire>() == 40);
+
+impl MetricDescWire {
+    pub fn new(metric: u32, name: &str) -> Self {
+        Self {
+            metric,
+            _reserved: 0,
+            name: encode_metric_name(name),
+        }
+    }
+
+    pub fn name_str(&self) -> &str {
+        decode_metric_name(&self.name)
+    }
+}
+
+/// Encode a name into a nul-padded [`MAX_METRIC_NAME_LEN`] array.
+pub fn encode_metric_name(s: &str) -> [u8; MAX_METRIC_NAME_LEN] {
+    assert!(s.is_ascii());
+    let mut out = [0u8; MAX_METRIC_NAME_LEN];
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    assert!(n <= MAX_METRIC_NAME_LEN);
+    out[..n].copy_from_slice(&bytes[..n]);
+    out
+}
+
+/// Decode a nul-padded fixed byte array back into a string slice.
+pub fn decode_metric_name(bytes: &[u8]) -> &str {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }

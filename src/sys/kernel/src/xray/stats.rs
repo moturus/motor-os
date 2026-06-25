@@ -20,6 +20,144 @@ use alloc::sync::Weak;
 
 use moto_sys::stats::*;
 
+/// The kernel's metric catalog and the source of truth for its metric set.
+/// `repr(u32)` so the discriminant is the metric's stable wire id (emitted
+/// directly into `MetricEntry::metric` / `MetricDescWire`).
+///
+/// This lives in the kernel — not moto-sys — because it drives the per-cpu
+/// counter array (`adjust_metric`/`get_metric`). Userspace never references it:
+/// it discovers metric ids and names dynamically via the SysRay describe op, so
+/// new metrics can be added here without recompiling any consumer.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug)]
+pub enum MetricType {
+    /// Memory usage in bytes.
+    MemoryUsage = 0,
+    /// CPU usage in tsc.
+    CpuUsage = 1,
+
+    ThreadsCreated = 2,
+    ActiveThreads = 3,
+
+    /// Total SysMem calls.
+    SysMemCalls = 4,
+    /// Memory allocations.
+    SysMemMaps = 5,
+    /// Memory deallocations.
+    SysMemUnmaps = 6,
+
+    /// Total SysCpu calls.
+    SysCpuCalls = 7,
+    /// SysCpu::wait() calls.
+    SysCpuWaits = 8,
+    /// SysCpu::wake() calls.
+    SysCpuWakes = 9,
+
+    /// Total SysObj calls.
+    SysObjCalls = 10,
+    /// Active system objects.
+    SysObjects = 11,
+    /// Active shared objects.
+    SharedObjects = 12,
+    /// Total objects created.
+    TotalObjects = 13,
+
+    /// Total SysRay calls.
+    SysRayCalls = 14,
+
+    TlbInvp = 15,
+
+    IrqFired = 16, // Total.
+    IrqTimerFired = 17,
+    IrqWakeupFired = 18,
+    IrqTlbShootdownFired = 19,
+    IrqPfFired = 20,
+
+    IrqCustom0Fired = 21,
+    IrqCustom1Fired = 22,
+    IrqCustom2Fired = 23,
+    IrqCustom3Fired = 24,
+    IrqCustom4Fired = 25,
+    IrqCustom5Fired = 26,
+    IrqCustom6Fired = 27,
+    IrqCustom7Fired = 28,
+
+    // Per-process stats sourced from dedicated KProcessStats fields (the same
+    // ones `sysbox ps` reports).
+    TotalChildren = 29,
+    ActiveChildren = 30,
+    PagesUser = 31,
+    PagesKernel = 32,
+
+    // System-wide memory metrics, reported only at the PID_SYSTEM scope.
+    MemAvailable = 33,
+    MemUsed = 34,
+    MemHeapTotal = 35,
+    MemUsedPages = 36,
+
+    TotalMetricTypes = 37,
+}
+
+impl MetricType {
+    pub fn from_custom_irq(irq_num: u8) -> Self {
+        assert!(irq_num <= 8);
+        // SAFETY: safe by construction.
+        unsafe { core::mem::transmute(Self::IrqCustom0Fired as u32 + (irq_num as u32)) }
+    }
+
+    pub fn from_idx(idx: usize) -> Self {
+        assert!(idx < Self::TotalMetricTypes as usize);
+        // SAFETY: safe by construction (repr(u32), idx in range).
+        unsafe { core::mem::transmute(idx as u32) }
+    }
+
+    /// A stable, machine-friendly name for this metric (the federated-stats
+    /// "name at the edge"). The kernel ships these over the SysRay describe op,
+    /// so tools never hardcode the metric set.
+    pub fn name(&self) -> &'static str {
+        match self {
+            MetricType::MemoryUsage => "memory_usage",
+            MetricType::CpuUsage => "cpu_usage",
+            MetricType::ThreadsCreated => "threads_created",
+            MetricType::ActiveThreads => "active_threads",
+            MetricType::SysMemCalls => "sys_mem_calls",
+            MetricType::SysMemMaps => "sys_mem_maps",
+            MetricType::SysMemUnmaps => "sys_mem_unmaps",
+            MetricType::SysCpuCalls => "sys_cpu_calls",
+            MetricType::SysCpuWaits => "sys_cpu_waits",
+            MetricType::SysCpuWakes => "sys_cpu_wakes",
+            MetricType::SysObjCalls => "sys_obj_calls",
+            MetricType::SysObjects => "sys_objects",
+            MetricType::SharedObjects => "shared_objects",
+            MetricType::TotalObjects => "total_objects",
+            MetricType::SysRayCalls => "sys_ray_calls",
+            MetricType::TlbInvp => "tlb_invp",
+            MetricType::IrqFired => "irq_fired",
+            MetricType::IrqTimerFired => "irq_timer_fired",
+            MetricType::IrqWakeupFired => "irq_wakeup_fired",
+            MetricType::IrqTlbShootdownFired => "irq_tlb_shootdown_fired",
+            MetricType::IrqPfFired => "irq_pf_fired",
+            MetricType::IrqCustom0Fired => "irq_custom0_fired",
+            MetricType::IrqCustom1Fired => "irq_custom1_fired",
+            MetricType::IrqCustom2Fired => "irq_custom2_fired",
+            MetricType::IrqCustom3Fired => "irq_custom3_fired",
+            MetricType::IrqCustom4Fired => "irq_custom4_fired",
+            MetricType::IrqCustom5Fired => "irq_custom5_fired",
+            MetricType::IrqCustom6Fired => "irq_custom6_fired",
+            MetricType::IrqCustom7Fired => "irq_custom7_fired",
+            MetricType::TotalChildren => "total_children",
+            MetricType::ActiveChildren => "active_children",
+            MetricType::PagesUser => "pages_user",
+            MetricType::PagesKernel => "pages_kernel",
+            MetricType::MemAvailable => "mem.available",
+            MetricType::MemUsed => "mem.used",
+            MetricType::MemHeapTotal => "mem.heap_total",
+            MetricType::MemUsedPages => "mem.used_pages",
+            MetricType::TotalMetricTypes => "total_metric_types",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct MemStats {
     pages_used: AtomicU64,
@@ -86,7 +224,7 @@ impl MemStats {
     }
 }
 
-const PCPU_STATS_CNT: usize = 36; // 8 * N + 4: see below.
+const PCPU_STATS_CNT: usize = 44; // 8 * N + 4: see below.
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
@@ -99,7 +237,7 @@ pub struct PerCpuStatsEntry {
 
 const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
 
-const _: () = assert!(320 == core::mem::size_of::<PerCpuStatsEntry>()); // 40 * 8
+const _: () = assert!(384 == core::mem::size_of::<PerCpuStatsEntry>()); // 48 * 8
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {
@@ -326,16 +464,14 @@ impl KProcessStats {
         SYSTEM_STATS.active_threads.fetch_sub(1, Ordering::Relaxed);
     }
 
-    pub fn into_v1(&self, dest: &mut ProcessStatsV1, now: u64) {
+    /// Snapshot the process's identity into `dest`. Counters and measurements
+    /// are intentionally NOT here — they are the kernel's `MetricType` catalog,
+    /// fetched per process via the federated query ([`collect_metrics`]).
+    ///
+    /// [`collect_metrics`]: KProcessStats::collect_metrics
+    pub fn into_v1(&self, dest: &mut ProcessInfoV1) {
         dest.pid = self.pid.as_u64();
         dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.pid.as_u64());
-        dest.total_threads = self.total_threads.load(Ordering::Relaxed);
-        dest.total_children = self.total_children.load(Ordering::Relaxed);
-        dest.active_threads = self.active_threads.load(Ordering::Relaxed);
-        dest.active_children = self.active_children.load(Ordering::Relaxed);
-        dest.pages_user = self.mem_stats_user.pages_used.load(Ordering::Relaxed);
-        dest.pages_kernel = self.mem_stats_kernel.pages_used.load(Ordering::Relaxed);
-        dest.cpu_usage = self.cpu_usage(now);
 
         dest.system_process = 0;
         if let Some(proc) = self.owner.upgrade() {
@@ -363,9 +499,51 @@ impl KProcessStats {
         } else {
             0
         };
+    }
 
-        for metric_idx in 0..(MetricType::TotalMetricTypes as usize) {
-            dest.metrics[metric_idx] = self.per_cpu_stats.get_metric(metric_idx)
+    /// Emit a `MetricEntry` for every metric this process exposes, at `scope`.
+    /// This — not `ProcessStatsV1` — is the federated-stats source of truth, so
+    /// the metric set can grow without touching any shared wire struct. Per-cpu
+    /// counters come from the per-cpu array; per-process stats (cpu/memory/
+    /// threads/children) from dedicated atomics; system-wide memory metrics are
+    /// filled only for the `PID_SYSTEM` aggregate.
+    pub fn collect_metrics(&self, scope: u64, now: u64, out: &mut alloc::vec::Vec<MetricEntry>) {
+        let n = MetricType::TotalMetricTypes as usize;
+        let mut vals = alloc::vec![0u64; n];
+
+        // Per-cpu counters (SysMem*/SysCpu*/Irq*), straight from the array.
+        #[allow(clippy::needless_range_loop)]
+        for idx in 0..n {
+            vals[idx] = self.per_cpu_stats.get_metric(idx);
+        }
+
+        // Per-process stats held in dedicated atomics override their slots.
+        let small_log2 = moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2;
+        let pages_user = self.mem_stats_user.pages_used.load(Ordering::Relaxed);
+        let pages_kernel = self.mem_stats_kernel.pages_used.load(Ordering::Relaxed);
+        vals[MetricType::CpuUsage as usize] = self.cpu_usage(now);
+        vals[MetricType::MemoryUsage as usize] = (pages_user + pages_kernel) << small_log2;
+        vals[MetricType::ThreadsCreated as usize] = self.total_threads.load(Ordering::Relaxed);
+        vals[MetricType::ActiveThreads as usize] = self.active_threads.load(Ordering::Relaxed);
+        vals[MetricType::TotalChildren as usize] = self.total_children.load(Ordering::Relaxed);
+        vals[MetricType::ActiveChildren as usize] = self.active_children.load(Ordering::Relaxed);
+        vals[MetricType::PagesUser as usize] = pages_user;
+        vals[MetricType::PagesKernel as usize] = pages_kernel;
+
+        // System-wide memory metrics live at the aggregate (PID_SYSTEM) scope.
+        if self.pid.as_u64() == PID_SYSTEM {
+            let phys = crate::mm::phys::PhysStats::get();
+            vals[MetricType::MemAvailable as usize] = phys.total_size;
+            vals[MetricType::MemUsed as usize] = phys.small_pages_used << small_log2;
+            vals[MetricType::MemHeapTotal as usize] =
+                crate::mm::kheap::heap_stats().total_in_heap as u64;
+            vals[MetricType::MemUsedPages as usize] = phys.small_pages_used;
+        }
+
+        out.reserve(n);
+        #[allow(clippy::needless_range_loop)]
+        for idx in 0..n {
+            out.push(MetricEntry::new(idx as u32, scope, vals[idx]));
         }
     }
 

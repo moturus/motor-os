@@ -12,6 +12,7 @@ moto-async       = { path = "../lib/moto-async"       }
 moto-io-internal = { path = "../lib/moto-io-internal" }
 moto-ipc         = { path = "../lib/moto-ipc"         }
 moto-rt          = { path = "../lib/moto-rt"          }
+moto-stats       = { path = "../lib/moto-stats"       }
 moto-sys         = { path = "../lib/moto-sys"         }
 moto-sys-io      = { path = "../lib/moto-sys-io", features = ["std"] }
 moto-tooling     = { path = "../lib/moto-tooling"     }

@@ -42,7 +42,7 @@ fn sys_map(
 ) -> SyscallResult {
     curr_thread
         .process_stats
-        .adjust_metric(stats::MetricType::SysMemMaps, 1);
+        .adjust_metric(crate::xray::stats::MetricType::SysMemMaps, 1);
 
     // Protect against bad numbers.
     let (new_bytes, overflow) = page_size.overflowing_mul(num_pages);
@@ -249,7 +249,7 @@ fn sys_unmap(
 ) -> SyscallResult {
     curr_thread
         .process_stats
-        .adjust_metric(stats::MetricType::SysMemUnmaps, 1);
+        .adjust_metric(crate::xray::stats::MetricType::SysMemUnmaps, 1);
 
     if flags != 0 {
         log::debug!("sys_unmap: unrecognized flags 0x{flags:x}");
@@ -337,7 +337,7 @@ fn sys_reclaim() -> SyscallResult {
 pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     thread
         .process_stats
-        .adjust_metric(stats::MetricType::SysMemCalls, 1);
+        .adjust_metric(crate::xray::stats::MetricType::SysMemCalls, 1);
 
     let version = args.version;
     if version > 0 {

@@ -53,8 +53,8 @@ fn conn_name(handle: SysHandle) -> String {
     } else {
         return "<unknown>".to_owned();
     };
-    let mut stats = [moto_sys::stats::ProcessStatsV1::default()];
-    if let Ok(1) = moto_sys::stats::ProcessStatsV1::list(pid, &mut stats) {
+    let mut stats = [moto_sys::stats::ProcessInfoV1::default()];
+    if let Ok(1) = moto_sys::stats::ProcessInfoV1::list(pid, &mut stats) {
         format!("{}: `{}`", pid, stats[0].debug_name()).to_owned()
     } else {
         "<unknown>".to_owned()

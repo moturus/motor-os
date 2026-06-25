@@ -522,7 +522,7 @@ fn debug_name(exe_plus: &Vec<&[u8]>, args: &Vec<&[u8]>) -> String {
     }
 
     res = res.trim().to_owned();
-    const MAX_BYTES: usize = moto_sys::stats::ProcessStatsV1::MAX_DEBUG_NAME_BYTES;
+    const MAX_BYTES: usize = moto_sys::stats::ProcessInfoV1::MAX_DEBUG_NAME_BYTES;
 
     if res.len() > MAX_BYTES {
         let mut truncate_to = MAX_BYTES - 3; // The ellipsis character takes three bytes.

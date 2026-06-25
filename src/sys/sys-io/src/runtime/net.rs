@@ -530,6 +530,12 @@ pub(super) async fn init(
 
     runtime.stats.num_devices.set(device_idx as u64);
 
+    // Always publish stats to the stats-server thread (independent of logging).
+    {
+        let stats = runtime.stats.clone();
+        let _ = moto_async::LocalRuntime::spawn(async move { stats::stat_publish_task(stats).await });
+    }
+
     if log_interval > 0 {
         let stats = runtime.stats.clone();
         let _ = moto_async::LocalRuntime::spawn(async move {

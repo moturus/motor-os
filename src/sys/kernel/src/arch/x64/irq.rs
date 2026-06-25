@@ -6,7 +6,7 @@ use crate::util::StaticRef;
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::arch::naked_asm;
-use moto_sys::stats::MetricType;
+use crate::xray::stats::MetricType;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 // Note: we use super::serial::write_serial_!() below instead of raw_log!()

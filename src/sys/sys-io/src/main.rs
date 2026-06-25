@@ -7,6 +7,7 @@ mod logger;
 // mod net;
 mod rt_vdso;
 mod runtime;
+mod stats_server;
 mod util;
 
 extern crate alloc;
@@ -63,6 +64,9 @@ pub extern "C" fn motor_runtime_start() {
 fn main() {
     runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
     runtime::spawn_async();
+
+    // Expose sys-io statistics to collectors (e.g. `free`, `ss`) over IPC.
+    stats_server::start();
 
     let mut cmd = std::process::Command::new("/sys/sys-init");
 

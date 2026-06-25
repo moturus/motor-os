@@ -1,0 +1,18 @@
+[package]
+name = "moto-stats"
+version = "0.1.0"
+authors = ["The Motor OS Project Developers"]
+license = "MIT OR Apache-2.0"
+keywords = ["motor", "motor-os"]
+repository = "https://github.com/moturus/motor-os"
+description = "Motor OS federated statistics/metrics protocol."
+edition = "2021"
+
+[dependencies]
+moto-ipc = { path = "../moto-ipc", optional = true }
+moto-rt  = { path = "../moto-rt",  optional = true }
+moto-sys = { path = "../moto-sys", optional = true }
+
+[features]
+default   = ["userspace"]
+userspace = ["moto-ipc", "moto-rt", "moto-sys"]
