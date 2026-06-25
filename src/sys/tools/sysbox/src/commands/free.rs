@@ -42,9 +42,27 @@ pub fn do_command(args: &[String]) {
         moto_sys::SysMem::reclaim(moto_sys::syscalls::SysHandle::KERNEL).unwrap();
     }
 
-    let stats = moto_sys::stats::MemoryStats::get().unwrap();
-    let total = stats.available >> shift_bits;
-    let used = stats.used() >> shift_bits;
+    // Read memory via the unified stats collector (kernel provider) instead of a
+    // direct syscall, so `free` consumes the same federated API that also serves
+    // userspace providers like sys-io. Metrics are resolved by name — nothing is
+    // hardcoded to a numeric id; the kernel describes its own metric set.
+    use moto_stats::Collector;
+    let kernel = Collector::kernel();
+    let metrics = Collector::query(&kernel).unwrap_or_default();
+    let descs = Collector::describe(&kernel).unwrap_or_default();
+    let metric = |name: &str| {
+        let Some(desc) = descs.iter().find(|d| d.name == name) else {
+            return 0;
+        };
+        metrics
+            .iter()
+            .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
+            .map(|e| e.value)
+            .unwrap_or(0)
+    };
+
+    let total = metric("mem.available") >> shift_bits;
+    let used = metric("mem.used") >> shift_bits;
 
     println!("               total         used         free        kheap    pages");
     println!(
@@ -52,7 +70,7 @@ pub fn do_command(args: &[String]) {
         total,
         used,
         total - used,
-        stats.heap_total >> shift_bits,
-        stats.used_pages,
+        metric("mem.heap_total") >> shift_bits,
+        metric("mem.used_pages"),
     );
 }

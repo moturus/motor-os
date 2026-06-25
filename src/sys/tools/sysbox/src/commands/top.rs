@@ -1,5 +1,5 @@
 use moto_rt::time::Instant;
-use moto_sys::stats::{CpuStatsV1, ProcessStatsV1};
+use moto_sys::stats::{CpuStatsV1, ProcessInfoV1};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicU32, Ordering},
@@ -132,12 +132,12 @@ fn get_cmd_string(cmd_cache: &mut HashMap<u64, String>, pid: u64) -> String {
 
     fn update_cache(cmd_cache: &mut HashMap<u64, String>, pid: u64) {
         const MAX_PROCS: usize = 256;
-        let mut processes: Vec<ProcessStatsV1> = Vec::with_capacity(MAX_PROCS);
+        let mut processes: Vec<ProcessInfoV1> = Vec::with_capacity(MAX_PROCS);
         for _ in 0..MAX_PROCS {
-            processes.push(ProcessStatsV1::default());
+            processes.push(ProcessInfoV1::default());
         }
 
-        ProcessStatsV1::list(pid, &mut processes[..]).unwrap();
+        ProcessInfoV1::list(pid, &mut processes[..]).unwrap();
         for stats in &processes {
             cmd_cache.insert(stats.pid, stats.debug_name().to_owned());
         }

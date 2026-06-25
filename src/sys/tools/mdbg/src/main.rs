@@ -68,10 +68,10 @@ fn _get_backtrace() -> [u64; BT_DEPTH] {
 }
 
 fn get_process_name(pid: u64) -> Result<String, moto_rt::ErrorCode> {
-    use moto_sys::stats::ProcessStatsV1;
+    use moto_sys::stats::ProcessInfoV1;
 
-    let mut ps = [ProcessStatsV1::default(); 1];
-    assert_eq!(1, ProcessStatsV1::list(pid, &mut ps)?);
+    let mut ps = [ProcessInfoV1::default(); 1];
+    assert_eq!(1, ProcessInfoV1::list(pid, &mut ps)?);
     let mut words = ps[0].debug_name().split_whitespace();
     let filename = if let Some(w) = words.next() {
         w

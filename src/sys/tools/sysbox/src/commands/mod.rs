@@ -16,6 +16,7 @@ pub mod rm;
 pub mod rmdir;
 pub mod sleep;
 pub mod ss;
+pub mod stats;
 pub mod time;
 pub mod top;
 pub mod uptime;
