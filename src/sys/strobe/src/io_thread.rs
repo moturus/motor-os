@@ -14,7 +14,6 @@ struct Connection {
     tag: String,
     tag_id: u64,
 
-    // log_file_path: PathBuf,
     log_file: Option<std::fs::File>,
 }
 

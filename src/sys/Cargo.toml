@@ -27,9 +27,9 @@ members = [
 
   # system binaries
   "kernel",
+  "strobe",
   "sys-init",
   "sys-io",
-  "sys-log",
   "sys-stats-reg",
   "sys-tty",
 

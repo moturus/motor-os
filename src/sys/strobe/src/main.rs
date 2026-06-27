@@ -1,3 +1,4 @@
+//! Motor OS' logging and telemetry utility.
 use std::mem::size_of;
 
 use moto_ipc::sync::*;
@@ -186,7 +187,7 @@ impl LogServer {
         };
 
         #[cfg(debug_assertions)]
-        SysRay::log("sys-log started").ok();
+        SysRay::log("strobe started").ok();
         log_server.run()
     }
 }

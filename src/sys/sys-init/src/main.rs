@@ -5,7 +5,7 @@ use moto_sys::*;
 #[derive(Debug)]
 struct Config {
     pub tty: String,
-    pub log: Option<String>,
+    pub strobe: Option<String>,
     pub services: Vec<(u64, String)>,
 }
 
@@ -14,7 +14,7 @@ fn process_config() -> Result<Config, String> {
         .expect("Error loading /sys/cfg/sys-init.cfg");
 
     let mut tty = None;
-    let mut log = None;
+    let mut strobe = None;
     let mut services = vec![];
 
     let mut curr_line = 0_u32;
@@ -31,8 +31,8 @@ fn process_config() -> Result<Config, String> {
             services.push(process_service_line(cap_cmd));
         } else if let Some(file) = line.strip_prefix("tty:") {
             tty = Some(file.to_owned());
-        } else if let Some(file) = line.strip_prefix("log:") {
-            log = Some(file.to_owned());
+        } else if let Some(file) = line.strip_prefix("strobe:") {
+            strobe = Some(file.to_owned());
         } else if line.as_bytes()[0] == b'#' {
             continue;
         } else {
@@ -46,7 +46,7 @@ fn process_config() -> Result<Config, String> {
 
     let config = Config {
         tty: tty.unwrap(),
-        log,
+        strobe,
         services,
     };
 
@@ -71,12 +71,12 @@ fn main() {
         }
     };
 
-    // First spawn sys-log, then services, then sys-tty.
+    // First spawn strobe, then services, then sys-tty.
 
-    if let Some(log) = &config.log {
-        // We just spawn sys-log, don't track/wait. Should we?
+    if let Some(strobe) = &config.strobe {
+        // We just spawn strobe, don't track/wait. Should we?
         #[allow(clippy::zombie_processes)]
-        let _ = std::process::Command::new(log.as_str())
+        let _ = std::process::Command::new(strobe.as_str())
             .env(
                 moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
                 format!("0x{:x}", moto_sys::caps::CAP_LOG),
@@ -85,7 +85,7 @@ fn main() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .unwrap_or_else(|_| panic!("Error spawning {log}"));
+            .unwrap_or_else(|_| panic!("Error spawning {strobe}"));
 
         // The logserver has just started. It needs time to start
         // listening, so we need to retry a few times.
@@ -98,7 +98,7 @@ fn main() {
                 std::process::exit(1);
             }
             if moto_log::init("sys-init").is_ok() {
-                log::info!("Started sys-log in {elapsed} ms.");
+                log::info!("Started strobe in {elapsed} ms.");
                 break;
             }
         }
@@ -162,7 +162,6 @@ fn spawn_service(caps: u64, cmd: &str) {
         std::process::exit(1);
     };
 
-    log::info!("Starting service '{cmd}' 100.");
     let mut command = std::process::Command::new(&words[0]);
     command.args(&words[1..]);
 
@@ -170,7 +169,6 @@ fn spawn_service(caps: u64, cmd: &str) {
         command.env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, format!("0x{caps:x}"));
     }
 
-    log::info!("Starting service '{cmd}' 200.");
     let _child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

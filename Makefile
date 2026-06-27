@@ -25,14 +25,14 @@ DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor
 all: boot core sys user img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
-sys: sys-io sys-init sys-log sys-stats-reg sys-tty
+sys: strobe sys-io sys-init sys-stats-reg sys-tty
 user: sysbox systest mio-test tokio-tests \
 	rush kibim mdbg rnetbench crossbench \
 	russhd httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
-.PHONY: sys-io sys-init sys-log sys-stats-reg sys-tty
+.PHONY: strobe sys-io sys-init sys-stats-reg sys-tty
 .PHONY: sysbox systest mio-test tokio-tests
 .PHONY: rush kibim russhd httpd httpd-axum
 .PHONY: mdbg rnetbench crossbench
@@ -78,10 +78,10 @@ sys-init:
 	cd src/sys/sys-init && CARGO_TARGET_DIR="$(OBJ_DIR)/sys-init" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/sys-init" "$(OBJ_DIR)/sys-init/$(SUB_DIR)/sys-init"
 
-sys-log:
+strobe:
 	mkdir -p $(BIN_DIR)
-	cd src/sys/sys-log && CARGO_TARGET_DIR="$(OBJ_DIR)/sys-log" $(DO_BUILD)
-	strip -o "$(BIN_DIR)/sys-log" "$(OBJ_DIR)/sys-log/$(SUB_DIR)/sys-log"
+	cd src/sys/strobe && CARGO_TARGET_DIR="$(OBJ_DIR)/strobe" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/strobe" "$(OBJ_DIR)/strobe/$(SUB_DIR)/strobe"
 
 sys-stats-reg:
 	mkdir -p $(BIN_DIR)
