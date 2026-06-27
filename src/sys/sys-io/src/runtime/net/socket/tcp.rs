@@ -918,7 +918,9 @@ impl MotoSocket {
             });
         log::debug!("Dropping TCP socket 0x{socket_id:x}.");
         moto_socket.borrow().base.device_notify().notify_one();
-        moto_async::yield_now().await; // Let the device process the abort above (send RST out).
+
+        // Let the device process the abort above (send RST out).
+        moto_async::sleep(std::time::Duration::from_millis(1)).await;
 
         let runtime = moto_socket.borrow().base.runtime.clone();
 
