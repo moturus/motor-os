@@ -1412,9 +1412,11 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "strobe"
 version = "0.1.0"
 dependencies = [
+ "log",
  "moto-ipc",
  "moto-log",
  "moto-rt",
+ "moto-stats",
  "moto-sys",
 ]
 
@@ -1483,18 +1485,6 @@ dependencies = [
  "toml",
  "virtio-async",
  "zerocopy",
-]
-
-[[package]]
-name = "sys-stats-reg"
-version = "0.1.0"
-dependencies = [
- "log",
- "moto-ipc",
- "moto-log",
- "moto-rt",
- "moto-stats",
- "moto-sys",
 ]
 
 [[package]]

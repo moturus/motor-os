@@ -30,7 +30,6 @@ members = [
   "strobe",
   "sys-init",
   "sys-io",
-  "sys-stats-reg",
   "sys-tty",
 
   # tools

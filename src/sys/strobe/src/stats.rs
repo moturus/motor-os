@@ -1,4 +1,4 @@
-//! sys-stats-reg: the Motor OS stats registry daemon.
+//! The Motor OS stats registry daemon.
 //!
 //! A standalone service hosting the well-known [`moto_stats::REGISTRY_URL`]
 //! endpoint. Userspace stats providers register themselves here on startup
@@ -11,17 +11,17 @@
 //! (provider set, metric names, units) is discovered at runtime.
 
 use moto_ipc::sync::*;
-use moto_stats::{ProviderRecord, RegisterRequest, RegisterResponse, PagedRequest};
+use moto_stats::{PagedRequest, ProviderRecord, RegisterRequest, RegisterResponse};
 use moto_sys::{SysHandle, SysObj};
 
-struct Registry {
+pub struct Registry {
     server: LocalServer,
     /// Registered providers, keyed by `provider_id` (one record per provider).
     providers: Vec<ProviderRecord>,
 }
 
 impl Registry {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let server = LocalServer::new(moto_stats::REGISTRY_URL, ChannelSize::Small, 16, 2)
             .expect("sys-stats-reg: failed to create registry endpoint");
         Registry {
@@ -69,7 +69,10 @@ impl Registry {
                 );
 
                 unsafe {
-                    conn.raw_channel().get_mut::<RegisterResponse>().header.result = moto_rt::E_OK;
+                    conn.raw_channel()
+                        .get_mut::<RegisterResponse>()
+                        .header
+                        .result = moto_rt::E_OK;
                 }
             }
             moto_stats::CMD_UNREGISTER => {
@@ -103,7 +106,15 @@ impl Registry {
         let _ = conn.finish_rpc();
     }
 
-    fn run(&mut self) -> ! {
+    pub fn run(&mut self) -> ! {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if moto_log::init("strobe-stats").is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+                break;
+            }
+        }
+
         loop {
             match self.server.wait(SysHandle::NONE, &[]) {
                 Ok(wakers) => {
@@ -117,14 +128,4 @@ impl Registry {
             }
         }
     }
-}
-
-fn main() {
-    let _ = moto_log::init("sys-stats-reg");
-    log::set_max_level(log::LevelFilter::Info);
-
-    #[cfg(debug_assertions)]
-    let _ = moto_sys::SysRay::log("sys-stats-reg started");
-
-    Registry::new().run()
 }

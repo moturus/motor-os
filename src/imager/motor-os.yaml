@@ -8,7 +8,6 @@ input_files:
   - "/sys/mdbg"
   - "/sys/strobe"
   - "/sys/sys-init"
-  - "/sys/sys-stats-reg"
   - "/sys/sys-tty"
   - "/sys/sysbox"
   - "/sys/tests/rnetbench"

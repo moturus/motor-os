@@ -25,14 +25,14 @@ DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor
 all: boot core sys user img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
-sys: strobe sys-io sys-init sys-stats-reg sys-tty
+sys: strobe sys-io sys-init sys-tty
 user: sysbox systest mio-test tokio-tests \
 	rush kibim mdbg rnetbench crossbench \
 	russhd httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
-.PHONY: strobe sys-io sys-init sys-stats-reg sys-tty
+.PHONY: strobe sys-io sys-init sys-tty
 .PHONY: sysbox systest mio-test tokio-tests
 .PHONY: rush kibim russhd httpd httpd-axum
 .PHONY: mdbg rnetbench crossbench
@@ -82,11 +82,6 @@ strobe:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/strobe && CARGO_TARGET_DIR="$(OBJ_DIR)/strobe" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/strobe" "$(OBJ_DIR)/strobe/$(SUB_DIR)/strobe"
-
-sys-stats-reg:
-	mkdir -p $(BIN_DIR)
-	cd src/sys/sys-stats-reg && CARGO_TARGET_DIR="$(OBJ_DIR)/sys-stats-reg" $(DO_BUILD)
-	strip -o "$(BIN_DIR)/sys-stats-reg" "$(OBJ_DIR)/sys-stats-reg/$(SUB_DIR)/sys-stats-reg"
 
 sys-tty:
 	mkdir -p $(BIN_DIR)
@@ -166,8 +161,7 @@ img: boot core sys user
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)
 	cd src/sys/sys-init && $(DO_CLIPPY)
-	cd src/sys/sys-log && $(DO_CLIPPY)
-	cd src/sys/sys-stats-reg && $(DO_CLIPPY)
+	cd src/sys/strobe && $(DO_CLIPPY)
 	cd src/sys/sys-tty && $(DO_CLIPPY)
 	cd src/sys/tools/sysbox && $(DO_CLIPPY)
 	cd src/sys/tools/mdbg && $(DO_CLIPPY)

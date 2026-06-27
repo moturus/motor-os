@@ -1,11 +1,11 @@
-use crate::LogRecord;
+use crate::logging::LogRecord;
 use moto_sys::SysHandle;
 use std::{collections::HashMap, io::Write, path::PathBuf};
 
 const LOG_DIR_PATH: &str = "/sys/logs";
 
 pub enum Msg {
-    NewConnection(crate::Connection),
+    NewConnection(crate::logging::Connection),
     DroppedConnection(SysHandle),
     Record(LogRecord),
 }
@@ -120,15 +120,17 @@ pub fn spawn(receiver: std::sync::mpsc::Receiver<Msg>) {
             let msg = receiver.recv().unwrap();
             match msg {
                 Msg::NewConnection(connection) => {
-                    let crate::Connection {
+                    let crate::logging::Connection {
                         tag,
                         tag_id,
                         handle,
                     } = connection;
 
-                    assert!(connections
-                        .insert(handle, Connection::new(tag, tag_id))
-                        .is_none());
+                    assert!(
+                        connections
+                            .insert(handle, Connection::new(tag, tag_id))
+                            .is_none()
+                    );
                 }
 
                 Msg::DroppedConnection(handle) => assert!(connections.remove(&handle).is_some()),
