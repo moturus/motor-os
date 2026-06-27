@@ -2,6 +2,8 @@
 //!
 //! Uses alloc::BinaryHeap.
 use alloc::collections::binary_heap::BinaryHeap;
+use alloc::rc::Rc;
+use core::cell::Cell;
 use moto_rt::time::Instant;
 
 extern crate alloc;
@@ -9,9 +11,32 @@ extern crate alloc;
 #[cfg(not(target_os = "motor"))]
 compile_error!("Only Motor OS targets supported.");
 
+/// Handle to a queued timer.
+///
+/// Futures such as [`crate::Sleep`] register a timer when first polled but are
+/// very often dropped before they fire — e.g. the losing branch of a `select!`.
+/// Such a future cancels its timer via this handle on drop; a cancelled timer is
+/// silently discarded instead of firing. Without this, dropped-but-uncancelled
+/// timers accumulate in the queue without bound and fire spurious wakeups that
+/// pile up in the run queue and starve the runtime.
+#[derive(Clone)]
+pub(crate) struct Timer {
+    alive: Rc<Cell<bool>>,
+}
+
+impl Timer {
+    /// Cancel the timer so it is skipped (does not fire) once its deadline passes.
+    pub(crate) fn cancel(&self) {
+        self.alive.set(false);
+    }
+}
+
 struct QueueEntry<T> {
     at: Instant,
     what: T,
+    // Cleared when the timer is cancelled; such entries are discarded rather than
+    // fired. Not part of the ordering below.
+    alive: Rc<Cell<bool>>,
 }
 
 impl<T: PartialEq> PartialEq for QueueEntry<T> {
@@ -56,22 +81,49 @@ impl<T: Eq + Ord> Default for TimeQ<T> {
 }
 
 impl<T: Eq + Ord> TimeQ<T> {
-    pub fn add_at(&mut self, at: Instant, what: T) {
-        self.inner.push(core::cmp::Reverse(QueueEntry { at, what }))
+    /// Queue a timer firing at `at`, returning a handle to cancel it (e.g. from
+    /// the registering future's `Drop`).
+    pub fn add_at(&mut self, at: Instant, what: T) -> Timer {
+        let alive = Rc::new(Cell::new(true));
+        self.inner.push(core::cmp::Reverse(QueueEntry {
+            at,
+            what,
+            alive: alive.clone(),
+        }));
+        Timer { alive }
     }
 
-    pub fn next(&self) -> Option<Instant> {
+    /// Deadline of the earliest still-live timer. Cancelled timers at the front
+    /// are purged first so we never sleep waiting for one.
+    pub fn next(&mut self) -> Option<Instant> {
+        self.purge_cancelled();
         self.inner.peek().map(|e| e.0.at)
     }
 
+    /// Pop the earliest live timer whose deadline is `<= at`, discarding any
+    /// cancelled timers encountered along the way.
     pub fn pop_at(&mut self, at: Instant) -> Option<T> {
-        if let Some(next_at) = self.next()
-            && next_at > at
-        {
-            return None;
+        loop {
+            let next_at = self.inner.peek().map(|e| e.0.at)?;
+            if next_at > at {
+                return None;
+            }
+            let entry = self.inner.pop().unwrap().0;
+            if entry.alive.get() {
+                return Some(entry.what);
+            }
+            // Cancelled and due: drop it and keep looking.
         }
+    }
 
-        self.inner.pop().map(|e| e.0.what)
+    /// Drop cancelled timers from the front of the queue.
+    fn purge_cancelled(&mut self) {
+        while let Some(top) = self.inner.peek() {
+            if top.0.alive.get() {
+                break;
+            }
+            self.inner.pop();
+        }
     }
 }
 

@@ -425,13 +425,13 @@ impl LocalRuntime {
         LocalRuntimeContextGuard::new(self)
     }
 
-    pub(crate) fn add_timer(when: Instant, cx: &mut Context<'_>) {
+    pub(crate) fn add_timer(when: Instant, cx: &mut Context<'_>) -> crate::timeq::Timer {
         let task_id = TaskId(cx.local_waker().data() as usize as u64);
 
         LocalRuntimeInner::current()
             .timeq
             .borrow_mut()
-            .add_at(when, task_id);
+            .add_at(when, task_id)
     }
 
     /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
@@ -473,7 +473,7 @@ impl LocalRuntime {
                 return;
             }
 
-            let timeo = inner.timeq.borrow().next();
+            let timeo = inner.timeq.borrow_mut().next();
             inner.wait(timeo);
         }
     }
