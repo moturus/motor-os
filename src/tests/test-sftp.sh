@@ -29,7 +29,7 @@ USER="${RUSSHD_USER:-motor}"
 # regardless of the current working directory.
 KEY="${RUSSHD_KEY:-$WD/test.key}"
 REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/bin}"
-REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/sys/logs/sys-io.log}"
+REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/sys/logs/sys-init.log}"
 EXPECTED_FILES=(russhd rush)
 
 SSH_OPTS=(
