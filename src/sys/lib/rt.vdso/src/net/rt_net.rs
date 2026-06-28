@@ -1004,6 +1004,7 @@ impl NetChannel {
             self.maybe_wake_io_thread();
             Ok(())
         } else {
+            self.response_handlers.lock().remove(&req.id);
             Err(moto_rt::E_NOT_READY)
         }
     }
