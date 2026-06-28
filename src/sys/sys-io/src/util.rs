@@ -51,6 +51,7 @@ pub fn map_native_error(err: moto_rt::Error) -> std::io::Error {
     std::io::Error::from_raw_os_error(err as u16 as i32)
 }
 
+#[allow(unused)]
 pub async fn stat(
     fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
     filename: &str,
@@ -83,6 +84,7 @@ pub async fn stat(
     Ok(Some((parent_id, entry_kind)))
 }
 
+#[allow(unused)]
 pub async fn create_file(
     fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
     filename: &str,
@@ -105,6 +107,7 @@ pub async fn create_file(
         .await
 }
 
+#[allow(unused)]
 pub async fn write_file(
     fs: &Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
     file_id: async_fs::EntryId,

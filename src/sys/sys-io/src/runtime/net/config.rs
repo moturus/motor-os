@@ -106,24 +106,10 @@ impl DeviceCfg {
 pub(super) struct NetConfig {
     pub loopback: bool,
     pub devices: BTreeMap<String, DeviceCfg>,
-
-    #[serde(default = "NetConfig::default_log_interval")]
-    pub stat_log_interval_secs: u32,
-
-    #[serde(default = "NetConfig::default_log_filename")]
-    pub stat_log_filename: String,
 }
 
 // Find the device name and the local IP address to route to dst.
 impl NetConfig {
-    fn default_log_interval() -> u32 {
-        60
-    }
-
-    fn default_log_filename() -> String {
-        "/sys/logs/sys-io.log".to_owned()
-    }
-
     pub(super) fn find_route(&self, dst: &IpAddr) -> Option<(String, IpAddr)> {
         for (dev_name, dev_cfg) in &self.devices {
             for route in &dev_cfg.routes {

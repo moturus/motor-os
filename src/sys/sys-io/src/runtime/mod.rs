@@ -15,7 +15,7 @@ use moto_sys::SysHandle;
 use std::io::Result as IoResult;
 
 pub mod fs;
-mod net;
+pub(crate) mod net;
 
 // A single 2M page used for VirtIO/MMIO.
 // It's a hack, but we don't need anything more complicated for now.

@@ -1,8 +1,28 @@
 //! Statistics for Net runtime, including devices and sockets.
+//!
+//! sys-io's stats provider (`crate::stats_server`) runs on its own thread, but
+//! the net stats live in this single-threaded async runtime (`Rc<Cell<..>>`) and
+//! can't be read from there directly. Instead the stats-server thread *polls*
+//! them: it sends a request over a cross-thread channel that
+//! [`stats_responder_task`] (running in the net runtime) answers with a freshly
+//! built snapshot. Best effort, never precise.
 
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
 use async_fs::FileSystem;
+use moto_stats::{MetricDescWire, MetricEntry};
+
+/// Net metric ids. They are private to sys-io: collectors learn their names
+/// dynamically via `CMD_DESCRIBE` (moto-stats hardcodes no metric ids). When
+/// sys-io is split into sys-io-fs / sys-io-net, each will own its own id space.
+mod ids {
+    pub const NET_NUM_DEVICES: u32 = 0;
+    pub const NET_ACTIVE_CLIENTS: u32 = 1;
+    pub const NET_TOTAL_CLIENTS: u32 = 2;
+    pub const NET_TCP_SOCKETS: u32 = 3;
+    pub const NET_TOTAL_TCP_SOCKETS: u32 = 4;
+    pub const NET_TCP_LISTENING_SOCKETS: u32 = 5;
+}
 
 #[derive(Default)]
 pub(super) struct NetStats {
@@ -17,111 +37,89 @@ pub(super) struct NetStats {
 }
 
 impl NetStats {
-    fn log(&self) -> String {
-        let mut result = format!(
-            "\n{}: sys-io net stats: {} devices;\n",
-            now_time(),
-            self.num_devices.get()
-        );
-
-        result.push_str(
-            format!("{:>25}: {}\n", "active_clients", self.active_clients.get()).as_str(),
-        );
-        result
-            .push_str(format!("{:>25}: {}\n", "total_clients", self.total_clients.get()).as_str());
-        result.push_str(format!("{:>25}: {}\n", "tcp_sockets", self.tcp_sockets.get()).as_str());
-        result.push_str(
-            format!(
-                "{:>25}: {}\n",
-                "total_tcp_sockets",
-                self.total_tcp_sockets.get()
-            )
-            .as_str(),
-        );
-        result.push_str(
-            format!(
-                "{:>25}: {}\n",
-                "tcp_listening_sockets",
-                self.tcp_listening_sockets.get()
-            )
-            .as_str(),
-        );
-
-        result
+    /// Build a snapshot of the metrics in moto-stats wire form. Mirrors
+    /// [`descriptors`].
+    fn entries(&self) -> Vec<MetricEntry> {
+        vec![
+            MetricEntry::global(ids::NET_NUM_DEVICES, self.num_devices.get()),
+            MetricEntry::global(ids::NET_ACTIVE_CLIENTS, self.active_clients.get()),
+            MetricEntry::global(ids::NET_TOTAL_CLIENTS, self.total_clients.get()),
+            MetricEntry::global(ids::NET_TCP_SOCKETS, self.tcp_sockets.get()),
+            MetricEntry::global(ids::NET_TOTAL_TCP_SOCKETS, self.total_tcp_sockets.get()),
+            MetricEntry::global(
+                ids::NET_TCP_LISTENING_SOCKETS,
+                self.tcp_listening_sockets.get(),
+            ),
+        ]
     }
 }
 
-pub(super) async fn stat_logging_task(
-    stats: Rc<NetStats>,
-    fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
-    log_filename: String,
-    log_interval_secs: u32,
-) {
-    moto_async::sleep(std::time::Duration::from_secs(log_interval_secs as u64)).await;
+/// The metric descriptors this provider exposes (the response to `CMD_DESCRIBE`).
+/// Mirrors [`NetStats::entries`]; lets collectors learn metric names at runtime.
+/// Static metadata, so the stats-server thread builds it directly.
+pub(crate) fn descriptors() -> Vec<MetricDescWire> {
+    vec![
+        MetricDescWire::new(ids::NET_NUM_DEVICES, "net.num_devices"),
+        MetricDescWire::new(ids::NET_ACTIVE_CLIENTS, "net.active_clients"),
+        MetricDescWire::new(ids::NET_TOTAL_CLIENTS, "net.total_clients"),
+        MetricDescWire::new(ids::NET_TCP_SOCKETS, "net.tcp_sockets"),
+        MetricDescWire::new(ids::NET_TOTAL_TCP_SOCKETS, "net.total_tcp_sockets"),
+        MetricDescWire::new(ids::NET_TCP_LISTENING_SOCKETS, "net.tcp_listening_sockets"),
+    ]
+}
 
-    if let Ok(Some((entry_id, entry_kind))) =
-        crate::util::stat(fs.clone(), log_filename.as_str()).await
-    {
-        if !matches!(entry_kind, async_fs::EntryKind::File) {
-            log::error!("Log file '{log_filename}' is not a file: net stats logging disabled.");
-            return;
-        } else {
-            let mut fs_mut = fs.lock().await;
-            if let Err(err) = fs_mut.delete_entry(entry_id).await {
-                log::error!("Failed to delete '{log_filename}'; net stats logging disabled.");
-                return;
-            }
-        }
+/// A request from the stats-server thread for a metrics snapshot, carrying the
+/// one-shot channel to respond on.
+struct StatsRequest {
+    respond_to: moto_async::oneshot::Sender<Vec<MetricEntry>>,
+}
+
+/// Sender half of the request channel. Set once, when the net runtime spawns its
+/// responder task; read by the stats-server thread in [`query_metrics`].
+static STATS_REQUESTS: OnceLock<moto_async::channel::Sender<StatsRequest>> = OnceLock::new();
+
+/// Capacity of the request channel. The stats-server thread serializes its
+/// queries (one outstanding at a time), so this only needs slack for races.
+const STATS_REQUEST_CAPACITY: usize = 4;
+
+/// Spawn the task that answers metric-snapshot requests from the stats-server
+/// thread. Call once, from the net runtime.
+pub(super) fn spawn_stats_responder(stats: Rc<NetStats>) {
+    let (tx, rx) = moto_async::channel(STATS_REQUEST_CAPACITY);
+    if STATS_REQUESTS.set(tx).is_err() {
+        log::error!("sys-io: net stats responder already started");
+        return;
     }
 
-    let Ok(log_file) = crate::util::create_file(fs.clone(), log_filename.as_str()).await else {
-        log::error!("Failed to create '{log_filename}'; net stats logging disabled.");
-        return;
+    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(stats, rx));
+}
+
+/// Listen for stats requests and answer each with a fresh snapshot of the
+/// (single-threaded) net stats. Runs in the net runtime.
+async fn stats_responder_task(
+    stats: Rc<NetStats>,
+    mut requests: moto_async::channel::Receiver<StatsRequest>,
+) {
+    while let Some(req) = requests.recv().await {
+        // The receiver is gone if the stats-server thread stopped waiting; ignore.
+        let _ = req.respond_to.send(stats.entries());
+    }
+}
+
+/// Poll a fresh snapshot of the net metrics out of the net runtime. Called from
+/// the stats-server thread; returns empty if the net runtime isn't up yet.
+pub(crate) fn query_metrics() -> Vec<MetricEntry> {
+    let Some(requests) = STATS_REQUESTS.get() else {
+        return Vec::new();
     };
 
-    log::debug!(
-        "started sys-io net stats logging to '{log_filename}' every {log_interval_secs} secs."
-    );
-
-    let mut offset = 0;
-    loop {
-        let line = stats.log();
-
-        assert_eq!(
-            line.len(),
-            crate::util::write_file(&fs, log_file, offset, line.as_bytes())
-                .await
-                .unwrap()
-        );
-
-        offset += line.len() as u64;
-
-        moto_async::sleep(std::time::Duration::from_secs(log_interval_secs as u64)).await;
-    }
-}
-
-/// Periodically publish a snapshot of the (single-threaded) net stats into the
-/// lock-free atomics read by the stats-server thread. Runs regardless of whether
-/// file logging is enabled.
-pub(super) async fn stat_publish_task(stats: Rc<NetStats>) {
-    loop {
-        crate::stats_server::NET.store(
-            stats.num_devices.get(),
-            stats.active_clients.get(),
-            stats.total_clients.get(),
-            stats.tcp_sockets.get(),
-            stats.total_tcp_sockets.get(),
-            stats.tcp_listening_sockets.get(),
-        );
-        moto_async::sleep(std::time::Duration::from_secs(1)).await;
-    }
-}
-
-fn now_time() -> String {
-    let now = moto_rt::time::Instant::now().duration_since(moto_rt::time::Instant::from_u64(0));
-    let millis = now.as_millis();
-    let secs = millis / 1000;
-    let millis = millis % 1000;
-
-    format!("{:3}:{:03}", secs, millis)
+    // This thread has no async runtime, so spin up a throwaway one to drive the
+    // cross-thread request/response round-trip to completion.
+    moto_async::LocalRuntime::new().block_on(async move {
+        let (respond_to, response) = moto_async::oneshot();
+        if requests.send(StatsRequest { respond_to }).await.is_err() {
+            return Vec::new();
+        }
+        response.await.unwrap_or_default()
+    })
 }

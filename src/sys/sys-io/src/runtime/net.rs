@@ -17,7 +17,7 @@ use crate::util::map_err_into_native;
 mod config;
 mod device;
 mod socket;
-mod stats;
+pub(crate) mod stats;
 mod tcp_listener;
 
 struct ClientConnection {
@@ -510,9 +510,6 @@ pub(super) async fn init(
         device_idx += 1;
     }
 
-    let log_interval = config.stat_log_interval_secs;
-    let log_filename = config.stat_log_filename.clone();
-
     let runtime = NetRuntime {
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             config,
@@ -529,21 +526,7 @@ pub(super) async fn init(
     };
 
     runtime.stats.num_devices.set(device_idx as u64);
-
-    // Always publish stats to the stats-server thread (independent of logging).
-    {
-        let stats = runtime.stats.clone();
-        let _ = moto_async::LocalRuntime::spawn(async move { stats::stat_publish_task(stats).await });
-    }
-
-    if log_interval > 0 {
-        let stats = runtime.stats.clone();
-        let _ = moto_async::LocalRuntime::spawn(async move {
-            stats::stat_logging_task(stats, fs, log_filename, log_interval).await
-        });
-    } else {
-        log::info!("net stats logging disabled");
-    }
+    stats::spawn_stats_responder(runtime.stats.clone());
 
     runtime.spawn_net_runtime().await;
     log::debug!("NET runtime started");
