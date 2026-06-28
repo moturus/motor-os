@@ -25,6 +25,7 @@ struct ClientConnection {
     sockets: HashSet<u64>,
     tcp_listeners: HashSet<u64>,
     shutting_down: bool,
+    pid: u64,
 }
 
 impl Drop for ClientConnection {
@@ -41,6 +42,7 @@ impl ClientConnection {
             sockets: HashSet::new(),
             tcp_listeners: HashSet::new(),
             shutting_down: false,
+            pid: 0,
         }
     }
 }
@@ -254,6 +256,20 @@ impl NetRuntime {
                 }
             }
         }
+    }
+
+    fn connection_pid(&self, conn_id: SysHandle) -> u64 {
+        let mut inner = self.inner.borrow_mut();
+        let Some(client) = inner.clients.get_mut(&conn_id) else {
+            // Sockets can linger after their client is gone, so the pid may be unknown.
+            return 0;
+        };
+
+        if client.pid == 0 {
+            client.pid = moto_sys::SysObj::get_pid(conn_id).unwrap_or(0);
+        }
+
+        client.pid
     }
 
     async fn on_connection_done(&self, conn_id: SysHandle) {

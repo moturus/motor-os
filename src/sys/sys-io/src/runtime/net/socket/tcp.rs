@@ -181,17 +181,18 @@ impl MotoSocket {
 
         // Read the smoltcp state first: with_tcp_smoltcp_socket() borrows both the
         // socket and the runtime inner, so we must not hold a borrow across it.
-        let smoltcp_state = Self::with_tcp_smoltcp_socket(
-            moto_socket,
-            |_socket_id, smoltcp_socket, _state| smoltcp_socket.state(),
-        );
+        let smoltcp_state =
+            Self::with_tcp_smoltcp_socket(moto_socket, |_socket_id, smoltcp_socket, _state| {
+                smoltcp_socket.state()
+            });
 
         let socket_ref = moto_socket.borrow();
         let Self { base, state } = &*socket_ref;
         let tcp_state = state.unwrap_tcp();
 
-        // Sockets can linger after their client is gone, so the pid may be unknown.
-        let pid = moto_sys::SysObj::get_pid(base.client_sender.remote_handle()).unwrap_or(0);
+        let pid = base
+            .runtime
+            .connection_pid(base.client_sender.remote_handle());
 
         let (local_addr, local_port) = addr_to_octets(&base.local_addr);
         let (remote_addr, remote_port) = match tcp_state.remote_addr {
