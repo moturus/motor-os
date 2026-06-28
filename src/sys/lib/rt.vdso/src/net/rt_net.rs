@@ -470,6 +470,7 @@ impl NetRuntime {
     }
 
     fn reserve_channel(&mut self) -> ChannelReservation {
+        // Note: it is fine to use Relaxed ordering because the fn is called under NET.lock().
         if let Some(entry) = self.channels.first_entry() {
             let channel = entry.get().clone();
             let reservations = 1 + channel.reservations.fetch_add(1, Ordering::Relaxed);
@@ -494,6 +495,7 @@ impl NetRuntime {
     }
 
     fn release_channel_reservation(&mut self, channel: &NetChannel) {
+        // Note: it is fine to use Relaxed ordering because the fn is called under NET.lock().
         channel.reservations.fetch_sub(1, Ordering::Relaxed);
         if let Some(channel) = self.full_channels.remove(&channel.id()) {
             // TODO: maybe clear empty channels?
