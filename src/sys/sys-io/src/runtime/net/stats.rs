@@ -22,6 +22,8 @@ mod ids {
     pub const NET_TCP_SOCKETS: u32 = 3;
     pub const NET_TOTAL_TCP_SOCKETS: u32 = 4;
     pub const NET_TCP_LISTENING_SOCKETS: u32 = 5;
+    pub const NET_UDP_SOCKETS: u32 = 6;
+    pub const NET_TOTAL_UDP_SOCKETS: u32 = 7;
 }
 
 #[derive(Default)]
@@ -32,8 +34,8 @@ pub(super) struct NetStats {
     pub tcp_sockets: Rc<Cell<u64>>,
     pub total_tcp_sockets: Rc<Cell<u64>>,
     pub tcp_listening_sockets: Rc<Cell<u64>>,
-    // pub udp_sockets: Rc<Cell<u64>>,
-    // pub total_udp_sockets: Rc<Cell<u64>>,
+    pub udp_sockets: Rc<Cell<u64>>,
+    pub total_udp_sockets: Rc<Cell<u64>>,
 }
 
 impl NetStats {
@@ -50,6 +52,8 @@ impl NetStats {
                 ids::NET_TCP_LISTENING_SOCKETS,
                 self.tcp_listening_sockets.get(),
             ),
+            MetricEntry::global(ids::NET_UDP_SOCKETS, self.udp_sockets.get()),
+            MetricEntry::global(ids::NET_TOTAL_UDP_SOCKETS, self.total_udp_sockets.get()),
         ]
     }
 }
@@ -65,6 +69,8 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_SOCKETS, "net.tcp_sockets"),
         MetricDescWire::new(ids::NET_TOTAL_TCP_SOCKETS, "net.total_tcp_sockets"),
         MetricDescWire::new(ids::NET_TCP_LISTENING_SOCKETS, "net.tcp_listening_sockets"),
+        MetricDescWire::new(ids::NET_UDP_SOCKETS, "net.udp_sockets"),
+        MetricDescWire::new(ids::NET_TOTAL_UDP_SOCKETS, "net.total_udp_sockets"),
     ]
 }
 

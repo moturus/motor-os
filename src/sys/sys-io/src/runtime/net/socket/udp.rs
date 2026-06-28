@@ -179,6 +179,11 @@ impl MotoSocket {
 
         log::debug!("UDP socket 0x{socket_id:x} dropped.");
 
+        runtime
+            .stats
+            .udp_sockets
+            .set(runtime.stats.udp_sockets.get() - 1);
+
         {
             let mut inner = runtime.inner.borrow_mut();
 
@@ -265,6 +270,15 @@ impl MotoSocket {
 
         let socket_id = udp_socket.borrow().socket_id();
         let weak_socket = Rc::downgrade(&udp_socket);
+
+        runtime
+            .stats
+            .udp_sockets
+            .set(runtime.stats.udp_sockets.get() + 1);
+        runtime
+            .stats
+            .total_udp_sockets
+            .set(runtime.stats.total_udp_sockets.get() + 1);
 
         #[cfg(debug_assertions)]
         log::debug!(
