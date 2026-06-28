@@ -7,14 +7,11 @@
 //! [`stats_responder_task`] (running in the net runtime) answers with a freshly
 //! built snapshot. Best effort, never precise.
 
+use moto_stats::{MetricDescWire, MetricEntry};
 use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
-use async_fs::FileSystem;
-use moto_stats::{MetricDescWire, MetricEntry};
-
 /// Net metric ids. They are private to sys-io: collectors learn their names
-/// dynamically via `CMD_DESCRIBE` (moto-stats hardcodes no metric ids). When
-/// sys-io is split into sys-io-fs / sys-io-net, each will own its own id space.
+/// dynamically via `CMD_DESCRIBE` (moto-stats hardcodes no metric ids).
 mod ids {
     pub const NET_NUM_DEVICES: u32 = 0;
     pub const NET_ACTIVE_CLIENTS: u32 = 1;

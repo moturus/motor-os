@@ -1,11 +1,12 @@
 //! sys-io stats provider: a synchronous-RPC service ("sys-io-stats") that
 //! exposes sys-io's metrics via the moto-stats protocol.
 //!
-//! sys-io's net stats live inside a single-threaded async runtime, so they
+//! sys-io's NET and FS stats live inside single-threaded async runtimes, so they
 //! cannot be read from this thread directly. On `CMD_QUERY_METRICS` we poll them
-//! out of the net runtime (see [`crate::runtime::net::stats`]); `CMD_DESCRIBE` is
-//! answered from static metadata. Best effort, never precise — consistent with
-//! the rest of Motor OS stats.
+//! out of those runtimes (see [`crate::runtime::net::stats`] and
+//! [`crate::runtime::fs::stats`]); `CMD_DESCRIBE` is answered from static
+//! metadata. Best effort, never precise — consistent with the rest of Motor OS
+//! stats.
 
 use moto_ipc::sync::*;
 use moto_sys::SysHandle;
@@ -93,11 +94,13 @@ fn process(server: &mut LocalServer, waker: SysHandle) {
 
     match cmd {
         moto_stats::CMD_QUERY_METRICS => {
-            let entries = crate::runtime::net::stats::query_metrics();
+            let mut entries = crate::runtime::net::stats::query_metrics();
+            entries.extend(crate::runtime::fs::stats::query_metrics());
             moto_stats::respond_pods(conn.data_mut(), &entries, start_index);
         }
         moto_stats::CMD_DESCRIBE => {
-            let descs = crate::runtime::net::stats::descriptors();
+            let mut descs = crate::runtime::net::stats::descriptors();
+            descs.extend(crate::runtime::fs::stats::descriptors());
             moto_stats::respond_pods(conn.data_mut(), &descs, start_index);
         }
         _ => {

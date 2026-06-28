@@ -14,6 +14,7 @@ use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
 mod mbr;
+pub mod stats;
 mod virtio_partition;
 
 /// The max number of "requests" in flight per connection.
@@ -230,6 +231,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
     };
 
     spawn_fs_listeners(fs.clone()).await;
+    stats::spawn_stats_responder(fs.clone());
     Ok(fs)
 }
 
