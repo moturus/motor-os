@@ -76,7 +76,10 @@ impl NetSnapshot {
 
     fn entries(&self) -> Vec<MetricEntry> {
         vec![
-            MetricEntry::global(ids::NET_NUM_DEVICES, self.num_devices.load(Ordering::Relaxed)),
+            MetricEntry::global(
+                ids::NET_NUM_DEVICES,
+                self.num_devices.load(Ordering::Relaxed),
+            ),
             MetricEntry::global(
                 ids::NET_ACTIVE_CLIENTS,
                 self.active_clients.load(Ordering::Relaxed),
@@ -85,7 +88,10 @@ impl NetSnapshot {
                 ids::NET_TOTAL_CLIENTS,
                 self.total_clients.load(Ordering::Relaxed),
             ),
-            MetricEntry::global(ids::NET_TCP_SOCKETS, self.tcp_sockets.load(Ordering::Relaxed)),
+            MetricEntry::global(
+                ids::NET_TCP_SOCKETS,
+                self.tcp_sockets.load(Ordering::Relaxed),
+            ),
             MetricEntry::global(
                 ids::NET_TOTAL_TCP_SOCKETS,
                 self.total_tcp_sockets.load(Ordering::Relaxed),
@@ -118,37 +124,40 @@ fn descriptors() -> Vec<MetricDescWire> {
 pub fn start() {
     let _ = std::thread::Builder::new()
         .name("sys-io:stats".to_owned())
-        .spawn(run);
-    let _ = std::thread::Builder::new()
-        .name("sys-io:stats-reg".to_owned())
-        .spawn(register_with_retry);
+        .spawn(stats_thread);
 }
 
-/// Register this provider with the stats registry. sys-io is loaded by the
-/// kernel before sys-init launches the registry daemon, so we retry until the
-/// registry is up (mirroring `moto_log::init`'s startup retry).
-fn register_with_retry() {
-    let mut tries = 0u32;
+/// Register this provider with the stats registry.
+fn register_stats_provider() -> bool {
+    // This is called on bootup. "strobe" (the stats registry daemon) won't start
+    // until some time later.
+    std::thread::sleep(std::time::Duration::from_millis(1_000));
+
+    let mut tries = 0u64;
     loop {
         match moto_stats::Collector::register(PROVIDER_NAME, STATS_URL) {
             Ok(()) => {
                 log::debug!("sys-io: registered stats provider after {tries} tries");
-                return;
+                return true;
             }
             Err(_) => {
                 tries += 1;
-                // Give up logging-loudly after a while, but keep trying quietly:
-                // the registry may start late, or be restarted.
-                if tries == 60 {
-                    log::warn!("sys-io: stats registry still unreachable; still retrying");
+                // Give up loudly after a while.
+                if tries == 30 {
+                    log::warn!("sys-io: stats registry (strobe) unreachable");
+                    return false;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(std::time::Duration::from_millis(1_00));
             }
         }
     }
 }
 
-fn run() {
+fn stats_thread() {
+    if !register_stats_provider() {
+        return;
+    }
+
     let mut server = match LocalServer::new(STATS_URL, ChannelSize::Small, 4, 2) {
         Ok(s) => s,
         Err(err) => {
