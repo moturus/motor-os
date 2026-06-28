@@ -453,6 +453,14 @@ impl BlockHeader {
     pub fn set_block_type(&mut self, block_type: BlockType) {
         self.block_type = block_type as u8;
     }
+
+    pub fn set_in_use(&mut self, in_use: bool) {
+        self.in_use = u8::from(in_use);
+    }
+
+    pub fn set_blocks_in_use(&mut self, blocks_in_use: u64) {
+        self.blocks_in_use = blocks_in_use;
+    }
 }
 
 const _: () = assert!(16 == core::mem::size_of::<BlockHeader>());

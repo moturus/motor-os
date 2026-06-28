@@ -110,6 +110,14 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         Ok(block)
     }
 
+    /// Reads a block via the underlying block cache *without* registering it in
+    /// the transaction. Use only for read-only tree walks where the block is
+    /// not modified: tracked reads accumulate in `txn_cache`, which is bounded,
+    /// so a walk that may visit many nodes must not use [`Self::get_block`].
+    pub async fn get_block_untracked(&mut self, block_no: BlockNo) -> std::io::Result<CachedBlock> {
+        self.block_cache().get_block(block_no.as_u64()).await
+    }
+
     pub fn get_empty_block_mut(&mut self, block_no: BlockNo) -> CachedBlock {
         assert!(!self.read_only);
 
@@ -310,6 +318,15 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         let last_block_start = prev_size & !(BLOCK_SIZE as u64 - 1);
         let last_block_key = last_block_start / (BLOCK_SIZE as u64);
 
+        // Case (c): a truncation that drops more than one data block (i.e. the
+        // last surviving block starts at least a full block below the old last
+        // block). The tree may be up to four levels deep and a single txn may
+        // only touch a bounded number of blocks, so this is done across several
+        // transactions and is handled separately, before the single-txn cases.
+        if new_size < prev_size && (new_size + (BLOCK_SIZE as u64)) <= last_block_start {
+            return Self::do_large_truncate(fs, file_id, new_size).await;
+        }
+
         let mut txn = Self {
             fs,
             txn_cache: micromap::Map::new(),
@@ -391,8 +408,122 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             return txn.commit().await;
         }
 
-        log::error!("do_resize_txn: not impl");
-        Err(ErrorKind::Interrupted.into())
+        // Every shrink case that reaches here was handled above, and case (c)
+        // returned early, so this point is unreachable.
+        log::error!("do_resize_txn: unexpected fall-through");
+        Err(ErrorKind::InvalidInput.into())
+    }
+
+    /// Handles a truncation that drops more than one data block (resize case (c)).
+    ///
+    /// The B+ tree is at most four levels deep, and a single transaction may only
+    /// touch a bounded number of blocks, so the right-most stale branches are
+    /// chopped off one tree level per transaction, walking from the root down to
+    /// the data (leaf) level.
+    async fn do_large_truncate(
+        fs: &mut MotorFs<BD>,
+        file_id: EntryIdInternal,
+        new_size: u64,
+    ) -> Result<()> {
+        // Shrink the recorded size first, so a crash mid-truncation leaves a
+        // usable (if briefly over-allocated) file rather than a short file that
+        // still points at now-detached blocks.
+        {
+            let mut txn = Txn {
+                fs: &mut *fs,
+                txn_cache: micromap::Map::new(),
+                read_only: false,
+            };
+            DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
+            txn.commit().await?;
+        }
+
+        // Every block whose key is at or above this holds only data above new_size.
+        let first_stale_key = new_size.div_ceil(BLOCK_SIZE as u64);
+
+        // Chop the right-most stale branches level by level, root first. The tree
+        // is at most four levels deep, so at most four iterations are needed; the
+        // last one chops off data blocks, completing the resize.
+        let mut node_block_no = file_id.block_no;
+        let mut is_root = true;
+        for _ in 0..4 {
+            match Self::truncate_right_txn(
+                &mut *fs,
+                file_id.block_no,
+                node_block_no,
+                is_root,
+                first_stale_key,
+            )
+            .await?
+            {
+                Some(child) => {
+                    node_block_no = child;
+                    is_root = false;
+                }
+                None => break,
+            }
+        }
+
+        // If new_size is not block-aligned, zero out the stale tail of the last
+        // surviving data block.
+        if new_size & (BLOCK_SIZE as u64 - 1) != 0 {
+            let last_block_start = new_size & !(BLOCK_SIZE as u64 - 1);
+            let last_block_key = last_block_start / (BLOCK_SIZE as u64);
+
+            let mut txn = Txn {
+                fs: &mut *fs,
+                txn_cache: micromap::Map::new(),
+                read_only: false,
+            };
+            if let Some(data_block_no) =
+                DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, last_block_key).await?
+            {
+                let new_end = (new_size - last_block_start) as usize;
+                let mut data_block = txn.get_block(data_block_no).await?;
+                data_block.block_mut().as_bytes_mut()[new_end..].fill(0);
+            }
+            txn.commit().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Chops off the right-most stale branches at a single tree level, in one
+    /// transaction. Returns the next node to process (the right-most surviving
+    /// child), or `None` once the data (leaf) level has been reached.
+    async fn truncate_right_txn(
+        fs: &mut MotorFs<BD>,
+        file_block_no: BlockNo,
+        node_block_no: BlockNo,
+        is_root: bool,
+        first_stale_key: u64,
+    ) -> Result<Option<BlockNo>> {
+        let mut txn = Txn {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        let next = if is_root {
+            crate::bplus_tree::RootNode::truncate_right(
+                &mut txn,
+                node_block_no,
+                file_block_no,
+                first_stale_key,
+            )
+            .await?
+        } else {
+            crate::bplus_tree::NonRootNode::truncate_right(
+                &mut txn,
+                node_block_no,
+                file_block_no,
+                first_stale_key,
+            )
+            .await?
+        };
+
+        txn.commit().await?;
+        Ok(next)
     }
 
     #[cfg(test)]

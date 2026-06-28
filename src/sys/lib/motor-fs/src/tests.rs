@@ -94,6 +94,30 @@ fn copy_file() {
 }
 
 #[test]
+fn resize_truncate() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(resize_truncate_test()).unwrap();
+}
+
+#[test]
+fn resize_truncate_random() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(resize_truncate_random_test()).unwrap();
+}
+
+#[test]
+fn resize_truncate_wide_leaf() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(resize_truncate_wide_leaf_test()).unwrap();
+}
+
+#[test]
 #[ignore]
 fn write_speed() {
     init_logger();
@@ -851,6 +875,199 @@ async fn copy_file_test() -> Result<()> {
     );
 
     println!("copy_file_test PASS");
+    Ok(())
+}
+
+// Position-dependent byte pattern, used to validate resize truncation.
+fn resize_pat(block_idx: u64, off: usize) -> u8 {
+    block_idx
+        .wrapping_mul(131)
+        .wrapping_add((off as u64).wrapping_mul(7))
+        .wrapping_add(off as u64) as u8
+}
+
+async fn resize_write_blocks(fs: &mut MotorFs, file: EntryId, count: u64) {
+    let mut buf = vec![0u8; 4096];
+    for b in 0..count {
+        for (i, byte) in buf.iter_mut().enumerate() {
+            *byte = resize_pat(b, i);
+        }
+        assert_eq!(4096, fs.write(file, b * 4096, &buf).await.unwrap());
+    }
+}
+
+/// Reads the first `size` bytes of `file`, block by block, and checks them
+/// against [`resize_pat`].
+async fn resize_verify(fs: &mut MotorFs, file: EntryId, size: u64) {
+    assert_eq!(size, fs.metadata(file).await.unwrap().size);
+    let mut buf = vec![0u8; 4096];
+    let mut off = 0u64;
+    while off < size {
+        let block_idx = off / 4096;
+        let len = 4096.min((size - off) as usize);
+        assert_eq!(len, fs.read(file, off, &mut buf[..len]).await.unwrap());
+        for (i, &byte) in buf[..len].iter().enumerate() {
+            assert_eq!(
+                byte,
+                resize_pat(block_idx, i),
+                "content mismatch at block {block_idx} byte {i} (size {size})"
+            );
+        }
+        off += len as u64;
+    }
+}
+
+async fn resize_truncate_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 8 / 4096; // 8 MB.
+    const BS: u64 = 4096;
+    let full = NUM_BLOCKS - RESERVED_BLOCKS as u64;
+
+    let mut fs = create_fs("motor_fs_resize_truncate_test", NUM_BLOCKS).await?;
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    let root = crate::ROOT_DIR_ID;
+    let file = fs.create_entry(root, EntryKind::File, "big").await.unwrap();
+
+    // > 226 blocks forces a multi-level B+ tree, so truncation must walk it.
+    const N0: u64 = 600;
+    resize_write_blocks(&mut fs, file, N0).await;
+    resize_verify(&mut fs, file, N0 * BS).await;
+
+    // (1) Aligned multi-block truncation (resize case (c)).
+    fs.resize(file, 350 * BS).await.unwrap();
+    resize_verify(&mut fs, file, 350 * BS).await;
+
+    // (2) Unaligned multi-block truncation: the kept tail must be zeroed.
+    let unaligned = 100 * BS + 1000;
+    fs.resize(file, unaligned).await.unwrap();
+    resize_verify(&mut fs, file, unaligned).await;
+
+    // Grow back over the dropped tail; it must read back as zeroes.
+    fs.resize(file, 101 * BS).await.unwrap();
+    let mut buf = vec![0u8; 4096];
+    assert_eq!(4096, fs.read(file, 100 * BS, &mut buf).await.unwrap());
+    for (i, &byte) in buf.iter().enumerate().take(1000) {
+        assert_eq!(byte, resize_pat(100, i), "live tail byte {i}");
+    }
+    for (i, byte) in buf.iter().enumerate().take(4096).skip(1000) {
+        assert_eq!(*byte, 0, "stale tail byte {i} was not zeroed");
+    }
+
+    // (3) Truncate the whole file away (still multi-block => case (c)).
+    fs.resize(file, 0).await.unwrap();
+    assert_eq!(0, fs.metadata(file).await?.size);
+    // Everything but the entry block has been freed.
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+    // (4) Re-grow and re-write: this drains the free list (allocating from the
+    //     orphan files created during truncation), exercising their structure.
+    resize_write_blocks(&mut fs, file, 200).await;
+    resize_verify(&mut fs, file, 200 * BS).await;
+
+    // (5) Fill the device, draining every orphan and forcing free-block accounting
+    //     checks on empty-area allocations (a wrong count would panic there).
+    let filler = fs
+        .create_entry(root, EntryKind::File, "filler")
+        .await
+        .unwrap();
+    let zero = vec![0u8; 4096];
+    let mut k = 0u64;
+    loop {
+        match fs.write(filler, k * BS, &zero).await {
+            Ok(_) => k += 1,
+            Err(err) => {
+                assert_eq!(err.kind(), ErrorKind::StorageFull);
+                break;
+            }
+        }
+    }
+    assert!(fs.empty_blocks().await.unwrap() < 1);
+
+    // (6) Delete everything; every block must be reclaimed.
+    fs.delete_entry(file).await.unwrap();
+    fs.delete_entry(filler).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    println!("resize_truncate_test PASS");
+    Ok(())
+}
+
+async fn resize_truncate_random_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 8 / 4096; // 8 MB.
+    const BS: u64 = 4096;
+    let full = NUM_BLOCKS - RESERVED_BLOCKS as u64;
+
+    let mut fs = create_fs("motor_fs_resize_truncate_random_test", NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID;
+    let file = fs.create_entry(root, EntryKind::File, "f").await.unwrap();
+
+    // A wider file: truncating to a size landing inside a full leaf chops off
+    // more branches than the orphan root node can hold, exercising the orphan's
+    // intermediate-node path.
+    const N0: u64 = 1200;
+    resize_write_blocks(&mut fs, file, N0).await;
+    resize_verify(&mut fs, file, N0 * BS).await;
+
+    // Truncate down through a sequence of decreasing sizes, mixing aligned and
+    // unaligned cuts; the surviving prefix must stay intact after every step.
+    for &(blocks, extra) in &[
+        (900u64, 17u64),
+        (640, 0),
+        (250, 4095),
+        (137, 1),
+        (3, 100),
+        (1, 0),
+    ] {
+        let new_size = blocks * BS + extra;
+        fs.resize(file, new_size).await.unwrap();
+        resize_verify(&mut fs, file, new_size).await;
+    }
+
+    // Back to empty, then reuse the freed space.
+    fs.resize(file, 0).await.unwrap();
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+    resize_write_blocks(&mut fs, file, 300).await;
+    resize_verify(&mut fs, file, 300 * BS).await;
+
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    println!("resize_truncate_random_test PASS");
+    Ok(())
+}
+
+async fn resize_truncate_wide_leaf_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 8 / 4096; // 8 MB.
+    const BS: u64 = 4096;
+    let full = NUM_BLOCKS - RESERVED_BLOCKS as u64;
+
+    let mut fs = create_fs("motor_fs_resize_truncate_wide_leaf_test", NUM_BLOCKS).await?;
+
+    let root = crate::ROOT_DIR_ID;
+
+    // Sequential appends grow the right-most leaf up to a full node before it
+    // splits. By stopping while that leaf is near-full and truncating near its
+    // start, a single leaf-level chop removes more branches than an orphan root
+    // node can hold, forcing the orphan's intermediate-node path.
+    for &build in &[367u64, 494, 621, 748] {
+        let file = fs.create_entry(root, EntryKind::File, "w").await.unwrap();
+        resize_write_blocks(&mut fs, file, build).await;
+
+        // first_stale_key lands a little past the start of the right-most leaf.
+        let new_size = (build - 247) * BS;
+        fs.resize(file, new_size).await.unwrap();
+        resize_verify(&mut fs, file, new_size).await;
+
+        fs.resize(file, 0).await.unwrap();
+        assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+        fs.delete_entry(file).await.unwrap();
+        assert_eq!(full, fs.empty_blocks().await.unwrap());
+    }
+
+    println!("resize_truncate_wide_leaf_test PASS");
     Ok(())
 }
 

@@ -5,6 +5,8 @@ use crate::BTREE_ROOT_OFFSET;
 use crate::BTREE_ROOT_ORDER; // = 226
 use crate::BlockHeader;
 use crate::BlockNo;
+use crate::BlockType;
+use crate::DirEntryBlock;
 use crate::Superblock;
 use crate::Txn;
 use async_fs::AsyncBlockDevice;
@@ -502,9 +504,25 @@ impl<const ORDER: usize> Node<ORDER> {
         let block = txn.get_block(this_block_no).await?;
         let block_ref = block.block();
         let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
-        assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+        // Normal deletes only ever underflow a node to exactly MIN - 1 keys, but
+        // draining an under-full (truncated) tree can present nodes with far
+        // fewer keys, so this is `<` rather than `==`.
+        let num_keys = this.num_keys as usize;
+        debug_assert!(num_keys < BTREE_NODE_MIN_KEYS);
+
+        if num_keys == 0 {
+            // An empty node only arises while draining an under-full tree, and
+            // only as the sole child of its parent (otherwise it would have
+            // borrowed/merged with a sibling before emptying). Move it up.
+            drop(block_ref);
+            drop(block);
+            assert_eq!(level, 1);
+            RootNode::assimilate_single_child(txn, parent_node_block_no, this_block_no).await?;
+            return Ok(None);
+        }
+
         let this_first_key = this.kv[0].key;
-        let this_last_key = this.kv[(this.num_keys - 1) as usize].key;
+        let this_last_key = this.kv[num_keys - 1].key;
 
         drop(block_ref);
         drop(block);
@@ -813,9 +831,10 @@ impl<const ORDER: usize> Node<ORDER> {
         let mut sibling_ref = sibling_block.block_mut();
         let sibling = sibling_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
 
-        // Because we first tried (unsuccessfully) borrowing from the sibling, the sibling
-        // must have the min number of keys.
-        if sibling.num_keys as usize != BTREE_NODE_MIN_KEYS {
+        // Because we first tried (unsuccessfully) borrowing from the sibling, the
+        // sibling has at most the min number of keys (it can have fewer when
+        // draining an under-full tree).
+        if sibling.num_keys as usize > BTREE_NODE_MIN_KEYS {
             log::error!(
                 "merge left: bad num keys: {} child block: {} sibling block: {} child key: {child_left_key}",
                 sibling.num_keys,
@@ -829,25 +848,31 @@ impl<const ORDER: usize> Node<ORDER> {
         let this_ref = this_block.block();
         let this = this_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
 
-        if sibling.kv[BTREE_NODE_MIN_KEYS - 1].key >= this.kv[0].key {
+        // The sibling has min keys; this node has at most min - 1 (it may have
+        // fewer when draining an under-full tree). The merged node therefore
+        // always fits.
+        let sibling_keys = sibling.num_keys as usize;
+        let this_keys = this.num_keys as usize;
+        assert!(sibling_keys + this_keys <= NonRootNode::order());
+
+        if sibling.kv[sibling_keys - 1].key >= this.kv[0].key {
             log::error!(
                 "merge left: bad keys: {} >= {}",
-                sibling.kv[BTREE_NODE_MIN_KEYS - 1].key,
+                sibling.kv[sibling_keys - 1].key,
                 this.kv[0].key
             );
             return Err(ErrorKind::InvalidData.into());
         }
 
         // Some assertions.
-        assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
         assert_eq!(this.kind, sibling.kind);
         assert!(!this.is_root());
         assert!(!sibling.is_root());
 
         // Copy the keys over.
-        sibling.kv[BTREE_NODE_MIN_KEYS..(BTREE_NODE_MIN_KEYS * 2 - 1)]
-            .clone_from_slice(&this.kv[..(BTREE_NODE_MIN_KEYS - 1)]);
-        sibling.num_keys = (BTREE_NODE_MIN_KEYS * 2 - 1) as u8;
+        sibling.kv[sibling_keys..(sibling_keys + this_keys)]
+            .clone_from_slice(&this.kv[..this_keys]);
+        sibling.num_keys = (sibling_keys + this_keys) as u8;
 
         Ok(Some((child_left_key, child_block_no)))
     }
@@ -869,9 +894,10 @@ impl<const ORDER: usize> Node<ORDER> {
         let sibling_ref = sibling_block.block();
         let sibling = sibling_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
 
-        // Because we first tried (unsuccessfully) borrowing from the sibling, the sibling
-        // must have the min number of keys.
-        if sibling.num_keys as usize != BTREE_NODE_MIN_KEYS {
+        // Because we first tried (unsuccessfully) borrowing from the sibling, the
+        // sibling has at most the min number of keys (it can have fewer when
+        // draining an under-full tree).
+        if sibling.num_keys as usize > BTREE_NODE_MIN_KEYS {
             log::error!(
                 "merge right: bad num keys: {} child block: {} sibling block: {} child key: {child_right_key}",
                 sibling.num_keys,
@@ -885,27 +911,231 @@ impl<const ORDER: usize> Node<ORDER> {
         let mut this_ref = this_block.block_mut();
         let this = this_ref.get_mut_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
 
-        // Some assertions.
-        assert_eq!(this.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+        // The sibling has min keys; this node has at most min - 1 (it may have
+        // fewer when draining an under-full tree). The merged node always fits.
+        let sibling_keys = sibling.num_keys as usize;
+        let this_keys = this.num_keys as usize;
+        assert!(this_keys + sibling_keys <= NonRootNode::order());
         assert_eq!(this.kind, sibling.kind);
         assert!(!this.is_root());
         assert!(!sibling.is_root());
 
-        if this.kv[BTREE_NODE_MIN_KEYS - 2].key >= sibling.kv[0].key {
+        if this.kv[this_keys - 1].key >= sibling.kv[0].key {
             log::error!(
                 "merge right: bad keys: {} >= {}",
-                this.kv[BTREE_NODE_MIN_KEYS - 2].key,
+                this.kv[this_keys - 1].key,
                 sibling.kv[0].key
             );
             return Err(ErrorKind::InvalidData.into());
         }
 
         // Copy the keys over.
-        this.kv[(BTREE_NODE_MIN_KEYS - 1)..(BTREE_NODE_MIN_KEYS * 2 - 1)]
-            .clone_from_slice(&sibling.kv[..BTREE_NODE_MIN_KEYS]);
-        this.num_keys = (BTREE_NODE_MIN_KEYS * 2 - 1) as u8;
+        this.kv[this_keys..(this_keys + sibling_keys)]
+            .clone_from_slice(&sibling.kv[..sibling_keys]);
+        this.num_keys = (this_keys + sibling_keys) as u8;
 
         Ok(Some((sibling.kv[0].key, right_sibling)))
+    }
+
+    /// Counts the total number of blocks (tree nodes plus data blocks) occupied
+    /// by the subtree rooted at `node_block_no`, including the node itself.
+    ///
+    /// The walk uses untracked reads so that it does not bloat the transaction's
+    /// (bounded) block cache: the visited nodes are not modified, only counted.
+    async fn count_subtree_blocks<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        node_block_no: BlockNo,
+    ) -> Result<u64> {
+        let block = txn.get_block_untracked(node_block_no).await?;
+        let (is_leaf, num_keys, children) = {
+            let block_ref = block.block();
+            let node = block_ref.get_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
+            let num_keys = node.num_keys as usize;
+            if num_keys > BTREE_NODE_ORDER {
+                log::error!("Bad B+ Tree Node {}.", node_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let is_leaf = node.is_leaf();
+            let children: Vec<BlockNo> = if is_leaf {
+                Vec::new()
+            } else {
+                node.kv[..num_keys]
+                    .iter()
+                    .map(|kv| kv.child_block_no)
+                    .collect()
+            };
+            (is_leaf, num_keys, children)
+        };
+
+        if is_leaf {
+            // This (leaf) node block, plus its data-block children.
+            return Ok(1 + num_keys as u64);
+        }
+
+        let mut total = 1u64; // This node.
+        for child in children {
+            total += Box::pin(NonRootNode::count_subtree_blocks(txn, child)).await?;
+        }
+        Ok(total)
+    }
+
+    /// Moves the chopped-off `branches` into a freshly allocated orphan file and
+    /// hands that file off to [`Superblock::free_complex_block`], which reclaims
+    /// the whole sub-forest lazily via the free list. `blocks_under` is the total
+    /// number of blocks reachable through `branches` (data blocks and tree nodes).
+    async fn orphan_branches<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        branches: &[KV],
+        is_leaf: bool,
+        blocks_under: u64,
+    ) -> Result<()> {
+        let leaf_flag = if is_leaf { Self::KIND_LEAF } else { 0 };
+
+        // Allocate the orphan file entry block.
+        let orphan_block_no = Superblock::allocate_block(txn).await?.block_no;
+
+        let orphan_blocks_in_use = if branches.len() <= BTREE_ROOT_ORDER {
+            // The branches fit directly under the orphan's root node.
+            let mut orphan_block = txn.get_empty_block_mut(orphan_block_no);
+            let mut orphan_ref = orphan_block.block_mut();
+
+            let bh = orphan_ref.get_mut_at_offset::<BlockHeader>(0);
+            bh.set_block_type(BlockType::FileEntry);
+            bh.set_in_use(true);
+
+            let root = orphan_ref.get_mut_at_offset::<RootNode>(BTREE_ROOT_OFFSET);
+            root.num_keys = branches.len() as u8;
+            root.kind = Self::KIND_ROOT | leaf_flag;
+            root.kv[..branches.len()].clone_from_slice(branches);
+
+            // The orphan entry plus all the blocks below the branches.
+            1 + blocks_under
+        } else {
+            // Too many branches to fit under the root (only possible for a
+            // non-root source node): stash them under one extra middle node.
+            log::debug!(
+                "orphan_branches: {} branches need an intermediate node",
+                branches.len()
+            );
+            let mid_block_no = Superblock::allocate_block(txn).await?.block_no;
+            {
+                let mut mid_block = txn.get_empty_block_mut(mid_block_no);
+                let mut mid_ref = mid_block.block_mut();
+                mid_ref
+                    .get_mut_at_offset::<BlockHeader>(0)
+                    .set_block_type(BlockType::TreeNode);
+                let mid = mid_ref.get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
+                mid.num_keys = branches.len() as u8;
+                mid.kind = leaf_flag;
+                mid.kv[..branches.len()].clone_from_slice(branches);
+            }
+            {
+                let mut orphan_block = txn.get_empty_block_mut(orphan_block_no);
+                let mut orphan_ref = orphan_block.block_mut();
+
+                let bh = orphan_ref.get_mut_at_offset::<BlockHeader>(0);
+                bh.set_block_type(BlockType::FileEntry);
+                bh.set_in_use(true);
+
+                let root = orphan_ref.get_mut_at_offset::<RootNode>(BTREE_ROOT_OFFSET);
+                root.num_keys = 1;
+                root.kind = Self::KIND_ROOT;
+                root.kv[0] = KV {
+                    key: 0,
+                    child_block_no: mid_block_no,
+                };
+            }
+
+            // The orphan entry, the middle node, and all blocks below.
+            2 + blocks_under
+        };
+
+        let mut orphan_block = txn.get_block(orphan_block_no).await?;
+        orphan_block
+            .block_mut()
+            .get_mut_at_offset::<BlockHeader>(0)
+            .set_blocks_in_use(orphan_blocks_in_use);
+
+        Superblock::free_complex_block(txn, orphan_block_no).await
+    }
+
+    /// Chops off the right-most branches of the node at `this_block_no` whose
+    /// keys are at or above `first_stale_key` (i.e. they hold only data above the
+    /// truncation point), moving them into an orphan file that is then freed.
+    /// `file_block_no` is the file entry whose `blocks_in_use` is decremented.
+    ///
+    /// Returns the right-most surviving child to descend into next, or `None`
+    /// when this node is a leaf (only data blocks were chopped) or when the whole
+    /// node was stale (no surviving child remains).
+    pub async fn truncate_right<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        this_block_no: BlockNo,
+        file_block_no: BlockNo,
+        first_stale_key: u64,
+    ) -> Result<Option<BlockNo>> {
+        let block = txn.get_block(this_block_no).await?;
+        let (is_leaf, cut, chopped) = {
+            let block_ref = block.block();
+            let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+            let num_keys = this.num_keys as usize;
+            if num_keys > ORDER {
+                log::error!("Bad B+ Tree Node {}.", this_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let is_leaf = this.is_leaf();
+            // Keys are sorted, so `cut` splits live (< first_stale_key) from stale.
+            let cut = this.kv[..num_keys].partition_point(|kv| kv.key < first_stale_key);
+            let chopped: Vec<KV> = this.kv[cut..num_keys].to_vec();
+            (is_leaf, cut, chopped)
+        };
+
+        if !chopped.is_empty() {
+            // Count the blocks that are about to leave this file.
+            let blocks_under = if is_leaf {
+                // Each chopped branch is a single data block.
+                chopped.len() as u64
+            } else {
+                let mut total = 0u64;
+                for kv in &chopped {
+                    total += Box::pin(NonRootNode::count_subtree_blocks(txn, kv.child_block_no))
+                        .await?;
+                }
+                total
+            };
+
+            Self::orphan_branches(txn, &chopped, is_leaf, blocks_under).await?;
+
+            // Detach the chopped branches from this node.
+            {
+                let mut block = txn.get_block(this_block_no).await?;
+                let mut block_ref = block.block_mut();
+                let this = block_ref.get_mut_at_offset::<Self>(Self::offset_in_block());
+                this.num_keys = cut as u8;
+                if cut == 0 {
+                    // The whole node became stale. This only happens at the root
+                    // (a node on the path always keeps its left-most child), so
+                    // reset it to a valid empty leaf root: the now-empty file must
+                    // remain writable.
+                    this.kind = Self::KIND_ROOT | Self::KIND_LEAF;
+                }
+            }
+
+            DirEntryBlock::decrement_blocks_in_use(txn, file_block_no, blocks_under).await?;
+        }
+
+        // A leaf chops data blocks directly: there is nothing deeper. An empty
+        // cut means the whole node was stale, so no surviving child remains.
+        if is_leaf || cut == 0 {
+            return Ok(None);
+        }
+
+        let next = {
+            let block = txn.get_block(this_block_no).await?;
+            let block_ref = block.block();
+            let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+            this.kv[cut - 1].child_block_no
+        };
+        Ok(Some(next))
     }
 
     #[allow(unused)]
@@ -1063,15 +1293,16 @@ impl RootNode {
         let child_block = txn.get_block(child_block_no).await?;
         let child_block_ref = child_block.block();
         let child = child_block_ref.get_at_offset::<NonRootNode>(NonRootNode::offset_in_block());
-        assert_eq!(child.num_keys as usize, BTREE_NODE_MIN_KEYS - 1);
+        // A normal collapse moves a child of min - 1 keys, but draining an
+        // under-full tree can collapse a child with any number of keys.
+        let child_keys = child.num_keys as usize;
 
         // Move data.
-        root.num_keys = (BTREE_NODE_MIN_KEYS - 1) as u8;
+        root.num_keys = child_keys as u8;
         if child.is_leaf() {
             root.kind |= Self::KIND_LEAF;
         }
-        root.kv[..(BTREE_NODE_MIN_KEYS - 1)]
-            .clone_from_slice(&child.kv[..(BTREE_NODE_MIN_KEYS - 1)]);
+        root.kv[..child_keys].clone_from_slice(&child.kv[..child_keys]);
 
         drop(root_block_ref);
         drop(child_block_ref);
