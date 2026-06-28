@@ -6,8 +6,19 @@
 //! them: it sends a request over a cross-thread channel that
 //! [`stats_responder_task`] (running in the net runtime) answers with a freshly
 //! built snapshot. Best effort, never precise.
+//!
+//! This module also hosts the `sys-io-stats-service` sync-RPC service (see
+//! [`moto_sys_io::stats`]) that lists live TCP sockets. It runs on its own
+//! thread and reuses the same cross-thread polling mechanism to read the socket
+//! table out of the net runtime.
 
+use moto_ipc::sync::{ChannelSize, LocalServer, ResponseHeader};
 use moto_stats::{MetricDescWire, MetricEntry};
+use moto_sys::SysHandle;
+use moto_sys_io::stats::{
+    CMD_TCP_STATS, GetTcpSocketStatsRequest, GetTcpSocketStatsResponse, MAX_TCP_SOCKET_STATS,
+    TcpSocketStatsV1, URL_IO_STATS,
+};
 use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
 /// Net metric ids. They are private to sys-io: collectors learn their names
@@ -71,41 +82,59 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
     ]
 }
 
-/// A request from the stats-server thread for a metrics snapshot, carrying the
-/// one-shot channel to respond on.
-struct StatsRequest {
-    respond_to: moto_async::oneshot::Sender<Vec<MetricEntry>>,
+/// A request from a polling thread for a fresh snapshot, carrying the one-shot
+/// channel to respond on. Answered by [`stats_responder_task`] in the net runtime.
+enum StatsRequest {
+    /// A metrics snapshot for the moto-stats provider (`crate::stats_server`).
+    Metrics(moto_async::oneshot::Sender<Vec<MetricEntry>>),
+    /// A page of TCP socket stats (ids >= `start_id`, ordered) for the
+    /// `sys-io-stats-service`.
+    TcpSockets {
+        start_id: u64,
+        respond_to: moto_async::oneshot::Sender<Vec<TcpSocketStatsV1>>,
+    },
 }
 
 /// Sender half of the request channel. Set once, when the net runtime spawns its
-/// responder task; read by the stats-server thread in [`query_metrics`].
+/// responder task; read by the polling threads in [`query_metrics`] and
+/// [`query_tcp_socket_stats`].
 static STATS_REQUESTS: OnceLock<moto_async::channel::Sender<StatsRequest>> = OnceLock::new();
 
-/// Capacity of the request channel. The stats-server thread serializes its
-/// queries (one outstanding at a time), so this only needs slack for races.
+/// Capacity of the request channel. Each polling thread keeps only one query
+/// outstanding at a time, so this only needs slack for races.
 const STATS_REQUEST_CAPACITY: usize = 4;
 
-/// Spawn the task that answers metric-snapshot requests from the stats-server
-/// thread. Call once, from the net runtime.
-pub(super) fn spawn_stats_responder(stats: Rc<NetStats>) {
+/// Spawn the task that answers snapshot requests from the polling threads. Call
+/// once, from the net runtime.
+pub(super) fn spawn_stats_responder(runtime: super::NetRuntime) {
     let (tx, rx) = moto_async::channel(STATS_REQUEST_CAPACITY);
     if STATS_REQUESTS.set(tx).is_err() {
         log::error!("sys-io: net stats responder already started");
         return;
     }
 
-    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(stats, rx));
+    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(runtime, rx));
 }
 
-/// Listen for stats requests and answer each with a fresh snapshot of the
-/// (single-threaded) net stats. Runs in the net runtime.
+/// Listen for stats requests and answer each with a fresh snapshot built from the
+/// (single-threaded) net runtime. Runs in the net runtime.
 async fn stats_responder_task(
-    stats: Rc<NetStats>,
+    runtime: super::NetRuntime,
     mut requests: moto_async::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
-        // The receiver is gone if the stats-server thread stopped waiting; ignore.
-        let _ = req.respond_to.send(stats.entries());
+        // The receiver is gone if the polling thread stopped waiting; ignore.
+        match req {
+            StatsRequest::Metrics(respond_to) => {
+                let _ = respond_to.send(runtime.stats.entries());
+            }
+            StatsRequest::TcpSockets {
+                start_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(collect_tcp_socket_stats(&runtime, start_id));
+            }
+        }
     }
 }
 
@@ -120,9 +149,128 @@ pub(crate) fn query_metrics() -> Vec<MetricEntry> {
     // cross-thread request/response round-trip to completion.
     moto_async::LocalRuntime::new().block_on(async move {
         let (respond_to, response) = moto_async::oneshot();
-        if requests.send(StatsRequest { respond_to }).await.is_err() {
+        if requests
+            .send(StatsRequest::Metrics(respond_to))
+            .await
+            .is_err()
+        {
             return Vec::new();
         }
         response.await.unwrap_or_default()
     })
+}
+
+/// Poll a page of TCP socket stats (ids >= `start_id`, ordered by id) out of the
+/// net runtime. Called from the socket-stats-service thread; returns empty if the
+/// net runtime isn't up yet.
+fn query_tcp_socket_stats(start_id: u64) -> Vec<TcpSocketStatsV1> {
+    let Some(requests) = STATS_REQUESTS.get() else {
+        return Vec::new();
+    };
+
+    moto_async::LocalRuntime::new().block_on(async move {
+        let (respond_to, response) = moto_async::oneshot();
+        if requests
+            .send(StatsRequest::TcpSockets {
+                start_id,
+                respond_to,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        response.await.unwrap_or_default()
+    })
+}
+
+/// Build a page of TCP socket stats: sockets with id >= `start_id`, ordered by
+/// id, capped at [`MAX_TCP_SOCKET_STATS`]. Runs in the net runtime.
+fn collect_tcp_socket_stats(runtime: &super::NetRuntime, start_id: u64) -> Vec<TcpSocketStatsV1> {
+    use super::socket::MotoSocket;
+
+    // Snapshot the socket handles, then drop the borrow: building each socket's
+    // stats re-borrows the runtime inner (to read the smoltcp state).
+    let sockets: Vec<_> = runtime.inner.borrow().sockets.values().cloned().collect();
+
+    let mut stats: Vec<TcpSocketStatsV1> = sockets
+        .iter()
+        .filter(|socket| socket.borrow().is_tcp())
+        .map(MotoSocket::collect_tcp_stats)
+        .filter(|stat| stat.id >= start_id)
+        .collect();
+
+    // Ordered by id so clients can page through via start_id.
+    stats.sort_by_key(|stat| stat.id);
+    stats.truncate(MAX_TCP_SOCKET_STATS);
+    stats
+}
+
+/// Spawn the `sys-io-stats-service` thread, which serves the TCP socket listing
+/// (see [`moto_sys_io::stats`]). Safe to call before the net runtime is up: it
+/// simply returns no sockets until the responder task is running.
+pub(crate) fn start_socket_stats_service() {
+    let _ = std::thread::Builder::new()
+        .name("sys-io:ss".to_owned())
+        .spawn(socket_stats_thread);
+}
+
+fn socket_stats_thread() {
+    let mut server = match LocalServer::new(URL_IO_STATS, ChannelSize::Small, 4, 2) {
+        Ok(s) => s,
+        Err(err) => {
+            log::error!("sys-io: failed to start socket stats server: {err:?}");
+            return;
+        }
+    };
+
+    log::debug!("sys-io socket stats server started");
+
+    loop {
+        match server.wait(SysHandle::NONE, &[]) {
+            Ok(wakers) => {
+                for waker in wakers {
+                    process_socket_stats(&mut server, waker);
+                }
+            }
+            // Dropped connections are already cleaned up by wait(); nothing to do.
+            Err(_dropped) => {}
+        }
+    }
+}
+
+fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
+    let Some(conn) = server.get_connection(waker) else {
+        return;
+    };
+    if !conn.connected() || !conn.have_req() {
+        return;
+    }
+
+    let (cmd, start_id) = {
+        let raw = conn.raw_channel();
+        let req = unsafe { raw.get::<GetTcpSocketStatsRequest>() };
+        (req.header.cmd, req.start_id)
+    };
+
+    match cmd {
+        CMD_TCP_STATS => {
+            let stats = query_tcp_socket_stats(start_id);
+            let raw = conn.raw_channel();
+            let resp =
+                unsafe { raw.get_mut::<GetTcpSocketStatsResponse<MAX_TCP_SOCKET_STATS>>() };
+            debug_assert!(stats.len() <= MAX_TCP_SOCKET_STATS);
+            resp.num_results = stats.len() as u64;
+            resp.socket_stats[..stats.len()].copy_from_slice(&stats);
+            resp.header.result = moto_rt::E_OK;
+        }
+        _ => {
+            let raw = conn.raw_channel();
+            unsafe {
+                raw.get_mut::<ResponseHeader>().result = moto_rt::E_INVALID_ARGUMENT;
+            }
+        }
+    }
+
+    let _ = conn.finish_rpc();
 }

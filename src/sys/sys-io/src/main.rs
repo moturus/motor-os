@@ -65,8 +65,6 @@ fn main() {
     runtime::init(); // Allocates the 2M page for PCI/VirtIO mappings.
     runtime::spawn_async();
 
-    stats_server::start();
-
     let mut cmd = std::process::Command::new("/sys/sys-init");
 
     // Init deals with stdio.
@@ -80,10 +78,14 @@ fn main() {
     cmd.env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, "0xffffffffffffffff");
 
     // Start sys-init and wait on it (exit when sys-init exits).
-    cmd.spawn()
-        .expect("Error starting sys-init: ")
-        .wait()
-        .unwrap();
+    let mut init_join_handle = cmd.spawn().expect("Error starting sys-init: ");
+
+    // Defer stats services start.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    stats_server::start();
+    runtime::net::stats::start_socket_stats_service();
+
+    init_join_handle.wait().unwrap();
 
     #[cfg(debug_assertions)]
     moto_sys::SysRay::log("sys-io exiting").ok();

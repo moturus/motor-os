@@ -172,6 +172,51 @@ impl MotoSocket {
         f(base.socket_id, smoltcp_socket, tcp_state)
     }
 
+    /// Build a best-effort stats snapshot for this TCP socket, used by the
+    /// `sys-io-stats-service` socket listing (see [`crate::runtime::net::stats`]).
+    pub(crate) fn collect_tcp_stats(
+        moto_socket: &Rc<RefCell<Self>>,
+    ) -> moto_sys_io::stats::TcpSocketStatsV1 {
+        use moto_sys_io::stats::TcpSocketStatsV1;
+
+        // Read the smoltcp state first: with_tcp_smoltcp_socket() borrows both the
+        // socket and the runtime inner, so we must not hold a borrow across it.
+        let smoltcp_state = Self::with_tcp_smoltcp_socket(
+            moto_socket,
+            |_socket_id, smoltcp_socket, _state| smoltcp_socket.state(),
+        );
+
+        let socket_ref = moto_socket.borrow();
+        let Self { base, state } = &*socket_ref;
+        let tcp_state = state.unwrap_tcp();
+
+        // Sockets can linger after their client is gone, so the pid may be unknown.
+        let pid = moto_sys::SysObj::get_pid(base.client_sender.remote_handle()).unwrap_or(0);
+
+        let (local_addr, local_port) = addr_to_octets(&base.local_addr);
+        let (remote_addr, remote_port) = match tcp_state.remote_addr {
+            Some(addr) => addr_to_octets(&addr),
+            None => ([0u8; 16], 0),
+        };
+
+        TcpSocketStatsV1 {
+            id: base.socket_id(),
+            device_id: base.device_idx as u64,
+            pid,
+            local_addr,
+            local_port,
+            remote_addr,
+            remote_port,
+            tcp_state: api_tcp_state(
+                smoltcp_state,
+                tcp_state.rx_closed,
+                tcp_state.tx_closed,
+                tcp_state.tcp_listener.is_some(),
+            ),
+            smoltcp_state,
+        }
+    }
+
     fn create_tcp_socket(
         runtime: &NetRuntime,
         device_idx: usize,
@@ -1465,6 +1510,64 @@ impl MotoSocket {
 
         Self::close_tcp_socket_inner(moto_socket, Some(msg)).await;
         Ok(())
+    }
+}
+
+/// Convert a socket address into the IPv6 (IPv4-mapped) octets + port form used
+/// by [`moto_sys_io::stats::TcpSocketStatsV1`].
+fn addr_to_octets(addr: &SocketAddr) -> ([u8; 16], u16) {
+    match addr {
+        SocketAddr::V4(v4) => (v4.ip().to_ipv6_mapped().octets(), v4.port()),
+        SocketAddr::V6(v6) => (v6.ip().octets(), v6.port()),
+    }
+}
+
+/// Best-effort mapping of a socket's smoltcp state (plus our shutdown flags) onto
+/// the Motor OS-level [`api_net::TcpState`] reported in stats.
+fn api_tcp_state(
+    smoltcp_state: smoltcp::socket::tcp::State,
+    rx_closed: bool,
+    tx_closed: bool,
+    has_listener: bool,
+) -> api_net::TcpState {
+    use api_net::TcpState as T;
+    use smoltcp::socket::tcp::State as S;
+
+    match smoltcp_state {
+        S::Closed => T::Closed,
+        S::Listen => T::Listening,
+        S::SynSent => T::Connecting,
+        S::SynReceived => {
+            // Still owned by a listener => an incoming connection awaiting accept.
+            if has_listener {
+                T::PendingAccept
+            } else {
+                T::Connecting
+            }
+        }
+        // Established: reflect which directions are still open.
+        S::Established => match (rx_closed, tx_closed) {
+            (false, false) => T::ReadWrite,
+            (false, true) => T::ReadOnly,
+            (true, false) => T::WriteOnly,
+            (true, true) => T::Closed,
+        },
+        // Remote initiated the close; we may still have data to send.
+        S::CloseWait | S::LastAck => {
+            if tx_closed {
+                T::Closed
+            } else {
+                T::WriteOnly
+            }
+        }
+        // We initiated the close; we may still have data to receive.
+        S::FinWait1 | S::FinWait2 | S::Closing | S::TimeWait => {
+            if rx_closed {
+                T::Closed
+            } else {
+                T::ReadOnly
+            }
+        }
     }
 }
 

@@ -526,7 +526,7 @@ pub(super) async fn init(
     };
 
     runtime.stats.num_devices.set(device_idx as u64);
-    stats::spawn_stats_responder(runtime.stats.clone());
+    stats::spawn_stats_responder(runtime.clone());
 
     runtime.spawn_net_runtime().await;
     log::debug!("NET runtime started");
