@@ -547,8 +547,10 @@ impl Drop for TcpStream {
         req.command = api_net::NetCmd::TcpStreamClose as u16;
         req.handle = self.handle();
 
-        // TODO: is this unwrap OK?
-        self.channel().post_msg(req).unwrap();
+        // Guaranteed delivery: never drop the close (sys-io would leak the
+        // stream), never panic on a full send queue, and never deadlock when
+        // this drop runs on the IO thread (see send_msg_guaranteed).
+        self.channel().send_msg_guaranteed(req);
 
         // Clear RX queue: basically, free up server-allocated pages.
         super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());

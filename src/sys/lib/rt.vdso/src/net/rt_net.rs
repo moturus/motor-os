@@ -548,6 +548,13 @@ pub struct NetChannel {
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
 
+    // Fire-and-forget messages (e.g. TcpStreamClose) that could not be staged
+    // into `send_queue` because it was full, and that were produced while
+    // running on the IO thread itself (so blocking to wait for room would
+    // deadlock). The IO thread's main loop drains these back into `send_queue`.
+    // Only ever touched by the IO thread.
+    deferred_msgs: Mutex<VecDeque<io_channel::Msg>>,
+
     // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
     legacy_resp_waiters: Mutex<BTreeMap<u64, (SysHandle, Option<io_channel::Msg>)>>,
     response_handlers: Mutex<BTreeMap<u64, Weak<dyn ResponseHandler + Send + Sync>>>,
@@ -599,9 +606,16 @@ impl NetChannel {
 
             self.io_thread_running.store(true, Ordering::Release);
             let mut should_sleep = self.io_thread_poll_messages();
+
+            // Re-stage messages deferred from a TcpStream drop that ran on this
+            // (the IO) thread while the send queue was full. Done here, in the
+            // main loop, so recv and send keep interleaving and we cannot
+            // deadlock against sys-io.
+            let deferred_pending = self.restage_deferred_msgs();
+
             let (sleep, msg) = self.io_thread_send_messages(maybe_msg);
             maybe_msg = msg;
-            should_sleep &= sleep;
+            should_sleep &= sleep && !deferred_pending;
 
             if !self.send_queue.is_full() {
                 // Take waiters because maybe_can_write() may push into write_waiters.
@@ -840,6 +854,7 @@ impl NetChannel {
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
+            deferred_msgs: Mutex::new(VecDeque::new()),
             legacy_resp_waiters: Mutex::new(BTreeMap::new()),
             response_handlers: Mutex::new(BTreeMap::new()),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
@@ -984,6 +999,64 @@ impl NetChannel {
         } else {
             Err(req)
         }
+    }
+
+    fn on_io_thread(&self) -> bool {
+        self.io_thread_wake_handle.load(Ordering::Relaxed)
+            == moto_sys::UserThreadControlBlock::get().self_handle
+    }
+
+    // Move deferred messages back into the send queue. Returns true if some
+    // remain (the send queue is still full). Only called from the IO thread.
+    fn restage_deferred_msgs(&self) -> bool {
+        debug_assert!(self.on_io_thread());
+
+        let mut deferred = self.deferred_msgs.lock();
+        while let Some(&msg) = deferred.front() {
+            if self.send_queue.push(msg).is_ok() {
+                deferred.pop_front();
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Enqueue a fire-and-forget message (e.g. TcpStreamClose) for delivery to
+    /// sys-io. Unlike `post_msg`, the message is never dropped (sys-io would
+    /// otherwise leak the stream), it never panics on a full send queue, and it
+    /// never deadlocks when called from the IO thread.
+    ///
+    /// A TcpStream can be dropped on the IO thread itself: the IO thread briefly
+    /// upgrades the Weak it keeps in `tcp_streams`, and if the application has
+    /// already closed its fd, that upgrade holds the last strong reference, so
+    /// `TcpStream::drop` (and this call) runs on the IO thread. Blocking there to
+    /// wait for the send queue to drain would deadlock, since the IO thread is
+    /// the only party that drains it.
+    pub fn send_msg_guaranteed(&self, msg: io_channel::Msg) {
+        // Fast path: there is room in the staging queue.
+        if self.post_msg(msg).is_ok() {
+            return;
+        }
+
+        if !self.on_io_thread() {
+            // A different thread drains the send queue, so blocking is safe.
+            // This is the same path that write()/send_receive() already use.
+            self.send_msg(msg);
+            return;
+        }
+
+        // We are the IO thread and the queue is full: hand the message to the
+        // main loop, which keeps interleaving recv and send (so it makes
+        // progress against sys-io) and will stage it as soon as there is room.
+        // `restage_deferred_msgs()` drains this back into `send_queue`.
+        self.deferred_msgs.lock().push_back(msg);
+        self.maybe_wake_io_thread();
+
+        // Ensure the main loop does not go to sleep with this still pending.
+        // Note: we are running on the IO thread (see the 'if' above), so
+        // just setting the flag is fine, no need to wake it.
+        self.io_thread_wake_requested.store(true, Ordering::Release);
     }
 
     pub fn post_msg_with_response_waiter(
