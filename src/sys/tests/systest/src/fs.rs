@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io::Seek, path::PathBuf};
 
 fn temp_dir() -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -204,11 +204,34 @@ pub fn smoke_test() {
     println!("    ---- FS: smoke_test PASS");
 }
 
+fn resize_test() {
+    println!("    ---- FS: resize_test starting...");
+    const LEN: usize = 1024 * 1024 * 7 + 131;
+
+    let mut bytes = Vec::with_capacity(LEN);
+    bytes.resize(LEN, 0);
+    for byte in &mut bytes {
+        *byte = std::random::random(..);
+    }
+
+    std::fs::write("/baz", bytes.as_slice()).unwrap();
+    let file = std::fs::File::open("/baz").unwrap();
+    assert_eq!(file.metadata().unwrap().len(), LEN as u64);
+
+    println!("    ---- FS: resize_test resizing...");
+    file.set_len(8192 + 11).unwrap();
+
+    drop(file);
+    std::fs::remove_file("/baz").unwrap();
+    println!("    ---- FS: resize_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
     smoke_test();
     copy_test();
     remove_dir_all_test();
+    resize_test();
 
     println!("FS tests PASS");
 }
