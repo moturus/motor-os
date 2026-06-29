@@ -446,11 +446,22 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         // Every block whose key is at or above this holds only data above new_size.
         let first_stale_key = new_size.div_ceil(BLOCK_SIZE as u64);
 
+        // Seed the root's subtree total from the file's maintained block count:
+        // every block the file occupies except the entry block itself sits below
+        // the root node. This lets truncate_right count chopped blocks by
+        // subtraction instead of walking the whole chopped-off forest.
+        let blocks_below_root = {
+            let entry_block = fs.block_cache().get_block(file_id.block_no()).await?;
+            let total = DirEntryBlock::from_block(&entry_block.block()).blocks_in_use();
+            total - 1
+        };
+
         // Chop the right-most stale branches level by level, root first. The tree
         // is at most four levels deep, so at most four iterations are needed; the
         // last one chops off data blocks, completing the resize.
         let mut node_block_no = file_id.block_no;
         let mut is_root = true;
+        let mut subtree_total = Some(blocks_below_root);
         for _step in 0..4 {
             #[cfg(test)]
             if _step >= TRUNCATE_MAX_STEPS.with(|c| c.get()) {
@@ -463,12 +474,14 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                 node_block_no,
                 is_root,
                 first_stale_key,
+                subtree_total,
             )
             .await?
             {
-                Some(child) => {
+                Some((child, child_total)) => {
                     node_block_no = child;
                     is_root = false;
+                    subtree_total = child_total;
                 }
                 None => break,
             }
@@ -502,15 +515,18 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
     }
 
     /// Chops off the right-most stale branches at a single tree level, in one
-    /// transaction. Returns the next node to process (the right-most surviving
-    /// child), or `None` once the data (leaf) level has been reached.
+    /// transaction. `subtree_total` is the number of blocks below `node_block_no`,
+    /// when known (see [`crate::bplus_tree::Node::truncate_right`]). Returns the
+    /// next node to process (the right-most surviving child) and its own subtree
+    /// total, or `None` once the data (leaf) level has been reached.
     async fn truncate_right_txn(
         fs: &mut MotorFs<BD>,
         file_block_no: BlockNo,
         node_block_no: BlockNo,
         is_root: bool,
         first_stale_key: u64,
-    ) -> Result<Option<BlockNo>> {
+        subtree_total: Option<u64>,
+    ) -> Result<Option<(BlockNo, Option<u64>)>> {
         let mut txn = Txn {
             fs,
             txn_cache: micromap::Map::new(),
@@ -523,6 +539,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                 node_block_no,
                 file_block_no,
                 first_stale_key,
+                subtree_total,
             )
             .await?
         } else {
@@ -531,6 +548,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                 node_block_no,
                 file_block_no,
                 first_stale_key,
+                subtree_total,
             )
             .await?
         };

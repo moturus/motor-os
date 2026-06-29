@@ -126,6 +126,14 @@ fn resize_truncate_crash_regrow() {
 }
 
 #[test]
+fn resize_truncate_accounting_walk() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(resize_truncate_accounting_walk_test()).unwrap();
+}
+
+#[test]
 #[ignore]
 fn write_speed() {
     init_logger();
@@ -1143,6 +1151,54 @@ async fn resize_truncate_crash_regrow_test() -> Result<()> {
     }
 
     println!("resize_truncate_crash_regrow_test PASS");
+    Ok(())
+}
+
+/// The block accounting during a multi-block truncation must walk the *smaller*
+/// of the surviving / chopped-off sides, deriving the other by subtraction from
+/// the file's recorded block count. In particular truncate-to-zero must not walk
+/// the chopped-off tree at all.
+async fn resize_truncate_accounting_walk_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 8 / 4096; // 8 MB.
+    const BS: u64 = 4096;
+    let full = NUM_BLOCKS - RESERVED_BLOCKS as u64;
+    let root = crate::ROOT_DIR_ID;
+
+    let mut fs = create_fs("motor_fs_resize_truncate_accounting_walk_test", NUM_BLOCKS).await?;
+    let file = fs.create_entry(root, EntryKind::File, "f").await.unwrap();
+
+    // > 226 blocks => the tree has internal nodes, so the chopped-off forest holds
+    // several tree nodes that a naive count would walk.
+    const N0: u64 = 1200;
+    resize_write_blocks(&mut fs, file, N0).await;
+
+    // (1) Truncate to zero: the surviving side is empty, so the chopped count is
+    //     the whole (known) subtree total -- nothing to walk.
+    crate::bplus_tree::COUNT_SUBTREE_VISITS.with(|c| c.set(0));
+    fs.resize(file, 0).await.unwrap();
+    let visits = crate::bplus_tree::COUNT_SUBTREE_VISITS.with(|c| c.get());
+    assert_eq!(visits, 0, "truncate-to-zero visited {visits} tree nodes; expected 0");
+    // Accounting must still be exact: only the entry block remains in use.
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+    // (2) Truncate-to-tiny: only the thin surviving spine is walked, never the
+    //     large chopped-off remainder.
+    resize_write_blocks(&mut fs, file, N0).await;
+    resize_verify(&mut fs, file, N0 * BS).await;
+
+    crate::bplus_tree::COUNT_SUBTREE_VISITS.with(|c| c.set(0));
+    fs.resize(file, BS).await.unwrap();
+    let visits = crate::bplus_tree::COUNT_SUBTREE_VISITS.with(|c| c.get());
+    // The surviving spine is at most one node per tree level (<= 4); walking the
+    // chopped-off side would instead visit every leaf (and any middle nodes).
+    assert!(visits <= 4, "truncate-to-tiny visited {visits} tree nodes; expected the spine only");
+    resize_verify(&mut fs, file, BS).await;
+
+    // Accounting is still exact end-to-end: everything is reclaimed on delete.
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    println!("resize_truncate_accounting_walk_test PASS");
     Ok(())
 }
 

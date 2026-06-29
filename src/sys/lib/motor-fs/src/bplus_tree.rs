@@ -15,6 +15,15 @@ use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
 
+#[cfg(test)]
+thread_local! {
+    /// Test instrumentation: counts how many tree nodes
+    /// [`Node::count_subtree_blocks`] visits, so tests can assert that a
+    /// truncation walks the smaller side rather than the whole chopped forest.
+    pub(crate) static COUNT_SUBTREE_VISITS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 // Note: we keep min keys at less than half to prevent insert/delete thrashing.
 // TODO: figure out the best value for this constant.
 // Note: because root nodes and non-root nodes have different orders,
@@ -947,6 +956,9 @@ impl<const ORDER: usize> Node<ORDER> {
         txn: &mut Txn<'_, BD>,
         node_block_no: BlockNo,
     ) -> Result<u64> {
+        #[cfg(test)]
+        COUNT_SUBTREE_VISITS.with(|c| c.set(c.get() + 1));
+
         let block = txn.get_block_untracked(node_block_no).await?;
         let (is_leaf, num_keys, children) = {
             let block_ref = block.block();
@@ -1065,17 +1077,25 @@ impl<const ORDER: usize> Node<ORDER> {
     /// truncation point), moving them into an orphan file that is then freed.
     /// `file_block_no` is the file entry whose `blocks_in_use` is decremented.
     ///
-    /// Returns the right-most surviving child to descend into next, or `None`
-    /// when this node is a leaf (only data blocks were chopped) or when the whole
-    /// node was stale (no surviving child remains).
+    /// `subtree_total`, when known, is the number of blocks below this node (all
+    /// of its children's subtrees combined). It lets the chopped-block count be
+    /// derived by subtraction after walking only the *surviving* side, so a
+    /// truncation that drops most of the tree (e.g. truncate-to-zero) need not
+    /// walk the whole chopped-off forest. See [`Self::count_subtree_blocks`].
+    ///
+    /// Returns the right-most surviving child to descend into next together with
+    /// *its* `subtree_total` (when cheaply known), or `None` when this node is a
+    /// leaf (only data blocks were chopped) or when the whole node was stale (no
+    /// surviving child remains).
     pub async fn truncate_right<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         file_block_no: BlockNo,
         first_stale_key: u64,
-    ) -> Result<Option<BlockNo>> {
+        subtree_total: Option<u64>,
+    ) -> Result<Option<(BlockNo, Option<u64>)>> {
         let block = txn.get_block(this_block_no).await?;
-        let (is_leaf, cut, chopped) = {
+        let (is_leaf, cut, chopped, survivors) = {
             let block_ref = block.block();
             let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
             let num_keys = this.num_keys as usize;
@@ -1087,15 +1107,44 @@ impl<const ORDER: usize> Node<ORDER> {
             // Keys are sorted, so `cut` splits live (< first_stale_key) from stale.
             let cut = this.kv[..num_keys].partition_point(|kv| kv.key < first_stale_key);
             let chopped: Vec<KV> = this.kv[cut..num_keys].to_vec();
-            (is_leaf, cut, chopped)
+            let survivors: Vec<BlockNo> =
+                this.kv[..cut].iter().map(|kv| kv.child_block_no).collect();
+            (is_leaf, cut, chopped, survivors)
         };
 
+        // `subtree_total` of the child we descend into, propagated to the next
+        // level when we learn it for free (i.e. when we walk the surviving side).
+        let mut next_subtree_total: Option<u64> = None;
+
         if !chopped.is_empty() {
-            // Count the blocks that are about to leave this file.
+            // Count the blocks that are about to leave this file, walking whichever
+            // side (surviving or chopped) is smaller.
             let blocks_under = if is_leaf {
-                // Each chopped branch is a single data block.
+                // Each chopped branch is a single data block; no walk needed.
                 chopped.len() as u64
+            } else if let Some(total) = subtree_total.filter(|_| cut <= chopped.len()) {
+                // The surviving side has no more branches than the chopped side, so
+                // walk it and derive the chopped count by subtraction. This is the
+                // win for truncate-to-zero (cut == 0, nothing to walk) and small
+                // truncations (only the thin surviving spine is walked).
+                let mut survivors_count = 0u64;
+                for (idx, child) in survivors.iter().enumerate() {
+                    let sub = Box::pin(NonRootNode::count_subtree_blocks(txn, *child)).await?;
+                    survivors_count += sub;
+                    // The last survivor is the child we descend into next; its
+                    // blocks (minus the child node itself) are that level's total.
+                    if idx + 1 == cut {
+                        next_subtree_total = Some(sub - 1);
+                    }
+                }
+                debug_assert!(
+                    survivors_count <= total,
+                    "survivors {survivors_count} exceed subtree total {total}"
+                );
+                total - survivors_count
             } else {
+                // The chopped side is the smaller one (or no total is known): walk
+                // it directly. The descend child's total stays unknown.
                 let mut total = 0u64;
                 for kv in &chopped {
                     total += Box::pin(NonRootNode::count_subtree_blocks(txn, kv.child_block_no))
@@ -1147,7 +1196,7 @@ impl<const ORDER: usize> Node<ORDER> {
             let this = block_ref.get_at_offset::<Self>(Self::offset_in_block());
             this.kv[cut - 1].child_block_no
         };
-        Ok(Some(next))
+        Ok(Some((next, next_subtree_total)))
     }
 
     #[allow(unused)]

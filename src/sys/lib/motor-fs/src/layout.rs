@@ -691,6 +691,12 @@ impl DirEntryBlock {
         &mut self.metadata
     }
 
+    /// Total number of blocks this entry occupies: the entry block itself plus
+    /// every tree node and data block reachable from it.
+    pub fn blocks_in_use(&self) -> u64 {
+        self.block_header.blocks_in_use
+    }
+
     pub async fn get_hash<BD: AsyncBlockDevice>(
         txn: &mut Txn<'_, BD>,
         parent_id: EntryIdInternal,
