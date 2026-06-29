@@ -118,6 +118,14 @@ fn resize_truncate_wide_leaf() {
 }
 
 #[test]
+fn resize_truncate_crash_regrow() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(resize_truncate_crash_regrow_test()).unwrap();
+}
+
+#[test]
 #[ignore]
 fn write_speed() {
     init_logger();
@@ -1068,6 +1076,73 @@ async fn resize_truncate_wide_leaf_test() -> Result<()> {
     }
 
     println!("resize_truncate_wide_leaf_test PASS");
+    Ok(())
+}
+
+/// A crash partway through a multi-block (case (c)) truncation must never leave
+/// reachable stale data above the recorded file size: re-growing the file later
+/// must read back zeroes over the truncated region, not pre-truncation bytes.
+///
+/// The truncation is interrupted after a controlled number of B+ tree levels via
+/// [`crate::txn::TRUNCATE_MAX_STEPS`], standing in for a power loss mid-operation.
+async fn resize_truncate_crash_regrow_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 8 / 4096; // 8 MB.
+    const BS: u64 = 4096;
+    const FS_TAG: &str = "motor_fs_resize_truncate_crash_regrow_test";
+    // > 226 blocks forces a multi-level tree, so truncation is case (c).
+    const N0: u64 = 600;
+    const NEW_BLOCKS: u64 = 200;
+    let root = crate::ROOT_DIR_ID;
+
+    // Simulate a crash after each possible number of completed truncation levels,
+    // including 0 (crash right at the start) and a value past the tree depth (the
+    // truncation runs to completion).
+    for cap in 0..4usize {
+        let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+        let file = fs.create_entry(root, EntryKind::File, "f").await.unwrap();
+        resize_write_blocks(&mut fs, file, N0).await;
+        fs.flush().await.unwrap();
+
+        // Truncate, but stop after `cap` tree levels, as if the machine died
+        // before the remaining levels (and the final size fix-up) ran.
+        crate::txn::TRUNCATE_MAX_STEPS.with(|c| c.set(cap));
+        fs.resize(file, NEW_BLOCKS * BS).await.unwrap();
+        crate::txn::TRUNCATE_MAX_STEPS.with(|c| c.set(usize::MAX));
+        fs.flush().await.unwrap();
+        drop(fs);
+
+        // Reopen (replaying the txn log) and read the recovered size.
+        let mut fs = open_fs(FS_TAG).await?;
+        let recovered = fs.metadata(file).await.unwrap().size;
+        assert!(
+            recovered >= NEW_BLOCKS * BS,
+            "cap {cap}: recovered size {recovered} below requested truncation"
+        );
+
+        // Grow the file back to its original length. Everything above the
+        // recovered EOF must read back as zeroes.
+        fs.resize(file, N0 * BS).await.unwrap();
+
+        let mut buf = vec![0u8; 4096];
+        let mut off = recovered;
+        while off < N0 * BS {
+            let block_start = off & !(BS - 1);
+            let len = ((BS - (off - block_start)) as usize).min((N0 * BS - off) as usize);
+            assert_eq!(len, fs.read(file, off, &mut buf[..len]).await.unwrap());
+            for (i, &byte) in buf[..len].iter().enumerate() {
+                assert_eq!(
+                    byte, 0,
+                    "cap {cap}: stale data above recovered EOF {recovered} at offset {}",
+                    off + i as u64
+                );
+            }
+            off += len as u64;
+        }
+
+        drop(fs);
+    }
+
+    println!("resize_truncate_crash_regrow_test PASS");
     Ok(())
 }
 

@@ -32,6 +32,16 @@ use std::io::{ErrorKind, Result};
 /// Max number of blocks a single transaction may touch.
 const TXN_CACHE_SIZE: usize = 16;
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook: caps how many `truncate_right_txn` levels
+    /// [`Txn::do_large_truncate`] runs before bailing out early, simulating a
+    /// crash partway through a large truncation. `usize::MAX` (the default)
+    /// means "run to completion".
+    pub(crate) static TRUNCATE_MAX_STEPS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(usize::MAX) };
+}
+
 /// The transaction object: accumulates "dirty" blocks, then either discards
 /// them on error (so no changes to the underlying FS happen) or applies them
 /// "atomically", i.e. either all or nothing.
@@ -420,24 +430,19 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
     /// touch a bounded number of blocks, so the right-most stale branches are
     /// chopped off one tree level per transaction, walking from the root down to
     /// the data (leaf) level.
+    ///
+    /// The recorded file size is *not* set to `new_size` up front: instead each
+    /// chopping transaction lowers it in step with the branches it removes (see
+    /// `truncate_right`), and the exact `new_size` is pinned at the very end.
+    /// This keeps the recorded size from ever sitting below the file's surviving
+    /// extent at a committed step, so a crash mid-truncation can never leave
+    /// stale data blocks reachable above EOF (which would otherwise resurface,
+    /// un-zeroed, when the file is later grown again).
     async fn do_large_truncate(
         fs: &mut MotorFs<BD>,
         file_id: EntryIdInternal,
         new_size: u64,
     ) -> Result<()> {
-        // Shrink the recorded size first, so a crash mid-truncation leaves a
-        // usable (if briefly over-allocated) file rather than a short file that
-        // still points at now-detached blocks.
-        {
-            let mut txn = Txn {
-                fs: &mut *fs,
-                txn_cache: micromap::Map::new(),
-                read_only: false,
-            };
-            DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
-            txn.commit().await?;
-        }
-
         // Every block whose key is at or above this holds only data above new_size.
         let first_stale_key = new_size.div_ceil(BLOCK_SIZE as u64);
 
@@ -446,7 +451,12 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         // last one chops off data blocks, completing the resize.
         let mut node_block_no = file_id.block_no;
         let mut is_root = true;
-        for _ in 0..4 {
+        for _step in 0..4 {
+            #[cfg(test)]
+            if _step >= TRUNCATE_MAX_STEPS.with(|c| c.get()) {
+                // Test hook: bail out as if the machine crashed mid-truncation.
+                return Ok(());
+            }
             match Self::truncate_right_txn(
                 &mut *fs,
                 file_id.block_no,
@@ -464,17 +474,22 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             }
         }
 
-        // If new_size is not block-aligned, zero out the stale tail of the last
-        // surviving data block.
+        // Final transaction: pin the recorded size to exactly new_size and, if
+        // new_size is not block-aligned, zero out the stale tail of the last
+        // surviving data block. The size is set unconditionally here (not only in
+        // the unaligned case) so that the aligned and sparse paths also land on
+        // exactly new_size regardless of how far the per-level shrinking above
+        // got.
+        let mut txn = Txn {
+            fs: &mut *fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
         if new_size & (BLOCK_SIZE as u64 - 1) != 0 {
             let last_block_start = new_size & !(BLOCK_SIZE as u64 - 1);
             let last_block_key = last_block_start / (BLOCK_SIZE as u64);
 
-            let mut txn = Txn {
-                fs: &mut *fs,
-                txn_cache: micromap::Map::new(),
-                read_only: false,
-            };
             if let Some(data_block_no) =
                 DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, last_block_key).await?
             {
@@ -482,10 +497,8 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                 let mut data_block = txn.get_block(data_block_no).await?;
                 data_block.block_mut().as_bytes_mut()[new_end..].fill(0);
             }
-            txn.commit().await?;
         }
-
-        Ok(())
+        txn.commit().await
     }
 
     /// Chops off the right-most stale branches at a single tree level, in one

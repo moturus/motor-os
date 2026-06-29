@@ -10,6 +10,7 @@ use crate::DirEntryBlock;
 use crate::Superblock;
 use crate::Txn;
 use async_fs::AsyncBlockDevice;
+use async_fs::BLOCK_SIZE;
 use bytemuck::Pod;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -1121,6 +1122,17 @@ impl<const ORDER: usize> Node<ORDER> {
             }
 
             DirEntryBlock::decrement_blocks_in_use(txn, file_block_no, blocks_under).await?;
+
+            // Lower the recorded file size in step with the chop: every block
+            // from `chopped[0].key` onward has just left the file, so nothing
+            // survives at or above that key. Doing this here, atomically with the
+            // detach, keeps the recorded size from ever dropping below the file's
+            // surviving extent at a committed step, so a crash mid-truncation can
+            // never leave stale data reachable above EOF (e.g. once the file is
+            // grown again). `do_large_truncate` pins the exact final size at the
+            // end.
+            let surviving_extent = chopped[0].key * (BLOCK_SIZE as u64);
+            DirEntryBlock::set_file_size_in_entry(txn, file_block_no, surviving_extent).await?;
         }
 
         // A leaf chops data blocks directly: there is nothing deeper. An empty
