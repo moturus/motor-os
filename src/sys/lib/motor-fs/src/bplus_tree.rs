@@ -265,40 +265,77 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(())
     }
 
+    /// Returns the child of the smallest key in this subtree that is strictly
+    /// greater than `key` -- i.e. the in-order successor's child block -- or
+    /// `None` if `key` is at or past the last key. Directory iteration uses it to
+    /// step from one name-hash bucket to the next (see `MotorFs::get_next_entry`).
+    ///
+    /// Leaves here hold no sibling links, so the successor of the last key in a
+    /// leaf lives in a different subtree: the descent looks for it under `key`'s
+    /// own child first, and on failure falls back to the left-most entry of the
+    /// next child. A miss with no next child propagates `None` up so the caller,
+    /// one level higher, tries *its* next child.
     pub async fn next_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
         this_offset: usize,
         key: u64,
     ) -> Result<Option<BlockNo>> {
-        let block = txn.get_block(this_block_no).await?;
-        let block_ref = block.block();
-        let this = block_ref.get_at_offset::<Self>(this_offset);
+        // Inspect this node and decide where to go, dropping the borrow before
+        // any recursive await. Leaf and empty/error cases return outright; the
+        // internal case yields the child to descend into plus the next child as
+        // a fallback.
+        let (child, sibling) = {
+            let block = txn.get_block_untracked(this_block_no).await?;
+            let block_ref = block.block();
+            let this = block_ref.get_at_offset::<Self>(this_offset);
 
-        if this.num_keys as usize > ORDER {
-            log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
-            return Err(ErrorKind::InvalidData.into());
-        }
+            if this.num_keys as usize > ORDER {
+                log::error!("Bad B+ Tree Node {:?}(?).", this_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let num_keys = this.num_keys as usize;
+            if num_keys == 0 {
+                return Ok(None);
+            }
 
-        if this.num_keys == 0 {
-            return Ok(None);
-        }
+            if this.is_leaf() {
+                // The first key strictly greater than `key`, if any, is in this
+                // same leaf.
+                let pos = this.kv[..num_keys].partition_point(|kv| kv.key <= key);
+                return Ok((pos < num_keys).then(|| this.kv[pos].child_block_no));
+            }
 
-        if this.is_leaf() {
-            return match this.kv[..(this.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key)
-            {
-                Ok(pos) => {
-                    if pos < ((this.num_keys as usize) - 1) {
-                        Ok(Some(this.kv[pos + 1].child_block_no))
-                    } else {
-                        Ok(None)
-                    }
+            // Internal node: descend into the child whose range covers `key`,
+            // remembering the next child (its left-most entry is the successor if
+            // `key`'s own subtree has none).
+            let pos = match this.kv[..num_keys].binary_search_by_key(&key, |kv| kv.key) {
+                Ok(pos) => pos,
+                Err(pos) => {
+                    assert!(pos > 0);
+                    pos - 1
                 }
-                Err(_) => Ok(None),
             };
+            (
+                this.kv[pos].child_block_no,
+                (pos + 1 < num_keys).then(|| this.kv[pos + 1].child_block_no),
+            )
+        };
+
+        // Successor within `key`'s own subtree?
+        if let Some(found) =
+            Box::pin(NonRootNode::next_child(txn, child, BTREE_NODE_OFFSET, key)).await?
+        {
+            return Ok(Some(found));
         }
 
-        todo!()
+        // Otherwise it is the left-most entry of the next subtree, if any.
+        match sibling {
+            Some(sibling) => Ok(Box::pin(NonRootNode::first_child(txn, sibling))
+                .await?
+                .map(|kv| kv.child_block_no)),
+            None => Ok(None),
+        }
     }
 
     async fn split_node<BD: AsyncBlockDevice + 'static>(

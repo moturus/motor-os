@@ -86,6 +86,14 @@ fn hash_collision_move() {
 }
 
 #[test]
+fn readdir_large_dir() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(readdir_large_dir_test()).unwrap();
+}
+
+#[test]
 fn delete_reopen() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -690,6 +698,59 @@ async fn hash_collision_move_test() -> Result<()> {
     assert_eq!(fs.empty_blocks().await.unwrap(), full);
 
     println!("hash_collision_move_test PASS");
+    Ok(())
+}
+
+async fn readdir_large_dir_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024;
+    let mut fs = create_fs("motor_fs_readdir_large_dir_test", NUM_BLOCKS).await?;
+    let full = fs.empty_blocks().await.unwrap();
+
+    let root = crate::ROOT_DIR_ID;
+    let dir = fs
+        .create_entry(root, EntryKind::Directory, "big")
+        .await
+        .unwrap();
+
+    // Enough distinct-hash names to split the directory's B+ tree root into
+    // multiple levels (the root's order is 226), so iterating must step between
+    // leaves through internal nodes -- exercising `Node::next_child`'s non-leaf
+    // path. Eight-character names are distinct hashes in debug builds.
+    const N: usize = 300;
+    let mut expected = std::collections::HashSet::new();
+    for i in 0..N {
+        let name = format!("{i:08}");
+        fs.create_entry(dir, EntryKind::File, &name).await.unwrap();
+        assert!(expected.insert(name));
+    }
+    // A few colliding names too, so iteration also steps from a multi-entry hash
+    // bucket to the next key across the tree.
+    for name in ["zzzzzzzzA", "zzzzzzzzB", "zzzzzzzzC"] {
+        fs.create_entry(dir, EntryKind::File, name).await.unwrap();
+        assert!(expected.insert(name.to_string()));
+    }
+
+    // Iterating the directory must return every entry exactly once.
+    let listed = collect_dir_names(&mut fs, dir).await;
+    assert_eq!(listed.len(), expected.len(), "duplicate or missing entries");
+    let listed_set: std::collections::HashSet<String> = listed.into_iter().collect();
+    assert_eq!(listed_set, expected);
+
+    // Each is reachable individually too.
+    for name in &expected {
+        assert!(fs.stat(dir, name).await.unwrap().is_some(), "{name} missing");
+    }
+
+    // Tear down (collapsing the tree back) and confirm exact accounting.
+    for name in &expected {
+        let (id, _) = fs.stat(dir, name).await.unwrap().unwrap();
+        fs.delete_entry(id).await.unwrap();
+    }
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 0);
+    fs.delete_entry(dir).await.unwrap();
+    assert_eq!(fs.empty_blocks().await.unwrap(), full);
+
+    println!("readdir_large_dir_test PASS");
     Ok(())
 }
 
