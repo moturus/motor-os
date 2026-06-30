@@ -67,6 +67,21 @@ unsafe impl<const ORDER: usize> bytemuck::Pod for Node<ORDER> {}
 pub(crate) type RootNode = Node<BTREE_ROOT_ORDER>;
 pub(crate) type NonRootNode = Node<BTREE_NODE_ORDER>;
 
+/// What [`Node::take_spare_block`] pulled off a chopped-off branch's right
+/// spine to repurpose as an orphan container.
+struct SpareBlock {
+    /// The block to reuse as an orphan container (the entry, or a mid node).
+    block: BlockNo,
+    /// Blocks handed straight to the free list while pulling the spare: the
+    /// emptied right-most leaf's lone data block, plus any single-child nodes
+    /// above it that collapsed. The orphan's `blocks_in_use` is the chopped
+    /// total minus this count.
+    freed: u64,
+    /// Set when the descended branch was itself taken whole (its right spine
+    /// collapsed all the way up), so it no longer belongs under the orphan.
+    consumed_branch: bool,
+}
+
 impl<const ORDER: usize> Node<ORDER> {
     const KIND_LEAF: u8 = 1;
     const KIND_ROOT: u8 = 2;
@@ -992,10 +1007,142 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(total)
     }
 
-    /// Moves the chopped-off `branches` into a freshly allocated orphan file and
-    /// hands that file off to [`Superblock::free_complex_block`], which reclaims
-    /// the whole sub-forest lazily via the free list. `blocks_under` is the total
-    /// number of blocks reachable through `branches` (data blocks and tree nodes).
+    /// Pulls a spare container block off the *right* spine of the subtree rooted
+    /// at `branch`, sourcing it from the chopped-off forest itself so truncation
+    /// never allocates -- which keeps it from draining the free list (and
+    /// triggering a B+ rebalance that could blow the transaction's block budget)
+    /// and lets it succeed even on a full device.
+    ///
+    /// Walks down the right spine to the right-most leaf and takes its right-most
+    /// data block (O(1): just shrink `num_keys`). If that leaf has only a single
+    /// data block -- so taking it would leave the leaf empty -- the leaf node
+    /// *itself* is taken instead: its lone data block is freed and the leaf is
+    /// detached from its parent. Truncation chops the right side without
+    /// rebalancing, so the right spine of an already-truncated file can be a thin
+    /// residue chain; detaching the leaf can therefore empty its parent, which is
+    /// then freed too, walking up until a node still has a child to keep (or the
+    /// branch collapses entirely -- see `consumed_branch`). The chain is at most
+    /// a few levels deep, so the freed-block count stays small.
+    ///
+    /// Interior nodes are read untracked; only the blocks actually taken, freed,
+    /// or trimmed are modified.
+    async fn take_spare_block<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        branch: BlockNo,
+    ) -> Result<SpareBlock> {
+        // Descend the right-most spine to a leaf, recording the path so we can
+        // walk back up if the leaf cannot spare a data block. The tree is at most
+        // a few levels deep; the bound also guards a corrupted (cyclic) tree.
+        let mut path: Vec<BlockNo> = Vec::with_capacity(8);
+        let mut node_no = branch;
+        let leaf_num_keys = loop {
+            if path.len() >= 8 {
+                log::error!("take_spare_block: spine too deep from {}", branch.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let (is_leaf, num_keys, rightmost_child) = {
+                let block = txn.get_block_untracked(node_no).await?;
+                let block_ref = block.block();
+                let node = block_ref.get_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
+                let num_keys = node.num_keys as usize;
+                if num_keys == 0 || num_keys > BTREE_NODE_ORDER {
+                    log::error!("take_spare_block: bad node {}", node_no.as_u64());
+                    return Err(ErrorKind::InvalidData.into());
+                }
+                (
+                    node.is_leaf(),
+                    num_keys,
+                    node.kv[num_keys - 1].child_block_no,
+                )
+            };
+            path.push(node_no);
+            if is_leaf {
+                break num_keys;
+            }
+            node_no = rightmost_child;
+        };
+        let leaf_no = *path.last().unwrap();
+
+        // TODO: carefully review the rest of the fn below: feels off.
+        //
+        // Common case: the right-most leaf has a data block to spare. Detach its
+        // right-most data block and hand it over; the leaf stays valid.
+        if leaf_num_keys >= 2 {
+            let mut leaf_block = txn.get_block(leaf_no).await?;
+            let mut leaf_ref = leaf_block.block_mut();
+            let leaf = leaf_ref.get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
+            let data_block_no = leaf.kv[leaf_num_keys - 1].child_block_no;
+            leaf.num_keys = (leaf_num_keys - 1) as u8;
+            return Ok(SpareBlock {
+                block: data_block_no,
+                freed: 0,
+                consumed_branch: false,
+            });
+        }
+
+        // The right-most leaf holds a single data block: take the leaf node
+        // itself. Free its lone data block, then detach the leaf from its parent,
+        // freeing each ancestor that the detach leaves empty.
+        let data_block_no = {
+            let block = txn.get_block_untracked(leaf_no).await?;
+            let block_ref = block.block();
+            block_ref.get_at_offset::<NonRootNode>(BTREE_NODE_OFFSET).kv[0].child_block_no
+        };
+        Superblock::free_single_block(txn, data_block_no).await?;
+        let mut freed = 1u64;
+
+        // `path` is [branch, .., leaf]. Drop the right-most child from each
+        // ancestor, bottom-up: the leaf's parent loses the leaf, the next loses
+        // whatever we just freed, and so on. Stop at the first ancestor that
+        // keeps a child; if none do, the whole branch is consumed.
+        for idx in (0..path.len() - 1).rev() {
+            let parent_no = path[idx];
+            let parent_keys = {
+                let block = txn.get_block_untracked(parent_no).await?;
+                let block_ref = block.block();
+                block_ref
+                    .get_at_offset::<NonRootNode>(BTREE_NODE_OFFSET)
+                    .num_keys as usize
+            };
+            if parent_keys >= 2 {
+                let mut block = txn.get_block(parent_no).await?;
+                let mut block_ref = block.block_mut();
+                block_ref
+                    .get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET)
+                    .num_keys = (parent_keys - 1) as u8;
+                return Ok(SpareBlock {
+                    block: leaf_no,
+                    freed,
+                    consumed_branch: false,
+                });
+            }
+            // The parent's only child was the node we just removed: it is now
+            // empty, so free it and keep walking up.
+            Superblock::free_single_block(txn, parent_no).await?;
+            freed += 1;
+        }
+
+        // Every node on the spine collapsed: the branch is wholly consumed, and
+        // the (now detached) leaf block is the spare.
+        Ok(SpareBlock {
+            block: leaf_no,
+            freed,
+            consumed_branch: true,
+        })
+    }
+
+    /// Moves the chopped-off `branches` into an orphan file and hands that file
+    /// off to [`Superblock::free_complex_block`], which reclaims the whole
+    /// sub-forest lazily via the free list. `blocks_under` is the total number of
+    /// blocks reachable through `branches` (data blocks and tree nodes).
+    ///
+    /// The orphan's container block(s) -- its entry, plus a middle node when the
+    /// branches don't fit under one root -- are sourced from the blocks being
+    /// truncated away, never from the allocator (see [`Self::take_spare_block`]).
+    /// Sourcing a container can hand a few blocks straight to the free list (when
+    /// the right-most leaf cannot spare a data block), so the orphan's
+    /// `blocks_in_use` is `blocks_under` minus whatever was freed that way; the
+    /// orphan and those freed blocks together account for exactly `blocks_under`.
     async fn orphan_branches<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         branches: &[KV],
@@ -1003,73 +1150,118 @@ impl<const ORDER: usize> Node<ORDER> {
         blocks_under: u64,
     ) -> Result<()> {
         let leaf_flag = if is_leaf { Self::KIND_LEAF } else { 0 };
+        let n = branches.len();
+        debug_assert!(n >= 1);
 
-        // Allocate the orphan file entry block.
-        let orphan_block_no = Superblock::allocate_block(txn).await?.block_no;
+        // Pick the container block(s) and the branches that go under them, along
+        // with the orphan's resulting `blocks_in_use`.
+        let (entry_no, mid_no, under, blocks_in_use): (BlockNo, Option<BlockNo>, &[KV], u64) =
+            if is_leaf {
+                // A leaf chop hands us data blocks directly, so repurpose the last
+                // one(s) (the end of the truncated range) as the container(s) and
+                // put the rest under them. Nothing is freed here, so the orphan
+                // holds all of `blocks_under`.
+                if n - 1 > BTREE_ROOT_ORDER {
+                    log::debug!("orphan_branches: {n} branches need an intermediate node");
+                    (
+                        branches[n - 1].child_block_no,
+                        Some(branches[n - 2].child_block_no),
+                        &branches[..n - 2],
+                        blocks_under,
+                    )
+                } else {
+                    (
+                        branches[n - 1].child_block_no,
+                        None,
+                        &branches[..n - 1],
+                        blocks_under,
+                    )
+                }
+            } else {
+                // An internal chop hands us subtree roots, all of which must hang
+                // under the orphan. Source the container(s) from the chopped-off
+                // forest by walking the right spine (see take_spare_block).
+                let spare = Self::take_spare_block(txn, branches[n - 1].child_block_no).await?;
+                let mut freed = spare.freed;
+                let under: &[KV] = if spare.consumed_branch {
+                    &branches[..n - 1]
+                } else {
+                    branches
+                };
 
-        let orphan_blocks_in_use = if branches.len() <= BTREE_ROOT_ORDER {
-            // The branches fit directly under the orphan's root node.
-            let mut orphan_block = txn.get_empty_block_mut(orphan_block_no);
-            let mut orphan_ref = orphan_block.block_mut();
+                if under.is_empty() {
+                    // The whole chopped forest was a single thin residue chain that
+                    // collapsed into the spare block; there is nothing left to hang
+                    // under an orphan, so just free that block too.
+                    debug_assert_eq!(freed + 1, blocks_under);
+                    return Superblock::free_single_block(txn, spare.block).await;
+                }
 
-            let bh = orphan_ref.get_mut_at_offset::<BlockHeader>(0);
-            bh.set_block_type(BlockType::FileEntry);
-            bh.set_in_use(true);
+                let mid = if under.len() > BTREE_ROOT_ORDER {
+                    // The orphan root holds at most BTREE_ROOT_ORDER children, so a
+                    // wider forest needs an intermediate node. Source it from the
+                    // left-most branch, which is never on the (possibly under-full)
+                    // right spine and so always has a leaf with a data block to
+                    // spare.
+                    log::debug!(
+                        "orphan_branches: {} branches need an intermediate node",
+                        under.len()
+                    );
+                    let mid_spare = Self::take_spare_block(txn, under[0].child_block_no).await?;
+                    debug_assert_eq!(mid_spare.freed, 0);
+                    debug_assert!(!mid_spare.consumed_branch);
+                    freed += mid_spare.freed;
+                    Some(mid_spare.block)
+                } else {
+                    None
+                };
 
-            let root = orphan_ref.get_mut_at_offset::<RootNode>(BTREE_ROOT_OFFSET);
-            root.num_keys = branches.len() as u8;
-            root.kind = Self::KIND_ROOT | leaf_flag;
-            root.kv[..branches.len()].clone_from_slice(branches);
+                (spare.block, mid, under, blocks_under - freed)
+            };
 
-            // The orphan entry plus all the blocks below the branches.
-            1 + blocks_under
-        } else {
-            // Too many branches to fit under the root (only possible for a
-            // non-root source node): stash them under one extra middle node.
-            log::debug!(
-                "orphan_branches: {} branches need an intermediate node",
-                branches.len()
-            );
-            let mid_block_no = Superblock::allocate_block(txn).await?.block_no;
+        if let Some(mid_no) = mid_no {
             {
-                let mut mid_block = txn.get_empty_block_mut(mid_block_no);
+                let mut mid_block = txn.get_empty_block_mut(mid_no);
                 let mut mid_ref = mid_block.block_mut();
                 mid_ref
                     .get_mut_at_offset::<BlockHeader>(0)
                     .set_block_type(BlockType::TreeNode);
                 let mid = mid_ref.get_mut_at_offset::<NonRootNode>(BTREE_NODE_OFFSET);
-                mid.num_keys = branches.len() as u8;
+                mid.num_keys = under.len() as u8;
                 mid.kind = leaf_flag;
-                mid.kv[..branches.len()].clone_from_slice(branches);
+                mid.kv[..under.len()].clone_from_slice(under);
             }
-            {
-                let mut orphan_block = txn.get_empty_block_mut(orphan_block_no);
-                let mut orphan_ref = orphan_block.block_mut();
+            let mut entry_block = txn.get_empty_block_mut(entry_no);
+            let mut entry_ref = entry_block.block_mut();
+            let bh = entry_ref.get_mut_at_offset::<BlockHeader>(0);
+            bh.set_block_type(BlockType::FileEntry);
+            bh.set_in_use(true);
+            let root = entry_ref.get_mut_at_offset::<RootNode>(BTREE_ROOT_OFFSET);
+            root.num_keys = 1;
+            root.kind = Self::KIND_ROOT;
+            root.kv[0] = KV {
+                key: 0,
+                child_block_no: mid_no,
+            };
+        } else {
+            let mut entry_block = txn.get_empty_block_mut(entry_no);
+            let mut entry_ref = entry_block.block_mut();
+            let bh = entry_ref.get_mut_at_offset::<BlockHeader>(0);
+            bh.set_block_type(BlockType::FileEntry);
+            bh.set_in_use(true);
+            let root = entry_ref.get_mut_at_offset::<RootNode>(BTREE_ROOT_OFFSET);
+            root.num_keys = under.len() as u8;
+            root.kind = Self::KIND_ROOT | leaf_flag;
+            root.kv[..under.len()].clone_from_slice(under);
+        }
 
-                let bh = orphan_ref.get_mut_at_offset::<BlockHeader>(0);
-                bh.set_block_type(BlockType::FileEntry);
-                bh.set_in_use(true);
-
-                let root = orphan_ref.get_mut_at_offset::<RootNode>(BTREE_ROOT_OFFSET);
-                root.num_keys = 1;
-                root.kind = Self::KIND_ROOT;
-                root.kv[0] = KV {
-                    key: 0,
-                    child_block_no: mid_block_no,
-                };
-            }
-
-            // The orphan entry, the middle node, and all blocks below.
-            2 + blocks_under
-        };
-
-        let mut orphan_block = txn.get_block(orphan_block_no).await?;
-        orphan_block
+        let mut entry_block = txn.get_block(entry_no).await?;
+        entry_block
             .block_mut()
             .get_mut_at_offset::<BlockHeader>(0)
-            .set_blocks_in_use(orphan_blocks_in_use);
+            .set_blocks_in_use(blocks_in_use);
 
-        Superblock::free_complex_block(txn, orphan_block_no).await
+        Superblock::free_complex_block(txn, entry_no).await
     }
 
     /// Chops off the right-most branches of the node at `this_block_no` whose
@@ -1147,8 +1339,8 @@ impl<const ORDER: usize> Node<ORDER> {
                 // it directly. The descend child's total stays unknown.
                 let mut total = 0u64;
                 for kv in &chopped {
-                    total += Box::pin(NonRootNode::count_subtree_blocks(txn, kv.child_block_no))
-                        .await?;
+                    total +=
+                        Box::pin(NonRootNode::count_subtree_blocks(txn, kv.child_block_no)).await?;
                 }
                 total
             };
@@ -1166,6 +1358,7 @@ impl<const ORDER: usize> Node<ORDER> {
                     // (a node on the path always keeps its left-most child), so
                     // reset it to a valid empty leaf root: the now-empty file must
                     // remain writable.
+                    assert_eq!(this_block_no, file_block_no);
                     this.kind = Self::KIND_ROOT | Self::KIND_LEAF;
                 }
             }

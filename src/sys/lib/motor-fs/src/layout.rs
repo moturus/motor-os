@@ -37,6 +37,14 @@ pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 8;
 pub(crate) const MAX_BLOCKS_IN_TXN_LOG: usize = 32; // 64 is faster with qemu, but chv hangs
 
+#[cfg(test)]
+thread_local! {
+    /// Test instrumentation: counts calls to [`Superblock::allocate_block`], so
+    /// tests can assert that a truncation allocates nothing -- it sources its
+    /// orphan container blocks from the truncated blocks themselves.
+    pub(crate) static ALLOC_BLOCK_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod)]
 #[repr(transparent)]
 pub(crate) struct BlockNo(u64);
@@ -234,6 +242,9 @@ impl Superblock {
     pub async fn allocate_block<BD: AsyncBlockDevice>(
         txn: &mut Txn<'_, BD>,
     ) -> Result<EntryIdInternal> {
+        #[cfg(test)]
+        ALLOC_BLOCK_CALLS.with(|c| c.set(c.get() + 1));
+
         let mut sb_block = txn.get_block(BlockNo(0)).await?;
         let mut superblock_ref = sb_block.block_mut();
         let superblock = superblock_ref.get_mut_at_offset::<Self>(0);

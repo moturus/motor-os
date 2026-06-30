@@ -134,6 +134,14 @@ fn resize_truncate_accounting_walk() {
 }
 
 #[test]
+fn resize_truncate_no_alloc() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(resize_truncate_no_alloc_test()).unwrap();
+}
+
+#[test]
 #[ignore]
 fn write_speed() {
     init_logger();
@@ -1199,6 +1207,81 @@ async fn resize_truncate_accounting_walk_test() -> Result<()> {
     assert_eq!(full, fs.empty_blocks().await.unwrap());
 
     println!("resize_truncate_accounting_walk_test PASS");
+    Ok(())
+}
+
+/// A multi-block truncation must allocate nothing: its orphan container blocks
+/// come from the blocks being truncated away. This is verified directly with the
+/// `ALLOC_BLOCK_CALLS` counter, and the free-block accounting is checked before,
+/// during and after -- including a truncation on a completely full device, which
+/// can only succeed if it allocates nothing.
+async fn resize_truncate_no_alloc_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 8 / 4096; // 8 MB.
+    const BS: u64 = 4096;
+    const FS_TAG: &str = "motor_fs_resize_truncate_no_alloc_test";
+    // > 226 blocks => a multi-level tree, so truncation chops subtree roots and
+    // must source its orphan container from inside the chopped-off forest.
+    const N0: u64 = 600;
+    let full = NUM_BLOCKS - RESERVED_BLOCKS as u64;
+    let root = crate::ROOT_DIR_ID;
+
+    let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+    let file = fs.create_entry(root, EntryKind::File, "big").await.unwrap();
+    resize_write_blocks(&mut fs, file, N0).await;
+    resize_verify(&mut fs, file, N0 * BS).await;
+
+    let before = fs.empty_blocks().await.unwrap();
+
+    // (1) A multi-block truncation allocates nothing, and only frees blocks.
+    crate::layout::ALLOC_BLOCK_CALLS.with(|c| c.set(0));
+    fs.resize(file, 137 * BS).await.unwrap();
+    assert_eq!(
+        0,
+        crate::layout::ALLOC_BLOCK_CALLS.with(|c| c.get()),
+        "truncation allocated a block"
+    );
+    resize_verify(&mut fs, file, 137 * BS).await;
+    let after = fs.empty_blocks().await.unwrap();
+    assert!(after > before, "empty_blocks did not grow: {before} -> {after}");
+
+    // (2) Truncate the rest away (also allocation-free); only the entry remains.
+    crate::layout::ALLOC_BLOCK_CALLS.with(|c| c.set(0));
+    fs.resize(file, 0).await.unwrap();
+    assert_eq!(0, crate::layout::ALLOC_BLOCK_CALLS.with(|c| c.get()));
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+    // (3) Re-grow to a multi-level tree and fill the device completely. A
+    //     truncation on a full device must still succeed -- it allocates nothing
+    //     -- which the previous allocate-based design could not do.
+    resize_write_blocks(&mut fs, file, N0).await;
+    let filler = fs
+        .create_entry(root, EntryKind::File, "filler")
+        .await
+        .unwrap();
+    let zero = vec![0u8; BS as usize];
+    let mut k = 0u64;
+    loop {
+        match fs.write(filler, k * BS, &zero).await {
+            Ok(_) => k += 1,
+            Err(err) => {
+                assert_eq!(err.kind(), ErrorKind::StorageFull);
+                break;
+            }
+        }
+    }
+    assert!(fs.empty_blocks().await.unwrap() < 1, "device is not full");
+
+    crate::layout::ALLOC_BLOCK_CALLS.with(|c| c.set(0));
+    fs.resize(file, 100 * BS).await.unwrap(); // StorageFull if it allocated.
+    assert_eq!(0, crate::layout::ALLOC_BLOCK_CALLS.with(|c| c.get()));
+    resize_verify(&mut fs, file, 100 * BS).await;
+
+    // (4) Everything is reclaimed on delete: the accounting is exact end-to-end.
+    fs.delete_entry(file).await.unwrap();
+    fs.delete_entry(filler).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    println!("resize_truncate_no_alloc_test PASS");
     Ok(())
 }
 
