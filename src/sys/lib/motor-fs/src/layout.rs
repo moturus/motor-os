@@ -107,6 +107,15 @@ impl EntryIdInternal {
         }
     }
 
+    /// A null id, used to terminate a hash-collision list (see
+    /// [`DirEntryBlock::next_entry_id`]).
+    pub fn null() -> Self {
+        Self {
+            block_no: BlockNo::null(),
+            generation: 0,
+        }
+    }
+
     pub fn block_no(&self) -> u64 {
         self.block_no.0
     }
@@ -826,7 +835,11 @@ impl DirEntryBlock {
         entry_id: EntryIdInternal,
         mark_not_used: bool,
     ) -> Result<()> {
-        let (name_buf, name_len) = {
+        // Read the entry: validate its parent, optionally retire it, and capture
+        // its successor in the hash-collision list plus its name (to recompute the
+        // hash). Detach its own forward link so the block is clean if it is later
+        // re-linked (a move/rename re-links the same block under a new name).
+        let (entry_next, name_buf, name_len) = {
             let mut entry_block = txn.get_block(entry_id.block_no).await?;
             let mut entry_ref = entry_block.block_mut();
             let entry = DirEntryBlock::from_block_mut(&mut entry_ref);
@@ -834,16 +847,16 @@ impl DirEntryBlock {
             if mark_not_used {
                 entry.block_header.in_use = 0;
             }
-            if entry.next_entry_id().is_some() {
-                todo!("delete the entry from the list.");
-            }
+            let entry_next = entry.next_entry_id();
+            entry.next_entry_id = EntryIdInternal::null();
+
             let name = entry.name()?;
             let mut name_buf = [0_u8; 256];
             let name_len = name.len();
             assert!(name_len <= name_buf.len());
             name_buf[..name_len].copy_from_slice(name.as_bytes());
 
-            (name_buf, name_len)
+            (entry_next, name_buf, name_len)
         };
 
         let hash = Self::get_hash(txn, parent_id, unsafe {
@@ -858,17 +871,57 @@ impl DirEntryBlock {
             return Err(ErrorKind::InvalidData.into());
         };
 
-        if list_head_block_no != entry_id.block_no {
-            todo!("delete the entry from the list.");
+        if list_head_block_no == entry_id.block_no {
+            // The entry is the list head -- the block the tree points at for this
+            // hash.
+            match entry_next {
+                // Sole entry for this hash: drop the tree link entirely.
+                None => {
+                    Node::<BTREE_ROOT_ORDER>::root_delete_link(
+                        txn,
+                        parent_id.block_no,
+                        hash,
+                        entry_id.block_no,
+                    )
+                    .await?;
+                }
+                // Promote the successor to head: the tree key is unchanged, only
+                // its child pointer moves, so swap it in place (no rebalance).
+                Some(next) => {
+                    Node::<BTREE_ROOT_ORDER>::replace_link(
+                        txn,
+                        parent_id.block_no,
+                        hash,
+                        entry_id.block_no,
+                        next.block_no,
+                    )
+                    .await?;
+                }
+            }
+        } else {
+            // The entry is past the head: walk the collision list to its
+            // predecessor and splice the entry out. The list can be long, so the
+            // traversal uses untracked reads; only the predecessor, which we
+            // actually modify, is fetched tracked.
+            let mut pred_block_no = list_head_block_no;
+            loop {
+                let pred_next = {
+                    let pred_block = txn.get_block_untracked(pred_block_no).await?;
+                    dir_entry!(pred_block).next_entry_id()
+                };
+                let Some(pred_next) = pred_next else {
+                    log::error!("unlink_entry: {entry_id:?} not found in hash list");
+                    return Err(ErrorKind::InvalidData.into());
+                };
+                if pred_next.block_no == entry_id.block_no {
+                    let mut pred_block = txn.get_block(pred_block_no).await?;
+                    Self::from_block_mut(&mut pred_block.block_mut()).next_entry_id =
+                        entry_next.unwrap_or_else(EntryIdInternal::null);
+                    break;
+                }
+                pred_block_no = pred_next.block_no;
+            }
         }
-
-        Node::<BTREE_ROOT_ORDER>::root_delete_link(
-            txn,
-            parent_id.block_no,
-            hash,
-            entry_id.block_no,
-        )
-        .await?;
 
         let mut parent_block = txn.get_block(parent_id.block_no).await?;
         Self::from_block_mut(&mut parent_block.block_mut())
@@ -903,15 +956,78 @@ impl DirEntryBlock {
             )
             .await;
 
-            if let Err(err) = &result
-                && err.kind() == ErrorKind::Interrupted
-            {
-                log::trace!("link_child_block: interrupted: retry");
-                continue;
+            if let Err(err) = &result {
+                match err.kind() {
+                    ErrorKind::Interrupted => {
+                        // A node split mid-insert; retry the descent.
+                        log::trace!("link_child_block: interrupted: retry");
+                        continue;
+                    }
+                    ErrorKind::AlreadyExists => {
+                        // The key (name hash) already has a link in the tree: a
+                        // hash collision. The tree keeps a single link per hash --
+                        // the head of the collision list -- so append this entry
+                        // to that list rather than touching the tree.
+                        return Self::append_to_hash_list(
+                            txn,
+                            parent_block_no,
+                            key,
+                            child_block_no,
+                        )
+                        .await;
+                    }
+                    _ => {}
+                }
             }
 
             return result;
         }
+    }
+
+    /// Appends `child_block_no` to the tail of the hash-collision list whose head
+    /// the directory tree maps `key` to (see [`Self::next_entry_id`]). Called when
+    /// an insert collides with an existing name hash.
+    async fn append_to_hash_list<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        parent_block_no: BlockNo,
+        key: u64,
+        child_block_no: BlockNo,
+    ) -> Result<()> {
+        let Some(head_block_no) =
+            Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, parent_block_no, key).await?
+        else {
+            log::error!("append_to_hash_list: no list head for key {key}");
+            return Err(ErrorKind::InvalidData.into());
+        };
+
+        // The new entry's full id (with generation), to store in the tail's link.
+        let child_id = {
+            let child_block = txn.get_block(child_block_no).await?;
+            dir_entry!(child_block).entry_id
+        };
+
+        // Walk to the tail of the list. The list can be long, so the read-only
+        // traversal uses untracked reads (see `Txn::get_block_untracked`); only
+        // the tail, which we actually modify, is fetched tracked.
+        let mut tail_block_no = head_block_no;
+        loop {
+            if tail_block_no == child_block_no {
+                log::error!("append_to_hash_list: {child_block_no:?} already linked");
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let next = {
+                let tail_block = txn.get_block_untracked(tail_block_no).await?;
+                dir_entry!(tail_block).next_entry_id()
+            };
+            match next {
+                Some(next_id) => tail_block_no = next_id.block_no,
+                None => break,
+            }
+        }
+
+        let mut tail_block = txn.get_block(tail_block_no).await?;
+        Self::from_block_mut(&mut tail_block.block_mut()).next_entry_id = child_id;
+        Ok(())
     }
 
     pub async fn unlink_child_block<BD: AsyncBlockDevice>(

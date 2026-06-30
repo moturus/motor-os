@@ -62,6 +62,30 @@ fn midsize_file() {
 }
 
 #[test]
+fn hash_collision() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(hash_collision_test()).unwrap();
+}
+
+#[test]
+fn hash_collision_stress() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(hash_collision_stress_test()).unwrap();
+}
+
+#[test]
+fn hash_collision_move() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(hash_collision_move_test()).unwrap();
+}
+
+#[test]
 fn delete_reopen() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -405,6 +429,267 @@ async fn readdir_test() -> Result<()> {
     }
 
     println!("readdir_test PASS");
+    Ok(())
+}
+
+/// Collect all entry names in a directory by walking `get_first`/`get_next`.
+/// This traverses both the per-hash collision lists and the directory tree.
+async fn collect_dir_names(fs: &mut MotorFs, dir: EntryId) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut cur = fs.get_first_entry(dir).await.unwrap();
+    while let Some(id) = cur {
+        names.push(fs.name(id).await.unwrap());
+        cur = fs.get_next_entry(id).await.unwrap();
+    }
+    names
+}
+
+async fn hash_collision_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let mut fs = create_fs("motor_fs_hash_collision_test", NUM_BLOCKS).await?;
+    let full = fs.empty_blocks().await.unwrap();
+
+    let root = crate::ROOT_DIR_ID;
+    let dir = fs
+        .create_entry(root, EntryKind::Directory, "d")
+        .await
+        .unwrap();
+
+    // In debug test builds the name hash is the first 8 bytes of the name, so
+    // these four (sharing the prefix "collide_") land in one hash bucket and
+    // exercise the collision list; in release the hash is seeded CityHash and
+    // they simply land in distinct buckets (still a valid functional test).
+    let colliding = ["collide_a", "collide_b", "collide_c", "collide_d"];
+    #[cfg(debug_assertions)]
+    {
+        use crate::layout::DirEntryBlock;
+        let h = DirEntryBlock::hash_debug(colliding[0]);
+        for name in &colliding {
+            assert_eq!(DirEntryBlock::hash_debug(name), h, "names must collide");
+        }
+        assert_ne!(DirEntryBlock::hash_debug("zzz"), h);
+    }
+
+    let mut ids = std::collections::HashMap::new();
+    for name in colliding {
+        let id = fs.create_entry(dir, EntryKind::File, name).await.unwrap();
+        assert!(ids.insert(name, id).is_none());
+    }
+    // Two non-colliding entries, to keep the tree non-trivial.
+    for name in ["zzz", "yyy"] {
+        fs.create_entry(dir, EntryKind::File, name).await.unwrap();
+    }
+
+    // Re-creating a colliding name must still fail with AlreadyExists.
+    assert_eq!(
+        fs.create_entry(dir, EntryKind::File, "collide_b")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::AlreadyExists
+    );
+
+    // Every colliding name resolves, each to its own distinct block.
+    let mut blocks = std::collections::HashSet::new();
+    for name in colliding {
+        let (id, kind) = fs.stat(dir, name).await.unwrap().unwrap();
+        assert_eq!(kind, EntryKind::File);
+        assert_eq!(id, ids[name]);
+        assert!(blocks.insert(id));
+    }
+
+    // readdir sees all six.
+    let listed = collect_dir_names(&mut fs, dir).await;
+    assert_eq!(listed.len(), 6);
+    for name in colliding {
+        assert!(
+            listed.iter().any(|n| n == name),
+            "missing {name} in {listed:?}"
+        );
+    }
+
+    // Delete in an order that exercises every collision-list case. The list is
+    // a -> b -> c -> d (append order; `a` is the head).
+
+    // 1. Middle: delete `c` (splice out of the list).
+    fs.delete_entry(ids["collide_c"]).await.unwrap();
+    assert!(fs.stat(dir, "collide_c").await.unwrap().is_none());
+    for name in ["collide_a", "collide_b", "collide_d"] {
+        assert!(fs.stat(dir, name).await.unwrap().is_some(), "{name} gone");
+    }
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 5);
+
+    // 2. Head with a successor: delete `a` (promote `b` to head).
+    fs.delete_entry(ids["collide_a"]).await.unwrap();
+    assert!(fs.stat(dir, "collide_a").await.unwrap().is_none());
+    for name in ["collide_b", "collide_d"] {
+        assert!(fs.stat(dir, name).await.unwrap().is_some(), "{name} gone");
+    }
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 4);
+
+    // 3. Tail: delete `d` (splice out the last list element).
+    fs.delete_entry(ids["collide_d"]).await.unwrap();
+    assert!(fs.stat(dir, "collide_d").await.unwrap().is_none());
+    assert!(fs.stat(dir, "collide_b").await.unwrap().is_some());
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 3);
+
+    // 4. Sole remaining of the bucket: delete `b` (the tree link goes away).
+    fs.delete_entry(ids["collide_b"]).await.unwrap();
+    assert!(fs.stat(dir, "collide_b").await.unwrap().is_none());
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 2);
+
+    // The non-colliding entries are untouched throughout.
+    for name in ["zzz", "yyy"] {
+        assert!(fs.stat(dir, name).await.unwrap().is_some());
+    }
+
+    // Re-create colliding names after the bucket was fully emptied.
+    for name in ["collide_a", "collide_b"] {
+        fs.create_entry(dir, EntryKind::File, name).await.unwrap();
+        assert!(fs.stat(dir, name).await.unwrap().is_some());
+    }
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 4);
+
+    // Tear everything down and confirm the free-block accounting is exact.
+    for name in ["collide_a", "collide_b", "zzz", "yyy"] {
+        let (id, _) = fs.stat(dir, name).await.unwrap().unwrap();
+        fs.delete_entry(id).await.unwrap();
+    }
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 0);
+    fs.delete_entry(dir).await.unwrap();
+    assert_eq!(fs.empty_blocks().await.unwrap(), full);
+
+    println!("hash_collision_test PASS");
+    Ok(())
+}
+
+async fn hash_collision_stress_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 512;
+    let mut fs = create_fs("motor_fs_hash_collision_stress_test", NUM_BLOCKS).await?;
+    let full = fs.empty_blocks().await.unwrap();
+
+    let root = crate::ROOT_DIR_ID;
+    let dir = fs
+        .create_entry(root, EntryKind::Directory, "stress")
+        .await
+        .unwrap();
+
+    // All share the prefix "samehash" (8 bytes) => one collision bucket in debug.
+    // N is deliberately larger than the transaction block cache (16): building
+    // and unlinking within such a list must walk it with untracked reads, so a
+    // long bucket does not overflow the cache.
+    const N: usize = 25;
+    let names: Vec<String> = (0..N).map(|i| format!("samehash{i:02}")).collect();
+    #[cfg(debug_assertions)]
+    {
+        use crate::layout::DirEntryBlock;
+        let h = DirEntryBlock::hash_debug(&names[0]);
+        for name in &names {
+            assert_eq!(DirEntryBlock::hash_debug(name), h);
+        }
+    }
+
+    for name in &names {
+        fs.create_entry(dir, EntryKind::File, name).await.unwrap();
+    }
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), N);
+
+    // Delete in a deliberately mixed order (heads, tails, middles, and the
+    // current head repeatedly), checking the whole bucket stays consistent after
+    // each deletion. `7` is coprime to `N`, so this visits every index once.
+    let order: Vec<usize> = (0..N).map(|i| (i * 7) % N).collect();
+    let mut deleted = std::collections::HashSet::new();
+    for &idx in &order {
+        let (id, _) = fs.stat(dir, &names[idx]).await.unwrap().unwrap();
+        fs.delete_entry(id).await.unwrap();
+        deleted.insert(idx);
+
+        let mut expected = 0;
+        for (i, name) in names.iter().enumerate() {
+            if deleted.contains(&i) {
+                assert!(fs.stat(dir, name).await.unwrap().is_none(), "{name} resurrected");
+            } else {
+                assert!(fs.stat(dir, name).await.unwrap().is_some(), "{name} vanished");
+                expected += 1;
+            }
+        }
+        assert_eq!(collect_dir_names(&mut fs, dir).await.len(), expected);
+    }
+
+    assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 0);
+    fs.delete_entry(dir).await.unwrap();
+    assert_eq!(fs.empty_blocks().await.unwrap(), full);
+
+    println!("hash_collision_stress_test PASS");
+    Ok(())
+}
+
+async fn hash_collision_move_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let mut fs = create_fs("motor_fs_hash_collision_move_test", NUM_BLOCKS).await?;
+    let full = fs.empty_blocks().await.unwrap();
+
+    let root = crate::ROOT_DIR_ID;
+    let a = fs
+        .create_entry(root, EntryKind::Directory, "a")
+        .await
+        .unwrap();
+    let b = fs
+        .create_entry(root, EntryKind::Directory, "b")
+        .await
+        .unwrap();
+
+    // All names share the prefix "movehash" (8 bytes): one bucket per directory
+    // in debug builds.
+    let a1 = fs.create_entry(a, EntryKind::File, "movehash_a1").await.unwrap();
+    let _a2 = fs.create_entry(a, EntryKind::File, "movehash_a2").await.unwrap();
+    let a3 = fs.create_entry(a, EntryKind::File, "movehash_a3").await.unwrap();
+    fs.create_entry(b, EntryKind::File, "movehash_b1").await.unwrap();
+
+    // Move the MIDDLE of A's list (a2) into B's bucket (collides with b1 there).
+    // A: a1 -> a2 -> a3  =>  a1 -> a3 ; B: b1  =>  b1 -> b2.
+    fs.move_entry(_a2, b, "movehash_b2").await.unwrap();
+    assert!(fs.stat(a, "movehash_a2").await.unwrap().is_none());
+    assert!(fs.stat(b, "movehash_b2").await.unwrap().is_some());
+    for name in ["movehash_a1", "movehash_a3"] {
+        assert!(fs.stat(a, name).await.unwrap().is_some(), "{name} lost");
+    }
+    assert!(fs.stat(b, "movehash_b1").await.unwrap().is_some());
+    assert_eq!(collect_dir_names(&mut fs, a).await.len(), 2);
+    assert_eq!(collect_dir_names(&mut fs, b).await.len(), 2);
+
+    // Move the HEAD of A's list (a1) into B (promotes a3 to A's head).
+    fs.move_entry(a1, b, "movehash_b3").await.unwrap();
+    assert!(fs.stat(a, "movehash_a1").await.unwrap().is_none());
+    assert!(fs.stat(a, "movehash_a3").await.unwrap().is_some());
+    for name in ["movehash_b1", "movehash_b2", "movehash_b3"] {
+        assert!(fs.stat(b, name).await.unwrap().is_some(), "{name} lost");
+    }
+    assert_eq!(collect_dir_names(&mut fs, a).await.len(), 1);
+    assert_eq!(collect_dir_names(&mut fs, b).await.len(), 3);
+
+    // Rename the now-sole entry in A to another colliding name (sole-entry
+    // unlink + sole-entry relink).
+    fs.move_entry(a3, a, "movehash_a9").await.unwrap();
+    assert!(fs.stat(a, "movehash_a3").await.unwrap().is_none());
+    assert!(fs.stat(a, "movehash_a9").await.unwrap().is_some());
+    assert_eq!(collect_dir_names(&mut fs, a).await.len(), 1);
+
+    // Tear down and confirm accounting.
+    for (parent, name) in [
+        (a, "movehash_a9"),
+        (b, "movehash_b1"),
+        (b, "movehash_b2"),
+        (b, "movehash_b3"),
+    ] {
+        let (id, _) = fs.stat(parent, name).await.unwrap().unwrap();
+        fs.delete_entry(id).await.unwrap();
+    }
+    fs.delete_entry(a).await.unwrap();
+    fs.delete_entry(b).await.unwrap();
+    assert_eq!(fs.empty_blocks().await.unwrap(), full);
+
+    println!("hash_collision_move_test PASS");
     Ok(())
 }
 

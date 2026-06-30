@@ -194,6 +194,77 @@ impl<const ORDER: usize> Node<ORDER> {
         Box::pin(NonRootNode::first_child_with_key(txn, child_block_no, key)).await
     }
 
+    /// Swaps the child a `key` points at from `old_child` to `new_child`, in
+    /// place. The key itself is unchanged, so the tree's shape does not change
+    /// (no split, merge, or rebalance).
+    ///
+    /// A directory's tree stores one link per name hash, pointing at the head of
+    /// that hash's collision list. When the head changes -- a colliding entry is
+    /// unlinked and its successor promoted -- only that one child pointer moves;
+    /// this performs exactly that.
+    pub async fn replace_link<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        this_block_no: BlockNo,
+        key: u64,
+        old_child: BlockNo,
+        new_child: BlockNo,
+    ) -> Result<()> {
+        // Find the key: either this node is a leaf holding it, or we learn which
+        // child to descend into. Read in its own scope so no borrow is held
+        // across the recursive await below.
+        let (is_leaf, pos, child_block_no) = {
+            let block = txn.get_block(this_block_no).await?;
+            let block_ref = block.block();
+            let node = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+            if node.num_keys as usize > ORDER {
+                log::error!("Bad B+ Tree Node {}.", this_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let pos = match node.kv[..(node.num_keys as usize)]
+                .binary_search_by_key(&key, |kv| kv.key)
+            {
+                Ok(pos) => pos,
+                Err(pos) => {
+                    if node.is_leaf() {
+                        log::error!("replace_link: key {key} not found");
+                        return Err(ErrorKind::NotFound.into());
+                    }
+                    assert!(pos > 0);
+                    pos - 1
+                }
+            };
+            (node.is_leaf(), pos, node.kv[pos].child_block_no)
+        };
+
+        if !is_leaf {
+            return Box::pin(NonRootNode::replace_link(
+                txn,
+                child_block_no,
+                key,
+                old_child,
+                new_child,
+            ))
+            .await;
+        }
+
+        // Leaf: swap the child pointer in place.
+        if child_block_no != old_child {
+            log::error!(
+                "replace_link: child {} != expected {}",
+                child_block_no.as_u64(),
+                old_child.as_u64()
+            );
+            return Err(ErrorKind::InvalidData.into());
+        }
+        let mut block = txn.get_block(this_block_no).await?;
+        let mut block_ref = block.block_mut();
+        block_ref
+            .get_mut_at_offset::<Self>(Self::offset_in_block())
+            .kv[pos]
+            .child_block_no = new_child;
+        Ok(())
+    }
+
     pub async fn next_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
         this_block_no: BlockNo,
