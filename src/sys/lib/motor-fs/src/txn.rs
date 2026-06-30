@@ -21,7 +21,8 @@
 //!   uses to track completions
 
 use crate::{
-    BlockNo, DirEntryBlock, EntryIdInternal, MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
+    BlockNo, DirEntryBlock, EntryIdInternal, INLINE_CAPACITY, INLINE_DATA_OFFSET,
+    MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
 };
 use async_fs::{
     AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
@@ -268,17 +269,45 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         if dir_entry!(block).metadata().kind() != EntryKind::File {
             return Err(ErrorKind::IsADirectory.into());
         }
+        let prev_file_size = dir_entry!(block).metadata().size;
+        drop(block);
 
         let block_key = block_start / (BLOCK_SIZE as u64);
-
-        let prev_file_size = dir_entry!(block).metadata().size;
         let new_file_size = offset + (buf.len() as u64);
+        let final_size = prev_file_size.max(new_file_size);
 
         let mut txn = Self {
             fs,
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
+
+        // Inline path: the file fits in its entry block both before and after the
+        // write, so the data lives in the entry block, not a tree.
+        if final_size <= INLINE_CAPACITY {
+            {
+                let mut entry_block = txn.get_block(file_id.block_no).await?;
+                let mut entry_ref = entry_block.block_mut();
+                let bytes = entry_ref.as_bytes_mut();
+                // A write starting past the current end leaves a hole; zero it.
+                if offset > prev_file_size {
+                    bytes[INLINE_DATA_OFFSET + prev_file_size as usize
+                        ..INLINE_DATA_OFFSET + offset as usize]
+                        .fill(0);
+                }
+                bytes[INLINE_DATA_OFFSET + offset as usize
+                    ..INLINE_DATA_OFFSET + new_file_size as usize]
+                    .copy_from_slice(buf);
+            }
+            DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, final_size).await?;
+            txn.commit().await?;
+            return Ok(buf.len());
+        }
+
+        // Tree path. If the file is currently inline, migrate it to a tree first.
+        if prev_file_size <= INLINE_CAPACITY {
+            DirEntryBlock::convert_inline_to_tree(&mut txn, file_id, prev_file_size).await?;
+        }
 
         // Step 1: find or insert the data block.
         let data_block_no =
@@ -287,19 +316,14 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                 None => DirEntryBlock::insert_data_block(&mut txn, file_id, block_key).await?,
             };
 
-        // Step 2: update the data lock.
+        // Step 2: update the data block.
         let mut data_block = txn.get_block(data_block_no).await?;
         data_block.block_mut().as_bytes_mut()
             [(offset - block_start) as usize..(new_file_size - block_start) as usize]
             .copy_from_slice(buf);
 
         // Step 3: update the file size & modified.
-        DirEntryBlock::set_file_size_in_entry(
-            &mut txn,
-            file_id.block_no,
-            prev_file_size.max(new_file_size),
-        )
-        .await?;
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, final_size).await?;
 
         txn.commit().await?;
 
@@ -320,11 +344,171 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         if dir_entry!(block).metadata().kind() != EntryKind::File {
             return Err(ErrorKind::IsADirectory.into());
         }
-
         let prev_size = dir_entry!(block).metadata().size;
+        drop(block);
         if new_size == prev_size {
             return Ok(());
         }
+
+        // Storage is size-based: a file is inline iff its size is <=
+        // INLINE_CAPACITY. A resize must keep that invariant, migrating between
+        // inline and tree storage as the size crosses the cutoff.
+        match (prev_size <= INLINE_CAPACITY, new_size <= INLINE_CAPACITY) {
+            (true, true) => Self::resize_inline(fs, file_id, prev_size, new_size).await,
+            (true, false) => Self::grow_inline_to_tree(fs, file_id, prev_size, new_size).await,
+            (false, true) => Self::shrink_tree_to_inline(fs, file_id, prev_size, new_size).await,
+            (false, false) => Self::resize_tree(fs, file_id, prev_size, new_size).await,
+        }
+    }
+
+    /// Resizes a file that stays inline (both sizes <= INLINE_CAPACITY): only the
+    /// entry block changes. Bytes that leave the file (shrink) or become a newly
+    /// exposed hole (grow) are zeroed, then the size is recorded.
+    async fn resize_inline(
+        fs: &mut MotorFs<BD>,
+        file_id: EntryIdInternal,
+        prev_size: u64,
+        new_size: u64,
+    ) -> Result<()> {
+        let mut txn = Txn {
+            fs: &mut *fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+        {
+            let mut entry_block = txn.get_block(file_id.block_no).await?;
+            let mut entry_ref = entry_block.block_mut();
+            let bytes = entry_ref.as_bytes_mut();
+            let lo = prev_size.min(new_size) as usize;
+            let hi = prev_size.max(new_size) as usize;
+            bytes[INLINE_DATA_OFFSET + lo..INLINE_DATA_OFFSET + hi].fill(0);
+        }
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
+        txn.commit().await
+    }
+
+    /// Grows a file from inline storage past INLINE_CAPACITY: migrates the inline
+    /// bytes into a tree, then records the larger (sparse) size.
+    async fn grow_inline_to_tree(
+        fs: &mut MotorFs<BD>,
+        file_id: EntryIdInternal,
+        prev_size: u64,
+        new_size: u64,
+    ) -> Result<()> {
+        let mut txn = Txn {
+            fs: &mut *fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+        DirEntryBlock::convert_inline_to_tree(&mut txn, file_id, prev_size).await?;
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
+        txn.commit().await
+    }
+
+    /// Shrinks a file from tree storage down to inline (`new_size <=
+    /// INLINE_CAPACITY < prev_size`). The surviving bytes `[0, new_size)` stay
+    /// reachable at every committed step:
+    ///
+    /// - Phase 1 reduces the tree to a single data block (key 0) via the ordinary
+    ///   truncation, with the recorded size held at `BLOCK_SIZE` -- still above
+    ///   `INLINE_CAPACITY`, so the size-based invariant holds at every commit and
+    ///   a crash leaves a valid (larger) tree file, never lost data.
+    /// - Phase 2 atomically collapses that single block into inline storage.
+    async fn shrink_tree_to_inline(
+        fs: &mut MotorFs<BD>,
+        file_id: EntryIdInternal,
+        prev_size: u64,
+        new_size: u64,
+    ) -> Result<()> {
+        // Truncate-to-empty is special: the ordinary truncation chops every child
+        // of the root in a single transaction (cut == 0), flipping the entry
+        // straight from a populated tree to an empty (size 0, hence inline) file.
+        // No intermediate committed state has size <= cap with a populated tree,
+        // and it walks nothing -- so do it directly.
+        if new_size == 0 {
+            return Self::resize_tree(fs, file_id, prev_size, 0).await;
+        }
+
+        // Phase 1: drop everything above the first data block, if there is more
+        // than one block. The intermediate size (BLOCK_SIZE) stays above the
+        // cutoff, so the file remains a valid tree at the commit boundary and a
+        // crash leaves the surviving bytes [0, new_size) intact.
+        if prev_size > BLOCK_SIZE as u64 {
+            Self::resize_tree(fs, file_id, prev_size, BLOCK_SIZE as u64).await?;
+        }
+        // Phase 2: atomic collapse to inline.
+        Self::collapse_to_inline(fs, file_id, new_size).await
+    }
+
+    /// Atomically collapses a file spanning at most one data block (key 0) into
+    /// inline storage of `new_size` bytes. It reads the surviving `[0, new_size)`
+    /// bytes, frees the whole (small) sub-tree, and rewrites the entry inline --
+    /// all in one transaction, so a crash leaves the file either fully tree (old
+    /// size) or fully inline (`new_size`), never torn.
+    async fn collapse_to_inline(
+        fs: &mut MotorFs<BD>,
+        file_id: EntryIdInternal,
+        new_size: u64,
+    ) -> Result<()> {
+        let mut txn = Txn {
+            fs: &mut *fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        // The surviving bytes: data block key 0, or zeros if it is a hole.
+        let mut data = vec![0u8; new_size as usize];
+        if let Some(block0) =
+            DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, 0).await?
+        {
+            let block = txn.get_block(block0).await?;
+            data.copy_from_slice(&block.block().as_bytes()[..new_size as usize]);
+        }
+
+        // Every block below the root (the thin spine plus data block 0). The file
+        // spans at most one data block here, so this is at most a few blocks.
+        let mut to_free: Vec<BlockNo> = Vec::new();
+        crate::bplus_tree::RootNode::collect_blocks_below(&mut txn, file_id.block_no, &mut to_free)
+            .await?;
+        let freed_count = to_free.len() as u64;
+        debug_assert!(
+            freed_count < MAX_BLOCKS_IN_TXN as u64,
+            "collapse_to_inline: sub-tree too large: {freed_count}"
+        );
+
+        // Rewrite the entry as inline: clear the data region and lay down the
+        // surviving bytes (the old tree root lived in this region).
+        {
+            let mut entry_block = txn.get_block(file_id.block_no).await?;
+            let mut entry_ref = entry_block.block_mut();
+            let bytes = entry_ref.as_bytes_mut();
+            bytes[INLINE_DATA_OFFSET..].fill(0);
+            bytes[INLINE_DATA_OFFSET..INLINE_DATA_OFFSET + new_size as usize]
+                .copy_from_slice(&data);
+        }
+        // The file now occupies just its entry block.
+        DirEntryBlock::set_file_size_in_entry(&mut txn, file_id.block_no, new_size).await?;
+        if freed_count > 0 {
+            DirEntryBlock::decrement_blocks_in_use(&mut txn, file_id.block_no, freed_count).await?;
+        }
+
+        // Free the now-detached sub-tree blocks.
+        for block_no in to_free {
+            Superblock::free_single_block(&mut txn, block_no).await?;
+        }
+
+        txn.commit().await
+    }
+
+    /// Resizes a file that stays in B+ tree storage. Both the old and new sizes
+    /// are above `INLINE_CAPACITY` (or `new_size == BLOCK_SIZE`, the intermediate
+    /// used by [`Self::shrink_tree_to_inline`]), so the file is and remains a tree.
+    async fn resize_tree(
+        fs: &mut MotorFs<BD>,
+        file_id: EntryIdInternal,
+        prev_size: u64,
+        new_size: u64,
+    ) -> Result<()> {
         let last_block_start = prev_size & !(BLOCK_SIZE as u64 - 1);
         let last_block_key = last_block_start / (BLOCK_SIZE as u64);
 
@@ -337,8 +521,8 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             return Self::do_large_truncate(fs, file_id, new_size).await;
         }
 
-        let mut txn = Self {
-            fs,
+        let mut txn = Txn {
+            fs: &mut *fs,
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -357,11 +541,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         //     - deallocate the last block
         //     - zero out truncated bytes on the new last block, if needed
         // (c) many blocks to deallocate
-        //     - unlink the last data block
-        //     - convert the unlinked (last) block to a TreeNodeBlock
-        //     - transfer the remaining extra blocks from the file
-        //       to the new TreeNodeBlock
-        //     - zero out truncated bytes on the new last block, if needed
+        //     - handled by do_large_truncate above
 
         if last_block_start < new_size {
             // Case (a): no data blocks to drop.
@@ -420,7 +600,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
 
         // Every shrink case that reaches here was handled above, and case (c)
         // returned early, so this point is unreachable.
-        log::error!("do_resize_txn: unexpected fall-through");
+        log::error!("resize_tree: unexpected fall-through");
         Err(ErrorKind::InvalidInput.into())
     }
 

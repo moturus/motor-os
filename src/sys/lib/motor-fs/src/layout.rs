@@ -520,6 +520,17 @@ const _: () = assert!(BTREE_ROOT_OFFSET == core::mem::offset_of!(DirEntryBlock, 
 pub(crate) const BTREE_NODE_ORDER: usize = 253;
 pub(crate) const BTREE_NODE_OFFSET: usize = 24;
 
+/// Where a small file's inline data begins inside its entry block: the same
+/// region the B+ tree root would occupy. A small file stores its bytes here
+/// instead of in a separate data block reached through the tree.
+pub(crate) const INLINE_DATA_OFFSET: usize = BTREE_ROOT_OFFSET;
+
+/// The largest file size (in bytes) that is stored inline. A file is inline iff
+/// `size <= INLINE_CAPACITY`; this is a hard invariant -- every operation that
+/// changes a file's size keeps the representation in step (see
+/// [`DirEntryBlock::convert_inline_to_tree`] and `Txn::do_resize_txn`).
+pub(crate) const INLINE_CAPACITY: u64 = (BLOCK_SIZE - INLINE_DATA_OFFSET) as u64;
+
 impl DirEntryBlock {
     pub fn from_block(block: &Block) -> &Self {
         block.get_at_offset(0)
@@ -750,6 +761,45 @@ impl DirEntryBlock {
         Ok(data_block_id.block_no)
     }
 
+    /// Converts a file from inline storage to B+ tree storage. The file's inline
+    /// bytes `[0, inline_size)` (which fit in the entry block) become the contents
+    /// of data block key 0, and the entry's data region becomes an empty-then-
+    /// populated tree root. The recorded size is left unchanged -- the caller sets
+    /// it. `inline_size` is the file's current size (`<= INLINE_CAPACITY`).
+    ///
+    /// Used when a write or grow pushes a file past [`INLINE_CAPACITY`].
+    pub async fn convert_inline_to_tree<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        file_id: EntryIdInternal,
+        inline_size: u64,
+    ) -> Result<()> {
+        // Capture the inline bytes before the tree root overwrites that region.
+        let data: Vec<u8> = if inline_size > 0 {
+            let entry_block = txn.get_block(file_id.block_no).await?;
+            entry_block.block().as_bytes()
+                [INLINE_DATA_OFFSET..INLINE_DATA_OFFSET + inline_size as usize]
+                .to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Reset the entry's data region to an empty B+ tree root.
+        {
+            let mut entry_block = txn.get_block(file_id.block_no).await?;
+            let mut entry_ref = entry_block.block_mut();
+            Self::from_block_mut(&mut entry_ref).btree_root.init_new_root();
+        }
+
+        // Move the captured bytes (if any) into data block key 0.
+        if !data.is_empty() {
+            let data_block_no = Self::insert_data_block(txn, file_id, 0).await?;
+            let mut data_block = txn.get_block(data_block_no).await?;
+            data_block.block_mut().as_bytes_mut()[..data.len()].copy_from_slice(&data);
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::await_holding_refcell_ref)]
     pub async fn set_file_size_in_entry<BD: AsyncBlockDevice>(
         txn: &mut Txn<'_, BD>,
@@ -808,8 +858,9 @@ impl DirEntryBlock {
         let entry_block = txn.get_block(entry_id.block_no).await?.clone();
         dir_entry!(entry_block).validate_entry(entry_id)?;
         let parent_id = dir_entry!(entry_block).parent_id();
+        let size = dir_entry!(entry_block).metadata().size;
 
-        if dir_entry!(entry_block).metadata().size == 0 {
+        if size == 0 {
             drop(entry_block);
             // Unlink first, in case there is a hash collision and this entry has a next poiner set.
             DirEntryBlock::unlink_entry(txn, parent_id, entry_id, true).await?;
@@ -824,7 +875,13 @@ impl DirEntryBlock {
             EntryKind::File => {
                 // Unlink first, in case there is a hash collision and this entry has a next poiner set.
                 DirEntryBlock::unlink_entry(txn, parent_id, entry_id, true).await?;
-                Superblock::free_complex_block(txn, entry_id.block_no).await
+                // An inline file is just its entry block (no tree); a tree file's
+                // data blocks are reclaimed lazily via the free list.
+                if size <= INLINE_CAPACITY {
+                    Superblock::free_single_block(txn, entry_id.block_no).await
+                } else {
+                    Superblock::free_complex_block(txn, entry_id.block_no).await
+                }
             }
         }
     }

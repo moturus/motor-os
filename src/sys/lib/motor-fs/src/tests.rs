@@ -150,6 +150,22 @@ fn resize_truncate_wide_leaf() {
 }
 
 #[test]
+fn inline_data() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(inline_data_test()).unwrap();
+}
+
+#[test]
+fn inline_truncate_spine() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(inline_truncate_spine_test()).unwrap();
+}
+
+#[test]
 fn resize_truncate_crash_regrow() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -311,9 +327,10 @@ async fn basic_test() -> Result<()> {
     const BYTES: &[u8] = "once upon a time there was a tree upon a hill".as_bytes();
     assert_eq!(BYTES.len(), fs.write(file, 0, BYTES).await.unwrap());
     assert_eq!(BYTES.len() as u64, fs.metadata(file).await?.size);
+    // This file (45 bytes) is stored inline in its entry block: no data block.
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
-        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 6
+        NUM_BLOCKS - RESERVED_BLOCKS as u64 - 5
     );
 
     let mut buf = [0_u8; 256];
@@ -360,12 +377,13 @@ async fn basic_test() -> Result<()> {
         NUM_BLOCKS - RESERVED_BLOCKS as u64 - 5
     );
 
-    // Add some bytes to the file before deleting it, so that it uses
-    // more than one block.
+    // Grow the file past the inline cutoff before deleting it, so it migrates to
+    // tree storage (a data block) -- exercising inline->tree and the multi-block
+    // delete path.
     assert_eq!(BYTES.len(), fs.write(file, 0, BYTES).await.unwrap());
     assert_eq!(
         BYTES.len(),
-        fs.write(file, BYTES.len() as u64, BYTES).await.unwrap()
+        fs.write(file, crate::INLINE_CAPACITY, BYTES).await.unwrap()
     );
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
@@ -1285,6 +1303,171 @@ async fn resize_verify(fs: &mut MotorFs, file: EntryId, size: u64) {
         }
         off += len as u64;
     }
+}
+
+/// Writes `size` (< one block) bytes into block 0 of `file`, matching
+/// [`resize_pat`] for block 0, so [`resize_verify`] can check it.
+async fn resize_write_partial(fs: &mut MotorFs, file: EntryId, size: u64) {
+    assert!(size <= 4096);
+    if size == 0 {
+        return;
+    }
+    let buf: Vec<u8> = (0..size as usize).map(|i| resize_pat(0, i)).collect();
+    assert_eq!(size as usize, fs.write(file, 0, &buf).await.unwrap());
+}
+
+/// Exercises inline small-file storage and every transition across the cutoff:
+/// inline read/write, inline<->tree on write and on resize, and (carefully)
+/// tree->inline truncation, with exact free-block accounting throughout.
+async fn inline_data_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let cap = crate::INLINE_CAPACITY; // 3640
+    let mut fs = create_fs("motor_fs_inline_data_test", NUM_BLOCKS).await?;
+    let full = fs.empty_blocks().await.unwrap();
+    let root = crate::ROOT_DIR_ID;
+
+    // --- Inline basics and the exact cutoff boundary. ---
+    let file = fs.create_entry(root, EntryKind::File, "f").await.unwrap();
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+    // A file of exactly `cap` bytes is inline: no data block.
+    resize_write_partial(&mut fs, file, cap).await;
+    resize_verify(&mut fs, file, cap).await;
+    assert_eq!(
+        full - 1,
+        fs.empty_blocks().await.unwrap(),
+        "exactly cap bytes must stay inline"
+    );
+
+    // One more byte crosses the cutoff: the file migrates to a data block.
+    let b = [resize_pat(0, cap as usize)];
+    assert_eq!(1, fs.write(file, cap, &b).await.unwrap());
+    resize_verify(&mut fs, file, cap + 1).await;
+    assert_eq!(
+        full - 2,
+        fs.empty_blocks().await.unwrap(),
+        "cap+1 bytes must use a data block"
+    );
+
+    // Truncate back to cap: tree -> inline, the data block is freed.
+    fs.resize(file, cap).await.unwrap();
+    resize_verify(&mut fs, file, cap).await;
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap(), "back to inline");
+
+    // Truncate to tiny, then to zero, then delete: accounting returns to full.
+    fs.resize(file, 7).await.unwrap();
+    resize_verify(&mut fs, file, 7).await;
+    fs.resize(file, 0).await.unwrap();
+    assert_eq!(0, fs.metadata(file).await.unwrap().size);
+    assert_eq!(0, fs.read(file, 0, &mut [0u8; 4]).await.unwrap());
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    // --- tree -> inline from a genuinely multi-block file. ---
+    let file = fs.create_entry(root, EntryKind::File, "big").await.unwrap();
+    resize_write_blocks(&mut fs, file, 5).await; // 5 full blocks => tree
+    resize_verify(&mut fs, file, 5 * 4096).await;
+    fs.resize(file, 100).await.unwrap(); // tree -> inline; [0,100) survive
+    resize_verify(&mut fs, file, 100).await;
+    assert_eq!(
+        full - 1,
+        fs.empty_blocks().await.unwrap(),
+        "tree->inline frees everything but the entry"
+    );
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    // --- inline -> tree by growing (sparse), then tree -> inline back. ---
+    let file = fs.create_entry(root, EntryKind::File, "g").await.unwrap();
+    resize_write_partial(&mut fs, file, 50).await; // inline
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+    fs.resize(file, 10 * 4096).await.unwrap(); // grow past cutoff: sparse tree
+    assert_eq!(10 * 4096, fs.metadata(file).await.unwrap().size);
+    {
+        let mut buf = vec![0xAAu8; 4096];
+        assert_eq!(4096, fs.read(file, 0, &mut buf).await.unwrap());
+        for (i, &byte) in buf.iter().enumerate() {
+            let expected = if i < 50 { resize_pat(0, i) } else { 0 };
+            assert_eq!(byte, expected, "byte {i}");
+        }
+        // A block deep in the hole reads as zeros.
+        assert_eq!(4096, fs.read(file, 8192, &mut buf).await.unwrap());
+        assert!(buf.iter().all(|&x| x == 0));
+    }
+    // Growing 50 inline bytes created exactly one data block (block 0).
+    assert_eq!(full - 2, fs.empty_blocks().await.unwrap());
+    fs.resize(file, 50).await.unwrap(); // tree -> inline, [0,50) survive
+    resize_verify(&mut fs, file, 50).await;
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    // --- sparse hole: data only at a high offset, then truncate into the hole. ---
+    let file = fs.create_entry(root, EntryKind::File, "s").await.unwrap();
+    {
+        let buf: Vec<u8> = (0..100).map(|i| resize_pat(2, i)).collect();
+        assert_eq!(100, fs.write(file, 2 * 4096, &buf).await.unwrap()); // block 2 => tree
+    }
+    assert_eq!(2 * 4096 + 100, fs.metadata(file).await.unwrap().size);
+    fs.resize(file, 80).await.unwrap(); // truncate into the (block 0) hole
+    {
+        let mut buf = vec![0xFFu8; 80];
+        assert_eq!(80, fs.read(file, 0, &mut buf).await.unwrap());
+        assert!(buf.iter().all(|&x| x == 0), "hole must read back as zero");
+    }
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    println!("inline_data_test PASS");
+    Ok(())
+}
+
+/// Tree -> inline collapse when the surviving single block hangs off a thin tree
+/// spine (left behind by truncating a multi-level tree without rebalancing), plus
+/// truncating a large file straight to inline and to zero.
+async fn inline_truncate_spine_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 512;
+    let cap = crate::INLINE_CAPACITY;
+    let mut fs = create_fs("motor_fs_inline_truncate_spine_test", NUM_BLOCKS).await?;
+    let full = fs.empty_blocks().await.unwrap();
+    let root = crate::ROOT_DIR_ID;
+
+    // 300 blocks => the tree has internal nodes (root order is 226).
+    let file = fs.create_entry(root, EntryKind::File, "f").await.unwrap();
+    resize_write_blocks(&mut fs, file, 300).await;
+    resize_verify(&mut fs, file, 300 * 4096).await;
+
+    // Truncate to just above the cutoff but within one block: this keeps only
+    // block 0 but leaves a thin tree spine above it (no rebalance on truncate).
+    fs.resize(file, cap + 1).await.unwrap();
+    resize_verify(&mut fs, file, cap + 1).await;
+
+    // Now collapse to inline: the collapse must free that whole spine plus the
+    // data block, leaving just the entry.
+    fs.resize(file, 64).await.unwrap();
+    resize_verify(&mut fs, file, 64).await;
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap(), "spine fully freed");
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    // Truncate a large multi-level file straight to a small inline size.
+    let file = fs.create_entry(root, EntryKind::File, "f2").await.unwrap();
+    resize_write_blocks(&mut fs, file, 300).await;
+    fs.resize(file, 1234).await.unwrap(); // tree -> inline directly
+    resize_verify(&mut fs, file, 1234).await;
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+
+    // ...and straight to zero.
+    fs.resize(file, 0).await.unwrap();
+    assert_eq!(0, fs.metadata(file).await.unwrap().size);
+    assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
+    fs.delete_entry(file).await.unwrap();
+    assert_eq!(full, fs.empty_blocks().await.unwrap());
+
+    println!("inline_truncate_spine_test PASS");
+    Ok(())
 }
 
 async fn resize_truncate_test() -> Result<()> {

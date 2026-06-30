@@ -17,8 +17,9 @@ use fittings::iobuf::IoBuf;
 use moto_tooling::iobuf::IoBuf;
 
 use crate::{
-    DirEntryBlock, EntryIdInternal, MAX_BLOCKS_IN_TXN_LOG, RESERVED_BLOCKS, ROOT_DIR_ID,
-    ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry, validate_filename,
+    DirEntryBlock, EntryIdInternal, INLINE_CAPACITY, INLINE_DATA_OFFSET, MAX_BLOCKS_IN_TXN_LOG,
+    RESERVED_BLOCKS, ROOT_DIR_ID, ROOT_DIR_ID_INTERNAL, Superblock, Txn, dir_entry,
+    validate_filename,
 };
 
 pub const PARTITION_ID: u8 = 0x2e;
@@ -437,6 +438,16 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         let file_size = dir_entry!(entry_block).metadata().size;
         if offset >= file_size {
             return Ok(0);
+        }
+
+        // Inline files keep their data in the entry block; the whole file is
+        // below one block, so no read can cross a block boundary.
+        if file_size <= INLINE_CAPACITY {
+            let to_read = buf.len().min((file_size - offset) as usize);
+            let start = INLINE_DATA_OFFSET + offset as usize;
+            buf[..to_read]
+                .copy_from_slice(&entry_block.block().as_bytes()[start..start + to_read]);
+            return Ok(to_read);
         }
 
         let block_start = offset & !(BLOCK_SIZE as u64 - 1);

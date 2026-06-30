@@ -1115,6 +1115,47 @@ impl<const ORDER: usize> Node<ORDER> {
         Ok(total)
     }
 
+    /// Appends every block strictly below this node -- all descendant tree nodes
+    /// and all data blocks -- to `out`. The node at `this_block_no` itself is not
+    /// included (for a file that is the entry/root block, which is kept).
+    ///
+    /// Reads untracked. Intended for collapsing a *small* tree (a file reduced to
+    /// at most one data block) into inline storage, where the caller then frees
+    /// exactly these blocks; it must not be called on a large tree.
+    pub(crate) async fn collect_blocks_below<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        this_block_no: BlockNo,
+        out: &mut Vec<BlockNo>,
+    ) -> Result<()> {
+        let (is_leaf, children) = {
+            let block = txn.get_block_untracked(this_block_no).await?;
+            let block_ref = block.block();
+            let node = block_ref.get_at_offset::<Self>(Self::offset_in_block());
+            let num_keys = node.num_keys as usize;
+            if num_keys > ORDER {
+                log::error!("Bad B+ Tree Node {}.", this_block_no.as_u64());
+                return Err(ErrorKind::InvalidData.into());
+            }
+            let children: Vec<BlockNo> = node.kv[..num_keys]
+                .iter()
+                .map(|kv| kv.child_block_no)
+                .collect();
+            (node.is_leaf(), children)
+        };
+
+        if is_leaf {
+            // Children are data blocks.
+            out.extend(children);
+        } else {
+            // Children are tree nodes: collect each and recurse below it.
+            for child in children {
+                out.push(child);
+                Box::pin(NonRootNode::collect_blocks_below(txn, child, out)).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Pulls a spare container block off the *right* spine of the subtree rooted
     /// at `branch`, sourcing it from the chopped-off forest itself so truncation
     /// never allocates -- which keeps it from draining the free list (and
