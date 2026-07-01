@@ -1,4 +1,4 @@
-use async_fs::Access;
+use async_fs::AccessPermissions;
 use async_fs::EntryId;
 use async_fs::Role;
 use async_fs::{EntryKind, FileSystem};
@@ -50,7 +50,7 @@ impl FileSystem for FS {
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
-        perms: [Access; 3],
+        perms: [AccessPermissions; 3],
     ) -> Result<EntryId> {
         match self {
             FS::MotorFs(motor_fs) => {
@@ -67,7 +67,7 @@ impl FileSystem for FS {
         caller: Role,
         entry_id: EntryId,
         target: Role,
-        access: Access,
+        access: AccessPermissions,
     ) -> Result<()> {
         match self {
             FS::MotorFs(motor_fs) => {
@@ -415,7 +415,7 @@ async fn on_cmd_create_file(
             parent_id,
             EntryKind::File,
             fname.as_str(),
-            [Access::Rwx; 3],
+            [AccessPermissions::Rwx; 3],
         )
         .await
         .map_err(|err| {
@@ -445,7 +445,7 @@ async fn on_cmd_create_dir(
             parent_id,
             EntryKind::Directory,
             fname.as_str(),
-            [Access::Rwx; 3],
+            [AccessPermissions::Rwx; 3],
         )
         .await
         .map_err(|err| {

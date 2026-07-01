@@ -256,7 +256,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         parent_id: EntryId,
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
-        perms: [async_fs::Access; 3],
+        perms: [async_fs::AccessPermissions; 3],
     ) -> Result<EntryId> {
         self.check_err()?;
 
@@ -276,7 +276,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             let allowed = if (role as u8) >= (target as u8) {
                 true
             } else {
-                perms[target as usize] == async_fs::Access::Rwx
+                perms[target as usize] == async_fs::AccessPermissions::Rwx
             };
             if !allowed {
                 return Err(ErrorKind::PermissionDenied.into());
@@ -307,7 +307,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         caller: Role,
         entry_id: EntryId,
         target: Role,
-        access: async_fs::Access,
+        access: async_fs::AccessPermissions,
     ) -> Result<()> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
@@ -375,8 +375,10 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
 
         // Moving requires write on both the source and destination directories.
-        self.require_access(role, old_parent_id.into(), true).await?;
-        self.require_access(role, new_parent_id.into(), true).await?;
+        self.require_access(role, old_parent_id.into(), true)
+            .await?;
+        self.require_access(role, new_parent_id.into(), true)
+            .await?;
 
         log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
         Txn::do_move_entry_txn(

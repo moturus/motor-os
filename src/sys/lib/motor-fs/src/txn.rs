@@ -25,7 +25,7 @@ use crate::{
     MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
 };
 use async_fs::{
-    Access, AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Role, Timestamp,
+    AccessPermissions, AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Role, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
 use std::io::{ErrorKind, Result};
@@ -148,7 +148,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         parent_id: EntryIdInternal,
         kind: EntryKind,
         filename: &'a str,
-        perms: [Access; 3],
+        perms: [AccessPermissions; 3],
     ) -> Result<EntryIdInternal> {
         log::trace!(
             "{}:{} - create entry: {parent_id:?} {kind:?} {filename}",
@@ -180,7 +180,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         caller: Role,
         entry_id: EntryIdInternal,
         target: Role,
-        access: Access,
+        access: AccessPermissions,
     ) -> Result<()> {
         let mut txn = Self {
             fs,

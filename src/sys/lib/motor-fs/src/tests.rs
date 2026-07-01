@@ -1,7 +1,7 @@
 use async_fs::EntryId;
 use async_fs::EntryKind;
 use async_fs::FileSystem;
-use async_fs::Access;
+use async_fs::AccessPermissions;
 use async_fs::Role;
 use async_fs::file_block_device::AsyncFileBlockDevice;
 use camino::Utf8PathBuf;
@@ -250,7 +250,7 @@ async fn basic_test() -> Result<()> {
     let ts_first_dir = SystemTime::now();
 
     let first = fs
-        .create_entry(Role::System, root, async_fs::EntryKind::Directory, "first", [Access::Rwx; 3])
+        .create_entry(Role::System, root, async_fs::EntryKind::Directory, "first", [AccessPermissions::Rwx; 3])
         .await?;
     assert_eq!(1, fs.metadata(Role::System, root).await?.size);
 
@@ -258,7 +258,7 @@ async fn basic_test() -> Result<()> {
     assert_eq!(root, fs.get_parent(Role::System, first).await?.unwrap());
 
     assert_eq!(
-        fs.create_entry(Role::System, first, async_fs::EntryKind::Directory, "/", [Access::Rwx; 3])
+        fs.create_entry(Role::System, first, async_fs::EntryKind::Directory, "/", [AccessPermissions::Rwx; 3])
             .await
             .err()
             .unwrap()
@@ -309,20 +309,20 @@ async fn basic_test() -> Result<()> {
     let root_metadata = fs.metadata(Role::System, root).await?;
     assert!(ts_now <= root_metadata.modified.into());
 
-    let dir1 = fs.create_entry(Role::System, root, EntryKind::Directory, "dir1", [Access::Rwx; 3]).await?;
-    let dir2 = fs.create_entry(Role::System, root, EntryKind::Directory, "dir2", [Access::Rwx; 3]).await?;
-    let dir3 = fs.create_entry(Role::System, root, EntryKind::Directory, "dir3", [Access::Rwx; 3]).await?;
+    let dir1 = fs.create_entry(Role::System, root, EntryKind::Directory, "dir1", [AccessPermissions::Rwx; 3]).await?;
+    let dir2 = fs.create_entry(Role::System, root, EntryKind::Directory, "dir2", [AccessPermissions::Rwx; 3]).await?;
+    let dir3 = fs.create_entry(Role::System, root, EntryKind::Directory, "dir3", [AccessPermissions::Rwx; 3]).await?;
     assert_eq!(3, fs.metadata(Role::System, root).await?.size);
     assert_eq!(
         fs.empty_blocks().await.unwrap(),
         NUM_BLOCKS - RESERVED_BLOCKS as u64 - 3
     );
 
-    let dir22 = fs.create_entry(Role::System, dir2, EntryKind::Directory, "dir22", [Access::Rwx; 3]).await?;
+    let dir22 = fs.create_entry(Role::System, dir2, EntryKind::Directory, "dir22", [AccessPermissions::Rwx; 3]).await?;
     assert_eq!(dir2, fs.get_parent(Role::System, dir22).await?.unwrap());
 
     // File.
-    let file = fs.create_entry(Role::System, dir2, EntryKind::File, "file", [Access::Rwx; 3]).await?;
+    let file = fs.create_entry(Role::System, dir2, EntryKind::File, "file", [AccessPermissions::Rwx; 3]).await?;
     assert_eq!(dir2, fs.get_parent(Role::System, file).await?.unwrap());
     assert_eq!(2, fs.metadata(Role::System, dir2).await?.size);
 
@@ -415,7 +415,7 @@ async fn readdir_test() -> Result<()> {
 
     let root = crate::ROOT_DIR_ID;
     let parent_id = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "parent", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "parent", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -425,7 +425,7 @@ async fn readdir_test() -> Result<()> {
     for idx in 0..23 {
         let name = format!("dir_{idx}");
         entries.insert(
-            fs.create_entry(Role::System, parent_id, EntryKind::Directory, name.as_str(), [Access::Rwx; 3])
+            fs.create_entry(Role::System, parent_id, EntryKind::Directory, name.as_str(), [AccessPermissions::Rwx; 3])
                 .await
                 .unwrap(),
             (EntryKind::Directory, name),
@@ -434,7 +434,7 @@ async fn readdir_test() -> Result<()> {
     for idx in 0..44 {
         let name = format!("file_{idx}");
         entries.insert(
-            fs.create_entry(Role::System, parent_id, EntryKind::File, name.as_str(), [Access::Rwx; 3])
+            fs.create_entry(Role::System, parent_id, EntryKind::File, name.as_str(), [AccessPermissions::Rwx; 3])
                 .await
                 .unwrap(),
             (EntryKind::File, name),
@@ -479,7 +479,7 @@ async fn hash_collision_test() -> Result<()> {
 
     let root = crate::ROOT_DIR_ID;
     let dir = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "d", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "d", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -500,17 +500,17 @@ async fn hash_collision_test() -> Result<()> {
 
     let mut ids = std::collections::HashMap::new();
     for name in colliding {
-        let id = fs.create_entry(Role::System, dir, EntryKind::File, name, [Access::Rwx; 3]).await.unwrap();
+        let id = fs.create_entry(Role::System, dir, EntryKind::File, name, [AccessPermissions::Rwx; 3]).await.unwrap();
         assert!(ids.insert(name, id).is_none());
     }
     // Two non-colliding entries, to keep the tree non-trivial.
     for name in ["zzz", "yyy"] {
-        fs.create_entry(Role::System, dir, EntryKind::File, name, [Access::Rwx; 3]).await.unwrap();
+        fs.create_entry(Role::System, dir, EntryKind::File, name, [AccessPermissions::Rwx; 3]).await.unwrap();
     }
 
     // Re-creating a colliding name must still fail with AlreadyExists.
     assert_eq!(
-        fs.create_entry(Role::System, dir, EntryKind::File, "collide_b", [Access::Rwx; 3])
+        fs.create_entry(Role::System, dir, EntryKind::File, "collide_b", [AccessPermissions::Rwx; 3])
             .await
             .unwrap_err()
             .kind(),
@@ -573,7 +573,7 @@ async fn hash_collision_test() -> Result<()> {
 
     // Re-create colliding names after the bucket was fully emptied.
     for name in ["collide_a", "collide_b"] {
-        fs.create_entry(Role::System, dir, EntryKind::File, name, [Access::Rwx; 3]).await.unwrap();
+        fs.create_entry(Role::System, dir, EntryKind::File, name, [AccessPermissions::Rwx; 3]).await.unwrap();
         assert!(fs.stat(Role::System, dir, name).await.unwrap().is_some());
     }
     assert_eq!(collect_dir_names(&mut fs, dir).await.len(), 4);
@@ -598,7 +598,7 @@ async fn hash_collision_stress_test() -> Result<()> {
 
     let root = crate::ROOT_DIR_ID;
     let dir = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "stress", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "stress", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -618,7 +618,7 @@ async fn hash_collision_stress_test() -> Result<()> {
     }
 
     for name in &names {
-        fs.create_entry(Role::System, dir, EntryKind::File, name, [Access::Rwx; 3]).await.unwrap();
+        fs.create_entry(Role::System, dir, EntryKind::File, name, [AccessPermissions::Rwx; 3]).await.unwrap();
     }
     assert_eq!(collect_dir_names(&mut fs, dir).await.len(), N);
 
@@ -659,20 +659,20 @@ async fn hash_collision_move_test() -> Result<()> {
 
     let root = crate::ROOT_DIR_ID;
     let a = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "a", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "a", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let b = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "b", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "b", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
     // All names share the prefix "movehash" (8 bytes): one bucket per directory
     // in debug builds.
-    let a1 = fs.create_entry(Role::System, a, EntryKind::File, "movehash_a1", [Access::Rwx; 3]).await.unwrap();
-    let _a2 = fs.create_entry(Role::System, a, EntryKind::File, "movehash_a2", [Access::Rwx; 3]).await.unwrap();
-    let a3 = fs.create_entry(Role::System, a, EntryKind::File, "movehash_a3", [Access::Rwx; 3]).await.unwrap();
-    fs.create_entry(Role::System, b, EntryKind::File, "movehash_b1", [Access::Rwx; 3]).await.unwrap();
+    let a1 = fs.create_entry(Role::System, a, EntryKind::File, "movehash_a1", [AccessPermissions::Rwx; 3]).await.unwrap();
+    let _a2 = fs.create_entry(Role::System, a, EntryKind::File, "movehash_a2", [AccessPermissions::Rwx; 3]).await.unwrap();
+    let a3 = fs.create_entry(Role::System, a, EntryKind::File, "movehash_a3", [AccessPermissions::Rwx; 3]).await.unwrap();
+    fs.create_entry(Role::System, b, EntryKind::File, "movehash_b1", [AccessPermissions::Rwx; 3]).await.unwrap();
 
     // Move the MIDDLE of A's list (a2) into B's bucket (collides with b1 there).
     // A: a1 -> a2 -> a3  =>  a1 -> a3 ; B: b1  =>  b1 -> b2.
@@ -728,7 +728,7 @@ async fn readdir_large_dir_test() -> Result<()> {
 
     let root = crate::ROOT_DIR_ID;
     let dir = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "big", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "big", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -740,13 +740,13 @@ async fn readdir_large_dir_test() -> Result<()> {
     let mut expected = std::collections::HashSet::new();
     for i in 0..N {
         let name = format!("{i:08}");
-        fs.create_entry(Role::System, dir, EntryKind::File, &name, [Access::Rwx; 3]).await.unwrap();
+        fs.create_entry(Role::System, dir, EntryKind::File, &name, [AccessPermissions::Rwx; 3]).await.unwrap();
         assert!(expected.insert(name));
     }
     // A few colliding names too, so iteration also steps from a multi-entry hash
     // bucket to the next key across the tree.
     for name in ["zzzzzzzzA", "zzzzzzzzB", "zzzzzzzzC"] {
-        fs.create_entry(Role::System, dir, EntryKind::File, name, [Access::Rwx; 3]).await.unwrap();
+        fs.create_entry(Role::System, dir, EntryKind::File, name, [AccessPermissions::Rwx; 3]).await.unwrap();
         assert!(expected.insert(name.to_string()));
     }
 
@@ -786,7 +786,7 @@ async fn midsize_file_test() -> Result<()> {
 
     let root = crate::ROOT_DIR_ID;
     let parent_id = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "parent dir", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "parent dir", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -796,7 +796,7 @@ async fn midsize_file_test() -> Result<()> {
     }
 
     let file_id = fs
-        .create_entry(Role::System, parent_id, EntryKind::File, "foo", [Access::Rwx; 3])
+        .create_entry(Role::System, parent_id, EntryKind::File, "foo", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -847,7 +847,7 @@ async fn midsize_file_test() -> Result<()> {
 
     // Recreate a large file: this tests reallocating blocks from a deleted file.
     let file_id = fs
-        .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "bar", [Access::Rwx; 3])
+        .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "bar", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -892,14 +892,14 @@ async fn delete_reopen_test() -> Result<()> {
     assert_eq!(NUM_BLOCKS, fs.num_blocks());
     assert_empty(&mut fs).await;
 
-    let foo_id = fs.create_entry(Role::System, root, EntryKind::File, "foo", [Access::Rwx; 3]).await.unwrap();
+    let foo_id = fs.create_entry(Role::System, root, EntryKind::File, "foo", [AccessPermissions::Rwx; 3]).await.unwrap();
     fs.write(Role::System, foo_id, 0, b"foobar").await.unwrap();
     assert_eq!(
         fs.stat(Role::System, root, "foo").await.unwrap().unwrap(),
         (foo_id, EntryKind::File)
     );
 
-    let bar_id = fs.create_entry(Role::System, root, EntryKind::File, "bar", [Access::Rwx; 3]).await.unwrap();
+    let bar_id = fs.create_entry(Role::System, root, EntryKind::File, "bar", [AccessPermissions::Rwx; 3]).await.unwrap();
     fs.write(Role::System, bar_id, 0, b"foobarbaz").await.unwrap();
     assert_eq!(
         fs.stat(Role::System, root, "bar").await.unwrap().unwrap(),
@@ -920,7 +920,7 @@ async fn delete_reopen_test() -> Result<()> {
 
     fs.delete_entry(Role::System, foo_id).await.unwrap();
 
-    let baz_id = fs.create_entry(Role::System, root, EntryKind::File, "baz", [Access::Rwx; 3]).await.unwrap();
+    let baz_id = fs.create_entry(Role::System, root, EntryKind::File, "baz", [AccessPermissions::Rwx; 3]).await.unwrap();
     fs.write(Role::System, baz_id, 0, b"baz").await.unwrap();
     assert_eq!(
         fs.stat(Role::System, root, "baz").await.unwrap().unwrap(),
@@ -952,7 +952,7 @@ async fn no_lost_commits_test() -> Result<()> {
     let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
 
     let root = crate::ROOT_DIR_ID;
-    let foo_id = fs.create_entry(Role::System, root, EntryKind::File, "foo", [Access::Rwx; 3]).await.unwrap();
+    let foo_id = fs.create_entry(Role::System, root, EntryKind::File, "foo", [AccessPermissions::Rwx; 3]).await.unwrap();
 
     // Wait for flush timeout.
     tokio::time::sleep(std::time::Duration::from_millis(
@@ -983,12 +983,12 @@ async fn txn_log_replay_test() -> Result<()> {
         fs.set_error_pct(0).await;
 
         let foo_id = fs
-            .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "foo", [Access::Rwx; 3])
+            .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "foo", [AccessPermissions::Rwx; 3])
             .await
             .unwrap();
 
         let bar_id = fs
-            .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "bar", [Access::Rwx; 3])
+            .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "bar", [AccessPermissions::Rwx; 3])
             .await
             .unwrap();
 
@@ -1057,7 +1057,7 @@ async fn random_file_test() -> Result<()> {
     );
 
     let file_id = fs
-        .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "foo", [Access::Rwx; 3])
+        .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "foo", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -1155,7 +1155,7 @@ async fn copy_file_test() -> Result<()> {
     // Source data spanning several blocks plus a partial tail.
     let src_bytes: Vec<u8> = (0..(4096 * 3 + 777)).map(|idx| (idx % 251) as u8).collect();
 
-    let src = fs.create_entry(Role::System, root, EntryKind::File, "src", [Access::Rwx; 3]).await.unwrap();
+    let src = fs.create_entry(Role::System, root, EntryKind::File, "src", [AccessPermissions::Rwx; 3]).await.unwrap();
 
     // Write the source file, respecting block boundaries.
     let mut off = 0;
@@ -1186,7 +1186,7 @@ async fn copy_file_test() -> Result<()> {
     }
 
     // 1. Full-file copy into a fresh, aligned destination.
-    let dst = fs.create_entry(Role::System, root, EntryKind::File, "dst", [Access::Rwx; 3]).await.unwrap();
+    let dst = fs.create_entry(Role::System, root, EntryKind::File, "dst", [AccessPermissions::Rwx; 3]).await.unwrap();
     let copied = fs
         .copy_file_range(Role::System, src, 0, dst, 0, src_bytes.len() as u64)
         .await
@@ -1201,7 +1201,7 @@ async fn copy_file_test() -> Result<()> {
     let to_offset = 5000; // Into the second block of the dest.
     let range = 4096 * 2 + 33;
     let dst2 = fs
-        .create_entry(Role::System, root, EntryKind::File, "dst2", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "dst2", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let copied = fs
@@ -1227,7 +1227,7 @@ async fn copy_file_test() -> Result<()> {
     // 3. Request more bytes than the source has: only the available bytes
     //    are copied, and the returned count reflects that.
     let dst3 = fs
-        .create_entry(Role::System, root, EntryKind::File, "dst3", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "dst3", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let from_offset = src_bytes.len() - 500;
@@ -1243,7 +1243,7 @@ async fn copy_file_test() -> Result<()> {
 
     // 4. Copying from an offset at or past the source EOF copies nothing.
     let dst4 = fs
-        .create_entry(Role::System, root, EntryKind::File, "dst4", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "dst4", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let copied = fs
@@ -1329,7 +1329,7 @@ async fn inline_data_test() -> Result<()> {
     let root = crate::ROOT_DIR_ID;
 
     // --- Inline basics and the exact cutoff boundary. ---
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [AccessPermissions::Rwx; 3]).await.unwrap();
     assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
 
     // A file of exactly `cap` bytes is inline: no data block.
@@ -1367,7 +1367,7 @@ async fn inline_data_test() -> Result<()> {
     assert_eq!(full, fs.empty_blocks().await.unwrap());
 
     // --- tree -> inline from a genuinely multi-block file. ---
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "big", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "big", [AccessPermissions::Rwx; 3]).await.unwrap();
     resize_write_blocks(&mut fs, file, 5).await; // 5 full blocks => tree
     resize_verify(&mut fs, file, 5 * 4096).await;
     fs.resize(Role::System, file, 100).await.unwrap(); // tree -> inline; [0,100) survive
@@ -1381,7 +1381,7 @@ async fn inline_data_test() -> Result<()> {
     assert_eq!(full, fs.empty_blocks().await.unwrap());
 
     // --- inline -> tree by growing (sparse), then tree -> inline back. ---
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "g", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "g", [AccessPermissions::Rwx; 3]).await.unwrap();
     resize_write_partial(&mut fs, file, 50).await; // inline
     assert_eq!(full - 1, fs.empty_blocks().await.unwrap());
     fs.resize(Role::System, file, 10 * 4096).await.unwrap(); // grow past cutoff: sparse tree
@@ -1406,7 +1406,7 @@ async fn inline_data_test() -> Result<()> {
     assert_eq!(full, fs.empty_blocks().await.unwrap());
 
     // --- sparse hole: data only at a high offset, then truncate into the hole. ---
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "s", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "s", [AccessPermissions::Rwx; 3]).await.unwrap();
     {
         let buf: Vec<u8> = (0..100).map(|i| resize_pat(2, i)).collect();
         assert_eq!(100, fs.write(Role::System, file, 2 * 4096, &buf).await.unwrap()); // block 2 => tree
@@ -1437,7 +1437,7 @@ async fn inline_truncate_spine_test() -> Result<()> {
     let root = crate::ROOT_DIR_ID;
 
     // 300 blocks => the tree has internal nodes (root order is 226).
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [AccessPermissions::Rwx; 3]).await.unwrap();
     resize_write_blocks(&mut fs, file, 300).await;
     resize_verify(&mut fs, file, 300 * 4096).await;
 
@@ -1455,7 +1455,7 @@ async fn inline_truncate_spine_test() -> Result<()> {
     assert_eq!(full, fs.empty_blocks().await.unwrap());
 
     // Truncate a large multi-level file straight to a small inline size.
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "f2", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "f2", [AccessPermissions::Rwx; 3]).await.unwrap();
     resize_write_blocks(&mut fs, file, 300).await;
     fs.resize(Role::System, file, 1234).await.unwrap(); // tree -> inline directly
     resize_verify(&mut fs, file, 1234).await;
@@ -1481,7 +1481,7 @@ async fn resize_truncate_test() -> Result<()> {
     assert_eq!(full, fs.empty_blocks().await.unwrap());
 
     let root = crate::ROOT_DIR_ID;
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "big", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "big", [AccessPermissions::Rwx; 3]).await.unwrap();
 
     // > 226 blocks forces a multi-level B+ tree, so truncation must walk it.
     const N0: u64 = 600;
@@ -1522,7 +1522,7 @@ async fn resize_truncate_test() -> Result<()> {
     // (5) Fill the device, draining every orphan and forcing free-block accounting
     //     checks on empty-area allocations (a wrong count would panic there).
     let filler = fs
-        .create_entry(Role::System, root, EntryKind::File, "filler", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "filler", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let zero = vec![0u8; 4096];
@@ -1555,7 +1555,7 @@ async fn resize_truncate_random_test() -> Result<()> {
     let mut fs = create_fs("motor_fs_resize_truncate_random_test", NUM_BLOCKS).await?;
 
     let root = crate::ROOT_DIR_ID;
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [AccessPermissions::Rwx; 3]).await.unwrap();
 
     // A wider file: truncating to a size landing inside a full leaf chops off
     // more branches than the orphan root node can hold, exercising the orphan's
@@ -1607,7 +1607,7 @@ async fn resize_truncate_wide_leaf_test() -> Result<()> {
     // start, a single leaf-level chop removes more branches than an orphan root
     // node can hold, forcing the orphan's intermediate-node path.
     for &build in &[367u64, 494, 621, 748] {
-        let file = fs.create_entry(Role::System, root, EntryKind::File, "w", [Access::Rwx; 3]).await.unwrap();
+        let file = fs.create_entry(Role::System, root, EntryKind::File, "w", [AccessPermissions::Rwx; 3]).await.unwrap();
         resize_write_blocks(&mut fs, file, build).await;
 
         // first_stale_key lands a little past the start of the right-most leaf.
@@ -1646,7 +1646,7 @@ async fn resize_truncate_crash_regrow_test() -> Result<()> {
     // truncation runs to completion).
     for cap in 0..4usize {
         let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
-        let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [Access::Rwx; 3]).await.unwrap();
+        let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [AccessPermissions::Rwx; 3]).await.unwrap();
         resize_write_blocks(&mut fs, file, N0).await;
         fs.flush().await.unwrap();
 
@@ -1704,7 +1704,7 @@ async fn resize_truncate_accounting_walk_test() -> Result<()> {
     let root = crate::ROOT_DIR_ID;
 
     let mut fs = create_fs("motor_fs_resize_truncate_accounting_walk_test", NUM_BLOCKS).await?;
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "f", [AccessPermissions::Rwx; 3]).await.unwrap();
 
     // > 226 blocks => the tree has internal nodes, so the chopped-off forest holds
     // several tree nodes that a naive count would walk.
@@ -1757,7 +1757,7 @@ async fn resize_truncate_no_alloc_test() -> Result<()> {
     let root = crate::ROOT_DIR_ID;
 
     let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
-    let file = fs.create_entry(Role::System, root, EntryKind::File, "big", [Access::Rwx; 3]).await.unwrap();
+    let file = fs.create_entry(Role::System, root, EntryKind::File, "big", [AccessPermissions::Rwx; 3]).await.unwrap();
     resize_write_blocks(&mut fs, file, N0).await;
     resize_verify(&mut fs, file, N0 * BS).await;
 
@@ -1786,7 +1786,7 @@ async fn resize_truncate_no_alloc_test() -> Result<()> {
     //     -- which the previous allocate-based design could not do.
     resize_write_blocks(&mut fs, file, N0).await;
     let filler = fs
-        .create_entry(Role::System, root, EntryKind::File, "filler", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "filler", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let zero = vec![0u8; BS as usize];
@@ -1835,7 +1835,7 @@ async fn write_speed_test() -> Result<()> {
     rng.fill_bytes(block.as_bytes_mut());
 
     let file_id = fs
-        .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "foo", [Access::Rwx; 3])
+        .create_entry(Role::System, crate::ROOT_DIR_ID, EntryKind::File, "foo", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
 
@@ -1947,30 +1947,30 @@ async fn native_write_speed_async_test() -> Result<()> {
 fn access_encoding_roundtrip() {
     // (§8.1) try_from round-trips 0..=4, rejects the rest; (§8.2) zero == Rwx.
     for (byte, acc) in [
-        (0u8, Access::Rwx),
-        (1, Access::Rx),
-        (2, Access::Rw),
-        (3, Access::R),
-        (4, Access::None),
+        (0u8, AccessPermissions::Rwx),
+        (1, AccessPermissions::Rx),
+        (2, AccessPermissions::Rw),
+        (3, AccessPermissions::R),
+        (4, AccessPermissions::None),
     ] {
-        assert_eq!(Access::try_from(byte).unwrap(), acc);
+        assert_eq!(AccessPermissions::try_from(byte).unwrap(), acc);
         assert_eq!(acc as u8, byte);
     }
     for byte in 5u8..=255 {
-        assert!(Access::try_from(byte).is_err(), "byte {byte} should be invalid");
+        assert!(AccessPermissions::try_from(byte).is_err(), "byte {byte} should be invalid");
     }
-    assert_eq!(Access::try_from(0).unwrap(), Access::Rwx);
+    assert_eq!(AccessPermissions::try_from(0).unwrap(), AccessPermissions::Rwx);
 }
 
 #[test]
 fn access_triple_and_gate() {
     // (§8.3) triple() correctness + the "r gates w,x" invariant.
-    assert_eq!(Access::Rwx.triple(), (true, true, true));
-    assert_eq!(Access::Rx.triple(), (true, false, true));
-    assert_eq!(Access::Rw.triple(), (true, true, false));
-    assert_eq!(Access::R.triple(), (true, false, false));
-    assert_eq!(Access::None.triple(), (false, false, false));
-    for a in [Access::Rwx, Access::Rx, Access::Rw, Access::R, Access::None] {
+    assert_eq!(AccessPermissions::Rwx.triple(), (true, true, true));
+    assert_eq!(AccessPermissions::Rx.triple(), (true, false, true));
+    assert_eq!(AccessPermissions::Rw.triple(), (true, true, false));
+    assert_eq!(AccessPermissions::R.triple(), (true, false, false));
+    assert_eq!(AccessPermissions::None.triple(), (false, false, false));
+    for a in [AccessPermissions::Rwx, AccessPermissions::Rx, AccessPermissions::Rw, AccessPermissions::R, AccessPermissions::None] {
         let (r, w, x) = a.triple();
         assert!(r || (!w && !x), "{a:?} grants w/x without r");
     }
@@ -1981,53 +1981,53 @@ fn access_zeroed_metadata_is_rwx() {
     // (§8.2) A zeroed Metadata reads back as fully permissive for every role.
     let m = async_fs::Metadata::zeroed();
     for role in [Role::None, Role::Interactive, Role::System] {
-        assert_eq!(m.access(role).unwrap(), Access::Rwx);
+        assert_eq!(m.access(role).unwrap(), AccessPermissions::Rwx);
     }
 }
 
 #[test]
 fn access_can_narrow_to_lattice() {
     // (§8.4) can_narrow_to over the lattice, incl. the Rx<->Rw incomparability.
-    use Access::{R, Rw, Rwx, Rx};
-    for t in [Rwx, Rx, Rw, R, Access::None] {
+    use AccessPermissions::{R, Rw, Rwx, Rx};
+    for t in [Rwx, Rx, Rw, R, AccessPermissions::None] {
         assert!(Rwx.can_narrow_to(t)); // Rwx narrows to everything
         assert!(t.can_narrow_to(t)); // reflexive
     }
     assert!(!Rx.can_narrow_to(Rw)); // incomparable
     assert!(!Rw.can_narrow_to(Rx));
     assert!(Rx.can_narrow_to(R));
-    assert!(Rx.can_narrow_to(Access::None));
+    assert!(Rx.can_narrow_to(AccessPermissions::None));
     assert!(!Rx.can_narrow_to(Rwx));
-    assert!(R.can_narrow_to(Access::None));
+    assert!(R.can_narrow_to(AccessPermissions::None));
     assert!(!R.can_narrow_to(Rw));
-    assert!(Access::None.can_narrow_to(Access::None));
-    assert!(!Access::None.can_narrow_to(R));
+    assert!(AccessPermissions::None.can_narrow_to(AccessPermissions::None));
+    assert!(!AccessPermissions::None.can_narrow_to(R));
 }
 
 #[test]
 fn access_meet_is_glb() {
     // (§8.5) meet() is a valid, commutative, idempotent greatest-lower-bound.
-    use Access::{R, Rw, Rwx, Rx};
-    let all = [Rwx, Rx, Rw, R, Access::None];
+    use AccessPermissions::{R, Rw, Rwx, Rx};
+    let all = [Rwx, Rx, Rw, R, AccessPermissions::None];
     for a in all {
         assert_eq!(a.meet(a), a);
         for b in all {
             let m = a.meet(b);
             assert_eq!(m, b.meet(a)); // commutative
             assert!(a.can_narrow_to(m) && b.can_narrow_to(m)); // lower bound
-            assert_eq!(Access::try_from(m as u8).unwrap(), m); // always valid
+            assert_eq!(AccessPermissions::try_from(m as u8).unwrap(), m); // always valid
         }
     }
     assert_eq!(Rx.meet(Rw), R); // keep only the shared 'r'
     assert_eq!(Rwx.meet(Rw), Rw);
-    assert_eq!(R.meet(Access::None), Access::None);
+    assert_eq!(R.meet(AccessPermissions::None), AccessPermissions::None);
 }
 
 #[test]
 fn perms_monotonic_check() {
     // (§8.6) accepts nested arrays, rejects inversions and incomparable pairs.
-    use Access::{R, Rw, Rwx, Rx};
-    let idx = |n: Access, i: Access, s: Access| {
+    use AccessPermissions::{R, Rw, Rwx, Rx};
+    let idx = |n: AccessPermissions, i: AccessPermissions, s: AccessPermissions| {
         let mut p = [Rwx; 3];
         p[Role::None as usize] = n;
         p[Role::Interactive as usize] = i;
@@ -2035,17 +2035,17 @@ fn perms_monotonic_check() {
         p
     };
     assert!(async_fs::perms_monotonic(idx(R, Rw, Rwx)));
-    assert!(async_fs::perms_monotonic(idx(Access::None, R, Rwx)));
+    assert!(async_fs::perms_monotonic(idx(AccessPermissions::None, R, Rwx)));
     assert!(async_fs::perms_monotonic(idx(Rwx, Rwx, Rwx)));
     assert!(!async_fs::perms_monotonic(idx(Rwx, R, R))); // None wider than Interactive
-    assert!(!async_fs::perms_monotonic(idx(Access::None, Rx, Rw))); // Rx not ⊆ Rw
+    assert!(!async_fs::perms_monotonic(idx(AccessPermissions::None, Rx, Rw))); // Rx not ⊆ Rw
 }
 
 #[test]
 fn may_set_matrix() {
     // (§8.7) exhaustive authority matrix, incl. System's own byte never widens.
     use async_fs::may_set;
-    use Access::{R, Rwx};
+    use AccessPermissions::{R, Rwx};
     let roles = [Role::None, Role::Interactive, Role::System];
     for &c in &roles {
         for &t in &roles {
@@ -2080,42 +2080,42 @@ async fn permissions_storage_test() -> Result<()> {
 
     // Default perms => every role is Rwx.
     let f = fs
-        .create_entry(Role::System, root, EntryKind::File, "f", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "f", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     for role in [Role::None, Role::Interactive, Role::System] {
-        assert_eq!(fs.metadata(Role::System, f).await?.access(role).unwrap(), Access::Rwx);
+        assert_eq!(fs.metadata(Role::System, f).await?.access(role).unwrap(), AccessPermissions::Rwx);
     }
 
     // Restricted but monotonic: None=R ⊆ Interactive=Rw ⊆ System=Rwx.
-    let mut p = [Access::Rwx; 3];
-    p[Role::None as usize] = Access::R;
-    p[Role::Interactive as usize] = Access::Rw;
+    let mut p = [AccessPermissions::Rwx; 3];
+    p[Role::None as usize] = AccessPermissions::R;
+    p[Role::Interactive as usize] = AccessPermissions::Rw;
     let g = fs
         .create_entry(Role::System, root, EntryKind::File, "g", p)
         .await
         .unwrap();
-    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::None).unwrap(), Access::R);
-    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::Interactive).unwrap(), Access::Rw);
-    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::System).unwrap(), Access::Rwx);
+    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::None).unwrap(), AccessPermissions::R);
+    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::Interactive).unwrap(), AccessPermissions::Rw);
+    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::System).unwrap(), AccessPermissions::Rwx);
 
     // A lower-privileged caller may create with the default perms (the higher
     // roles stay Rwx) and may restrict its own/lower roles monotonically.
     let i = fs
-        .create_entry(Role::Interactive, root, EntryKind::File, "i", [Access::Rwx; 3])
+        .create_entry(Role::Interactive, root, EntryKind::File, "i", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
-    assert_eq!(fs.metadata(Role::System, i).await?.access(Role::System).unwrap(), Access::Rwx);
-    let mut ip = [Access::Rwx; 3];
-    ip[Role::None as usize] = Access::R;
-    ip[Role::Interactive as usize] = Access::Rw;
+    assert_eq!(fs.metadata(Role::System, i).await?.access(Role::System).unwrap(), AccessPermissions::Rwx);
+    let mut ip = [AccessPermissions::Rwx; 3];
+    ip[Role::None as usize] = AccessPermissions::R;
+    ip[Role::Interactive as usize] = AccessPermissions::Rw;
     fs.create_entry(Role::Interactive, root, EntryKind::File, "i2", ip)
         .await
         .unwrap();
 
     // Non-monotonic creation is rejected.
-    let mut bad = [Access::Rwx; 3];
-    bad[Role::Interactive as usize] = Access::R; // None(Rwx) wider than Interactive(R)
+    let mut bad = [AccessPermissions::Rwx; 3];
+    bad[Role::Interactive as usize] = AccessPermissions::R; // None(Rwx) wider than Interactive(R)
     assert_eq!(
         fs.create_entry(Role::System, root, EntryKind::File, "bad", bad)
             .await
@@ -2125,8 +2125,8 @@ async fn permissions_storage_test() -> Result<()> {
     );
 
     // An Interactive caller cannot restrict the System byte at creation.
-    let mut sysrestrict = [Access::Rwx; 3];
-    sysrestrict[Role::System as usize] = Access::R;
+    let mut sysrestrict = [AccessPermissions::Rwx; 3];
+    sysrestrict[Role::System as usize] = AccessPermissions::R;
     assert_eq!(
         fs.create_entry(Role::Interactive, root, EntryKind::File, "nope", sysrestrict)
             .await
@@ -2138,9 +2138,9 @@ async fn permissions_storage_test() -> Result<()> {
     // Restricted perms survive a flush + reopen; fresh entries stay Rwx.
     fs.flush().await?;
     let mut fs = open_fs(FS_TAG).await?;
-    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::Interactive).unwrap(), Access::Rw);
-    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::None).unwrap(), Access::R);
-    assert_eq!(fs.metadata(Role::System, f).await?.access(Role::None).unwrap(), Access::Rwx);
+    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::Interactive).unwrap(), AccessPermissions::Rw);
+    assert_eq!(fs.metadata(Role::System, g).await?.access(Role::None).unwrap(), AccessPermissions::R);
+    assert_eq!(fs.metadata(Role::System, f).await?.access(Role::None).unwrap(), AccessPermissions::Rwx);
     Ok(())
 }
 
@@ -2152,7 +2152,7 @@ fn permissions_authority() {
 }
 
 /// The decoded permission for `role` on `id` (queried as System).
-async fn perm_of(fs: &mut MotorFs, id: EntryId, role: Role) -> Access {
+async fn perm_of(fs: &mut MotorFs, id: EntryId, role: Role) -> AccessPermissions {
     fs.metadata(Role::System, id).await.unwrap().access(role).unwrap()
 }
 
@@ -2165,15 +2165,15 @@ async fn permissions_authority_test() -> Result<()> {
 
     // --- Authority (item 10) ---
     let a = fs
-        .create_entry(Role::System, root, EntryKind::File, "auth", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "auth", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     // Own-byte narrow ok.
-    fs.set_permissions(Role::Interactive, a, Role::Interactive, Access::Rx).await.unwrap();
-    assert_eq!(perm_of(&mut fs, a, Role::Interactive).await, Access::Rx);
+    fs.set_permissions(Role::Interactive, a, Role::Interactive, AccessPermissions::Rx).await.unwrap();
+    assert_eq!(perm_of(&mut fs, a, Role::Interactive).await, AccessPermissions::Rx);
     // Own-byte widen denied.
     assert_eq!(
-        fs.set_permissions(Role::Interactive, a, Role::Interactive, Access::Rwx)
+        fs.set_permissions(Role::Interactive, a, Role::Interactive, AccessPermissions::Rwx)
             .await
             .unwrap_err()
             .kind(),
@@ -2181,37 +2181,37 @@ async fn permissions_authority_test() -> Result<()> {
     );
     // Strictly-higher target forbidden (None cannot touch System).
     assert_eq!(
-        fs.set_permissions(Role::None, a, Role::System, Access::R)
+        fs.set_permissions(Role::None, a, Role::System, AccessPermissions::R)
             .await
             .unwrap_err()
             .kind(),
         ErrorKind::PermissionDenied
     );
     // System may narrow a lower role freely.
-    fs.set_permissions(Role::System, a, Role::None, Access::None).await.unwrap();
-    assert_eq!(perm_of(&mut fs, a, Role::None).await, Access::None);
+    fs.set_permissions(Role::System, a, Role::None, AccessPermissions::None).await.unwrap();
+    assert_eq!(perm_of(&mut fs, a, Role::None).await, AccessPermissions::None);
 
     // --- Cascade (item 12) ---
     let c = fs
-        .create_entry(Role::System, root, EntryKind::File, "cascade", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "cascade", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
-    fs.set_permissions(Role::System, c, Role::System, Access::Rx).await.unwrap(); // drop w
+    fs.set_permissions(Role::System, c, Role::System, AccessPermissions::Rx).await.unwrap(); // drop w
     for role in [Role::None, Role::Interactive, Role::System] {
         assert!(!perm_of(&mut fs, c, role).await.can_write(), "{role:?} kept write");
-        assert!(Access::Rx.can_narrow_to(perm_of(&mut fs, c, role).await)); // ⊆ System
+        assert!(AccessPermissions::Rx.can_narrow_to(perm_of(&mut fs, c, role).await)); // ⊆ System
     }
 
     // --- Cap (item 11) ---
     let d = fs
-        .create_entry(Role::System, root, EntryKind::File, "cap", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "cap", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
-    fs.set_permissions(Role::System, d, Role::System, Access::R).await.unwrap(); // cascade -> all R
-    assert_eq!(perm_of(&mut fs, d, Role::Interactive).await, Access::R);
+    fs.set_permissions(Role::System, d, Role::System, AccessPermissions::R).await.unwrap(); // cascade -> all R
+    assert_eq!(perm_of(&mut fs, d, Role::Interactive).await, AccessPermissions::R);
     // Widening Interactive past the System=R ceiling is denied.
     assert_eq!(
-        fs.set_permissions(Role::System, d, Role::Interactive, Access::Rw)
+        fs.set_permissions(Role::System, d, Role::Interactive, AccessPermissions::Rw)
             .await
             .unwrap_err()
             .kind(),
@@ -2219,7 +2219,7 @@ async fn permissions_authority_test() -> Result<()> {
     );
     // Widening None past the Interactive=R ceiling is denied.
     assert_eq!(
-        fs.set_permissions(Role::System, d, Role::None, Access::Rw)
+        fs.set_permissions(Role::System, d, Role::None, AccessPermissions::Rw)
             .await
             .unwrap_err()
             .kind(),
@@ -2228,17 +2228,17 @@ async fn permissions_authority_test() -> Result<()> {
 
     // --- Sealing (item 13) ---
     let s = fs
-        .create_entry(Role::System, root, EntryKind::File, "seal", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::File, "seal", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
-    fs.set_permissions(Role::System, s, Role::System, Access::Rx).await.unwrap(); // seal writes
+    fs.set_permissions(Role::System, s, Role::System, AccessPermissions::Rx).await.unwrap(); // seal writes
     for role in [Role::None, Role::Interactive, Role::System] {
         assert!(!perm_of(&mut fs, s, role).await.can_write());
     }
     // Write can never be re-granted to anyone.
-    assert!(fs.set_permissions(Role::System, s, Role::System, Access::Rwx).await.is_err());
-    assert!(fs.set_permissions(Role::System, s, Role::Interactive, Access::Rw).await.is_err());
-    assert!(fs.set_permissions(Role::System, s, Role::None, Access::Rw).await.is_err());
+    assert!(fs.set_permissions(Role::System, s, Role::System, AccessPermissions::Rwx).await.is_err());
+    assert!(fs.set_permissions(Role::System, s, Role::Interactive, AccessPermissions::Rw).await.is_err());
+    assert!(fs.set_permissions(Role::System, s, Role::None, AccessPermissions::Rw).await.is_err());
     // Seal survives reopen.
     fs.flush().await?;
     let mut fs = open_fs(FS_TAG).await?;
@@ -2263,17 +2263,17 @@ async fn permissions_enforcement_test() -> Result<()> {
     let denied = |r: Result<()>| assert_eq!(r.unwrap_err().kind(), ErrorKind::PermissionDenied);
 
     let dir = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "d", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "d", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let file = fs
-        .create_entry(Role::System, dir, EntryKind::File, "f", [Access::Rwx; 3])
+        .create_entry(Role::System, dir, EntryKind::File, "f", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     fs.write(Role::System, file, 0, b"hello").await.unwrap();
 
     // --- read (r on the file) ---
-    fs.set_permissions(Role::System, file, Role::None, Access::None).await.unwrap();
+    fs.set_permissions(Role::System, file, Role::None, AccessPermissions::None).await.unwrap();
     let mut buf = [0u8; 8];
     assert_eq!(
         fs.read(Role::None, file, 0, &mut buf).await.unwrap_err().kind(),
@@ -2282,15 +2282,15 @@ async fn permissions_enforcement_test() -> Result<()> {
     assert!(fs.read(Role::System, file, 0, &mut buf).await.unwrap() > 0); // System still can
 
     // --- write / resize (w on the file) ---
-    fs.set_permissions(Role::System, file, Role::None, Access::R).await.unwrap();
+    fs.set_permissions(Role::System, file, Role::None, AccessPermissions::R).await.unwrap();
     denied(fs.write(Role::None, file, 0, b"x").await.map(|_| ()));
     denied(fs.resize(Role::None, file, 0).await);
     assert!(fs.read(Role::None, file, 0, &mut buf).await.is_ok()); // R still grants read
 
     // --- create / delete (w on the parent dir) ---
-    fs.set_permissions(Role::System, dir, Role::None, Access::R).await.unwrap();
+    fs.set_permissions(Role::System, dir, Role::None, AccessPermissions::R).await.unwrap();
     denied(
-        fs.create_entry(Role::None, dir, EntryKind::File, "new", [Access::Rwx; 3])
+        fs.create_entry(Role::None, dir, EntryKind::File, "new", [AccessPermissions::Rwx; 3])
             .await
             .map(|_| ()),
     );
@@ -2300,29 +2300,29 @@ async fn permissions_enforcement_test() -> Result<()> {
     assert!(fs.get_first_entry(Role::None, dir).await.unwrap().is_some());
 
     // --- list (r on the dir) ---
-    fs.set_permissions(Role::System, dir, Role::None, Access::None).await.unwrap();
+    fs.set_permissions(Role::System, dir, Role::None, AccessPermissions::None).await.unwrap();
     denied(fs.stat(Role::None, dir, "f").await.map(|_| ()));
     denied(fs.get_first_entry(Role::None, dir).await.map(|_| ()));
 
     // --- move (w on BOTH parents) ---
     let a = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "a", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "a", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let b = fs
-        .create_entry(Role::System, root, EntryKind::Directory, "b", [Access::Rwx; 3])
+        .create_entry(Role::System, root, EntryKind::Directory, "b", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     let m = fs
-        .create_entry(Role::System, a, EntryKind::File, "m", [Access::Rwx; 3])
+        .create_entry(Role::System, a, EntryKind::File, "m", [AccessPermissions::Rwx; 3])
         .await
         .unwrap();
     // No write on the source dir 'a' -> denied.
-    fs.set_permissions(Role::System, a, Role::None, Access::R).await.unwrap();
+    fs.set_permissions(Role::System, a, Role::None, AccessPermissions::R).await.unwrap();
     denied(fs.move_entry(Role::None, m, b, "m2").await);
     // Restore 'a', deny the destination dir 'b' -> still denied.
-    fs.set_permissions(Role::System, a, Role::None, Access::Rwx).await.unwrap();
-    fs.set_permissions(Role::System, b, Role::None, Access::R).await.unwrap();
+    fs.set_permissions(Role::System, a, Role::None, AccessPermissions::Rwx).await.unwrap();
+    fs.set_permissions(Role::System, b, Role::None, AccessPermissions::R).await.unwrap();
     denied(fs.move_entry(Role::None, m, b, "m2").await);
     // System has write on both -> succeeds.
     fs.move_entry(Role::System, m, b, "m2").await.unwrap();

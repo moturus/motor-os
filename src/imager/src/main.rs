@@ -63,7 +63,7 @@ async fn create_motorfs_partition_async(
                 parent_id,
                 async_fs::EntryKind::File,
                 filename,
-                [async_fs::Access::Rwx; 3],
+                [async_fs::AccessPermissions::Rwx; 3],
             )
             .await
             .unwrap();
@@ -86,7 +86,12 @@ async fn create_motorfs_partition_async(
                 break;
             }
 
-            assert_eq!(sz, fs.write(async_fs::Role::System, new_file_id, offset, &buf[..sz]).await.unwrap());
+            assert_eq!(
+                sz,
+                fs.write(async_fs::Role::System, new_file_id, offset, &buf[..sz])
+                    .await
+                    .unwrap()
+            );
             offset += sz as u64;
         }
     }

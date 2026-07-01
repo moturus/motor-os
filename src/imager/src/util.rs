@@ -21,7 +21,10 @@ pub async fn motor_fs_create_dir_all(
             continue;
         }
 
-        let stat_result = fs.stat(async_fs::Role::System, parent_id, filename).await.unwrap_or(None);
+        let stat_result = fs
+            .stat(async_fs::Role::System, parent_id, filename)
+            .await
+            .unwrap_or(None);
         parent_id = if let Some((entry_id, _)) = stat_result {
             entry_id
         } else {
@@ -30,10 +33,10 @@ pub async fn motor_fs_create_dir_all(
                 parent_id,
                 async_fs::EntryKind::Directory,
                 filename,
-                [async_fs::Access::Rwx; 3],
+                [async_fs::AccessPermissions::Rwx; 3],
             )
-                .await
-                .unwrap()
+            .await
+            .unwrap()
         };
     }
 

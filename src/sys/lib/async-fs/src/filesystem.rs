@@ -61,7 +61,7 @@ pub enum Role {
 /// incomparable). See PERMISSIONS_DESIGN.md.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Access {
+pub enum AccessPermissions {
     Rwx = 0, // zero => full access (legacy/format default)
     Rx = 1,
     Rw = 2,
@@ -69,15 +69,15 @@ pub enum Access {
     None = 4,
 }
 
-impl Access {
+impl AccessPermissions {
     /// (read, write, execute)
     pub fn triple(self) -> (bool, bool, bool) {
         match self {
-            Access::Rwx => (true, true, true),
-            Access::Rx => (true, false, true),
-            Access::Rw => (true, true, false),
-            Access::R => (true, false, false),
-            Access::None => (false, false, false),
+            AccessPermissions::Rwx => (true, true, true),
+            AccessPermissions::Rx => (true, false, true),
+            AccessPermissions::Rw => (true, true, false),
+            AccessPermissions::R => (true, false, false),
+            AccessPermissions::None => (false, false, false),
         }
     }
 
@@ -96,7 +96,7 @@ impl Access {
     /// True iff `target`'s permission set is a subset of `self`'s, i.e. `self`
     /// may be *narrowed* to `target` without granting anything new. Rejects e.g.
     /// `Rx -> Rw` (would drop x and add w).
-    pub fn can_narrow_to(self, target: Access) -> bool {
+    pub fn can_narrow_to(self, target: AccessPermissions) -> bool {
         let (sr, sw, sx) = self.triple();
         let (tr, tw, tx) = target.triple();
         (!tr || sr) && (!tw || sw) && (!tx || sx)
@@ -105,7 +105,7 @@ impl Access {
     /// Per-bit intersection of two permissions. ANDing two r-gated values keeps
     /// the r-gate, so the result is always a valid `Access`. Used to clamp lower
     /// roles when a higher role is narrowed (cross-role cascade).
-    pub fn meet(self, other: Access) -> Access {
+    pub fn meet(self, other: AccessPermissions) -> AccessPermissions {
         let (ar, aw, ax) = self.triple();
         let (br, bw, bx) = other.triple();
         Self::from_triple(ar && br, aw && bw, ax && bx)
@@ -113,18 +113,18 @@ impl Access {
 
     /// Build an `Access` from an r-gated `(r, w, x)` triple. Only ever fed gated
     /// triples (raw disk bytes go through `try_from`).
-    fn from_triple(r: bool, w: bool, x: bool) -> Access {
+    fn from_triple(r: bool, w: bool, x: bool) -> AccessPermissions {
         match (r, w, x) {
-            (true, true, true) => Access::Rwx,
-            (true, false, true) => Access::Rx,
-            (true, true, false) => Access::Rw,
-            (true, false, false) => Access::R,
-            _ => Access::None,
+            (true, true, true) => AccessPermissions::Rwx,
+            (true, false, true) => AccessPermissions::Rx,
+            (true, true, false) => AccessPermissions::Rw,
+            (true, false, false) => AccessPermissions::R,
+            _ => AccessPermissions::None,
         }
     }
 }
 
-impl TryFrom<u8> for Access {
+impl TryFrom<u8> for AccessPermissions {
     #[cfg(feature = "std")]
     type Error = std::io::Error;
 
@@ -133,11 +133,11 @@ impl TryFrom<u8> for Access {
 
     fn try_from(value: u8) -> Result<Self> {
         match value {
-            0 => Ok(Access::Rwx),
-            1 => Ok(Access::Rx),
-            2 => Ok(Access::Rw),
-            3 => Ok(Access::R),
-            4 => Ok(Access::None),
+            0 => Ok(AccessPermissions::Rwx),
+            1 => Ok(AccessPermissions::Rx),
+            2 => Ok(AccessPermissions::Rw),
+            3 => Ok(AccessPermissions::R),
+            4 => Ok(AccessPermissions::None),
             x => {
                 log::error!("Corrupted Access: {x}.");
 
@@ -161,7 +161,7 @@ impl TryFrom<u8> for Access {
 ///   - target strictly below caller : any change (widen or narrow)
 ///   - target == caller (own byte)  : narrow only
 ///   - target strictly above caller : forbidden
-pub fn may_set(caller: Role, target: Role, old: Access, new: Access) -> bool {
+pub fn may_set(caller: Role, target: Role, old: AccessPermissions, new: AccessPermissions) -> bool {
     use core::cmp::Ordering::*;
     match (caller as u8).cmp(&(target as u8)) {
         Greater => true,
@@ -173,7 +173,7 @@ pub fn may_set(caller: Role, target: Role, old: Access, new: Access) -> bool {
 /// True iff `perms` (indexed by `Role`) satisfies cross-role monotonicity:
 /// `perms[None] ⊆ perms[Interactive] ⊆ perms[System]`. Used to validate the
 /// initial permissions passed to `create_entry`.
-pub fn perms_monotonic(perms: [Access; 3]) -> bool {
+pub fn perms_monotonic(perms: [AccessPermissions; 3]) -> bool {
     perms[Role::System as usize].can_narrow_to(perms[Role::Interactive as usize])
         && perms[Role::Interactive as usize].can_narrow_to(perms[Role::None as usize])
 }
@@ -293,20 +293,20 @@ impl Metadata {
     }
 
     /// Decoded permission for `role`. Errors only on a corrupt on-disk byte.
-    pub fn access(&self, role: Role) -> Result<Access> {
-        Access::try_from(self.perms[role as usize])
+    pub fn access(&self, role: Role) -> Result<AccessPermissions> {
+        AccessPermissions::try_from(self.perms[role as usize])
     }
 
     /// Overwrite the raw permission byte for `role`. The caller is responsible
     /// for authorization (`may_set`) and for maintaining cross-role
     /// monotonicity; this is the unchecked setter used by the txn layer.
-    pub fn set_access(&mut self, role: Role, access: Access) {
+    pub fn set_access(&mut self, role: Role, access: AccessPermissions) {
         self.perms[role as usize] = access as u8;
     }
 
     /// Overwrite all three per-role permission bytes at once (indexed by
     /// `Role`). Used when initializing a new entry.
-    pub fn set_perms(&mut self, perms: [Access; 3]) {
+    pub fn set_perms(&mut self, perms: [AccessPermissions; 3]) {
         self.set_access(Role::None, perms[Role::None as usize]);
         self.set_access(Role::Interactive, perms[Role::Interactive as usize]);
         self.set_access(Role::System, perms[Role::System as usize]);
@@ -318,7 +318,8 @@ impl Metadata {
 pub trait FileSystem {
     /// Find a file or directory by its full path.
     async fn stat(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         parent_id: EntryId,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>>;
@@ -326,11 +327,12 @@ pub trait FileSystem {
     /// Create a file or directory with the given initial per-role permissions
     /// (indexed by `Role`). `[Access::Rwx; 3]` is the fully-permissive default.
     async fn create_entry(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
-        perms: [Access; 3],
+        perms: [AccessPermissions; 3],
     ) -> Result<EntryId>;
 
     /// Change one role's permission on an entry, acting as `caller`. Enforces
@@ -341,7 +343,7 @@ pub trait FileSystem {
         caller: Role,
         entry_id: EntryId,
         target: Role,
-        access: Access,
+        access: AccessPermissions,
     ) -> Result<()>;
 
     /// Delete the file or directory.
@@ -349,7 +351,8 @@ pub trait FileSystem {
 
     /// Rename and/or move the file or directory.
     async fn move_entry(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
@@ -372,11 +375,23 @@ pub trait FileSystem {
 
     /// Read bytes from a file.
     /// Note that cross-block reads may not be supported.
-    async fn read(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize>;
+    async fn read(
+        &mut self,
+        role: Role,
+        file_id: EntryId,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize>;
 
     /// Write bytes to a file.
     /// Note that cross-block writes may not be supported.
-    async fn write(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
+    async fn write(
+        &mut self,
+        role: Role,
+        file_id: EntryId,
+        offset: u64,
+        buf: &[u8],
+    ) -> Result<usize>;
 
     /// Resize the file.
     async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()>;
@@ -388,7 +403,8 @@ pub trait FileSystem {
 
     /// Copies bytes from one file to another.
     async fn copy_file_range(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         from: EntryId,
         from_offset: u64,
         to: EntryId,
