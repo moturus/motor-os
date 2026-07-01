@@ -103,7 +103,13 @@ pub async fn create_file(
 
     let mut fs_mut = fs.lock().await;
     fs_mut
-        .create_entry(async_fs::Role::System, dir_id, async_fs::EntryKind::File, file)
+        .create_entry(
+            async_fs::Role::System,
+            dir_id,
+            async_fs::EntryKind::File,
+            file,
+            [async_fs::Access::Rwx; 3],
+        )
         .await
 }
 

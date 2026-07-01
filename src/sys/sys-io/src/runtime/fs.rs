@@ -1,3 +1,4 @@
+use async_fs::Access;
 use async_fs::EntryId;
 use async_fs::Role;
 use async_fs::{EntryKind, FileSystem};
@@ -49,9 +50,31 @@ impl FileSystem for FS {
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
+        perms: [Access; 3],
     ) -> Result<EntryId> {
         match self {
-            FS::MotorFs(motor_fs) => motor_fs.create_entry(role, parent_id, kind, name).await,
+            FS::MotorFs(motor_fs) => {
+                motor_fs
+                    .create_entry(role, parent_id, kind, name, perms)
+                    .await
+            }
+        }
+    }
+
+    /// Change one role's permission on an entry.
+    async fn set_permissions(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        target: Role,
+        access: Access,
+    ) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => {
+                motor_fs
+                    .set_permissions(caller, entry_id, target, access)
+                    .await
+            }
         }
     }
 
@@ -387,7 +410,13 @@ async fn on_cmd_create_file(
 
     let mut fs = fs.lock().await;
     let entry_id = fs
-        .create_entry(Role::System, parent_id, EntryKind::File, fname.as_str())
+        .create_entry(
+            Role::System,
+            parent_id,
+            EntryKind::File,
+            fname.as_str(),
+            [Access::Rwx; 3],
+        )
         .await
         .map_err(|err| {
             log::warn!("fs.create_entry(Role::System, ) failed: {err:?}");
@@ -411,7 +440,13 @@ async fn on_cmd_create_dir(
 
     let mut fs = fs.lock().await;
     let entry_id = fs
-        .create_entry(Role::System, parent_id, EntryKind::Directory, fname.as_str())
+        .create_entry(
+            Role::System,
+            parent_id,
+            EntryKind::Directory,
+            fname.as_str(),
+            [Access::Rwx; 3],
+        )
         .await
         .map_err(|err| {
             log::warn!("fs.create_entry(Role::System, ) failed: {err:?}");

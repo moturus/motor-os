@@ -151,7 +151,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         parent_id: EntryId,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>> {
@@ -216,12 +217,38 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn create_entry(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         parent_id: EntryId,
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
+        perms: [async_fs::Access; 3],
     ) -> Result<EntryId> {
         self.check_err()?;
+
+        // Validate the requested initial permissions. Cross-role monotonicity
+        // must hold, and the caller may set only its own and strictly-lower
+        // roles (starting from the Rwx default, so any value is fine); a
+        // strictly-higher role must be left fully permissive (Rwx), since the
+        // caller cannot restrict what it does not control. (Note: this is the
+        // corrected form of the may_set-based check in PERMISSIONS_DESIGN.md
+        // §6.2 -- may_set forbids *touching* a higher role even to its unchanged
+        // Rwx default, which would reject a lower-privileged caller using the
+        // default perms.)
+        if !async_fs::perms_monotonic(perms) {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        for target in [Role::None, Role::Interactive, Role::System] {
+            let allowed = if (role as u8) >= (target as u8) {
+                true
+            } else {
+                perms[target as usize] == async_fs::Access::Rwx
+            };
+            if !allowed {
+                return Err(ErrorKind::PermissionDenied.into());
+            }
+        }
+
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
         } else {
@@ -233,9 +260,25 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         }
 
         log::debug!("create_entry: parent_id: {parent_id:x} kind: {kind:?} fname: '{filename}'");
-        Txn::do_create_entry_txn(self, parent_id.into(), kind, filename)
+        Txn::do_create_entry_txn(self, parent_id.into(), kind, filename, perms)
             .await
             .map(|e| e.into())
+    }
+
+    async fn set_permissions(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        target: Role,
+        access: async_fs::Access,
+    ) -> Result<()> {
+        self.check_err()?;
+        let entry_id = if entry_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            entry_id
+        };
+        Txn::do_set_permissions_txn(self, caller, entry_id.into(), target, access).await
     }
 
     async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()> {
@@ -249,7 +292,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn move_entry(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
@@ -425,7 +469,13 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(res)
     }
 
-    async fn read(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    async fn read(
+        &mut self,
+        role: Role,
+        file_id: EntryId,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize> {
         self.check_err()?;
         let file_id: EntryIdInternal = file_id.into();
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
@@ -445,8 +495,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         if file_size <= INLINE_CAPACITY {
             let to_read = buf.len().min((file_size - offset) as usize);
             let start = INLINE_DATA_OFFSET + offset as usize;
-            buf[..to_read]
-                .copy_from_slice(&entry_block.block().as_bytes()[start..start + to_read]);
+            buf[..to_read].copy_from_slice(&entry_block.block().as_bytes()[start..start + to_read]);
             return Ok(to_read);
         }
 
@@ -492,7 +541,13 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(to_read)
     }
 
-    async fn write(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+    async fn write(
+        &mut self,
+        role: Role,
+        file_id: EntryId,
+        offset: u64,
+        buf: &[u8],
+    ) -> Result<usize> {
         self.check_err()?;
         log::trace!(
             "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
@@ -518,7 +573,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     /// Copies bytes from one file to another.
     async fn copy_file_range(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         from: EntryId,
         from_offset: u64,
         to: EntryId,
@@ -540,7 +596,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             let dst_room = BLOCK_SIZE as u64 - (to_offset % BLOCK_SIZE as u64);
             let chunk = remaining.min(src_room).min(dst_room) as usize;
 
-            let read = self.read(role, from, from_offset, &mut buf[..chunk]).await?;
+            let read = self
+                .read(role, from, from_offset, &mut buf[..chunk])
+                .await?;
             if read == 0 {
                 break; // Reached the end of the source file.
             }

@@ -58,7 +58,13 @@ async fn create_motorfs_partition_async(
             .await
             .unwrap();
         let new_file_id = fs
-            .create_entry(async_fs::Role::System, parent_id, async_fs::EntryKind::File, filename)
+            .create_entry(
+                async_fs::Role::System,
+                parent_id,
+                async_fs::EntryKind::File,
+                filename,
+                [async_fs::Access::Rwx; 3],
+            )
             .await
             .unwrap();
 

@@ -46,14 +46,136 @@ impl TryFrom<u8> for EntryKind {
 
 /// Privilege role for permission checks: System > Interactive > None. The
 /// discriminant is both the privilege rank and the per-role permissions array
-/// index (see PERMISSIONS_DESIGN.md). Phase 0: threaded through `FileSystem`
-/// but not yet consulted.
+/// index (see PERMISSIONS_DESIGN.md).
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     None = 0,
     Interactive = 1,
     System = 2,
+}
+
+/// Per-role permission value. `r` gates `w` and `x` (if reading is not allowed,
+/// neither writing nor execution is). Zero == `Rwx`, so a zeroed entry is fully
+/// permissive. The value space is a lattice, not a chain (`Rx` and `Rw` are
+/// incomparable). See PERMISSIONS_DESIGN.md.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Access {
+    Rwx = 0, // zero => full access (legacy/format default)
+    Rx = 1,
+    Rw = 2,
+    R = 3,
+    None = 4,
+}
+
+impl Access {
+    /// (read, write, execute)
+    pub fn triple(self) -> (bool, bool, bool) {
+        match self {
+            Access::Rwx => (true, true, true),
+            Access::Rx => (true, false, true),
+            Access::Rw => (true, true, false),
+            Access::R => (true, false, false),
+            Access::None => (false, false, false),
+        }
+    }
+
+    pub fn can_read(self) -> bool {
+        self.triple().0
+    }
+
+    pub fn can_write(self) -> bool {
+        self.triple().1
+    }
+
+    pub fn can_execute(self) -> bool {
+        self.triple().2
+    }
+
+    /// True iff `target`'s permission set is a subset of `self`'s, i.e. `self`
+    /// may be *narrowed* to `target` without granting anything new. Rejects e.g.
+    /// `Rx -> Rw` (would drop x and add w).
+    pub fn can_narrow_to(self, target: Access) -> bool {
+        let (sr, sw, sx) = self.triple();
+        let (tr, tw, tx) = target.triple();
+        (!tr || sr) && (!tw || sw) && (!tx || sx)
+    }
+
+    /// Per-bit intersection of two permissions. ANDing two r-gated values keeps
+    /// the r-gate, so the result is always a valid `Access`. Used to clamp lower
+    /// roles when a higher role is narrowed (cross-role cascade).
+    pub fn meet(self, other: Access) -> Access {
+        let (ar, aw, ax) = self.triple();
+        let (br, bw, bx) = other.triple();
+        Self::from_triple(ar && br, aw && bw, ax && bx)
+    }
+
+    /// Build an `Access` from an r-gated `(r, w, x)` triple. Only ever fed gated
+    /// triples (raw disk bytes go through `try_from`).
+    fn from_triple(r: bool, w: bool, x: bool) -> Access {
+        match (r, w, x) {
+            (true, true, true) => Access::Rwx,
+            (true, false, true) => Access::Rx,
+            (true, true, false) => Access::Rw,
+            (true, false, false) => Access::R,
+            _ => Access::None,
+        }
+    }
+}
+
+impl TryFrom<u8> for Access {
+    #[cfg(feature = "std")]
+    type Error = std::io::Error;
+
+    #[cfg(not(feature = "std"))]
+    type Error = moto_rt::Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        match value {
+            0 => Ok(Access::Rwx),
+            1 => Ok(Access::Rx),
+            2 => Ok(Access::Rw),
+            3 => Ok(Access::R),
+            4 => Ok(Access::None),
+            x => {
+                log::error!("Corrupted Access: {x}.");
+
+                #[cfg(feature = "std")]
+                {
+                    Err(std::io::ErrorKind::InvalidData.into())
+                }
+
+                #[cfg(not(feature = "std"))]
+                {
+                    Err(moto_rt::Error::InvalidData)
+                }
+            }
+        }
+    }
+}
+
+/// May a caller acting as `caller` change role `target`'s permission from `old`
+/// to `new`? Governs **authority only**; cross-role monotonicity is a separate
+/// constraint applied by the FS (cap + cascade). See PERMISSIONS_DESIGN.md.
+///   - target strictly below caller : any change (widen or narrow)
+///   - target == caller (own byte)  : narrow only
+///   - target strictly above caller : forbidden
+pub fn may_set(caller: Role, target: Role, old: Access, new: Access) -> bool {
+    use core::cmp::Ordering::*;
+    match (caller as u8).cmp(&(target as u8)) {
+        Greater => true,
+        Equal => old.can_narrow_to(new),
+        Less => false,
+    }
+}
+
+/// True iff `perms` (indexed by `Role`) satisfies cross-role monotonicity:
+/// `perms[None] ⊆ perms[Interactive] ⊆ perms[System]`. Used to validate the
+/// initial permissions passed to `create_entry`.
+pub fn perms_monotonic(perms: [Access; 3]) -> bool {
+    perms[Role::System as usize].can_narrow_to(perms[Role::Interactive as usize])
+        && perms[Role::Interactive as usize].can_narrow_to(perms[Role::None as usize])
 }
 
 pub type EntryId = u128;
@@ -127,8 +249,14 @@ pub struct Metadata {
     pub modified: Timestamp,
     pub accessed: Timestamp,
     kind: u8, // Must use u8, as using EntryKind leads to ub if not properly initialized.
-    _reserved: [u8; 11],
-    pub user_extensions: [u8; 72], // Permissions, ACL, whatever.
+    // Per-role permissions: one `Access` byte per `Role`, indexed by the role's
+    // discriminant (perms[0]=None, perms[1]=Interactive, perms[2]=System). Zero
+    // == `Access::Rwx`, so a zeroed entry is fully permissive. Kept as raw bytes
+    // (not `[Access; 3]`) because `Access` has invalid bit patterns and so is
+    // not `Pod`; decode via `access()`. See PERMISSIONS_DESIGN.md.
+    perms: [u8; 3],
+    _reserved: [u8; 8],
+    pub user_extensions: [u8; 72], // Reserved for a future ACL/xattr record.
 }
 
 unsafe impl bytemuck::Zeroable for Metadata {}
@@ -158,9 +286,30 @@ impl Metadata {
             modified: Timestamp::zero(),
             accessed: Timestamp::zero(),
             kind: 0,
-            _reserved: [0; 11],
+            perms: [0; 3],
+            _reserved: [0; 8],
             user_extensions: [0; 72],
         }
+    }
+
+    /// Decoded permission for `role`. Errors only on a corrupt on-disk byte.
+    pub fn access(&self, role: Role) -> Result<Access> {
+        Access::try_from(self.perms[role as usize])
+    }
+
+    /// Overwrite the raw permission byte for `role`. The caller is responsible
+    /// for authorization (`may_set`) and for maintaining cross-role
+    /// monotonicity; this is the unchecked setter used by the txn layer.
+    pub fn set_access(&mut self, role: Role, access: Access) {
+        self.perms[role as usize] = access as u8;
+    }
+
+    /// Overwrite all three per-role permission bytes at once (indexed by
+    /// `Role`). Used when initializing a new entry.
+    pub fn set_perms(&mut self, perms: [Access; 3]) {
+        self.set_access(Role::None, perms[Role::None as usize]);
+        self.set_access(Role::Interactive, perms[Role::Interactive as usize]);
+        self.set_access(Role::System, perms[Role::System as usize]);
     }
 }
 
@@ -174,13 +323,26 @@ pub trait FileSystem {
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>>;
 
-    /// Create a file or directory.
+    /// Create a file or directory with the given initial per-role permissions
+    /// (indexed by `Role`). `[Access::Rwx; 3]` is the fully-permissive default.
     async fn create_entry(
         &mut self, role: Role,
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
+        perms: [Access; 3],
     ) -> Result<EntryId>;
+
+    /// Change one role's permission on an entry, acting as `caller`. Enforces
+    /// authority and cross-role monotonicity (see PERMISSIONS_DESIGN.md);
+    /// returns `PermissionDenied` if not allowed.
+    async fn set_permissions(
+        &mut self,
+        caller: Role,
+        entry_id: EntryId,
+        target: Role,
+        access: Access,
+    ) -> Result<()>;
 
     /// Delete the file or directory.
     async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()>;

@@ -25,7 +25,7 @@ use crate::{
     MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
 };
 use async_fs::{
-    AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Timestamp,
+    Access, AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Role, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
 use std::io::{ErrorKind, Result};
@@ -148,6 +148,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         parent_id: EntryIdInternal,
         kind: EntryKind,
         filename: &'a str,
+        perms: [Access; 3],
     ) -> Result<EntryIdInternal> {
         log::trace!(
             "{}:{} - create entry: {parent_id:?} {kind:?} {filename}",
@@ -163,12 +164,78 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         let hash = DirEntryBlock::get_hash(&mut txn, parent_id, filename).await?;
 
         let entry_id = Superblock::allocate_block(&mut txn).await?;
-        DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename);
+        DirEntryBlock::init_child_entry(&mut txn, parent_id, entry_id, kind, filename, perms);
         DirEntryBlock::link_child_block(&mut txn, parent_id.block_no, entry_id.block_no, hash)
             .await?;
         DirEntryBlock::increment_dir_size(&mut txn, parent_id).await?;
         txn.commit().await?;
         Ok(entry_id)
+    }
+
+    /// Change one role's permission on `entry_id`, enforcing authority
+    /// (`may_set`) and cross-role monotonicity (cap on widening + cascade on
+    /// narrowing). See PERMISSIONS_DESIGN.md §4a.
+    pub async fn do_set_permissions_txn(
+        fs: &'a mut MotorFs<BD>,
+        caller: Role,
+        entry_id: EntryIdInternal,
+        target: Role,
+        access: Access,
+    ) -> Result<()> {
+        let mut txn = Self {
+            fs,
+            txn_cache: micromap::Map::new(),
+            read_only: false,
+        };
+
+        let entry_block = txn.get_block(entry_id.block_no).await?.clone();
+        dir_entry!(entry_block).validate_entry(entry_id)?;
+
+        // The immediately-higher role is the ceiling for widening (`System` has
+        // none). Because the invariant already nests the higher roles, the
+        // immediate ceiling is the tightest one.
+        let ceiling_role = match target {
+            Role::None => Some(Role::Interactive),
+            Role::Interactive => Some(Role::System),
+            Role::System => None,
+        };
+
+        // Authorize, then cap: the new value may not exceed the ceiling.
+        let old = dir_entry!(entry_block).metadata().access(target)?;
+        if !async_fs::may_set(caller, target, old, access) {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        if let Some(ceiling_role) = ceiling_role {
+            let ceiling = dir_entry!(entry_block).metadata().access(ceiling_role)?;
+            if !ceiling.can_narrow_to(access) {
+                return Err(ErrorKind::PermissionDenied.into());
+            }
+        }
+        drop(entry_block);
+
+        // Write the target, then cascade: clamp every strictly-lower role to a
+        // subset of the new value. One pass suffices (the lower roles were
+        // already nested).
+        {
+            let mut entry_block = txn.get_block(entry_id.block_no).await?;
+            let mut entry_ref = entry_block.block_mut();
+            let meta = DirEntryBlock::from_block_mut(&mut entry_ref).metadata_mut();
+            meta.set_access(target, access);
+
+            let lower: &[Role] = match target {
+                Role::System => &[Role::Interactive, Role::None],
+                Role::Interactive => &[Role::None],
+                Role::None => &[],
+            };
+            for &role in lower {
+                let clamped = meta.access(role)?.meet(access);
+                meta.set_access(role, clamped);
+            }
+
+            meta.modified = Timestamp::now();
+        }
+
+        txn.commit().await
     }
 
     pub async fn do_delete_entry_txn(
@@ -208,7 +275,11 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         };
 
         // Delete the target entry, if present (and not empty).
-        if let Some((target, _)) = txn.fs.stat(async_fs::Role::System, new_parent_id.into(), new_name).await? {
+        if let Some((target, _)) = txn
+            .fs
+            .stat(async_fs::Role::System, new_parent_id.into(), new_name)
+            .await?
+        {
             let target_id: EntryIdInternal = target.into();
             if target_id == entry_id {
                 return Err(ErrorKind::InvalidInput.into());
