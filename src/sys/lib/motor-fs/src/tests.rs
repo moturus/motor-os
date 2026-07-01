@@ -2245,3 +2245,86 @@ async fn permissions_authority_test() -> Result<()> {
     assert!(!fs.metadata(Role::System, s).await?.access(Role::System).unwrap().can_write());
     Ok(())
 }
+
+#[test]
+fn permissions_enforcement() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(permissions_enforcement_test()).unwrap();
+}
+
+async fn permissions_enforcement_test() -> Result<()> {
+    // (§8.15, Mode E) data-path enforcement: read/write/resize on files, and
+    // create/delete/move/list gated by the parent directory.
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+    const FS_TAG: &str = "motor_fs_permissions_enforcement_test";
+    let mut fs = create_fs(FS_TAG, NUM_BLOCKS).await?;
+    let root = crate::ROOT_DIR_ID;
+    let denied = |r: Result<()>| assert_eq!(r.unwrap_err().kind(), ErrorKind::PermissionDenied);
+
+    let dir = fs
+        .create_entry(Role::System, root, EntryKind::Directory, "d", [Access::Rwx; 3])
+        .await
+        .unwrap();
+    let file = fs
+        .create_entry(Role::System, dir, EntryKind::File, "f", [Access::Rwx; 3])
+        .await
+        .unwrap();
+    fs.write(Role::System, file, 0, b"hello").await.unwrap();
+
+    // --- read (r on the file) ---
+    fs.set_permissions(Role::System, file, Role::None, Access::None).await.unwrap();
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        fs.read(Role::None, file, 0, &mut buf).await.unwrap_err().kind(),
+        ErrorKind::PermissionDenied
+    );
+    assert!(fs.read(Role::System, file, 0, &mut buf).await.unwrap() > 0); // System still can
+
+    // --- write / resize (w on the file) ---
+    fs.set_permissions(Role::System, file, Role::None, Access::R).await.unwrap();
+    denied(fs.write(Role::None, file, 0, b"x").await.map(|_| ()));
+    denied(fs.resize(Role::None, file, 0).await);
+    assert!(fs.read(Role::None, file, 0, &mut buf).await.is_ok()); // R still grants read
+
+    // --- create / delete (w on the parent dir) ---
+    fs.set_permissions(Role::System, dir, Role::None, Access::R).await.unwrap();
+    denied(
+        fs.create_entry(Role::None, dir, EntryKind::File, "new", [Access::Rwx; 3])
+            .await
+            .map(|_| ()),
+    );
+    denied(fs.delete_entry(Role::None, file).await);
+    // R still grants listing.
+    assert!(fs.stat(Role::None, dir, "f").await.unwrap().is_some());
+    assert!(fs.get_first_entry(Role::None, dir).await.unwrap().is_some());
+
+    // --- list (r on the dir) ---
+    fs.set_permissions(Role::System, dir, Role::None, Access::None).await.unwrap();
+    denied(fs.stat(Role::None, dir, "f").await.map(|_| ()));
+    denied(fs.get_first_entry(Role::None, dir).await.map(|_| ()));
+
+    // --- move (w on BOTH parents) ---
+    let a = fs
+        .create_entry(Role::System, root, EntryKind::Directory, "a", [Access::Rwx; 3])
+        .await
+        .unwrap();
+    let b = fs
+        .create_entry(Role::System, root, EntryKind::Directory, "b", [Access::Rwx; 3])
+        .await
+        .unwrap();
+    let m = fs
+        .create_entry(Role::System, a, EntryKind::File, "m", [Access::Rwx; 3])
+        .await
+        .unwrap();
+    // No write on the source dir 'a' -> denied.
+    fs.set_permissions(Role::System, a, Role::None, Access::R).await.unwrap();
+    denied(fs.move_entry(Role::None, m, b, "m2").await);
+    // Restore 'a', deny the destination dir 'b' -> still denied.
+    fs.set_permissions(Role::System, a, Role::None, Access::Rwx).await.unwrap();
+    fs.set_permissions(Role::System, b, Role::None, Access::R).await.unwrap();
+    denied(fs.move_entry(Role::None, m, b, "m2").await);
+    // System has write on both -> succeeds.
+    fs.move_entry(Role::System, m, b, "m2").await.unwrap();
+    Ok(())
+}

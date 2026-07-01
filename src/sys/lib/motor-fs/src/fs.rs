@@ -48,6 +48,37 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         }
     }
 
+    /// Mode-E access enforcement: require that `role` may read (or write, when
+    /// `need_write`) `entry_id`, keyed off the entry's own per-role permission
+    /// byte. Write implies read (`r` gates `w`), so a write check also covers
+    /// read. The execute bit is store-and-report only and is never enforced
+    /// here. See PERMISSIONS_DESIGN.md §5.
+    async fn require_access(
+        &mut self,
+        role: Role,
+        entry_id: EntryIdInternal,
+        need_write: bool,
+    ) -> Result<()> {
+        let block = self
+            .block_cache
+            .get_block(entry_id.block_no())
+            .await?
+            .clone();
+        dir_entry!(block).validate_entry(entry_id)?;
+        let access = dir_entry!(block).metadata().access(role)?;
+        let ok = if need_write {
+            access.can_write()
+        } else {
+            access.can_read()
+        };
+        if ok {
+            Ok(())
+        } else {
+            log::debug!("access denied: {role:?} need_write={need_write} on {entry_id:?}");
+            Err(ErrorKind::PermissionDenied.into())
+        }
+    }
+
     pub(crate) fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache<BD> {
         &mut self.block_cache
     }
@@ -176,6 +207,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             return Err(ErrorKind::NotADirectory.into());
         }
 
+        // Lookup requires read on the directory.
+        self.require_access(role, id, false).await?;
+
         let hash = dir_entry!(parent_block).hash(filename);
 
         let mut txn = Txn::new_readonly(self);
@@ -255,6 +289,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             parent_id
         };
 
+        // Creating an entry requires write on the parent directory.
+        self.require_access(role, parent_id.into(), true).await?;
+
         if self.stat(role, parent_id, filename).await?.is_some() {
             return Err(ErrorKind::AlreadyExists.into());
         }
@@ -285,6 +322,11 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
+        }
+
+        // Deletion is gated by write on the parent directory.
+        if let Some(parent) = self.get_parent(role, entry_id).await? {
+            self.require_access(role, parent.into(), true).await?;
         }
 
         log::debug!("delete_entry {entry_id:x}");
@@ -332,6 +374,10 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
         let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
 
+        // Moving requires write on both the source and destination directories.
+        self.require_access(role, old_parent_id.into(), true).await?;
+        self.require_access(role, new_parent_id.into(), true).await?;
+
         log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
         Txn::do_move_entry_txn(
             self,
@@ -364,6 +410,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             return Err(ErrorKind::NotADirectory.into());
         }
 
+        // Listing requires read on the directory.
+        self.require_access(role, parent_id, false).await?;
+
         let mut txn = Txn::new_readonly(self);
         let Some(child_block_no) = dir_entry!(parent_block).first_child(&mut txn).await? else {
             return Ok(None);
@@ -382,6 +431,11 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Ok(None);
+        }
+
+        // Listing is gated by read on the directory (the entry's parent).
+        if let Some(parent) = self.get_parent(role, entry_id).await? {
+            self.require_access(role, parent.into(), false).await?;
         }
 
         let entry_id: EntryIdInternal = entry_id.into();
@@ -478,6 +532,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     ) -> Result<usize> {
         self.check_err()?;
         let file_id: EntryIdInternal = file_id.into();
+        self.require_access(role, file_id, false).await?;
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
         dir_entry!(entry_block).validate_entry(file_id)?;
 
@@ -549,6 +604,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         buf: &[u8],
     ) -> Result<usize> {
         self.check_err()?;
+        self.require_access(role, file_id.into(), true).await?;
         log::trace!(
             "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
             buf.len()
@@ -558,6 +614,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()> {
         self.check_err()?;
+        self.require_access(role, file_id.into(), true).await?;
         Txn::do_resize_txn(self, file_id.into(), new_size).await
     }
 
