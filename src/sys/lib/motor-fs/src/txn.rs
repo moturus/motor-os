@@ -25,7 +25,7 @@ use crate::{
     MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
 };
 use async_fs::{
-    AccessPermissions, AsyncBlockDevice, BLOCK_SIZE, EntryKind, FileSystem, Role, Timestamp,
+    AccessPermissions, AsyncBlockDevice, BLOCK_SIZE, EntryKind, Role, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
 use std::io::{ErrorKind, Result};
@@ -274,12 +274,11 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             read_only: false,
         };
 
-        // Delete the target entry, if present (and not empty).
-        if let Some((target, _)) = txn
-            .fs
-            .stat(async_fs::Role::System, new_parent_id.into(), new_name)
-            .await?
-        {
+        // Delete the target entry, if present (and not empty). This internal
+        // existence check uses the unenforced lookup: the move is already gated
+        // by write on both parents, so it must not additionally require
+        // traverse/`x` on the destination.
+        if let Some((target, _)) = txn.fs.lookup_child(new_parent_id, new_name).await? {
             let target_id: EntryIdInternal = target.into();
             if target_id == entry_id {
                 return Err(ErrorKind::InvalidInput.into());

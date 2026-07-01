@@ -32,6 +32,15 @@ pub const MAX_FLUSH_DELAY_MS: u64 = 50;
 #[cfg(not(test))]
 pub const MAX_FLUSH_DELAY_MS: u64 = 500;
 
+/// The permission a Mode-E access check requires of the caller's role byte.
+/// `Execute` gates directory traversal/listing (see PERMISSIONS_DESIGN.md §5).
+#[derive(Clone, Copy)]
+enum Need {
+    Read,
+    Write,
+    Execute,
+}
+
 pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
     block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
@@ -48,16 +57,16 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         }
     }
 
-    /// Mode-E access enforcement: require that `role` may read (or write, when
-    /// `need_write`) `entry_id`, keyed off the entry's own per-role permission
-    /// byte. Write implies read (`r` gates `w`), so a write check also covers
-    /// read. The execute bit is store-and-report only and is never enforced
-    /// here. See PERMISSIONS_DESIGN.md §5.
+    /// Mode-E access enforcement: require that `role` holds the `need`
+    /// permission on `entry_id`, keyed off the entry's own per-role permission
+    /// byte. `r` gates `w` and `x`, so a write/execute check also implies read.
+    /// Directory traversal/listing needs `Execute`; file read/write need
+    /// `Read`/`Write`. See PERMISSIONS_DESIGN.md §5.
     async fn require_access(
         &mut self,
         role: Role,
         entry_id: EntryIdInternal,
-        need_write: bool,
+        need: Need,
     ) -> Result<()> {
         let block = self
             .block_cache
@@ -66,17 +75,75 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             .clone();
         dir_entry!(block).validate_entry(entry_id)?;
         let access = dir_entry!(block).metadata().access(role)?;
-        let ok = if need_write {
-            access.can_write()
-        } else {
-            access.can_read()
+        let ok = match need {
+            Need::Read => access.can_read(),
+            Need::Write => access.can_write(),
+            Need::Execute => access.can_execute(),
         };
         if ok {
             Ok(())
         } else {
-            log::debug!("access denied: {role:?} need_write={need_write} on {entry_id:?}");
+            log::debug!("access denied: {role:?} on {entry_id:?}");
             Err(ErrorKind::PermissionDenied.into())
         }
+    }
+
+    /// Look a name up in a directory *without* enforcing caller permissions --
+    /// used both by `stat` (after it has checked `Execute`) and by internal
+    /// bookkeeping (create/move existence checks), which are gated by their own
+    /// `Write` checks rather than by traversal (`Execute`). Errors if
+    /// `parent_id` is not a directory.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub(crate) async fn lookup_child(
+        &mut self,
+        parent_id: EntryIdInternal,
+        filename: &str,
+    ) -> Result<Option<(EntryId, EntryKind)>> {
+        let parent_block = self
+            .block_cache
+            .get_block(parent_id.block_no())
+            .await?
+            .clone();
+        dir_entry!(parent_block).validate_entry(parent_id)?;
+        if dir_entry!(parent_block).kind() != EntryKind::Directory {
+            return Err(ErrorKind::NotADirectory.into());
+        }
+
+        let hash = dir_entry!(parent_block).hash(filename);
+
+        let mut txn = Txn::new_readonly(self);
+        let Some(mut child_block_no) = dir_entry!(parent_block)
+            .first_child_with_hash(&mut txn, hash)
+            .await?
+        else {
+            return Ok(None);
+        };
+        drop(txn);
+
+        loop {
+            let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
+            assert_eq!(
+                dir_entry!(parent_block).hash(dir_entry!(child_block).name()?),
+                hash,
+                "bad child hash: child: '{filename}', parent: {} child block: {}",
+                parent_id.block_no.as_u64(),
+                child_block_no.as_u64()
+            );
+
+            if dir_entry!(child_block).name()? == filename {
+                let (id, kind) =
+                    dir_entry!(child_block).entry_id_with_validation(child_block_no)?;
+                return Ok(Some((id.into(), kind)));
+            }
+
+            child_block_no = if let Some(id) = dir_entry!(child_block).next_entry_id() {
+                id.block_no
+            } else {
+                break;
+            };
+        }
+
+        Ok(None)
     }
 
     pub(crate) fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache<BD> {
@@ -180,7 +247,6 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 
 #[async_trait(?Send)]
 impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
-    #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
         &mut self,
         role: Role,
@@ -197,57 +263,19 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         } else {
             parent_id
         };
-
         let id: EntryIdInternal = parent_id.into();
-        let parent_block = self.block_cache.get_block(id.block_no()).await?.clone();
-        assert!(!parent_block.is_dirty());
-        dir_entry!(parent_block).validate_entry(id)?;
 
-        if dir_entry!(parent_block).kind() != EntryKind::Directory {
-            return Err(ErrorKind::NotADirectory.into());
-        }
-
-        // Lookup requires read on the directory.
-        self.require_access(role, id, false).await?;
-
-        let hash = dir_entry!(parent_block).hash(filename);
-
-        let mut txn = Txn::new_readonly(self);
-
-        assert!(!parent_block.is_dirty());
-        let Some(mut child_block_no) = dir_entry!(parent_block)
-            .first_child_with_hash(&mut txn, hash)
-            .await?
-        else {
-            assert!(!parent_block.is_dirty());
-            return Ok(None);
-        };
-        drop(txn);
-
-        loop {
-            let child_block = self.block_cache.get_block(child_block_no.as_u64()).await?;
-            assert_eq!(
-                dir_entry!(parent_block).hash(dir_entry!(child_block).name()?),
-                hash,
-                "bad child hash: child: '{filename}', parent: {} child block: {}",
-                id.block_no.as_u64(),
-                child_block_no.as_u64()
-            );
-
-            if dir_entry!(child_block).name()? == filename {
-                let (id, kind) =
-                    dir_entry!(child_block).entry_id_with_validation(child_block_no)?;
-                return Ok(Some((id.into(), kind)));
+        {
+            let parent_block = self.block_cache.get_block(id.block_no()).await?.clone();
+            if dir_entry!(parent_block).kind() != EntryKind::Directory {
+                return Err(ErrorKind::NotADirectory.into());
             }
-
-            child_block_no = if let Some(id) = dir_entry!(child_block).next_entry_id() {
-                id.block_no
-            } else {
-                break;
-            };
         }
 
-        Ok(None)
+        // Resolving a name in a directory requires execute (traverse) on it;
+        // `lookup_child` then performs the unenforced lookup.
+        self.require_access(role, id, Need::Execute).await?;
+        self.lookup_child(id, filename).await
     }
 
     async fn create_entry(
@@ -259,6 +287,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         perms: [async_fs::AccessPermissions; 3],
     ) -> Result<EntryId> {
         self.check_err()?;
+        validate_filename(filename)?;
 
         // Validate the requested initial permissions. Cross-role monotonicity
         // must hold, and the caller may set only its own and strictly-lower
@@ -289,10 +318,17 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             parent_id
         };
 
-        // Creating an entry requires write on the parent directory.
-        self.require_access(role, parent_id.into(), true).await?;
+        // Creating an entry requires write on the parent directory. The
+        // existence check uses the unenforced lookup so that `w` alone suffices
+        // (it does not additionally require traverse/`x`).
+        self.require_access(role, parent_id.into(), Need::Write)
+            .await?;
 
-        if self.stat(role, parent_id, filename).await?.is_some() {
+        if self
+            .lookup_child(parent_id.into(), filename)
+            .await?
+            .is_some()
+        {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
@@ -326,7 +362,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
         // Deletion is gated by write on the parent directory.
         if let Some(parent) = self.get_parent(role, entry_id).await? {
-            self.require_access(role, parent.into(), true).await?;
+            self.require_access(role, parent.into(), Need::Write)
+                .await?;
         }
 
         log::debug!("delete_entry {entry_id:x}");
@@ -375,9 +412,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
 
         // Moving requires write on both the source and destination directories.
-        self.require_access(role, old_parent_id.into(), true)
+        self.require_access(role, old_parent_id.into(), Need::Write)
             .await?;
-        self.require_access(role, new_parent_id.into(), true)
+        self.require_access(role, new_parent_id.into(), Need::Write)
             .await?;
 
         log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
@@ -412,8 +449,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             return Err(ErrorKind::NotADirectory.into());
         }
 
-        // Listing requires read on the directory.
-        self.require_access(role, parent_id, false).await?;
+        // Listing requires execute (traverse) on the directory.
+        self.require_access(role, parent_id, Need::Execute).await?;
 
         let mut txn = Txn::new_readonly(self);
         let Some(child_block_no) = dir_entry!(parent_block).first_child(&mut txn).await? else {
@@ -435,9 +472,11 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             return Ok(None);
         }
 
-        // Listing is gated by read on the directory (the entry's parent).
+        // Listing is gated by execute (traverse) on the directory (the entry's
+        // parent).
         if let Some(parent) = self.get_parent(role, entry_id).await? {
-            self.require_access(role, parent.into(), false).await?;
+            self.require_access(role, parent.into(), Need::Execute)
+                .await?;
         }
 
         let entry_id: EntryIdInternal = entry_id.into();
@@ -534,7 +573,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     ) -> Result<usize> {
         self.check_err()?;
         let file_id: EntryIdInternal = file_id.into();
-        self.require_access(role, file_id, false).await?;
+        self.require_access(role, file_id, Need::Read).await?;
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
         dir_entry!(entry_block).validate_entry(file_id)?;
 
@@ -606,7 +645,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         buf: &[u8],
     ) -> Result<usize> {
         self.check_err()?;
-        self.require_access(role, file_id.into(), true).await?;
+        self.require_access(role, file_id.into(), Need::Write)
+            .await?;
         log::trace!(
             "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
             buf.len()
@@ -616,7 +656,8 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()> {
         self.check_err()?;
-        self.require_access(role, file_id.into(), true).await?;
+        self.require_access(role, file_id.into(), Need::Write)
+            .await?;
         Txn::do_resize_txn(self, file_id.into(), new_size).await
     }
 

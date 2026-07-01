@@ -2287,19 +2287,24 @@ async fn permissions_enforcement_test() -> Result<()> {
     denied(fs.resize(Role::None, file, 0).await);
     assert!(fs.read(Role::None, file, 0, &mut buf).await.is_ok()); // R still grants read
 
-    // --- create / delete (w on the parent dir) ---
-    fs.set_permissions(Role::System, dir, Role::None, AccessPermissions::R).await.unwrap();
+    // --- listing/lookup requires execute (x); modification requires write (w) ---
+    // Rx: traverse + read, no write -> can stat/list, cannot create/delete.
+    fs.set_permissions(Role::System, dir, Role::None, AccessPermissions::Rx).await.unwrap();
+    assert!(fs.stat(Role::None, dir, "f").await.unwrap().is_some()); // x grants lookup
+    assert!(fs.get_first_entry(Role::None, dir).await.unwrap().is_some()); // x grants listing
     denied(
         fs.create_entry(Role::None, dir, EntryKind::File, "new", [AccessPermissions::Rwx; 3])
             .await
             .map(|_| ()),
     );
     denied(fs.delete_entry(Role::None, file).await);
-    // R still grants listing.
-    assert!(fs.stat(Role::None, dir, "f").await.unwrap().is_some());
-    assert!(fs.get_first_entry(Role::None, dir).await.unwrap().is_some());
 
-    // --- list (r on the dir) ---
+    // R (no execute): lookup/listing denied even though read is present.
+    fs.set_permissions(Role::System, dir, Role::None, AccessPermissions::R).await.unwrap();
+    denied(fs.stat(Role::None, dir, "f").await.map(|_| ()));
+    denied(fs.get_first_entry(Role::None, dir).await.map(|_| ()));
+
+    // None: still denied.
     fs.set_permissions(Role::System, dir, Role::None, AccessPermissions::None).await.unwrap();
     denied(fs.stat(Role::None, dir, "f").await.map(|_| ()));
     denied(fs.get_first_entry(Role::None, dir).await.map(|_| ()));
