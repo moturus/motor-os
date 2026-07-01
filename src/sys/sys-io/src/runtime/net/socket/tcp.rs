@@ -1454,7 +1454,6 @@ impl MotoSocket {
             let shut_wr = options & api_net::TCP_OPTION_SHUT_WR != 0;
             if shut_wr {
                 options ^= api_net::TCP_OPTION_SHUT_WR;
-                log::error!("implement linger logic");
             }
 
             if options != 0 {
@@ -1472,6 +1471,15 @@ impl MotoSocket {
                         state.rx_closed = true;
                     }
                     if shut_wr {
+                        // Close the write half gracefully, applying the same
+                        // linger logic as a full socket close (see
+                        // `close_tcp_socket_inner`): mark TX as closed and wake
+                        // the TX task. Any bytes still queued to send are not
+                        // dropped -- `tcp_write_task` flushes them out to the
+                        // wire first and only then issues `smoltcp::close()`
+                        // (the FIN). Unlike a full close, the socket itself is
+                        // kept alive (the read half stays open), so no linger
+                        // task / deferred drop is needed here.
                         state.tx_closed = true;
                         state.tx_queue_notify.notify_one();
                     }
