@@ -73,7 +73,7 @@ pub async fn stat(
             return Err(std::io::ErrorKind::InvalidFilename.into());
         }
 
-        let Some((entry_id, kind)) = fs_mut.stat(parent_id, path).await? else {
+        let Some((entry_id, kind)) = fs_mut.stat(async_fs::Role::System, parent_id, path).await? else {
             return Ok(None);
         };
 
@@ -103,7 +103,7 @@ pub async fn create_file(
 
     let mut fs_mut = fs.lock().await;
     fs_mut
-        .create_entry(dir_id, async_fs::EntryKind::File, file)
+        .create_entry(async_fs::Role::System, dir_id, async_fs::EntryKind::File, file)
         .await
 }
 
@@ -125,7 +125,7 @@ pub async fn write_file(
     assert_eq!(
         first_len as usize,
         fs_mut
-            .write(file_id, offset, &bytes[..(first_len as usize)])
+            .write(async_fs::Role::System, file_id, offset, &bytes[..(first_len as usize)])
             .await?
     );
 
@@ -134,7 +134,7 @@ pub async fn write_file(
         assert_eq!(
             second_len as usize,
             fs_mut
-                .write(file_id, offset + first_len, &bytes[(first_len as usize)..])
+                .write(async_fs::Role::System, file_id, offset + first_len, &bytes[(first_len as usize)..])
                 .await?
         );
     }

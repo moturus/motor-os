@@ -208,7 +208,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         };
 
         // Delete the target entry, if present (and not empty).
-        if let Some((target, _)) = txn.fs.stat(new_parent_id.into(), new_name).await? {
+        if let Some((target, _)) = txn.fs.stat(async_fs::Role::System, new_parent_id.into(), new_name).await? {
             let target_id: EntryIdInternal = target.into();
             if target_id == entry_id {
                 return Err(ErrorKind::InvalidInput.into());

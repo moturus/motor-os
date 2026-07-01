@@ -135,7 +135,7 @@ pub(super) async fn load(
 
     let mut fs_mut = fs.lock().await;
     let Some((sys_dir, _)) = fs_mut
-        .stat(async_fs::ROOT_ID, "sys")
+        .stat(async_fs::Role::System, async_fs::ROOT_ID, "sys")
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
     else {
@@ -143,7 +143,7 @@ pub(super) async fn load(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
     let Some((cfg_dir, _)) = fs_mut
-        .stat(sys_dir, "cfg")
+        .stat(async_fs::Role::System, sys_dir, "cfg")
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
     else {
@@ -151,7 +151,7 @@ pub(super) async fn load(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     };
     let Some((cfg_file, _)) = fs_mut
-        .stat(cfg_dir, "sys-net.toml")
+        .stat(async_fs::Role::System, cfg_dir, "sys-net.toml")
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?
     else {
@@ -161,7 +161,7 @@ pub(super) async fn load(
 
     let mut buf = [0; 4096];
     let sz = fs_mut
-        .read(cfg_file, 0, &mut buf)
+        .read(async_fs::Role::System, cfg_file, 0, &mut buf)
         .await
         .inspect_err(|err| log::error!("Error reading {CFG_PATH}: {err:?}."))?;
     let bytes = &buf[..sz];

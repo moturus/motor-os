@@ -58,7 +58,7 @@ async fn create_motorfs_partition_async(
             .await
             .unwrap();
         let new_file_id = fs
-            .create_entry(parent_id, async_fs::EntryKind::File, filename)
+            .create_entry(async_fs::Role::System, parent_id, async_fs::EntryKind::File, filename)
             .await
             .unwrap();
 
@@ -80,7 +80,7 @@ async fn create_motorfs_partition_async(
                 break;
             }
 
-            assert_eq!(sz, fs.write(new_file_id, offset, &buf[..sz]).await.unwrap());
+            assert_eq!(sz, fs.write(async_fs::Role::System, new_file_id, offset, &buf[..sz]).await.unwrap());
             offset += sz as u64;
         }
     }

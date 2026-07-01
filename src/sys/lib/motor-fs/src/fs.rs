@@ -6,7 +6,7 @@
 
 use async_fs::block_cache::BlockCache;
 use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
-use async_fs::{EntryId, EntryKind};
+use async_fs::{EntryId, EntryKind, Role};
 use async_trait::async_trait;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -151,7 +151,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     #[allow(clippy::await_holding_refcell_ref)]
     async fn stat(
-        &mut self,
+        &mut self, role: Role,
         parent_id: EntryId,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>> {
@@ -216,7 +216,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn create_entry(
-        &mut self,
+        &mut self, role: Role,
         parent_id: EntryId,
         kind: async_fs::EntryKind,
         filename: &str, // Leaf name.
@@ -228,7 +228,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             parent_id
         };
 
-        if self.stat(parent_id, filename).await?.is_some() {
+        if self.stat(role, parent_id, filename).await?.is_some() {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
@@ -238,7 +238,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             .map(|e| e.into())
     }
 
-    async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()> {
+    async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()> {
         self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() {
             return Err(ErrorKind::InvalidInput.into());
@@ -249,7 +249,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn move_entry(
-        &mut self,
+        &mut self, role: Role,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
@@ -275,7 +275,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         // which will create a detached cycle.
         let mut ancestor_id = new_parent_id;
         loop {
-            let Some(grandparent_id) = self.get_parent(ancestor_id).await? else {
+            let Some(grandparent_id) = self.get_parent(role, ancestor_id).await? else {
                 assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL.into());
                 break;
             };
@@ -286,7 +286,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             ancestor_id = grandparent_id;
         }
 
-        let old_parent_id = self.get_parent(entry_id).await?.unwrap();
+        let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
 
         log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
         Txn::do_move_entry_txn(
@@ -301,7 +301,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     /// Get the first entry in a directory.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_first_entry(&mut self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -334,7 +334,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     /// Get the next entry in a directory.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_next_entry(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Ok(None);
@@ -379,7 +379,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(Some(id.into()))
     }
 
-    async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_parent(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         let id: EntryIdInternal = entry_id.into();
         if id == ROOT_DIR_ID_INTERNAL || id == async_fs::ROOT_ID.into() {
@@ -394,7 +394,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn name(&mut self, entry_id: EntryId) -> Result<String> {
+    async fn name(&mut self, role: Role, entry_id: EntryId) -> Result<String> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -410,7 +410,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn metadata(&mut self, entry_id: EntryId) -> Result<async_fs::Metadata> {
+    async fn metadata(&mut self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -425,7 +425,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(res)
     }
 
-    async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    async fn read(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
         self.check_err()?;
         let file_id: EntryIdInternal = file_id.into();
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
@@ -492,7 +492,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(to_read)
     }
 
-    async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+    async fn write(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
         self.check_err()?;
         log::trace!(
             "write to file {file_id:x} at offset 0x{offset:x} len 0x{:x}",
@@ -501,7 +501,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Txn::do_write_txn(self, file_id.into(), offset, buf).await
     }
 
-    async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()> {
+    async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()> {
         self.check_err()?;
         Txn::do_resize_txn(self, file_id.into(), new_size).await
     }
@@ -518,7 +518,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     /// Copies bytes from one file to another.
     async fn copy_file_range(
-        &mut self,
+        &mut self, role: Role,
         from: EntryId,
         from_offset: u64,
         to: EntryId,
@@ -540,7 +540,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             let dst_room = BLOCK_SIZE as u64 - (to_offset % BLOCK_SIZE as u64);
             let chunk = remaining.min(src_room).min(dst_room) as usize;
 
-            let read = self.read(from, from_offset, &mut buf[..chunk]).await?;
+            let read = self.read(role, from, from_offset, &mut buf[..chunk]).await?;
             if read == 0 {
                 break; // Reached the end of the source file.
             }
@@ -548,7 +548,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             let mut written = 0;
             while written < read {
                 written += self
-                    .write(to, to_offset + written as u64, &buf[written..read])
+                    .write(role, to, to_offset + written as u64, &buf[written..read])
                     .await?;
             }
 

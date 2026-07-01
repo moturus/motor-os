@@ -44,6 +44,18 @@ impl TryFrom<u8> for EntryKind {
     }
 }
 
+/// Privilege role for permission checks: System > Interactive > None. The
+/// discriminant is both the privilege rank and the per-role permissions array
+/// index (see PERMISSIONS_DESIGN.md). Phase 0: threaded through `FileSystem`
+/// but not yet consulted.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    None = 0,
+    Interactive = 1,
+    System = 2,
+}
+
 pub type EntryId = u128;
 pub const ROOT_ID: EntryId = 0;
 
@@ -157,55 +169,55 @@ impl Metadata {
 pub trait FileSystem {
     /// Find a file or directory by its full path.
     async fn stat(
-        &mut self,
+        &mut self, role: Role,
         parent_id: EntryId,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>>;
 
     /// Create a file or directory.
     async fn create_entry(
-        &mut self,
+        &mut self, role: Role,
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
     ) -> Result<EntryId>;
 
     /// Delete the file or directory.
-    async fn delete_entry(&mut self, entry_id: EntryId) -> Result<()>;
+    async fn delete_entry(&mut self, role: Role, entry_id: EntryId) -> Result<()>;
 
     /// Rename and/or move the file or directory.
     async fn move_entry(
-        &mut self,
+        &mut self, role: Role,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()>;
 
     /// Get the first entry in a directory.
-    async fn get_first_entry(&mut self, parent_id: EntryId) -> Result<Option<EntryId>>;
+    async fn get_first_entry(&mut self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Get the next entry in a directory.
-    async fn get_next_entry(&mut self, entry_id: EntryId) -> Result<Option<EntryId>>;
+    async fn get_next_entry(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Get the parent of the entry.
-    async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>>;
+    async fn get_parent(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Filename of the entry, without parent directories.
-    async fn name(&mut self, entry_id: EntryId) -> Result<String>;
+    async fn name(&mut self, role: Role, entry_id: EntryId) -> Result<String>;
 
     /// The metadata of the directory entry.
-    async fn metadata(&mut self, entry_id: EntryId) -> Result<Metadata>;
+    async fn metadata(&mut self, role: Role, entry_id: EntryId) -> Result<Metadata>;
 
     /// Read bytes from a file.
     /// Note that cross-block reads may not be supported.
-    async fn read(&mut self, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize>;
+    async fn read(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize>;
 
     /// Write bytes to a file.
     /// Note that cross-block writes may not be supported.
-    async fn write(&mut self, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
+    async fn write(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize>;
 
     /// Resize the file.
-    async fn resize(&mut self, file_id: EntryId, new_size: u64) -> Result<()>;
+    async fn resize(&mut self, role: Role, file_id: EntryId, new_size: u64) -> Result<()>;
 
     /// The total number of blocks in the FS.
     fn num_blocks(&self) -> u64;
@@ -214,7 +226,7 @@ pub trait FileSystem {
 
     /// Copies bytes from one file to another.
     async fn copy_file_range(
-        &mut self,
+        &mut self, role: Role,
         from: EntryId,
         from_offset: u64,
         to: EntryId,

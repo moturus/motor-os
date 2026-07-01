@@ -21,11 +21,11 @@ pub async fn motor_fs_create_dir_all(
             continue;
         }
 
-        let stat_result = fs.stat(parent_id, filename).await.unwrap_or(None);
+        let stat_result = fs.stat(async_fs::Role::System, parent_id, filename).await.unwrap_or(None);
         parent_id = if let Some((entry_id, _)) = stat_result {
             entry_id
         } else {
-            fs.create_entry(parent_id, async_fs::EntryKind::Directory, filename)
+            fs.create_entry(async_fs::Role::System, parent_id, async_fs::EntryKind::Directory, filename)
                 .await
                 .unwrap()
         };
