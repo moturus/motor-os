@@ -166,7 +166,7 @@ fn test_ipc() {
     }
 }
 
-fn test_lazy_memory_map() {
+fn test_lazy_memory_map_read() {
     use moto_sys::*;
 
     let addr = SysMem::map(
@@ -196,7 +196,38 @@ fn test_lazy_memory_map() {
     }
 
     SysMem::free(addr).unwrap();
-    println!("test_lazy_memory_map: done");
+    println!("test_lazy_memory_map_read: done");
+}
+
+fn test_lazy_memory_map_write() {
+    use moto_sys::*;
+
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        1,
+    )
+    .unwrap();
+
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(addr as usize as *mut u8, sys_mem::PAGE_SIZE_SMALL as usize)
+    };
+
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..buf.len() {
+        buf[idx] = (idx % (u8::MAX as usize)) as u8;
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..buf.len() {
+        assert_eq!(buf[idx], (idx % (u8::MAX as usize)) as u8);
+    }
+
+    SysMem::free(addr).unwrap();
+    println!("test_lazy_memory_map_write: done");
 }
 
 fn test_file_write() {
@@ -425,6 +456,8 @@ fn main() {
 
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
+    test_lazy_memory_map_read();
+    test_lazy_memory_map_write();
     fs::run_tests();
     // return;
 
@@ -468,11 +501,12 @@ fn main() {
     // tcp::test_wget();
     test_file_write();
 
-    test_lazy_memory_map();
+    test_lazy_memory_map_read();
+    test_lazy_memory_map_write();
     test_ipc();
     stats::test_stats_provider();
     stdio::run_all_tests();
-    fs::run_tests();
+    // fs::run_tests();
 
     println!("PASS");
 

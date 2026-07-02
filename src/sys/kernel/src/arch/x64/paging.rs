@@ -671,4 +671,8 @@ impl PageTable {
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
         unsafe { self.inst.get().lock(line!()).virt_to_phys(virt_addr) }
     }
+
+    pub fn flush_virt_addr(&self, virt_addr: u64) {
+        unsafe { self.inst.get().lock(line!()).flush_virt_addr(virt_addr) }
+    }
 }

@@ -421,8 +421,13 @@ impl ThreadControlBlock {
             this_tcb.user_rsp = irq_stack.rsp; //irq_stack as *const _ as usize as u64;
             this_tcb.rip = irq_stack.rip;
             this_tcb.rflags = irq_stack.flags;
+            this_tcb.user_rbp = irq_stack.rbp;
             this_tcb.irq_stack = *irq_stack;
             this_tcb.pf_addr = Some(pf_addr);
+            // Save SSE/AVX state: resume_preempted_thread() unconditionally does
+            // xrstor(), and the interrupted instruction may hold live data in
+            // vector registers (e.g. a vectorized memset faulting in a lazy page).
+            this_tcb.xsave();
         }
         crate::util::full_fence();
         preempt_current_thread_asm()

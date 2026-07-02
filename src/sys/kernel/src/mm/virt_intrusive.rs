@@ -495,6 +495,7 @@ impl VmemSegment {
         self.address_space()
             .page_table
             .map_page(phys_addr, virt_addr, page_type, mapping_options);
+        self.address_space().page_table.flush_virt_addr(virt_addr);
 
         Ok(())
     }
