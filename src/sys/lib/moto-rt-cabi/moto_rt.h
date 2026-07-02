@@ -4,7 +4,7 @@
  * (moto-rt/src/error.rs), not POSIX errno. Non-negative = success value.
  *
  * This header is the C half of the moto-rt-cabi crate's ABI; keep the two in
- * sync. See docs/porting-libc-by-fable.md (Appendix B) for the design.
+ * sync. See docs/porting-libc-appendix-b.md for the design.
  */
 #ifndef MOTO_RT_H
 #define MOTO_RT_H
@@ -27,6 +27,7 @@ extern "C" {
 #define MOTO_E_NOT_ALLOWED      9
 #define MOTO_E_NOT_FOUND        10
 #define MOTO_E_TIMED_OUT        12
+#define MOTO_E_ALREADY_IN_USE   13
 #define MOTO_E_BAD_HANDLE       17
 
 /* open() flags (moto-rt/src/fs.rs). */
@@ -78,6 +79,10 @@ int64_t moto_rt_write(int32_t fd, const uint8_t *buf, size_t n);
 int64_t moto_rt_seek(int32_t fd, int64_t offset, uint8_t whence);
 int32_t moto_rt_close(int32_t fd);
 int32_t moto_rt_mkdir(const uint8_t *path, size_t path_len);
+int32_t moto_rt_unlink(const uint8_t *path, size_t path_len);
+int32_t moto_rt_rmdir(const uint8_t *path, size_t path_len);
+int32_t moto_rt_rename(const uint8_t *old_path, size_t old_len,
+                       const uint8_t *new_path, size_t new_len);
 int32_t moto_rt_is_terminal(int32_t fd); /* 1 = tty, 0 = not (or bad fd) */
 
 /* time */

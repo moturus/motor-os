@@ -4,7 +4,7 @@
 //! (moto-rt/src/error.rs), NOT a POSIX errno; errno translation happens in the
 //! libc sysdeps. Non-negative return = success value.
 //!
-//! See docs/porting-libc-by-fable.md (Appendix B) for the design.
+//! See docs/porting-libc-appendix-b.md for the design.
 #![no_std]
 // The safety contract of every exported function is the C ABI documented in
 // moto_rt.h (valid pointer + length, etc.); per-function `# Safety` sections
@@ -237,6 +237,53 @@ pub unsafe extern "C" fn moto_rt_mkdir(path: *const u8, path_len: usize) -> i32 
         Err(e) => return e as i32,
     };
     match moto_rt::fs::mkdir(path) {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_unlink(path: *const u8, path_len: usize) -> i32 {
+    let path = match str_arg(path, path_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    match moto_rt::fs::unlink(path) {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+/// NOTE: in today's VDSO rmdir aliases unlink (rt_fs.rs); we still wrap both
+/// so the shim ABI tracks moto-rt's API, not the current implementation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_rmdir(path: *const u8, path_len: usize) -> i32 {
+    let path = match str_arg(path, path_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    match moto_rt::fs::rmdir(path) {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_rename(
+    old_path: *const u8,
+    old_len: usize,
+    new_path: *const u8,
+    new_len: usize,
+) -> i32 {
+    let old = match str_arg(old_path, old_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    let new = match str_arg(new_path, new_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    match moto_rt::fs::rename(old, new) {
         Ok(()) => 0,
         Err(e) => err64(e) as i32,
     }

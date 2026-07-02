@@ -6,7 +6,7 @@
 //! list, which the VDSO's exit loop (rt.vdso/src/rt_tls.rs) picks up on its next
 //! iteration.
 //!
-//! Known limitation (see docs/porting-libc-by-fable.md, B.3): dtors run on
+//! Known limitation (see docs/porting-libc-appendix-b.md, B.3): dtors run on
 //! *thread* exit; `main` returning ends the process via proc_exit without
 //! draining the main thread's keys. Revisit when mlibc's exit() lands (M2).
 
