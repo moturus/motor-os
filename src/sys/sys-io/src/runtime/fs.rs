@@ -35,7 +35,8 @@ pub(crate) enum FS {
 impl FileSystem for FS {
     /// Find a file or directory by its full path.
     async fn stat(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         parent_id: EntryId,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>> {
@@ -46,7 +47,8 @@ impl FileSystem for FS {
 
     /// Create a file or directory.
     async fn create_entry(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         parent_id: EntryId,
         kind: EntryKind,
         name: &str, // Leaf name.
@@ -87,13 +89,18 @@ impl FileSystem for FS {
 
     /// Rename and/or move the file or directory.
     async fn move_entry(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         entry_id: EntryId,
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()> {
         match self {
-            FS::MotorFs(motor_fs) => motor_fs.move_entry(role, entry_id, new_parent_id, new_name).await,
+            FS::MotorFs(motor_fs) => {
+                motor_fs
+                    .move_entry(role, entry_id, new_parent_id, new_name)
+                    .await
+            }
         }
     }
 
@@ -134,7 +141,13 @@ impl FileSystem for FS {
 
     /// Read bytes from a file.
     /// Note that cross-block reads may not be supported.
-    async fn read(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &mut [u8]) -> Result<usize> {
+    async fn read(
+        &mut self,
+        role: Role,
+        file_id: EntryId,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.read(role, file_id, offset, buf).await,
         }
@@ -142,7 +155,13 @@ impl FileSystem for FS {
 
     /// Write bytes to a file.
     /// Note that cross-block writes may not be supported.
-    async fn write(&mut self, role: Role, file_id: EntryId, offset: u64, buf: &[u8]) -> Result<usize> {
+    async fn write(
+        &mut self,
+        role: Role,
+        file_id: EntryId,
+        offset: u64,
+        buf: &[u8],
+    ) -> Result<usize> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.write(role, file_id, offset, buf).await,
         }
@@ -157,7 +176,8 @@ impl FileSystem for FS {
 
     /// Copies bytes from one file to another.
     async fn copy_file_range(
-        &mut self, role: Role,
+        &mut self,
+        role: Role,
         from: EntryId,
         from_offset: u64,
         to: EntryId,
@@ -386,10 +406,13 @@ async fn on_cmd_stat(
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
     let mut fs = fs.lock().await;
-    let Some((entry_id, entry_kind)) = fs.stat(Role::System, parent_id, fname.as_str()).await.map_err(|err| {
-        log::warn!("fs.stat(Role::System, ) failed: {err:?}");
-        err
-    })?
+    let Some((entry_id, entry_kind)) = fs
+        .stat(Role::System, parent_id, fname.as_str())
+        .await
+        .map_err(|err| {
+            log::warn!("fs.stat(Role::System, ) failed: {err:?}");
+            err
+        })?
     else {
         log::debug!("stat({parent_id}, {fname}): not found");
         return Err(std::io::Error::from(ErrorKind::NotFound));
@@ -449,7 +472,7 @@ async fn on_cmd_create_dir(
         )
         .await
         .map_err(|err| {
-            log::warn!("fs.create_entry(Role::System, ) failed: {err:?}");
+            log::debug!("fs.create_entry(Role::System, ) failed: {err:?}");
             map_err_into_native(err)
         })
         .map_err(map_native_error)?;
@@ -470,7 +493,12 @@ async fn on_cmd_write(
 
     let mut fs = fs.lock().await;
     let written = fs
-        .write(Role::System, file_id, offset, &io_page.bytes()[..(len as usize)])
+        .write(
+            Role::System,
+            file_id,
+            offset,
+            &io_page.bytes()[..(len as usize)],
+        )
         .await?;
     assert_eq!(written, len as usize);
     core::mem::drop(fs);
@@ -494,7 +522,12 @@ async fn on_cmd_read(
 
     let mut fs = fs.lock().await;
     let read = fs
-        .read(Role::System, file_id, offset, &mut io_page.bytes_mut()[..(len as usize)])
+        .read(
+            Role::System,
+            file_id,
+            offset,
+            &mut io_page.bytes_mut()[..(len as usize)],
+        )
         .await?;
     core::mem::drop(fs);
 
@@ -554,7 +587,9 @@ async fn on_cmd_delete_entry(
     let mut fs = fs.lock().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
-        fs.delete_entry(Role::System, entry_id).await.map_err(map_err_into_native),
+        fs.delete_entry(Role::System, entry_id)
+            .await
+            .map_err(map_err_into_native),
     );
     core::mem::drop(fs);
 
@@ -582,7 +617,10 @@ async fn on_cmd_get_first_entry(
 ) -> Result<()> {
     let parent_id = api_fs::get_first_entry_req_decode(msg);
     let mut fs = fs.lock().await;
-    let resp = api_fs::get_first_entry_resp_encode(msg, fs.get_first_entry(Role::System, parent_id).await?);
+    let resp = api_fs::get_first_entry_resp_encode(
+        msg,
+        fs.get_first_entry(Role::System, parent_id).await?,
+    );
     core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
@@ -659,7 +697,9 @@ async fn on_cmd_copy_file_range(
     let mut fs = fs.lock().await;
 
     // In this implementation, from_offset == to_offset.
-    let copied = fs.copy_file_range(Role::System, from, offset, to, offset, size).await?;
+    let copied = fs
+        .copy_file_range(Role::System, from, offset, to, offset, size)
+        .await?;
     core::mem::drop(fs);
 
     let resp = api_fs::copy_file_range_resp_encode(msg.id, copied);

@@ -19,7 +19,7 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
         std::io::ErrorKind::WouldBlock => moto_rt::Error::NotReady,
         std::io::ErrorKind::NotADirectory => moto_rt::Error::NotADirectory,
         std::io::ErrorKind::IsADirectory => todo!(),
-        std::io::ErrorKind::DirectoryNotEmpty => todo!(),
+        std::io::ErrorKind::DirectoryNotEmpty => moto_rt::Error::FileTooLarge,
         std::io::ErrorKind::ReadOnlyFilesystem => todo!(),
         std::io::ErrorKind::FilesystemLoop => todo!(),
         std::io::ErrorKind::StaleNetworkFileHandle => todo!(),
@@ -73,7 +73,8 @@ pub async fn stat(
             return Err(std::io::ErrorKind::InvalidFilename.into());
         }
 
-        let Some((entry_id, kind)) = fs_mut.stat(async_fs::Role::System, parent_id, path).await? else {
+        let Some((entry_id, kind)) = fs_mut.stat(async_fs::Role::System, parent_id, path).await?
+        else {
             return Ok(None);
         };
 
@@ -131,7 +132,12 @@ pub async fn write_file(
     assert_eq!(
         first_len as usize,
         fs_mut
-            .write(async_fs::Role::System, file_id, offset, &bytes[..(first_len as usize)])
+            .write(
+                async_fs::Role::System,
+                file_id,
+                offset,
+                &bytes[..(first_len as usize)]
+            )
             .await?
     );
 
@@ -140,7 +146,12 @@ pub async fn write_file(
         assert_eq!(
             second_len as usize,
             fs_mut
-                .write(async_fs::Role::System, file_id, offset + first_len, &bytes[(first_len as usize)..])
+                .write(
+                    async_fs::Role::System,
+                    file_id,
+                    offset + first_len,
+                    &bytes[(first_len as usize)..]
+                )
                 .await?
         );
     }
