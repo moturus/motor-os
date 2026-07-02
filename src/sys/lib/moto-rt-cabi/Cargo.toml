@@ -1,0 +1,19 @@
+[package]
+name = "moto-rt-cabi"
+authors = ["The Motor OS Project Developers"]
+license = "MIT OR Apache-2.0"
+keywords = ["motor", "motor-os"]
+description = "C-ABI surface over the Motor OS RT.VDSO, for mlibc & friends."
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+test = false
+
+[dependencies]
+# `libc` feature: compiles moto-rt/src/libc.rs, whose memcpy/memmove/memset/memcmp
+# and __stack_chk_fail land in our archive — C code needs them and compiler-rt
+# builtins do not provide mem*. Revisit at M2 if mlibc ships its own mem*.
+moto-rt = { path = "../moto-rt", features = ["libc"] }
+moto-sys = { path = "../moto-sys" } # default features = userspace

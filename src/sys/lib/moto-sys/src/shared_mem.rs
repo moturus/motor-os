@@ -96,7 +96,16 @@ pub struct UserThreadControlBlock {
     pub reserved0: [u8; 3],
     pub name_len: u8,
     pub name_bytes: [u8; crate::MAX_THREAD_NAME_LEN],
+
+    /// The C library's thread control block pointer (pthread self).
+    /// Owned by userspace; the kernel only zeroes it at thread start.
+    /// Present iff kernel_version >= 2.
+    pub libc_tcb: u64,
 }
+
+// The C library hard-codes this offset in its thread-pointer accessor
+// (e.g. `mov %fs:0x58, %rax`); keep it pinned.
+const _: () = assert!(core::mem::offset_of!(UserThreadControlBlock, libc_tcb) == 0x58);
 
 impl UserThreadControlBlock {
     #[cfg(feature = "userspace")]

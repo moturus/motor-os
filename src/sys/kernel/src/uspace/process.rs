@@ -1185,7 +1185,7 @@ impl Thread {
         unsafe {
             let user_tcb = self.user_tcb_mut();
             user_tcb.guard = Self::USER_TCB_GUARD;
-            user_tcb.kernel_version = 1;
+            user_tcb.kernel_version = 2; // v2: added libc_tcb.
             user_tcb.user_version = 0;
             user_tcb.self_handle = self.self_handle.as_u64();
             user_tcb.self_tid = self.tid.as_u64();
@@ -1195,6 +1195,7 @@ impl Thread {
             user_tcb.reserved0 = [0; 3];
             user_tcb.name_len = 0;
             user_tcb.name_bytes = [0; 32];
+            user_tcb.libc_tcb = 0;
         }
     }
 

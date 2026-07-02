@@ -948,6 +948,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moto-rt-cabi"
+version = "0.1.0"
+dependencies = [
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
 name = "moto-stats"
 version = "0.1.0"
 dependencies = [
