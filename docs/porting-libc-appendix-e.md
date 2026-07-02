@@ -1,5 +1,10 @@
 # Appendix E — M4, step by step
 
+> **Status: complete** (2026-07-02) — `m4` prints "all tests passed" on Motor OS,
+> exit 0; `m3` regression passes relinked against the M4 `libc.a`. Found and fixed
+> a VDSO bug along the way (`opendir` returned errors as positive fds — see the
+> E.7 pitfalls).
+
 > Part of the Motor OS libc porting guide — main: [porting-libc-by-fable.md](porting-libc-by-fable.md); appendices: [A: M0 toolchain](porting-libc-appendix-a.md) · [B: M1 shim](porting-libc-appendix-b.md) · [C: M2 mlibc](porting-libc-appendix-c.md) · [D: M3 stdio+malloc](porting-libc-appendix-d.md) · [E: M4 filesystem](porting-libc-appendix-e.md)
 
 M4 is the POSIX filesystem surface: the `stat` family, directories
@@ -444,9 +449,10 @@ cd $MLIBC && ninja -C build && DESTDIR=$SYSROOT ninja -C build install
   ("it is unspecified whether entries for dot and dot-dot are returned"), but
   scripts that expect them will notice.
 - **`rmdir` on a non-empty directory** — Motor has no `DirectoryNotEmpty` error
-  code (error.rs tops out at 21); whatever comes back maps to something generic
-  instead of `ENOTEMPTY`. m4 records the actual errno; adding the code to
-  moto-rt + the VDSO is Motor-side wishlist.
+  code (error.rs tops out at 21), and `sys-io/src/util.rs:22` maps motor-fs's
+  correct `io::ErrorKind::DirectoryNotEmpty` to `FileTooLarge` as a placeholder,
+  so libc reports `EFBIG` instead of `ENOTEMPTY` (measured: errno 27 in m4).
+  Motor-side wishlist: new moto-rt error code + `util.rs` + `moto_to_errno()`.
 - **Timestamps may be 0** (= unknown) depending on what motor-fs records; the
   sysdep passes 0 through, m4 tolerates it.
 
@@ -615,14 +621,30 @@ cp m4 $MOTOR/img_files/motor-os/bin/
 `make img`, boot, then `m4` → the six `M4: ... ok` lines, the
 `rmdir(non-empty) errno` note, `M4: all tests passed`, exit 0.
 
-- [ ] Shim v4 staged; the 8 new exports present; struct-size asserts compile.
-- [ ] mlibc rebuilt with the 12 new tags; `m3` still passes (regression).
-- [ ] `m4` audit clean; full pass on Motor; the recorded `rmdir(non-empty)`
-      errno noted here: ____.
-- [ ] Kernel log reviewed; new `mlibc:` warnings (if any) → M5+ worklist.
+- [x] Shim v4 staged; the 8 new exports present; struct-size asserts compile.
+- [x] mlibc rebuilt with the 12 new tags; `m3` still passes (regression, relinked
+      against the new `libc.a`).
+- [x] `m4` audit clean; full pass on Motor. Recorded `rmdir(non-empty)` errno:
+      **27 = `EFBIG`**. Full chain: motor-fs correctly returns
+      `io::ErrorKind::DirectoryNotEmpty` (`motor-fs/src/layout.rs:876`), but
+      `sys-io/src/util.rs:22` maps it to `moto_rt::Error::FileTooLarge` as an
+      explicit placeholder (moto-rt has no `DirectoryNotEmpty` code), and the
+      sysdep table faithfully maps 18 → `EFBIG`. Fix belongs Motor-side: add
+      `DirectoryNotEmpty` to moto-rt's error codes, use it in `util.rs`, then map
+      it to `ENOTEMPTY` in `moto_to_errno()`.
+- [x] Kernel log reviewed: only the expected `AlreadyExists` WARNs (the
+      `mkdir(ROOT)` on an existing dir + the deliberate EEXIST check).
 
 Known M4 pitfalls, pre-answered:
 
+- **`opendir()` on a regular file "succeeds"** (m4's ENOTDIR check fails with
+  `errno=0`; hit at first M4 run) → VDSO bug, fixed 2026-07-02: `rt_fs.rs::opendir`
+  returned its error codes as **positive** i32 — but it returns an fd on success,
+  and moto-rt's `to_result!` treats any non-negative value as a valid fd, so
+  `NotADirectory` (16) came back as "fd 16". Errors from fd-returning VDSO
+  functions must be negative (like `open`'s). This also affected Rust std's
+  `read_dir` on a non-directory path. When adding a new fd-returning vtable
+  entry, check its error sign convention first.
 - **VDSO writes `FileAttr`/`DirEntry` with 16-byte alignment assumptions** →
   if the C structs lose `__attribute__((aligned(16)))`, stack-allocated ones may
   be 8-aligned and Rust-side `*attr = a` can fault or tear. The `static_assert`s

@@ -289,6 +289,108 @@ pub unsafe extern "C" fn moto_rt_rename(
     }
 }
 
+// The C mirrors in moto_rt.h (moto_file_attr_t / moto_dir_entry_t) assume
+// these exact sizes; a drift must break the build, not the runtime.
+const _: () = assert!(core::mem::size_of::<moto_rt::fs::FileAttr>() == 80);
+const _: () = assert!(core::mem::size_of::<moto_rt::fs::DirEntry>() == 368);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_stat(
+    path: *const u8,
+    path_len: usize,
+    attr: *mut moto_rt::fs::FileAttr,
+) -> i32 {
+    let path = match str_arg(path, path_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    match moto_rt::fs::stat(path) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            0
+        }
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_fstat(fd: i32, attr: *mut moto_rt::fs::FileAttr) -> i32 {
+    match moto_rt::fs::get_file_attr(fd) {
+        Ok(a) => {
+            unsafe { *attr = a };
+            0
+        }
+        Err(e) => err64(e) as i32,
+    }
+}
+
+/// Returns the full cwd length; copies min(len, capacity) bytes into buf.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_getcwd(buf: *mut u8, capacity: usize) -> i64 {
+    match moto_rt::fs::getcwd() {
+        Ok(cwd) => {
+            let bytes = cwd.as_bytes();
+            let n = bytes.len().min(capacity);
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n) };
+            bytes.len() as i64
+        }
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_chdir(path: *const u8, path_len: usize) -> i32 {
+    let path = match str_arg(path, path_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    match moto_rt::fs::chdir(path) {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_opendir(path: *const u8, path_len: usize) -> i64 {
+    let path = match str_arg(path, path_len) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match moto_rt::fs::opendir(path) {
+        Ok(fd) => fd as i64,
+        Err(e) => err64(e),
+    }
+}
+
+/// 1 = entry written, 0 = end of directory, negative = -err.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_readdir(fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> i32 {
+    match moto_rt::fs::readdir(fd) {
+        Ok(Some(e)) => {
+            unsafe { *dentry = e };
+            1
+        }
+        Ok(None) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_ftruncate(fd: i32, size: u64) -> i32 {
+    match moto_rt::fs::truncate(fd, size) {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_fsync(fd: i32) -> i32 {
+    match moto_rt::fs::fsync(fd) {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn moto_rt_seek(fd: i32, offset: i64, whence: u8) -> i64 {
     match moto_rt::fs::seek(fd, offset, whence) {

@@ -49,6 +49,36 @@ extern "C" {
 #define MOTO_FD_STDOUT 1
 #define MOTO_FD_STDERR 2
 
+/* file types / permissions (moto-rt/src/fs.rs) */
+#define MOTO_FILETYPE_FILE      1
+#define MOTO_FILETYPE_DIRECTORY 2
+#define MOTO_PERM_READ  1u
+#define MOTO_PERM_WRITE 2u
+#define MOTO_MAX_FILENAME_LEN 256
+
+/* Mirrors moto_rt::fs::FileAttr, #[repr(C, align(16))] — keep the alignment
+ * attribute: the VDSO writes these structs with alignment-assuming code.
+ * Timestamps: u128 nanoseconds since the UNIX epoch as (lo, hi); 0 = unknown. */
+typedef struct {
+	uint64_t version; /* == 1 */
+	uint64_t size;
+	uint64_t perm;
+	uint8_t  file_type;
+	uint8_t  _reserved[7];
+	uint64_t created_lo,  created_hi;
+	uint64_t modified_lo, modified_hi;
+	uint64_t accessed_lo, accessed_hi;
+} __attribute__((aligned(16))) moto_file_attr_t;
+
+/* Mirrors moto_rt::fs::DirEntry, #[repr(C, align(16))]. */
+typedef struct {
+	uint64_t version; /* == 1 */
+	uint64_t _reserved;
+	moto_file_attr_t attr;
+	uint16_t fname_size;              /* fname is NOT NUL-terminated */
+	uint8_t  fname[MOTO_MAX_FILENAME_LEN];
+} __attribute__((aligned(16))) moto_dir_entry_t;
+
 /* init / process / misc */
 void     moto_rt_start(void);              /* MUST be the first call */
 uint64_t moto_rt_version(void);            /* == MOTO_RT_VERSION      */
@@ -84,6 +114,18 @@ int32_t moto_rt_rmdir(const uint8_t *path, size_t path_len);
 int32_t moto_rt_rename(const uint8_t *old_path, size_t old_len,
                        const uint8_t *new_path, size_t new_len);
 int32_t moto_rt_is_terminal(int32_t fd); /* 1 = tty, 0 = not (or bad fd) */
+
+/* fs, part 2 (M4) */
+int32_t moto_rt_stat(const uint8_t *path, size_t path_len, moto_file_attr_t *attr);
+int32_t moto_rt_fstat(int32_t fd, moto_file_attr_t *attr);
+/* returns the full cwd length; copies min(len, capacity) bytes into buf */
+int64_t moto_rt_getcwd(uint8_t *buf, size_t capacity);
+int32_t moto_rt_chdir(const uint8_t *path, size_t path_len);
+int64_t moto_rt_opendir(const uint8_t *path, size_t path_len); /* fd or -err */
+/* 1 = entry written, 0 = end of directory, negative = -err */
+int32_t moto_rt_readdir(int32_t fd, moto_dir_entry_t *dentry);
+int32_t moto_rt_ftruncate(int32_t fd, uint64_t size);
+int32_t moto_rt_fsync(int32_t fd);
 
 /* time */
 uint64_t moto_rt_mono_nanos(void);         /* monotonic, since boot   */
