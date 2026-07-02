@@ -89,6 +89,52 @@ pub extern "C" fn moto_rt_num_cpus() -> usize {
     moto_rt::num_cpus()
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_tid() -> u64 {
+    moto_sys::UserThreadControlBlock::get().self_tid
+}
+
+/// Builds a NULL-terminated char** block (pointers first, then the string
+/// bytes, each NUL-terminated) in a single VDSO-heap allocation. Never freed.
+fn c_strv(strings: alloc::vec::Vec<alloc::string::String>) -> *mut *mut u8 {
+    let n = strings.len();
+    let mut bytes = 0usize;
+    for s in &strings {
+        bytes += s.len() + 1;
+    }
+    let total = (n + 1) * size_of::<*mut u8>() + bytes;
+    let block = moto_rt::alloc::alloc(Layout::from_size_align(total, 8).unwrap());
+    assert!(!block.is_null());
+    let ptrs = block as *mut *mut u8;
+    let mut str_p = unsafe { block.add((n + 1) * size_of::<*mut u8>()) };
+    for (i, s) in strings.iter().enumerate() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(s.as_ptr(), str_p, s.len());
+            *str_p.add(s.len()) = 0;
+            *ptrs.add(i) = str_p;
+            str_p = str_p.add(s.len() + 1);
+        }
+    }
+    unsafe { *ptrs.add(n) = core::ptr::null_mut() };
+    ptrs
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_get_args(argc: *mut i32) -> *mut *mut u8 {
+    let args = moto_rt::process::args();
+    unsafe { *argc = args.len() as i32 };
+    c_strv(args)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_get_env() -> *mut *mut u8 {
+    let mut v = alloc::vec::Vec::new();
+    for (k, val) in moto_rt::process::env() {
+        v.push(alloc::format!("{k}={val}"));
+    }
+    c_strv(v)
+}
+
 // ---- heap (VDSO allocator; NOT for the libc malloc — that sits on vm_map) ------
 
 #[unsafe(no_mangle)]
@@ -176,6 +222,12 @@ pub unsafe extern "C" fn moto_rt_write(fd: i32, buf: *const u8, n: usize) -> i64
         Ok(sz) => sz as i64,
         Err(e) => err64(e),
     }
+}
+
+/// 1 = terminal, 0 = not a terminal (also 0 for invalid fds).
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_is_terminal(fd: i32) -> i32 {
+    moto_rt::fs::is_terminal(fd) as i32
 }
 
 #[unsafe(no_mangle)]

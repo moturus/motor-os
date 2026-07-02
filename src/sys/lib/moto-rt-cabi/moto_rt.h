@@ -55,6 +55,11 @@ _Noreturn void moto_rt_proc_exit(int32_t code);
 void     moto_rt_log(const uint8_t *msg, size_t len);
 void     moto_rt_fill_random_bytes(uint8_t *buf, size_t len);
 size_t   moto_rt_num_cpus(void);
+uint64_t moto_rt_tid(void);
+
+/* argv/env, NULL-terminated; single VDSO-heap allocation, never free */
+char   **moto_rt_get_args(int32_t *argc);
+char   **moto_rt_get_env(void);          /* "KEY=VALUE" strings */
 
 /* VDSO heap (paired: never mix with another allocator's free) */
 void *moto_rt_alloc(size_t size, size_t align);
@@ -73,6 +78,7 @@ int64_t moto_rt_write(int32_t fd, const uint8_t *buf, size_t n);
 int64_t moto_rt_seek(int32_t fd, int64_t offset, uint8_t whence);
 int32_t moto_rt_close(int32_t fd);
 int32_t moto_rt_mkdir(const uint8_t *path, size_t path_len);
+int32_t moto_rt_is_terminal(int32_t fd); /* 1 = tty, 0 = not (or bad fd) */
 
 /* time */
 uint64_t moto_rt_mono_nanos(void);         /* monotonic, since boot   */
