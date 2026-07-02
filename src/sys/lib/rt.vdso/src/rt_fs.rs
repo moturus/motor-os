@@ -928,17 +928,19 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
     let path = unsafe { core::str::from_utf8_unchecked(path_bytes) };
 
+    // NB: this returns an fd on success, so errors must be NEGATIVE (like
+    // open()): moto-rt's to_result! treats any non-negative i32 as a valid fd.
     let c_path = match CanonicalPath::parse(path) {
         Ok(cp) => cp,
-        Err(err) => return err as u16 as i32,
+        Err(err) => return -(err as u16 as i32),
     };
     let (entry_id, entry_kind) = match AsyncFsClient::get().unwrap().stat_internal(c_path) {
         Ok(val) => val,
-        Err(err) => return err as u16 as i32,
+        Err(err) => return -(err as u16 as i32),
     };
 
     if entry_kind != EntryKind::Directory {
-        return moto_rt::Error::NotADirectory as u16 as i32;
+        return -(moto_rt::Error::NotADirectory as u16 as i32);
     }
 
     let rdr = ReadDir {
