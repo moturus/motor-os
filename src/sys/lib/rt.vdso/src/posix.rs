@@ -59,29 +59,30 @@ pub trait PosixFile: Any + Send + Sync {
     fn set_nonblocking(&self, val: bool) -> Result<(), ErrorCode> {
         Err(moto_rt::E_NOT_IMPLEMENTED)
     }
+    // Not pollable by default: fd kinds without readiness semantics (e.g.
+    // regular files) must report an error, not kill the process — libc-level
+    // poll() treats E_INVALID_ARGUMENT as "always ready", per POSIX rules
+    // for regular files.
     fn poll_add(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
+        _r_id: u64,
+        _source_fd: RtFd,
+        _token: Token,
+        _interests: Interests,
     ) -> Result<(), ErrorCode> {
-        todo!()
-        // Err(E_INVALID_ARGUMENT)
+        Err(E_INVALID_ARGUMENT)
     }
     fn poll_set(
         &self,
-        r_id: u64,
-        source_fd: RtFd,
-        token: Token,
-        interests: Interests,
+        _r_id: u64,
+        _source_fd: RtFd,
+        _token: Token,
+        _interests: Interests,
     ) -> Result<(), ErrorCode> {
-        todo!()
-        // Err(E_INVALID_ARGUMENT)
+        Err(E_INVALID_ARGUMENT)
     }
-    fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        panic!("Unexpected poll_del for {:?}", self.kind())
-        // Err(E_INVALID_ARGUMENT)
+    fn poll_del(&self, _r_id: u64, _source_fd: RtFd) -> Result<(), ErrorCode> {
+        Err(E_INVALID_ARGUMENT)
     }
 }
 
