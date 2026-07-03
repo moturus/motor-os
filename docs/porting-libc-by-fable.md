@@ -16,6 +16,7 @@ markers and pitfalls) lives in one appendix file per milestone:
 | D | M3 — stdio + malloc | [porting-libc-appendix-d.md](porting-libc-appendix-d.md) |
 | E | M4 — filesystem | [porting-libc-appendix-e.md](porting-libc-appendix-e.md) |
 | F | M5 — threads + TLS | [porting-libc-appendix-f.md](porting-libc-appendix-f.md) |
+| G | M6 — sockets | [porting-libc-appendix-g.md](porting-libc-appendix-g.md) |
 
 ---
 
@@ -285,6 +286,7 @@ their Motor answers:
    `_Thread_local` validates the emutls ABI; `__cxa_thread_atexit` dtor test.
    Step-by-step: **[Appendix F](porting-libc-appendix-f.md)**.
 7. **M6 — sockets**: TCP/UDP + `getaddrinfo` over `moto-rt::net`.
+   Step-by-step: **[Appendix G](porting-libc-appendix-g.md)**.
 8. **M7 — real program**: a fork-free Unix utility end-to-end in a VM.
 9. **M8 — C++ stack**: libc++abi/libc++ (no-EH) cross-built; C++17 program runs.
 10. **M9 — native toolchain**: clang+lld on the image compile hello.c natively.

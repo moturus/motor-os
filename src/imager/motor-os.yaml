@@ -18,4 +18,4 @@ input_files:
 static_dirs:
   - "img_files/motor-os"
 filesystem: "motor-fs"
-data_partition_size_mb: 64
+data_partition_size_mb: 128

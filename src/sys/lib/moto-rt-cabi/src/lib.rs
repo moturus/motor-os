@@ -407,6 +407,246 @@ pub extern "C" fn moto_rt_close(fd: i32) -> i32 {
     }
 }
 
+// ---- net (moto-rt/src/net.rs; addresses use moto_rt::netc, NOT the Linux ABI) --
+
+// The C mirrors in moto_rt.h (moto_sockaddr_t) assume these exact sizes.
+const _: () = assert!(core::mem::size_of::<moto_rt::netc::sockaddr>() == 28);
+const _: () = assert!(core::mem::size_of::<moto_rt::netc::sockaddr_in>() == 8);
+
+fn ret0(r: moto_rt::Result<()>) -> i32 {
+    match r {
+        Ok(()) => 0,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+fn ret_fd(r: moto_rt::Result<moto_rt::RtFd>) -> i64 {
+    match r {
+        Ok(fd) => fd as i64,
+        Err(e) => err64(e),
+    }
+}
+
+fn ret_bool(r: moto_rt::Result<bool>) -> i32 {
+    match r {
+        Ok(v) => v as i32,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+fn nanos_to_timo(nanos: u64) -> Option<core::time::Duration> {
+    if nanos == u64::MAX {
+        None
+    } else {
+        Some(core::time::Duration::from_nanos(nanos))
+    }
+}
+
+fn timo_to_nanos(r: moto_rt::Result<Option<core::time::Duration>>) -> i64 {
+    match r {
+        Ok(None) => i64::MAX, // callers treat MAX as "none"
+        Ok(Some(d)) => d.as_nanos().min(i64::MAX as u128) as i64,
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_bind(proto: u8, addr: *const moto_rt::netc::sockaddr) -> i64 {
+    ret_fd(moto_rt::net::bind(proto, unsafe { &*addr }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_listen(fd: i32, backlog: u32) -> i32 {
+    ret0(moto_rt::net::listen(fd, backlog))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_accept(fd: i32, peer: *mut moto_rt::netc::sockaddr) -> i64 {
+    match moto_rt::net::accept(fd) {
+        Ok((fd2, addr)) => {
+            unsafe { *peer = addr };
+            fd2 as i64
+        }
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_tcp_connect(
+    addr: *const moto_rt::netc::sockaddr,
+    timeout_nanos: u64,
+    nonblocking: i32,
+) -> i64 {
+    let timeout = nanos_to_timo(timeout_nanos).unwrap_or(core::time::Duration::MAX);
+    ret_fd(moto_rt::net::tcp_connect(
+        unsafe { &*addr },
+        timeout,
+        nonblocking != 0,
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_udp_connect(
+    fd: i32,
+    addr: *const moto_rt::netc::sockaddr,
+) -> i32 {
+    ret0(moto_rt::net::udp_connect(fd, unsafe { &*addr }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_socket_addr(
+    fd: i32,
+    out: *mut moto_rt::netc::sockaddr,
+) -> i32 {
+    match moto_rt::net::socket_addr(fd) {
+        Ok(addr) => {
+            unsafe { *out = addr };
+            0
+        }
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_peer_addr(fd: i32, out: *mut moto_rt::netc::sockaddr) -> i32 {
+    match moto_rt::net::peer_addr(fd) {
+        Ok(addr) => {
+            unsafe { *out = addr };
+            0
+        }
+        Err(e) => err64(e) as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_shutdown(fd: i32, how: u8) -> i32 {
+    ret0(moto_rt::net::shutdown(fd, how))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_peek(fd: i32, buf: *mut u8, n: usize) -> i64 {
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, n) };
+    match moto_rt::net::peek(fd, buf) {
+        Ok(sz) => sz as i64,
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_udp_recv_from(
+    fd: i32,
+    buf: *mut u8,
+    n: usize,
+    from: *mut moto_rt::netc::sockaddr,
+) -> i64 {
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, n) };
+    match moto_rt::net::udp_recv_from(fd, buf) {
+        Ok((sz, addr)) => {
+            unsafe { *from = addr };
+            sz as i64
+        }
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_udp_peek_from(
+    fd: i32,
+    buf: *mut u8,
+    n: usize,
+    from: *mut moto_rt::netc::sockaddr,
+) -> i64 {
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, n) };
+    match moto_rt::net::udp_peek_from(fd, buf) {
+        Ok((sz, addr)) => {
+            unsafe { *from = addr };
+            sz as i64
+        }
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_udp_send_to(
+    fd: i32,
+    buf: *const u8,
+    n: usize,
+    to: *const moto_rt::netc::sockaddr,
+) -> i64 {
+    let buf = unsafe { core::slice::from_raw_parts(buf, n) };
+    match moto_rt::net::udp_send_to(fd, buf, unsafe { &*to }) {
+        Ok(sz) => sz as i64,
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_set_nonblocking(fd: i32, nonblocking: i32) -> i32 {
+    ret0(moto_rt::net::set_nonblocking(fd, nonblocking != 0))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_set_nodelay(fd: i32, v: i32) -> i32 {
+    ret0(moto_rt::net::set_nodelay(fd, v != 0))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_nodelay(fd: i32) -> i32 {
+    ret_bool(moto_rt::net::nodelay(fd))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_set_ttl(fd: i32, ttl: u32) -> i32 {
+    ret0(moto_rt::net::set_ttl(fd, ttl))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_ttl(fd: i32) -> i64 {
+    match moto_rt::net::ttl(fd) {
+        Ok(v) => v as i64,
+        Err(e) => err64(e),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_set_broadcast(fd: i32, v: i32) -> i32 {
+    ret0(moto_rt::net::set_udp_broadcast(fd, v != 0))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_broadcast(fd: i32) -> i32 {
+    ret_bool(moto_rt::net::udp_broadcast(fd))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_set_read_timeout(fd: i32, nanos: u64) -> i32 {
+    ret0(moto_rt::net::set_read_timeout(fd, nanos_to_timo(nanos)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_set_write_timeout(fd: i32, nanos: u64) -> i32 {
+    ret0(moto_rt::net::set_write_timeout(fd, nanos_to_timo(nanos)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_read_timeout(fd: i32) -> i64 {
+    timo_to_nanos(moto_rt::net::read_timeout(fd))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_write_timeout(fd: i32) -> i64 {
+    timo_to_nanos(moto_rt::net::write_timeout(fd))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_net_take_error(fd: i32) -> i32 {
+    match moto_rt::net::take_error(fd) {
+        Ok(None) => 0,
+        Ok(Some(e)) => err64(e) as i32,
+        Err(e) => err64(e) as i32,
+    }
+}
+
 // ---- time ----------------------------------------------------------------------
 
 /// Monotonic nanoseconds since boot.

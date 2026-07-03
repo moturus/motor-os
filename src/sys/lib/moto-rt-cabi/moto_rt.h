@@ -127,6 +127,69 @@ int32_t moto_rt_readdir(int32_t fd, moto_dir_entry_t *dentry);
 int32_t moto_rt_ftruncate(int32_t fd, uint64_t size);
 int32_t moto_rt_fsync(int32_t fd);
 
+/* net (moto-rt/src/netc.rs — NOT the Linux sockaddr ABI: family is u8,
+ * MOTO_AF_INET = 0, MOTO_AF_INET6 = 1, and the v6 field order differs). */
+#define MOTO_AF_INET  0
+#define MOTO_AF_INET6 1
+#define MOTO_PROTO_TCP 1
+#define MOTO_PROTO_UDP 2
+#define MOTO_SHUTDOWN_READ  1u
+#define MOTO_SHUTDOWN_WRITE 2u
+
+typedef struct {
+	uint8_t  family; /* MOTO_AF_INET */
+	uint16_t port;   /* big-endian */
+	uint32_t addr;   /* big-endian (network order), as in Linux */
+} moto_sockaddr_in_t;
+
+typedef struct {
+	uint8_t  family; /* MOTO_AF_INET6 */
+	uint16_t port;   /* big-endian */
+	uint8_t  addr[16];
+	uint32_t flowinfo;
+	uint32_t scope_id;
+} moto_sockaddr_in6_t;
+
+typedef union {
+	moto_sockaddr_in_t  v4;
+	moto_sockaddr_in6_t v6;
+} moto_sockaddr_t;
+
+/* creation / lifecycle (fd or -err unless noted) */
+int64_t moto_rt_net_bind(uint8_t proto, const moto_sockaddr_t *addr);
+int32_t moto_rt_net_listen(int32_t fd, uint32_t backlog);
+int64_t moto_rt_net_accept(int32_t fd, moto_sockaddr_t *peer);
+int64_t moto_rt_net_tcp_connect(const moto_sockaddr_t *addr,
+                                uint64_t timeout_nanos /* MAX = none */,
+                                int32_t nonblocking);
+int32_t moto_rt_net_udp_connect(int32_t fd, const moto_sockaddr_t *addr);
+int32_t moto_rt_net_socket_addr(int32_t fd, moto_sockaddr_t *out);
+int32_t moto_rt_net_peer_addr(int32_t fd, moto_sockaddr_t *out);
+int32_t moto_rt_net_shutdown(int32_t fd, uint8_t how); /* MOTO_SHUTDOWN_*, or'able */
+
+/* net I/O beyond plain read/write */
+int64_t moto_rt_net_peek(int32_t fd, uint8_t *buf, size_t n);
+int64_t moto_rt_net_udp_recv_from(int32_t fd, uint8_t *buf, size_t n,
+                                  moto_sockaddr_t *from);
+int64_t moto_rt_net_udp_peek_from(int32_t fd, uint8_t *buf, size_t n,
+                                  moto_sockaddr_t *from);
+int64_t moto_rt_net_udp_send_to(int32_t fd, const uint8_t *buf, size_t n,
+                                const moto_sockaddr_t *to);
+
+/* net options (getters return the value or -err; timeouts: MAX = none) */
+int32_t moto_rt_net_set_nonblocking(int32_t fd, int32_t nonblocking);
+int32_t moto_rt_net_set_nodelay(int32_t fd, int32_t v);
+int32_t moto_rt_net_nodelay(int32_t fd);
+int32_t moto_rt_net_set_ttl(int32_t fd, uint32_t ttl);
+int64_t moto_rt_net_ttl(int32_t fd);
+int32_t moto_rt_net_set_broadcast(int32_t fd, int32_t v);
+int32_t moto_rt_net_broadcast(int32_t fd);
+int32_t moto_rt_net_set_read_timeout(int32_t fd, uint64_t nanos);
+int32_t moto_rt_net_set_write_timeout(int32_t fd, uint64_t nanos);
+int64_t moto_rt_net_read_timeout(int32_t fd);  /* nanos; MAX = none */
+int64_t moto_rt_net_write_timeout(int32_t fd); /* nanos; MAX = none */
+int32_t moto_rt_net_take_error(int32_t fd);    /* 0 = none; -err */
+
 /* time */
 uint64_t moto_rt_mono_nanos(void);         /* monotonic, since boot   */
 uint64_t moto_rt_real_nanos(void);         /* wall clock, UNIX epoch  */
