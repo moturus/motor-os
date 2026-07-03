@@ -195,6 +195,38 @@ uint64_t moto_rt_mono_nanos(void);         /* monotonic, since boot   */
 uint64_t moto_rt_real_nanos(void);         /* wall clock, UNIX epoch  */
 void     moto_rt_sleep_nanos(uint64_t nanos);
 
+/* poll: the VDSO readiness registry (mio/epoll-shaped).
+ * A registry is an ordinary fd: close it with moto_rt_close().
+ * Delivery is edge-ish: sources synthesize current readiness at add-time and
+ * push transitions afterwards; wait() drains accumulated (token, events).
+ * Not every fd kind is pollable: poll_add on e.g. a regular file returns
+ * MOTO_E_INVALID_ARGUMENT (callers treat that as "always ready"). */
+#define MOTO_POLL_READABLE     1ull
+#define MOTO_POLL_WRITABLE     2ull
+#define MOTO_POLL_READ_CLOSED  4ull
+#define MOTO_POLL_WRITE_CLOSED 8ull
+#define MOTO_POLL_ERROR        16ull
+
+typedef struct { /* mirrors moto_rt::poll::Event */
+    uint64_t token;
+    uint64_t events;
+} moto_poll_event_t;
+
+int32_t moto_rt_poll_new(void); /* registry fd; -err */
+int32_t moto_rt_poll_add(int32_t poll_fd, int32_t source_fd, uint64_t token,
+                         uint64_t interests); /* 0 or -err */
+int32_t moto_rt_poll_set(int32_t poll_fd, int32_t source_fd, uint64_t token,
+                         uint64_t interests);   /* 0 or -err */
+int32_t moto_rt_poll_del(int32_t poll_fd, int32_t source_fd); /* 0 or -err */
+int32_t moto_rt_poll_wake(int32_t poll_fd);                   /* 0 or -err */
+/* timeout is RELATIVE nanos; UINT64_MAX = infinite; 0 = harvest only.
+ * Returns the number of events written (0 = timeout), or -err. */
+int32_t moto_rt_poll_wait(int32_t poll_fd, uint64_t timeout_nanos,
+                          moto_poll_event_t *events, uintptr_t events_cap);
+
+/* process identity */
+int64_t moto_rt_getpid(void);
+
 /* futex (u64 max timeout = infinite); 1 = woken, 0 = timed out */
 int32_t moto_rt_futex_wait(const uint32_t *addr, uint32_t expected,
                            uint64_t timeout_nanos);

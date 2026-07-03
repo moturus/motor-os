@@ -17,6 +17,7 @@ markers and pitfalls) lives in one appendix file per milestone:
 | E | M4 — filesystem | [porting-libc-appendix-e.md](porting-libc-appendix-e.md) |
 | F | M5 — threads + TLS | [porting-libc-appendix-f.md](porting-libc-appendix-f.md) |
 | G | M6 — sockets | [porting-libc-appendix-g.md](porting-libc-appendix-g.md) |
+| H | M7 — poll/select, signals-lite, real program (Lua) | [porting-libc-appendix-h.md](porting-libc-appendix-h.md) |
 
 ---
 

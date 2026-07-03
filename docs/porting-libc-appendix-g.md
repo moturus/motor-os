@@ -1,6 +1,15 @@
 # Appendix G — M6, step by step
 
-> Part of the Motor OS libc porting guide — main: [porting-libc-by-fable.md](porting-libc-by-fable.md); appendices: [A: M0 toolchain](porting-libc-appendix-a.md) · [B: M1 shim](porting-libc-appendix-b.md) · [C: M2 mlibc](porting-libc-appendix-c.md) · [D: M3 stdio+malloc](porting-libc-appendix-d.md) · [E: M4 filesystem](porting-libc-appendix-e.md) · [F: M5 threads+TLS](porting-libc-appendix-f.md) · [G: M6 sockets](porting-libc-appendix-g.md)
+> **Status: complete** (2026-07-03) — `m6` prints "all tests passed" on Motor OS
+> (TCP echo, UDP incl. connected/peek/timeouts, getaddrinfo numeric+hosts,
+> nonblocking + fcntl, error paths), and the sys-io `TcpListener::drop` panic on
+> client exit no longer reproduces after the `drop_from_client` ordering fix.
+> Motor-side findings on the way (Pitfalls in G.8): the VDSO UDP rx-timeout
+> bug and the sys-io listener-drop panic (both fixed), plus the
+> nonblocking-only `listen()` semantic (bridged sysdep-side).
+> Not captured: the `connect(closed port)` errno note in the G.8 checklist.
+
+> Part of the Motor OS libc porting guide — main: [porting-libc-by-fable.md](porting-libc-by-fable.md); appendices: [A: M0 toolchain](porting-libc-appendix-a.md) · [B: M1 shim](porting-libc-appendix-b.md) · [C: M2 mlibc](porting-libc-appendix-c.md) · [D: M3 stdio+malloc](porting-libc-appendix-d.md) · [E: M4 filesystem](porting-libc-appendix-e.md) · [F: M5 threads+TLS](porting-libc-appendix-f.md) · [G: M6 sockets](porting-libc-appendix-g.md) · [H: M7 poll + real program](porting-libc-appendix-h.md)
 
 M6 is BSD sockets: TCP client/server, UDP (incl. connected UDP), `getsockname`/
 `getpeername`, `shutdown`, the common `setsockopt`s, nonblocking sockets, plus

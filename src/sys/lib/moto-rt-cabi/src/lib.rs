@@ -671,6 +671,61 @@ pub extern "C" fn moto_rt_sleep_nanos(nanos: u64) {
     moto_rt::thread::sleep_until(deadline);
 }
 
+// ---- poll (moto-rt/src/poll.rs: the VDSO readiness registry) --------------------
+
+// The C mirror in moto_rt.h (moto_poll_event_t) assumes this exact size.
+const _: () = assert!(core::mem::size_of::<moto_rt::poll::Event>() == 16);
+
+/// Returns a registry fd (close with moto_rt_close) or -err.
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_poll_new() -> i32 {
+    ret_fd(moto_rt::poll::new()) as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_poll_add(poll_fd: i32, source_fd: i32, token: u64, interests: u64) -> i32 {
+    ret0(moto_rt::poll::add(poll_fd, source_fd, token, interests))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_poll_set(poll_fd: i32, source_fd: i32, token: u64, interests: u64) -> i32 {
+    ret0(moto_rt::poll::set(poll_fd, source_fd, token, interests))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_poll_del(poll_fd: i32, source_fd: i32) -> i32 {
+    ret0(moto_rt::poll::del(poll_fd, source_fd))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_poll_wake(poll_fd: i32) -> i32 {
+    ret0(moto_rt::poll::wake(poll_fd))
+}
+
+/// timeout_nanos is relative; u64::MAX = infinite. The deadline must be built
+/// here, not in C: Instant's u64 payload is TSC ticks, not nanos.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_poll_wait(
+    poll_fd: i32,
+    timeout_nanos: u64,
+    events: *mut moto_rt::poll::Event,
+    events_cap: usize,
+) -> i32 {
+    let deadline = (timeout_nanos != u64::MAX)
+        .then(|| moto_rt::time::Instant::now() + core::time::Duration::from_nanos(timeout_nanos));
+    match moto_rt::poll::wait(poll_fd, events, events_cap, deadline) {
+        Ok(n) => n as i32,
+        Err(e) => err64(e) as i32,
+    }
+}
+
+// ---- process identity ------------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "C" fn moto_rt_getpid() -> i64 {
+    moto_sys::current_pid() as i64
+}
+
 // ---- futex ----------------------------------------------------------------------
 
 /// timeout_nanos == u64::MAX means "no timeout". Returns 1 = woken, 0 = timed out.
