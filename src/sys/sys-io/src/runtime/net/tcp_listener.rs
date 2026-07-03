@@ -489,6 +489,22 @@ impl TcpListener {
             }
         }
 
+        // Unregister the listener BEFORE dropping its sockets — same ordering
+        // as on_connection_done(): a listening socket leaving the Listen state
+        // respawns a replacement via its weak listener ref (socket/tcp.rs), so
+        // the listener must be unreachable first (removed from the maps AND
+        // this function's Rc dropped below), or the drained sets repopulate:
+        // a zombie listener that keeps accepting SYNs after close(), and a
+        // failed Drop assert when it is finally dropped.
+        let remote_handle = tcp_listener.borrow().client_sender.remote_handle();
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            inner.tcp_listeners.remove(&listener_id);
+            if let Some(client) = inner.clients.get_mut(&remote_handle) {
+                client.tcp_listeners.remove(&listener_id);
+            }
+        }
+
         let mut socket_ids = {
             let mut listener = tcp_listener.borrow_mut();
 
@@ -506,6 +522,10 @@ impl TcpListener {
 
             socket_ids
         };
+
+        // Drop our Rc so the listening sockets' replenish tasks can no longer
+        // upgrade their weak refs while the sockets below are dropped.
+        drop(tcp_listener);
 
         for socket_id in socket_ids {
             let moto_socket = runtime
