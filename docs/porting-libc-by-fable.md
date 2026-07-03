@@ -15,6 +15,7 @@ markers and pitfalls) lives in one appendix file per milestone:
 | C | M2 — mlibc bring-up (sysdeps, crt1) | [porting-libc-appendix-c.md](porting-libc-appendix-c.md) |
 | D | M3 — stdio + malloc | [porting-libc-appendix-d.md](porting-libc-appendix-d.md) |
 | E | M4 — filesystem | [porting-libc-appendix-e.md](porting-libc-appendix-e.md) |
+| F | M5 — threads + TLS | [porting-libc-appendix-f.md](porting-libc-appendix-f.md) |
 
 ---
 
@@ -280,8 +281,9 @@ their Motor answers:
    Step-by-step: **[Appendix D](porting-libc-appendix-d.md)**.
 5. **M4 — filesystem**: open/read/write/stat/dirs/getcwd under `/sys/tmp`.
    Step-by-step: **[Appendix E](porting-libc-appendix-e.md)**.
-6. **M5 — threads + TLS**: `pthread_create/join/mutex/cond`; two-thread
-   `_Thread_local` counter validates emutls ABI; C++ `thread_local` dtor test.
+6. **M5 — threads + TLS**: `pthread_create/join/mutex/cond`; multi-thread
+   `_Thread_local` validates the emutls ABI; `__cxa_thread_atexit` dtor test.
+   Step-by-step: **[Appendix F](porting-libc-appendix-f.md)**.
 7. **M6 — sockets**: TCP/UDP + `getaddrinfo` over `moto-rt::net`.
 8. **M7 — real program**: a fork-free Unix utility end-to-end in a VM.
 9. **M8 — C++ stack**: libc++abi/libc++ (no-EH) cross-built; C++17 program runs.
@@ -292,7 +294,8 @@ their Motor answers:
 ## 7. Top risks
 
 - **emutls ABI drift** — the control-struct layout is an LLVM implementation detail;
-  pin LLVM, test at M5, re-test on toolchain bumps.
+  pin LLVM, re-test on toolchain bumps. **Validated at M5** (2026-07-03): multi-thread
+  `_Thread_local` with nonzero initializers behaves correctly across 10+ runs.
 - **lld output vs. the loader** — the loader's minimal reloc support is the sharpest
   edge; that's why it's M0, not M9.
 - **mlibc internals under a foreign TCB scheme** — patching `get_current_tcb()` and
