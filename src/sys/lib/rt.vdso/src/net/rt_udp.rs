@@ -142,7 +142,7 @@ impl UdpSocket {
         }
 
         let deadline = {
-            let timo = self.tx_timeout_ns.load(Ordering::Relaxed);
+            let timo = self.rx_timeout_ns.load(Ordering::Relaxed);
             if timo == u64::MAX {
                 None
             } else {
