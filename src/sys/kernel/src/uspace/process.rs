@@ -1842,7 +1842,7 @@ impl Thread {
             log_msg.push_str(alloc::format!("\t0x{val:x} \\\n").as_str());
         }
 
-        log::debug!("{log_msg}");
+        log::info!("{log_msg}");
     }
 
     fn on_pagefault(&self) {
@@ -1892,7 +1892,9 @@ impl Thread {
                 self.tcb.rip(),
                 self.user_stack
             );
-            // self.print_backtrace();
+
+            #[cfg(debug_assertions)]
+            self.print_backtrace();
             // crate::xray::tracing::dump();
         }
 

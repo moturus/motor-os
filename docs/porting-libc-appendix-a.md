@@ -1,6 +1,6 @@
 # Appendix A — M0, step by step
 
-> Part of the Motor OS libc porting guide — main: [porting-libc-by-fable.md](porting-libc-by-fable.md); appendices: [A: M0 toolchain](porting-libc-appendix-a.md) · [B: M1 shim](porting-libc-appendix-b.md) · [C: M2 mlibc](porting-libc-appendix-c.md) · [D: M3 stdio+malloc](porting-libc-appendix-d.md) · [E: M4 filesystem](porting-libc-appendix-e.md) · [F: M5 threads+TLS](porting-libc-appendix-f.md) · [G: M6 sockets](porting-libc-appendix-g.md) · [H: M7 poll + real program](porting-libc-appendix-h.md)
+> Part of the Motor OS libc porting guide — main: [porting-libc-by-fable.md](porting-libc-by-fable.md); appendices: [A: M0 toolchain](porting-libc-appendix-a.md) · [B: M1 shim](porting-libc-appendix-b.md) · [C: M2 mlibc](porting-libc-appendix-c.md) · [D: M3 stdio+malloc](porting-libc-appendix-d.md) · [E: M4 filesystem](porting-libc-appendix-e.md) · [F: M5 threads+TLS](porting-libc-appendix-f.md) · [G: M6 sockets](porting-libc-appendix-g.md) · [H: M7 poll + real program](porting-libc-appendix-h.md) · [I: M8 C++ stack](porting-libc-appendix-i.md)
 
 > **Status: complete** (2026-07-01) — `m0` runs on Motor OS, exits 42.
 
@@ -242,14 +242,15 @@ toolchain already defaults to the adjacent `ld.lld`):
 ```
 -static-pie
 -nostdlib
--ffreestanding
 -Wl,-e,motor_start
 -Wl,--pack-dyn-relocs=none
 -Wl,-z,noexecstack
 ```
 
-(`-nostdlib`/`-ffreestanding` are M0-appropriate; at M2 this file evolves to add the
-sysroot, crt0 and libraries instead.) Verify the wiring:
+(At M0 the file also carried `-ffreestanding`; **removed at M8** — with a real
+libc the target is hosted, and freestanding mode mangles C++ `main`
+(`__STDC_HOSTED__ 0`) and implies `-fno-builtin`. See appendix I pitfalls.
+Current file additionally has `-fuse-ld=lld`.) Verify the wiring:
 
 ```bash
 $B/clang --target=x86_64-unknown-motor -v -### /dev/null 2>&1 | grep -i 'configuration file'

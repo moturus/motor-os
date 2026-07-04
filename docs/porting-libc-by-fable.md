@@ -18,6 +18,7 @@ markers and pitfalls) lives in one appendix file per milestone:
 | F | M5 — threads + TLS | [porting-libc-appendix-f.md](porting-libc-appendix-f.md) |
 | G | M6 — sockets | [porting-libc-appendix-g.md](porting-libc-appendix-g.md) |
 | H | M7 — poll/select, signals-lite, real program (Lua) | [porting-libc-appendix-h.md](porting-libc-appendix-h.md) |
+| I | M8 — C++ stack (libc++abi/libc++, no-EH) | [porting-libc-appendix-i.md](porting-libc-appendix-i.md) |
 
 ---
 
@@ -289,7 +290,9 @@ their Motor answers:
 7. **M6 — sockets**: TCP/UDP + `getaddrinfo` over `moto-rt::net`.
    Step-by-step: **[Appendix G](porting-libc-appendix-g.md)**.
 8. **M7 — real program**: a fork-free Unix utility end-to-end in a VM.
+   Step-by-step: **[Appendix H](porting-libc-appendix-h.md)**.
 9. **M8 — C++ stack**: libc++abi/libc++ (no-EH) cross-built; C++17 program runs.
+   Step-by-step: **[Appendix I](porting-libc-appendix-i.md)**.
 10. **M9 — native toolchain**: clang+lld on the image compile hello.c natively.
 11. **M10 — polish**: EH-enabled libc++, upstream `sysdeps/motor` to mlibc, upstream
     the LLVM target.
