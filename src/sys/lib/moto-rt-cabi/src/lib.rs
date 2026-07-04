@@ -726,6 +726,127 @@ pub extern "C" fn moto_rt_getpid() -> i64 {
     moto_sys::current_pid() as i64
 }
 
+// ---- process spawn/wait (M9b) ----------------------------------------------------
+//
+// Motor spawns without fork. The runtime identifies children by u64 handles;
+// POSIX wants pid_t, so keep a pseudo-pid -> handle table here (same pattern
+// as the pseudo-socket fd table in the mlibc sysdeps). Pseudo-pids start at
+// 0x40000000 to stay clear of real kernel pids returned by moto_rt_getpid.
+
+const PSEUDO_PID_BASE: i32 = 0x4000_0000;
+
+struct SpawnTable {
+    next_pid: i32,
+    children: alloc::collections::BTreeMap<i32, u64>,
+}
+
+static SPAWN_TABLE: moto_rt::mutex::Mutex<SpawnTable> = moto_rt::mutex::Mutex::new(SpawnTable {
+    next_pid: PSEUDO_PID_BASE,
+    children: alloc::collections::BTreeMap::new(),
+});
+
+/// Walks a NULL-terminated array of NUL-terminated C strings.
+unsafe fn c_str_array(mut p: *const *const u8) -> alloc::vec::Vec<alloc::string::String> {
+    use alloc::borrow::ToOwned;
+    let mut result = alloc::vec::Vec::new();
+    if p.is_null() {
+        return result;
+    }
+    unsafe {
+        while !(*p).is_null() {
+            let cstr = core::ffi::CStr::from_ptr(*p as *const core::ffi::c_char);
+            if let Ok(s) = cstr.to_str() {
+                result.push(s.to_owned());
+            }
+            p = p.add(1);
+        }
+    }
+    result
+}
+
+/// Spawns `prog` with the child inheriting this process's stdio and cwd.
+/// `argv` is the full POSIX argv (NULL-terminated); argv[0] is skipped —
+/// Motor always sets the child's argv[0] to the resolved executable path.
+/// `envp` is a NULL-terminated array of "KEY=VALUE" strings (may be NULL).
+/// On success writes a pseudo-pid (>= 0x40000000) and returns 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_spawn(
+    prog: *const u8,
+    prog_len: usize,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    pid_out: *mut i32,
+) -> i32 {
+    let program = match str_arg(prog, prog_len) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+
+    let mut args = unsafe { c_str_array(argv) };
+    if !args.is_empty() {
+        args.remove(0); // argv[0]: Motor supplies the exe path itself
+    }
+
+    let mut env = alloc::vec::Vec::new();
+    for kv in unsafe { c_str_array(envp) } {
+        if let Some(eq) = kv.find('=') {
+            use alloc::borrow::ToOwned;
+            env.push((kv[..eq].to_owned(), kv[eq + 1..].to_owned()));
+        }
+    }
+
+    let spawn_args = moto_rt::process::SpawnArgs {
+        program: alloc::string::ToString::to_string(program),
+        args,
+        env,
+        cwd: None,
+        stdin: moto_rt::process::STDIO_INHERIT,
+        stdout: moto_rt::process::STDIO_INHERIT,
+        stderr: moto_rt::process::STDIO_INHERIT,
+    };
+
+    match moto_rt::process::spawn(spawn_args) {
+        Ok((handle, child_stdin, child_stdout, child_stderr)) => {
+            // STDIO_INHERIT produces no new fds, but close any that appear
+            // (defensive: a leaked pipe fd would never see EOF).
+            for fd in [child_stdin, child_stdout, child_stderr] {
+                if fd >= 0 {
+                    let _ = moto_rt::fs::close(fd);
+                }
+            }
+            let mut table = SPAWN_TABLE.lock();
+            let pid = table.next_pid;
+            table.next_pid += 1;
+            table.children.insert(pid, handle);
+            unsafe { *pid_out = pid };
+            0
+        }
+        Err(e) => err64(e) as i32,
+    }
+}
+
+/// Blocks until the child exits; writes its exit status and reaps it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_waitpid(pid: i32, exit_status: *mut i32) -> i32 {
+    let handle = {
+        let table = SPAWN_TABLE.lock();
+        match table.children.get(&pid) {
+            Some(h) => *h,
+            None => return err64(moto_rt::Error::BadHandle) as i32,
+        }
+    };
+
+    // Don't hold the lock across the blocking wait.
+    match moto_rt::process::wait(handle) {
+        Ok(status) => {
+            SPAWN_TABLE.lock().children.remove(&pid);
+            unsafe { *exit_status = status };
+            0
+        }
+        Err(e) => err64(e) as i32,
+    }
+}
+
 // ---- futex ----------------------------------------------------------------------
 
 /// timeout_nanos == u64::MAX means "no timeout". Returns 1 = woken, 0 = timed out.

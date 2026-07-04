@@ -232,6 +232,18 @@ int32_t moto_rt_poll_wait(int32_t poll_fd, uint64_t timeout_nanos,
 /* process identity */
 int64_t moto_rt_getpid(void);
 
+/* process spawn/wait (M9b). Motor spawns without fork; children are tracked
+ * by pseudo-pids >= 0x40000000 (real kernel pids stay below).
+ *   - argv: full POSIX argv, NULL-terminated; argv[0] is SKIPPED (Motor
+ *     always sets the child's argv[0] to the resolved executable path).
+ *   - envp: NULL-terminated array of "KEY=VALUE" strings; may be NULL.
+ *   - the child inherits this process's stdio and cwd.
+ * moto_rt_waitpid blocks until the child exits, then reaps it. */
+int32_t moto_rt_spawn(const uint8_t *prog, size_t prog_len,
+                      const uint8_t *const *argv, const uint8_t *const *envp,
+                      int32_t *pid_out);
+int32_t moto_rt_waitpid(int32_t pid, int32_t *exit_status);
+
 /* futex (u64 max timeout = infinite); 1 = woken, 0 = timed out */
 int32_t moto_rt_futex_wait(const uint32_t *addr, uint32_t expected,
                            uint64_t timeout_nanos);
