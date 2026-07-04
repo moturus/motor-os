@@ -70,10 +70,16 @@ pub struct FileAttr {
     pub created: u128,
     pub modified: u128,
     pub accessed: u128,
+    /// v2: the filesystem entry id — a unique file identity (motor-fs:
+    /// low u64 = block_no, high u64 = generation). 0 = unknown / not a
+    /// filesystem object. The VDSO writes this field (and the fields of
+    /// any future version) only when the caller-stamped `version` says
+    /// the caller's struct has room for it.
+    pub entry_id: u128,
 }
 
 impl FileAttr {
-    pub const VERSION: u64 = 1;
+    pub const VERSION: u64 = 2;
 
     pub fn new() -> Self {
         Self {
@@ -101,7 +107,8 @@ impl core::default::Default for DirEntry {
 }
 
 impl DirEntry {
-    pub const VERSION: u64 = 1;
+    // v2: `attr` grew (FileAttr v2); the fname block moved 16 bytes up.
+    pub const VERSION: u64 = 2;
 
     fn new() -> Self {
         Self {

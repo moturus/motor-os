@@ -2,7 +2,7 @@
 
 WD="$(dirname $0)"
 
-qemu-system-x86_64 -m 256M -enable-kvm -cpu host -smp 4 \
+qemu-system-x86_64 -m 1024M -enable-kvm -cpu host -smp 4 \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -device virtio-blk-pci,drive=drive0,id=virtblk0,num-queues=1,disable-legacy=on \
   -drive file="$WD/motor-os.img",if=none,id=drive0,format=raw \

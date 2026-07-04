@@ -294,6 +294,7 @@ their Motor answers:
 9. **M8 — C++ stack**: libc++abi/libc++ (no-EH) cross-built; C++17 program runs.
    Step-by-step: **[Appendix I](porting-libc-appendix-i.md)**.
 10. **M9 — native toolchain**: clang+lld on the image compile hello.c natively.
+    Step-by-step: **[Appendix J](porting-libc-appendix-j.md)**.
 11. **M10 — polish**: EH-enabled libc++, upstream `sysdeps/motor` to mlibc, upstream
     the LLVM target.
 

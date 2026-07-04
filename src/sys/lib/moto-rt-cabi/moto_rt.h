@@ -58,9 +58,13 @@ extern "C" {
 
 /* Mirrors moto_rt::fs::FileAttr, #[repr(C, align(16))] — keep the alignment
  * attribute: the VDSO writes these structs with alignment-assuming code.
- * Timestamps: u128 nanoseconds since the UNIX epoch as (lo, hi); 0 = unknown. */
+ * Timestamps: u128 nanoseconds since the UNIX epoch as (lo, hi); 0 = unknown.
+ * entry_id (v2): unique file identity (motor-fs: lo = block_no, unique among
+ * live entries and stable for the entry's lifetime; hi = generation, never
+ * reused); 0 = unknown / not a filesystem object. The shim always speaks v2;
+ * the VDSO fills entry_id only for version >= 2 callers. */
 typedef struct {
-	uint64_t version; /* == 1 */
+	uint64_t version; /* == 2 */
 	uint64_t size;
 	uint64_t perm;
 	uint8_t  file_type;
@@ -68,11 +72,12 @@ typedef struct {
 	uint64_t created_lo,  created_hi;
 	uint64_t modified_lo, modified_hi;
 	uint64_t accessed_lo, accessed_hi;
+	uint64_t entry_id_lo, entry_id_hi; /* v2 */
 } __attribute__((aligned(16))) moto_file_attr_t;
 
 /* Mirrors moto_rt::fs::DirEntry, #[repr(C, align(16))]. */
 typedef struct {
-	uint64_t version; /* == 1 */
+	uint64_t version; /* == 2 (v2: attr grew; fname moved 16 bytes up) */
 	uint64_t _reserved;
 	moto_file_attr_t attr;
 	uint16_t fname_size;              /* fname is NOT NUL-terminated */

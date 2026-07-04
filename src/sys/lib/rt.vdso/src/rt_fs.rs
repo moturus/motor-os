@@ -466,6 +466,7 @@ impl AsyncFsClient {
         file_attr.created = metadata.created.as_nanos();
         file_attr.modified = metadata.modified.as_nanos();
         file_attr.accessed = metadata.accessed.as_nanos();
+        file_attr.entry_id = entry_id; // v2: unique file identity
 
         Ok(file_attr)
     }
@@ -710,6 +711,60 @@ pub fn ok() -> bool {
     AsyncFsClient::get().is_ok()
 }
 
+// FileAttr/DirEntry grew in v2 (FileAttr::entry_id). Binaries built against
+// the v1 structs pass smaller buffers; FileAttr::new()/DirEntry::new() stamp
+// the caller's ABI version, so honor it: v1 callers get the v1 layout, with
+// `version` written back as 1. The mirror structs below ARE the v1 layout —
+// keep them frozen.
+
+#[repr(C, align(16))]
+struct FileAttrV1 {
+    version: u64,
+    size: u64,
+    perm: u64,
+    file_type: u8,
+    _reserved: [u8; 7],
+    created: u128,
+    modified: u128,
+    accessed: u128,
+}
+const _: () = assert!(core::mem::size_of::<FileAttrV1>() == 80);
+const _: () = assert!(core::mem::offset_of!(moto_rt::fs::FileAttr, entry_id) == 80);
+
+#[repr(C, align(16))]
+struct DirEntryV1 {
+    version: u64,
+    _reserved: u64,
+    attr: FileAttrV1,
+    fname_size: u16,
+    fname: [u8; moto_rt::fs::MAX_FILENAME_LEN],
+}
+const _: () = assert!(core::mem::size_of::<DirEntryV1>() == 368);
+
+fn file_attr_v1(a: &moto_rt::fs::FileAttr) -> FileAttrV1 {
+    FileAttrV1 {
+        version: 1,
+        size: a.size,
+        perm: a.perm,
+        file_type: a.file_type,
+        _reserved: [0; 7],
+        created: a.created,
+        modified: a.modified,
+        accessed: a.accessed,
+    }
+}
+
+/// Writes `attr` into the caller's buffer honoring the caller's ABI version.
+///
+/// Safety: `dst` must point to a caller-initialized FileAttr (any version).
+unsafe fn write_file_attr(dst: *mut moto_rt::fs::FileAttr, attr: moto_rt::fs::FileAttr) {
+    if unsafe { (*dst).version } >= 2 {
+        unsafe { *dst = attr };
+    } else {
+        unsafe { (dst as *mut FileAttrV1).write(file_attr_v1(&attr)) };
+    }
+}
+
 pub extern "C" fn stat(
     path_ptr: *const u8,
     path_size: usize,
@@ -720,7 +775,7 @@ pub extern "C" fn stat(
 
     match AsyncFsClient::get().unwrap().stat(path) {
         Ok(a) => {
-            unsafe { *attr = a };
+            unsafe { write_file_attr(attr, a) };
             moto_rt::Error::Ok.into()
         }
         Err(err) => err.into(),
@@ -774,7 +829,7 @@ pub extern "C" fn get_file_attr(
 
     match AsyncFsClient::get().unwrap().metadata(file.entry_id) {
         Ok(a) => {
-            unsafe { *attr = a };
+            unsafe { write_file_attr(attr, a) };
             moto_rt::Error::Ok.into()
         }
         Err(err) => err.into(),
@@ -1023,11 +1078,24 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> mot
 
     // Safety: we (have to) trust the caller.
     unsafe {
-        let dentry_mut: &mut moto_rt::fs::DirEntry = dentry.as_mut().unwrap();
-        *dentry_mut = moto_rt::fs::DirEntry::default();
-        dentry_mut.attr = attr;
-        dentry_mut.fname_size = name.len() as u16;
-        dentry_mut.fname[..name.len()].clone_from_slice(&name.as_bytes()[..name.len()]);
+        if (*dentry).version >= 2 {
+            let dentry_mut: &mut moto_rt::fs::DirEntry = dentry.as_mut().unwrap();
+            *dentry_mut = moto_rt::fs::DirEntry::default();
+            dentry_mut.attr = attr;
+            dentry_mut.fname_size = name.len() as u16;
+            dentry_mut.fname[..name.len()].clone_from_slice(&name.as_bytes()[..name.len()]);
+        } else {
+            // v1 caller: 368-byte layout, fname block 16 bytes lower.
+            let mut v1 = DirEntryV1 {
+                version: 1,
+                _reserved: 0,
+                attr: file_attr_v1(&attr),
+                fname_size: name.len() as u16,
+                fname: [0; moto_rt::fs::MAX_FILENAME_LEN],
+            };
+            v1.fname[..name.len()].clone_from_slice(&name.as_bytes()[..name.len()]);
+            (dentry as *mut DirEntryV1).write(v1);
+        }
     }
 
     moto_rt::E_OK

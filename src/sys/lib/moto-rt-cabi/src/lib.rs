@@ -291,8 +291,8 @@ pub unsafe extern "C" fn moto_rt_rename(
 
 // The C mirrors in moto_rt.h (moto_file_attr_t / moto_dir_entry_t) assume
 // these exact sizes; a drift must break the build, not the runtime.
-const _: () = assert!(core::mem::size_of::<moto_rt::fs::FileAttr>() == 80);
-const _: () = assert!(core::mem::size_of::<moto_rt::fs::DirEntry>() == 368);
+const _: () = assert!(core::mem::size_of::<moto_rt::fs::FileAttr>() == 96); // v2: + entry_id
+const _: () = assert!(core::mem::size_of::<moto_rt::fs::DirEntry>() == 384); // v2
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moto_rt_stat(
