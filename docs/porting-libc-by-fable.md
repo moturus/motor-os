@@ -296,7 +296,7 @@ their Motor answers:
 10. **M9 — native toolchain**: clang+lld on the image compile hello.c natively.
     Step-by-step: **[Appendix J](porting-libc-appendix-j.md)**.
 11. **M10 — polish**: EH-enabled libc++, upstream `sysdeps/motor` to mlibc, upstream
-    the LLVM target.
+    the LLVM target. Step-by-step: **[Appendix K](porting-libc-appendix-k.md)**.
 
 ## 7. Top risks
 
