@@ -678,9 +678,20 @@ impl PosixFile for File {
     */
 }
 
+// Iteration state: the id of the entry the NEXT readdir() call will return
+// is prefetched while its predecessor still exists. This makes the classic
+// "read entry, delete it, read next" pattern (rm -r, std::filesystem::
+// remove_all, shutil.rmtree) work: motor-fs's get_next_entry(id) validates
+// `id` itself, so a cursor pointing at an already-deleted entry is dead.
+enum ReadDirCursor {
+    NotStarted,
+    Next(moto_io::fs::EntryId),
+    Done,
+}
+
 struct ReadDir {
     dir_id: moto_io::fs::EntryId,
-    prev_entry_id: moto_rt::mutex::Mutex<Option<moto_io::fs::EntryId>>,
+    cursor: moto_rt::mutex::Mutex<ReadDirCursor>,
 }
 
 impl PosixFile for ReadDir {
@@ -945,7 +956,7 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
 
     let rdr = ReadDir {
         dir_id: entry_id,
-        prev_entry_id: moto_rt::mutex::Mutex::new(None),
+        cursor: moto_rt::mutex::Mutex::new(ReadDirCursor::NotStarted),
     };
 
     crate::posix::push_file(alloc::sync::Arc::new(rdr))
@@ -972,19 +983,29 @@ pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> mot
 
     let fs_client = AsyncFsClient::get().unwrap();
 
-    let entry_id = if let Some(prev_id) = *dir.prev_entry_id.lock() {
-        fs_client.get_next_entry(prev_id)
-    } else {
-        fs_client.get_first_entry(dir.dir_id)
+    let mut cursor = dir.cursor.lock();
+    let entry_id = match *cursor {
+        ReadDirCursor::NotStarted => match fs_client.get_first_entry(dir.dir_id) {
+            Ok(Some(val)) => val,
+            Ok(None) => {
+                *cursor = ReadDirCursor::Done;
+                return moto_rt::Error::NotFound.into();
+            }
+            Err(err) => return err.into(),
+        },
+        ReadDirCursor::Next(id) => id,
+        ReadDirCursor::Done => return moto_rt::Error::NotFound.into(),
     };
 
-    let entry_id = match entry_id {
-        Ok(Some(val)) => val,
-        Ok(None) => return moto_rt::Error::NotFound.into(),
+    // Prefetch the successor NOW, before the caller gets (and may delete)
+    // this entry. Entries the caller has not yet seen can only vanish via
+    // concurrent modification, which readdir does not have to survive.
+    match fs_client.get_next_entry(entry_id) {
+        Ok(Some(next)) => *cursor = ReadDirCursor::Next(next),
+        Ok(None) => *cursor = ReadDirCursor::Done,
         Err(err) => return err.into(),
-    };
-
-    *dir.prev_entry_id.lock() = Some(entry_id);
+    }
+    drop(cursor);
 
     let attr = match fs_client.metadata(entry_id) {
         Ok(val) => val,
