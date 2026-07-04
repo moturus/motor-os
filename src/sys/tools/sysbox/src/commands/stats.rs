@@ -8,7 +8,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("\t\tDescribe every available stat: provider id, metric id, and names.");
     eprintln!("\tsysbox stats providers");
     eprintln!("\t\tList registered providers (id, name, transport).");
-    eprintln!("\tsysbox stats get <provider_id>[:<metric_id>][:<scope_id>]");
+    eprintln!("\tsysbox stats get [-h] <provider_id>[:<metric_id>][:<scope_id>]");
     eprintln!("\t\tRead metric values. <scope_id> is a PID (default: 0, the aggregate).");
     eprintln!("\t\tWith <metric_id>, read one value (bare, script-friendly):");
     eprintln!("\t\t  'stats get 1:0'    reads kernel metric 0 at scope 0.");
@@ -89,11 +89,14 @@ fn do_list(args: &[String]) {
 /// scope: `stats get 2` (all of provider 2, scope 0) or `stats get 1::2` (all of
 /// provider 1 at scope 2).
 fn do_get(args: &[String]) {
-    if args.len() != 1 {
+    let (human_friendly, spec) = if args.len() == 1 {
+        (false, &args[0])
+    } else if args.len() == 2 && args[0] == "-h" {
+        (true, &args[1])
+    } else {
         print_usage_and_exit(1);
-    }
+    };
 
-    let spec = &args[0];
     let parts: Vec<&str> = spec.split(':').collect();
     if parts.len() > 3 {
         eprintln!("stats get: expected <provider_id>[:<metric_id>][:<scope_id>], got '{spec}'");
@@ -123,15 +126,21 @@ fn do_get(args: &[String]) {
     };
 
     match metric {
-        Some(metric) => get_one(&provider, metric, scope),
-        None => get_all(&provider, scope),
+        Some(metric) => get_one(&provider, metric, scope, human_friendly),
+        None => get_all(&provider, scope, human_friendly),
     }
 }
 
 /// Read and print a single metric value (bare, for scripting).
-fn get_one(provider: &ProviderInfo, metric: u32, scope: u64) {
+fn get_one(provider: &ProviderInfo, metric: u32, scope: u64, human_friendly: bool) {
     match Collector::read(provider, metric, scope) {
-        Ok(value) => println!("{value}"),
+        Ok(value) => {
+            if human_friendly {
+                println!("{}", crate::format_bytes(value))
+            } else {
+                println!("{value}")
+            }
+        }
         Err(err) => {
             eprintln!("stats get: {}:{metric}:{scope}: {err:?}", provider.id);
             std::process::exit(1);
@@ -140,7 +149,7 @@ fn get_one(provider: &ProviderInfo, metric: u32, scope: u64) {
 }
 
 /// Read and print every metric a provider exposes at `scope`.
-fn get_all(provider: &ProviderInfo, scope: u64) {
+fn get_all(provider: &ProviderInfo, scope: u64, human_friendly: bool) {
     let entries = match Collector::query_scoped(provider, scope) {
         Ok(entries) => entries,
         Err(err) => {
@@ -153,7 +162,7 @@ fn get_all(provider: &ProviderInfo, scope: u64) {
     // descriptor just leaves the metric unnamed).
     let descs = Collector::describe(provider).unwrap_or_default();
 
-    println!("{:>9} {:<24} VALUE", "METRIC_ID", "METRIC");
+    println!("{:>9} {:<26} VALUE", "METRIC_ID", "METRIC");
     for e in &entries {
         // IPC providers ignore `scope` and report only their global metrics;
         // keep just the entries actually at the requested scope.
@@ -165,7 +174,16 @@ fn get_all(provider: &ProviderInfo, scope: u64) {
             .find(|d| d.id == e.metric)
             .map(|d| d.name.as_str())
             .unwrap_or("?");
-        println!("{:>9} {:<24} {}", e.metric, name, e.value);
+        if human_friendly {
+            println!(
+                "{:>9} {:<26} {}",
+                e.metric,
+                name,
+                crate::format_bytes(e.value)
+            );
+        } else {
+            println!("{:>9} {:<26} {}", e.metric, name, e.value);
+        }
     }
 }
 

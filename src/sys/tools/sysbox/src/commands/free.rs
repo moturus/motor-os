@@ -21,9 +21,11 @@ pub fn do_command(args: &[String]) {
     }
 
     let mut shift_bits = 0;
+    let mut human_friendly = false;
     if args.len() > 1 {
         match args[1].as_str() {
             "-b" => {}
+            "-h" => human_friendly = true,
             "--help" => print_usage_and_exit(0),
             "-k" => shift_bits = 10,
             "-m" => shift_bits = 20,
@@ -65,12 +67,26 @@ pub fn do_command(args: &[String]) {
     let used = metric("mem.used") >> shift_bits;
 
     println!("               total         used         free        kheap    pages");
-    println!(
-        "Mem:    {:12} {:12} {:12} {:12}    {}",
-        total,
-        used,
-        total - used,
-        metric("mem.heap_total") >> shift_bits,
-        metric("mem.used_pages"),
-    );
+
+    if human_friendly {
+        use crate::format_bytes;
+
+        println!(
+            "Mem:    {:>12} {:>12} {:>12} {:>12}    {}",
+            format_bytes(total),
+            format_bytes(used),
+            format_bytes(total - used),
+            format_bytes(metric("mem.heap_total")),
+            metric("mem.used_pages"),
+        );
+    } else {
+        println!(
+            "Mem:    {:12} {:12} {:12} {:12}    {}",
+            total,
+            used,
+            total - used,
+            metric("mem.heap_total") >> shift_bits,
+            metric("mem.used_pages"),
+        );
+    }
 }
