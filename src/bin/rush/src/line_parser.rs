@@ -118,9 +118,23 @@ impl LineParser {
         vec![arg.to_owned()]
     }
 
+    /// Returns true when the parser is waiting for a continuation line
+    /// (i.e. the previous line ended with a backslash or an open quote).
+    pub fn is_continuation(&self) -> bool {
+        self.state != State::Normal
+    }
+
     // Parse a line; return a vector of pipelined commands to run, each
     // command represented by a vector of strings, with wildcards resolved.
     pub fn parse_line(&mut self, line: &str) -> Option<Vec<Vec<String>>> {
+        // A trailing backslash from the previous line means line continuation:
+        // consume the backslash+newline and continue parsing normally.
+        // We reset here (rather than at the end of the previous call) so that
+        // `is_continuation()` returns true between the two calls.
+        if self.state == State::Escape {
+            self.state = State::Normal;
+        }
+
         for c in line.chars() {
             self.process_char(c);
         }

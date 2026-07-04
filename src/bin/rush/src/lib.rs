@@ -155,8 +155,28 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
             let mut parser = line_parser::LineParser::new();
 
             let args = vec![];
+            let mut accumulated = String::new();
             loop {
-                if let Some(commands) = parser.parse_line(term::readline().as_str()) {
+                let line = if parser.is_continuation() {
+                    term::readline_continuation()
+                } else {
+                    accumulated.clear();
+                    term::readline()
+                };
+                if parser.is_continuation() {
+                    // The line ended with '\': strip it so the history
+                    // entry reads as a single merged command (e.g. "echo foo"
+                    // rather than "echo \ foo").
+                    let trimmed = accumulated.trim_end_matches('\\');
+                    accumulated.truncate(trimmed.len());
+                }
+                accumulated.push_str(line.as_str());
+                if let Some(commands) = parser.parse_line(line.as_str()) {
+                    if accumulated != line {
+                        // Multi-line command: readline skipped history for
+                        // continuation lines, so add the merged command now.
+                        term::add_to_history(accumulated.as_str());
+                    }
                     exec::run(commands, false, &args).ok(); // Ignore results in the interactive mode.
                 }
             }

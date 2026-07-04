@@ -193,9 +193,13 @@ pub fn run_script(fname: &str, args: Vec<String>, global: bool) {
 
     let mut parser = crate::line_parser::LineParser::new();
     for line in script.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.as_bytes()[0] == b'#' {
-            continue;
+        // When the parser is mid-continuation (previous line ended with `\`),
+        // don't skip any lines — the continuation must be fed to the parser.
+        if !parser.is_continuation() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.as_bytes()[0] == b'#' {
+                continue;
+            }
         }
         if let Some(commands) = parser.parse_line(line)
             && let Err(err) = run(commands, global, &args)

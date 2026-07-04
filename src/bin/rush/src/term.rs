@@ -248,9 +248,9 @@ impl Term {
         }
     }
 
-    fn readline(&mut self) -> Option<String> {
+    fn readline(&mut self, continuation: bool) -> Option<String> {
         self.term_impl.make_raw();
-        self.start_line();
+        self.start_line(continuation);
 
         if !self.history.is_empty() {
             let msg = format!(
@@ -306,7 +306,7 @@ impl Term {
                     if cmd.is_empty() {
                         // self.write("\r\n".as_bytes());
                         self.write("\n".as_bytes());
-                        self.start_line();
+                        self.start_line(false);
                         break;
                     }
                     if self.process_locally(cmd.as_str()) {
@@ -315,7 +315,9 @@ impl Term {
                         // self.write("\r\n".as_bytes());
                         self.write("\n".as_bytes());
                         self.term_impl.make_cooked();
-                        self.maybe_add_to_history(cmd.as_str());
+                        if !continuation {
+                            self.maybe_add_to_history(cmd.as_str());
+                        }
                         return Some(cmd);
                     }
                 }
@@ -446,7 +448,7 @@ impl Term {
                             }
                         }
                         self.write("^C\n\r".as_bytes());
-                        self.start_line();
+                        self.start_line(false);
                     }
                 },
                 ProcessByteResult::Clear => {
@@ -469,8 +471,12 @@ impl Term {
         stdout.flush().unwrap();
     }
 
-    fn start_line(&mut self) {
-        let col = prompt();
+    fn start_line(&mut self, continuation: bool) {
+        let col = if continuation {
+            continuation_prompt()
+        } else {
+            prompt()
+        };
         self.line.clear();
         self.prev_line.clear();
         self.line_start = col as u32;
@@ -673,7 +679,7 @@ impl Term {
                     self.move_cursor(1, 1);
                 }
                 self.maybe_add_to_history(cmd);
-                self.start_line();
+                self.start_line(false);
 
                 true
             }
@@ -688,7 +694,7 @@ impl Term {
                 }
                 stdout_lock.flush().unwrap();
                 self.maybe_add_to_history(cmd);
-                self.start_line();
+                self.start_line(false);
 
                 true
             }
@@ -696,7 +702,7 @@ impl Term {
                 self.debug = !self.debug;
                 self.maybe_add_to_history(cmd);
                 self.write("\r\n".as_bytes());
-                self.start_line();
+                self.start_line(false);
                 true
             }
             _ => false,
@@ -716,6 +722,16 @@ fn prompt() -> usize {
     prompt_str.len() + 8 // "rush:<prompt>$ "
 }
 
+fn continuation_prompt() -> usize {
+    let bytes = "\r> ";
+
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(bytes.as_bytes()).unwrap();
+    stdout.flush().unwrap();
+
+    2 // "> "
+}
+
 static TERM: Mutex<Option<Term>> = Mutex::new(None);
 
 pub fn init(piped: bool) {
@@ -724,11 +740,26 @@ pub fn init(piped: bool) {
 }
 
 pub fn readline() -> String {
+    readline_inner(false)
+}
+
+pub fn readline_continuation() -> String {
+    readline_inner(true)
+}
+
+fn readline_inner(continuation: bool) -> String {
     let term = &mut *TERM.lock().unwrap();
     loop {
-        if let Some(line) = term.as_mut().unwrap().readline() {
+        if let Some(line) = term.as_mut().unwrap().readline(continuation) {
             return line;
         }
+    }
+}
+
+pub fn add_to_history(cmd: &str) {
+    let term = &mut *TERM.lock().unwrap();
+    if let Some(term) = term.as_mut() {
+        term.maybe_add_to_history(cmd);
     }
 }
 
