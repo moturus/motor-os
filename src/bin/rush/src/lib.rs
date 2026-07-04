@@ -104,6 +104,12 @@ pub fn parse_args(args_raw: Vec<String>) -> (Vec<String>, Option<String>) {
             }
         }
 
+        // POSIX `sh -c -- command`: "--" terminates option parsing; libc
+        // system()/popen() pass it before the command string. Skip it.
+        if *MODE.lock().unwrap() == Mode::Command && args.is_empty() && arg == "--" {
+            continue;
+        }
+
         if script.is_none() && *MODE.lock().unwrap() != Mode::Command {
             // If the first positional arg looks like VAR=val, treat all
             // args as a command rather than interpreting it as a script name.
