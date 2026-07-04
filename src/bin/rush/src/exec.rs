@@ -42,6 +42,18 @@ fn process_vars(tokens: &[String], _env: &[(&str, &str)], args: &[String]) -> Ve
     result
 }
 
+/// Run a sequence of &&-separated pipelines, short-circuiting on failure.
+pub fn run_sequence(
+    pipelines: Vec<Vec<Vec<String>>>,
+    global: bool,
+    args: &[String],
+) -> Result<(), i32> {
+    for pipeline in pipelines {
+        run(pipeline, global, args)?;
+    }
+    Ok(())
+}
+
 pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<(), i32> {
     let mut prev_child = None;
     let mut cmd = None;
@@ -201,8 +213,8 @@ pub fn run_script(fname: &str, args: Vec<String>, global: bool) {
                 continue;
             }
         }
-        if let Some(commands) = parser.parse_line(line)
-            && let Err(err) = run(commands, global, &args)
+        if let Some(pipelines) = parser.parse_line(line)
+            && let Err(err) = run_sequence(pipelines, global, &args)
         {
             std::process::exit(err);
         }
@@ -210,8 +222,12 @@ pub fn run_script(fname: &str, args: Vec<String>, global: bool) {
 }
 
 pub fn run_command(args: Vec<String>) {
-    if let Err(err) = run(vec![args], true, &[]) {
-        std::process::exit(err);
+    let line = args.join(" ");
+    let mut parser = crate::line_parser::LineParser::new();
+    if let Some(pipelines) = parser.parse_line(&line) {
+        if let Err(err) = run_sequence(pipelines, true, &[]) {
+            std::process::exit(err);
+        }
     }
     std::process::exit(0);
 }

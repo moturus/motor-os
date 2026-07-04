@@ -5,11 +5,15 @@ enum State {
     Quoted(char),
     Escape, // Last char was '\'
     QuotedEscape(char),
+    PendingAmpersand, // Saw one '&', waiting to see if next is '&' too.
 }
 
 #[derive(Default)]
 pub struct LineParser {
-    result: Vec<Vec<String>>,
+    /// Finished pipelines (&&-separated groups), each pipeline is a Vec of commands.
+    pipelines: Vec<Vec<Vec<String>>>,
+    /// Commands accumulated for the current pipeline.
+    current_pipeline: Vec<Vec<String>>,
     current_command: Vec<String>,
     current_token: String,
 
@@ -26,7 +30,9 @@ impl LineParser {
     fn process_char(&mut self, c: char) {
         match self.state {
             State::Normal => {
-                if c.is_whitespace() {
+                if c == '&' {
+                    self.state = State::PendingAmpersand;
+                } else if c.is_whitespace() {
                     self.finish_token();
                 } else if c == '|' {
                     self.finish_command();
@@ -36,6 +42,20 @@ impl LineParser {
                     self.state = State::Escape;
                 } else {
                     self.current_token.push(c);
+                }
+            }
+            State::PendingAmpersand => {
+                if c == '&' {
+                    // We saw "&&" — finish the current pipeline.
+                    self.finish_pipeline();
+                    self.state = State::Normal;
+                } else {
+                    // A lone '&' — just treat it as a literal character
+                    // (background execution is not supported).
+                    self.current_token.push('&');
+                    self.state = State::Normal;
+                    // Re-process the current character in Normal state.
+                    self.process_char(c);
                 }
             }
             State::Quoted(q) => {
@@ -77,12 +97,20 @@ impl LineParser {
     }
 
     fn finish_command(&mut self) {
-        assert_eq!(self.state, State::Normal);
-
         self.finish_token();
 
         if !self.current_command.is_empty() {
-            self.result.push(std::mem::take(&mut self.current_command));
+            self.current_pipeline
+                .push(std::mem::take(&mut self.current_command));
+        }
+    }
+
+    fn finish_pipeline(&mut self) {
+        self.finish_command();
+
+        if !self.current_pipeline.is_empty() {
+            self.pipelines
+                .push(std::mem::take(&mut self.current_pipeline));
         }
     }
 
@@ -121,12 +149,13 @@ impl LineParser {
     /// Returns true when the parser is waiting for a continuation line
     /// (i.e. the previous line ended with a backslash or an open quote).
     pub fn is_continuation(&self) -> bool {
-        self.state != State::Normal
+        !matches!(self.state, State::Normal | State::PendingAmpersand)
     }
 
-    // Parse a line; return a vector of pipelined commands to run, each
-    // command represented by a vector of strings, with wildcards resolved.
-    pub fn parse_line(&mut self, line: &str) -> Option<Vec<Vec<String>>> {
+    // Parse a line; return a list of &&-separated pipelines.
+    // Each pipeline is a vector of piped commands; each command is a
+    // vector of strings (argv), with wildcards resolved.
+    pub fn parse_line(&mut self, line: &str) -> Option<Vec<Vec<Vec<String>>>> {
         // A trailing backslash from the previous line means line continuation:
         // consume the backslash+newline and continue parsing normally.
         // We reset here (rather than at the end of the previous call) so that
@@ -140,12 +169,17 @@ impl LineParser {
         }
 
         match self.state {
-            State::Normal => {
-                self.finish_command();
-                if self.result.is_empty() {
+            State::Normal | State::PendingAmpersand => {
+                // A trailing lone '&' at end-of-line: emit it as a literal.
+                if self.state == State::PendingAmpersand {
+                    self.current_token.push('&');
+                    self.state = State::Normal;
+                }
+                self.finish_pipeline();
+                if self.pipelines.is_empty() {
                     None
                 } else {
-                    Some(std::mem::take(&mut self.result))
+                    Some(std::mem::take(&mut self.pipelines))
                 }
             }
             _ => None,

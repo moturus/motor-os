@@ -171,13 +171,13 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
                     accumulated.truncate(trimmed.len());
                 }
                 accumulated.push_str(line.as_str());
-                if let Some(commands) = parser.parse_line(line.as_str()) {
+                if let Some(pipelines) = parser.parse_line(line.as_str()) {
                     if accumulated != line {
                         // Multi-line command: readline skipped history for
                         // continuation lines, so add the merged command now.
                         term::add_to_history(accumulated.as_str());
                     }
-                    exec::run(commands, false, &args).ok(); // Ignore results in the interactive mode.
+                    exec::run_sequence(pipelines, false, &args).ok(); // Ignore results in the interactive mode.
                 }
             }
             // unreachable
