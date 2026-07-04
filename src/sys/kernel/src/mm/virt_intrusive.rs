@@ -441,6 +441,8 @@ impl VmemSegment {
     pub(super) fn fix_pagefault(&mut self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
         debug_assert!(self.segment.contains(pf_addr));
 
+        // Note: this is run under spinlock on self.
+
         if (((pf_addr & !(PAGE_SIZE_SMALL - 1)) == self.segment.start)
             || (pf_addr >= (self.segment.end() - PAGE_SIZE_SMALL)))
             && self.mapping_options.contains(MappingOptions::GUARD)
@@ -456,8 +458,12 @@ impl VmemSegment {
         assert!(page.contains(pf_addr));
 
         if !page.frame.is_null() {
-            log::error!("#PF with a frame present.");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            // Multiple threads page-faulted the same address concurrently.
+            let mapping_options = page.mapping_options;
+            assert!(mapping_options.contains(MappingOptions::USER_ACCESSIBLE));
+            assert!(!mapping_options.contains(MappingOptions::LAZY));
+            assert!(!mapping_options.contains(MappingOptions::GUARD));
+            return Ok(());
         }
 
         if error_code == 0 {
@@ -485,9 +491,9 @@ impl VmemSegment {
         }
 
         page.frame = super::phys::allocate_frame(PageType::SmallPage)?;
-        let mut mapping_options = page.mapping_options;
-        mapping_options.remove(MappingOptions::LAZY);
-        mapping_options.remove(MappingOptions::GUARD);
+        page.mapping_options.remove(MappingOptions::LAZY);
+        page.mapping_options.remove(MappingOptions::GUARD);
+        let mapping_options = page.mapping_options;
 
         let phys_addr = page.frame.get().unwrap().start();
         let virt_addr = page.start;

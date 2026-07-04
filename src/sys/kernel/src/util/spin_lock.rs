@@ -58,7 +58,7 @@ impl<T> SpinLock<T> {
             // Spin while the lock is already locked.
             while self.locked.load(Relaxed) {
                 iters += 1;
-                if iters > 100_000_000 {
+                if iters > 10_000_000_000 {
                     panic!("spin_lock.rs: deadlock? {}", lockword);
                 }
                 core::hint::spin_loop();
