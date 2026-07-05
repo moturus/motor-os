@@ -6,6 +6,10 @@
 # This runs build-base.sh first (so a bare machine is fully bootstrapped), then
 # performs every step from docs/build-llvm.md, and finally rebuilds the image.
 #
+# On-image layout (see docs/porting-libc/dirs.md): headers + libraries live
+# under /sys/tools/llvm, the clang driver config under /sys/cfg/llvm, and
+# mlibc's config files under /sys/cfg/libc — not the classic /usr and /etc.
+#
 # USAGE
 #   Copy this script AND build-base.sh into an empty directory and run:
 #
@@ -40,6 +44,12 @@ SYSROOT="$MOTORH/motor-sysroot"
 CROSS_FILE="$MOTORH/motor.cross-file"
 LUA_VER="5.4.8"
 CLANG_MAJOR=""                      # detected after the host toolchain is built
+
+# On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
+# sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
+TOOLS="sys/tools/llvm"              # headers + libraries
+CFG_LLVM="sys/cfg/llvm"            # clang <triple>.cfg
+CFG_LIBC="sys/cfg/libc"           # mlibc config files (resolv.conf, ...)
 
 # --- 0. bootstrap the base environment via build-base.sh --------------------
 run_build_base() {
@@ -116,12 +126,12 @@ EOF
 # --- stage 2: the C-ABI shim (libmoto_rt_cabi.a) ----------------------------
 build_shim() {
 	log "stage 2: building the moto-rt-cabi shim"
-	mkdir -p "$SYSROOT/usr/lib" "$SYSROOT/usr/include"
+	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
 	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
 		&& cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release )
 	cp "$MOTOR/src/sys/target/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
-		"$SYSROOT/usr/lib/"
-	cp "$MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h" "$SYSROOT/usr/include/"
+		"$SYSROOT/$TOOLS/lib/"
+	cp "$MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h" "$SYSROOT/$TOOLS/include/"
 }
 
 # --- stage 3: compiler-rt builtins (emutls excluded) ------------------------
@@ -129,9 +139,9 @@ build_builtins() {
 	log "stage 3: building compiler-rt builtins"
 	# -ffreestanding: the builtins are freestanding, and it keeps clang's
 	# resource limits.h/stdint.h from #include_next-ing into the host's glibc
-	# headers. The Motor ToolChain adds <sysroot>/usr/include, which is the host
-	# /usr/include under the empty sysroot, and mlibc's headers do not exist yet
-	# at this stage. (The old host cfg used to supply -ffreestanding here.)
+	# headers. The Motor ToolChain adds <sysroot>/sys/tools/llvm/include, which
+	# is empty under the cross sysroot at this stage (mlibc's headers do not
+	# exist yet). (The old host cfg used to supply -ffreestanding here.)
 	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$LLVM/build-builtins" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Generic \
@@ -161,7 +171,7 @@ build_builtins() {
 
 	# Stage a copy in the sysroot and one at the per-target resource-dir path
 	# where both mlibc's build and the clang driver look for it.
-	cp "$builtins" "$SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a"
+	cp "$builtins" "$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a"
 	local rd="$LLVM/build/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor"
 	mkdir -p "$rd"
 	cp "$builtins" "$rd/libclang_rt.builtins.a"
@@ -171,6 +181,8 @@ build_builtins() {
 build_mlibc() {
 	log "stage 4: building mlibc"
 	# Meson cross file with this machine's absolute paths (kept out of the repos).
+	# MLIBC_SYSCONFDIR repoints mlibc's runtime config lookups (resolv.conf,
+	# hosts, passwd, ...) from /etc to /sys/cfg/libc.
 	cat > "$CROSS_FILE" << EOF
 [binaries]
 c = ['$B/clang', '--target=x86_64-unknown-motor']
@@ -185,8 +197,8 @@ cpu = 'x86_64'
 endian = 'little'
 
 [built-in options]
-c_args = ['-I$SYSROOT/usr/include', '-D_GNU_SOURCE']
-cpp_args = ['-I$SYSROOT/usr/include', '-D_GNU_SOURCE']
+c_args = ['-I$SYSROOT/$TOOLS/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/$CFG_LIBC"']
+cpp_args = ['-I$SYSROOT/$TOOLS/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/$CFG_LIBC"']
 
 [properties]
 needs_exe_wrapper = true
@@ -195,18 +207,18 @@ EOF
 	( cd "$MLIBC"
 		# Headers first (validates ABI/meson wiring quickly).
 		[ -f build-headers/build.ninja ] || \
-			meson setup --cross-file "$CROSS_FILE" --prefix=/usr \
+			meson setup --cross-file "$CROSS_FILE" --prefix="/$TOOLS" \
 				-Dheaders_only=true build-headers
 		DESTDIR="$SYSROOT" ninja -C build-headers install
 
 		# The real static build: libc.a, crt1.o, headers, companion stubs.
 		[ -f build/build.ninja ] || \
-			meson setup --cross-file "$CROSS_FILE" --prefix=/usr \
+			meson setup --cross-file "$CROSS_FILE" --prefix="/$TOOLS" \
 				-Ddefault_library=static -Dbuild_tests=false build
 		ninja -C build
 		DESTDIR="$SYSROOT" ninja -C build install )
 
-	ls "$SYSROOT/usr/lib/libc.a" "$SYSROOT/usr/lib/crt1.o" >/dev/null
+	ls "$SYSROOT/$TOOLS/lib/libc.a" "$SYSROOT/$TOOLS/lib/crt1.o" >/dev/null
 }
 
 # --- stage 5: the C++ runtime stack (with exceptions) -----------------------
@@ -220,9 +232,9 @@ build_cxx_runtimes() {
 		-DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
 		-DCMAKE_SYSTEM_NAME=Generic \
 		-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-		-DCMAKE_C_FLAGS="-isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-		-DCMAKE_CXX_FLAGS="-isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_C_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
+		-DCMAKE_CXX_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
+		-DCMAKE_INSTALL_PREFIX="/$TOOLS" \
 		-DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
 		-DLLVM_USE_LINKER=lld \
 		-DLIBUNWIND_ENABLE_SHARED=OFF -DLIBUNWIND_ENABLE_STATIC=ON \
@@ -255,8 +267,8 @@ build_cxx_runtimes() {
 	DESTDIR="$SYSROOT" ninja -C "$LLVM/build-motor-cxx" \
 		install-unwind install-cxxabi install-cxx
 
-	ls "$SYSROOT/usr/lib/libc++.a" "$SYSROOT/usr/lib/libc++abi.a" \
-		"$SYSROOT/usr/lib/libunwind.a" >/dev/null
+	ls "$SYSROOT/$TOOLS/lib/libc++.a" "$SYSROOT/$TOOLS/lib/libc++abi.a" \
+		"$SYSROOT/$TOOLS/lib/libunwind.a" >/dev/null
 }
 
 # --- stage 6: the native LLVM toolchain (the on-image `llvm`) ----------------
@@ -273,11 +285,11 @@ build_native_llvm() {
 		-DCMAKE_CXX_COMPILER="$B/clang++" \
 		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
 		-DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_C_FLAGS="-isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-		-DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/usr/include/c++/v1 -isystem $SYSROOT/usr/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-		-DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/usr/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-		-DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/usr/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-		-DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/usr/lib" \
+		-DCMAKE_C_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
+		-DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/$TOOLS/include/c++/v1 -isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
+		-DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+		-DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+		-DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/$TOOLS/lib" \
 		-DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES="CMAKE_C_STANDARD_LIBRARIES;CMAKE_CXX_STANDARD_LIBRARIES" \
 		-DLLVM_HOST_TRIPLE=x86_64-unknown-motor \
 		-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-motor \
@@ -294,7 +306,7 @@ build_native_llvm() {
 		-DCLANG_DEFAULT_LINKER=lld -DCLANG_DEFAULT_RTLIB=compiler-rt \
 		-DCLANG_DEFAULT_CXX_STDLIB=libc++ \
 		-DDEFAULT_SYSROOT= \
-		-DCLANG_CONFIG_FILE_SYSTEM_DIR=/etc
+		-DCLANG_CONFIG_FILE_SYSTEM_DIR="/$CFG_LLVM"
 
 	# Force the final link so the staged binary reflects the freshly built
 	# sysroot archives (CMAKE_*_STANDARD_LIBRARIES are flags, not tracked deps).
@@ -310,7 +322,7 @@ build_lua() {
 		[ -d "lua-$LUA_VER" ] || tar xf "lua-$LUA_VER.tar.gz" )
 
 	( cd "$MOTORH/lua-$LUA_VER/src"
-		local cflags="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/usr/include -DLUA_USE_POSIX"
+		local cflags="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/$TOOLS/include -DLUA_USE_POSIX"
 		local f
 		for f in $(ls ./*.c | grep -v -e 'lua\.c$' -e 'luac\.c$'); do
 			# shellcheck disable=SC2086
@@ -319,48 +331,61 @@ build_lua() {
 		"$B/llvm-ar" rcs liblua.a ./*.o
 		# shellcheck disable=SC2086
 		"$B/clang" $cflags lua.c liblua.a \
-			"$SYSROOT/usr/lib/crt1.o" "$SYSROOT/usr/lib/libc.a" \
-			"$SYSROOT/usr/lib/libmoto_rt_cabi.a" \
-			"$SYSROOT/usr/lib/libclang_rt.builtins-x86_64.a" -o lua )
+			"$SYSROOT/$TOOLS/lib/crt1.o" "$SYSROOT/$TOOLS/lib/libc.a" \
+			"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" \
+			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" -o lua )
 }
 
 # --- stage 8: stage everything into the image -------------------------------
 stage_image() {
 	log "stage 8: staging the toolchain, sysroot, and Lua into img_files"
 	local img="$MOTOR/img_files/motor-os"
-	mkdir -p "$img/bin" "$img/etc" "$img/usr/lib" "$img/usr/src"
+
+	# Remove any obsolete /usr + /etc staging from earlier layouts — the
+	# toolchain now lives entirely under /sys.
+	rm -rf "$img/usr" "$img/etc"
+
+	mkdir -p "$img/bin" "$img/$TOOLS/lib" "$img/$TOOLS/src" \
+		"$img/$CFG_LLVM" "$img/$CFG_LIBC"
 
 	# Headers: mlibc + libc++'s c++/v1 (rm+copy for a clean, stale-free tree).
-	rm -rf "$img/usr/include"
-	cp -a "$SYSROOT/usr/include" "$img/usr/include"
+	rm -rf "$img/$TOOLS/include"
+	cp -a "$SYSROOT/$TOOLS/include" "$img/$TOOLS/include"
 
 	# Clang's own resource headers (intrinsics, stdarg.h, ...).
-	rm -rf "$img/usr/lib/clang/$CLANG_MAJOR/include"
-	mkdir -p "$img/usr/lib/clang/$CLANG_MAJOR"
+	rm -rf "$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
+	mkdir -p "$img/$TOOLS/lib/clang/$CLANG_MAJOR"
 	cp -a "$LLVM/build/lib/clang/$CLANG_MAJOR/include" \
-		"$img/usr/lib/clang/$CLANG_MAJOR/include"
+		"$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
 
 	# Libraries — strip debug info on the way in.
 	local a
 	for a in libc libc++ libc++abi libunwind libmoto_rt_cabi \
 	         libclang_rt.builtins-x86_64 \
 	         libdl libm libpthread librt libresolv libutil libssp libssp_nonshared; do
-		"$B/llvm-objcopy" --strip-debug "$SYSROOT/usr/lib/$a.a" "$img/usr/lib/$a.a"
+		"$B/llvm-objcopy" --strip-debug "$SYSROOT/$TOOLS/lib/$a.a" "$img/$TOOLS/lib/$a.a"
 	done
-	cp "$SYSROOT/usr/lib/crt1.o" "$img/usr/lib/"
+	cp "$SYSROOT/$TOOLS/lib/crt1.o" "$img/$TOOLS/lib/"
 
-	# The on-image toolchain and interpreter, stripped.
+	# The on-image toolchain and interpreter, stripped. (Binaries stay in /bin.)
 	"$B/llvm-strip" -o "$img/bin/llvm" "$LLVM/build-motor-native/bin/llvm"
 	"$B/llvm-strip" -o "$img/bin/lua"  "$MOTORH/lua-$LUA_VER/src/lua"
 
 	# The image driver config: only the resource dir needs pinning (the full
-	# link/include recipe lives in the Motor ToolChain now).
-	cat > "$img/etc/x86_64-unknown-motor.cfg" << EOF
--resource-dir /usr/lib/clang/$CLANG_MAJOR
+	# link/include recipe lives in the Motor ToolChain now). Clang auto-loads it
+	# from /sys/cfg/llvm (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
+	cat > "$img/$CFG_LLVM/x86_64-unknown-motor.cfg" << EOF
+-resource-dir /$TOOLS/lib/clang/$CLANG_MAJOR
+EOF
+
+	# mlibc reads its config from /sys/cfg/libc (MLIBC_SYSCONFDIR). Ship a
+	# resolv.conf so getaddrinfo has a nameserver.
+	cat > "$img/$CFG_LIBC/resolv.conf" << 'EOF'
+nameserver 8.8.8.8
 EOF
 
 	# Sample sources to compile natively in the VM.
-	cat > "$img/usr/src/hello.c" << 'EOF'
+	cat > "$img/$TOOLS/src/hello.c" << 'EOF'
 #include <stdio.h>
 
 int main(void) {
@@ -368,7 +393,7 @@ int main(void) {
 	return 0;
 }
 EOF
-	cat > "$img/usr/src/hello.cpp" << 'EOF'
+	cat > "$img/$TOOLS/src/hello.cpp" << 'EOF'
 #include <iostream>
 #include <string>
 #include <vector>
