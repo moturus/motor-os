@@ -142,6 +142,20 @@ build_builtins() {
 	# headers. The Motor ToolChain adds <sysroot>/sys/tools/llvm/include, which
 	# is empty under the cross sysroot at this stage (mlibc's headers do not
 	# exist yet). (The old host cfg used to supply -ffreestanding here.)
+	#
+	# CMAKE_DISABLE_FIND_PACKAGE_LLVM=ON: the standalone builtins build calls a
+	# non-REQUIRED find_package(LLVM) (compiler-rt/.../CompilerRTUtils.cmake,
+	# load_llvm_config). With no hint it searches system paths and, on a host
+	# that has a distro LLVM -dev package installed (e.g. /usr/lib/llvm-21),
+	# loads that package's LLVMExports.cmake — which declares the libLLVM/LTO/
+	# Remarks dylibs as `SHARED IMPORTED`. Under CMAKE_SYSTEM_NAME=Generic the
+	# platform has no dynamic linking, and newer CMake makes an imported SHARED
+	# target a hard error ("... target platform does not support dynamic
+	# linking"), aborting the configure. The builtins don't need LLVM at all:
+	# disabling the lookup forces compiler-rt's built-in mock-config fallback,
+	# which is the same path taken on a host with no system LLVM. (Pointing at
+	# the freshly built build tree would not help — its exports carry the same
+	# SHARED-imported LTO/Remarks targets.)
 	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$LLVM/build-builtins" -G Ninja \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_SYSTEM_NAME=Generic \
@@ -154,7 +168,8 @@ build_builtins() {
 		-DCMAKE_AR="$B/llvm-ar" -DCMAKE_RANLIB="$B/llvm-ranlib" -DCMAKE_NM="$B/llvm-nm" \
 		-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
 		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-		-DCOMPILER_RT_BAREMETAL_BUILD=ON
+		-DCOMPILER_RT_BAREMETAL_BUILD=ON \
+		-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON
 	ninja -C "$LLVM/build-builtins"
 
 	local builtins

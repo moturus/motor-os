@@ -185,7 +185,8 @@ cmake -S compiler-rt/lib/builtins -B build-builtins -G Ninja \
   -DCMAKE_AR=$B/llvm-ar -DCMAKE_RANLIB=$B/llvm-ranlib -DCMAKE_NM=$B/llvm-nm \
   -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
   -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-  -DCOMPILER_RT_BAREMETAL_BUILD=ON
+  -DCOMPILER_RT_BAREMETAL_BUILD=ON \
+  -DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON
 ninja -C build-builtins
 
 BUILTINS=$(find $LLVM/build-builtins -name 'libclang_rt.builtins*.a' | head -1)
@@ -210,6 +211,28 @@ clang's freestanding `limits.h`/`stdint.h` would `#include_next` into the host
 glibc headers and fail (`bits/libc-header-start.h` not found) — and `-isystem
 $SYSROOT/sys/tools/llvm/include` can't help here because mlibc's headers don't
 exist yet at this stage.
+
+`-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON` keeps the build reproducible across hosts.
+The standalone builtins configure runs a **non-`REQUIRED`** `find_package(LLVM)`
+(via `load_llvm_config` in `compiler-rt/cmake/Modules/CompilerRTUtils.cmake`).
+With no hint it searches the system paths, so on a machine that happens to have a
+distro LLVM `-dev` package installed (say `/usr/lib/llvm-21`) it loads *that*
+package's `LLVMExports.cmake`, which declares the `libLLVM`/`LTO`/`Remarks`
+dylibs as `SHARED IMPORTED`. Under `CMAKE_SYSTEM_NAME=Generic` the platform has
+no dynamic linking, and recent CMake turns an imported `SHARED` target into a
+hard error and aborts the configure:
+
+```
+CMake Error at /usr/lib/llvm-21/lib/cmake/llvm/LLVMExports.cmake:… (add_library):
+  ADD_LIBRARY called with SHARED option but the target platform does not
+  support dynamic linking.
+```
+
+The builtins don't need LLVM at all — disabling the lookup forces compiler-rt's
+built-in mock-config fallback (the same path a host *without* a system LLVM takes
+silently). Pointing `find_package` at the freshly built LLVM tree instead does
+**not** fix it: that tree's exports carry the same `SHARED IMPORTED` `LTO`/
+`Remarks` targets and hit the identical error.
 
 ## Stage 4 — mlibc
 
