@@ -22,16 +22,34 @@ A: Existing shell projects (a) aim to be 'a better shell', and (b) have a lot of
 - File bug reports;
 - Type 'exit' or 'quit'.
 
-## What works
+## Status
 
-- Basic line editing (arrows, home/end, del/backspace, basic history);
-- Command piping (e.g. 'ls | wc -l');
-- Globbing (e.g. "ls src/\*.rs") (using glob crate).
+**Work in progress.** Today `rush` is a minimal command runner, not yet a POSIX
+shell. A full plan to get there lives in the crate root:
 
-## TODO
+- [`rush-to-sh-gaps.md`](./rush-to-sh-gaps.md) — analysis of what works vs. every
+  POSIX gap, grouped by spec area.
+- [`rush-to-sh-plan.md`](./rush-to-sh-plan.md) — phased implementation plan
+  (P0–P9, milestones M1–M4) and target architecture.
 
-- Non-interactive mode (batch processing);
-- Variables, environment, loops, eval, etc.
+**Next step — Phase 0:** add a test harness (the crate currently has no tests),
+introduce a `sys/` platform-abstraction layer, and land small correctness fixes
+(diagnostics to stderr, correct 127/126 exit codes). See the plan for details.
+
+## What works today
+
+- Basic line editing (arrows, home/end, del/backspace, in-memory history);
+- Running a single external command, plus `cd` / `exit` / `quit` builtins;
+- `&&` sequencing and `\` line continuation;
+- Inline `VAR=value command` and stdout redirection (`>`, `>>`);
+- `-c <string>` and running a script file.
+
+## Not yet working (see the gap analysis)
+
+- Multi-stage pipelines (`ls | wc -l`) — currently unimplemented;
+- Globbing (`*`, `?`, `[...]`) — currently disabled;
+- Variables / `$?`, `;` and `||`, control flow (`if` / `for` / `while` / `case`),
+  functions, command substitution, `<` / `2>` redirects, and most builtins.
 
 ## Contributions:
 
