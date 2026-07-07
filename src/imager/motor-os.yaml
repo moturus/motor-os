@@ -3,6 +3,7 @@ input_files:
   - "/bin/httpd-axum"
   - "/bin/russhd"
   - "/bin/kibim"
+  - "/bin/red"
   - "/bin/rnetbench"
   - "/bin/rush"
   - "/sys/mdbg"
