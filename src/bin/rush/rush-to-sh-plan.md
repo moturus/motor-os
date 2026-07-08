@@ -184,10 +184,24 @@ referenced outside `sys/unix.rs`; diagnostics on stderr; correct not-found codes
 
 ---
 
-## Phase 1 — Lexer
+## Phase 1 — Lexer  ✅ DONE (2026-07-08)
 **Goal:** replace char-scanning `LineParser` tokenization with a POSIX token
 recognizer (§2.2, §2.3, §2.10.1). Parser comes next; this phase just produces a
 correct token stream + unit tests.
+
+**Landed:** `src/token.rs` (Token/Operator/Word/WordPart/ExpansionKind/HereDoc)
+and `src/lexer.rs` (`tokenize()` → `Result<Vec<Token>, LexError>`). Covers all
+control + redirection operators and IO_NUMBER; single/double/backslash/`$'…'`
+quoting with per-part quoted flags preserved (never stripped); `$name`/`${…}`/
+`$(…)`/`` `…` ``/`$((…))` captured as opaque quote-aware balanced spans; `#`
+comments at word boundaries; `\`-newline continuation; and here-docs (`<<`/`<<-`,
+quoted-delimiter, tab-strip, multiple-per-line, in-place token with deferred
+body collection). `LexError::Incomplete{Quote|Expansion|Backslash|HereDoc}`
+drives PS2 continuation. 14 unit tests in `lexer.rs`; not yet wired to execution
+(module is `#[allow(dead_code)]` until Phase 2). Known limits (documented in
+code): `$((`-vs-`$( (` prefers arithmetic (bash-compatible); `#` comments inside
+`$(…)` aren't special-cased. Old `line_parser.rs` still drives execution until
+Phase 2 replaces it.
 
 Work items:
 - **Operators:** control operators `; & && || | ( ) ;;` and newline; redirection

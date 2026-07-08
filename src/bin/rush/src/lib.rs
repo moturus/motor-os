@@ -1,10 +1,12 @@
 use std::sync::Mutex;
 
 mod exec;
+mod lexer;
 mod line_parser;
 mod redirect;
 mod sys;
 mod term;
+mod token;
 
 fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() || !name.is_ascii() {
