@@ -230,10 +230,30 @@ execution.
 
 ---
 
-## Phase 2 — Parser & AST
+## Phase 2 — Parser & AST  ✅ DONE (2026-07-08)
 **Goal:** turn tokens into the AST of §1, for the *non-compound* core: lists,
 and-or lists, pipelines, simple commands with assignments and redirections.
 Compound commands (reserved words) land in Phase 4.
+
+**Landed:** `src/ast.rs` (List/ListItem/Separator/AndOr/AndOrOp/Pipeline/Command/
+SimpleCommand/Assignment/Redirect/RedirOp — quoting preserved into the AST) and
+`src/parser.rs` (recursive-descent `parse_source(&str) -> Parsed`). Parses list
+(`;`/`&`/newline) → and-or (`&&`/`||`, left-assoc, newline-after-operator
+continuation) → pipeline (`|`) → simple command, with leading `NAME=value`
+assignments split from words and redirections (incl. `IO_NUMBER` and here-docs)
+attached in any position. Lexer "incomplete" and parser "needs another operand"
+fold into one `Parsed::Incomplete` that drives PS2; syntax errors → `Parsed::Error`
+(exit 2). Reserved words / `(`-subshells / `!` are *recognized but deferred*
+(subshell → clean syntax error) per the Phase 4 seam. `line_parser.rs` and
+`redirect.rs` deleted; `exec.rs` rewritten as a minimal AST walker (lists, and-or
+short-circuit, single-command pipelines, `cd`/`exit`/`quit` builtins, inline env,
+fd 0/1/2 file redirects); `lib.rs` interactive loop now accumulates + re-lexes for
+here-doc/continuation support. **Deferred to Phase 3 (refused cleanly, never a
+panic):** `$`-expansion (words flatten to literals; bare `$@`/`$*` still splices),
+multi-stage pipelines, here-doc delivery, fd-dup (`<&`/`>&`), and honoring a
+redirected fd for the shell's own not-found diagnostic. 14 parser unit tests +
+8 `tests/phase2.rs` golden tests (`;`/`&`/`||` sequencing); crate warning/clippy-
+clean, dev + release build.
 
 Work items:
 - **`ast.rs`** node types per §1.

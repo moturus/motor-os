@@ -1,9 +1,9 @@
 use std::sync::Mutex;
 
+mod ast;
 mod exec;
 mod lexer;
-mod line_parser;
-mod redirect;
+mod parser;
 mod sys;
 mod term;
 mod token;
@@ -144,8 +144,8 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
 
         Mode::Script => {
             if let Some(script) = script {
-                // This is usually config, setting PATH and such.
-                exec::run_script(script.as_str(), args, true);
+                // Running a script file: its exit status is the last command's.
+                crate::exit(exec::run_script(script.as_str(), args, true));
             }
         }
         Mode::Terminal | Mode::Piped => {
@@ -158,32 +158,39 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
             }
             let _cleanup = Cleanup {}; // On panic, restore the terminal state.
             term::init(mode == Mode::Piped);
-            let mut parser = line_parser::LineParser::new();
 
-            let args = vec![];
-            let mut accumulated = String::new();
+            let empty: Vec<String> = vec![];
+            // Accumulate raw input across lines so the lexer sees whole
+            // multi-line constructs (here-docs, continuations). When the
+            // accumulated buffer neither lexes nor parses to completion we read
+            // another line (PS2); otherwise we execute and reset.
+            let mut buf = String::new();
             loop {
-                let line = if parser.is_continuation() {
-                    term::readline_continuation()
-                } else {
-                    accumulated.clear();
+                let line = if buf.is_empty() {
                     term::readline()
+                } else {
+                    buf.push('\n');
+                    term::readline_continuation()
                 };
-                if parser.is_continuation() {
-                    // The line ended with '\': strip it so the history
-                    // entry reads as a single merged command (e.g. "echo foo"
-                    // rather than "echo \ foo").
-                    let trimmed = accumulated.trim_end_matches('\\');
-                    accumulated.truncate(trimmed.len());
-                }
-                accumulated.push_str(line.as_str());
-                if let Some(pipelines) = parser.parse_line(line.as_str()) {
-                    if accumulated != line {
-                        // Multi-line command: readline skipped history for
-                        // continuation lines, so add the merged command now.
-                        term::add_to_history(accumulated.as_str());
+                buf.push_str(line.as_str());
+
+                match parser::parse_source(&buf) {
+                    parser::Parsed::Incomplete => continue, // read a PS2 line
+                    parser::Parsed::Empty => buf.clear(),
+                    parser::Parsed::Error(msg) => {
+                        eprintln!("rush: {msg}");
+                        buf.clear();
                     }
-                    exec::run_sequence(pipelines, false, &args).ok(); // Ignore results in the interactive mode.
+                    parser::Parsed::Complete(list) => {
+                        if buf.contains('\n') {
+                            // Multi-line command: readline only recorded the
+                            // first line, so add the merged command to history.
+                            term::add_to_history(buf.as_str());
+                        }
+                        // Interactive mode ignores the overall status.
+                        exec::exec_list(&list, false, &empty);
+                        buf.clear();
+                    }
                 }
             }
             // unreachable

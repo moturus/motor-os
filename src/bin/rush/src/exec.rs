@@ -1,10 +1,33 @@
+//! AST executor (Phase 2 — deliberately minimal).
+//!
+//! This walks the [`crate::ast`] tree: it runs `List`s (`;`/`&`/newline
+//! separators), `AndOr` lists (`&&`/`||` short-circuiting), pipelines, and
+//! simple commands with assignments and file redirections. It is intentionally
+//! a bootstrap: the real executor — full word expansion (variables, command
+//! substitution, arithmetic, field splitting, globbing, tilde), multi-stage
+//! pipelines wired with real pipes, fd duplication, here-document delivery, and
+//! subshells — lands in Phase 3.
+//!
+//! Phase 2 limitations, all reported cleanly (never a panic) and revisited in
+//! Phase 3:
+//! - `$`-expansions flatten to the empty string (the sole exception is a bare
+//!   unquoted `$@`/`$*`, which still splices the positional parameters, matching
+//!   the previous behavior).
+//! - multi-stage pipelines (`a | b`) are refused;
+//! - here-document and fd-duplication (`<&`, `>&`) redirections are refused;
+//! - background `&` runs synchronously.
+
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::{path::Path, process::Stdio};
+
+use crate::ast::{AndOr, AndOrOp, Command, List, RedirOp, Redirect, SimpleCommand};
+use crate::parser::{self, Parsed};
+use crate::token::{ExpansionKind, Word, WordPart};
 
 /// Last command's exit status, i.e. the value `$?` will eventually expose.
-/// This is a Phase-0 placeholder; Phase 3 moves it into the `Shell` state
-/// object. For now it is enough to make a bare `exit` use the previous
-/// command's status.
+/// This is a placeholder; Phase 3 moves it into the `Shell` state object. For
+/// now it is enough to make a bare `exit` use the previous command's status.
 static LAST_STATUS: AtomicI32 = AtomicI32::new(0);
 
 fn set_last_status(code: i32) {
@@ -15,245 +38,137 @@ fn last_status() -> i32 {
     LAST_STATUS.load(Ordering::Relaxed)
 }
 
-fn take_env(command: &[String]) -> Option<(&str, &str)> {
-    if command.is_empty() {
-        return None;
-    }
+// ---- source-string entry points -------------------------------------------
 
-    let cmd = command[0].as_str().trim();
-    if let Some((k, v)) = cmd.split_once('=') {
-        if super::is_valid_var_name(k) {
-            Some((k, v))
-        } else {
-            None
+/// Parse and execute a whole source buffer, returning its exit status. Used by
+/// the `-c` and script paths, which — unlike the interactive loop — treat
+/// incomplete input as a syntax error rather than prompting for more.
+fn exec_source(src: &str, global: bool, args: &[String]) -> i32 {
+    match parser::parse_source(src) {
+        Parsed::Complete(list) => exec_list(&list, global, args),
+        Parsed::Empty => 0,
+        Parsed::Incomplete => {
+            eprintln!("rush: syntax error: unexpected end of input");
+            2
         }
-    } else {
-        None
-    }
-}
-
-fn apply_global_env(env: &Vec<(&str, &str)>) {
-    for (k, v) in env {
-        // SAFETY: TBD.
-        unsafe { std::env::set_var(k, v) };
-    }
-}
-
-fn process_vars(tokens: &[String], _env: &[(&str, &str)], args: &[String]) -> Vec<String> {
-    // We should do a proper language interpreter with AST later.
-    // For now we have something simple to bootstrap things.
-
-    let mut result = Vec::new();
-    for token in tokens {
-        if token.as_str() == "$@" {
-            for arg in &args[1..] {
-                result.push(arg.clone());
-            }
-        } else {
-            result.push(token.clone());
-        }
-    }
-
-    result
-}
-
-/// Run a sequence of &&-separated pipelines, short-circuiting on failure.
-pub fn run_sequence(
-    pipelines: Vec<Vec<Vec<String>>>,
-    global: bool,
-    args: &[String],
-) -> Result<(), i32> {
-    for pipeline in pipelines {
-        match run(pipeline, global, args) {
-            Ok(()) => set_last_status(0),
-            Err(code) => {
-                set_last_status(code);
-                return Err(code);
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<(), i32> {
-    let mut prev_child = None;
-
-    if commands.len() > 1 {
-        todo!("piping needs better stdio treatment");
-    }
-
-    for idx in 0..commands.len() {
-        let mut command = commands[idx].as_slice();
-
-        // We should do a proper language interpreter with AST later.
-        // For now we have something simple to bootstrap things.
-
-        // Process commands like `A=B do_something`.
-        let mut env: Vec<(&str, &str)> = vec![];
-        while let Some(k_v) = take_env(command) {
-            env.push(k_v);
-            command = &command[1..];
-        }
-
-        if command.is_empty() {
-            if global {
-                if idx == 0 && commands.len() == 1 {
-                    apply_global_env(&env);
-                } else {
-                    eprintln!("rush: cannot set an environment variable in a pipeline.");
-                    return Err(1);
-                }
-            }
-            continue;
-        }
-
-        // Process inline vars.
-        let command = process_vars(command, &env, args);
-        if command.is_empty() {
-            continue;
-        }
-
-        let cmd = command[0].clone();
-        let args = &command[1..];
-        match cmd.as_str() {
-            "cd" => {
-                if args.len() != 1 {
-                    eprintln!("rush: cd: expected a single argument.");
-                    prev_child = None;
-                    continue;
-                }
-                let new_dir = args[0].as_str();
-                let root = Path::new(new_dir);
-                if let Err(e) = std::env::set_current_dir(root) {
-                    eprintln!("rush: cd: {new_dir}: {e}");
-                }
-
-                prev_child = None;
-            }
-            "quit" => crate::exit(0),
-            "exit" => process_exit(args),
-            command => {
-                let stdin = prev_child.map_or(Stdio::inherit(), |output: std::process::Child| {
-                    Stdio::from(output.stdout.unwrap())
-                });
-
-                let redirect_to_file = super::redirect::parse_args(args);
-                if redirect_to_file.is_err() {
-                    // parse_args() eprints the error message.
-                    return Err(-1);
-                }
-                let (args, maybe_redirect) = redirect_to_file.unwrap();
-
-                let stdout = if (idx < (commands.len() - 1)) || maybe_redirect.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::inherit()
-                };
-
-                let stderr = if idx < (commands.len() - 1) {
-                    Stdio::piped()
-                } else {
-                    Stdio::inherit()
-                };
-
-                let child = std::process::Command::new(command)
-                    .args(args)
-                    .stdin(stdin)
-                    .stdout(stdout)
-                    .stderr(stderr)
-                    .envs(env)
-                    .spawn();
-
-                match child {
-                    Ok(mut child) => {
-                        if let Some(mut redirect_to_file) = maybe_redirect
-                            && let Some(child_stdout) = &mut child.stdout
-                        {
-                            redirect_to_file.consume_stdout(child_stdout);
-                        }
-                        prev_child = Some(child);
-                    }
-                    Err(e) => match e.kind() {
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => {
-                            // POSIX: a command that cannot be found exits 127.
-                            eprintln!("rush: {command}: command not found");
-                            return Err(127);
-                        }
-                        std::io::ErrorKind::PermissionDenied => {
-                            // POSIX: found but not executable exits 126.
-                            eprintln!("rush: {command}: permission denied");
-                            return Err(126);
-                        }
-                        _ => {
-                            eprintln!("rush: {command}: {e}");
-                            return Err(126);
-                        }
-                    },
-                };
-            }
-        }
-    }
-
-    if let Some(mut last) = prev_child {
-        match last.wait() {
-            Ok(status) => {
-                if let Some(code) = status.code() {
-                    if code == 0 { Ok(()) } else { Err(code) }
-                } else {
-                    // Terminated by a signal (no exit code). POSIX reports
-                    // 128 + signum; without a portable signal accessor here we
-                    // use a generic non-zero status.
-                    Err(128)
-                }
-            }
-            Err(err) => {
-                eprintln!("rush: {err}");
-                Err(126)
-            }
-        }
-    } else {
-        Ok(())
-    }
-}
-
-pub fn run_script(fname: &str, args: Vec<String>, global: bool) {
-    let script = {
-        match std::fs::read_to_string(std::path::Path::new(fname)) {
-            Ok(text) => text,
-            Err(err) => {
-                eprintln!("Error reading '{fname}': {err:?}");
-                std::process::exit(1);
-            }
-        }
-    };
-
-    let mut parser = crate::line_parser::LineParser::new();
-    for line in script.lines() {
-        // When the parser is mid-continuation (previous line ended with `\`),
-        // don't skip any lines — the continuation must be fed to the parser.
-        if !parser.is_continuation() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.as_bytes()[0] == b'#' {
-                continue;
-            }
-        }
-        if let Some(pipelines) = parser.parse_line(line)
-            && let Err(err) = run_sequence(pipelines, global, &args)
-        {
-            std::process::exit(err);
+        Parsed::Error(msg) => {
+            eprintln!("rush: {msg}");
+            2
         }
     }
 }
 
 pub fn run_command(args: Vec<String>) {
     let line = args.join(" ");
-    let mut parser = crate::line_parser::LineParser::new();
-    if let Some(pipelines) = parser.parse_line(&line)
-        && let Err(err) = run_sequence(pipelines, true, &[])
-    {
-        std::process::exit(err);
+    let status = exec_source(&line, true, &[]);
+    crate::exit(status);
+}
+
+pub fn run_script(fname: &str, args: Vec<String>, global: bool) -> i32 {
+    let script = match std::fs::read_to_string(Path::new(fname)) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("Error reading '{fname}': {err:?}");
+            std::process::exit(1);
+        }
+    };
+    exec_source(&script, global, &args)
+}
+
+// ---- AST walk --------------------------------------------------------------
+
+/// Run a complete command list, returning the status of the last and-or list.
+/// Records `$?` after each one so a subsequent bare `exit` sees it.
+pub fn exec_list(list: &List, global: bool, args: &[String]) -> i32 {
+    let mut status = 0;
+    for item in &list.0 {
+        // `Separator::Async` (`&`) is honored in Phase 7; for now everything
+        // runs synchronously.
+        status = exec_and_or(&item.and_or, global, args);
+        set_last_status(status);
     }
-    std::process::exit(0);
+    status
+}
+
+fn exec_and_or(and_or: &AndOr, global: bool, args: &[String]) -> i32 {
+    let mut status = exec_pipeline(&and_or.first, global, args);
+    for (op, pipeline) in &and_or.rest {
+        let run = match op {
+            AndOrOp::And => status == 0,
+            AndOrOp::Or => status != 0,
+        };
+        if run {
+            status = exec_pipeline(pipeline, global, args);
+        }
+    }
+    status
+}
+
+fn exec_pipeline(pipeline: &crate::ast::Pipeline, global: bool, args: &[String]) -> i32 {
+    // Pipeline negation (`!`) is finalized in Phase 4.
+    match pipeline.commands.as_slice() {
+        [single] => exec_command(single, global, args),
+        _ => {
+            // Real multi-stage pipelines need pipe/dup fd wiring (and builtins
+            // as stages), which arrives in Phase 3. Refuse cleanly rather than
+            // panic.
+            eprintln!("rush: multi-stage pipelines are not yet supported (Phase 3)");
+            1
+        }
+    }
+}
+
+fn exec_command(command: &Command, global: bool, args: &[String]) -> i32 {
+    match command {
+        Command::Simple(simple) => exec_simple(simple, global, args),
+    }
+}
+
+fn exec_simple(simple: &SimpleCommand, global: bool, args: &[String]) -> i32 {
+    let assigns: Vec<(String, String)> = simple
+        .assigns
+        .iter()
+        .map(|a| (a.name.clone(), flatten_word(&a.value)))
+        .collect();
+    let argv = build_argv(&simple.words, args);
+
+    if argv.is_empty() {
+        // Assignment-only (and/or redirect-only) command. In "global" contexts
+        // (config scripts, `-c`) a bare assignment updates the process
+        // environment; interactively it is a no-op until shell variables land
+        // in Phase 3.
+        if global {
+            for (k, v) in &assigns {
+                // SAFETY: single-threaded shell control flow; TBD in Phase 3.
+                unsafe { std::env::set_var(k, v) };
+            }
+        }
+        return noword_redirects(&simple.redirects);
+    }
+
+    match argv[0].as_str() {
+        "cd" => builtin_cd(&argv[1..]),
+        "quit" => crate::exit(0),
+        "exit" => process_exit(&argv[1..]),
+        _ => spawn_external(&argv, &assigns, &simple.redirects),
+    }
+}
+
+// ---- builtins --------------------------------------------------------------
+
+fn builtin_cd(args: &[String]) -> i32 {
+    // Full `cd` (no-arg → $HOME, `cd -`, CDPATH, PWD/OLDPWD) is Phase 5.
+    if args.len() != 1 {
+        eprintln!("rush: cd: expected a single argument.");
+        return 1;
+    }
+    match std::env::set_current_dir(Path::new(&args[0])) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("rush: cd: {}: {e}", args[0]);
+            1
+        }
+    }
 }
 
 fn process_exit(args: &[String]) -> ! {
@@ -271,4 +186,189 @@ fn process_exit(args: &[String]) -> ! {
         2
     };
     crate::exit(code);
+}
+
+// ---- external commands & redirections --------------------------------------
+
+fn spawn_external(argv: &[String], env: &[(String, String)], redirects: &[Redirect]) -> i32 {
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+
+    for redirect in redirects {
+        if let Err(code) = apply_redirect(&mut cmd, redirect) {
+            return code;
+        }
+    }
+
+    match cmd.spawn() {
+        Ok(mut child) => match child.wait() {
+            // A signal-terminated child has no exit code. POSIX reports
+            // 128 + signum; without a portable signal accessor here we use a
+            // generic non-zero status.
+            Ok(status) => status.code().unwrap_or(128),
+            Err(err) => {
+                eprintln!("rush: {err}");
+                126
+            }
+        },
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => {
+                // POSIX: a command that cannot be found exits 127.
+                eprintln!("rush: {}: command not found", argv[0]);
+                127
+            }
+            std::io::ErrorKind::PermissionDenied => {
+                // POSIX: found but not executable exits 126.
+                eprintln!("rush: {}: permission denied", argv[0]);
+                126
+            }
+            _ => {
+                eprintln!("rush: {}: {e}", argv[0]);
+                126
+            }
+        },
+    }
+}
+
+/// Wire one redirection onto a to-be-spawned command. Only fd 0/1/2 file
+/// redirections are supported in Phase 2; fd duplication and here-documents
+/// (and fds > 2) return `Err(status)` after a diagnostic — Phase 3.
+fn apply_redirect(cmd: &mut std::process::Command, redirect: &Redirect) -> Result<(), i32> {
+    let (fd, op, target) = match redirect {
+        Redirect::File { fd, op, target } => (*fd, *op, target),
+        Redirect::Heredoc { .. } => {
+            eprintln!("rush: here-documents are not yet supported (Phase 3)");
+            return Err(1);
+        }
+    };
+
+    let file = match op {
+        RedirOp::Read => open_read(target)?,
+        RedirOp::Write | RedirOp::Clobber => open_create(target)?,
+        RedirOp::Append => open_append(target)?,
+        RedirOp::ReadWrite => open_read_write(target)?,
+        RedirOp::DupRead | RedirOp::DupWrite => {
+            eprintln!("rush: fd duplication (`<&`, `>&`) is not yet supported (Phase 3)");
+            return Err(1);
+        }
+    };
+
+    let fd = fd.unwrap_or_else(|| default_fd(op));
+    match fd {
+        0 => {
+            cmd.stdin(file);
+        }
+        1 => {
+            cmd.stdout(file);
+        }
+        2 => {
+            cmd.stderr(file);
+        }
+        other => {
+            eprintln!("rush: redirection to fd {other} is not yet supported (Phase 3)");
+            return Err(1);
+        }
+    }
+    Ok(())
+}
+
+/// Perform the side effects of a command that has redirections but no command
+/// word (e.g. `> file` truncates it). Input/dup/here-doc redirections have no
+/// standalone effect worth emulating in Phase 2 and are ignored.
+fn noword_redirects(redirects: &[Redirect]) -> i32 {
+    for redirect in redirects {
+        if let Redirect::File { op, target, .. } = redirect {
+            let result = match op {
+                RedirOp::Write | RedirOp::Clobber => open_create(target).map(drop),
+                RedirOp::Append => open_append(target).map(drop),
+                _ => Ok(()),
+            };
+            if let Err(code) = result {
+                return code;
+            }
+        }
+    }
+    0
+}
+
+fn default_fd(op: RedirOp) -> u32 {
+    match op {
+        RedirOp::Read | RedirOp::ReadWrite | RedirOp::DupRead => 0,
+        RedirOp::Write | RedirOp::Append | RedirOp::Clobber | RedirOp::DupWrite => 1,
+    }
+}
+
+fn open_read(target: &Word) -> Result<File, i32> {
+    open_with(target, |p| File::open(p))
+}
+fn open_create(target: &Word) -> Result<File, i32> {
+    open_with(target, |p| File::create(p))
+}
+fn open_append(target: &Word) -> Result<File, i32> {
+    open_with(target, |p| OpenOptions::new().create(true).append(true).open(p))
+}
+fn open_read_write(target: &Word) -> Result<File, i32> {
+    open_with(target, |p| {
+        // POSIX `<>` opens for read+write without truncating.
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(p)
+    })
+}
+
+fn open_with(
+    target: &Word,
+    open: impl FnOnce(&Path) -> std::io::Result<File>,
+) -> Result<File, i32> {
+    let path = flatten_word(target);
+    open(Path::new(&path)).map_err(|e| {
+        eprintln!("rush: {path}: {e}");
+        1
+    })
+}
+
+// ---- minimal word flattening (Phase 3 replaces this with real expansion) ---
+
+/// Build the argument vector from the command words. Each word yields exactly
+/// one field (no field splitting yet — Phase 3), except a bare unquoted `$@` /
+/// `$*`, which splices the positional parameters.
+fn build_argv(words: &[Word], args: &[String]) -> Vec<String> {
+    let mut argv = Vec::new();
+    for word in words {
+        if is_at_or_star(word) {
+            argv.extend(args.iter().skip(1).cloned());
+        } else {
+            argv.push(flatten_word(word));
+        }
+    }
+    argv
+}
+
+/// A word that is exactly a single unquoted `$@` or `$*` expansion.
+fn is_at_or_star(word: &Word) -> bool {
+    matches!(
+        word.0.as_slice(),
+        [WordPart::Expansion { kind: ExpansionKind::Parameter, raw, quoted: false }]
+            if raw == "@" || raw == "*"
+    )
+}
+
+/// Flatten a word to a string: concatenate literal parts (quote removal).
+/// `$`-expansions are not evaluated in Phase 2 — they contribute nothing. The
+/// full expansion engine replaces this in Phase 3.
+fn flatten_word(word: &Word) -> String {
+    let mut s = String::new();
+    for part in &word.0 {
+        match part {
+            WordPart::Literal { text, .. } => s.push_str(text),
+            WordPart::Expansion { .. } => { /* Phase 3: expand. */ }
+        }
+    }
+    s
 }

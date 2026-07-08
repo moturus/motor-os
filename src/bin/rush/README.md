@@ -34,30 +34,36 @@ shell. A full plan to get there lives in the crate root:
 
 Done so far: Phase 0 (a `sys/` platform-abstraction layer with termios confined
 to the Linux host backend; correctness fixes — diagnostics to stderr, 127/126
-exit codes, POSIX `exit` semantics; a golden integration test suite) and Phase 1
+exit codes, POSIX `exit` semantics; a golden integration test suite), Phase 1
 (a POSIX lexer in `src/lexer.rs` — operators, `IO_NUMBER`, quoting with
 preserved metadata, `$`/backtick expansions captured opaquely, comments,
-here-documents, and continuation reporting, with unit tests). The lexer is not
-yet wired into execution.
+here-documents, and continuation reporting), and Phase 2 (a recursive-descent
+parser in `src/parser.rs` building an AST — `src/ast.rs` — of lists, and-or
+lists, pipelines, and simple commands with assignments and redirections, now
+wired into a minimal AST-walking executor that replaces the old flat parser).
 
-**Next step — Phase 2:** a recursive-descent parser building an AST (lists,
-and-or, pipelines, simple commands with redirections) on top of the lexer,
-replacing the flat `line_parser`. See the plan for details.
+**Next step — Phase 3 (milestone M1):** shell state plus the real execution
+core — variables and `$?`, the POSIX word-expansion engine (parameter/command/
+arithmetic expansion, field splitting, globbing), working multi-stage pipelines,
+the full redirection set, here-document delivery, and command substitution. This
+is the biggest jump in value. See the plan for details.
 
 ## What works today
 
 - Basic line editing (arrows, home/end, del/backspace, in-memory history);
 - Running a single external command, plus `cd` / `exit` / `quit` builtins;
-- `&&` sequencing and `\` line continuation;
-- Inline `VAR=value command` and stdout redirection (`>`, `>>`);
+- `;` / `&&` / `||` sequencing (left-associative), and `\` line continuation;
+- Inline `VAR=value command` and fd 0/1/2 file redirection (`<`, `>`, `>>`, `2>`, …);
 - `-c <string>` and running a script file.
 
 ## Not yet working (see the gap analysis)
 
-- Multi-stage pipelines (`ls | wc -l`) — currently unimplemented;
+- `$`-expansion — variables, `$?`, command substitution, arithmetic (words
+  currently flatten to their literal parts; expansion is Phase 3);
+- Multi-stage pipelines (`ls | wc -l`), here-document delivery, and fd
+  duplication (`2>&1`) — parsed, but execution is deferred to Phase 3;
 - Globbing (`*`, `?`, `[...]`) — currently disabled;
-- Variables / `$?`, `;` and `||`, control flow (`if` / `for` / `while` / `case`),
-  functions, command substitution, `<` / `2>` redirects, and most builtins.
+- Control flow (`if` / `for` / `while` / `case`), functions, and most builtins.
 
 ## Contributions:
 
