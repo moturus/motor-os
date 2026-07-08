@@ -1,9 +1,13 @@
 use std::sync::Mutex;
 
+mod arith;
 mod ast;
 mod exec;
+mod expand;
+mod glob;
 mod lexer;
 mod parser;
+mod shell;
 mod sys;
 mod term;
 mod token;
@@ -139,19 +143,29 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
         *MODE.lock().unwrap() = Mode::Terminal;
         mode = Mode::Terminal;
     }
+
+    // The single persistent shell state, carried across the whole session.
+    let mut sh = shell::Shell::new();
+
     match mode {
-        Mode::Command => crate::exec::run_command(args),
+        Mode::Command => crate::exec::run_command(args, &mut sh),
 
         Mode::Script => {
             if let Some(script) = script {
+                // Positional parameters: $0 is the script name, $1.. the rest.
+                // (Full invocation parsing lands in Phase 6.)
+                if let Some((name, rest)) = args.split_first() {
+                    sh.set_name(name.clone());
+                    sh.set_params(rest.to_vec());
+                }
                 // Running a script file: its exit status is the last command's.
-                crate::exit(exec::run_script(script.as_str(), args, true));
+                crate::exit(exec::run_script(script.as_str(), &mut sh));
             }
         }
         Mode::Terminal | Mode::Piped => {
             if let Some(script) = script {
                 // This is usually config, setting PATH and such.
-                exec::run_script(script.as_str(), args, true);
+                exec::run_script(script.as_str(), &mut sh);
             }
             if mode == Mode::Terminal {
                 assert_terminal();
@@ -159,7 +173,6 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
             let _cleanup = Cleanup {}; // On panic, restore the terminal state.
             term::init(mode == Mode::Piped);
 
-            let empty: Vec<String> = vec![];
             // Accumulate raw input across lines so the lexer sees whole
             // multi-line constructs (here-docs, continuations). When the
             // accumulated buffer neither lexes nor parses to completion we read
@@ -188,7 +201,7 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
                             term::add_to_history(buf.as_str());
                         }
                         // Interactive mode ignores the overall status.
-                        exec::exec_list(&list, false, &empty);
+                        exec::run_list(&list, &mut sh);
                         buf.clear();
                     }
                 }

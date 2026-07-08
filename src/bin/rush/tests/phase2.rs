@@ -93,15 +93,9 @@ fn a_syntax_error_exits_2() {
 }
 
 #[test]
-fn multi_stage_pipeline_is_deferred_cleanly() {
-    // Phase 2 boundary: parses, but the executor refuses rather than panicking.
-    // Real pipelines arrive in Phase 3.
+fn multi_stage_pipeline_runs() {
+    // Phase 2 parsed pipelines but deferred execution; Phase 3 runs them.
     let r = run_c("echo a | cat");
-    assert_eq!(r.stdout, "");
-    assert!(
-        r.stderr.contains("not yet supported"),
-        "stderr was: {:?}",
-        r.stderr
-    );
-    assert_ne!(r.code, 0);
+    assert_eq!(r.stdout, "a\n");
+    assert_eq!(r.code, 0);
 }

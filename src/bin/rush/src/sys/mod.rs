@@ -61,3 +61,18 @@ pub use unix::HostTerm as TerminalBackend;
 mod motor;
 #[cfg(not(unix))]
 pub use motor::MotorTerm as TerminalBackend;
+
+/// The shell's process id, backing the `$$` special parameter.
+///
+/// Motor OS pids are `u64` and its `std` pal deliberately `panic!`s in
+/// `std::process::id()` (which returns `u32`), so pids must come from `moto-sys`
+/// there; the Unix host uses `std`.
+#[cfg(unix)]
+pub fn pid() -> u64 {
+    std::process::id() as u64
+}
+
+#[cfg(not(unix))]
+pub fn pid() -> u64 {
+    moto_sys::current_pid()
+}

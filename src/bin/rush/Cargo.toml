@@ -19,6 +19,11 @@ path = "src/main.rs"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# On Motor OS, `std::process::id()` panics (Motor pids are u64), so pids come
+# from moto-sys instead — see `sys::pid()`.
+[target.'cfg(not(unix))'.dependencies]
+moto-sys = { path = "../../sys/lib/moto-sys" }
+
 [profile.release]
 panic = "abort"
 lto = "fat"

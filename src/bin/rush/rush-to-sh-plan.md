@@ -274,9 +274,45 @@ sequencing works end-to-end even before full expansion; golden tests green.
 
 ---
 
-## Phase 3 — Shell state, expansion engine, real execution  ⟵ **M1**
+## Phase 3 — Shell state, expansion engine, real execution  ⟵ **M1**  ✅ DONE (2026-07-08)
 **Goal:** the core that makes rush an actual shell. Largest phase; split into
 sub-steps, each independently testable.
+
+**Landed:** five new modules wired into a persistent `Shell` threaded through
+the executor.
+- `src/shell.rs` — `Shell` state: variables (exported live in `std::env`,
+  unexported in a side map that shadows it, readonly set), positional params
+  `$0`/`$1…`/`$#`, `$?`, `$$`, `IFS`, `noglob`, plus snapshot/restore for
+  command-substitution isolation.
+- `src/arith.rs` — `$(( ))` evaluator: signed `i64`, full C operator set incl.
+  `**`, ternary/`&&`/`||` short-circuit, assignment ops, recursive variable
+  refs, decoupled via an `ArithEnv` trait. 10 unit tests.
+- `src/glob.rs` — in-crate `fnmatch` (`* ? […]`, `\`-escape) and pathname
+  expansion (leading-dot rule, sorted, no-match→literal), reused by trimming.
+  4 unit tests.
+- `src/expand.rs` — the 7-step engine (tilde → parameter → command → arithmetic
+  → field splitting → globbing → quote removal), carrying per-char quoting so
+  only unquoted expansion results split and only unquoted `*?[` are magic;
+  parameter modifiers `:- := :? :+`, `${#x}`, `#/##/%/%%`; quoted-vs-unquoted
+  `$@`/`$*`; here-doc body expansion. `to_fields` (argv) / `to_string`
+  (assignments, redirect targets). 8 unit tests.
+- `src/exec.rs` — rewritten AST walker: real N-stage pipelines (std stdio
+  chaining), full fd 0/1/2 redirection set incl. `2>&1`-style duplication and
+  here-documents (fed via a pipe), and command substitution captured through a
+  temp file with subshell state rollback. All on `std::process`/`std::fs` — **no
+  `fork`/`dup2` syscalls**, preserving Motor OS portability. `lib.rs` now owns
+  one `Shell` for the whole session.
+
+16 `tests/phase3.rs` golden tests cross-checked against dash. Crate is
+warning/clippy-clean; dev + release build; 91 tests total.
+
+**Documented Phase 3 limits (revisited later):** pipeline stages are external
+commands (the only builtins, `cd`/`exit`/`quit`, are nonsensical mid-pipeline);
+per-stage `<&`/`>&`/here-docs inside a pipeline and redirections to fds > 2 are
+not wired; background `&` runs synchronously (Phase 7); `set -f`/full `$-` await
+Phase 6; `${x:?}` diagnoses but does not abort; command-substitution rollback
+covers shell vars + cwd but not exported-env mutations. `~user` tilde is left
+literal.
 
 ### 3.1 `Shell` state (`shell.rs`)
 - Variables as a map with flags (**exported**, **readonly**); the shell/env
