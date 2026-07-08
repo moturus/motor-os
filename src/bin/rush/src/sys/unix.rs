@@ -1,12 +1,19 @@
+//! Unix host terminal backend.
+//!
+//! This is the ONLY place in the crate that may touch termios. It exists so the
+//! shell is comfortable to develop and test on Linux; the portable contract
+//! (see `sys` module docs) is that the console is always raw and driven purely
+//! with ANSI escape sequences, which is what the Motor OS backend assumes.
+
 use libc::termios as Termios;
 
-pub(super) struct ArchTerm {
+pub struct HostTerm {
     cooked_termios: Termios,
     raw_termios: Termios,
 }
 
-impl ArchTerm {
-    pub(super) fn new() -> Self {
+impl HostTerm {
+    pub fn new() -> Self {
         let mut cooked_termios: Termios = unsafe { core::mem::zeroed() };
         unsafe {
             libc::tcgetattr(libc::STDOUT_FILENO, &mut cooked_termios);
@@ -32,7 +39,7 @@ impl ArchTerm {
     }
 }
 
-impl super::term::TermImpl for ArchTerm {
+impl super::TermImpl for HostTerm {
     fn make_raw(&mut self) {
         unsafe {
             libc::tcsetattr(libc::STDOUT_FILENO, libc::TCSANOW, &self.raw_termios);

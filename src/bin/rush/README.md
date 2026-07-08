@@ -32,9 +32,14 @@ shell. A full plan to get there lives in the crate root:
 - [`rush-to-sh-plan.md`](./rush-to-sh-plan.md) — phased implementation plan
   (P0–P9, milestones M1–M4) and target architecture.
 
-**Next step — Phase 0:** add a test harness (the crate currently has no tests),
-introduce a `sys/` platform-abstraction layer, and land small correctness fixes
-(diagnostics to stderr, correct 127/126 exit codes). See the plan for details.
+Phase 0 is done: a `sys/` platform-abstraction layer (termios confined to the
+Linux host backend), correctness fixes (diagnostics to stderr, 127/126 exit
+codes, POSIX `exit` semantics), and a golden integration test suite
+(`cargo test`).
+
+**Next step — Phase 1:** a POSIX lexer (proper operator recognition for `;`,
+`||`, redirections, etc.; quoting with preserved metadata; here-documents and
+continuation). See the plan for details.
 
 ## What works today
 

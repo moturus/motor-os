@@ -1,4 +1,19 @@
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::{path::Path, process::Stdio};
+
+/// Last command's exit status, i.e. the value `$?` will eventually expose.
+/// This is a Phase-0 placeholder; Phase 3 moves it into the `Shell` state
+/// object. For now it is enough to make a bare `exit` use the previous
+/// command's status.
+static LAST_STATUS: AtomicI32 = AtomicI32::new(0);
+
+fn set_last_status(code: i32) {
+    LAST_STATUS.store(code, Ordering::Relaxed);
+}
+
+fn last_status() -> i32 {
+    LAST_STATUS.load(Ordering::Relaxed)
+}
 
 fn take_env(command: &[String]) -> Option<(&str, &str)> {
     if command.is_empty() {
@@ -49,14 +64,19 @@ pub fn run_sequence(
     args: &[String],
 ) -> Result<(), i32> {
     for pipeline in pipelines {
-        run(pipeline, global, args)?;
+        match run(pipeline, global, args) {
+            Ok(()) => set_last_status(0),
+            Err(code) => {
+                set_last_status(code);
+                return Err(code);
+            }
+        }
     }
     Ok(())
 }
 
 pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<(), i32> {
     let mut prev_child = None;
-    let mut cmd = None;
 
     if commands.len() > 1 {
         todo!("piping needs better stdio treatment");
@@ -80,8 +100,8 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
                 if idx == 0 && commands.len() == 1 {
                     apply_global_env(&env);
                 } else {
-                    println!("Error: cannot set global environment variable in a subcommand.");
-                    return Err(-1);
+                    eprintln!("rush: cannot set an environment variable in a pipeline.");
+                    return Err(1);
                 }
             }
             continue;
@@ -93,19 +113,19 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
             continue;
         }
 
-        cmd = Some(command[0].clone());
+        let cmd = command[0].clone();
         let args = &command[1..];
-        match cmd.as_ref().unwrap().as_str() {
+        match cmd.as_str() {
             "cd" => {
                 if args.len() != 1 {
-                    println!("cd: must have a single argument.");
+                    eprintln!("rush: cd: expected a single argument.");
                     prev_child = None;
                     continue;
                 }
                 let new_dir = args[0].as_str();
                 let root = Path::new(new_dir);
                 if let Err(e) = std::env::set_current_dir(root) {
-                    println!("{e}");
+                    eprintln!("rush: cd: {new_dir}: {e}");
                 }
 
                 prev_child = None;
@@ -154,13 +174,19 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
                         prev_child = Some(child);
                     }
                     Err(e) => match e.kind() {
-                        std::io::ErrorKind::InvalidFilename => {
-                            println!("{}: command not found.", cmd.unwrap());
-                            return Err(-1);
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => {
+                            // POSIX: a command that cannot be found exits 127.
+                            eprintln!("rush: {command}: command not found");
+                            return Err(127);
+                        }
+                        std::io::ErrorKind::PermissionDenied => {
+                            // POSIX: found but not executable exits 126.
+                            eprintln!("rush: {command}: permission denied");
+                            return Err(126);
                         }
                         _ => {
-                            println!("Command [{command}] failed with error: [{e}].");
-                            return Err(-1);
+                            eprintln!("rush: {command}: {e}");
+                            return Err(126);
                         }
                     },
                 };
@@ -171,20 +197,18 @@ pub fn run(commands: Vec<Vec<String>>, global: bool, args: &[String]) -> Result<
     if let Some(mut last) = prev_child {
         match last.wait() {
             Ok(status) => {
-                if !status.success() {
-                    if let Some(code) = status.code() {
-                        println!("[{}] exited with status {:?}", cmd.unwrap(), code);
-                        Err(code)
-                    } else {
-                        Err(-1)
-                    }
+                if let Some(code) = status.code() {
+                    if code == 0 { Ok(()) } else { Err(code) }
                 } else {
-                    Ok(())
+                    // Terminated by a signal (no exit code). POSIX reports
+                    // 128 + signum; without a portable signal accessor here we
+                    // use a generic non-zero status.
+                    Err(128)
                 }
             }
             Err(err) => {
-                println!("{err:?}");
-                Err(-1)
+                eprintln!("rush: {err}");
+                Err(126)
             }
         }
     } else {
@@ -224,22 +248,27 @@ pub fn run_script(fname: &str, args: Vec<String>, global: bool) {
 pub fn run_command(args: Vec<String>) {
     let line = args.join(" ");
     let mut parser = crate::line_parser::LineParser::new();
-    if let Some(pipelines) = parser.parse_line(&line) {
-        if let Err(err) = run_sequence(pipelines, true, &[]) {
-            std::process::exit(err);
-        }
+    if let Some(pipelines) = parser.parse_line(&line)
+        && let Err(err) = run_sequence(pipelines, true, &[])
+    {
+        std::process::exit(err);
     }
     std::process::exit(0);
 }
 
 fn process_exit(args: &[String]) -> ! {
-    if args.is_empty() {
-        crate::exit(0);
-    }
-
-    if let Ok(exit_val) = args[0].as_str().parse::<i32>() {
-        crate::exit(exit_val);
+    let code = if args.is_empty() {
+        // Bare `exit` exits with the status of the last command ($?).
+        last_status()
+    } else if let Ok(exit_val) = args[0].as_str().parse::<i32>() {
+        // POSIX: the exit status is the argument taken modulo 256.
+        exit_val & 0xff
     } else {
-        crate::exit(-1);
-    }
+        // Behavior (error to stderr, exit 2) is the universal POSIX-shell
+        // convention; wording follows the common "numeric argument required"
+        // phrasing rather than dash's shell-specific "Illegal number".
+        eprintln!("rush: exit: {}: numeric argument required", args[0]);
+        2
+    };
+    crate::exit(code);
 }

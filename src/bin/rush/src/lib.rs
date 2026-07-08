@@ -3,10 +3,8 @@ use std::sync::Mutex;
 mod exec;
 mod line_parser;
 mod redirect;
+mod sys;
 mod term;
-
-#[cfg(unix)]
-mod term_impl_unix;
 
 fn is_valid_var_name(name: &str) -> bool {
     if name.is_empty() || !name.is_ascii() {

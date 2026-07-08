@@ -2,29 +2,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
-pub trait TermImpl: Send + Sync {
-    fn make_raw(&mut self) {}
-    fn make_cooked(&mut self) {}
-    fn on_exit(&mut self) {}
-}
-
-#[cfg(unix)]
-use crate::term_impl_unix as term_impl;
-
-#[cfg(not(unix))]
-mod term_impl {
-    pub use super::PipedTerminal as ArchTerm;
-}
-
-pub struct PipedTerminal {}
-
-impl PipedTerminal {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl TermImpl for PipedTerminal {}
+use crate::sys::{NoopTerm, TermImpl, TerminalBackend};
 
 #[derive(Clone, PartialEq, Eq)]
 enum ProcessingMode {
@@ -93,9 +71,9 @@ impl Term {
             line: vec![],
             prev_line: vec![],
             term_impl: if piped {
-                Box::new(PipedTerminal::new())
+                Box::new(NoopTerm::new())
             } else {
-                Box::new(term_impl::ArchTerm::new())
+                Box::new(TerminalBackend::new())
             },
             escapes_in,
             line_start: 0,

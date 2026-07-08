@@ -147,9 +147,21 @@ quote removal is the *last* expansion step.
 
 ---
 
-## Phase 0 — Foundations, `sys` layer, and quick correctness wins
+## Phase 0 — Foundations, `sys` layer, and quick correctness wins  ✅ DONE (2026-07-07)
 **Goal:** a safety net and the platform seam, before the big refactor. No new
 language features yet.
+
+**Landed:** `src/sys/` abstraction layer (`mod.rs` trait + always-raw-console
+contract, `unix.rs` termios host backend renamed `HostTerm`, `motor.rs` no-op
+`MotorTerm`); `term_impl_unix.rs` deleted and termios now confined to
+`sys/unix.rs`. Correctness fixes in `exec.rs`: all diagnostics to stderr;
+command-not-found → 127, permission-denied/other spawn error → 126; spurious
+"exited with status" line removed; `LAST_STATUS` tracking so bare `exit` uses
+`$?`; `exit N` taken mod 256, non-numeric arg → stderr + exit 2 with the common
+"numeric argument required" wording (not dash's shell-specific "Illegal number").
+`tests/phase0.rs` — 12 golden integration tests (run the real binary via
+`CARGO_BIN_EXE_rush`, cross-checked against dash). Crate is warning- and
+clippy-clean; dev + release (`panic=abort`/LTO) builds pass.
 
 Work items:
 1. **Test harness** (§0.3): integration runner comparing stdout/stderr/status,
@@ -354,6 +366,36 @@ configure/init script runs to completion using only builtins.
   (read stdin), `-o option`, `--`, and correct **`sh -c string [name [args…]]`**
   (set `$0`, `$1`…; stop appending operands to the command string). Set
   positional parameters from remaining operands for script mode too.
+
+  **Invocation compatibility — what stays vs. what breaks.** The current arg
+  parsing (untouched by Phase 0) is a *mostly*-compatible subset of POSIX
+  `sh [options] [command_file [args…]]` / `sh -c string [name [args…]]`
+  (POSIX XCU `sh`, §2.5.1 special parameters). Verified against `dash`:
+
+  *Stable — compatible today, this phase only extends them:*
+  - `sh -c 'single command string'` (one operand) — the form libc
+    `system()`/`popen()` emit, with or without a leading `--`. The hot path.
+  - `sh scriptfile` — running a file is the correct shape.
+  - interactive `sh` with no operands.
+  - unknown option → diagnostic + non-zero exit (wording/`exit 2` polish only).
+
+  *Breaking — current behavior actively diverges and MUST change here:*
+  1. **`-c` with extra operands** — rush joins them into the command string
+     (`run_command`'s `args.join(" ")`); POSIX makes operand 1 = `$0`, operand
+     2 = `$1`, …  e.g. `rush -c 'echo $1' NAME hello` prints `$1 NAME hello`
+     today, must become `hello`. The join is replaced once positional params +
+     `$`-expansion exist (why this waits for Phases 2–3).
+  2. **Script operands** — `sh script.sh WORLD` does not set `$1` today; it must.
+  3. **`-h` = print usage** — non-POSIX (dash rejects `-h` as an illegal option;
+     POSIX reserves the letter for the `set -h` hashing option). Drop it or keep
+     as an explicitly documented deviation.
+  4. **`-i <script>`** = "run this file, then go interactive" — invented; POSIX
+     locates an init file via `$ENV`. Replaced by the startup-file handling below.
+  5. **`VAR=val` as the first operand → command mode** — a non-standard heuristic
+     (`sh FOO=bar` should seek a *file* named that). Removed/changed.
+  6. **`-piped`** — a rush-internal, hidden mode; as a token it is not a valid
+     POSIX option cluster. Kept only as an internal extension (candidate for a
+     `--long` rename), never advertised as POSIX.
 - **Startup files:** interactive shells expand and source `$ENV`; login shells
   read profile. Keep this minimal and documented (note what's honored).
 - **Environment maintenance:** `PWD`/`OLDPWD`/`HOME`/`IFS`, and prompt variables
@@ -361,7 +403,9 @@ configure/init script runs to completion using only builtins.
   (`term.rs:713`). PS2 drives the continuation reader from Phase 2.
 
 **Exit criteria:** option matrix tests; `-c`/`-s`/script positional-parameter
-tests; prompt/`$ENV` behavior tested.
+tests (the six breaking cases above pass, matching dash where applicable, and
+any retained deviations like `-h`/`-piped` are documented); prompt/`$ENV`
+behavior tested.
 
 ---
 
