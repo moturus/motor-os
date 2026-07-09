@@ -36,7 +36,7 @@ pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
         std::io::ErrorKind::Deadlock => todo!(),
         std::io::ErrorKind::CrossesDevices => todo!(),
         std::io::ErrorKind::TooManyLinks => todo!(),
-        std::io::ErrorKind::InvalidFilename => todo!(),
+        std::io::ErrorKind::InvalidFilename => moto_rt::Error::InvalidFilename,
         std::io::ErrorKind::ArgumentListTooLong => todo!(),
         std::io::ErrorKind::Interrupted => moto_rt::Error::InternalError,
         std::io::ErrorKind::Unsupported => moto_rt::Error::NotImplemented,
