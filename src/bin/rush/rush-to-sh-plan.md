@@ -380,8 +380,50 @@ arithmetic, and globbing — cross-checked against `dash`.
 
 ---
 
-## Phase 4 — Compound commands & functions  ⟵ completes core language
+## Phase 4 — Compound commands & functions  ✅ DONE (2026-07-08)  ⟵ completes core language
 **Goal:** control flow and functions on top of the Phase 3 executor.
+
+**Landed:** compound commands and functions across `ast.rs`, `parser.rs`,
+`shell.rs`, and `exec.rs`.
+- `ast.rs` — `Command` gains `Compound { kind, redirects }` and
+  `Function { name, body }`; new `CompoundCommand` (Brace/Subshell/If/For/
+  While/Case), `IfClause`/`ForClause`/`WhileClause`/`CaseClause`/`CaseItem`,
+  and `FunctionBody { body, redirects }`.
+- `parser.rs` — a `Reserved` word table recognized **only in command position**;
+  `parse_compound_list` stops at terminator keywords/operators (`then` `else`
+  `elif` `fi` `do` `done` `esac` `}` `)` `;;`); recursive-descent for
+  `if`/`elif`/`else`, `for [in …]`, `while`/`until`, `case` (with `|`
+  alternation and optional leading `(`), brace groups `{ …; }`, subshells
+  `( … )`, and `name() compound-command` function defs; pipeline `!` negation;
+  trailing redirect lists on compound commands and function defs. Multi-line
+  constructs fold into `Parsed::Incomplete` for PS2.
+- `shell.rs` — a `Flow` signal (`Normal`/`Break(n)`/`Continue(n)`/`Return(n)`)
+  plus a functions map (`Rc<FunctionBody>`); both threaded into subshell
+  snapshot/restore.
+- `exec.rs` — `exec_compound` dispatch; `if`/`for`/`while`/`until`/`case`
+  (patterns via `expand::to_pattern` + `glob::fnmatch`); brace group (current
+  env) vs. subshell (snapshot/restore + flow reset); function invocation
+  (positional-param rebind with `$0` unchanged, def redirects applied, `return`
+  absorbed at the boundary); `break`/`continue`/`return` builtins with `n`-level
+  propagation through lists/loops; pipeline `!` inversion.
+- Bonus correctness fix (POSIX §2.6.4): `$(( … ))` now expands `$`-parameters/
+  command-substitutions/nested arithmetic **before** evaluation (shared
+  double-quote expander in `expand.rs`), so `$1`/`$x`/`$(cmd)` work inside
+  arithmetic — needed for recursion and positional-param loops.
+
+24 parser unit tests total + `tests/phase4.rs` (25 golden tests cross-checked
+against dash); whole crate warning/clippy-clean (`--all-targets`), dev + release
+(`panic=abort`/LTO) builds, and the Motor target (`cargo
++dev-x86_64-unknown-motor check --target x86_64-unknown-motor`) all pass.
+
+**Documented Phase 4 limits:** a multi-stage pipeline's stages must be external
+commands — a compound command or function as a non-trivial pipeline stage
+(`{ …; } | cmd`, `cmd | while …`) is refused cleanly (needs a subshell wired to
+a pipe fd, deferred with the builtins/job work); `exit` inside an emulated
+`( … )` subshell exits the whole shell; prefix assignments on a function call
+(`VAR=x func`) persist rather than scoping to the call; `${x:?}` still diagnoses
+without aborting; `return` outside a function/sourced script stops the current
+list rather than erroring.
 
 Work items (parser support + executor support + tests each):
 - `if / then / elif / else / fi`.

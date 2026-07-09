@@ -51,6 +51,34 @@ fn inline_assignment_scopes_to_the_command() {
     assert_eq!(run_c("FOO=bar true; echo \"[$FOO]\"").stdout, "[]\n");
 }
 
+#[test]
+fn command_resolved_via_unexported_shell_path() {
+    // Regression (Motor OS): command search must use the shell's own PATH
+    // variable, even when PATH is not exported to the process environment
+    // (POSIX §2.9.1.1; matches dash). Motor's resolver reads only the process
+    // env and has no default-PATH fallback, so the shell must resolve PATH.
+    let dir = tmp("pathbin");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cmd = dir.join("mycmd");
+    std::fs::write(&cmd, "#!/bin/sh\necho CUSTOM\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cmd, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // env_clear() removes the inherited PATH, so PATH exists only as an
+    // (unexported) shell variable set inside the script — exactly the Motor case.
+    let out = Command::new(RUSH)
+        .env_clear()
+        .arg("-c")
+        .arg(format!("PATH={}; mycmd", dir.display()))
+        .output()
+        .expect("failed to spawn rush");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "CUSTOM\n");
+}
+
 // ---- parameter expansion ---------------------------------------------------
 
 #[test]

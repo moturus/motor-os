@@ -69,7 +69,8 @@ pub fn to_fields(word: &Word, shell: &mut Shell) -> Vec<String> {
 }
 
 /// Expand a word to a single string (assignment RHS, redirection target, `case`
-/// word): steps 1–4 and quote removal, without field splitting or globbing.
+/// subject word): steps 1–4 and quote removal, without field splitting or
+/// globbing.
 pub fn to_string(word: &Word, shell: &mut Shell) -> String {
     let elems = build(word, shell, false);
     let mut s = String::new();
@@ -79,6 +80,23 @@ pub fn to_string(word: &Word, shell: &mut Shell) -> String {
         }
     }
     s
+}
+
+/// Expand a word into an [`crate::glob::fnmatch`] pattern (a `case` pattern):
+/// steps 1–4 with no field splitting or pathname expansion, but with quoting
+/// preserved as `\`-escapes so only *unquoted* `*?[` stay pattern-magic.
+pub fn to_pattern(word: &Word, shell: &mut Shell) -> String {
+    let elems = build(word, shell, false);
+    let mut p = String::new();
+    for e in elems {
+        if let Elem::Ch(c, tag) = e {
+            if tag == Tag::Quoted || c == '\\' {
+                p.push('\\');
+            }
+            p.push(c);
+        }
+    }
+    p
 }
 
 // ---- prefield construction (steps 1–4) -------------------------------------
@@ -114,13 +132,7 @@ fn build(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
                     push_scalar(&mut out, &s, *quoted, splitting);
                 }
                 crate::token::ExpansionKind::Arithmetic => {
-                    let s = match arith::eval(raw, shell) {
-                        Ok(n) => n.to_string(),
-                        Err(e) => {
-                            eprintln!("rush: arithmetic: {e}");
-                            String::new()
-                        }
-                    };
+                    let s = eval_arith(raw, shell);
                     push_scalar(&mut out, &s, *quoted, splitting);
                 }
             },
@@ -537,10 +549,31 @@ fn expand_raw_to_string(raw: &str, shell: &mut Shell) -> String {
     }
 }
 
+/// Evaluate an arithmetic expansion `$(( expr ))`. Per POSIX §2.6.4 the
+/// expression is first expanded as if double-quoted (parameter expansion,
+/// command substitution, nested arithmetic) — so `$1`, `$x`, `$(cmd)` work
+/// inside it — then evaluated by [`crate::arith`].
+pub fn eval_arith(raw: &str, shell: &mut Shell) -> String {
+    let expr = expand_double_quoted(raw, shell);
+    match arith::eval(&expr, shell) {
+        Ok(n) => n.to_string(),
+        Err(e) => {
+            eprintln!("rush: arithmetic: {e}");
+            String::new()
+        }
+    }
+}
+
 /// Expand a here-document body: double-quote rules (parameter/command/
 /// arithmetic expansion, backslash special only before `$` `` ` `` `\`), no
 /// field splitting or globbing.
 pub fn expand_heredoc_body(body: &str, shell: &mut Shell) -> String {
+    expand_double_quoted(body, shell)
+}
+
+/// The shared double-quote-context expander used by here-documents and by
+/// arithmetic-expression pre-expansion.
+fn expand_double_quoted(body: &str, shell: &mut Shell) -> String {
     let chars: Vec<char> = body.chars().collect();
     let mut i = 0;
     let mut out = String::new();
@@ -583,8 +616,7 @@ fn scan_dollar(chars: &[char], i: usize, shell: &mut Shell) -> (String, usize) {
         }
         '(' if chars.get(j + 1) == Some(&'(') => {
             let (inner, next) = scan_balanced_arith(chars, j + 2);
-            let v = arith::eval(&inner, shell).map(|n| n.to_string()).unwrap_or_default();
-            (v, next)
+            (eval_arith(&inner, shell), next)
         }
         '(' => {
             let (inner, next) = scan_balanced(chars, j + 1, '(', ')');

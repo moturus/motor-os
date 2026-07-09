@@ -9,16 +9,39 @@
 //!
 //! The struct also implements [`arith::ArithEnv`] so `$(( … ))` reads and
 //! writes shell variables directly.
+//!
+//! Phase 4 adds shell functions and a [`Flow`] signal: `break`/`continue`/
+//! `return` set a pending flow that the executor propagates up through lists and
+//! loops (loops decrement `break n`/`continue n`, functions absorb `return`).
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::arith::ArithEnv;
+use crate::ast::FunctionBody;
+
+/// A pending non-local control-flow transfer, set by the `break`/`continue`/
+/// `return` builtins and consumed by the executor. `Normal` means ordinary
+/// sequential flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Normal,
+    /// `break n`: stop the innermost `n` enclosing loops.
+    Break(u32),
+    /// `continue n`: resume the `n`-th enclosing loop's next iteration.
+    Continue(u32),
+    /// `return n`: leave the current function (or sourced script) with status `n`.
+    Return(i32),
+}
 
 pub struct Shell {
     /// Unexported shell variables; these shadow the process environment.
     vars: HashMap<String, String>,
     /// Names that reject assignment.
     readonly: HashSet<String>,
+    /// Defined shell functions, by name. Stored behind `Rc` so a call can clone
+    /// the handle out and execute the body while the shell is mutably borrowed.
+    functions: HashMap<String, Rc<FunctionBody>>,
     /// Positional parameters `$1`, `$2`, … (index 0 is `$1`).
     params: Vec<String>,
     /// `$0` — the shell or script name.
@@ -28,6 +51,12 @@ pub struct Shell {
     /// `$$` — the shell's process id, fixed for the shell's lifetime. `u64`
     /// because Motor OS pids do not fit in `u32`.
     pid: u64,
+    /// Pending control-flow transfer (`break`/`continue`/`return`).
+    flow: Flow,
+    /// Number of lexically enclosing loops currently executing. `break`/
+    /// `continue` are no-ops when this is 0 (matching dash), and it resets across
+    /// a function-call boundary.
+    loop_depth: u32,
     /// `set -f`: pathname expansion (globbing) disabled. Wired to the `set`
     /// builtin in Phase 6; default off.
     pub noglob: bool,
@@ -38,10 +67,13 @@ impl Shell {
         Self {
             vars: HashMap::new(),
             readonly: HashSet::new(),
+            functions: HashMap::new(),
             params: Vec::new(),
             name: "rush".to_string(),
             status: 0,
             pid: crate::sys::pid(),
+            flow: Flow::Normal,
+            loop_depth: 0,
             noglob: false,
         }
     }
@@ -114,6 +146,57 @@ impl Shell {
         self.get("IFS").unwrap_or_else(|| " \t\n".to_string())
     }
 
+    // ---- functions ---------------------------------------------------------
+
+    /// Define (or redefine) a shell function.
+    pub fn define_function(&mut self, name: &str, body: Rc<FunctionBody>) {
+        self.functions.insert(name.to_string(), body);
+    }
+
+    /// The function named `name`, if defined. Returns a cloned handle so the
+    /// body can be executed while `self` is mutably borrowed.
+    pub fn get_function(&self, name: &str) -> Option<Rc<FunctionBody>> {
+        self.functions.get(name).cloned()
+    }
+
+    // ---- control flow (break / continue / return) --------------------------
+
+    pub fn flow(&self) -> Flow {
+        self.flow
+    }
+
+    pub fn set_flow(&mut self, flow: Flow) {
+        self.flow = flow;
+    }
+
+    pub fn clear_flow(&mut self) {
+        self.flow = Flow::Normal;
+    }
+
+    /// Whether a `break`/`continue` currently has an enclosing loop to act on.
+    pub fn in_loop(&self) -> bool {
+        self.loop_depth > 0
+    }
+
+    pub fn enter_loop(&mut self) {
+        self.loop_depth += 1;
+    }
+
+    pub fn exit_loop(&mut self) {
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+    }
+
+    /// Save-and-reset the loop nesting for a function call (a function's
+    /// `break`/`continue` only see loops defined within it); pair with
+    /// [`Shell::set_loop_depth`] to restore.
+    pub fn take_loop_depth(&mut self) -> u32 {
+        std::mem::take(&mut self.loop_depth)
+    }
+
+    pub fn set_loop_depth(&mut self, depth: u32) {
+        self.loop_depth = depth;
+    }
+
     // ---- positional & special parameters -----------------------------------
 
     pub fn set_params(&mut self, params: Vec<String>) {
@@ -161,12 +244,14 @@ impl Shell {
     // ---- subshell isolation (command substitution) -------------------------
 
     /// Capture the mutable shell state that a subshell must not leak back into
-    /// the parent: shell variables and the working directory. Exported-variable
-    /// mutations inside a subshell may still leak (a documented Phase 3 limit).
+    /// the parent: shell variables, functions, and the working directory.
+    /// Exported-variable mutations inside a subshell may still leak (a documented
+    /// Phase 3 limit).
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             vars: self.vars.clone(),
             readonly: self.readonly.clone(),
+            functions: self.functions.clone(),
             cwd: std::env::current_dir().ok(),
         }
     }
@@ -174,6 +259,7 @@ impl Shell {
     pub fn restore(&mut self, snap: Snapshot) {
         self.vars = snap.vars;
         self.readonly = snap.readonly;
+        self.functions = snap.functions;
         if let Some(cwd) = snap.cwd {
             let _ = std::env::set_current_dir(cwd);
         }
@@ -183,6 +269,7 @@ impl Shell {
 pub struct Snapshot {
     vars: HashMap<String, String>,
     readonly: HashSet<String>,
+    functions: HashMap<String, Rc<FunctionBody>>,
     cwd: Option<std::path::PathBuf>,
 }
 

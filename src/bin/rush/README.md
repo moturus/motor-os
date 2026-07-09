@@ -32,43 +32,49 @@ shell. A full plan to get there lives in the crate root:
 - [`rush-to-sh-plan.md`](./rush-to-sh-plan.md) — phased implementation plan
   (P0–P9, milestones M1–M4) and target architecture.
 
-Done so far: Phases 0–3. Phase 0 (a `sys/` platform-abstraction layer with
+Done so far: Phases 0–4. Phase 0 (a `sys/` platform-abstraction layer with
 termios confined to the Linux host backend; correctness fixes; a golden test
 suite), Phase 1 (a POSIX lexer, `src/lexer.rs`), Phase 2 (a recursive-descent
-parser + AST, `src/parser.rs`/`src/ast.rs`), and **Phase 3 — milestone M1**: a
+parser + AST, `src/parser.rs`/`src/ast.rs`), **Phase 3 — milestone M1**: a
 persistent `Shell` (`src/shell.rs`) plus the real execution core — the seven-step
 word-expansion engine (`src/expand.rs`), arithmetic (`src/arith.rs`), in-crate
 globbing (`src/glob.rs`), and an executor (`src/exec.rs`) with working
 multi-stage pipelines, the full fd 0/1/2 redirection set, here-documents, and
-command substitution.
+command substitution — and **Phase 4**: compound commands and functions.
 
-**Next step — Phase 4:** compound commands and functions — `if` / `for` /
-`while` / `until` / `case`, brace groups `{ …; }` and subshells `( … )`, and
-`name() { … }` function definitions with `return`/`break`/`continue`. See the
-plan for details.
+**Next step — Phase 5 (milestone M2):** the POSIX builtins — `echo`/`printf`/
+`test`/`[`/`read`/`export`/`readonly`/`set`/`shift`/`unset`/`.`/`eval`/…, split
+into special vs. regular. See the plan for details.
 
 ## What works today
 
 - Basic line editing (arrows, home/end, del/backspace, in-memory history);
 - External commands and **multi-stage pipelines** (`ls | sort | wc -l`);
-- `;` / `&&` / `||` sequencing, and `\` line continuation;
+- `;` / `&&` / `||` sequencing, pipeline `!` negation, and `\` line continuation;
+- **Control flow**: `if`/`elif`/`else`, `for [in …]`, `while`/`until`, `case`
+  (with `|` alternation and glob patterns), brace groups `{ …; }`, subshells
+  `( … )`, and **functions** `name() { … }` with `return`/`break`/`continue`
+  (including `break n`/`continue n`);
 - **Variables**, `$?`, `$#`, `$@`/`$*`, positional parameters, and `export`able
   environment; inline `VAR=value command`;
 - **Word expansion**: `$var` / `${var}` with `:-` `:=` `:?` `:+` `${#x}`
   `#`/`##`/`%`/`%%`, command substitution (`$(…)` / `` `…` ``), arithmetic
-  `$(( … ))`, tilde `~`, field splitting on `IFS`, and pathname globbing
-  (`*` `?` `[...]`);
+  `$(( … ))` (with `$`-params inside), tilde `~`, field splitting on `IFS`, and
+  pathname globbing (`*` `?` `[...]`);
 - **Redirections**: `<`, `>`, `>>`, `2>`, `2>&1`-style fd duplication, `<>`, and
-  here-documents (`<<`, `<<-`, quoted delimiter);
-- `cd` / `exit` / `quit` builtins; `-c <string>` and running a script file.
+  here-documents (`<<`, `<<-`, quoted delimiter); redirections also apply to
+  compound commands (`… done > file`);
+- `cd` / `exit` / `quit` / `:` / `true` / `false` builtins; `-c <string>` and
+  running a script file.
 
 ## Not yet working (see the gap analysis)
 
-- Control flow (`if` / `for` / `while` / `case`), functions, and subshell `( … )`
-  syntax — Phase 4;
 - Most builtins (`echo`/`printf`/`test`/`read`/`export`/`set`/…) — Phase 5;
-- Shell options (`set -e`/`-u`/`-x`/`-f`), full invocation parsing — Phase 6;
-- Traps, background `&`/`wait`, job control — Phase 7.
+- Shell options (`set -e`/`-u`/`-x`/`-f`), full invocation parsing (incl.
+  positional params for `-c string name args`) — Phase 6;
+- Traps, background `&`/`wait`, job control — Phase 7;
+- A compound command or function as a stage of a multi-stage pipeline
+  (`{ …; } | cmd`, `cmd | while …`) is not yet wired.
 
 ## Contributions:
 

@@ -1,17 +1,16 @@
-//! Abstract syntax tree produced by the parser (Phase 2).
+//! Abstract syntax tree produced by the parser (Phase 2, extended in Phase 4).
 //!
-//! The parser turns the lexer's token stream into this tree for the
-//! *non-compound* core of the grammar (POSIX §2.9): a `List` of `AndOr` lists
-//! of `Pipeline`s of `Command`s. In Phase 2 the only `Command` is a
-//! [`SimpleCommand`]; compound commands (`if`, `for`, `while`, `case`, brace
-//! groups, subshells) and function definitions arrive in Phase 4, and the
-//! executor that fully walks this tree — with real expansion, pipelines, and
-//! redirections — arrives in Phase 3.
+//! The parser turns the lexer's token stream into this tree (POSIX §2.9): a
+//! `List` of `AndOr` lists of `Pipeline`s of `Command`s. A [`Command`] is a
+//! [`SimpleCommand`], a [`CompoundCommand`] (`if`, `for`, `while`/`until`,
+//! `case`, brace group `{ … }`, subshell `( … )`) with attached redirections, or
+//! a function definition. The executor that walks this tree — with real
+//! expansion, pipelines, redirections, and control flow — lives in
+//! [`crate::exec`].
 //!
-//! Some fields and variants are placeholders wired up now for AST stability but
-//! only acted on in a later phase (pipeline negation `!`, the `Async` `&`
-//! separator, and the fd-duplication redirection operators). Hence the
-//! module-level `allow(dead_code)`.
+//! Some fields and variants are placeholders wired up for AST stability but only
+//! acted on in a later phase (the `Async` `&` separator runs synchronously until
+//! Phase 7). Hence the module-level `allow(dead_code)`.
 #![allow(dead_code)]
 
 use crate::token::{HereDoc, Word};
@@ -55,8 +54,8 @@ pub enum AndOrOp {
     Or,
 }
 
-/// One or more commands connected by `|`. `bang` is the leading `!` negation
-/// (recognized in Phase 4).
+/// One or more commands connected by `|`. `bang` is the leading `!` negation,
+/// which inverts the pipeline's final exit status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pipeline {
     pub bang: bool,
@@ -65,9 +64,83 @@ pub struct Pipeline {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// A simple command: `echo hi`, `VAR=x cmd args >file`.
     Simple(SimpleCommand),
-    // Compound commands (Brace/Subshell/If/For/While/Until/Case) and function
-    // definitions arrive in Phase 4.
+    /// A compound command (`if`, `for`, `while`/`until`, `case`, `{ … }`,
+    /// `( … )`) with any redirections that apply to the whole construct.
+    Compound {
+        kind: CompoundCommand,
+        redirects: Vec<Redirect>,
+    },
+    /// A function definition `name() compound-command`. Executing it registers
+    /// the function; it produces no output and exits 0.
+    Function { name: String, body: FunctionBody },
+}
+
+/// A compound command (POSIX §2.9.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompoundCommand {
+    /// `{ list; }` — runs in the current shell environment.
+    Brace(List),
+    /// `( list )` — runs in a subshell environment.
+    Subshell(List),
+    If(IfClause),
+    For(ForClause),
+    While(WhileClause),
+    Case(CaseClause),
+}
+
+/// `if cond; then …; [elif cond; then …]…; [else …]; fi`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfClause {
+    pub cond: List,
+    pub then_branch: List,
+    /// Zero or more `elif cond; then body` clauses, in order.
+    pub elifs: Vec<(List, List)>,
+    pub else_branch: Option<List>,
+}
+
+/// `for name [in words…]; do body; done`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForClause {
+    pub var: String,
+    /// The `in` word list. `None` means the `in` clause was omitted, so the loop
+    /// iterates over the positional parameters (`"$@"`); `Some(vec![])` is an
+    /// explicit empty list (the body never runs).
+    pub words: Option<Vec<Word>>,
+    pub body: List,
+}
+
+/// `while cond; do body; done` or `until cond; do body; done`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileClause {
+    /// `false` for `while`, `true` for `until` (the condition sense is inverted).
+    pub until: bool,
+    pub cond: List,
+    pub body: List,
+}
+
+/// `case word in pat) body ;; … esac`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseClause {
+    pub word: Word,
+    pub items: Vec<CaseItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseItem {
+    /// One or more `|`-separated patterns; the item matches if any does.
+    pub patterns: Vec<Word>,
+    /// The commands run on a match (may be empty).
+    pub body: List,
+}
+
+/// A function's stored body: the compound command plus any redirections that
+/// were attached to the definition (applied on each invocation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionBody {
+    pub body: CompoundCommand,
+    pub redirects: Vec<Redirect>,
 }
 
 /// A simple command: optional variable assignments, a command word and its
