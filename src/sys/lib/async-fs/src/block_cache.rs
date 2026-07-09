@@ -16,8 +16,9 @@ use std::rc::Rc;
 #[cfg(feature = "std")]
 use std::rc::Weak;
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::num::NonZero;
+use core::task::{Poll, Waker};
 use lru::LruCache;
 
 #[cfg(not(feature = "std"))]
@@ -115,16 +116,14 @@ impl Drop for InnerCachedBlock {
             panic!("Block 0x{:x} is dirty when dropped.", self.block_no)
         }
 
+        let mut caches = self.supporting_caches.borrow_mut();
+        caches.clear_expiring_block(self.block_no);
         if Rc::strong_count(&self.clean_block) == 1 {
-            let mut caches = self.supporting_caches.borrow_mut();
             caches.push_free_block(self.clean_block.clone());
-            caches.clear_expiring_block(self.block_no);
-        } else {
-            todo!()
-            // self.supporting_caches
-            //     .borrow_mut()
-            //     .push_expiring_block(self.block_no, &self.clean_block);
         }
+        // else: the block data is still referenced, e.g. by a CheckpointedBlock
+        // held by the background writer; the last holder returns it to the
+        // free list when it drops (see CheckpointedBlock::drop).
     }
 }
 
@@ -380,20 +379,37 @@ impl AsyncStub {
     }
 }
 
+/// A device read in flight; concurrent `get_block()` callers for the same
+/// block number wait on this instead of issuing a duplicate device read
+/// (which would also create a second, divergent `CachedBlock` identity for
+/// the same on-disk block).
+#[derive(Default)]
+struct PendingRead {
+    wakers: Vec<Waker>,
+}
+
 /// LRU-based block cache.
+///
+/// All methods take `&self`: the cache supports concurrent (cooperatively
+/// interleaved, single-threaded) readers. Interior borrows are never held
+/// across an await; concurrent misses of the same block are deduplicated via
+/// `pending_reads`.
 pub struct BlockCache<BD: AsyncBlockDevice> {
     block_dev: Rc<BD>,
     #[allow(unused)]
     cache_size: usize,
 
     // The main cache.
-    lru_cache: LruCache<u64, CachedBlock>,
+    lru_cache: RefCell<LruCache<u64, CachedBlock>>,
     supporting_caches: Rc<RefCell<SupportingCaches>>,
+
+    // Device reads in flight, keyed by block number.
+    pending_reads: RefCell<BTreeMap<u64, PendingRead>>,
 
     async_stub: AsyncStub,
 
     #[allow(unused)]
-    cache_misses: u64,
+    cache_misses: Cell<u64>,
 
     // Pinned blocks are always cached. Used by txn log.
     pinned_blocks_start: u64,
@@ -402,6 +418,31 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
 
     // Block 0.
     superblock: CachedBlock,
+}
+
+/// Cancel-safety for pending-read deduplication: whatever happens to the
+/// first reader (success, device error, or its future being dropped at the
+/// await point), the pending entry must be removed and the waiters woken so
+/// one of them can retry.
+struct PendingReadGuard<'a, BD: AsyncBlockDevice> {
+    cache: &'a BlockCache<BD>,
+    block_no: u64,
+}
+
+impl<BD: AsyncBlockDevice> Drop for PendingReadGuard<'_, BD> {
+    fn drop(&mut self) {
+        let pending = self
+            .cache
+            .pending_reads
+            .borrow_mut()
+            .remove(&self.block_no);
+        // Wake outside of the borrow.
+        if let Some(pending) = pending {
+            for waker in pending.wakers {
+                waker.wake();
+            }
+        }
+    }
 }
 
 impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
@@ -504,10 +545,11 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         Ok(Self {
             block_dev,
             cache_size,
-            lru_cache: LruCache::new(NonZero::new(cache_size).unwrap()),
+            lru_cache: RefCell::new(LruCache::new(NonZero::new(cache_size).unwrap())),
             supporting_caches,
+            pending_reads: RefCell::new(BTreeMap::new()),
             async_stub,
-            cache_misses: 0,
+            cache_misses: Cell::new(0),
             pinned_blocks_start,
             pinned_blocks_num,
             pinned_blocks,
@@ -536,10 +578,15 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         self.pinned_blocks_num
     }
 
-    fn push_block(&mut self, block_no: u64, block: CachedBlock) {
+    fn push_block(&self, block_no: u64, block: CachedBlock) {
         assert_ne!(0, block_no);
 
-        if let Some((prev_block_no, prev_block)) = self.lru_cache.push(block_no, block.clone()) {
+        let evicted = self.lru_cache.borrow_mut().push(block_no, block.clone());
+        if let Some((prev_block_no, prev_block)) = evicted {
+            // LruCache::push() also returns the previous value if the key was
+            // already present; that must not happen here (it would mean two
+            // CachedBlock identities exist for one on-disk block).
+            debug_assert_ne!(prev_block_no, block_no);
             let prev_ref = prev_block.inner.borrow();
             if 1 == Rc::strong_count(&prev_block.inner) {
                 assert!(prev_ref.dirty_block.is_none());
@@ -552,17 +599,21 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         };
     }
 
-    /// Get a reference to a cached block.
-    pub async fn get_block(&mut self, block_no: u64) -> Result<CachedBlock> {
+    /// The synchronous fast path of get_block(): the block is pinned, cached,
+    /// or expiring. Never awaits, never leaves a borrow live on return.
+    fn get_cached(&self, block_no: u64) -> Option<CachedBlock> {
         if block_no == 0 {
-            return Ok(self.superblock.clone());
+            return Some(self.superblock.clone());
         }
 
         if self.is_pinned(block_no) {
-            return Ok(self.pinned_blocks[(block_no - self.pinned_blocks_start) as usize].clone());
+            return Some(
+                self.pinned_blocks[(block_no - self.pinned_blocks_start) as usize].clone(),
+            );
         }
-        if let Some(block) = self.lru_cache.get(&block_no) {
-            return Ok(block.clone());
+
+        if let Some(block) = self.lru_cache.borrow_mut().get(&block_no) {
+            return Some(block.clone());
         }
 
         let expiring_block = self
@@ -573,20 +624,83 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         if let Some(block) = expiring_block {
             let cached_block = CachedBlock { inner: block };
             self.push_block(block_no, cached_block.clone());
-            return Ok(cached_block);
+            return Some(cached_block);
         }
 
-        self.cache_misses += 1;
+        None
+    }
+
+    /// Try to become the (sole) task reading `block_no` from the device.
+    fn try_claim_pending_read(&self, block_no: u64) -> bool {
+        let mut claimed = false;
+        self.pending_reads
+            .borrow_mut()
+            .entry(block_no)
+            .or_insert_with(|| {
+                claimed = true;
+                PendingRead::default()
+            });
+        claimed
+    }
+
+    /// Wait until the in-flight device read of `block_no` (if any) completes
+    /// (successfully or not).
+    async fn wait_pending_read(&self, block_no: u64) {
+        core::future::poll_fn(|cx| {
+            let mut pending = self.pending_reads.borrow_mut();
+            if let Some(p) = pending.get_mut(&block_no) {
+                if !p.wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                    p.wakers.push(cx.waker().clone());
+                }
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await
+    }
+
+    /// Get a reference to a cached block.
+    pub async fn get_block(&self, block_no: u64) -> Result<CachedBlock> {
+        loop {
+            if let Some(block) = self.get_cached(block_no) {
+                return Ok(block);
+            }
+
+            // The block must be read from the device. If another task is
+            // already reading it, wait for that read and re-check the cache;
+            // otherwise claim the read for ourselves.
+            if self.try_claim_pending_read(block_no) {
+                break;
+            }
+            self.wait_pending_read(block_no).await;
+        }
+
+        // We hold the pending-read claim for block_no. The guard releases the
+        // claim and wakes waiters on every exit path, including cancellation.
+        let _guard = PendingReadGuard {
+            cache: self,
+            block_no,
+        };
+
+        self.cache_misses.set(self.cache_misses.get() + 1);
         let rc_block = self.supporting_caches.borrow_mut().pop_free_block();
         let Ok(block) = Rc::try_unwrap(rc_block) else {
             panic!()
         };
 
         let (block, result) = self.block_dev.read_block(block_no, block).await;
-        result?;
+        if let Err(err) = result {
+            self.supporting_caches
+                .borrow_mut()
+                .push_free_block(Rc::new(block));
+            return Err(err);
+        }
         let cached_block =
             CachedBlock::new(block_no, Rc::new(block), self.supporting_caches.clone());
 
+        // Publish the block before the guard wakes the waiters (on drop), so
+        // that they find it in the cache.
         self.push_block(block_no, cached_block.clone());
 
         Ok(cached_block)
@@ -594,11 +708,15 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
     /// Get an empty block. Use with caution: any previously stored
     /// data in the block on the block device will be lost.
-    pub fn get_empty_block(&mut self, block_no: u64) -> CachedBlock {
+    pub fn get_empty_block(&self, block_no: u64) -> CachedBlock {
         assert_ne!(0, block_no);
         assert!(!self.is_pinned(block_no));
+        // Only the (exclusive) write path uses empty blocks, and freshly
+        // allocated blocks are never concurrently read.
+        debug_assert!(!self.pending_reads.borrow().contains_key(&block_no));
 
-        if let Some(block) = self.lru_cache.get(&block_no) {
+        let cached = self.lru_cache.borrow_mut().get(&block_no).cloned();
+        if let Some(block) = cached {
             let mut clone = block.clone();
             clone.block_mut().clear();
             return clone;
@@ -625,8 +743,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     }
 
     #[cfg(debug_assertions)]
-    pub fn debug_check_clean(&mut self) {
-        for (block_no, block) in self.lru_cache.iter() {
+    pub fn debug_check_clean(&self) {
+        for (block_no, block) in self.lru_cache.borrow().iter() {
             assert!(!block.is_dirty(), "Block {block_no} is dirty.");
         }
     }

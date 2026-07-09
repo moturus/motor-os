@@ -129,11 +129,11 @@ impl NetConfig {
 
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
 pub(super) async fn load(
-    fs: &Rc<moto_async::LocalMutex<super::super::fs::FS>>,
+    fs: &Rc<moto_async::LocalRwLock<super::super::fs::FS>>,
 ) -> std::io::Result<NetConfig> {
     const CFG_PATH: &str = "/sys/cfg/sys-net.toml";
 
-    let mut fs_mut = fs.lock().await;
+    let fs_mut = fs.read().await;
     let Some((sys_dir, _)) = fs_mut
         .stat(async_fs::Role::System, async_fs::ROOT_ID, "sys")
         .await

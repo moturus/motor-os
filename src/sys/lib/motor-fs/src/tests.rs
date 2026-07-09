@@ -2333,3 +2333,292 @@ async fn permissions_enforcement_test() -> Result<()> {
     fs.move_entry(Role::System, m, b, "m2").await.unwrap();
     Ok(())
 }
+
+// ------------------------- Concurrency tests -------------------------------
+//
+// Read-only FS operations take &self and may interleave (single-threaded,
+// cooperative). Writers require &mut self, so reader/writer exclusion is
+// enforced by the type system here and by an async RwLock in sys-io. The
+// tests below exercise concurrent readers and the block cache's
+// pending-read deduplication.
+
+/// Tracks the number of device reads currently in flight, and the maximum
+/// that was ever in flight (i.e. the achieved read concurrency).
+#[derive(Default)]
+struct InFlightStats {
+    current: std::cell::Cell<u64>,
+    max: std::cell::Cell<u64>,
+}
+
+/// A block device wrapper that counts per-block device reads and widens the
+/// read window (via yield_now) so that concurrent cache misses of the same
+/// block actually collide.
+struct CountingBlockDevice {
+    inner: AsyncFileBlockDevice,
+    reads: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<u64, u64>>>,
+    in_flight: std::rc::Rc<InFlightStats>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl async_fs::AsyncBlockDevice for CountingBlockDevice {
+    type Completion = <AsyncFileBlockDevice as async_fs::AsyncBlockDevice>::Completion;
+
+    fn num_blocks(&self) -> u64 {
+        self.inner.num_blocks()
+    }
+
+    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        *self.reads.borrow_mut().entry(block_no).or_insert(0) += 1;
+        let current = self.in_flight.current.get() + 1;
+        self.in_flight.current.set(current);
+        self.in_flight
+            .max
+            .set(self.in_flight.max.get().max(current));
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let result = self.inner.read_block(block_no, block).await;
+        self.in_flight
+            .current
+            .set(self.in_flight.current.get() - 1);
+        result
+    }
+
+    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        self.inner.write_block(block_no, block).await
+    }
+
+    async fn write_block_with_completion(
+        &self,
+        block_no: u64,
+        block: async_fs::block_cache::CheckpointedBlock,
+    ) -> Result<Self::Completion> {
+        self.inner.write_block_with_completion(block_no, block).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+}
+
+type ReadCounts = std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<u64, u64>>>;
+
+/// Creates a MotorFs over a counting block device, with one file of
+/// `num_file_blocks` blocks, where block `i` is filled with byte
+/// `(i * 31 + 7) as u8`. Returns (fs, file_id, read counters,
+/// in-flight read stats).
+///
+/// The FS is written with a plain device, flushed, and reopened through the
+/// counting device, so the block cache is cold and every test read hits the
+/// device (a freshly written FS keeps everything cached, which would make
+/// the read counts vacuous).
+async fn create_concurrency_test_fs(
+    tag: &str,
+    num_file_blocks: u64,
+) -> Result<(
+    std::rc::Rc<crate::MotorFs<CountingBlockDevice>>,
+    EntryId,
+    ReadCounts,
+    std::rc::Rc<InFlightStats>,
+)> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+    let path = std::env::temp_dir().join(tag);
+    let path = Utf8PathBuf::from_path_buf(path).unwrap();
+    std::fs::remove_file(path.clone()).ok();
+
+    let bd = AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?;
+    let mut fs = crate::MotorFs::format(Box::new(bd)).await?;
+
+    let file_id = fs
+        .create_entry(
+            Role::System,
+            crate::ROOT_DIR_ID,
+            EntryKind::File,
+            "concurrent",
+            [AccessPermissions::Rwx; 3],
+        )
+        .await
+        .unwrap();
+
+    let mut block = [0_u8; 4096];
+    for key in 0..num_file_blocks {
+        block.fill((key * 31 + 7) as u8);
+        let written = fs
+            .write(Role::System, file_id, key * 4096, &block)
+            .await
+            .unwrap();
+        assert_eq!(written, 4096);
+    }
+
+    fs.flush().await?;
+    drop(fs);
+
+    let bd = AsyncFileBlockDevice::open(&path).await?;
+    let reads: ReadCounts = Default::default();
+    let in_flight: std::rc::Rc<InFlightStats> = Default::default();
+    let bd = CountingBlockDevice {
+        inner: bd,
+        reads: reads.clone(),
+        in_flight: in_flight.clone(),
+    };
+    let fs = crate::MotorFs::open(Box::new(bd)).await?;
+
+    // Only count reads from here on (opening did its own).
+    reads.borrow_mut().clear();
+    in_flight.max.set(0);
+    Ok((std::rc::Rc::new(fs), file_id, reads, in_flight))
+}
+
+fn expected_block_byte(key: u64) -> u8 {
+    (key * 31 + 7) as u8
+}
+
+/// N tasks concurrently read the whole file (each starting at a different
+/// phase); every task must see the correct content, and, thanks to
+/// pending-read deduplication + the (large enough) cache, no block may be
+/// read from the device more than once.
+async fn concurrent_reads_test() -> Result<()> {
+    const FILE_BLOCKS: u64 = 128;
+    const NUM_READERS: u64 = 8;
+
+    let (fs, file_id, reads, _) =
+        create_concurrency_test_fs("motor_fs_concurrent_reads_test", FILE_BLOCKS).await?;
+
+    let mut join_handles = vec![];
+    for reader in 0..NUM_READERS {
+        let fs = fs.clone();
+        join_handles.push(tokio::task::spawn_local(async move {
+            let mut buf = [0_u8; 4096];
+            for step in 0..FILE_BLOCKS {
+                // Each reader starts at its own phase to mix hits, misses,
+                // and concurrent misses of the same block.
+                let key = (step + reader * FILE_BLOCKS / NUM_READERS) % FILE_BLOCKS;
+                let read = fs
+                    .read(Role::System, file_id, key * 4096, &mut buf)
+                    .await
+                    .unwrap();
+                assert_eq!(read, 4096);
+                assert!(
+                    buf.iter().all(|b| *b == expected_block_byte(key)),
+                    "corrupt read of block {key}"
+                );
+            }
+        }));
+    }
+
+    for handle in join_handles {
+        handle.await.unwrap();
+    }
+
+    for (block_no, count) in reads.borrow().iter() {
+        assert_eq!(
+            *count, 1,
+            "block {block_no} was read {count} times from the device"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn concurrent_reads() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(concurrent_reads_test()).unwrap();
+}
+
+/// Prefetch warms the cache: after prefetch(0..N), reading the file causes
+/// no further device reads of its data blocks.
+async fn prefetch_test() -> Result<()> {
+    const FILE_BLOCKS: u64 = 64;
+
+    let (fs, file_id, reads, _) =
+        create_concurrency_test_fs("motor_fs_prefetch_test", FILE_BLOCKS).await?;
+
+    fs.prefetch(file_id, 0, FILE_BLOCKS).await;
+    let reads_after_prefetch = reads.borrow().clone();
+
+    let mut buf = [0_u8; 4096];
+    for key in 0..FILE_BLOCKS {
+        let read = fs
+            .read(Role::System, file_id, key * 4096, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(read, 4096);
+        assert!(buf.iter().all(|b| *b == expected_block_byte(key)));
+    }
+
+    assert_eq!(
+        *reads.borrow(),
+        reads_after_prefetch,
+        "reading a prefetched file must not touch the device"
+    );
+
+    // Prefetching past EOF or with a bogus id must not panic or read.
+    fs.prefetch(file_id, FILE_BLOCKS * 2, 16).await;
+    fs.prefetch(file_id ^ 0xdead_beef, 0, 16).await;
+
+    Ok(())
+}
+
+#[test]
+fn prefetch() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(prefetch_test()).unwrap();
+}
+
+/// Many tasks concurrently read the *same* single block of a cold file:
+/// exactly one device read per block may happen (dedup), and everyone gets
+/// the right data.
+async fn concurrent_miss_dedup_test() -> Result<()> {
+    const FILE_BLOCKS: u64 = 4;
+    const NUM_READERS: usize = 16;
+
+    let (fs, file_id, reads, _) =
+        create_concurrency_test_fs("motor_fs_concurrent_miss_dedup_test", FILE_BLOCKS).await?;
+
+    let mut join_handles = vec![];
+    for _ in 0..NUM_READERS {
+        let fs = fs.clone();
+        join_handles.push(tokio::task::spawn_local(async move {
+            let mut buf = [0_u8; 4096];
+            for key in 0..FILE_BLOCKS {
+                let read = fs
+                    .read(Role::System, file_id, key * 4096, &mut buf)
+                    .await
+                    .unwrap();
+                assert_eq!(read, 4096);
+                assert!(buf.iter().all(|b| *b == expected_block_byte(key)));
+            }
+        }));
+    }
+
+    for handle in join_handles {
+        handle.await.unwrap();
+    }
+
+    for (block_no, count) in reads.borrow().iter() {
+        assert_eq!(
+            *count, 1,
+            "block {block_no} was read {count} times from the device"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn concurrent_miss_dedup() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(concurrent_miss_dedup_test()).unwrap();
+}

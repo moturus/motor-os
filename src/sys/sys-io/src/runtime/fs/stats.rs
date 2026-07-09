@@ -1,7 +1,7 @@
 //! Statistics for the FS runtime.
 //!
 //! sys-io's stats provider (`crate::stats_server`) runs on its own thread, but
-//! the FS lives in this single-threaded async runtime (`Rc<LocalMutex<FS>>`) and
+//! the FS lives in this single-threaded async runtime (`Rc<LocalRwLock<FS>>`) and
 //! can't be read from there directly. Instead the stats-server thread *polls*
 //! them: it sends a request over a cross-thread channel that
 //! [`stats_responder_task`] (running in the FS runtime) answers with a freshly
@@ -9,7 +9,7 @@
 
 use super::FS;
 use async_fs::FileSystem;
-use moto_async::LocalMutex;
+use moto_async::LocalRwLock;
 use moto_stats::{MetricDescWire, MetricEntry};
 use std::{rc::Rc, sync::OnceLock};
 
@@ -22,7 +22,7 @@ mod ids {
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(fs: &mut FS) -> Vec<MetricEntry> {
+async fn entries(fs: &FS) -> Vec<MetricEntry> {
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
         .empty_blocks()
@@ -62,7 +62,7 @@ const STATS_REQUEST_CAPACITY: usize = 4;
 
 /// Spawn the task that answers metric-snapshot requests from the stats-server
 /// thread. Call once, from the FS runtime.
-pub(super) fn spawn_stats_responder(fs: Rc<LocalMutex<FS>>) {
+pub(super) fn spawn_stats_responder(fs: Rc<LocalRwLock<FS>>) {
     let (tx, rx) = moto_async::channel(STATS_REQUEST_CAPACITY);
     if STATS_REQUESTS.set(tx).is_err() {
         log::error!("sys-io: fs stats responder already started");
@@ -75,11 +75,11 @@ pub(super) fn spawn_stats_responder(fs: Rc<LocalMutex<FS>>) {
 /// Listen for stats requests and answer each with a fresh snapshot of the
 /// (single-threaded) FS stats. Runs in the FS runtime.
 async fn stats_responder_task(
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
     mut requests: moto_async::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
-        let snapshot = entries(&mut *fs.lock().await).await;
+        let snapshot = entries(&*fs.read().await).await;
         // The receiver is gone if the stats-server thread stopped waiting; ignore.
         let _ = req.respond_to.send(snapshot);
     }

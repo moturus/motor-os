@@ -100,7 +100,7 @@ struct NetRuntime {
     stats: Rc<stats::NetStats>,
 
     // Filesystem is used to write log/stats.
-    fs: Rc<moto_async::LocalMutex<super::fs::FS>>,
+    fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
 }
 
 impl NetRuntime {
@@ -463,7 +463,7 @@ impl NetRuntime {
 /// Takes filesystem parameter to read net config.
 pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
-    fs: Rc<moto_async::LocalMutex<super::fs::FS>>,
+    fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
 ) -> Result<()> {
     let config = config::load(&fs).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");

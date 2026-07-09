@@ -318,7 +318,7 @@ impl Metadata {
 pub trait FileSystem {
     /// Find a file or directory by its full path.
     async fn stat(
-        &mut self,
+        &self,
         role: Role,
         parent_id: EntryId,
         filename: &str,
@@ -359,24 +359,24 @@ pub trait FileSystem {
     ) -> Result<()>;
 
     /// Get the first entry in a directory.
-    async fn get_first_entry(&mut self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>>;
+    async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Get the next entry in a directory.
-    async fn get_next_entry(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>>;
+    async fn get_next_entry(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Get the parent of the entry.
-    async fn get_parent(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>>;
+    async fn get_parent(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>>;
 
     /// Filename of the entry, without parent directories.
-    async fn name(&mut self, role: Role, entry_id: EntryId) -> Result<String>;
+    async fn name(&self, role: Role, entry_id: EntryId) -> Result<String>;
 
     /// The metadata of the directory entry.
-    async fn metadata(&mut self, role: Role, entry_id: EntryId) -> Result<Metadata>;
+    async fn metadata(&self, role: Role, entry_id: EntryId) -> Result<Metadata>;
 
     /// Read bytes from a file.
     /// Note that cross-block reads may not be supported.
     async fn read(
-        &mut self,
+        &self,
         role: Role,
         file_id: EntryId,
         offset: u64,
@@ -399,7 +399,7 @@ pub trait FileSystem {
     /// The total number of blocks in the FS.
     fn num_blocks(&self) -> u64;
 
-    async fn empty_blocks(&mut self) -> Result<u64>;
+    async fn empty_blocks(&self) -> Result<u64>;
 
     /// Copies bytes from one file to another.
     async fn copy_file_range(

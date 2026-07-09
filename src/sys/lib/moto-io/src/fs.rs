@@ -225,19 +225,27 @@ impl FsClient {
 
         let mut written = 0_usize;
         let mut step_offset = offset;
+        let mut error = None;
         loop {
             // `buf` can be large; we split it into 4k chunks; we send them
             // in batches of BATCH_SIZE and then wait for completions.
             const BATCH_SIZE: usize = 16;
 
-            let mut batch_ids = [0_u64; BATCH_SIZE];
+            // (msg id, chunk len) of the in-flight messages.
+            let mut batch: [(u64, usize); BATCH_SIZE] = [(0, 0); BATCH_SIZE];
             let mut batch_idx = 0;
             loop {
                 let step_len = ((BLOCK_SIZE as u64) - (step_offset & (BLOCK_SIZE as u64 - 1)))
                     .min(buf_running.len() as u64);
                 debug_assert!(step_len < u16::MAX as u64);
 
-                let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+                let io_page = match self.io_sender.alloc_page(u64::MAX).await {
+                    Ok(io_page) => io_page,
+                    Err(err) => {
+                        error = Some(err);
+                        break;
+                    }
+                };
                 io_page.bytes_mut()[0..step_len as usize]
                     .clone_from_slice(&buf_running[0..(step_len as usize)]);
 
@@ -246,14 +254,14 @@ impl FsClient {
                 let msg_id = self.new_request_id();
                 msg.id = msg_id;
                 if let Err(err) = self.clone().send(msg).await {
-                    todo!()
+                    error = Some(err);
+                    break;
                 }
 
-                written += (step_len as usize);
                 step_offset += step_len;
                 buf_running = &buf_running[(step_len as usize)..];
 
-                batch_ids[batch_idx] = msg_id;
+                batch[batch_idx] = (msg_id, step_len as usize);
                 batch_idx += 1;
                 if batch_idx >= BATCH_SIZE {
                     break;
@@ -264,21 +272,40 @@ impl FsClient {
                 }
             }
 
-            for id in batch_ids {
-                if id == 0 {
-                    break;
-                }
-                if let Err(err) = self.clone().recv(id).await {
-                    todo!()
+            // Always receive the response of every sent message, even after an
+            // error: abandoned responses would leak in self.responses forever.
+            for (id, step_len) in batch.iter().take(batch_idx) {
+                match self.clone().recv(*id).await {
+                    Ok(msg) => {
+                        if error.is_none() {
+                            match msg.status() {
+                                // Responses are processed in send order, so
+                                // `written` counts a contiguous prefix.
+                                Ok(()) => written += step_len,
+                                Err(err) => error = Some(err),
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if error.is_none() {
+                            error = Some(err);
+                        }
+                    }
                 }
             }
 
-            if buf_running.is_empty() {
+            if error.is_some() || buf_running.is_empty() {
                 break;
             }
         }
 
-        Ok(written)
+        if written > 0 {
+            Ok(written)
+        } else if let Some(err) = error {
+            Err(err)
+        } else {
+            Ok(0)
+        }
     }
 
     /// Read bytes from a file.
@@ -291,7 +318,6 @@ impl FsClient {
     ) -> Result<usize> {
         let mut buf_running = buf;
 
-        let mut to_be_read = 0_usize;
         let mut actual_read = 0_usize;
         let mut step_offset = offset;
         let mut remaining_len = buf_running.len();
@@ -312,10 +338,10 @@ impl FsClient {
                 let msg_id = self.new_request_id();
                 msg.id = msg_id;
                 if let Err(err) = self.clone().send(msg).await {
-                    todo!()
+                    error = Some(err);
+                    break;
                 }
 
-                to_be_read += (step_len as usize);
                 step_offset += step_len;
                 remaining_len -= (step_len as usize);
 
@@ -330,33 +356,38 @@ impl FsClient {
                 }
             }
 
-            for id in batch_ids {
-                if id == 0 {
-                    break;
-                }
-                match self.clone().recv(id).await {
+            // Always receive the response of every sent message, even after an
+            // error: abandoned responses would leak in self.responses forever,
+            // together with their io_pages (the pool is finite). After an
+            // error, responses are drained but their data is discarded:
+            // `actual_read` must stay a contiguous prefix of `buf`.
+            for id in batch_ids.iter().take(batch_idx) {
+                match self.clone().recv(*id).await {
                     Ok(msg) => match api_fs::read_resp_decode(msg, &self.io_receiver.borrow()) {
                         Ok((len, io_page)) => {
-                            assert!(len as usize <= buf_running.len());
-                            buf_running[..(len as usize)]
-                                .clone_from_slice(&io_page.bytes()[..(len as usize)]);
-                            // buf = &mut buf[..(len as usize)];
-                            buf_running = &mut buf_running[(len as usize)..];
-                            actual_read += len as usize;
+                            if error.is_none() {
+                                assert!(len as usize <= buf_running.len());
+                                buf_running[..(len as usize)]
+                                    .clone_from_slice(&io_page.bytes()[..(len as usize)]);
+                                buf_running = &mut buf_running[(len as usize)..];
+                                actual_read += len as usize;
+                            }
                         }
                         Err(err) => {
-                            error = Some(err);
-                            break;
+                            if error.is_none() {
+                                error = Some(err);
+                            }
                         }
                     },
                     Err(err) => {
-                        error = Some(err);
-                        break;
+                        if error.is_none() {
+                            error = Some(err);
+                        }
                     }
                 }
             }
 
-            if remaining_len == 0 {
+            if error.is_some() || remaining_len == 0 {
                 break;
             }
         }

@@ -24,6 +24,10 @@ use crate::{
 
 pub const PARTITION_ID: u8 = 0x2e;
 
+// Note: for some reason a smaller cache results in faster sequential reads/writes.
+//       Claude Fable hypothesised that the smaller cache stays in L2/L3 CPU cache,
+//       while a larger cache spills over to RAM.
+// const CACHE_SIZE: usize = 4096; // 16MB.
 const CACHE_SIZE: usize = 512; // 2MB.
 
 #[cfg(test)]
@@ -63,7 +67,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// Directory traversal/listing needs `Execute`; file read/write need
     /// `Read`/`Write`. See PERMISSIONS_DESIGN.md §5.
     async fn require_access(
-        &mut self,
+        &self,
         role: Role,
         entry_id: EntryIdInternal,
         need: Need,
@@ -95,7 +99,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// `parent_id` is not a directory.
     #[allow(clippy::await_holding_refcell_ref)]
     pub(crate) async fn lookup_child(
-        &mut self,
+        &self,
         parent_id: EntryIdInternal,
         filename: &str,
     ) -> Result<Option<(EntryId, EntryKind)>> {
@@ -146,8 +150,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         Ok(None)
     }
 
-    pub(crate) fn block_cache(&mut self) -> &mut async_fs::block_cache::BlockCache<BD> {
-        &mut self.block_cache
+    pub(crate) fn block_cache(&self) -> &async_fs::block_cache::BlockCache<BD> {
+        &self.block_cache
     }
 
     #[cfg(test)]
@@ -243,12 +247,53 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     ) -> Result<()> {
         Txn::test_remove_block_txn(self, file_id.into(), offset).await
     }
+
+    /// Warm the block cache with up to `count` data blocks of `file_id`,
+    /// starting at file block `first_key` (a file block key is
+    /// `offset / BLOCK_SIZE`). Best-effort readahead: errors are swallowed,
+    /// sparse holes are skipped. No data is returned, so no permission check
+    /// is needed (callers issue this after a successful authorized read of
+    /// the same file).
+    pub async fn prefetch(&self, file_id: EntryId, first_key: u64, count: u64) {
+        if self.check_err().is_err() {
+            return;
+        }
+        let file_id: EntryIdInternal = file_id.into();
+        let Ok(entry_block) = self.block_cache.get_block(file_id.block_no()).await else {
+            return;
+        };
+        if dir_entry!(entry_block).validate_entry(file_id).is_err()
+            || dir_entry!(entry_block).kind() != EntryKind::File
+        {
+            return;
+        }
+        let file_size = dir_entry!(entry_block).metadata().size;
+        drop(entry_block);
+        if file_size <= INLINE_CAPACITY {
+            return; // Inline files live in the entry block, already cached.
+        }
+
+        let last_key = (file_size - 1) / (BLOCK_SIZE as u64);
+        for key in first_key..(first_key + count).min(last_key + 1) {
+            let mut txn = Txn::new_readonly(self);
+            let data_block_no =
+                DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, key).await;
+            drop(txn);
+            match data_block_no {
+                Ok(Some(data_block_no)) => {
+                    let _ = self.block_cache.get_block(data_block_no.as_u64()).await;
+                }
+                Ok(None) => continue, // A sparse hole.
+                Err(_) => return,
+            }
+        }
+    }
 }
 
 #[async_trait(?Send)]
 impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     async fn stat(
-        &mut self,
+        &self,
         role: Role,
         parent_id: EntryId,
         filename: &str,
@@ -430,7 +475,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     /// Get the first entry in a directory.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn get_first_entry(&mut self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         let parent_id = if parent_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -466,7 +511,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
     /// Get the next entry in a directory.
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn get_next_entry(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_next_entry(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
             return Ok(None);
@@ -518,7 +563,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Ok(Some(id.into()))
     }
 
-    async fn get_parent(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_parent(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         self.check_err()?;
         let id: EntryIdInternal = entry_id.into();
         if id == ROOT_DIR_ID_INTERNAL || id == async_fs::ROOT_ID.into() {
@@ -533,7 +578,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn name(&mut self, role: Role, entry_id: EntryId) -> Result<String> {
+    async fn name(&self, role: Role, entry_id: EntryId) -> Result<String> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -549,7 +594,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn metadata(&mut self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
+    async fn metadata(&self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
         self.check_err()?;
         let entry_id = if entry_id == async_fs::ROOT_ID {
             ROOT_DIR_ID
@@ -565,7 +610,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     }
 
     async fn read(
-        &mut self,
+        &self,
         role: Role,
         file_id: EntryId,
         offset: u64,
@@ -661,7 +706,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         Txn::do_resize_txn(self, file_id.into(), new_size).await
     }
 
-    async fn empty_blocks(&mut self) -> Result<u64> {
+    async fn empty_blocks(&self) -> Result<u64> {
         self.check_err()?;
         let sb = self.block_cache.get_block(0).await?;
         let res = sb.block().get_at_offset::<Superblock>(0).free_blocks();

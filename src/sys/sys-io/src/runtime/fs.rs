@@ -3,7 +3,7 @@ use async_fs::EntryId;
 use async_fs::Role;
 use async_fs::{EntryKind, FileSystem};
 use async_trait::async_trait;
-use moto_async::{AsFuture, LocalMutex};
+use moto_async::{AsFuture, LocalRwLock};
 use moto_sys_io::api_fs;
 use moto_sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
@@ -31,11 +31,20 @@ pub(crate) enum FS {
     MotorFs(motor_fs::MotorFs<VirtioPartition>),
 }
 
+impl FS {
+    /// Best-effort readahead; see [`motor_fs::MotorFs::prefetch`].
+    async fn prefetch(&self, file_id: EntryId, first_key: u64, count: u64) {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.prefetch(file_id, first_key, count).await,
+        }
+    }
+}
+
 #[async_trait(?Send)]
 impl FileSystem for FS {
     /// Find a file or directory by its full path.
     async fn stat(
-        &mut self,
+        &self,
         role: Role,
         parent_id: EntryId,
         filename: &str,
@@ -105,35 +114,35 @@ impl FileSystem for FS {
     }
 
     /// Get the first entry in a directory.
-    async fn get_first_entry(&mut self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.get_first_entry(role, parent_id).await,
         }
     }
 
     /// Get the next entry in a directory.
-    async fn get_next_entry(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_next_entry(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.get_next_entry(role, entry_id).await,
         }
     }
 
     /// Get the parent of the entry.
-    async fn get_parent(&mut self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
+    async fn get_parent(&self, role: Role, entry_id: EntryId) -> Result<Option<EntryId>> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.get_parent(role, entry_id).await,
         }
     }
 
     /// Filename of the entry, without parent directories.
-    async fn name(&mut self, role: Role, entry_id: EntryId) -> Result<String> {
+    async fn name(&self, role: Role, entry_id: EntryId) -> Result<String> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.name(role, entry_id).await,
         }
     }
 
     /// The metadata of the directory entry.
-    async fn metadata(&mut self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
+    async fn metadata(&self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.metadata(role, entry_id).await,
         }
@@ -142,7 +151,7 @@ impl FileSystem for FS {
     /// Read bytes from a file.
     /// Note that cross-block reads may not be supported.
     async fn read(
-        &mut self,
+        &self,
         role: Role,
         file_id: EntryId,
         offset: u64,
@@ -200,7 +209,7 @@ impl FileSystem for FS {
         }
     }
 
-    async fn empty_blocks(&mut self) -> Result<u64> {
+    async fn empty_blocks(&self) -> Result<u64> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.empty_blocks().await,
         }
@@ -213,7 +222,7 @@ impl FileSystem for FS {
     }
 }
 
-pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalMutex<FS>>> {
+pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalRwLock<FS>>> {
     let block_device = virtio_async::BlockDevice::from(block_device)?;
 
     use zerocopy::FromZeros;
@@ -230,7 +239,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
         std::io::Error::from(ErrorKind::InvalidData)
     })?;
 
-    let mut fs: Option<Rc<LocalMutex<FS>>> = None;
+    let mut fs: Option<Rc<LocalRwLock<FS>>> = None;
     for pte in &mbr.entries {
         log::trace!("MBR PTE: {pte:?}");
         match pte.partition_type {
@@ -258,7 +267,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
                         std::io::Error::from(ErrorKind::InvalidData)
                     })?,
                 );
-                fs = Some(Rc::new(LocalMutex::new(FS::MotorFs(
+                fs = Some(Rc::new(LocalRwLock::new(FS::MotorFs(
                     motor_fs::MotorFs::open(partition).await.map_err(|err| {
                         log::error!("Mbr::parse() failed: {err:?}.");
                         std::io::Error::from(ErrorKind::InvalidData)
@@ -279,7 +288,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
     Ok(fs)
 }
 
-async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {
+async fn spawn_fs_listeners(fs: Rc<LocalRwLock<FS>>) {
     const NUM_LISTENERS: usize = 8;
     for _ in 0..NUM_LISTENERS {
         spawn_new_listener(fs.clone()).await;
@@ -288,7 +297,7 @@ async fn spawn_fs_listeners(fs: Rc<LocalMutex<FS>>) {
     //       otherwise the FS is not yet functional.
 }
 
-async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
+async fn spawn_new_listener(fs: Rc<LocalRwLock<FS>>) {
     use std::sync::atomic::*;
     let (started_tx, started_rx) = moto_async::oneshot();
 
@@ -305,7 +314,7 @@ async fn spawn_new_listener(fs: Rc<LocalMutex<FS>>) {
 }
 
 async fn fs_listener(
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
     started_tx: moto_async::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
@@ -370,7 +379,7 @@ async fn fs_listener(
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
     sender: moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) {
     if let Err(err) = match msg.command {
         moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
@@ -401,11 +410,11 @@ async fn on_msg(
 async fn on_cmd_stat(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.lock().await;
+    let fs = fs.read().await;
     let Some((entry_id, entry_kind)) = fs
         .stat(Role::System, parent_id, fname.as_str())
         .await
@@ -426,12 +435,12 @@ async fn on_cmd_stat(
 async fn on_cmd_create_file(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
     let entry_id = fs
         .create_entry(
             Role::System,
@@ -456,12 +465,12 @@ async fn on_cmd_create_file(
 async fn on_cmd_create_dir(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
     let entry_id = fs
         .create_entry(
             Role::System,
@@ -486,12 +495,18 @@ async fn on_cmd_create_dir(
 async fn on_cmd_write(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.lock().await;
+    // `len` comes from the (untrusted) client; reject anything that does not
+    // fit into an io_page instead of panicking on the slice below.
+    if len as usize > moto_ipc::io_channel::PAGE_SIZE {
+        return Err(std::io::Error::from(ErrorKind::InvalidInput));
+    }
+
+    let mut fs = fs.write().await;
     let written = fs
         .write(
             Role::System,
@@ -511,17 +526,23 @@ async fn on_cmd_write(
 async fn on_cmd_read(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
+
+    // `len` comes from the (untrusted) client; reject anything that does not
+    // fit into an io_page instead of panicking on the slice below.
+    if len as usize > moto_ipc::io_channel::PAGE_SIZE {
+        return Err(std::io::Error::from(ErrorKind::InvalidInput));
+    }
 
     let io_page = sender
         .alloc_page(u64::MAX)
         .await
         .map_err(map_native_error)?;
 
-    let mut fs = fs.lock().await;
-    let read = fs
+    let fs_guard = fs.read().await;
+    let read = fs_guard
         .read(
             Role::System,
             file_id,
@@ -529,21 +550,48 @@ async fn on_cmd_read(
             &mut io_page.bytes_mut()[..(len as usize)],
         )
         .await?;
-    core::mem::drop(fs);
+    core::mem::drop(fs_guard);
 
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
     let _ = sender.send(resp).await;
+
+    maybe_readahead(fs, file_id, offset, read);
     Ok(())
+}
+
+/// Sequential readahead: full-block reads are the signature of streaming
+/// (e.g. the VDSO loading a binary; moto-io splits large reads into
+/// block-sized chunks). On every 16th file block, prefetch the 32 blocks past
+/// the current 16-block window into the block cache in the background.
+/// Duplicate device reads with foreground requests are impossible: the block
+/// cache deduplicates concurrent reads of the same block.
+fn maybe_readahead(fs: Rc<LocalRwLock<FS>>, file_id: EntryId, offset: u64, read: usize) {
+    const TRIGGER_WINDOW: u64 = 16; // Matches the moto-io read batch size.
+    const READAHEAD_BLOCKS: u64 = 32;
+
+    if read != async_fs::BLOCK_SIZE || !offset.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
+        return;
+    }
+    let block_key = offset / (async_fs::BLOCK_SIZE as u64);
+    if !block_key.is_multiple_of(TRIGGER_WINDOW) {
+        return;
+    }
+
+    moto_async::LocalRuntime::spawn(async move {
+        let fs = fs.read().await;
+        fs.prefetch(file_id, block_key + TRIGGER_WINDOW, READAHEAD_BLOCKS)
+            .await;
+    });
 }
 
 async fn on_cmd_metadata(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
 
-    let mut fs = fs.lock().await;
+    let fs = fs.read().await;
     let metadata = fs.metadata(Role::System, entry_id).await?;
 
     let io_page = sender
@@ -560,11 +608,11 @@ async fn on_cmd_metadata(
 async fn on_cmd_resize(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
 
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.resize(Role::System, file_id, new_size)
@@ -580,11 +628,11 @@ async fn on_cmd_resize(
 async fn on_cmd_delete_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
 
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.delete_entry(Role::System, entry_id)
@@ -600,9 +648,9 @@ async fn on_cmd_delete_entry(
 async fn on_cmd_flush(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
     let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
     core::mem::drop(fs);
 
@@ -613,10 +661,10 @@ async fn on_cmd_flush(
 async fn on_cmd_get_first_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let parent_id = api_fs::get_first_entry_req_decode(msg);
-    let mut fs = fs.lock().await;
+    let fs = fs.read().await;
     let resp = api_fs::get_first_entry_resp_encode(
         msg,
         fs.get_first_entry(Role::System, parent_id).await?,
@@ -630,10 +678,10 @@ async fn on_cmd_get_first_entry(
 async fn on_cmd_get_next_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let entry_id = api_fs::get_next_entry_req_decode(msg);
-    let mut fs = fs.lock().await;
+    let fs = fs.read().await;
     let next_entry_id = fs.get_next_entry(Role::System, entry_id).await?;
     core::mem::drop(fs);
     let resp = api_fs::get_next_entry_resp_encode(msg, next_entry_id);
@@ -645,10 +693,10 @@ async fn on_cmd_get_next_entry(
 async fn on_cmd_get_name(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let entry_id = api_fs::get_name_req_decode(msg);
-    let mut fs = fs.lock().await;
+    let fs = fs.read().await;
     let name = fs.name(Role::System, entry_id).await?;
     core::mem::drop(fs);
     if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
@@ -669,12 +717,12 @@ async fn on_cmd_get_name(
 async fn on_cmd_move_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.move_entry(Role::System, entry_id, new_parent_id, fname.as_str())
@@ -690,11 +738,11 @@ async fn on_cmd_move_entry(
 async fn on_cmd_copy_file_range(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalMutex<FS>>,
+    fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
 
-    let mut fs = fs.lock().await;
+    let mut fs = fs.write().await;
 
     // In this implementation, from_offset == to_offset.
     let copied = fs

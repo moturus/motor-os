@@ -43,11 +43,35 @@ thread_local! {
         const { std::cell::Cell::new(usize::MAX) };
 }
 
+/// How a transaction borrows the FS: read-only transactions borrow it shared
+/// (so concurrent readers can interleave), mutating transactions borrow it
+/// exclusively (writers are serialized by the caller, e.g. sys-io's RwLock).
+enum FsHandle<'a, BD: AsyncBlockDevice + 'static> {
+    Shared(&'a MotorFs<BD>),
+    Exclusive(&'a mut MotorFs<BD>),
+}
+
+impl<'a, BD: AsyncBlockDevice + 'static> FsHandle<'a, BD> {
+    fn fs(&self) -> &MotorFs<BD> {
+        match self {
+            FsHandle::Shared(fs) => fs,
+            FsHandle::Exclusive(fs) => fs,
+        }
+    }
+
+    fn fs_mut(&mut self) -> &mut MotorFs<BD> {
+        match self {
+            FsHandle::Shared(_) => panic!("read-only transaction"),
+            FsHandle::Exclusive(fs) => fs,
+        }
+    }
+}
+
 /// The transaction object: accumulates "dirty" blocks, then either discards
 /// them on error (so no changes to the underlying FS happen) or applies them
 /// "atomically", i.e. either all or nothing.
 pub struct Txn<'a, BD: AsyncBlockDevice + 'static> {
-    fs: &'a mut MotorFs<BD>,
+    fs: FsHandle<'a, BD>,
     txn_cache: micromap::Map<BlockNo, CachedBlock, TXN_CACHE_SIZE>,
     read_only: bool,
 }
@@ -69,8 +93,12 @@ impl<'a, BD: AsyncBlockDevice + 'static> Drop for Txn<'a, BD> {
 }
 
 impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
-    fn block_cache(&mut self) -> &mut BlockCache<BD> {
-        self.fs.block_cache()
+    fn block_cache(&self) -> &BlockCache<BD> {
+        self.fs.fs().block_cache()
+    }
+
+    pub(crate) fn fs(&self) -> &MotorFs<BD> {
+        self.fs.fs()
     }
 
     async fn commit(mut self) -> Result<()> {
@@ -97,12 +125,12 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             }
         }
 
-        fs.log_txn(txn_blocks).await
+        fs.fs_mut().log_txn(txn_blocks).await
     }
 
-    pub fn new_readonly(fs: &'a mut MotorFs<BD>) -> Self {
+    pub fn new_readonly(fs: &'a MotorFs<BD>) -> Self {
         Self {
-            fs,
+            fs: FsHandle::Shared(fs),
             txn_cache: micromap::Map::new(),
             read_only: true,
         }
@@ -156,7 +184,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             line!()
         );
         let mut txn = Self {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -183,7 +211,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         access: AccessPermissions,
     ) -> Result<()> {
         let mut txn = Self {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -245,7 +273,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         log::trace!("{}:{} - delete entry: {entry_id:?}", file!(), line!());
 
         let mut txn = Self {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -269,7 +297,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             line!()
         );
         let mut txn = Self {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -278,7 +306,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         // existence check uses the unenforced lookup: the move is already gated
         // by write on both parents, so it must not additionally require
         // traverse/`x` on the destination.
-        if let Some((target, _)) = txn.fs.lookup_child(new_parent_id, new_name).await? {
+        if let Some((target, _)) = txn.fs().lookup_child(new_parent_id, new_name).await? {
             let target_id: EntryIdInternal = target.into();
             if target_id == entry_id {
                 return Err(ErrorKind::InvalidInput.into());
@@ -347,7 +375,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         let final_size = prev_file_size.max(new_file_size);
 
         let mut txn = Self {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -441,7 +469,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         new_size: u64,
     ) -> Result<()> {
         let mut txn = Txn {
-            fs: &mut *fs,
+            fs: FsHandle::Exclusive(&mut *fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -466,7 +494,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         new_size: u64,
     ) -> Result<()> {
         let mut txn = Txn {
-            fs: &mut *fs,
+            fs: FsHandle::Exclusive(&mut *fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -521,7 +549,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         new_size: u64,
     ) -> Result<()> {
         let mut txn = Txn {
-            fs: &mut *fs,
+            fs: FsHandle::Exclusive(&mut *fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -592,7 +620,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         }
 
         let mut txn = Txn {
-            fs: &mut *fs,
+            fs: FsHandle::Exclusive(&mut *fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -744,7 +772,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         // exactly new_size regardless of how far the per-level shrinking above
         // got.
         let mut txn = Txn {
-            fs: &mut *fs,
+            fs: FsHandle::Exclusive(&mut *fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -778,7 +806,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         subtree_total: Option<u64>,
     ) -> Result<Option<(BlockNo, Option<u64>)>> {
         let mut txn = Txn {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
@@ -818,7 +846,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         let block_key = offset / (BLOCK_SIZE as u64);
 
         let mut txn = Self {
-            fs,
+            fs: FsHandle::Exclusive(fs),
             txn_cache: micromap::Map::new(),
             read_only: false,
         };
