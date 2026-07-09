@@ -29,6 +29,7 @@ mod local_notify;
 mod local_runtime;
 mod mutex;
 pub mod oneshot;
+mod rwlock;
 mod time;
 mod timeq;
 
@@ -37,4 +38,5 @@ pub use local_notify::*;
 pub use local_runtime::*;
 pub use mutex::{LocalMutex, LocalMutexGuard};
 pub use oneshot::oneshot;
+pub use rwlock::{LocalRwLock, LocalRwLockReadGuard, LocalRwLockWriteGuard};
 pub use time::{Instant, Sleep, sleep, sleep_until};
