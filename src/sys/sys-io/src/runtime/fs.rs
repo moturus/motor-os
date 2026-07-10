@@ -83,6 +83,10 @@ pub(crate) mod perf {
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
 
+/// How far sequential readahead prefetches past the current read (in 4K
+/// blocks). See `maybe_readahead` and `on_cmd_read_multi`.
+const READAHEAD_BLOCKS: u64 = 32;
+
 // We allow(private_interfaces) to hide a warning that VirtioPartition
 // has less visibility than enum FS, which is by design: the enum
 // has crate visibility to allow internal/async FS access, but
@@ -599,10 +603,10 @@ async fn on_cmd_read(
     let started = perf::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
 
-    // `len` comes from the (untrusted) client; reject anything that does not
-    // fit into an io_page instead of panicking on the slice below.
+    // Requests spanning more than one io_page get a multi-page response;
+    // see `api_fs::READ_MAX_PAGES`.
     if len as usize > moto_ipc::io_channel::PAGE_SIZE {
-        return Err(std::io::Error::from(ErrorKind::InvalidInput));
+        return on_cmd_read_multi(msg, sender, fs, file_id, offset, len).await;
     }
 
     let io_page = sender
@@ -633,6 +637,105 @@ async fn on_cmd_read(
     Ok(())
 }
 
+/// A read request spanning several io_pages, answered with one multi-page
+/// response (see `api_fs::read_multi_resp_encode`): the fixed per-message
+/// cost is paid once per up to 48K instead of once per 4K. Chunk sizes are
+/// deterministic from (offset, len) — `api_fs::read_chunks` — so the client
+/// reassembles without extra metadata. On early EOF the response carries
+/// fewer pages than requested; `total_len` is authoritative.
+async fn on_cmd_read_multi(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalRwLock<FS>>,
+    file_id: EntryId,
+    offset: u64,
+    len: u16,
+) -> Result<()> {
+    let started = perf::now_ticks();
+
+    // `len`/`offset` come from the (untrusted) client: reject anything
+    // spanning more chunks than a response can carry.
+    if len as usize > api_fs::READ_MAX_BYTES {
+        return Err(std::io::Error::from(ErrorKind::InvalidInput));
+    }
+    let mut chunk_sizes = [0_usize; api_fs::READ_MAX_PAGES];
+    let mut num_chunks = 0_usize;
+    for chunk in api_fs::read_chunks(offset, len as u32) {
+        if num_chunks == api_fs::READ_MAX_PAGES {
+            return Err(std::io::Error::from(ErrorKind::InvalidInput));
+        }
+        chunk_sizes[num_chunks] = chunk;
+        num_chunks += 1;
+    }
+
+    // One page pool, one FS lock acquire, one tree-walk warmup for the whole
+    // message. `alloc_page` may wait for the pool; pages recycle as soon as
+    // the client consumes earlier responses, independent of the FS lock, so
+    // waiting here (holding a read guard) cannot deadlock.
+    let mut pages: Vec<moto_ipc::io_channel::IoPage> = Vec::with_capacity(num_chunks);
+    let mut total = 0_u32;
+    {
+        let fs_guard = fs.read().await;
+        let mut chunk_offset = offset;
+        for &size in &chunk_sizes[..num_chunks] {
+            let io_page = sender
+                .alloc_page(u64::MAX)
+                .await
+                .map_err(map_native_error)?;
+            let read = fs_guard
+                .read(
+                    Role::System,
+                    file_id,
+                    chunk_offset,
+                    &mut io_page.bytes_mut()[..size],
+                )
+                .await?; // On error: `pages` drops, freeing them; on_msg sends the error response.
+            pages.push(io_page);
+            total += read as u32;
+            chunk_offset += read as u64;
+            if read < size {
+                break; // EOF.
+            }
+        }
+    }
+
+    // Free the pages the data didn't reach (EOF), including a trailing
+    // zero-byte one.
+    let mut needed = 0_usize;
+    let mut accounted = 0_u32;
+    while accounted < total {
+        accounted += (chunk_sizes[needed] as u32).min(total - accounted);
+        needed += 1;
+    }
+    pages.truncate(needed);
+
+    let resp = api_fs::read_multi_resp_encode(msg.id, total, pages);
+    let _ = sender.send(resp).await;
+
+    perf::add(&perf::READ_MSGS, 1);
+    if perf::TIMINGS {
+        perf::add(&perf::READ_TICKS, perf::now_ticks().wrapping_sub(started));
+    }
+
+    // Fully-satisfied block-aligned reads are streaming: prefetch past the
+    // end of this message's window (the cursor + cached-window probe make
+    // the per-message trigger cheap).
+    let end = offset + total as u64;
+    if total == len as u32 && end.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
+        perf::add(&perf::READAHEAD_SPAWNS, 1);
+        moto_async::LocalRuntime::spawn(async move {
+            let fs = fs.read().await;
+            fs.prefetch(
+                file_id,
+                end / (async_fs::BLOCK_SIZE as u64),
+                READAHEAD_BLOCKS,
+            )
+            .await;
+        });
+    }
+    Ok(())
+}
+
 /// Sequential readahead: full-block reads are the signature of streaming
 /// (e.g. the VDSO loading a binary; moto-io splits large reads into
 /// block-sized chunks). On every 16th file block, prefetch the 32 blocks past
@@ -641,7 +744,6 @@ async fn on_cmd_read(
 /// cache deduplicates concurrent reads of the same block.
 fn maybe_readahead(fs: Rc<LocalRwLock<FS>>, file_id: EntryId, offset: u64, read: usize) {
     const TRIGGER_WINDOW: u64 = 16; // Matches the moto-io read batch size.
-    const READAHEAD_BLOCKS: u64 = 32;
 
     if read != async_fs::BLOCK_SIZE || !offset.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
         return;

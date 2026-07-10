@@ -1,11 +1,12 @@
 use async_fs::EntryId;
-use moto_ipc::io_channel::{IoPage, Msg, Receiver, Sender};
+use moto_ipc::io_channel::{IoPage, Msg, PAGE_SIZE, Receiver, Sender};
 use moto_rt::Result;
 use moto_rt::fs::MAX_PATH_LEN;
 
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 pub const FS_URL: &str = "sys-io-fs";
 pub const CMD_STAT: u16 = 1;
@@ -135,6 +136,81 @@ pub fn write_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u16, Io
     let len = msg.payload.args_16()[10];
 
     Ok((file_id, offset, len, io_page))
+}
+
+/// Multi-block reads: a CMD_READ request whose `len` spans more than one
+/// io_page is answered with a *multi-page* response carrying up to
+/// [`READ_MAX_PAGES`] pages in `payload.shared_pages` (its full capacity).
+/// A request with `len <= PAGE_SIZE` gets the classic single-page response;
+/// the requester picked `len`, so it always knows which response format to
+/// expect. This amortizes the fixed per-message cost (decode, page alloc,
+/// locking, response send + wake) over up to 48K instead of 4K.
+pub const READ_MAX_PAGES: usize = 12;
+pub const READ_MAX_BYTES: usize = READ_MAX_PAGES * PAGE_SIZE; // 48K.
+
+/// A multi-page read response packs the total length and the page count
+/// into `Msg::flags`: pages hold chunks of deterministic sizes (see
+/// [`read_chunks`]), so nothing else needs to travel.
+const READ_RESP_LEN_MASK: u32 = (1 << 20) - 1;
+const READ_RESP_PAGES_SHIFT: u32 = 20;
+const _: () = assert!(READ_MAX_BYTES as u32 <= READ_RESP_LEN_MASK);
+
+/// The per-page chunk sizes of a read at `offset` for `len` bytes: the first
+/// chunk runs to the next io_page boundary, each following chunk is a whole
+/// page (the last possibly partial). Both sides derive the same split, so
+/// only (offset, len) travel on the wire.
+pub fn read_chunks(offset: u64, len: u32) -> impl Iterator<Item = usize> {
+    let mut chunk_offset = offset;
+    let mut remaining = len as usize;
+    core::iter::from_fn(move || {
+        if remaining == 0 {
+            return None;
+        }
+        let step = (PAGE_SIZE - (chunk_offset as usize % PAGE_SIZE)).min(remaining);
+        chunk_offset += step as u64;
+        remaining -= step;
+        Some(step)
+    })
+}
+
+/// Encode a multi-page read response. `total_len` is the number of bytes
+/// actually read; `pages` hold its chunks in [`read_chunks`] order.
+pub fn read_multi_resp_encode(msg_id: u64, total_len: u32, pages: Vec<IoPage>) -> Msg {
+    debug_assert!(pages.len() <= READ_MAX_PAGES);
+    debug_assert!(total_len as usize <= READ_MAX_BYTES);
+
+    let mut msg = Msg::new();
+    msg.id = msg_id;
+    msg.command = CMD_READ;
+    msg.status = moto_rt::Error::Ok.into();
+    msg.flags = total_len | ((pages.len() as u32) << READ_RESP_PAGES_SHIFT);
+    for (idx, page) in pages.into_iter().enumerate() {
+        msg.payload.shared_pages_mut()[idx] = IoPage::into_u16(page);
+    }
+
+    msg
+}
+
+/// Decode a multi-page read response: (total bytes read, that data's pages).
+pub fn read_multi_resp_decode(msg: Msg, receiver: &Receiver) -> Result<(u32, Vec<IoPage>)> {
+    msg.status()?;
+
+    let total_len = msg.flags & READ_RESP_LEN_MASK;
+    let num_pages = (msg.flags >> READ_RESP_PAGES_SHIFT) as usize;
+    if num_pages > READ_MAX_PAGES || total_len as usize > READ_MAX_BYTES {
+        return Err(moto_rt::Error::InvalidData);
+    }
+
+    let mut pages = Vec::with_capacity(num_pages);
+    for idx in 0..num_pages {
+        // Note: pages already recovered are dropped (freed) if a later
+        // get_page fails; the failed message's remaining pages leak, but a
+        // bad page index means channel corruption, matching the single-page
+        // decode's behavior.
+        pages.push(receiver.get_page(msg.payload.shared_pages()[idx])?);
+    }
+
+    Ok((total_len, pages))
 }
 
 pub fn read_msg_encode(file_id: u128, offset: u64, len: u16) -> Msg {

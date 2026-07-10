@@ -316,25 +316,37 @@ impl FsClient {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize> {
+        // Multi-block reads: each request asks for up to READ_MAX_PAGES
+        // io_pages of data (48K) and gets one multi-page response (or the
+        // classic single-page response when the request fits one page).
+        // WINDOW requests in flight bound transient page usage to
+        // WINDOW * READ_MAX_PAGES = 48 of the channel's 64 server pages,
+        // leaving slack for concurrent stat/metadata responses.
+        const WINDOW: usize = 4;
+
         let mut buf_running = buf;
 
         let mut actual_read = 0_usize;
-        let mut step_offset = offset;
+        let mut send_offset = offset;
         let mut remaining_len = buf_running.len();
         let mut error = None;
-        loop {
-            // `buf` can be large; we split it into 4k chunks; we send them
-            // in batches of BATCH_SIZE and then wait for completions.
-            const BATCH_SIZE: usize = 16;
+        let mut eof = false;
 
-            let mut batch_ids = [0_u64; BATCH_SIZE];
+        while error.is_none() && !eof && remaining_len > 0 {
+            // (msg id, request offset, request len) of the in-flight batch.
+            let mut batch = [(0_u64, 0_u64, 0_u32); WINDOW];
             let mut batch_idx = 0;
-            loop {
-                let step_len = ((BLOCK_SIZE as u64) - (step_offset & (BLOCK_SIZE as u64 - 1)))
-                    .min(remaining_len as u64);
-                debug_assert!(step_len < u16::MAX as u64);
+            while batch_idx < WINDOW && remaining_len > 0 {
+                // The first chunk runs to a page boundary, so the whole
+                // request spans at most READ_MAX_PAGES pages.
+                let first_chunk =
+                    ((BLOCK_SIZE as u64) - (send_offset & (BLOCK_SIZE as u64 - 1))) as usize;
+                let req_len = remaining_len
+                    .min(first_chunk + (api_fs::READ_MAX_PAGES - 1) * BLOCK_SIZE)
+                    as u32;
+                debug_assert!(req_len as usize <= api_fs::READ_MAX_BYTES);
 
-                let mut msg = api_fs::read_msg_encode(file_id, step_offset, step_len as u16);
+                let mut msg = api_fs::read_msg_encode(file_id, send_offset, req_len as u16);
                 let msg_id = self.new_request_id();
                 msg.id = msg_id;
                 if let Err(err) = self.clone().send(msg).await {
@@ -342,53 +354,77 @@ impl FsClient {
                     break;
                 }
 
-                step_offset += step_len;
-                remaining_len -= (step_len as usize);
-
-                batch_ids[batch_idx] = msg_id;
+                batch[batch_idx] = (msg_id, send_offset, req_len);
                 batch_idx += 1;
-                if batch_idx >= BATCH_SIZE {
-                    break;
-                }
-
-                if remaining_len == 0 {
-                    break;
-                }
+                send_offset += req_len as u64;
+                remaining_len -= req_len as usize;
             }
 
             // Always receive the response of every sent message, even after an
             // error: abandoned responses would leak in self.responses forever,
             // together with their io_pages (the pool is finite). After an
-            // error, responses are drained but their data is discarded:
-            // `actual_read` must stay a contiguous prefix of `buf`.
-            for id in batch_ids.iter().take(batch_idx) {
-                match self.clone().recv(*id).await {
-                    Ok(msg) => match api_fs::read_resp_decode(msg, &self.io_receiver.borrow()) {
-                        Ok((len, io_page)) => {
-                            if error.is_none() {
-                                assert!(len as usize <= buf_running.len());
-                                buf_running[..(len as usize)]
-                                    .clone_from_slice(&io_page.bytes()[..(len as usize)]);
-                                buf_running = &mut buf_running[(len as usize)..];
-                                actual_read += len as usize;
-                            }
-                        }
-                        Err(err) => {
-                            if error.is_none() {
-                                error = Some(err);
-                            }
-                        }
-                    },
+            // error - or after a short (EOF) response - later responses are
+            // drained but their data is discarded: `actual_read` must stay a
+            // contiguous prefix of `buf`.
+            for &(msg_id, req_offset, req_len) in batch.iter().take(batch_idx) {
+                let resp = match self.clone().recv(msg_id).await {
+                    Ok(resp) => resp,
                     Err(err) => {
                         if error.is_none() {
                             error = Some(err);
                         }
+                        continue;
                     }
-                }
-            }
+                };
 
-            if error.is_some() || remaining_len == 0 {
-                break;
+                // The response format follows the request length we chose:
+                // one page carries it => single-page format.
+                let decoded = if req_len as usize <= BLOCK_SIZE {
+                    api_fs::read_resp_decode(resp, &self.io_receiver.borrow())
+                        .map(|(len, io_page)| (len as u32, alloc::vec![io_page]))
+                } else {
+                    api_fs::read_multi_resp_decode(resp, &self.io_receiver.borrow())
+                };
+                // Pages freed on drop, so error/discard paths below leak nothing.
+                let (total, pages) = match decoded {
+                    Ok(decoded) => decoded,
+                    Err(err) => {
+                        if error.is_none() {
+                            error = Some(err);
+                        }
+                        continue;
+                    }
+                };
+
+                if error.is_some() || eof {
+                    continue;
+                }
+
+                // Reassemble: page i holds chunk i; chunk sizes derive from
+                // (request offset, total) on both sides.
+                let mut copied = 0_usize;
+                let mut valid = total <= req_len;
+                if valid {
+                    for (io_page, chunk) in
+                        pages.iter().zip(api_fs::read_chunks(req_offset, total))
+                    {
+                        buf_running[copied..(copied + chunk)]
+                            .clone_from_slice(&io_page.bytes()[..chunk]);
+                        copied += chunk;
+                    }
+                    // Fewer pages than chunks => a malformed response.
+                    valid = copied == total as usize;
+                }
+                if !valid {
+                    error = Some(moto_rt::Error::InvalidData);
+                    continue;
+                }
+
+                actual_read += copied;
+                buf_running = &mut buf_running[copied..];
+                if copied < req_len as usize {
+                    eof = true;
+                }
             }
         }
 

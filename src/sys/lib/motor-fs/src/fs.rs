@@ -394,10 +394,9 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         if let Ok(Some(block_no)) = self
             .data_block_at_key_cached(file_id.block_no, window_end)
             .await
+            && self.block_cache.is_cached(block_no.as_u64())
         {
-            if self.block_cache.is_cached(block_no.as_u64()) {
-                return;
-            }
+            return;
         }
 
         for key in first_key..=window_end {
