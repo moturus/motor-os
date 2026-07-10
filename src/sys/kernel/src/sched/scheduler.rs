@@ -487,19 +487,35 @@ fn update_system_time() {
 
 pub fn post(job: Job) {
     if job.cpu == uCpus::MAX {
-        GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job);
-        let mut wake = |_: uCpus, scheduler: &Scheduler| -> bool {
+        // Hand the job directly to an idle CPU if there is one. Pushing it to
+        // the global queue and waking an idle CPU is racy: any CPU may pop the
+        // job, and in a request-response lockstep between two processes the
+        // poster's CPU always wins, so both processes end up sharing one CPU
+        // (with TLB flushes on every switch) while the woken CPU finds the
+        // queue empty and goes back to sleep.
+        let mut job = Some(job);
+        let mut hand_off = |_: uCpus, scheduler: &Scheduler| -> bool {
             if scheduler.idle.load(Ordering::Acquire) {
+                scheduler
+                    .local_queue
+                    .lock(line!())
+                    .push_back(job.take().unwrap());
+                scheduler.queue_length.fetch_add(1, Ordering::Relaxed);
                 scheduler.wake();
                 return true;
             }
             false
         };
+        PERCPU_SCHEDULERS.for_each_cpu(&mut hand_off);
 
-        // Note: it's OK if no CPUs are woken by the wake() above,
-        // because _this_ cpu, the cpu on which this code is currently
-        // running, is not sleeping.
-        PERCPU_SCHEDULERS.for_each_cpu(&mut wake);
+        let Some(job) = job else {
+            return; // Handed off to an idle CPU.
+        };
+
+        // No idle CPUs: post to the global queue. It's OK that nobody is
+        // woken, because _this_ cpu, the cpu on which this code is currently
+        // running, is not sleeping and will eventually pop the job.
+        GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job);
     } else {
         assert!(job.cpu < crate::arch::num_cpus());
         let scheduler = PERCPU_SCHEDULERS.get_for_cpu(job.cpu);
