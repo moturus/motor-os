@@ -160,8 +160,8 @@ pub fn smoke_test() {
         .find(|p| p.id == 2)
         .unwrap();
 
-    let mut stats_before = [0_u64; 10];
-    for idx in 0..10 {
+    let mut stats_before = [0_u64; 11];
+    for idx in 0..11 {
         stats_before[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
@@ -177,13 +177,13 @@ pub fn smoke_test() {
     let cpu_usage_read = crate::mpmc::get_cpu_usage();
     run_pstat("after");
 
-    let mut stats_after = [0_u64; 10];
-    for idx in 0..10 {
+    let mut stats_after = [0_u64; 11];
+    for idx in 0..11 {
         stats_after[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
 
-    for idx in 0..10 {
+    for idx in 0..11 {
         println!(
             "sys-io::{} metric values before/after write+read: {} - {}",
             idx + 1002,
@@ -265,8 +265,8 @@ pub fn hot_cache_read_test() {
         .find(|p| p.id == 2)
         .unwrap();
 
-    let mut stats_before = [0_u64; 10];
-    for idx in 0..10 {
+    let mut stats_before = [0_u64; 11];
+    for idx in 0..11 {
         stats_before[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
@@ -281,13 +281,13 @@ pub fn hot_cache_read_test() {
     let cpu_usage = crate::mpmc::get_cpu_usage();
     run_pstat("hot after");
 
-    let mut stats_after = [0_u64; 10];
-    for idx in 0..10 {
+    let mut stats_after = [0_u64; 11];
+    for idx in 0..11 {
         stats_after[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
 
-    for idx in 0..10 {
+    for idx in 0..11 {
         println!(
             "sys-io::{} metric values before/after hot read: {} - {}",
             idx + 1002,

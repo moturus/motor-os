@@ -4,6 +4,8 @@ use async_trait::async_trait;
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 #[cfg(not(target_os = "motor"))]
 use fittings::iobuf::IoBuf;
@@ -21,6 +23,30 @@ pub trait AsyncBlockDevice {
     /// Read a single block.
     async fn read_block<T: AsMut<IoBuf> + Unpin>(&self, block_no: u64, block: T)
     -> (T, Result<()>);
+
+    /// Read `blocks.len()` consecutive blocks starting at `first_block_no`,
+    /// scattered into the provided buffers. Devices that support it (virtio)
+    /// issue ONE request for the whole run; this default reads block by
+    /// block. On error, all buffers are still returned (their contents
+    /// unspecified).
+    async fn read_blocks<T: AsMut<IoBuf> + Unpin>(
+        &self,
+        first_block_no: u64,
+        blocks: Vec<T>,
+    ) -> (Vec<T>, Result<()>) {
+        let mut result = Ok(());
+        let mut done = Vec::with_capacity(blocks.len());
+        for (idx, block) in blocks.into_iter().enumerate() {
+            if result.is_ok() {
+                let (block, res) = self.read_block(first_block_no + idx as u64, block).await;
+                done.push(block);
+                result = res;
+            } else {
+                done.push(block);
+            }
+        }
+        (done, result)
+    }
     async fn write_block<T: AsRef<IoBuf> + Unpin>(
         &self,
         block_no: u64,

@@ -230,6 +230,74 @@ impl BlockDevice {
         }
     }
 
+    /// Read `buffers.len()` consecutive 4K blocks starting at `sector` with
+    /// ONE device request: a single descriptor chain scatter-gathers the
+    /// contiguous disk range into the (arbitrarily located) buffers, so the
+    /// whole read costs one queue notification (a VM exit) and one
+    /// completion interrupt instead of one per block.
+    #[inline(never)]
+    pub async fn post_read_many<T: AsMut<IoBuf> + Unpin>(
+        self: Rc<Self>,
+        sector: u64,
+        mut buffers: Vec<T>,
+    ) -> crate::virtio_queue::ReadManyCompletion<T> {
+        use super::virtio_queue::UserData;
+
+        let num_buffers = buffers.len();
+        assert!(num_buffers > 0);
+        // Header + data descriptors + status must fit the queue (and leave
+        // room for concurrent requests; callers keep chains short).
+        let chain_len = (num_buffers + 2) as u16;
+        assert!(chain_len <= self.virtqueue.borrow().queue_size() / 2);
+
+        let chain_head = VqAlloc::new(self.virtqueue.clone(), chain_len).await;
+        let mut virtqueue = self.virtqueue.borrow_mut();
+
+        let (header, phys_addr, mut next_idx) = virtqueue.get_buffer::<BlkHeader>(chain_head);
+        *header = BlkHeader {
+            type_: 0, /* VIRTIO_BLK_T_IN */
+            _reserved: 0,
+            sector,
+        };
+
+        let mut buffs: Vec<UserData> = Vec::with_capacity(num_buffers + 2);
+        buffs.push(UserData {
+            phys_addr,
+            len: core::mem::size_of::<BlkHeader>() as u32,
+        });
+
+        for buf in &mut buffers {
+            assert_eq!(buf.as_mut().len(), 4096);
+            buffs.push(UserData {
+                phys_addr: buf.as_mut().phys_addr() as u64,
+                len: 4096,
+            });
+            // The data descriptors' header buffers are unused; walk past them
+            // to the last descriptor, whose header buffer holds the status.
+            next_idx = virtqueue.next_idx(next_idx);
+        }
+
+        const VIRTIO_BLK_S_UNSUPP: u8 = 2;
+
+        // If we use a single byte for status, CHV corrupts the stack (writes
+        // more than one byte).
+        let (status, phys_addr, _) = virtqueue.get_buffer::<u64>(next_idx);
+        *status = VIRTIO_BLK_S_UNSUPP as u64; // Note: we assume LE.
+        buffs.push(UserData { phys_addr, len: 1 });
+
+        drop(virtqueue);
+        let vq_completion = Virtqueue::add_buffs(
+            self.virtqueue.clone(),
+            &buffs,
+            1,
+            (num_buffers + 1) as u16,
+            chain_head,
+            buffers,
+        );
+
+        crate::virtio_queue::ReadManyCompletion { vq_completion }
+    }
+
     #[inline(never)]
     pub async fn post_write<T: AsRef<IoBuf> + Unpin>(
         self: Rc<Self>,

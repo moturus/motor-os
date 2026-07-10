@@ -33,6 +33,7 @@ mod ids {
     pub const FS_DEVICE_READ_NS_TOTAL: u32 = 1009;
     pub const FS_DEVICE_WRITES: u32 = 1010;
     pub const FS_WRITE_MSGS: u32 = 1011;
+    pub const FS_DEVICE_READ_BLOCKS: u32 = 1012;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
@@ -67,6 +68,10 @@ async fn entries(fs: &FS) -> Vec<MetricEntry> {
         ),
         MetricEntry::global(ids::FS_DEVICE_WRITES, perf::get(&perf::DEVICE_WRITES)),
         MetricEntry::global(ids::FS_WRITE_MSGS, perf::get(&perf::WRITE_MSGS)),
+        MetricEntry::global(
+            ids::FS_DEVICE_READ_BLOCKS,
+            perf::get(&perf::DEVICE_READ_BLOCKS),
+        ),
     ]
 }
 
@@ -87,6 +92,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::FS_DEVICE_READ_NS_TOTAL, "fs.device.read_ns_total"),
         MetricDescWire::new(ids::FS_DEVICE_WRITES, "fs.device.writes"),
         MetricDescWire::new(ids::FS_WRITE_MSGS, "fs.write.msgs"),
+        MetricDescWire::new(ids::FS_DEVICE_READ_BLOCKS, "fs.device.read_blocks"),
     ]
 }
 

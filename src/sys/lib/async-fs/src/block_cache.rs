@@ -39,6 +39,10 @@ use moto_tooling::iobuf::IoBuf;
 
 const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
 
+/// The longest scatter-gather device read (blocks per request) issued by
+/// [`BlockCache::prefetch_range`]: 16 blocks = 64K.
+const MAX_READ_RUN: usize = 16;
+
 pub struct BlockHolder {
     iobuf: IoBuf,
 }
@@ -742,6 +746,89 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         self.push_block(block_no, cached_block.clone());
 
         Ok(cached_block)
+    }
+
+    /// Read `count` consecutive device blocks starting at `first_block_no`
+    /// into the cache with as few device requests as possible: blocks that
+    /// are cached or already being read are skipped, and each remaining run
+    /// (up to [`MAX_READ_RUN`] blocks) is read with one scatter-gather
+    /// device request. Best-effort: device errors are swallowed here —
+    /// waiters retry via `get_block` and surface them there.
+    pub async fn prefetch_range(&self, first_block_no: u64, count: u64) {
+        let end = first_block_no + count;
+        let mut next = first_block_no;
+        while next < end {
+            // Skip blocks that are cached or have a device read in flight.
+            // (`get_cached`, not `is_cached`: it also resurrects expiring
+            // blocks, which must not be re-read into a second identity.)
+            if self.get_cached(next).is_some()
+                || self.pending_reads.borrow().contains_key(&next)
+            {
+                next += 1;
+                continue;
+            }
+
+            // Claim a maximal run of blocks needing a device read. No awaits
+            // while claiming, so the checks cannot go stale.
+            let run_first = next;
+            let mut guards: Vec<PendingReadGuard<'_, BD>> = Vec::new();
+            while next < end
+                && guards.len() < MAX_READ_RUN
+                && self.get_cached(next).is_none()
+                && self.try_claim_pending_read(next)
+            {
+                guards.push(PendingReadGuard {
+                    cache: self,
+                    block_no: next,
+                });
+                next += 1;
+            }
+            debug_assert!(!guards.is_empty());
+
+            self.read_claimed_run(run_first, guards.len()).await;
+            // The guards drop here: pending entries are removed and their
+            // waiters woken — after the blocks were published above.
+        }
+    }
+
+    /// Read `count` blocks at `first_block_no` — all claimed in
+    /// `pending_reads` by the caller — with one device request, and publish
+    /// them in the cache.
+    async fn read_claimed_run(&self, first_block_no: u64, count: usize) {
+        let mut bufs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let rc_block = self.supporting_caches.borrow_mut().pop_free_block();
+            let Ok(block) = Rc::try_unwrap(rc_block) else {
+                panic!()
+            };
+            bufs.push(block);
+        }
+
+        self.cache_misses
+            .set(self.cache_misses.get() + count as u64);
+        let (bufs, result) = self.block_dev.read_blocks(first_block_no, bufs).await;
+        match result {
+            Ok(()) => {
+                for (idx, block) in bufs.into_iter().enumerate() {
+                    let block_no = first_block_no + idx as u64;
+                    let cached_block = CachedBlock::new(
+                        block_no,
+                        Rc::new(block),
+                        self.supporting_caches.clone(),
+                    );
+                    self.push_block(block_no, cached_block);
+                }
+            }
+            Err(err) => {
+                log::error!(
+                    "Error reading {count} blocks at 0x{first_block_no:x}: {err:?}."
+                );
+                let mut caches = self.supporting_caches.borrow_mut();
+                for block in bufs {
+                    caches.push_free_block(Rc::new(block));
+                }
+            }
+        }
     }
 
     /// Get an empty block. Use with caution: any previously stored

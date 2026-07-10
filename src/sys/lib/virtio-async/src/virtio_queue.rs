@@ -467,6 +467,7 @@ impl Virtqueue {
         let chain_start = self.free_head_idx;
 
         let mut curr = chain_start;
+        let mut marked = 0_u16;
         for idx in 0..chain_len {
             debug_assert!(curr < self.queue_size);
 
@@ -475,6 +476,7 @@ impl Virtqueue {
                 break;
             }
             header_buffer.in_use_by_device = true;
+            marked += 1;
 
             let descriptor = self.get_descriptor_mut(curr);
 
@@ -490,12 +492,13 @@ impl Virtqueue {
             curr = descriptor.next;
         }
 
-        // Allocation failed: clear "in_use".
+        // Allocation failed: clear "in_use" on exactly the `marked`
+        // descriptors above. The blocking descriptor and everything past it
+        // belong to in-flight chains (the free list wraps into them when it
+        // runs out) and must not be touched: unmarking them would make their
+        // completions report as done while the device still owns the memory.
         curr = chain_start;
-        loop {
-            if !self.header_buffers[curr as usize].in_use_by_device {
-                break;
-            }
+        for _ in 0..marked {
             self.header_buffers[curr as usize].in_use_by_device = false;
             curr = self.get_descriptor_mut(curr).next;
         }
@@ -550,6 +553,11 @@ impl Virtqueue {
                 next,
             )
         }
+    }
+
+    /// The index of the descriptor following `idx` in its chain.
+    pub(crate) fn next_idx(&self, idx: u16) -> u16 {
+        self.get_descriptor(idx).next
     }
 
     fn get_descriptor_mut(&mut self, idx: u16) -> &mut VirtqDesc {
@@ -762,6 +770,37 @@ impl<T: Unpin> Future for WriteCompletion<T> {
             .vq_completion
             .do_poll(cx)
             .map(|(val, res)| (val, res.map(|_| ())))
+    }
+}
+
+/// Completion of a scatter-gather read: one request filling several 4K
+/// buffers (see `BlockDevice::post_read_many`).
+pub struct ReadManyCompletion<T: AsMut<IoBuf> + Unpin> {
+    pub(crate) vq_completion: VqCompletion<Vec<T>>,
+}
+
+impl<T: AsMut<IoBuf> + Unpin> Future for ReadManyCompletion<T> {
+    type Output = (Vec<T>, Result<()>);
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.as_mut()
+            .vq_completion
+            .do_poll(cx)
+            .map(|(mut bufs, res)| {
+                if res.is_ok() {
+                    // As in ReadCompletion, the device-reported size is
+                    // unreliable (it may include the status byte); each
+                    // buffer is a full block.
+                    for buf in &mut bufs {
+                        buf.as_mut().set_len(4096);
+                    }
+                }
+
+                (bufs, res.map(|_| ()))
+            })
     }
 }
 

@@ -48,8 +48,11 @@ pub(crate) mod perf {
         pub static WRITE_MSGS: Cell<u64> = const { Cell::new(0) };
         /// Readahead tasks spawned.
         pub static READAHEAD_SPAWNS: Cell<u64> = const { Cell::new(0) };
-        /// 4k block reads submitted to the virtio device.
+        /// Read requests submitted to the virtio device (a scatter-gather
+        /// request covers up to 16 blocks; see DEVICE_READ_BLOCKS).
         pub static DEVICE_READS: Cell<u64> = const { Cell::new(0) };
+        /// 4k blocks read from the virtio device.
+        pub static DEVICE_READ_BLOCKS: Cell<u64> = const { Cell::new(0) };
         /// Total TSC ticks from virtio read submission to completion.
         pub static DEVICE_READ_TICKS: Cell<u64> = const { Cell::new(0) };
         /// 4k block writes submitted to the virtio device.

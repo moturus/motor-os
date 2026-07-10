@@ -82,6 +82,37 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         let result = completion.await;
 
         perf::add(&perf::DEVICE_READS, 1);
+        perf::add(&perf::DEVICE_READ_BLOCKS, 1);
+        if perf::TIMINGS {
+            perf::add(&perf::DEVICE_READ_TICKS, perf::now_ticks().wrapping_sub(started));
+        }
+        result
+    }
+
+    /// Read `blocks.len()` consecutive 4k blocks with one scatter-gather
+    /// virtio request: one queue notification (a VM exit) and one completion
+    /// interrupt for the whole run.
+    async fn read_blocks<T: AsMut<IoBuf> + Unpin>(
+        &self,
+        first_block_no: u64,
+        blocks: Vec<T>,
+    ) -> (Vec<T>, Result<()>) {
+        use super::perf;
+
+        let started = perf::now_ticks();
+        let first_sector_no =
+            first_block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
+        let num_blocks = blocks.len() as u64;
+        let completion = virtio_async::BlockDevice::post_read_many(
+            self.virtio_bd.clone(),
+            first_sector_no,
+            blocks,
+        )
+        .await;
+        let result = completion.await;
+
+        perf::add(&perf::DEVICE_READS, 1);
+        perf::add(&perf::DEVICE_READ_BLOCKS, num_blocks);
         if perf::TIMINGS {
             perf::add(&perf::DEVICE_READ_TICKS, perf::now_ticks().wrapping_sub(started));
         }

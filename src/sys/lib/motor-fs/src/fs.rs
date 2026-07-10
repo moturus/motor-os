@@ -395,14 +395,31 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             return;
         }
 
+        // Group the window's data blocks into maximal runs of consecutive
+        // device blocks; each run is fetched with scatter-gather device
+        // reads (one request per up to 16 blocks) instead of one request
+        // per block. Sequentially written files are laid out sequentially,
+        // so a 32-block window is typically 2 device round trips.
+        let mut run_first = 0_u64;
+        let mut run_len = 0_u64;
         for key in first_key..=window_end {
-            match self.data_block_at_key_cached(file_id.block_no, key).await {
-                Ok(Some(data_block_no)) => {
-                    let _ = self.block_cache.get_block(data_block_no.as_u64()).await;
-                }
+            let block_no = match self.data_block_at_key_cached(file_id.block_no, key).await {
+                Ok(Some(data_block_no)) => data_block_no.as_u64(),
                 Ok(None) => continue, // A sparse hole.
-                Err(_) => return,
+                Err(_) => break,
+            };
+            if run_len > 0 && block_no == run_first + run_len {
+                run_len += 1;
+                continue;
             }
+            if run_len > 0 {
+                self.block_cache.prefetch_range(run_first, run_len).await;
+            }
+            run_first = block_no;
+            run_len = 1;
+        }
+        if run_len > 0 {
+            self.block_cache.prefetch_range(run_first, run_len).await;
         }
     }
 }
