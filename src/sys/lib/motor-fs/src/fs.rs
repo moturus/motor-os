@@ -252,6 +252,11 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         &self.block_cache
     }
 
+    /// Block cache hit/miss/dedup counters. Diagnostics only.
+    pub fn cache_stats(&self) -> async_fs::block_cache::BlockCacheStats {
+        self.block_cache.cache_stats()
+    }
+
     #[cfg(test)]
     pub(crate) async fn set_error_pct(&mut self, error_pct: u8) {
         self.txn_logger.set_error_pct(error_pct).await;

@@ -19,6 +19,67 @@ mod mbr;
 pub mod stats;
 mod virtio_partition;
 
+/// Performance counters for the FS data path. Diagnostics only: pure
+/// counters, no behavior. Everything here - command handlers, the virtio
+/// partition, the stats responder - runs on the single FS runtime thread,
+/// so plain thread-local `Cell`s are race-free and cost a few ns to bump.
+///
+/// The FS runtime is CPU-bound during streaming, so the hot path must stay
+/// near-free: durations accumulate in raw TSC ticks and are compile-time
+/// gated (see [`perf::TIMINGS`]); the ticks->ns conversion happens only when
+/// the stats provider is queried.
+pub(crate) mod perf {
+    use std::cell::Cell;
+
+    /// Compile-time switch for the TSC timing pairs (READ_TICKS,
+    /// DEVICE_READ_TICKS). `Instant::now()` is a vdso rdtsc — cheap on bare
+    /// metal, but a possible VM exit under some hypervisor configurations,
+    /// which at two reads per 4KB message is a measurable tax. Timings are
+    /// only needed when actively diagnosing latency: flip to `true` locally,
+    /// don't commit it on. Counters are unaffected (a few ns each).
+    pub const TIMINGS: bool = false;
+
+    thread_local! {
+        /// CMD_READ messages handled.
+        pub static READ_MSGS: Cell<u64> = const { Cell::new(0) };
+        /// Total TSC ticks spent in `on_cmd_read` (decode to response sent).
+        pub static READ_TICKS: Cell<u64> = const { Cell::new(0) };
+        /// Readahead tasks spawned.
+        pub static READAHEAD_SPAWNS: Cell<u64> = const { Cell::new(0) };
+        /// 4k block reads submitted to the virtio device.
+        pub static DEVICE_READS: Cell<u64> = const { Cell::new(0) };
+        /// Total TSC ticks from virtio read submission to completion.
+        pub static DEVICE_READ_TICKS: Cell<u64> = const { Cell::new(0) };
+        /// 4k block writes submitted to the virtio device.
+        pub static DEVICE_WRITES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub fn add(counter: &'static std::thread::LocalKey<Cell<u64>>, delta: u64) {
+        counter.with(|c| c.set(c.get() + delta));
+    }
+
+    pub fn get(counter: &'static std::thread::LocalKey<Cell<u64>>) -> u64 {
+        counter.with(|c| c.get())
+    }
+
+    /// The current TSC value; always 0 when [`TIMINGS`] is off (the const
+    /// folds the rdtsc away).
+    pub fn now_ticks() -> u64 {
+        if TIMINGS {
+            moto_rt::time::Instant::now().as_u64()
+        } else {
+            0
+        }
+    }
+
+    /// Convert accumulated TSC ticks to nanoseconds. Not for the hot path.
+    pub fn ticks_to_ns(ticks: u64) -> u64 {
+        moto_rt::time::Instant::from_u64(ticks)
+            .duration_since(moto_rt::time::Instant::from_u64(0))
+            .as_nanos() as u64
+    }
+}
+
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
 
@@ -36,6 +97,13 @@ impl FS {
     async fn prefetch(&self, file_id: EntryId, first_key: u64, count: u64) {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.prefetch(file_id, first_key, count).await,
+        }
+    }
+
+    /// Block cache hit/miss/dedup counters. Diagnostics only.
+    fn cache_stats(&self) -> async_fs::block_cache::BlockCacheStats {
+        match self {
+            FS::MotorFs(motor_fs) => motor_fs.cache_stats(),
         }
     }
 }
@@ -528,6 +596,7 @@ async fn on_cmd_read(
     sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
+    let started = perf::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
 
     // `len` comes from the (untrusted) client; reject anything that does not
@@ -555,6 +624,11 @@ async fn on_cmd_read(
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
     let _ = sender.send(resp).await;
 
+    perf::add(&perf::READ_MSGS, 1);
+    if perf::TIMINGS {
+        perf::add(&perf::READ_TICKS, perf::now_ticks().wrapping_sub(started));
+    }
+
     maybe_readahead(fs, file_id, offset, read);
     Ok(())
 }
@@ -577,6 +651,7 @@ fn maybe_readahead(fs: Rc<LocalRwLock<FS>>, file_id: EntryId, offset: u64, read:
         return;
     }
 
+    perf::add(&perf::READAHEAD_SPAWNS, 1);
     moto_async::LocalRuntime::spawn(async move {
         let fs = fs.read().await;
         fs.prefetch(file_id, block_key + TRIGGER_WINDOW, READAHEAD_BLOCKS)

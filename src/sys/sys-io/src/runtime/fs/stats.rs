@@ -18,21 +18,53 @@ use std::{rc::Rc, sync::OnceLock};
 mod ids {
     pub const FS_CAPACITY_BYTES: u32 = 1000;
     pub const FS_AVAILABLE_BYTES: u32 = 1001;
+
+    // Data-path performance counters (see `super::super::perf` and
+    // `BlockCache::cache_stats`), added to diagnose sequential-read speed.
+    // The two *_NS_TOTAL metrics read 0 unless `perf::TIMINGS` is
+    // compiled on; the rest are always live.
+    pub const FS_CACHE_HITS: u32 = 1002;
+    pub const FS_CACHE_MISSES: u32 = 1003;
+    pub const FS_CACHE_DEDUP_WAITS: u32 = 1004;
+    pub const FS_READ_MSGS: u32 = 1005;
+    pub const FS_READ_NS_TOTAL: u32 = 1006;
+    pub const FS_READAHEAD_SPAWNS: u32 = 1007;
+    pub const FS_DEVICE_READS: u32 = 1008;
+    pub const FS_DEVICE_READ_NS_TOTAL: u32 = 1009;
+    pub const FS_DEVICE_WRITES: u32 = 1010;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
 async fn entries(fs: &FS) -> Vec<MetricEntry> {
+    use super::perf;
+
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
         .empty_blocks()
         .await
         .inspect_err(|err| log::error!("FS::empty_blocks() failed: {err:?}"))
         .unwrap_or(0);
+    let cache_stats = fs.cache_stats();
 
     vec![
         MetricEntry::global(ids::FS_CAPACITY_BYTES, num_blocks * 4096),
         MetricEntry::global(ids::FS_AVAILABLE_BYTES, empty_blocks * 4096),
+        MetricEntry::global(ids::FS_CACHE_HITS, cache_stats.hits),
+        MetricEntry::global(ids::FS_CACHE_MISSES, cache_stats.misses),
+        MetricEntry::global(ids::FS_CACHE_DEDUP_WAITS, cache_stats.dedup_waits),
+        MetricEntry::global(ids::FS_READ_MSGS, perf::get(&perf::READ_MSGS)),
+        MetricEntry::global(
+            ids::FS_READ_NS_TOTAL,
+            perf::ticks_to_ns(perf::get(&perf::READ_TICKS)),
+        ),
+        MetricEntry::global(ids::FS_READAHEAD_SPAWNS, perf::get(&perf::READAHEAD_SPAWNS)),
+        MetricEntry::global(ids::FS_DEVICE_READS, perf::get(&perf::DEVICE_READS)),
+        MetricEntry::global(
+            ids::FS_DEVICE_READ_NS_TOTAL,
+            perf::ticks_to_ns(perf::get(&perf::DEVICE_READ_TICKS)),
+        ),
+        MetricEntry::global(ids::FS_DEVICE_WRITES, perf::get(&perf::DEVICE_WRITES)),
     ]
 }
 
@@ -43,6 +75,15 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
     vec![
         MetricDescWire::new(ids::FS_CAPACITY_BYTES, "fs.capacity_bytes"),
         MetricDescWire::new(ids::FS_AVAILABLE_BYTES, "fs.available_bytes"),
+        MetricDescWire::new(ids::FS_CACHE_HITS, "fs.cache.hits"),
+        MetricDescWire::new(ids::FS_CACHE_MISSES, "fs.cache.misses"),
+        MetricDescWire::new(ids::FS_CACHE_DEDUP_WAITS, "fs.cache.dedup_waits"),
+        MetricDescWire::new(ids::FS_READ_MSGS, "fs.read.msgs"),
+        MetricDescWire::new(ids::FS_READ_NS_TOTAL, "fs.read.ns_total"),
+        MetricDescWire::new(ids::FS_READAHEAD_SPAWNS, "fs.readahead.spawns"),
+        MetricDescWire::new(ids::FS_DEVICE_READS, "fs.device.reads"),
+        MetricDescWire::new(ids::FS_DEVICE_READ_NS_TOTAL, "fs.device.read_ns_total"),
+        MetricDescWire::new(ids::FS_DEVICE_WRITES, "fs.device.writes"),
     ]
 }
 

@@ -408,8 +408,9 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
 
     async_stub: AsyncStub,
 
-    #[allow(unused)]
     cache_misses: Cell<u64>,
+    cache_hits: Cell<u64>,
+    dedup_waits: Cell<u64>,
 
     // Pinned blocks are always cached. Used by txn log.
     pinned_blocks_start: u64,
@@ -418,6 +419,18 @@ pub struct BlockCache<BD: AsyncBlockDevice> {
 
     // Block 0.
     superblock: CachedBlock,
+}
+
+/// Counters of [`BlockCache::get_block`] outcomes, for diagnostics.
+/// Every `get_block` call increments exactly one of these.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockCacheStats {
+    /// Served from the cache without waiting.
+    pub hits: u64,
+    /// Read from the device by this call.
+    pub misses: u64,
+    /// Waited for another task's in-flight device read of the same block.
+    pub dedup_waits: u64,
 }
 
 /// Cancel-safety for pending-read deduplication: whatever happens to the
@@ -550,6 +563,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             pending_reads: RefCell::new(BTreeMap::new()),
             async_stub,
             cache_misses: Cell::new(0),
+            cache_hits: Cell::new(0),
+            dedup_waits: Cell::new(0),
             pinned_blocks_start,
             pinned_blocks_num,
             pinned_blocks,
@@ -660,6 +675,15 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         .await
     }
 
+    /// Counters of `get_block` outcomes since creation. Diagnostics only.
+    pub fn cache_stats(&self) -> BlockCacheStats {
+        BlockCacheStats {
+            hits: self.cache_hits.get(),
+            misses: self.cache_misses.get(),
+            dedup_waits: self.dedup_waits.get(),
+        }
+    }
+
     /// Whether `block_no` is currently cached, without promoting it in the
     /// LRU order or reading it from the device. Used by readahead to skip
     /// already-cached windows.
@@ -669,8 +693,14 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
 
     /// Get a reference to a cached block.
     pub async fn get_block(&self, block_no: u64) -> Result<CachedBlock> {
+        let mut waited = false;
         loop {
             if let Some(block) = self.get_cached(block_no) {
+                if waited {
+                    self.dedup_waits.set(self.dedup_waits.get() + 1);
+                } else {
+                    self.cache_hits.set(self.cache_hits.get() + 1);
+                }
                 return Ok(block);
             }
 
@@ -680,6 +710,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             if self.try_claim_pending_read(block_no) {
                 break;
             }
+            waited = true;
             self.wait_pending_read(block_no).await;
         }
 

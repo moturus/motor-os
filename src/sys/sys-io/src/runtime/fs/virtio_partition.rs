@@ -71,12 +71,21 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         block_no: u64,
         block: T,
     ) -> (T, Result<()>) {
+        use super::perf;
+
+        let started = perf::now_ticks();
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
         let completion =
             virtio_async::BlockDevice::post_read(self.virtio_bd.clone(), first_sector_no, block)
                 .await;
-        completion.await
+        let result = completion.await;
+
+        perf::add(&perf::DEVICE_READS, 1);
+        if perf::TIMINGS {
+            perf::add(&perf::DEVICE_READ_TICKS, perf::now_ticks().wrapping_sub(started));
+        }
+        result
     }
 
     /// Write a single block.
@@ -85,9 +94,12 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         block_no: u64,
         block: T,
     ) -> (T, Result<()>) {
+        use super::perf;
+
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
+        perf::add(&perf::DEVICE_WRITES, 1);
         virtio_async::BlockDevice::post_write(self.virtio_bd.clone(), first_sector_no, block)
             .await
             .await
@@ -98,6 +110,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         block_no: u64,
         block: async_fs::block_cache::CheckpointedBlock,
     ) -> Result<Self::Completion> {
+        super::perf::add(&super::perf::DEVICE_WRITES, 1);
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
