@@ -24,11 +24,7 @@ use crate::{
 
 pub const PARTITION_ID: u8 = 0x2e;
 
-// Note: for some reason a smaller cache results in faster sequential reads/writes.
-//       Claude Fable hypothesised that the smaller cache stays in L2/L3 CPU cache,
-//       while a larger cache spills over to RAM.
-// const CACHE_SIZE: usize = 4096; // 16MB.
-const CACHE_SIZE: usize = 512; // 2MB.
+const CACHE_SIZE: usize = 4096; // 16MB.
 
 #[cfg(test)]
 pub const MAX_FLUSH_DELAY_MS: u64 = 50;
@@ -743,7 +739,12 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         dir_entry!(entry_block).validate_entry(file_id)?;
         // Inlined `require_access(role, file_id, Need::Read)`: reads are hot,
         // don't fetch the entry block a second time.
-        Self::check_access(dir_entry!(entry_block).metadata(), role, file_id, Need::Read)?;
+        Self::check_access(
+            dir_entry!(entry_block).metadata(),
+            role,
+            file_id,
+            Need::Read,
+        )?;
 
         if dir_entry!(entry_block).kind() != EntryKind::File {
             return Err(ErrorKind::IsADirectory.into());
