@@ -78,6 +78,14 @@ pub struct Txn<'a, BD: AsyncBlockDevice + 'static> {
 
 impl<'a, BD: AsyncBlockDevice + 'static> Drop for Txn<'a, BD> {
     fn drop(&mut self) {
+        // A mutating transaction may have changed tree structure; the
+        // sequential-lookup cursors are only valid while the tree is
+        // unchanged. Every mutation ends here (commit and abort alike), so
+        // this is the single invalidation point.
+        if !self.read_only {
+            self.fs.fs().invalidate_lookup_cursors();
+        }
+
         for (block_no, block) in self.txn_cache.drain() {
             assert_eq!(block_no.as_u64(), block.block_no());
             if block.is_dirty() {

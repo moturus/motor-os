@@ -660,6 +660,13 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         .await
     }
 
+    /// Whether `block_no` is currently cached, without promoting it in the
+    /// LRU order or reading it from the device. Used by readahead to skip
+    /// already-cached windows.
+    pub fn is_cached(&self, block_no: u64) -> bool {
+        block_no == 0 || self.is_pinned(block_no) || self.lru_cache.borrow().contains(&block_no)
+    }
+
     /// Get a reference to a cached block.
     pub async fn get_block(&self, block_no: u64) -> Result<CachedBlock> {
         loop {

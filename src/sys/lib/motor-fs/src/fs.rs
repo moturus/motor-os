@@ -45,11 +45,27 @@ enum Need {
     Execute,
 }
 
+/// Slots in [`MotorFs::lookup_cursors`]: how many files can have an active
+/// sequential-lookup cursor at once (concurrent streams beyond this thrash,
+/// costing only the full tree walk they would do anyway).
+const LOOKUP_CURSORS: usize = 4;
+
 pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
     block_cache: async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
 
     txn_logger: crate::txn_log::TxnLogger,
+
+    /// Sequential-read accelerator: (file entry block, tree leaf block) of
+    /// recent data-block lookups, so the next lookup for a nearby key reads
+    /// the leaf directly instead of walking the tree from the root. Every
+    /// mutating transaction clears this (see `Txn::drop`), so a cursor is
+    /// only ever used while the tree is unchanged since it was set — which
+    /// makes trusting the cached leaf sound even across cache eviction
+    /// (re-reading the block from the device yields the same committed leaf).
+    lookup_cursors: core::cell::RefCell<[Option<(crate::BlockNo, crate::BlockNo)>; LOOKUP_CURSORS]>,
+    /// Round-robin replacement position for `lookup_cursors`.
+    lookup_cursor_next: core::cell::Cell<usize>,
 }
 
 impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
@@ -78,7 +94,20 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             .await?
             .clone();
         dir_entry!(block).validate_entry(entry_id)?;
-        let access = dir_entry!(block).metadata().access(role)?;
+        let metadata = *dir_entry!(block).metadata();
+        Self::check_access(&metadata, role, entry_id, need)
+    }
+
+    /// The permission check of [`Self::require_access`] on already-fetched
+    /// entry metadata — hot paths that hold the entry block avoid fetching it
+    /// a second time.
+    fn check_access(
+        metadata: &async_fs::Metadata,
+        role: Role,
+        entry_id: EntryIdInternal,
+        need: Need,
+    ) -> Result<()> {
+        let access = metadata.access(role)?;
         let ok = match need {
             Need::Read => access.can_read(),
             Need::Write => access.can_write(),
@@ -90,6 +119,75 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             log::debug!("access denied: {role:?} on {entry_id:?}");
             Err(ErrorKind::PermissionDenied.into())
         }
+    }
+
+    /// Drop all sequential-lookup cursors. Called by every mutating
+    /// transaction (committed or aborted): cursors are only valid while the
+    /// tree is unchanged.
+    pub(crate) fn invalidate_lookup_cursors(&self) {
+        *self.lookup_cursors.borrow_mut() = [None; LOOKUP_CURSORS];
+    }
+
+    fn lookup_cursor(&self, file_block_no: crate::BlockNo) -> Option<crate::BlockNo> {
+        self.lookup_cursors
+            .borrow()
+            .iter()
+            .flatten()
+            .find(|(file, _)| *file == file_block_no)
+            .map(|(_, leaf)| *leaf)
+    }
+
+    fn remember_lookup_cursor(&self, file_block_no: crate::BlockNo, leaf_block_no: crate::BlockNo) {
+        if file_block_no == leaf_block_no {
+            // The "leaf" is the root node in the entry block itself: a full
+            // walk is already a single cached-block read, nothing to gain.
+            return;
+        }
+        let mut cursors = self.lookup_cursors.borrow_mut();
+        if let Some(slot) = cursors
+            .iter_mut()
+            .find(|slot| matches!(slot, Some((file, _)) if *file == file_block_no))
+        {
+            *slot = Some((file_block_no, leaf_block_no));
+            return;
+        }
+        let idx = self.lookup_cursor_next.get();
+        cursors[idx] = Some((file_block_no, leaf_block_no));
+        self.lookup_cursor_next.set((idx + 1) % LOOKUP_CURSORS);
+    }
+
+    /// [`DirEntryBlock::data_block_at_key`] with a per-file cursor: sequential
+    /// reads keep hitting the same tree leaf, so probe it directly instead of
+    /// walking the tree from the root every time (measured ~11 block-cache
+    /// lookups per 4KB read message without this).
+    async fn data_block_at_key_cached(
+        &self,
+        file_block_no: crate::BlockNo,
+        key: u64,
+    ) -> Result<Option<crate::BlockNo>> {
+        use crate::bplus_tree::{LeafProbe, NonRootNode};
+
+        if let Some(leaf_block_no) = self.lookup_cursor(file_block_no) {
+            let block = self.block_cache.get_block(leaf_block_no.as_u64()).await?;
+            let probe = {
+                let block_ref = block.block();
+                block_ref
+                    .get_at_offset::<NonRootNode>(crate::BTREE_NODE_OFFSET)
+                    .leaf_probe(key)
+            };
+            match probe {
+                LeafProbe::Found(block_no) => return Ok(Some(block_no)),
+                LeafProbe::Hole => return Ok(None),
+                LeafProbe::Miss => {} // Fall through to the full walk.
+            }
+        }
+
+        let mut txn = Txn::new_readonly(self);
+        let (res, leaf_block_no) =
+            DirEntryBlock::data_block_at_key_with_leaf(&mut txn, file_block_no, key).await?;
+        drop(txn);
+        self.remember_lookup_cursor(file_block_no, leaf_block_no);
+        Ok(res)
     }
 
     /// Look a name up in a directory *without* enforcing caller permissions --
@@ -193,6 +291,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             block_cache,
             txn_logger,
             error: Ok(()),
+            lookup_cursors: Default::default(),
+            lookup_cursor_next: Default::default(),
         })
     }
 
@@ -221,6 +321,8 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             block_cache,
             txn_logger,
             error: Ok(()),
+            lookup_cursors: Default::default(),
+            lookup_cursor_next: Default::default(),
         })
     }
 
@@ -255,7 +357,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// is needed (callers issue this after a successful authorized read of
     /// the same file).
     pub async fn prefetch(&self, file_id: EntryId, first_key: u64, count: u64) {
-        if self.check_err().is_err() {
+        if count == 0 || self.check_err().is_err() {
             return;
         }
         let file_id: EntryIdInternal = file_id.into();
@@ -274,12 +376,27 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         }
 
         let last_key = (file_size - 1) / (BLOCK_SIZE as u64);
-        for key in first_key..(first_key + count).min(last_key + 1) {
-            let mut txn = Txn::new_readonly(self);
-            let data_block_no =
-                DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, key).await;
-            drop(txn);
-            match data_block_no {
+        let window_end = (first_key + count - 1).min(last_key);
+        if window_end < first_key {
+            return; // The window lies entirely past EOF.
+        }
+
+        // If the window's last data block is already cached, assume the whole
+        // window is, and skip it: repeated reads of a fully-cached file would
+        // otherwise re-walk the tree `count` times per readahead trigger for
+        // nothing. A wrong guess (partial eviction) only costs waiting for
+        // the next trigger — readahead is best-effort.
+        if let Ok(Some(block_no)) = self
+            .data_block_at_key_cached(file_id.block_no, window_end)
+            .await
+        {
+            if self.block_cache.is_cached(block_no.as_u64()) {
+                return;
+            }
+        }
+
+        for key in first_key..=window_end {
+            match self.data_block_at_key_cached(file_id.block_no, key).await {
                 Ok(Some(data_block_no)) => {
                     let _ = self.block_cache.get_block(data_block_no.as_u64()).await;
                 }
@@ -618,9 +735,11 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
     ) -> Result<usize> {
         self.check_err()?;
         let file_id: EntryIdInternal = file_id.into();
-        self.require_access(role, file_id, Need::Read).await?;
         let entry_block = self.block_cache.get_block(file_id.block_no()).await?;
         dir_entry!(entry_block).validate_entry(file_id)?;
+        // Inlined `require_access(role, file_id, Need::Read)`: reads are hot,
+        // don't fetch the entry block a second time.
+        Self::check_access(dir_entry!(entry_block).metadata(), role, file_id, Need::Read)?;
 
         if dir_entry!(entry_block).kind() != EntryKind::File {
             return Err(ErrorKind::IsADirectory.into());
@@ -656,9 +775,9 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             buf.len().min((file_size - offset) as usize)
         };
 
-        let mut txn = Txn::new_readonly(self);
-        let Some(data_block_no) =
-            DirEntryBlock::data_block_at_key(&mut txn, file_id.block_no, block_key).await?
+        let Some(data_block_no) = self
+            .data_block_at_key_cached(file_id.block_no, block_key)
+            .await?
         else {
             log::debug!(
                 "MotorFs::Read(): block not found:\n\tkey {block_key:x} offset {offset} file_block: {:x}.",
@@ -671,7 +790,6 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
 
             return Ok(to_read);
         };
-        drop(txn);
 
         let data_block = self.block_cache.get_block(data_block_no.as_u64()).await?;
         let offset_within_block = (offset - block_start) as usize;

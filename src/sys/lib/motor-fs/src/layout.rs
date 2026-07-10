@@ -681,6 +681,17 @@ impl DirEntryBlock {
         Node::<BTREE_ROOT_ORDER>::first_child_with_key(txn, file_block_no, block_key).await
     }
 
+    /// As [`Self::data_block_at_key`], but also returns the tree node the
+    /// search ended in, for use as a sequential-lookup cursor.
+    pub async fn data_block_at_key_with_leaf<BD: AsyncBlockDevice>(
+        txn: &mut Txn<'_, BD>,
+        file_block_no: BlockNo,
+        block_key: u64,
+    ) -> Result<(Option<BlockNo>, BlockNo)> {
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key_and_leaf(txn, file_block_no, block_key)
+            .await
+    }
+
     pub fn parent_id(&self) -> EntryIdInternal {
         self.parent_id
     }

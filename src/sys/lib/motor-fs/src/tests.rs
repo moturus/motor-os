@@ -64,6 +64,14 @@ fn midsize_file() {
 }
 
 #[test]
+fn lookup_cursor() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(lookup_cursor_test()).unwrap();
+}
+
+#[test]
 fn hash_collision() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -869,6 +877,129 @@ async fn midsize_file_test() -> Result<()> {
     );
 
     println!("midsize_file_test PASS");
+    Ok(())
+}
+
+/// Exercises the sequential-lookup cursor (`data_block_at_key_cached`):
+/// sequential reads of a multi-leaf file (the root node holds ~226 keys, so
+/// a >1MB file has non-root leaves), sparse-hole reads answered by a cursor
+/// probe, and reads after mutations (which must invalidate the cursor).
+async fn lookup_cursor_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024 * 1024 * 16 / 4096;
+    // Spans several tree leaves; deliberately not block-aligned.
+    const FILE_SIZE: usize = 1024 * 1024 * 3 + 1001;
+    const BLOCK: usize = 4096;
+
+    async fn verify(fs: &MotorFs, file_id: EntryId, expected: &[u8]) {
+        let mut back = vec![0_u8; expected.len()];
+        let mut offset = 0;
+        while offset < expected.len() {
+            let len = BLOCK.min(expected.len() - offset);
+            let read = fs
+                .read(
+                    Role::System,
+                    file_id,
+                    offset as u64,
+                    &mut back[offset..(offset + len)],
+                )
+                .await
+                .unwrap();
+            assert_eq!(read, len);
+            offset += len;
+        }
+        assert_eq!(back, expected);
+    }
+
+    let mut fs = create_fs("motor_fs_lookup_cursor_test", NUM_BLOCKS).await?;
+    let root = crate::ROOT_DIR_ID;
+    let file_id = fs
+        .create_entry(
+            Role::System,
+            root,
+            EntryKind::File,
+            "cursor",
+            [AccessPermissions::Rwx; 3],
+        )
+        .await
+        .unwrap();
+
+    let mut bytes = vec![0_u8; FILE_SIZE];
+    for byte in &mut bytes {
+        *byte = std::random::random(..);
+    }
+
+    // Write the file sparsely: skip every 8th block. Holes must read as
+    // zeroes, including via the cursor's leaf probe (`LeafProbe::Hole`).
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let len = BLOCK.min(bytes.len() - offset);
+        if (offset / BLOCK) % 8 == 7 {
+            for byte in &mut bytes[offset..(offset + len)] {
+                *byte = 0;
+            }
+        } else {
+            let written = fs
+                .write(
+                    Role::System,
+                    file_id,
+                    offset as u64,
+                    &bytes[offset..(offset + len)],
+                )
+                .await
+                .unwrap();
+            assert_eq!(written, len);
+        }
+        offset += len;
+    }
+    // The file size is where the last write ended; sizes must match for
+    // the verification below (the last block, key % 8 == 7, is a hole iff
+    // FILE_SIZE makes it so - resize to be explicit).
+    fs.resize(Role::System, file_id, FILE_SIZE as u64)
+        .await
+        .unwrap();
+
+    // Two sequential passes: the first populates the cursor, the second runs
+    // fully cursor-hot.
+    verify(&fs, file_id, &bytes).await;
+    verify(&fs, file_id, &bytes).await;
+
+    // Mutate: overwrite a block in the first leaf, fill a former hole (a key
+    // *insert* — changes tree structure), and overwrite one far away. A stale
+    // cursor would keep reporting the filled hole as absent (zeroes).
+    for &key in &[3_usize, 7, 700] {
+        let offset = key * BLOCK;
+        for byte in &mut bytes[offset..(offset + BLOCK)] {
+            *byte = std::random::random(..);
+        }
+        let written = fs
+            .write(
+                Role::System,
+                file_id,
+                offset as u64,
+                &bytes[offset..(offset + BLOCK)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(written, BLOCK);
+    }
+    verify(&fs, file_id, &bytes).await;
+
+    // Truncate to half (rebalances/chops the tree), then verify the
+    // remainder and that reads past EOF return nothing.
+    const HALF: usize = FILE_SIZE / 2;
+    fs.resize(Role::System, file_id, HALF as u64).await.unwrap();
+    verify(&fs, file_id, &bytes[..HALF]).await;
+    let mut one = [0_u8; 1];
+    assert_eq!(
+        0,
+        fs.read(Role::System, file_id, HALF as u64, &mut one)
+            .await
+            .unwrap()
+    );
+
+    fs.delete_entry(Role::System, file_id).await.unwrap();
+
+    println!("lookup_cursor_test PASS");
     Ok(())
 }
 

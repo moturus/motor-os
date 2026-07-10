@@ -67,6 +67,18 @@ unsafe impl<const ORDER: usize> bytemuck::Pod for Node<ORDER> {}
 pub(crate) type RootNode = Node<BTREE_ROOT_ORDER>;
 pub(crate) type NonRootNode = Node<BTREE_NODE_ORDER>;
 
+/// The outcome of [`Node::leaf_probe`].
+pub(crate) enum LeafProbe {
+    /// The key maps to this child block.
+    Found(BlockNo),
+    /// The key falls inside this leaf's key range but is absent: a sparse
+    /// hole. Authoritative only while the tree is unchanged.
+    Hole,
+    /// This node cannot answer for the key (not a leaf, empty, or the key is
+    /// outside its range): do a full tree walk.
+    Miss,
+}
+
 /// What [`Node::take_spare_block`] pulled off a chopped-off branch's right
 /// spine to repurpose as an orphan container.
 struct SpareBlock {
@@ -116,6 +128,26 @@ impl<const ORDER: usize> Node<ORDER> {
         self.num_keys == (ORDER as u8)
     }
 
+    /// Probe this node, assumed to be a cached leaf, for `key` — the O(1)
+    /// fast path of a sequential-lookup cursor (no tree walk). Only sound
+    /// while the tree is unchanged since the cursor was set; cursor holders
+    /// invalidate on every mutating transaction.
+    pub(crate) fn leaf_probe(&self, key: u64) -> LeafProbe {
+        if self.num_keys == 0 || (self.num_keys as usize) > ORDER || !self.is_leaf() {
+            return LeafProbe::Miss;
+        }
+        let kvs = &self.kv[..(self.num_keys as usize)];
+        if key < kvs[0].key || key > kvs[kvs.len() - 1].key {
+            return LeafProbe::Miss;
+        }
+        match kvs.binary_search_by_key(&key, |kv| kv.key) {
+            Ok(pos) => LeafProbe::Found(kvs[pos].child_block_no),
+            // Within this leaf's key range but absent: the full walk would
+            // land in this same leaf and also find nothing (a sparse hole).
+            Err(_) => LeafProbe::Hole,
+        }
+    }
+
     /// Get the (key, block_no) of the first child, if any.
     pub async fn first_child<BD: AsyncBlockDevice + 'static>(
         txn: &mut Txn<'_, BD>,
@@ -152,6 +184,20 @@ impl<const ORDER: usize> Node<ORDER> {
         this_block_no: BlockNo,
         key: u64,
     ) -> Result<Option<BlockNo>> {
+        Ok(Self::first_child_with_key_and_leaf(txn, this_block_no, key)
+            .await?
+            .0)
+    }
+
+    /// As [`Self::first_child_with_key`], but also returns the node block the
+    /// search ended in (the leaf, or the node that would hold the key).
+    /// Callers may cache it as a lookup cursor for nearby keys; see
+    /// `MotorFs::data_block_at_key_cached`.
+    pub async fn first_child_with_key_and_leaf<BD: AsyncBlockDevice + 'static>(
+        txn: &mut Txn<'_, BD>,
+        this_block_no: BlockNo,
+        key: u64,
+    ) -> Result<(Option<BlockNo>, BlockNo)> {
         let block = txn.get_block(this_block_no).await?;
 
         let (child_block_no, key) = {
@@ -164,15 +210,15 @@ impl<const ORDER: usize> Node<ORDER> {
             }
 
             if node.num_keys == 0 {
-                return Ok(None);
+                return Ok((None, this_block_no));
             }
 
             if node.is_leaf() {
                 return match node.kv[..(node.num_keys as usize)]
                     .binary_search_by_key(&key, |kv| kv.key)
                 {
-                    Ok(pos) => Ok(Some(node.kv[pos].child_block_no)),
-                    Err(_) => Ok(None),
+                    Ok(pos) => Ok((Some(node.kv[pos].child_block_no), this_block_no)),
+                    Err(_) => Ok((None, this_block_no)),
                 };
             }
 
@@ -191,7 +237,12 @@ impl<const ORDER: usize> Node<ORDER> {
         };
 
         // Recursive call (modulo ORDER).
-        Box::pin(NonRootNode::first_child_with_key(txn, child_block_no, key)).await
+        Box::pin(NonRootNode::first_child_with_key_and_leaf(
+            txn,
+            child_block_no,
+            key,
+        ))
+        .await
     }
 
     /// Swaps the child a `key` points at from `old_child` to `new_child`, in
