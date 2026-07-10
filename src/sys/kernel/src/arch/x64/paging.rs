@@ -314,7 +314,9 @@ impl PageTableImpl {
         table_l1.set(idx_l1, pte);
     }
 
-    fn unmap_page(&mut self, phys_addr: u64, virt_addr: u64, kind: PageType) {
+    // With `flush: false` the caller must flush the TLB (e.g. via
+    // `flush_pages`) before the unmapped physical frame is freed/reused.
+    fn unmap_page(&mut self, phys_addr: u64, virt_addr: u64, kind: PageType, flush: bool) {
         assert_eq!(0, phys_addr & (kind.page_size() - 1));
         assert_eq!(0, virt_addr & (kind.page_size() - 1));
 
@@ -334,7 +336,9 @@ impl PageTableImpl {
                 self.table_l4.set(idx_l4, PTE::empty());
                 phys_deallocate_frameless(table_l3.self_phys_addr(), PageType::SmallPage);
             }
-            self.flush_virt_addr(virt_addr);
+            if flush {
+                self.flush_virt_addr(virt_addr);
+            }
             return;
         }
 
@@ -355,7 +359,9 @@ impl PageTableImpl {
                     phys_deallocate_frameless(table_l3.self_phys_addr(), PageType::SmallPage);
                 }
             }
-            self.flush_virt_addr(virt_addr);
+            if flush {
+                self.flush_virt_addr(virt_addr);
+            }
             return;
         }
 
@@ -378,7 +384,9 @@ impl PageTableImpl {
                 }
             }
         }
-        self.flush_virt_addr(virt_addr);
+        if flush {
+            self.flush_virt_addr(virt_addr);
+        }
     }
 
     fn is_readable(&self, virt_addr: u64) -> bool {
@@ -416,12 +424,18 @@ impl PageTableImpl {
     }
 
     fn flush_virt_addr(&self, virt_addr: u64) {
+        self.flush_pages(virt_addr, 1);
+    }
+
+    // A single TLB shootdown for the whole range: a shootdown is expensive
+    // (IPI all CPUs + spin for their acks), so unmapping a region must not
+    // do it per page.
+    fn flush_pages(&self, first_page_vaddr: u64, num_pages: u64) {
         if self.dead {
             // This is a userspace PT and the process is dead: no need to flush TLB.
             return;
         }
-        super::tlb::invalidate(self.table_l4.self_phys_addr(), virt_addr, 1);
-        // invalidate(self.table_l4.self_phys_addr(), virt_addr, 1);
+        super::tlb::invalidate(self.table_l4.self_phys_addr(), first_page_vaddr, num_pages);
     }
 }
 
@@ -448,6 +462,14 @@ pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
     }
 
     if current_page_table != page_table {
+        return;
+    }
+
+    // For large ranges a full TLB flush is cheaper than per-page invlpg
+    // (same ballpark as Linux's tlb_single_page_flush_ceiling).
+    const FULL_FLUSH_PAGES: u64 = 33;
+    if num_pages > FULL_FLUSH_PAGES {
+        flush_kpt(); // Reloads CR3, flushing all non-global translations.
         return;
     }
 
@@ -618,7 +640,29 @@ impl PageTable {
             self.inst
                 .get()
                 .lock(4)
-                .unmap_page(phys_addr, virt_addr, kind);
+                .unmap_page(phys_addr, virt_addr, kind, true);
+        }
+    }
+
+    /// Unmap without flushing the TLB. The caller must call `flush_pages`
+    /// before the unmapped physical frame is freed/reused, otherwise another
+    /// CPU may keep accessing the frame through a stale translation.
+    pub fn unmap_page_no_flush(&self, phys_addr: u64, virt_addr: u64, kind: PageType) {
+        unsafe {
+            self.inst
+                .get()
+                .lock(line!())
+                .unmap_page(phys_addr, virt_addr, kind, false);
+        }
+    }
+
+    /// One TLB shootdown covering `num_pages` small pages from `first_page_vaddr`.
+    pub fn flush_pages(&self, first_page_vaddr: u64, num_pages: u64) {
+        unsafe {
+            self.inst
+                .get()
+                .lock(line!())
+                .flush_pages(first_page_vaddr, num_pages)
         }
     }
 
@@ -670,9 +714,5 @@ impl PageTable {
 
     pub fn virt_to_phys(&self, virt_addr: u64) -> Option<u64> {
         unsafe { self.inst.get().lock(line!()).virt_to_phys(virt_addr) }
-    }
-
-    pub fn flush_virt_addr(&self, virt_addr: u64) {
-        unsafe { self.inst.get().lock(line!()).flush_virt_addr(virt_addr) }
     }
 }

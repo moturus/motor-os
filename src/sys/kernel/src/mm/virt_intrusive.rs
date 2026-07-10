@@ -291,32 +291,43 @@ impl VmemSegment {
         self.clear()
     }
 
-    fn clear_page(&mut self, page: UnsafeRef<Page>) {
-        let page_ptr = UnsafeRef::into_raw(page);
-        let page_mut = unsafe { page_ptr.as_mut().unwrap() };
-        let frame = page_mut.frame.take();
-        if let Some(frame) = frame.get() {
-            self.address_space().page_table.unmap_page(
-                frame.start(),
-                page_mut.start,
-                PageType::SmallPage,
-            );
-        }
-
-        page_mut.clear();
-        self.address_space().page_allocator.free_page(page_ptr);
-    }
-
     fn clear(&mut self) -> u64 {
         debug_assert_ne!(self.segment.size, 0);
         debug_assert!(!self.owner.is_null());
+
+        // Unmap all mapped pages first, then do a single ranged TLB
+        // shootdown: a shootdown IPIs all CPUs and spins for their acks,
+        // so doing it per page makes large frees pathologically slow.
+        let mut mapped_pages = 0_u64;
+        for page in self.pages.iter() {
+            if let Some(frame) = page.frame.get() {
+                self.address_space().page_table.unmap_page_no_flush(
+                    frame.start(),
+                    page.start,
+                    PageType::SmallPage,
+                );
+                mapped_pages += 1;
+            }
+        }
+        if mapped_pages > 0 {
+            self.address_space().page_table.flush_pages(
+                self.segment.start,
+                self.segment.size >> PAGE_SIZE_SMALL_LOG2,
+            );
+        }
 
         let mut pages = self.pages.take();
         let mut cursor = pages.front_mut();
         let mut sz = 0;
 
         while let Some(page) = cursor.remove() {
-            self.clear_page(page);
+            let page_ptr = UnsafeRef::into_raw(page);
+            let page_mut = unsafe { page_ptr.as_mut().unwrap() };
+            // The frame is freed here, after the TLB flush above: no CPU can
+            // reach a reused frame through a stale translation.
+            page_mut.frame.take();
+            page_mut.clear();
+            self.address_space().page_allocator.free_page(page_ptr);
             sz += PAGE_SIZE_SMALL;
         }
 
@@ -501,7 +512,9 @@ impl VmemSegment {
         self.address_space()
             .page_table
             .map_page(phys_addr, virt_addr, page_type, mapping_options);
-        self.address_space().page_table.flush_virt_addr(virt_addr);
+        // No TLB flush: the PTE went from non-present to present, and x86
+        // CPUs don't cache non-present translations (and every unmap path
+        // flushes), so no CPU — including this one — holds a stale entry.
 
         Ok(())
     }
