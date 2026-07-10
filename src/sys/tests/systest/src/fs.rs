@@ -154,21 +154,21 @@ pub fn smoke_test() {
         *byte = std::random::random(..);
     }
 
-    let ts0 = std::time::Instant::now();
-    std::fs::write("/bar", bytes.as_slice()).unwrap();
-    let cpu_usage_write = crate::mpmc::get_cpu_usage();
-
     // add stats
     let sys_io_provider = moto_stats::Collector::providers()
         .into_iter()
         .find(|p| p.id == 2)
         .unwrap();
 
-    let mut stats_before = [0_u64; 9];
-    for idx in 0..9 {
+    let mut stats_before = [0_u64; 10];
+    for idx in 0..10 {
         stats_before[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
+
+    let ts0 = std::time::Instant::now();
+    std::fs::write("/bar", bytes.as_slice()).unwrap();
+    let cpu_usage_write = crate::mpmc::get_cpu_usage();
 
     run_pstat("before");
     let ts1 = std::time::Instant::now();
@@ -177,15 +177,15 @@ pub fn smoke_test() {
     let cpu_usage_read = crate::mpmc::get_cpu_usage();
     run_pstat("after");
 
-    let mut stats_after = [0_u64; 9];
-    for idx in 0..9 {
+    let mut stats_after = [0_u64; 10];
+    for idx in 0..10 {
         stats_after[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
 
-    for idx in 0..9 {
+    for idx in 0..10 {
         println!(
-            "sys-io::{} metric values before/after read: {} - {}",
+            "sys-io::{} metric values before/after write+read: {} - {}",
             idx + 1002,
             stats_before[idx],
             stats_after[idx]
@@ -265,8 +265,8 @@ pub fn hot_cache_read_test() {
         .find(|p| p.id == 2)
         .unwrap();
 
-    let mut stats_before = [0_u64; 9];
-    for idx in 0..9 {
+    let mut stats_before = [0_u64; 10];
+    for idx in 0..10 {
         stats_before[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
@@ -281,13 +281,13 @@ pub fn hot_cache_read_test() {
     let cpu_usage = crate::mpmc::get_cpu_usage();
     run_pstat("hot after");
 
-    let mut stats_after = [0_u64; 9];
-    for idx in 0..9 {
+    let mut stats_after = [0_u64; 10];
+    for idx in 0..10 {
         stats_after[idx] =
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
 
-    for idx in 0..9 {
+    for idx in 0..10 {
         println!(
             "sys-io::{} metric values before/after hot read: {} - {}",
             idx + 1002,

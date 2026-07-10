@@ -44,6 +44,8 @@ pub(crate) mod perf {
         pub static READ_MSGS: Cell<u64> = const { Cell::new(0) };
         /// Total TSC ticks spent in `on_cmd_read` (decode to response sent).
         pub static READ_TICKS: Cell<u64> = const { Cell::new(0) };
+        /// CMD_WRITE messages handled.
+        pub static WRITE_MSGS: Cell<u64> = const { Cell::new(0) };
         /// Readahead tasks spawned.
         pub static READAHEAD_SPAWNS: Cell<u64> = const { Cell::new(0) };
         /// 4k block reads submitted to the virtio device.
@@ -569,6 +571,12 @@ async fn on_cmd_write(
     sender: &moto_ipc::io_channel::Sender,
     fs: Rc<LocalRwLock<FS>>,
 ) -> Result<()> {
+    // Multi-page write requests carry the total length in `flags`; classic
+    // single-page requests never set it. See `api_fs::write_multi_msg_encode`.
+    if msg.flags != 0 {
+        return on_cmd_write_multi(msg, sender, fs).await;
+    }
+
     let (file_id, offset, len, io_page) =
         api_fs::write_msg_decode(msg, sender).map_err(map_native_error)?;
 
@@ -592,6 +600,64 @@ async fn on_cmd_write(
 
     let resp = api_fs::empty_resp_encode(msg.id, Ok(()));
     let _ = sender.send(resp).await;
+    perf::add(&perf::WRITE_MSGS, 1);
+    Ok(())
+}
+
+/// A write request spanning several io_pages, decoded by
+/// `api_fs::write_multi_msg_decode`: the fixed per-message cost (decode,
+/// lock acquire, response send + wake) is paid once per up to 32K instead of
+/// once per 4K. Page i holds chunk i of `api_fs::io_chunks(offset, len)`, so
+/// no chunk crosses an FS block boundary. The response carries the number of
+/// bytes actually written; a short count means a later chunk was cut short
+/// or failed after earlier chunks were written.
+async fn on_cmd_write_multi(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    fs: Rc<LocalRwLock<FS>>,
+) -> Result<()> {
+    let (file_id, offset, len, pages) =
+        api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
+
+    // One FS lock acquire for the whole message. The decode above recovered
+    // every page, so all paths below free them on drop.
+    let mut total = 0_u32;
+    {
+        let mut fs_guard = fs.write().await;
+        let mut chunk_offset = offset;
+        for (io_page, size) in pages.iter().zip(api_fs::io_chunks(offset, len)) {
+            match fs_guard
+                .write(
+                    Role::System,
+                    file_id,
+                    chunk_offset,
+                    &io_page.bytes()[..size],
+                )
+                .await
+            {
+                Ok(written) => {
+                    total += written as u32;
+                    chunk_offset += written as u64;
+                    if written < size {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if total == 0 {
+                        return Err(err); // on_msg sends the error response.
+                    }
+                    // Chunks already written stay written: report the short
+                    // count; the client stops there, and a retry of the rest
+                    // hits the error with total == 0.
+                    break;
+                }
+            }
+        }
+    }
+
+    let resp = api_fs::write_multi_resp_encode(msg.id, total);
+    let _ = sender.send(resp).await;
+    perf::add(&perf::WRITE_MSGS, 1);
     Ok(())
 }
 
@@ -640,7 +706,7 @@ async fn on_cmd_read(
 /// A read request spanning several io_pages, answered with one multi-page
 /// response (see `api_fs::read_multi_resp_encode`): the fixed per-message
 /// cost is paid once per up to 48K instead of once per 4K. Chunk sizes are
-/// deterministic from (offset, len) — `api_fs::read_chunks` — so the client
+/// deterministic from (offset, len) — `api_fs::io_chunks` — so the client
 /// reassembles without extra metadata. On early EOF the response carries
 /// fewer pages than requested; `total_len` is authoritative.
 async fn on_cmd_read_multi(
@@ -660,7 +726,7 @@ async fn on_cmd_read_multi(
     }
     let mut chunk_sizes = [0_usize; api_fs::READ_MAX_PAGES];
     let mut num_chunks = 0_usize;
-    for chunk in api_fs::read_chunks(offset, len as u32) {
+    for chunk in api_fs::io_chunks(offset, len as u32) {
         if num_chunks == api_fs::READ_MAX_PAGES {
             return Err(std::io::Error::from(ErrorKind::InvalidInput));
         }

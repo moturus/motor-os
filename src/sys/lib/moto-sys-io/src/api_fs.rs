@@ -138,6 +138,78 @@ pub fn write_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u16, Io
     Ok((file_id, offset, len, io_page))
 }
 
+/// Multi-block writes, mirroring multi-block reads: a CMD_WRITE request whose
+/// data spans more than one io_page carries up to [`WRITE_MAX_PAGES`] pages
+/// in `payload.shared_pages[0..8]`, holding chunks in [`io_chunks`] order.
+/// To make room, the file id moves to the long handle and the offset to
+/// `payload.args_64()[2]`; the total length travels in `Msg::flags` — a
+/// classic single-page write leaves `flags` zero, which is how the server
+/// tells the request formats apart. The response returns the number of bytes
+/// actually written in `Msg::flags`; a short count means a later chunk
+/// failed after earlier ones were written.
+pub const WRITE_MAX_PAGES: usize = 8;
+pub const WRITE_MAX_BYTES: usize = WRITE_MAX_PAGES * PAGE_SIZE; // 32K.
+
+pub fn write_multi_msg_encode(file_id: u128, offset: u64, len: u32, pages: Vec<IoPage>) -> Msg {
+    debug_assert!(len > 0 && len as usize <= WRITE_MAX_BYTES);
+    debug_assert_eq!(pages.len(), io_chunks(offset, len).count());
+
+    let mut msg = Msg::new();
+    msg.command = CMD_WRITE;
+    msg.set_long_handle(file_id);
+    msg.flags = len;
+    msg.payload.args_64_mut()[2] = offset;
+    for (idx, page) in pages.into_iter().enumerate() {
+        msg.payload.shared_pages_mut()[idx] = IoPage::into_u16(page);
+    }
+
+    msg
+}
+
+/// Decode a multi-page write request: (file_id, offset, len, data pages).
+/// Page i holds chunk i of `io_chunks(offset, len)`.
+pub fn write_multi_msg_decode(msg: Msg, sender: &Sender) -> Result<(u128, u64, u32, Vec<IoPage>)> {
+    let file_id = msg.get_long_handle();
+    let offset = msg.payload.args_64()[2];
+    let len = msg.flags;
+
+    // (offset, len) come from an untrusted client; bound them before
+    // recovering pages. The byte bound alone does not bound the page count:
+    // an unaligned WRITE_MAX_BYTES write would span one page too many.
+    if len == 0 || len as usize > WRITE_MAX_BYTES {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let num_pages = io_chunks(offset, len).count();
+    if num_pages > WRITE_MAX_PAGES {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+
+    let mut pages = Vec::with_capacity(num_pages);
+    for idx in 0..num_pages {
+        // Note: pages already recovered are dropped (freed) if a later
+        // get_page fails; see read_multi_resp_decode.
+        pages.push(sender.get_page(msg.payload.shared_pages()[idx])?);
+    }
+
+    Ok((file_id, offset, len, pages))
+}
+
+pub fn write_multi_resp_encode(msg_id: u64, written: u32) -> Msg {
+    let mut msg = Msg::new();
+    msg.id = msg_id;
+    msg.command = CMD_WRITE;
+    msg.status = moto_rt::Error::Ok.into();
+    msg.flags = written;
+
+    msg
+}
+
+/// Decode a multi-page write response: the number of bytes written.
+pub fn write_multi_resp_decode(msg: Msg) -> Result<u32> {
+    msg.status()?;
+    Ok(msg.flags)
+}
+
 /// Multi-block reads: a CMD_READ request whose `len` spans more than one
 /// io_page is answered with a *multi-page* response carrying up to
 /// [`READ_MAX_PAGES`] pages in `payload.shared_pages` (its full capacity).
@@ -150,16 +222,16 @@ pub const READ_MAX_BYTES: usize = READ_MAX_PAGES * PAGE_SIZE; // 48K.
 
 /// A multi-page read response packs the total length and the page count
 /// into `Msg::flags`: pages hold chunks of deterministic sizes (see
-/// [`read_chunks`]), so nothing else needs to travel.
+/// [`io_chunks`]), so nothing else needs to travel.
 const READ_RESP_LEN_MASK: u32 = (1 << 20) - 1;
 const READ_RESP_PAGES_SHIFT: u32 = 20;
 const _: () = assert!(READ_MAX_BYTES as u32 <= READ_RESP_LEN_MASK);
 
-/// The per-page chunk sizes of a read at `offset` for `len` bytes: the first
-/// chunk runs to the next io_page boundary, each following chunk is a whole
-/// page (the last possibly partial). Both sides derive the same split, so
-/// only (offset, len) travel on the wire.
-pub fn read_chunks(offset: u64, len: u32) -> impl Iterator<Item = usize> {
+/// The per-page chunk sizes of a read or write at `offset` for `len` bytes:
+/// the first chunk runs to the next io_page boundary, each following chunk is
+/// a whole page (the last possibly partial). Both sides derive the same
+/// split, so only (offset, len) travel on the wire.
+pub fn io_chunks(offset: u64, len: u32) -> impl Iterator<Item = usize> {
     let mut chunk_offset = offset;
     let mut remaining = len as usize;
     core::iter::from_fn(move || {
@@ -174,7 +246,7 @@ pub fn read_chunks(offset: u64, len: u32) -> impl Iterator<Item = usize> {
 }
 
 /// Encode a multi-page read response. `total_len` is the number of bytes
-/// actually read; `pages` hold its chunks in [`read_chunks`] order.
+/// actually read; `pages` hold its chunks in [`io_chunks`] order.
 pub fn read_multi_resp_encode(msg_id: u64, total_len: u32, pages: Vec<IoPage>) -> Msg {
     debug_assert!(pages.len() <= READ_MAX_PAGES);
     debug_assert!(total_len as usize <= READ_MAX_BYTES);

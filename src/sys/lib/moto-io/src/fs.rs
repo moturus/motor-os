@@ -214,43 +214,78 @@ impl FsClient {
     }
 
     /// Write bytes to a file.
-    /// Note that cross-block writes may not be supported.
     pub async fn write(
         self: &Rc<Self>,
         file_id: EntryId,
         offset: u64,
         buf: &[u8],
     ) -> Result<usize> {
+        // Multi-block writes: each request carries up to WRITE_MAX_PAGES
+        // io_pages of data (32K); see api_fs::write_multi_msg_encode.
+        // A request whose data fits the first (boundary-limited) chunk uses
+        // the classic single-page format. WINDOW requests in flight bound
+        // transient page usage to WINDOW * WRITE_MAX_PAGES = 32 of the
+        // channel's 64 client pages, leaving slack for concurrent
+        // stat/create requests.
+        const WINDOW: usize = 4;
+
         let mut buf_running = buf;
 
         let mut written = 0_usize;
-        let mut step_offset = offset;
+        let mut send_offset = offset;
         let mut error = None;
-        loop {
-            // `buf` can be large; we split it into 4k chunks; we send them
-            // in batches of BATCH_SIZE and then wait for completions.
-            const BATCH_SIZE: usize = 16;
+        let mut short_write = false;
 
-            // (msg id, chunk len) of the in-flight messages.
-            let mut batch: [(u64, usize); BATCH_SIZE] = [(0, 0); BATCH_SIZE];
+        while error.is_none() && !short_write && !buf_running.is_empty() {
+            // (msg id, request len, multi format) of the in-flight batch.
+            let mut batch = [(0_u64, 0_u32, false); WINDOW];
             let mut batch_idx = 0;
-            loop {
-                let step_len = ((BLOCK_SIZE as u64) - (step_offset & (BLOCK_SIZE as u64 - 1)))
-                    .min(buf_running.len() as u64);
-                debug_assert!(step_len < u16::MAX as u64);
+            while batch_idx < WINDOW && !buf_running.is_empty() {
+                // The first chunk runs to a page boundary, so the request
+                // spans at most WRITE_MAX_PAGES pages and no chunk crosses
+                // an FS block boundary.
+                let first_chunk =
+                    ((BLOCK_SIZE as u64) - (send_offset & (BLOCK_SIZE as u64 - 1))) as usize;
+                let req_len = buf_running
+                    .len()
+                    .min(first_chunk + (api_fs::WRITE_MAX_PAGES - 1) * BLOCK_SIZE)
+                    as u32;
+                debug_assert!(req_len as usize <= api_fs::WRITE_MAX_BYTES);
+                let multi = req_len as usize > first_chunk;
 
-                let io_page = match self.io_sender.alloc_page(u64::MAX).await {
-                    Ok(io_page) => io_page,
-                    Err(err) => {
-                        error = Some(err);
-                        break;
+                // Allocate and fill the data pages: page i holds chunk i.
+                // On any failure the pages collected so far drop, freeing
+                // them.
+                let mut pages = alloc::vec::Vec::new();
+                let mut filled = 0_usize;
+                for chunk in api_fs::io_chunks(send_offset, req_len) {
+                    match self.io_sender.alloc_page(u64::MAX).await {
+                        Ok(io_page) => {
+                            io_page.bytes_mut()[..chunk]
+                                .clone_from_slice(&buf_running[filled..(filled + chunk)]);
+                            filled += chunk;
+                            pages.push(io_page);
+                        }
+                        Err(err) => {
+                            error = Some(err);
+                            break;
+                        }
                     }
-                };
-                io_page.bytes_mut()[0..step_len as usize]
-                    .clone_from_slice(&buf_running[0..(step_len as usize)]);
+                }
+                if error.is_some() {
+                    break;
+                }
 
-                let mut msg =
-                    api_fs::write_msg_encode(file_id, step_offset, step_len as u16, io_page);
+                let mut msg = if multi {
+                    api_fs::write_multi_msg_encode(file_id, send_offset, req_len, pages)
+                } else {
+                    api_fs::write_msg_encode(
+                        file_id,
+                        send_offset,
+                        req_len as u16,
+                        pages.pop().unwrap(),
+                    )
+                };
                 let msg_id = self.new_request_id();
                 msg.id = msg_id;
                 if let Err(err) = self.clone().send(msg).await {
@@ -258,44 +293,50 @@ impl FsClient {
                     break;
                 }
 
-                step_offset += step_len;
-                buf_running = &buf_running[(step_len as usize)..];
-
-                batch[batch_idx] = (msg_id, step_len as usize);
+                batch[batch_idx] = (msg_id, req_len, multi);
                 batch_idx += 1;
-                if batch_idx >= BATCH_SIZE {
-                    break;
-                }
-
-                if buf_running.is_empty() {
-                    break;
-                }
+                send_offset += req_len as u64;
+                buf_running = &buf_running[(req_len as usize)..];
             }
 
-            // Always receive the response of every sent message, even after an
-            // error: abandoned responses would leak in self.responses forever.
-            for (id, step_len) in batch.iter().take(batch_idx) {
-                match self.clone().recv(*id).await {
-                    Ok(msg) => {
-                        if error.is_none() {
-                            match msg.status() {
-                                // Responses are processed in send order, so
-                                // `written` counts a contiguous prefix.
-                                Ok(()) => written += step_len,
-                                Err(err) => error = Some(err),
-                            }
-                        }
-                    }
+            // Always receive the response of every sent message, even after
+            // an error: abandoned responses would leak in self.responses
+            // forever. Responses are processed in send order, so `written`
+            // counts a contiguous prefix; after an error or a short write,
+            // later responses are drained but not counted (like any
+            // pipelined write, file content past the reported prefix is
+            // unspecified after a failure).
+            for &(msg_id, req_len, multi) in batch.iter().take(batch_idx) {
+                let resp = match self.clone().recv(msg_id).await {
+                    Ok(resp) => resp,
                     Err(err) => {
                         if error.is_none() {
                             error = Some(err);
                         }
+                        continue;
                     }
+                };
+                if error.is_some() || short_write {
+                    continue;
                 }
-            }
 
-            if error.is_some() || buf_running.is_empty() {
-                break;
+                // The response format follows the request format we chose:
+                // the classic response is status-only (a full write).
+                let done = if multi {
+                    api_fs::write_multi_resp_decode(resp)
+                } else {
+                    resp.status().map(|_| req_len)
+                };
+                match done {
+                    Ok(n) if n > req_len => error = Some(moto_rt::Error::InvalidData),
+                    Ok(n) => {
+                        written += n as usize;
+                        if n < req_len {
+                            short_write = true;
+                        }
+                    }
+                    Err(err) => error = Some(err),
+                }
             }
         }
 
@@ -406,7 +447,7 @@ impl FsClient {
                 let mut valid = total <= req_len;
                 if valid {
                     for (io_page, chunk) in
-                        pages.iter().zip(api_fs::read_chunks(req_offset, total))
+                        pages.iter().zip(api_fs::io_chunks(req_offset, total))
                     {
                         buf_running[copied..(copied + chunk)]
                             .clone_from_slice(&io_page.bytes()[..chunk]);
