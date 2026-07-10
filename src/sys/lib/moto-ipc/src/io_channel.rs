@@ -7,6 +7,7 @@
 //! Also simpler than io_uring. More specifically, SQE and CQE have the same layout.
 //!
 //! Async: ServerConnection uses local wakers, ClientConnection uses cross-thread wakers.
+use core::future::Future;
 use core::{fmt::Debug, sync::atomic::*};
 
 use alloc::sync::Arc;
@@ -1468,56 +1469,70 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
     Ok((sender, receiver))
 }
 
-pub async fn listen(url: &str) -> Result<(Sender, Receiver)> {
-    let addr = SysMem::map(
-        SysHandle::SELF,
-        0, // not mapped
-        u64::MAX,
-        u64::MAX,
-        4096,
-        (core::mem::size_of::<RawChannel>() >> 12) as u64,
-    )?;
-    let full_url = alloc::format!(
-        "shared:url={};address={};page_type=small;page_num={}",
-        moto_sys::url_encode(url),
-        addr,
-        64
-    );
+pub fn listen(url: &str) -> impl Future<Output = Result<(Sender, Receiver)>> {
+    // The URL is registered synchronously, at call time: once `listen`
+    // returns, a concurrent `connect` finds the URL, and the returned future
+    // only waits for a client. Were the registration inside the future (as
+    // in `async fn`), it would not happen until the first poll — a race for
+    // the common "signal the server is ready right after calling listen"
+    // pattern, because `connect` fails with NotFound instead of waiting.
+    let setup = || -> Result<(u64, SysHandle)> {
+        let addr = SysMem::map(
+            SysHandle::SELF,
+            0, // not mapped
+            u64::MAX,
+            u64::MAX,
+            4096,
+            (core::mem::size_of::<RawChannel>() >> 12) as u64,
+        )?;
+        let full_url = alloc::format!(
+            "shared:url={};address={};page_type=small;page_num={}",
+            moto_sys::url_encode(url),
+            addr,
+            64
+        );
 
-    let remote_handle = SysObj::create(SysHandle::SELF, 0, &full_url)
-        .inspect_err(|_| SysMem::free(addr).unwrap())?;
-
-    remote_handle.as_future().await?;
-
-    if !moto_sys::SysObj::is_connected(remote_handle)? {
-        return Err(moto_rt::Error::NotConnected);
+        let remote_handle = SysObj::create(SysHandle::SELF, 0, &full_url)
+            .inspect_err(|_| SysMem::free(addr).unwrap())?;
+        Ok((addr, remote_handle))
     };
+    let registered = setup();
 
-    compiler_fence(Ordering::Acquire);
-    fence(Ordering::Acquire);
+    async move {
+        let (addr, remote_handle) = registered?;
 
-    // Safety: safe because we checked is_connected above.
-    unsafe {
-        let raw_channel = addr as usize as *mut RawChannel;
-        if (*raw_channel).server_queue_head.load(Ordering::Relaxed) != 0
-            || (*raw_channel).server_queue_tail.load(Ordering::Relaxed) != 0
-        {
-            return Err(moto_rt::Error::BadHandle);
+        remote_handle.as_future().await?;
+
+        if !moto_sys::SysObj::is_connected(remote_handle)? {
+            return Err(moto_rt::Error::NotConnected);
+        };
+
+        compiler_fence(Ordering::Acquire);
+        fence(Ordering::Acquire);
+
+        // Safety: safe because we checked is_connected above.
+        unsafe {
+            let raw_channel = addr as usize as *mut RawChannel;
+            if (*raw_channel).server_queue_head.load(Ordering::Relaxed) != 0
+                || (*raw_channel).server_queue_tail.load(Ordering::Relaxed) != 0
+            {
+                return Err(moto_rt::Error::BadHandle);
+            }
         }
+
+        let raw_channel = AtomicPtr::new(addr as usize as *mut RawChannel);
+        let sender = Sender {
+            inner: Arc::new(IoChannelImpl {
+                raw_channel,
+                remote_handle,
+                endpoint_type: EndpointType::Server,
+            }),
+        };
+        let receiver = Receiver {
+            inner: sender.inner.clone(),
+            recv_future: None,
+        };
+
+        Ok((sender, receiver))
     }
-
-    let raw_channel = AtomicPtr::new(addr as usize as *mut RawChannel);
-    let sender = Sender {
-        inner: Arc::new(IoChannelImpl {
-            raw_channel,
-            remote_handle,
-            endpoint_type: EndpointType::Server,
-        }),
-    };
-    let receiver = Receiver {
-        inner: sender.inner.clone(),
-        recv_future: None,
-    };
-
-    Ok((sender, receiver))
 }
