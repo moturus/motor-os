@@ -32,4 +32,5 @@ fn main() {
     rt_handle::run_all_tests();
 
     println!("tokio-tests PASS");
+    std::thread::sleep(std::time::Duration::from_millis(20));
 }
