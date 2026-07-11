@@ -444,6 +444,13 @@ impl LocalRuntime {
         let waker = Rc::new(RefCell::new(None));
         let task_id = inner.next_task_id();
 
+        // Box `f` before capturing it in the wrapper block: the wrapper's
+        // generator layout stores the captured future AND its awaitee copy
+        // without overlapping them, so capturing `f` inline would make the
+        // task allocation ~2x the future size. Big tasks fall out of the
+        // global allocator's slabs (> 2048 bytes) into per-alloc SysMem
+        // map/unmap - a broadcast TLB shootdown on every free.
+        let f = Box::pin(f);
         let task = Task {
             id: task_id,
             fut: Box::pin(async move {
