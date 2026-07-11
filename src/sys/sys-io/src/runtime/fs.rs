@@ -19,75 +19,6 @@ mod mbr;
 pub mod stats;
 mod virtio_partition;
 
-/// Performance counters for the FS data path. Diagnostics only: pure
-/// counters, no behavior. Everything here - command handlers, the virtio
-/// partition, the stats responder - runs on the single FS runtime thread,
-/// so plain thread-local `Cell`s are race-free and cost a few ns to bump.
-///
-/// The FS runtime is CPU-bound during streaming, so the hot path must stay
-/// near-free: durations accumulate in raw TSC ticks and are compile-time
-/// gated (see [`perf::TIMINGS`]); the ticks->ns conversion happens only when
-/// the stats provider is queried.
-pub(crate) mod perf {
-    use std::cell::Cell;
-
-    /// Compile-time switch for the TSC timing pairs (READ_TICKS,
-    /// DEVICE_READ_TICKS). `Instant::now()` is a vdso rdtsc — cheap on bare
-    /// metal, but a possible VM exit under some hypervisor configurations,
-    /// which at two reads per 4KB message is a measurable tax. Timings are
-    /// only needed when actively diagnosing latency: flip to `true` locally,
-    /// don't commit it on. Counters are unaffected (a few ns each).
-    pub const TIMINGS: bool = false;
-
-    thread_local! {
-        /// CMD_READ messages handled.
-        pub static READ_MSGS: Cell<u64> = const { Cell::new(0) };
-        /// Total TSC ticks spent in `on_cmd_read` (decode to response sent).
-        pub static READ_TICKS: Cell<u64> = const { Cell::new(0) };
-        /// CMD_WRITE messages handled.
-        pub static WRITE_MSGS: Cell<u64> = const { Cell::new(0) };
-        /// Readahead tasks spawned.
-        pub static READAHEAD_SPAWNS: Cell<u64> = const { Cell::new(0) };
-        /// Read requests submitted to the virtio device (a scatter-gather
-        /// request covers up to 16 blocks; see DEVICE_READ_BLOCKS).
-        pub static DEVICE_READS: Cell<u64> = const { Cell::new(0) };
-        /// 4k blocks read from the virtio device.
-        pub static DEVICE_READ_BLOCKS: Cell<u64> = const { Cell::new(0) };
-        /// Total TSC ticks from virtio read submission to completion.
-        pub static DEVICE_READ_TICKS: Cell<u64> = const { Cell::new(0) };
-        /// Write requests submitted to the virtio device (a scatter-gather
-        /// request covers up to 16 blocks; see DEVICE_WRITE_BLOCKS).
-        pub static DEVICE_WRITES: Cell<u64> = const { Cell::new(0) };
-        /// 4k blocks written to the virtio device.
-        pub static DEVICE_WRITE_BLOCKS: Cell<u64> = const { Cell::new(0) };
-    }
-
-    pub fn add(counter: &'static std::thread::LocalKey<Cell<u64>>, delta: u64) {
-        counter.with(|c| c.set(c.get() + delta));
-    }
-
-    pub fn get(counter: &'static std::thread::LocalKey<Cell<u64>>) -> u64 {
-        counter.with(|c| c.get())
-    }
-
-    /// The current TSC value; always 0 when [`TIMINGS`] is off (the const
-    /// folds the rdtsc away).
-    pub fn now_ticks() -> u64 {
-        if TIMINGS {
-            moto_rt::time::Instant::now().as_u64()
-        } else {
-            0
-        }
-    }
-
-    /// Convert accumulated TSC ticks to nanoseconds. Not for the hot path.
-    pub fn ticks_to_ns(ticks: u64) -> u64 {
-        moto_rt::time::Instant::from_u64(ticks)
-            .duration_since(moto_rt::time::Instant::from_u64(0))
-            .as_nanos() as u64
-    }
-}
-
 /// The max number of "requests" in flight per connection.
 const MAX_IN_FLIGHT: usize = 64;
 
@@ -302,8 +233,18 @@ impl FileSystem for FS {
     }
 }
 
+/// The FS runtime handle passed around the message handlers: the filesystem
+/// plus its data-path stats. Cheap to clone (two `Rc`s). Mirrors
+/// `runtime::net::NetRuntime`.
+#[derive(Clone)]
+pub(crate) struct FsRuntime {
+    fs: Rc<LocalRwLock<FS>>,
+    fs_stats: Rc<stats::FsStats>,
+}
+
 pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalRwLock<FS>>> {
     let block_device = virtio_async::BlockDevice::from(block_device)?;
+    let fs_stats = Rc::new(stats::FsStats::default());
 
     use zerocopy::FromZeros;
 
@@ -340,6 +281,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
                         block_device.clone(),
                         pte.lba as u64,
                         pte.sectors as u64,
+                        fs_stats.clone(),
                     )
                     .await
                     .map_err(|err| {
@@ -363,28 +305,32 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
         return Err(std::io::Error::from(ErrorKind::InvalidData));
     };
 
-    spawn_fs_listeners(fs.clone()).await;
-    stats::spawn_stats_responder(fs.clone());
+    let runtime = FsRuntime {
+        fs: fs.clone(),
+        fs_stats,
+    };
+    spawn_fs_listeners(runtime.clone()).await;
+    stats::spawn_stats_responder(runtime);
     Ok(fs)
 }
 
-async fn spawn_fs_listeners(fs: Rc<LocalRwLock<FS>>) {
+async fn spawn_fs_listeners(runtime: FsRuntime) {
     const NUM_LISTENERS: usize = 8;
     for _ in 0..NUM_LISTENERS {
-        spawn_new_listener(fs.clone()).await;
+        spawn_new_listener(runtime.clone()).await;
     }
     // Note: we must not return until there is a started listener,
     //       otherwise the FS is not yet functional.
 }
 
-async fn spawn_new_listener(fs: Rc<LocalRwLock<FS>>) {
+async fn spawn_new_listener(runtime: FsRuntime) {
     use std::sync::atomic::*;
     let (started_tx, started_rx) = moto_async::oneshot();
 
     moto_async::LocalRuntime::spawn(async move {
-        if let Err(err) = fs_listener(fs.clone(), started_tx).await {
+        if let Err(err) = fs_listener(runtime.clone(), started_tx).await {
             log::debug!("fs_listener() failed: {err:?}");
-            spawn_new_listener(fs).await;
+            spawn_new_listener(runtime).await;
         }
     });
 
@@ -394,7 +340,7 @@ async fn spawn_new_listener(fs: Rc<LocalRwLock<FS>>) {
 }
 
 async fn fs_listener(
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
     started_tx: moto_async::oneshot::Sender<()>,
 ) -> Result<()> {
     let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
@@ -419,7 +365,7 @@ async fn fs_listener(
     // Note that if this function returns an error, it will be called again.
     // Thus to avoid spawning extra listeners, it must NOT return an error below,
     // after spawn_new_listener() is called.
-    spawn_new_listener(fs.clone()).await;
+    spawn_new_listener(runtime.clone()).await;
 
     // We want to process more than one message at at time (due to I/O waits), but
     // we don't want to have unlimited concurrency, we want backpressure.
@@ -444,10 +390,10 @@ async fn fs_listener(
         match receiver.recv().await {
             Ok(msg) => {
                 let sender = sender.clone();
-                let fs = fs.clone();
+                let runtime = runtime.clone();
                 let ticket_tx = ticket_tx.clone();
                 moto_async::LocalRuntime::spawn(async move {
-                    on_msg(msg, sender, fs).await;
+                    on_msg(msg, sender, runtime).await;
                     let _ = ticket_tx.send(()).await;
                 });
             }
@@ -459,23 +405,29 @@ async fn fs_listener(
 async fn on_msg(
     msg: moto_ipc::io_channel::Msg,
     sender: moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) {
     if let Err(err) = match msg.command {
-        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => on_cmd_get_first_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => on_cmd_get_next_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, fs).await,
-        moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => on_cmd_copy_file_range(msg, &sender, fs).await,
+        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_CREATE_FILE => on_cmd_create_file(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => {
+            on_cmd_get_first_entry(msg, &sender, runtime).await
+        }
+        moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => {
+            on_cmd_get_next_entry(msg, &sender, runtime).await
+        }
+        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => {
+            on_cmd_copy_file_range(msg, &sender, runtime).await
+        }
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -490,11 +442,11 @@ async fn on_msg(
 async fn on_cmd_stat(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (parent_id, fname) = api_fs::stat_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let fs = fs.read().await;
+    let fs = runtime.fs.read().await;
     let Some((entry_id, entry_kind)) = fs
         .stat(Role::System, parent_id, fname.as_str())
         .await
@@ -515,12 +467,12 @@ async fn on_cmd_stat(
 async fn on_cmd_create_file(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let entry_id = fs
         .create_entry(
             Role::System,
@@ -545,12 +497,12 @@ async fn on_cmd_create_file(
 async fn on_cmd_create_dir(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (parent_id, fname) =
         api_fs::create_entry_msg_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let entry_id = fs
         .create_entry(
             Role::System,
@@ -575,12 +527,12 @@ async fn on_cmd_create_dir(
 async fn on_cmd_write(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     // Multi-page write requests carry the total length in `flags`; classic
     // single-page requests never set it. See `api_fs::write_multi_msg_encode`.
     if msg.flags != 0 {
-        return on_cmd_write_multi(msg, sender, fs).await;
+        return on_cmd_write_multi(msg, sender, runtime).await;
     }
 
     let (file_id, offset, len, io_page) =
@@ -592,7 +544,7 @@ async fn on_cmd_write(
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     }
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let written = fs
         .write(
             Role::System,
@@ -606,7 +558,10 @@ async fn on_cmd_write(
 
     let resp = api_fs::empty_resp_encode(msg.id, Ok(()));
     let _ = sender.send(resp).await;
-    perf::add(&perf::WRITE_MSGS, 1);
+    runtime
+        .fs_stats
+        .write_msgs
+        .set(runtime.fs_stats.write_msgs.get() + 1);
     Ok(())
 }
 
@@ -620,7 +575,7 @@ async fn on_cmd_write(
 async fn on_cmd_write_multi(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (file_id, offset, len, pages) =
         api_fs::write_multi_msg_decode(msg, sender).map_err(map_native_error)?;
@@ -629,7 +584,7 @@ async fn on_cmd_write_multi(
     // every page, so all paths below free them on drop.
     let mut total = 0_u32;
     {
-        let mut fs_guard = fs.write().await;
+        let mut fs_guard = runtime.fs.write().await;
         let mut chunk_offset = offset;
         for (io_page, size) in pages.iter().zip(api_fs::io_chunks(offset, len)) {
             match fs_guard
@@ -663,22 +618,25 @@ async fn on_cmd_write_multi(
 
     let resp = api_fs::write_multi_resp_encode(msg.id, total);
     let _ = sender.send(resp).await;
-    perf::add(&perf::WRITE_MSGS, 1);
+    runtime
+        .fs_stats
+        .write_msgs
+        .set(runtime.fs_stats.write_msgs.get() + 1);
     Ok(())
 }
 
 async fn on_cmd_read(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
-    let started = perf::now_ticks();
+    let started = stats::now_ticks();
     let (file_id, offset, len) = api_fs::read_msg_decode(msg);
 
     // Requests spanning more than one io_page get a multi-page response;
     // see `api_fs::READ_MAX_PAGES`.
     if len as usize > moto_ipc::io_channel::PAGE_SIZE {
-        return on_cmd_read_multi(msg, sender, fs, file_id, offset, len).await;
+        return on_cmd_read_multi(msg, sender, runtime, file_id, offset, len).await;
     }
 
     let io_page = sender
@@ -686,7 +644,7 @@ async fn on_cmd_read(
         .await
         .map_err(map_native_error)?;
 
-    let fs_guard = fs.read().await;
+    let fs_guard = runtime.fs.read().await;
     let read = fs_guard
         .read(
             Role::System,
@@ -700,12 +658,19 @@ async fn on_cmd_read(
     let resp = api_fs::read_resp_encode(msg.id, read as u16, io_page);
     let _ = sender.send(resp).await;
 
-    perf::add(&perf::READ_MSGS, 1);
-    if perf::TIMINGS {
-        perf::add(&perf::READ_TICKS, perf::now_ticks().wrapping_sub(started));
+    runtime
+        .fs_stats
+        .read_msgs
+        .set(runtime.fs_stats.read_msgs.get() + 1);
+    if stats::TIMINGS {
+        let elapsed = stats::now_ticks().wrapping_sub(started);
+        runtime
+            .fs_stats
+            .read_ticks
+            .set(runtime.fs_stats.read_ticks.get() + elapsed);
     }
 
-    maybe_readahead(fs, file_id, offset, read);
+    maybe_readahead(runtime, file_id, offset, read);
     Ok(())
 }
 
@@ -718,12 +683,12 @@ async fn on_cmd_read(
 async fn on_cmd_read_multi(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
     file_id: EntryId,
     offset: u64,
     len: u16,
 ) -> Result<()> {
-    let started = perf::now_ticks();
+    let started = stats::now_ticks();
 
     // `len`/`offset` come from the (untrusted) client: reject anything
     // spanning more chunks than a response can carry.
@@ -747,7 +712,7 @@ async fn on_cmd_read_multi(
     let mut pages: Vec<moto_ipc::io_channel::IoPage> = Vec::with_capacity(num_chunks);
     let mut total = 0_u32;
     {
-        let fs_guard = fs.read().await;
+        let fs_guard = runtime.fs.read().await;
         let mut chunk_offset = offset;
         for &size in &chunk_sizes[..num_chunks] {
             let io_page = sender
@@ -784,9 +749,16 @@ async fn on_cmd_read_multi(
     let resp = api_fs::read_multi_resp_encode(msg.id, total, pages);
     let _ = sender.send(resp).await;
 
-    perf::add(&perf::READ_MSGS, 1);
-    if perf::TIMINGS {
-        perf::add(&perf::READ_TICKS, perf::now_ticks().wrapping_sub(started));
+    runtime
+        .fs_stats
+        .read_msgs
+        .set(runtime.fs_stats.read_msgs.get() + 1);
+    if stats::TIMINGS {
+        let elapsed = stats::now_ticks().wrapping_sub(started);
+        runtime
+            .fs_stats
+            .read_ticks
+            .set(runtime.fs_stats.read_ticks.get() + elapsed);
     }
 
     // Fully-satisfied block-aligned reads are streaming: prefetch past the
@@ -794,9 +766,12 @@ async fn on_cmd_read_multi(
     // the per-message trigger cheap).
     let end = offset + total as u64;
     if total == len as u32 && end.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
-        perf::add(&perf::READAHEAD_SPAWNS, 1);
+        runtime
+            .fs_stats
+            .readahead_spawns
+            .set(runtime.fs_stats.readahead_spawns.get() + 1);
         moto_async::LocalRuntime::spawn(async move {
-            let fs = fs.read().await;
+            let fs = runtime.fs.read().await;
             fs.prefetch(
                 file_id,
                 end / (async_fs::BLOCK_SIZE as u64),
@@ -814,7 +789,7 @@ async fn on_cmd_read_multi(
 /// the current 16-block window into the block cache in the background.
 /// Duplicate device reads with foreground requests are impossible: the block
 /// cache deduplicates concurrent reads of the same block.
-fn maybe_readahead(fs: Rc<LocalRwLock<FS>>, file_id: EntryId, offset: u64, read: usize) {
+fn maybe_readahead(runtime: FsRuntime, file_id: EntryId, offset: u64, read: usize) {
     const TRIGGER_WINDOW: u64 = 16; // Matches the moto-io read batch size.
 
     if read != async_fs::BLOCK_SIZE || !offset.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
@@ -825,9 +800,12 @@ fn maybe_readahead(fs: Rc<LocalRwLock<FS>>, file_id: EntryId, offset: u64, read:
         return;
     }
 
-    perf::add(&perf::READAHEAD_SPAWNS, 1);
+    runtime
+        .fs_stats
+        .readahead_spawns
+        .set(runtime.fs_stats.readahead_spawns.get() + 1);
     moto_async::LocalRuntime::spawn(async move {
-        let fs = fs.read().await;
+        let fs = runtime.fs.read().await;
         fs.prefetch(file_id, block_key + TRIGGER_WINDOW, READAHEAD_BLOCKS)
             .await;
     });
@@ -836,11 +814,11 @@ fn maybe_readahead(fs: Rc<LocalRwLock<FS>>, file_id: EntryId, offset: u64, read:
 async fn on_cmd_metadata(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let entry_id = api_fs::metadata_msg_decode(msg);
 
-    let fs = fs.read().await;
+    let fs = runtime.fs.read().await;
     let metadata = fs.metadata(Role::System, entry_id).await?;
 
     let io_page = sender
@@ -857,11 +835,11 @@ async fn on_cmd_metadata(
 async fn on_cmd_resize(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.resize(Role::System, file_id, new_size)
@@ -877,11 +855,11 @@ async fn on_cmd_resize(
 async fn on_cmd_delete_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.delete_entry(Role::System, entry_id)
@@ -897,9 +875,9 @@ async fn on_cmd_delete_entry(
 async fn on_cmd_flush(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(msg.id, fs.flush().await.map_err(map_err_into_native));
     core::mem::drop(fs);
 
@@ -910,10 +888,10 @@ async fn on_cmd_flush(
 async fn on_cmd_get_first_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let parent_id = api_fs::get_first_entry_req_decode(msg);
-    let fs = fs.read().await;
+    let fs = runtime.fs.read().await;
     let resp = api_fs::get_first_entry_resp_encode(
         msg,
         fs.get_first_entry(Role::System, parent_id).await?,
@@ -927,10 +905,10 @@ async fn on_cmd_get_first_entry(
 async fn on_cmd_get_next_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let entry_id = api_fs::get_next_entry_req_decode(msg);
-    let fs = fs.read().await;
+    let fs = runtime.fs.read().await;
     let next_entry_id = fs.get_next_entry(Role::System, entry_id).await?;
     core::mem::drop(fs);
     let resp = api_fs::get_next_entry_resp_encode(msg, next_entry_id);
@@ -942,10 +920,10 @@ async fn on_cmd_get_next_entry(
 async fn on_cmd_get_name(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let entry_id = api_fs::get_name_req_decode(msg);
-    let fs = fs.read().await;
+    let fs = runtime.fs.read().await;
     let name = fs.name(Role::System, entry_id).await?;
     core::mem::drop(fs);
     if name.len() > moto_rt::fs::MAX_FILENAME_LEN {
@@ -966,12 +944,12 @@ async fn on_cmd_get_name(
 async fn on_cmd_move_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.move_entry(Role::System, entry_id, new_parent_id, fname.as_str())
@@ -987,11 +965,11 @@ async fn on_cmd_move_entry(
 async fn on_cmd_copy_file_range(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: FsRuntime,
 ) -> Result<()> {
     let (from, to, offset, size) = api_fs::copy_file_range_req_decode(msg);
 
-    let mut fs = fs.write().await;
+    let mut fs = runtime.fs.write().await;
 
     // In this implementation, from_offset == to_offset.
     let copied = fs

@@ -1,3 +1,4 @@
+use super::stats;
 use async_fs::{AsyncBlockDevice, Block};
 use async_trait::async_trait;
 use moto_tooling::iobuf::IoBuf;
@@ -15,6 +16,8 @@ pub(super) struct VirtioPartition {
     // This partition starts at `virtio_block_offset` and contains `virtio_blocks`.
     virtio_block_offset: u64,
     virtio_blocks: u64,
+
+    fs_stats: Rc<stats::FsStats>,
 }
 
 impl VirtioPartition {
@@ -22,6 +25,7 @@ impl VirtioPartition {
         virtio_bd: Rc<virtio_async::BlockDevice>,
         virtio_block_offset: u64,
         virtio_blocks: u64,
+        fs_stats: Rc<stats::FsStats>,
     ) -> Result<Self> {
         // Virtio blocks/sectors are 512 bytes; everywhere else across Motor OS
         // block size is 4k, so we validate that the virtio partition was formatted properly.
@@ -36,6 +40,7 @@ impl VirtioPartition {
             virtio_bd,
             virtio_block_offset,
             virtio_blocks,
+            fs_stats,
         })
     }
 }
@@ -71,9 +76,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         block_no: u64,
         block: T,
     ) -> (T, Result<()>) {
-        use super::perf;
-
-        let started = perf::now_ticks();
+        let started = stats::now_ticks();
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
         let completion =
@@ -81,10 +84,16 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
                 .await;
         let result = completion.await;
 
-        perf::add(&perf::DEVICE_READS, 1);
-        perf::add(&perf::DEVICE_READ_BLOCKS, 1);
-        if perf::TIMINGS {
-            perf::add(&perf::DEVICE_READ_TICKS, perf::now_ticks().wrapping_sub(started));
+        let fs_stats = &self.fs_stats;
+        fs_stats.device_reads.set(fs_stats.device_reads.get() + 1);
+        fs_stats
+            .device_read_blocks
+            .set(fs_stats.device_read_blocks.get() + 1);
+        if stats::TIMINGS {
+            let elapsed = stats::now_ticks().wrapping_sub(started);
+            fs_stats
+                .device_read_ticks
+                .set(fs_stats.device_read_ticks.get() + elapsed);
         }
         result
     }
@@ -97,9 +106,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         first_block_no: u64,
         blocks: Vec<T>,
     ) -> (Vec<T>, Result<()>) {
-        use super::perf;
-
-        let started = perf::now_ticks();
+        let started = stats::now_ticks();
         let first_sector_no =
             first_block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
         let num_blocks = blocks.len() as u64;
@@ -111,10 +118,16 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         .await;
         let result = completion.await;
 
-        perf::add(&perf::DEVICE_READS, 1);
-        perf::add(&perf::DEVICE_READ_BLOCKS, num_blocks);
-        if perf::TIMINGS {
-            perf::add(&perf::DEVICE_READ_TICKS, perf::now_ticks().wrapping_sub(started));
+        let fs_stats = &self.fs_stats;
+        fs_stats.device_reads.set(fs_stats.device_reads.get() + 1);
+        fs_stats
+            .device_read_blocks
+            .set(fs_stats.device_read_blocks.get() + num_blocks);
+        if stats::TIMINGS {
+            let elapsed = stats::now_ticks().wrapping_sub(started);
+            fs_stats
+                .device_read_ticks
+                .set(fs_stats.device_read_ticks.get() + elapsed);
         }
         result
     }
@@ -125,12 +138,11 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         block_no: u64,
         block: T,
     ) -> (T, Result<()>) {
-        use super::perf;
-
         let first_sector_no =
             block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
-        perf::add(&perf::DEVICE_WRITES, 1);
+        let fs_stats = &self.fs_stats;
+        fs_stats.device_writes.set(fs_stats.device_writes.get() + 1);
         virtio_async::BlockDevice::post_write(self.virtio_bd.clone(), first_sector_no, block)
             .await
             .await
@@ -143,8 +155,11 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         first_block_no: u64,
         blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
-        super::perf::add(&super::perf::DEVICE_WRITES, 1);
-        super::perf::add(&super::perf::DEVICE_WRITE_BLOCKS, blocks.len() as u64);
+        let fs_stats = &self.fs_stats;
+        fs_stats.device_writes.set(fs_stats.device_writes.get() + 1);
+        fs_stats
+            .device_write_blocks
+            .set(fs_stats.device_write_blocks.get() + blocks.len() as u64);
         let first_sector_no =
             first_block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 

@@ -11,7 +11,67 @@ use super::FS;
 use async_fs::FileSystem;
 use moto_async::LocalRwLock;
 use moto_stats::{MetricDescWire, MetricEntry};
-use std::{rc::Rc, sync::OnceLock};
+use std::{cell::Cell, rc::Rc, sync::OnceLock};
+
+/// Data-path performance counters for the FS runtime. Diagnostics only: pure
+/// counters, no behavior. Everything that touches them — the command handlers,
+/// the virtio partition, [`stats_responder_task`] — runs on the single-threaded
+/// IO runtime, so plain `Cell`s are race-free and cost a few ns to bump.
+/// Created once in `super::init` and shared via `Rc` (mirrors
+/// `runtime::net::stats::NetStats`).
+///
+/// The FS runtime is CPU-bound during streaming, so the hot path must stay
+/// near-free: durations accumulate in raw TSC ticks and are compile-time
+/// gated (see [`TIMINGS`]); the ticks->ns conversion happens only when the
+/// stats provider is queried.
+#[derive(Default)]
+pub(super) struct FsStats {
+    /// CMD_READ messages handled.
+    pub read_msgs: Cell<u64>,
+    /// Total TSC ticks spent in `on_cmd_read` (decode to response sent).
+    pub read_ticks: Cell<u64>,
+    /// CMD_WRITE messages handled.
+    pub write_msgs: Cell<u64>,
+    /// Readahead tasks spawned.
+    pub readahead_spawns: Cell<u64>,
+    /// Read requests submitted to the virtio device (a scatter-gather
+    /// request covers up to 16 blocks; see `device_read_blocks`).
+    pub device_reads: Cell<u64>,
+    /// 4k blocks read from the virtio device.
+    pub device_read_blocks: Cell<u64>,
+    /// Total TSC ticks from virtio read submission to completion.
+    pub device_read_ticks: Cell<u64>,
+    /// Write requests submitted to the virtio device (a scatter-gather
+    /// request covers up to 16 blocks; see `device_write_blocks`).
+    pub device_writes: Cell<u64>,
+    /// 4k blocks written to the virtio device.
+    pub device_write_blocks: Cell<u64>,
+}
+
+/// Compile-time switch for the TSC timing pairs (`read_ticks`,
+/// `device_read_ticks`). `Instant::now()` is a vdso rdtsc — cheap on bare
+/// metal, but a possible VM exit under some hypervisor configurations,
+/// which at two reads per 4KB message is a measurable tax. Timings are
+/// only needed when actively diagnosing latency: flip to `true` locally,
+/// don't commit it on. Counters are unaffected (a few ns each).
+pub(super) const TIMINGS: bool = false;
+
+/// The current TSC value; always 0 when [`TIMINGS`] is off (the const
+/// folds the rdtsc away).
+pub(super) fn now_ticks() -> u64 {
+    if TIMINGS {
+        moto_rt::time::Instant::now().as_u64()
+    } else {
+        0
+    }
+}
+
+/// Convert accumulated TSC ticks to nanoseconds. Not for the hot path.
+fn ticks_to_ns(ticks: u64) -> u64 {
+    moto_rt::time::Instant::from_u64(ticks)
+        .duration_since(moto_rt::time::Instant::from_u64(0))
+        .as_nanos() as u64
+}
 
 /// FS metric ids. They are private to sys-io: collectors learn their names
 /// dynamically via `CMD_DESCRIBE` (moto-stats hardcodes no metric ids).
@@ -19,9 +79,9 @@ mod ids {
     pub const FS_CAPACITY_BYTES: u32 = 1000;
     pub const FS_AVAILABLE_BYTES: u32 = 1001;
 
-    // Data-path performance counters (see `super::super::perf` and
+    // Data-path performance counters (see [`super::FsStats`] and
     // `BlockCache::cache_stats`), added to diagnose sequential-read speed.
-    // The two *_NS_TOTAL metrics read 0 unless `perf::TIMINGS` is
+    // The two *_NS_TOTAL metrics read 0 unless [`super::TIMINGS`] is
     // compiled on; the rest are always live.
     pub const FS_CACHE_HITS: u32 = 1002;
     pub const FS_CACHE_MISSES: u32 = 1003;
@@ -39,9 +99,7 @@ mod ids {
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(fs: &FS) -> Vec<MetricEntry> {
-    use super::perf;
-
+async fn entries(fs: &FS, stats: &FsStats) -> Vec<MetricEntry> {
     let num_blocks = fs.num_blocks();
     let empty_blocks = fs
         .empty_blocks()
@@ -56,27 +114,18 @@ async fn entries(fs: &FS) -> Vec<MetricEntry> {
         MetricEntry::global(ids::FS_CACHE_HITS, cache_stats.hits),
         MetricEntry::global(ids::FS_CACHE_MISSES, cache_stats.misses),
         MetricEntry::global(ids::FS_CACHE_DEDUP_WAITS, cache_stats.dedup_waits),
-        MetricEntry::global(ids::FS_READ_MSGS, perf::get(&perf::READ_MSGS)),
-        MetricEntry::global(
-            ids::FS_READ_NS_TOTAL,
-            perf::ticks_to_ns(perf::get(&perf::READ_TICKS)),
-        ),
-        MetricEntry::global(ids::FS_READAHEAD_SPAWNS, perf::get(&perf::READAHEAD_SPAWNS)),
-        MetricEntry::global(ids::FS_DEVICE_READS, perf::get(&perf::DEVICE_READS)),
+        MetricEntry::global(ids::FS_READ_MSGS, stats.read_msgs.get()),
+        MetricEntry::global(ids::FS_READ_NS_TOTAL, ticks_to_ns(stats.read_ticks.get())),
+        MetricEntry::global(ids::FS_READAHEAD_SPAWNS, stats.readahead_spawns.get()),
+        MetricEntry::global(ids::FS_DEVICE_READS, stats.device_reads.get()),
         MetricEntry::global(
             ids::FS_DEVICE_READ_NS_TOTAL,
-            perf::ticks_to_ns(perf::get(&perf::DEVICE_READ_TICKS)),
+            ticks_to_ns(stats.device_read_ticks.get()),
         ),
-        MetricEntry::global(ids::FS_DEVICE_WRITES, perf::get(&perf::DEVICE_WRITES)),
-        MetricEntry::global(ids::FS_WRITE_MSGS, perf::get(&perf::WRITE_MSGS)),
-        MetricEntry::global(
-            ids::FS_DEVICE_READ_BLOCKS,
-            perf::get(&perf::DEVICE_READ_BLOCKS),
-        ),
-        MetricEntry::global(
-            ids::FS_DEVICE_WRITE_BLOCKS,
-            perf::get(&perf::DEVICE_WRITE_BLOCKS),
-        ),
+        MetricEntry::global(ids::FS_DEVICE_WRITES, stats.device_writes.get()),
+        MetricEntry::global(ids::FS_WRITE_MSGS, stats.write_msgs.get()),
+        MetricEntry::global(ids::FS_DEVICE_READ_BLOCKS, stats.device_read_blocks.get()),
+        MetricEntry::global(ids::FS_DEVICE_WRITE_BLOCKS, stats.device_write_blocks.get()),
     ]
 }
 
@@ -118,24 +167,24 @@ const STATS_REQUEST_CAPACITY: usize = 4;
 
 /// Spawn the task that answers metric-snapshot requests from the stats-server
 /// thread. Call once, from the FS runtime.
-pub(super) fn spawn_stats_responder(fs: Rc<LocalRwLock<FS>>) {
+pub(super) fn spawn_stats_responder(runtime: super::FsRuntime) {
     let (tx, rx) = moto_async::channel(STATS_REQUEST_CAPACITY);
     if STATS_REQUESTS.set(tx).is_err() {
         log::error!("sys-io: fs stats responder already started");
         return;
     }
 
-    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(fs, rx));
+    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(runtime, rx));
 }
 
 /// Listen for stats requests and answer each with a fresh snapshot of the
 /// (single-threaded) FS stats. Runs in the FS runtime.
 async fn stats_responder_task(
-    fs: Rc<LocalRwLock<FS>>,
+    runtime: super::FsRuntime,
     mut requests: moto_async::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
-        let snapshot = entries(&*fs.read().await).await;
+        let snapshot = entries(&*runtime.fs.read().await, &runtime.fs_stats).await;
         // The receiver is gone if the stats-server thread stopped waiting; ignore.
         let _ = req.respond_to.send(snapshot);
     }
