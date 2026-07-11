@@ -64,12 +64,19 @@ fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
 }
 
 fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
+    let stats = crate::stats::PhaseSnapshot::take();
     match cmd {
         crate::CMD_TCP_RR => {
             do_rr(handshake(addr, cmd)?, Duration::from_secs(args.time as u64))?;
+            stats.report("TCP RR");
         }
-        crate::CMD_TCP_THROUGHPUT_IN | crate::CMD_TCP_THROUGHPUT_OUT => {
+        crate::CMD_TCP_THROUGHPUT_IN => {
             do_throughput_cmd(cmd, addr, args)?;
+            stats.report("server => client (local RX)");
+        }
+        crate::CMD_TCP_THROUGHPUT_OUT => {
+            do_throughput_cmd(cmd, addr, args)?;
+            stats.report("client => server (local TX)");
         }
         _ => {
             panic!("unrecognized command: {cmd}");

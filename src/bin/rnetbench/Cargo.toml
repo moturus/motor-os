@@ -9,6 +9,11 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 clap = { version = "4.5.4", default-features = false, features = ["derive", "error-context", "help", "std"] }
 
+# Per-phase perf metric reports (src/stats.rs); Motor-only.
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-stats = { path = "../../sys/lib/moto-stats" }
+moto-sys   = { path = "../../sys/lib/moto-sys"   }
+
 [profile.release]
 panic = "abort"
 lto = "fat"

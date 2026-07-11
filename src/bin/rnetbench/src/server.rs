@@ -54,13 +54,22 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
     tcp_stream.read_exact(buf)?;
     match cmd {
         crate::CMD_TCP_RR => {
-            do_rr(tcp_stream)?;
+            // The RR phase normally ends with the client closing the
+            // connection, i.e. with an Err: report stats before returning it.
+            let stats = crate::stats::PhaseSnapshot::take();
+            let result = do_rr(tcp_stream);
+            stats.report("TCP RR");
+            result?;
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
+            let stats = crate::stats::PhaseSnapshot::take();
             crate::do_throughput_read(tcp_stream, None);
+            stats.report("client => server (local RX)");
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
+            let stats = crate::stats::PhaseSnapshot::take();
             crate::do_throughput_write(tcp_stream, None);
+            stats.report("server => client (local TX)");
         }
         _ => {
             eprintln!("unrecognized command: {cmd}");

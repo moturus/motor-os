@@ -9,6 +9,7 @@ use clap::Parser;
 
 mod client;
 mod server;
+mod stats;
 
 #[derive(Parser, Debug, Clone)]
 struct Args {
