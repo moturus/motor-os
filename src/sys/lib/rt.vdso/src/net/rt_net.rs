@@ -516,6 +516,22 @@ impl NetRuntime {
     }
 }
 
+/// The `Msg::flags` value marking a client-internal TcpStreamTx marker: it
+/// tells the IO thread to claim and send the stream's pending TX pages (see
+/// `rt_tcp::PendingTxPage`), and never reaches sys-io. The value cannot occur
+/// in a real Tx message: the classic format keeps `flags` zero and the
+/// multi-page format stores `total_len <= TCP_TX_MAX_BYTES` there.
+pub(super) const TCP_TX_MARKER_FLAGS: u32 = u32::MAX;
+
+/// A marker message for stream `handle` (see [`TCP_TX_MARKER_FLAGS`]).
+pub(super) fn tcp_tx_marker_msg(handle: u64) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = api_net::NetCmd::TcpStreamTx as u16;
+    msg.handle = handle;
+    msg.flags = TCP_TX_MARKER_FLAGS;
+    msg
+}
+
 /// A communication channel between the current process and sys-io.
 ///
 /// Each channel has a dedicated io_thread.
@@ -776,7 +792,21 @@ impl NetChannel {
     fn io_thread_send_messages(&self, carry: &mut VecDeque<io_channel::Msg>) -> bool {
         let mut sent_messages = 0;
         while let Some(msg) = carry.pop_front().or_else(|| self.send_queue.pop()) {
-            let msg = self.coalesce_tcp_tx(msg, carry);
+            let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
+                && msg.flags == TCP_TX_MARKER_FLAGS
+            {
+                // A TX marker: claim the stream's pending pages and send
+                // them as one message, binding their lengths now (see
+                // rt_tcp::PendingTxPage). An empty pending queue — an
+                // earlier marker or the stream's drop claimed the pages
+                // already — is a no-op.
+                match self.claim_tcp_tx(msg.handle) {
+                    Some(msg) => msg,
+                    None => continue,
+                }
+            } else {
+                msg
+            };
             fence(Ordering::SeqCst);
             if let Err(err) = self.conn.send(msg) {
                 assert_eq!(err, moto_rt::Error::NotReady);
@@ -798,106 +828,22 @@ impl NetChannel {
         true
     }
 
-    /// Coalesce a run of adjacent single-page TcpStreamTx messages for the
-    /// same stream into fewer, fuller pages: sub-page app writes otherwise
-    /// travel one mostly-empty page per message, and per-message costs
-    /// dominate the TX path (net-opportunities.md N2). Bytes are packed into
-    /// the run's pages (all full except the last, up to `TCP_TX_MAX_PAGES`),
-    /// drained source pages are freed, and the result is emitted as a classic
-    /// single-page message or a multi-page one (`tcp_stream_tx_multi_msg`).
-    /// Only strictly adjacent messages merge, so per-stream byte order and
-    /// cross-message ordering are preserved; the first popped message that
-    /// cannot join the run goes to the front of `carry`. Zero added latency:
-    /// only messages already queued behind `head` are packed.
-    fn coalesce_tcp_tx(
-        &self,
-        head: io_channel::Msg,
-        carry: &mut VecDeque<io_channel::Msg>,
-    ) -> io_channel::Msg {
-        fn is_single_page_tx(msg: &io_channel::Msg) -> bool {
-            // flags != 0 is the multi-page format (already coalesced at the
-            // source); id != 0 never happens for Tx, excluded for safety.
-            msg.command == api_net::NetCmd::TcpStreamTx as u16 && msg.id == 0 && msg.flags == 0
-        }
+    /// Claim stream `handle`'s pending TX pages in response to a marker.
+    /// None if the stream is gone (its drop flushed the pages) or the
+    /// pending queue is empty.
+    fn claim_tcp_tx(&self, handle: u64) -> Option<io_channel::Msg> {
+        let stream = self.tcp_streams.lock().get(&handle)?.upgrade()?;
+        stream.claim_pending_tx()
+    }
 
-        if !is_single_page_tx(&head) {
-            return head;
-        }
-
-        // Peek at the next message; the common (unloaded) case is a run of
-        // one, which passes through untouched.
-        let Some(next) = carry.pop_front().or_else(|| self.send_queue.pop()) else {
-            return head;
-        };
-        if !(is_single_page_tx(&next) && next.handle == head.handle) {
-            carry.push_front(next);
-            return head;
-        }
-
-        // A real run: pack the fragments' bytes into full pages.
-        let mut pages: Vec<io_channel::IoPage> = Vec::with_capacity(api_net::TCP_TX_MAX_PAGES);
-        pages.push(self.get_page(head.payload.shared_pages()[0]).unwrap());
-        let mut last_fill = head.payload.args_64()[1] as usize;
-
-        let mut pending = Some(next);
-        while let Some(fragment) = pending.take() {
-            let len = fragment.payload.args_64()[1] as usize;
-            debug_assert!(len <= io_channel::PAGE_SIZE);
-            let space = io_channel::PAGE_SIZE - last_fill;
-            if len > space && pages.len() == api_net::TCP_TX_MAX_PAGES {
-                // No room for this fragment; it stays unsent, ahead of
-                // everything else.
-                carry.push_front(fragment);
-                break;
-            }
-
-            let src = self.get_page(fragment.payload.shared_pages()[0]).unwrap();
-            let copied = len.min(space);
-            if copied > 0 {
-                let dst = pages.last().unwrap();
-                dst.bytes_mut()[last_fill..(last_fill + copied)]
-                    .copy_from_slice(&src.bytes()[..copied]);
-                last_fill += copied;
-            }
-            if len > copied {
-                // The tail did not fit: shift it to the page start and keep
-                // the page as the run's new last page.
-                src.bytes_mut().copy_within(copied..len, 0);
-                pages.push(src);
-                last_fill = len - copied;
-            } // Otherwise the drained source page is dropped here, i.e. freed.
-
-            if pages.len() == api_net::TCP_TX_MAX_PAGES && last_fill == io_channel::PAGE_SIZE {
-                break;
-            }
-
-            match carry.pop_front().or_else(|| self.send_queue.pop()) {
-                Some(msg) if is_single_page_tx(&msg) && msg.handle == head.handle => {
-                    pending = Some(msg);
-                }
-                Some(msg) => carry.push_front(msg),
-                None => {}
-            }
-        }
-
-        // Keep the head's (oldest) timestamp.
-        let timestamp = head.payload.args_64()[2];
-        if pages.len() == 1 {
-            api_net::tcp_stream_tx_msg(head.handle, pages.pop().unwrap(), last_fill, timestamp)
-        } else {
-            let total = (pages.len() - 1) * io_channel::PAGE_SIZE + last_fill;
-            let num_pages = pages.len();
-            let mut page_ids = [0_u16; api_net::TCP_TX_MAX_PAGES];
-            for (idx, page) in pages.into_iter().enumerate() {
-                page_ids[idx] = io_channel::IoPage::into_u16(page);
-            }
-            api_net::tcp_stream_tx_multi_msg(
-                head.handle,
-                &page_ids[..num_pages],
-                total as u32,
-                timestamp,
-            )
-        }
+    /// Block the calling thread until the send queue likely has room
+    /// (mirrors the wait in [`Self::send_msg`]).
+    pub(super) fn wait_can_send(&self) {
+        self.send_waiters
+            .lock()
+            .push_back(moto_sys::UserThreadControlBlock::this_thread_handle().into());
+        self.maybe_wake_io_thread();
+        let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
     }
 
     pub fn add_write_waiter(&self, stream: &TcpStream) {

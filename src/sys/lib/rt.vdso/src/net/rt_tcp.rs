@@ -337,6 +337,7 @@ impl TcpListener {
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
+            pending_tx: Mutex::new(VecDeque::new()),
         });
         crate::net::rt_net::stats_tcp_stream_created();
 
@@ -533,6 +534,27 @@ pub struct TcpStream {
     subchannel_mask: u64, // Never changes.
 
     error: AtomicU16, // Erorr during async ops.
+
+    // Written TX bytes awaiting pickup by the IO thread; see PendingTxPage.
+    pending_tx: Mutex<VecDeque<PendingTxPage>>,
+}
+
+/// A TX io_page in the stream's `pending_tx` queue, not yet sent to sys-io.
+///
+/// Writes append into the queue's back page while it has room (no page
+/// alloc, no queue traffic), so page fill adapts to how far the app runs
+/// ahead of the IO thread. Each page is pushed together with a MARKER
+/// message (see `rt_net::tcp_tx_marker_msg`) enqueued on the ordinary send
+/// queue: the IO thread claims pending pages when it pops the marker and
+/// binds their lengths at that moment ([`TcpStream::claim_pending_tx`]), so
+/// data is never delayed beyond one IO-thread pass — the same latency as a
+/// directly-queued message. Only the back page can be partially filled
+/// (with one exception: a marker-enqueue retry after a full send queue can
+/// re-push a partial page behind a concurrent writer's page; the claim path
+/// therefore stops at the first partial page rather than assuming).
+struct PendingTxPage {
+    page: io_channel::IoPage,
+    filled: usize,
 }
 
 impl Drop for TcpStream {
@@ -542,6 +564,9 @@ impl Drop for TcpStream {
             super::rt_net::stats_tcp_stream_dropped();
             return;
         }
+
+        // Written bytes must reach the wire before the close.
+        self.flush_pending_tx();
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamClose as u16;
@@ -856,6 +881,7 @@ impl TcpStream {
             tx_timeout_ns: AtomicU64::new(u64::MAX),
             subchannel_mask,
             error: AtomicU16::new(moto_rt::E_OK),
+            pending_tx: Mutex::new(VecDeque::new()),
         });
         super::rt_net::stats_tcp_stream_created();
 
@@ -1277,7 +1303,15 @@ impl TcpStream {
     }
 
     fn have_write_buffer_space(&self) -> bool {
-        self.channel().may_alloc_page(self.subchannel_mask)
+        if self.channel().may_alloc_page(self.subchannel_mask) {
+            return true;
+        }
+        // A partially-filled pending page also accepts bytes.
+        self.pending_tx
+            .lock()
+            .back()
+            .map(|back| back.filled < io_channel::PAGE_SIZE)
+            .unwrap_or(false)
     }
 
     fn write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
@@ -1292,6 +1326,11 @@ impl TcpStream {
             return self.write_nonblocking(bufs);
         }
 
+        let total_in: usize = bufs.iter().map(|b| b.len()).sum();
+        if total_in == 0 {
+            return Ok(0);
+        }
+
         let timestamp = Instant::now();
         let timo_ns = self.tx_timeout_ns.load(Ordering::Relaxed);
         let abs_timeout = if timo_ns == u64::MAX {
@@ -1300,6 +1339,14 @@ impl TcpStream {
             Some(timestamp + Duration::from_nanos(timo_ns))
         };
 
+        // Fast path: top up the pending page the IO thread has not claimed
+        // yet — no page alloc, no queue traffic (see PendingTxPage).
+        let mut written = self.append_pending_tx(bufs, 0);
+        if written == total_in {
+            return Ok(written);
+        }
+
+        // Need a fresh page.
         // TODO: now we sleep exponentially long (up to a limit) on stuck writes.
         //       We should add a new msg to the driver so that it wakes us up
         //       when writes are unstuck.
@@ -1310,6 +1357,9 @@ impl TcpStream {
             if let Some(timo) = abs_timeout
                 && Instant::now() >= timo
             {
+                if written > 0 {
+                    return Ok(written);
+                }
                 return Err(moto_rt::E_TIMED_OUT);
             }
 
@@ -1317,7 +1367,14 @@ impl TcpStream {
                 Ok(page) => break page,
                 Err(_) => {
                     if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
-                        return Ok(0);
+                        return Ok(written);
+                    }
+
+                    // The pipeline may have freed pending-page space while we
+                    // were waiting for a whole page.
+                    written += self.append_pending_tx(bufs, written);
+                    if written == total_in {
+                        return Ok(written);
                     }
 
                     if spin_loop_counter < 100 {
@@ -1357,30 +1414,21 @@ impl TcpStream {
                 }
             }
         };
-        let write_sz = unsafe { Self::tx_copy(bufs, io_page.bytes_mut()) };
+        written += self.push_pending_tx(io_page, bufs, written);
 
-        let (msg, total_sz) = self.build_tx_msg(bufs, io_page, write_sz);
-        self.channel().send_msg(msg);
-        Ok(total_sz)
-    }
-
-    unsafe fn tx_copy(src: &[&[u8]], mut dst: &mut [u8]) -> usize {
-        let mut written = 0;
-        for buf in src {
-            let to_write = buf.len().min(dst.len());
-            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), dst.as_mut_ptr(), to_write) };
-            written += to_write;
-            dst = &mut dst[to_write..];
-
-            if dst.is_empty() {
+        // Grow a multi-page write without blocking: send what fits.
+        while written < total_in {
+            let Ok(page) = self.channel().alloc_page(self.subchannel_mask) else {
                 break;
-            }
+            };
+            written += self.push_pending_tx(page, bufs, written);
         }
 
-        written
+        Ok(written)
     }
 
-    /// Like [`Self::tx_copy`], but skipping the first `offset` bytes of `src`.
+    /// Copy from `src` (skipping its first `offset` bytes) into `dst`;
+    /// returns the bytes copied.
     fn tx_copy_at(src: &[&[u8]], mut offset: usize, dst: &mut [u8]) -> usize {
         let mut written = 0;
         for buf in src {
@@ -1403,155 +1451,146 @@ impl TcpStream {
         written
     }
 
-    /// Build the Tx message for `bufs`, whose first [`io_channel::PAGE_SIZE`]
-    /// bytes are already in `first_page` (`first_sz` of them). A write larger
-    /// than one page grows into a multi-page message (up to
-    /// [`api_net::TCP_TX_MAX_PAGES`] pages, see `tcp_stream_tx_multi_msg`);
-    /// the extra pages are allocated non-blocking, so a large write sends
-    /// what fits and returns a short count rather than stalling while it
-    /// holds pages. Returns the message and the total bytes it carries.
-    fn build_tx_msg(
-        &self,
-        bufs: &[&[u8]],
-        first_page: io_channel::IoPage,
-        first_sz: usize,
-    ) -> (io_channel::Msg, usize) {
-        let total_in: usize = bufs.iter().map(|b| b.len()).sum();
-        if first_sz < io_channel::PAGE_SIZE || first_sz == total_in {
-            let msg = api_net::tcp_stream_tx_msg(
-                self.handle(),
-                first_page,
-                first_sz,
-                Instant::now().as_u64(),
-            );
-            return (msg, first_sz);
+    /// Append bytes from `bufs[offset..]` into the pending back page, if it
+    /// has room. Returns the bytes appended. The marker enqueued when that
+    /// page was pushed is still pending (or the page would have been
+    /// claimed), so the appended bytes ride it — no new message needed.
+    fn append_pending_tx(&self, bufs: &[&[u8]], offset: usize) -> usize {
+        let mut pending = self.pending_tx.lock();
+        let Some(back) = pending.back_mut() else {
+            return 0;
+        };
+        if back.filled == io_channel::PAGE_SIZE {
+            return 0;
         }
+        let n = Self::tx_copy_at(bufs, offset, &mut back.page.bytes_mut()[back.filled..]);
+        back.filled += n;
+        n
+    }
 
-        let mut pages = alloc::vec![first_page];
-        let mut total = first_sz;
-        while total < total_in && pages.len() < api_net::TCP_TX_MAX_PAGES {
-            let Ok(page) = self.channel().alloc_page(self.subchannel_mask) else {
-                break;
-            };
-            let sz = Self::tx_copy_at(bufs, total, page.bytes_mut());
-            debug_assert!(sz > 0);
-            pages.push(page);
-            total += sz;
-            if sz < io_channel::PAGE_SIZE {
-                break;
+    /// Fill a fresh page from `bufs[offset..]` and queue it: the page goes
+    /// into `pending_tx` and its marker onto the send queue, atomically, so
+    /// the IO thread cannot observe one without the other. A full send queue
+    /// is handled by retracting the page and blocking *outside* the lock
+    /// (the IO thread's claim path takes it), then retrying. Returns the
+    /// bytes consumed from `bufs`.
+    fn push_pending_tx(&self, page: io_channel::IoPage, bufs: &[&[u8]], offset: usize) -> usize {
+        let filled = Self::tx_copy_at(bufs, offset, page.bytes_mut());
+        debug_assert!(filled > 0);
+        let mut entry = PendingTxPage { page, filled };
+        loop {
+            {
+                let mut pending = self.pending_tx.lock();
+                pending.push_back(entry);
+                if self
+                    .channel()
+                    .post_msg(super::rt_net::tcp_tx_marker_msg(self.handle()))
+                    .is_ok()
+                {
+                    return filled;
+                }
+                // We held the lock throughout, so the entry is still the back.
+                entry = pending.pop_back().unwrap();
             }
-        }
-
-        if pages.len() == 1 {
-            let msg = api_net::tcp_stream_tx_msg(
-                self.handle(),
-                pages.pop().unwrap(),
-                total,
-                Instant::now().as_u64(),
-            );
-            return (msg, total);
-        }
-
-        let mut page_ids = [0_u16; api_net::TCP_TX_MAX_PAGES];
-        let num_pages = pages.len();
-        for (idx, page) in pages.into_iter().enumerate() {
-            page_ids[idx] = io_channel::IoPage::into_u16(page);
-        }
-        let msg = api_net::tcp_stream_tx_multi_msg(
-            self.handle(),
-            &page_ids[..num_pages],
-            total as u32,
-            Instant::now().as_u64(),
-        );
-        (msg, total)
-    }
-
-    /// Recover and drop (= free) every io_page referenced by a Tx message
-    /// that will not be sent.
-    fn tx_msg_free_pages(&self, msg: &io_channel::Msg) {
-        let num_pages = if msg.flags == 0 {
-            1
-        } else {
-            (msg.flags as usize).div_ceil(io_channel::PAGE_SIZE)
-        };
-        for idx in 0..num_pages {
-            // Recovering the page and dropping it frees it.
-            let _ = self.channel().get_page(msg.payload.shared_pages()[idx]);
+            self.channel().wait_can_send();
         }
     }
 
-    fn do_write_nonblocking(&self, iovec: &[&[u8]]) -> Result<usize, ErrorCode> {
-        let Ok(io_page) = self.channel().alloc_page(self.subchannel_mask) else {
-            self.channel().add_write_waiter(self);
-            return Err(moto_rt::E_NOT_READY);
-        };
-
-        let write_sz = unsafe { Self::tx_copy(iovec, io_page.bytes_mut()) };
-
-        let (msg, total_sz) = self.build_tx_msg(iovec, io_page, write_sz);
-        if let Err(msg) = self.try_tx(msg, total_sz) {
-            // Get the page(s) back so that they can be released.
-            self.tx_msg_free_pages(&msg);
-            self.channel().add_write_waiter(self);
-            return Err(moto_rt::E_NOT_READY);
-        }
-
-        Ok(total_sz)
-    }
-
-    fn write_nonblocking(&self, iovec: &[&[u8]]) -> Result<usize, ErrorCode> {
+    fn write_nonblocking(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         // These are checked at the callsite.
         debug_assert!(self.tcp_state().can_write());
 
-        fn seek_exact<'a>(bufs: &'a [&'a [u8]], mut offset: usize) -> (&'a [u8], &'a [&'a [u8]]) {
-            for (i, buf) in bufs.iter().enumerate() {
-                if offset < buf.len() {
-                    return (&buf[offset..], &bufs[i + 1..]);
-                }
-                offset -= buf.len();
-            }
-            (&[], &[])
+        let total_in: usize = bufs.iter().map(|b| b.len()).sum();
+        if total_in == 0 {
+            return Ok(0);
         }
 
-        let mut total_written = 0;
+        let mut written = self.append_pending_tx(bufs, 0);
 
-        loop {
-            let (head, tail) = seek_exact(iovec, total_written);
-
-            if head.is_empty() && tail.is_empty() {
-                return Ok(total_written);
-            }
-
-            let result = if total_written == 0 {
-                self.do_write_nonblocking(iovec)
-            } else if head.is_empty() {
-                self.do_write_nonblocking(tail)
-            } else {
-                let mut iovec = Vec::with_capacity(tail.len() + 1);
-                iovec.push(head);
-                iovec.extend_from_slice(tail);
-                self.do_write_nonblocking(&iovec)
+        while written < total_in {
+            let Ok(page) = self.channel().alloc_page(self.subchannel_mask) else {
+                break;
             };
+            let filled = Self::tx_copy_at(bufs, written, page.bytes_mut());
+            debug_assert!(filled > 0);
 
-            match result {
-                Ok(0) => panic!(),
-                Ok(n) => {
-                    total_written += n;
-                }
-                Err(e) => {
-                    if total_written > 0 {
-                        return Ok(total_written);
-                    } else {
-                        return Err(e);
-                    }
+            let mut pending = self.pending_tx.lock();
+            pending.push_back(PendingTxPage { page, filled });
+            if self
+                .channel()
+                .post_msg(super::rt_net::tcp_tx_marker_msg(self.handle()))
+                .is_err()
+            {
+                // Full send queue; retracting the entry drops (frees) the page.
+                let _ = pending.pop_back();
+                break;
+            }
+            written += filled;
+        }
+
+        if written == 0 {
+            self.channel().add_write_waiter(self);
+            return Err(moto_rt::E_NOT_READY);
+        }
+        Ok(written)
+    }
+
+    /// Pop pending TX pages and build one wire message out of them: up to
+    /// [`api_net::TCP_TX_MAX_PAGES`] pages, stopping after the first
+    /// partially-filled one (the multi-page format requires all pages full
+    /// except the last). Returns None if nothing is pending. Called by the
+    /// IO thread when it pops a marker — the late length-binding that makes
+    /// page fill adapt to load — and by [`Self::flush_pending_tx`].
+    pub(super) fn claim_pending_tx(&self) -> Option<io_channel::Msg> {
+        let mut page_ids = [0_u16; api_net::TCP_TX_MAX_PAGES];
+        let mut num_pages = 0_usize;
+        let mut total = 0_usize;
+        {
+            let mut pending = self.pending_tx.lock();
+            while num_pages < api_net::TCP_TX_MAX_PAGES {
+                let Some(entry) = pending.pop_front() else {
+                    break;
+                };
+                let filled = entry.filled;
+                total += filled;
+                page_ids[num_pages] = io_channel::IoPage::into_u16(entry.page);
+                num_pages += 1;
+                if filled < io_channel::PAGE_SIZE {
+                    break;
                 }
             }
+        }
+
+        match num_pages {
+            0 => None,
+            1 => {
+                // Mirrors api_net::tcp_stream_tx_msg (which takes the page
+                // by value; ours is already converted).
+                let mut msg = io_channel::Msg::new();
+                msg.command = api_net::NetCmd::TcpStreamTx as u16;
+                msg.handle = self.handle();
+                msg.payload.shared_pages_mut()[0] = page_ids[0];
+                msg.payload.args_64_mut()[1] = total as u64;
+                msg.payload.args_64_mut()[2] = Instant::now().as_u64();
+                Some(msg)
+            }
+            _ => Some(api_net::tcp_stream_tx_multi_msg(
+                self.handle(),
+                &page_ids[..num_pages],
+                total as u32,
+                Instant::now().as_u64(),
+            )),
         }
     }
 
-    fn try_tx(&self, msg: io_channel::Msg, write_sz: usize) -> Result<(), io_channel::Msg> {
-        self.channel().post_msg(msg)?;
-        Ok(())
+    /// Send all pending TX bytes now, ahead of a Close/shutdown(write)
+    /// control message; the pages' markers, still queued behind us, then
+    /// no-op on the emptied queue. Guaranteed delivery, because this runs
+    /// from drop, potentially on the IO thread itself.
+    fn flush_pending_tx(&self) {
+        while let Some(msg) = self.claim_pending_tx() {
+            self.channel().send_msg_guaranteed(msg);
+        }
     }
 
     pub fn peer_addr(&self) -> Result<SocketAddr, ErrorCode> {
@@ -1592,6 +1631,9 @@ impl TcpStream {
         if write {
             option |= api_net::TCP_OPTION_SHUT_WR;
             self.tx_closed.store(true, Ordering::Release);
+            // Bytes written before the shutdown must go out before sys-io
+            // sees SHUT_WR (their still-queued markers will no-op).
+            self.flush_pending_tx();
         }
 
         let mut req = io_channel::Msg::new();
