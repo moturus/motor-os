@@ -43,7 +43,7 @@ fn connect_with_retry(addr: SocketAddr) -> TcpStream {
     panic!("Failed to connect to {addr:?}")
 }
 
-fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
+fn handshake(addr: SocketAddr, cmd: u64, buf_size: u32) -> Result<TcpStream> {
     let mut buf: [u8; 1500] = [0; 1500];
     let mut tcp_stream = connect_with_retry(addr);
     tcp_stream.set_nodelay(true).unwrap();
@@ -60,6 +60,11 @@ fn handshake(addr: SocketAddr, cmd: u64) -> Result<TcpStream> {
         unsafe { core::slice::from_raw_parts(&cmd as *const u64 as usize as *const u8, 8) };
     tcp_stream.write_all(buf)?;
 
+    let buf_size = buf_size as u64;
+    let buf: &[u8] =
+        unsafe { core::slice::from_raw_parts(&buf_size as *const u64 as usize as *const u8, 8) };
+    tcp_stream.write_all(buf)?;
+
     Ok(tcp_stream)
 }
 
@@ -67,7 +72,10 @@ fn try_addr(addr: SocketAddr, cmd: u64, args: &crate::Args) -> Result<()> {
     let stats = crate::stats::PhaseSnapshot::take();
     match cmd {
         crate::CMD_TCP_RR => {
-            do_rr(handshake(addr, cmd)?, Duration::from_secs(args.time as u64))?;
+            do_rr(
+                handshake(addr, cmd, args.buf_size)?,
+                Duration::from_secs(args.time as u64),
+            )?;
             stats.report("TCP RR");
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
@@ -108,13 +116,18 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
     let duration = std::time::Duration::from_secs(args.time as u64);
 
     let thread_func = move |arg: Arc<Mutex<ThroughputResult>>, args: crate::Args| {
+        let buf_size = args.buf_size as usize;
         let (duration, bytes) = match cmd {
-            crate::CMD_TCP_THROUGHPUT_IN => {
-                crate::do_throughput_read(handshake(addr, cmd).unwrap(), Some(&args))
-            }
-            crate::CMD_TCP_THROUGHPUT_OUT => {
-                crate::do_throughput_write(handshake(addr, cmd).unwrap(), Some(&args))
-            }
+            crate::CMD_TCP_THROUGHPUT_IN => crate::do_throughput_read(
+                handshake(addr, cmd, args.buf_size).unwrap(),
+                buf_size,
+                Some(&args),
+            ),
+            crate::CMD_TCP_THROUGHPUT_OUT => crate::do_throughput_write(
+                handshake(addr, cmd, args.buf_size).unwrap(),
+                buf_size,
+                Some(&args),
+            ),
             _ => panic!(),
         };
         let mut res = arg.lock().unwrap();

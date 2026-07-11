@@ -47,11 +47,23 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
     }
     tcp_stream.write_all(crate::MAGIC_BYTES_SERVER)?;
 
-    // Figure out which test we are doing.
+    // Figure out which test we are doing, and the client's buffer size.
     let mut cmd: u64 = 0;
     let buf: &mut [u8] =
         unsafe { core::slice::from_raw_parts_mut(&mut cmd as *mut u64 as usize as *mut u8, 8) };
     tcp_stream.read_exact(buf)?;
+
+    let mut buf_size: u64 = 0;
+    let buf: &mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(&mut buf_size as *mut u64 as usize as *mut u8, 8)
+    };
+    tcp_stream.read_exact(buf)?;
+    if buf_size < (crate::MIN_BUF_SIZE as u64) || buf_size > (crate::MAX_BUF_SIZE as u64) {
+        eprintln!("bad buf_size: {buf_size}");
+        return Ok(());
+    }
+    let buf_size = buf_size as usize;
+
     match cmd {
         crate::CMD_TCP_RR => {
             // The RR phase normally ends with the client closing the
@@ -63,12 +75,12 @@ fn handle_connection(mut tcp_stream: TcpStream) -> Result<()> {
         }
         crate::CMD_TCP_THROUGHPUT_OUT => {
             let stats = crate::stats::PhaseSnapshot::take();
-            crate::do_throughput_read(tcp_stream, None);
+            crate::do_throughput_read(tcp_stream, buf_size, None);
             stats.report("client => server (local RX)");
         }
         crate::CMD_TCP_THROUGHPUT_IN => {
             let stats = crate::stats::PhaseSnapshot::take();
-            crate::do_throughput_write(tcp_stream, None);
+            crate::do_throughput_write(tcp_stream, buf_size, None);
             stats.report("server => client (local TX)");
         }
         _ => {
