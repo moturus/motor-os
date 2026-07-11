@@ -1154,13 +1154,10 @@ impl NetChannel {
                 log::debug!("Orphan TX reply for socket 0x{:x}", msg.handle);
             }
             api_net::NetCmd::TcpStreamRx => {
-                // RX raced with the client dropping the sream. Need to get page to free it.
-                let sz_read = msg.payload.args_64()[1];
-                assert_ne!(0, sz_read);
-                // crate::moto_log!("orphan RX");
-                // Get the page so that it is properly dropped.
+                // RX raced with the client dropping the stream. Claim the
+                // page(s) so that they are properly dropped (freed).
                 log::debug!("Orphan RX for socket 0x{:x}", msg.handle);
-                let _ = self.conn.get_page(msg.payload.shared_pages()[0]);
+                claim_rx_page(self, &msg, &mut |_page, _len| {});
             }
             api_net::NetCmd::EvtTcpStreamStateChanged => {}
             api_net::NetCmd::TcpStreamClose => {}
@@ -1239,6 +1236,24 @@ impl ChannelReservation {
     }
 }
 
+/// Claim the io_page of a TcpStreamRx message (one page, length in
+/// `args_64[1]`; zero-length messages carry no page). Calls `f(page, len)`;
+/// dropping a claimed page frees it back to the channel.
+pub fn claim_rx_page(
+    channel: &NetChannel,
+    msg: &io_channel::Msg,
+    f: &mut dyn FnMut(io_channel::IoPage, usize),
+) {
+    debug_assert_eq!(msg.command, api_net::NetCmd::TcpStreamRx as u16);
+
+    let sz = msg.payload.args_64()[1] as usize;
+    assert!(sz <= io_channel::PAGE_SIZE);
+    if sz > 0 {
+        let page = channel.get_page(msg.payload.shared_pages()[0]).unwrap();
+        f(page, sz);
+    }
+}
+
 pub fn clear_rx_queue(
     rx_queue: &Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
     channel: &NetChannel,
@@ -1250,15 +1265,10 @@ pub fn clear_rx_queue(
             continue;
         }
         assert_eq!(msg.command, api_net::NetCmd::TcpStreamRx as u16);
-        let sz_read = msg.payload.args_64()[1];
-        if sz_read > 0 {
-            let _ = channel.conn.get_page(msg.payload.shared_pages()[0]);
-        }
+        claim_rx_page(channel, &msg, &mut |_page, _len| {});
     }
 
-    if let Some(bytes_len) = rxq.loose_bytes().map(|bytes| bytes.len()) {
-        rxq.consume_bytes(bytes_len);
-    }
+    rxq.clear_rx_bufs();
 }
 
 pub fn reserve_channel() -> ChannelReservation {

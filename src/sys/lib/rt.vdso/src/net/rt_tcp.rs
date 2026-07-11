@@ -328,7 +328,6 @@ impl TcpListener {
             nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
             channel_reservation,
             recv_queue,
-            next_rx_seq: AtomicU64::new(1).into(),
             rx_waiter: Mutex::new(None),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
@@ -506,7 +505,6 @@ pub struct TcpStream {
     // This is, most of the time, a single-producer, single-consumer queue.
     // MUST be locked before rx_buf is locked.
     recv_queue: Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
-    next_rx_seq: CachePadded<AtomicU64>,
 
     rx_waiter: Mutex<Option<SysHandle>>,
 
@@ -714,11 +712,15 @@ impl TcpStream {
         }
     }
 
+    /// Tell sys-io this stream is ready to receive: sys-io's RX pump does
+    /// not send anything until the first TcpStreamRxAck arrives, so this is
+    /// sent once per stream, on connect/accept. (The pre-2026-07 protocol
+    /// also acked every 8th Rx message; those acks gated nothing on the
+    /// sys-io side and were deleted.)
     fn ack_rx(&self) {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamRxAck as u16;
         req.handle = self.handle();
-        req.payload.args_64_mut()[0] = self.next_rx_seq.load(Ordering::Relaxed) - 1;
         self.channel().send_msg(req);
     }
 
@@ -750,10 +752,8 @@ impl TcpStream {
         if msg.command == (api_net::NetCmd::TcpStreamRx as u16)
             && self.rx_closed.load(Ordering::Acquire)
         {
-            let sz_read = msg.payload.args_64()[1];
-            if sz_read > 0 {
-                let _ = self.channel().get_page(msg.payload.shared_pages()[0]);
-            }
+            // Claiming the page(s) and dropping them frees them.
+            super::rt_net::claim_rx_page(self.channel(), &msg, &mut |_page, _len| {});
             return rx_lock.take().unwrap_or(SysHandle::NONE);
         }
 
@@ -813,7 +813,7 @@ impl TcpStream {
             return;
         }
 
-        if recv_q.loose_bytes().is_some() {
+        if recv_q.have_loose_bytes() {
             // Already some queue processing has been done.
             return;
         }
@@ -823,7 +823,9 @@ impl TcpStream {
         if msg.command == (api_net::NetCmd::TcpStreamRx as u16) {
             let sz_read = msg.payload.args_64()[1] as usize;
             if sz_read > 0 {
-                recv_q.push_back(msg);
+                // push_front: more Rx messages may have been queued behind
+                // this one while the accept was in flight.
+                recv_q.push_front(msg);
                 drop(recv_q);
                 self.event_source.on_event(moto_rt::poll::POLL_READABLE);
             }
@@ -872,7 +874,6 @@ impl TcpStream {
             me: me.clone(),
             nonblocking: AtomicBool::new(nonblocking),
             recv_queue: super::inner_rx_stream::InnerRxStream::new(),
-            next_rx_seq: AtomicU64::new(1).into(),
             rx_waiter: Mutex::new(None),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
@@ -1113,27 +1114,44 @@ impl TcpStream {
     fn poll_rx(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
         let mut recv_q = self.recv_queue.lock();
 
-        if let Some(bytes) = recv_q.loose_bytes() {
-            let copied_bytes = unsafe { Self::rx_copy(bytes, bufs) };
-            if !peek {
-                recv_q.consume_bytes(copied_bytes);
+        loop {
+            // Claim the pages of all leading Rx messages, so that a single
+            // read drains as much as fits in `bufs` instead of one page
+            // per call.
+            while recv_q
+                .front()
+                .is_some_and(|msg| msg.command == (api_net::NetCmd::TcpStreamRx as u16))
+            {
+                let msg = recv_q.pop_front().unwrap();
+                super::rt_net::claim_rx_page(self.channel(), &msg, &mut |page, len| {
+                    recv_q.push_bytes(page, len)
+                });
             }
-            return Ok(copied_bytes);
-        }
 
-        let Some(msg) = recv_q.pop_front() else {
-            if self.rx_closed.load(Ordering::Acquire) {
-                return Ok(0);
+            let copied = recv_q.copy_out(bufs, peek);
+            if copied > 0 || recv_q.have_loose_bytes() {
+                // copied == 0 with bytes still queued means `bufs` had no
+                // capacity; a zero-sized read returns 0.
+                return Ok(copied);
             }
-            match self.tcp_state() {
-                TcpState::Closed | TcpState::WriteOnly => {
+
+            // No RX bytes; the front message, if any, is not an Rx.
+            let Some(msg) = recv_q.pop_front() else {
+                if self.rx_closed.load(Ordering::Acquire) {
                     return Ok(0);
                 }
-                _ => return Err(moto_rt::E_NOT_READY),
-            }
-        };
+                match self.tcp_state() {
+                    TcpState::Closed | TcpState::WriteOnly => {
+                        return Ok(0);
+                    }
+                    _ => return Err(moto_rt::E_NOT_READY),
+                }
+            };
 
-        if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+            if msg.command != (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
+                panic!("bad cmd: {} {}", msg.command, msg.status);
+            }
+
             // Note: this message was preprocessed in process_incoming_msg,
             // and the state was set to read-only.
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
@@ -1144,67 +1162,10 @@ impl TcpStream {
                     return Ok(0);
                 }
                 _ => {
-                    // Careful: recursion.
-                    return self.poll_rx(bufs, peek);
+                    recv_q = self.recv_queue.lock();
                 }
             }
         }
-
-        if msg.command != (api_net::NetCmd::TcpStreamRx as u16) {
-            panic!("bad cmd: {} {}", msg.command, msg.status);
-        }
-        let sz_read = msg.payload.args_64()[1] as usize;
-        assert!(sz_read <= moto_ipc::io_channel::PAGE_SIZE);
-        assert_ne!(0, sz_read);
-        let rx_seq_incoming = msg.payload.args_64()[2];
-        let rx_seq = self.next_rx_seq.fetch_add(1, Ordering::Relaxed);
-
-        // Note: rx_seq was used in the legacy TCP stack implementation
-        //       to manage backpressure (I assume). It appears it is
-        //       no longer needed to do so with the new async TCP stack.
-        //
-        //       We should be careful: maybe there is a corner case
-        //       where this is needed (at least in the legacy case).
-        // assert_eq!(rx_seq, rx_seq_incoming);
-
-        let io_page = self
-            .channel()
-            .get_page(msg.payload.shared_pages()[0])
-            .unwrap();
-        // #[cfg(debug_assertions)]
-        // moto_log!(
-        //     "{}:{} incoming {} bytes for stream 0x{:x} rx_seq {}",
-        //     file!(),
-        //     line!(),
-        //     sz_read,
-        //     msg.handle,
-        //     rx_seq
-        // );
-
-        recv_q.push_bytes(io_page, sz_read);
-        drop(recv_q);
-
-        if rx_seq & (api_net::TCP_RX_MAX_INFLIGHT - 1) == 0 {
-            self.ack_rx();
-        }
-        // Careful: recursion!
-        self.poll_rx(bufs, peek)
-    }
-
-    unsafe fn rx_copy(mut src: &[u8], dst: &mut [&mut [u8]]) -> usize {
-        let mut copied_bytes = 0;
-        for buf in dst {
-            let to_copy = buf.len().min(src.len());
-            unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), buf.as_mut_ptr(), to_copy) };
-
-            copied_bytes += to_copy;
-            src = &src[to_copy..];
-            if src.is_empty() {
-                break;
-            }
-        }
-
-        copied_bytes
     }
 
     fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
@@ -1542,6 +1503,11 @@ impl TcpStream {
     /// IO thread when it pops a marker — the late length-binding that makes
     /// page fill adapt to load — and by [`Self::flush_pending_tx`].
     pub(super) fn claim_pending_tx(&self) -> Option<io_channel::Msg> {
+        // Multi-page messages matter in this direction: each client->sys-io
+        // message costs sys-io a task spawn + dispatch (A/B-measured
+        // 2026-07-11: capping claims at one full page dropped bulk TX
+        // 400 -> 342 MiB/s; the reverse direction measured no difference
+        // and stays single-page).
         let mut page_ids = [0_u16; api_net::TCP_TX_MAX_PAGES];
         let mut num_pages = 0_usize;
         let mut total = 0_usize;

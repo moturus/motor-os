@@ -670,6 +670,13 @@ impl MotoSocket {
             sender.remote_handle().as_u64()
         );
 
+        // Note: RX messages carry a single page each. Multi-page RX (the
+        // mirror of the multi-page TX) was implemented and A/B-measured on
+        // 2026-07-11: no throughput change — unlike the client->server
+        // direction, where every message costs a task spawn etc., messages
+        // in this direction are nearly free on both sides (the pump pushes
+        // into the ring directly, the client io thread handles inline), so
+        // there is nothing to amortize and the RX costs are per-page.
         loop {
             // Step 1: wait for the socket to become readable.
             let can_recv = std::future::poll_fn(|cx| {

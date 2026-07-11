@@ -79,13 +79,14 @@ pub(super) struct NetStats {
     /// Payload bytes in those messages. Page fill ratio =
     /// tcp_rx_bytes / (tcp_rx_msgs * 4096).
     pub tcp_rx_bytes: Cell<u64>,
-    /// TcpStreamTx messages received from clients.
+    /// TcpStreamTx messages received from clients (one message carries
+    /// up to 8 io_pages).
     pub tcp_tx_msgs: Cell<u64>,
-    /// Payload bytes in those messages. Page fill ratio =
-    /// tcp_tx_bytes / (tcp_tx_msgs * 4096).
+    /// Payload bytes in those messages. Same fill caveat as tcp_rx_bytes.
     pub tcp_tx_bytes: Cell<u64>,
-    /// TcpStreamRxAck messages received (vestigial protocol traffic:
-    /// only the first ack per stream gates anything).
+    /// TcpStreamRxAck messages received. One per stream: the client's
+    /// I-am-ready signal that starts the RX pump (the vestigial
+    /// every-8th-Rx-msg acks were deleted 2026-07-11).
     pub tcp_rx_acks: Cell<u64>,
     /// Times the TCP RX pump found the subchannel out of io_pages and
     /// had to wait for the client to consume + free one.

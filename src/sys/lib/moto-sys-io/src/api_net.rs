@@ -67,8 +67,6 @@ pub const TCP_OPTION_NODELAY: u64 = 1 << 2;
 pub const TCP_OPTION_TTL: u64 = 1 << 3;
 pub const TCP_OPTION_LINGER: u64 = 1 << 4;
 
-pub const TCP_RX_MAX_INFLIGHT: u64 = 8;
-
 /// The number of subchannels per channel.
 ///
 /// Each IO Channel in moto_ipc::io_channel has 64 pages (for the server and for the client).
@@ -300,6 +298,12 @@ pub fn tcp_stream_rx_msg(
 
     msg
 }
+
+// Note: there is deliberately no multi-page RX mirroring the multi-page TX
+// above. It was implemented and A/B-measured (2026-07-11): no throughput
+// difference. Unlike client->server messages, which each cost sys-io a task
+// spawn + dispatch, server->client messages are nearly free on both sides,
+// so there is nothing to amortize.
 
 pub fn udp_socket_tx_rx_msg(
     handle: u64,
