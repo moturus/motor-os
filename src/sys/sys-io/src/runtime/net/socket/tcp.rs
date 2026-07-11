@@ -484,7 +484,13 @@ impl MotoSocket {
                 smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(120_000)));
                 smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(120_000)));
                 smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
-                smoltcp_socket.set_ack_delay(None);
+                // Delayed ACKs (also set on the connect side; keep in sync).
+                // Sub-MSS ACKs wait up to 10ms so a prompt reply carries the
+                // ACK instead of a separate pure-ACK packet (halves egress
+                // packets in request/response traffic). Bulk transfers are
+                // unaffected: smoltcp force-expires the timer once un-ACKed
+                // data exceeds one MSS, and window-update ACKs bypass it.
+                smoltcp_socket.set_ack_delay(Some(smoltcp::time::Duration::from_millis(10)));
 
                 let remote_endpoint = smoltcp_socket.remote_endpoint().unwrap();
                 crate::runtime::net::config::socket_addr_from_endpoint(remote_endpoint)
@@ -621,7 +627,9 @@ impl MotoSocket {
             smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(120_000)));
             smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(120_000)));
             smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
-            smoltcp_socket.set_ack_delay(None);
+            // Delayed ACKs — see the comment on the accept side
+            // (on_incoming_connection); keep the two in sync.
+            smoltcp_socket.set_ack_delay(Some(smoltcp::time::Duration::from_millis(10)));
         });
 
         let (sender, msg) = {
