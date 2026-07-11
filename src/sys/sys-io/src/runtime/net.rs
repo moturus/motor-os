@@ -233,11 +233,27 @@ impl NetRuntime {
         }
 
         loop {
-            let _ticket = ticket_rx.recv().await;
-
-            // Now that we have a ticket, we can poll for msg.
             match receiver.recv().await {
                 Ok(msg) => {
+                    // Data-path fast path: TcpStreamTx and TcpStreamRxAck
+                    // handlers complete synchronously (they never await;
+                    // only the rare error-path response send can, which
+                    // then just pauses this one client's ingress), so
+                    // dispatch them inline — the per-message task spawn +
+                    // ticket round-trip below costs a few µs, the dominant
+                    // fixed cost of the TX data path (it is why TX messages
+                    // are multi-page: fewer messages to spawn for).
+                    if msg.command == (NetCmd::TcpStreamTx as u16)
+                        || msg.command == (NetCmd::TcpStreamRxAck as u16)
+                    {
+                        self.on_msg(msg, sender.clone()).await;
+                        continue;
+                    }
+
+                    // Control-path commands may genuinely await (accept,
+                    // connect, close, ...), so they run as tasks; the
+                    // tickets bound their concurrency.
+                    let _ticket = ticket_rx.recv().await;
                     let sender = sender.clone();
                     let this = self.clone();
                     let ticket_tx = ticket_tx.clone();
