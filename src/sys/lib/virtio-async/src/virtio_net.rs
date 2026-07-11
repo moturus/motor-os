@@ -47,10 +47,101 @@ pub struct NetHeader {
 
 pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<NetHeader>();
 
+/// The packet's L4 checksum field holds the pseudo-header sum; the device
+/// (or the host stack, lazily) completes the checksum.
+const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const ETHERTYPE_IPV6: u16 = 0x86DD;
+
+/// TX checksum offload (VIRTIO_NET_F_CSUM): smoltcp is told (via sys-io's
+/// ChecksumCapabilities) not to compute TCP checksums — it zeroes the field
+/// — so every egress TCP packet must get VIRTIO_NET_HDR_F_NEEDS_CSUM here:
+/// seed the checksum field with the TCP pseudo-header sum and point the
+/// device at it (virtio 1.1 §5.1.6.2). Everything else (ARP, ICMP, UDP,
+/// IPv4 headers) is still fully checksummed by smoltcp and passes through
+/// with flags == 0. UDP is deliberately not offloaded: a fragmented UDP
+/// datagram carries its L4 header only in the first fragment, which
+/// NEEDS_CSUM cannot describe.
+fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) {
+    const ETH: usize = 14; // dst(6) + src(6) + ethertype(2)
+    const TCP_CSUM_OFFSET: u16 = 16; // checksum position in the TCP header
+    const TCP: u8 = 6;
+
+    if packet.len() < ETH + 40 {
+        // Smaller than the smallest (IPv4 + TCP) header pair.
+        return;
+    }
+
+    // (csum_start, ones'-complement pseudo-header sum), or not ours.
+    let (csum_start, mut sum): (usize, u32) = match u16::from_be_bytes([packet[12], packet[13]])
+    {
+        ETHERTYPE_IPV4 => {
+            let ip = &packet[ETH..];
+            let ihl = ((ip[0] & 0xf) as usize) * 4;
+            let total_len = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+            if ip[0] >> 4 != 4
+                || ihl < 20
+                || total_len < ihl + 20
+                || ETH + total_len > packet.len()
+                || ip[9] != TCP
+                // A fragment's checksum can't be offloaded; smoltcp never
+                // fragments TCP, but be safe: reject a set MF flag or a
+                // nonzero fragment offset (DF is fine).
+                || u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff != 0
+            {
+                return;
+            }
+            let mut sum = TCP as u32 + (total_len - ihl) as u32; // proto + TCP len
+            for word in ip[12..20].chunks_exact(2) {
+                // src + dst addresses
+                sum += u16::from_be_bytes([word[0], word[1]]) as u32;
+            }
+            (ETH + ihl, sum)
+        }
+        ETHERTYPE_IPV6 => {
+            let ip = &packet[ETH..];
+            let payload_len = u16::from_be_bytes([ip[4], ip[5]]) as usize;
+            if ip[0] >> 4 != 6
+                // TCP as the direct next header only — smoltcp emits no
+                // extension headers for TCP.
+                || ip[6] != TCP
+                || payload_len < 20
+                || ETH + 40 + payload_len > packet.len()
+            {
+                return;
+            }
+            let mut sum = TCP as u32 + payload_len as u32; // next-hdr + TCP len
+            for word in ip[8..40].chunks_exact(2) {
+                // src + dst addresses
+                sum += u16::from_be_bytes([word[0], word[1]]) as u32;
+            }
+            (ETH + 40, sum)
+        }
+        _ => return, // ARP etc. — fully checksummed by the stack.
+    };
+
+    while sum > 0xffff {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    // Seed the TCP checksum field with the pseudo-header sum, NOT
+    // complemented: whoever completes the checksum sums [csum_start..]
+    // with this field as-is and stores the complement.
+    let csum_field = csum_start + TCP_CSUM_OFFSET as usize;
+    packet[csum_field] = (sum >> 8) as u8;
+    packet[csum_field + 1] = sum as u8;
+
+    header.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+    header.csum_start = csum_start as u16;
+    header.csum_offset = TCP_CSUM_OFFSET;
+}
+
 pub struct NetDevice {
     dev: Rc<RefCell<VirtioDevice>>,
     mac: [u8; 6],
     mtu: Option<u16>,
+    csum_offload: bool,
     virtq_tx: Rc<RefCell<Virtqueue>>,
     virtq_rx: Rc<RefCell<Virtqueue>>,
 }
@@ -102,6 +193,7 @@ impl NetDevice {
 
         dev_mut.acknowledge_driver(); // Step 3
         let (mac, mtu) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
+        let csum_offload = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_CSUM) != 0;
         dev_mut.init_virtqueues(2, 2)?; // Step 7
         dev_mut.driver_ok(); // Step 8
 
@@ -119,6 +211,7 @@ impl NetDevice {
             dev,
             mac,
             mtu,
+            csum_offload,
             virtq_rx,
             virtq_tx,
         }))
@@ -194,24 +287,19 @@ impl NetDevice {
             log::info!("virtio-net: VIRTIO_NET_F_GUEST_CSUM negotiated.");
         }
 
-        if (features_available & VIRTIO_NET_F_CSUM) == VIRTIO_NET_F_CSUM {
-            // Note: in VirtIO 1.1. spec, section 5.1.6.2, it says:
-            /*
-                If the driver negotiated VIRTIO_NET_F_CSUM, it can skip checksumming the packet:
-                • flags has the VIRTIO_NET_HDR_F_NEEDS_CSUM set,
-                • csum_start is set to the offset within the packet to begin checksumming, and
-                • csum_offset indicates how many bytes after the csum_start the new (16 bit ones’ complement)
-                checksum is placed by the device.
-                • The TCP checksum field in the packet is set to the sum of the TCP pseudo header, so that replacing
-                it by the ones’ complement checksum of the TCP header and body will give the correct result.
-                Note: For example, consider a partially checksummed TCP (IPv4) packet. It will have a 14 byte ether-
-                net header and 20 byte IP header followed by the TCP header (with the TCP checksum field 16
-                bytes into that header). csum_start will be 14+20 = 34 (the TCP checksum includes the header),
-                and csum_offset will be 16.
-            */
-            // Basically, that means that the header should be populated with the knowledge of the packet structure,
-            // i.e. passed in; but smoltcp does not expose this capability, so we can't offload checksums at the moment.
-            log::debug!("{}:{} - VIRTIO_NET_F_CSUM.", file!(), line!());
+        // VIRTIO_NET_F_CSUM: the device completes partially-checksummed
+        // packets from the driver (virtio 1.1 §5.1.6.2): flags has
+        // VIRTIO_NET_HDR_F_NEEDS_CSUM set, the L4 checksum field is seeded
+        // with the pseudo-header sum, and csum_start/csum_offset point at
+        // it. post_write derives all three by parsing its own egress
+        // packet (maybe_set_needs_csum below), freeing the network stack
+        // from a full write-side pass over TX payload — sys-io keys its
+        // smoltcp ChecksumCapabilities off csum_offload(). Bonus: for
+        // host-local delivery the checksum is typically never computed by
+        // anyone at all (the host keeps the packet CHECKSUM_PARTIAL).
+        if (features_available & VIRTIO_NET_F_CSUM) != 0 {
+            features_acked |= VIRTIO_NET_F_CSUM;
+            log::info!("virtio-net: VIRTIO_NET_F_CSUM negotiated.");
         }
 
         dev.write_enabled_features(features_acked);
@@ -261,6 +349,13 @@ impl NetDevice {
         (self.dev.borrow().virtio_features_negotiated & VIRTIO_NET_F_GUEST_CSUM) != 0
     }
 
+    /// True if VIRTIO_NET_F_CSUM was negotiated: post_write offloads TCP
+    /// checksums (NEEDS_CSUM + pseudo-header seed), so the network stack
+    /// must not compute them.
+    pub fn csum_offload(&self) -> bool {
+        self.csum_offload
+    }
+
     #[inline(never)]
     pub async fn post_read(self: Rc<Self>, mut bytes: IoBuf) -> ReadCompletion<IoBuf> {
         let chain_head = VqAlloc::new(self.virtq_rx.clone(), 2).await;
@@ -296,12 +391,15 @@ impl NetDevice {
     }
 
     #[inline(never)]
-    pub async fn post_write(self: Rc<Self>, bytes: IoBuf) -> WriteCompletion<IoBuf> {
+    pub async fn post_write(self: Rc<Self>, mut bytes: IoBuf) -> WriteCompletion<IoBuf> {
         let chain_head = VqAlloc::new(self.virtq_tx.clone(), 2).await;
         let mut virtqueue = self.virtq_tx.borrow_mut();
 
         let (header, phys_addr, next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
         *header = NetHeader::default();
+        if self.csum_offload {
+            maybe_set_needs_csum(bytes.as_mut(), header);
+        }
 
         use super::virtio_queue::UserData;
         let buffs: [UserData; 2] = [

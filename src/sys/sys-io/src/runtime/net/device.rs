@@ -50,6 +50,7 @@ pub(super) struct VirtioDevice {
     tx_notify: Rc<moto_async::LocalNotify>,
     mtu: u16,
     guest_csum: bool,
+    csum_offload: bool,
 
     buf_cache: BufCache,
 }
@@ -58,6 +59,7 @@ impl VirtioDevice {
     pub(super) fn new(inner: Rc<NetDevice>, stats: Rc<NetStats>) -> Self {
         let mtu = inner.mtu().unwrap_or(1536);
         let guest_csum = inner.guest_csum();
+        let csum_offload = inner.csum_offload();
         let this = Self {
             inner,
             rx_queue: Default::default(),
@@ -66,6 +68,7 @@ impl VirtioDevice {
             tx_notify: Default::default(),
             mtu,
             guest_csum,
+            csum_offload,
             buf_cache: Default::default(),
         };
 
@@ -259,21 +262,36 @@ impl smoltcp::phy::Device for VirtioDevice {
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
+        use smoltcp::phy::Checksum;
         let mut caps = smoltcp::phy::DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ethernet;
         caps.max_transmission_unit = self.mtu as usize;
-        if self.guest_csum {
-            // VIRTIO_NET_F_GUEST_CSUM negotiated: host-originated packets
-            // arrive with partial (pseudo-header-only) L4 checksums that the
-            // host vouches for, so smoltcp must not verify them on RX — it
-            // would reject them — and gets to skip a full read pass over all
-            // RX payload. TX checksums are still computed in software until
-            // VIRTIO_NET_F_CSUM offload is wired up. IPv4 *header* checksums
-            // (20-ish bytes) are still verified — near-free and not covered
-            // by the L4 offload contract.
-            caps.checksum.tcp = smoltcp::phy::Checksum::Tx;
-            caps.checksum.udp = smoltcp::phy::Checksum::Tx;
-        }
+        // Checksum offloads, keyed on what the driver negotiated:
+        // - guest_csum (VIRTIO_NET_F_GUEST_CSUM): host-originated packets
+        //   arrive with partial (pseudo-header-only) L4 checksums that the
+        //   host vouches for, so smoltcp must not verify them on RX — it
+        //   would reject them — and gets to skip a full read pass over all
+        //   RX payload.
+        // - csum_offload (VIRTIO_NET_F_CSUM): smoltcp skips computing TCP
+        //   checksums on TX (zeroes the field); the driver's post_write
+        //   seeds the pseudo-header sum and sets NEEDS_CSUM instead — a
+        //   full write-side pass over all TX payload saved.
+        // UDP TX stays in software even with csum_offload: a fragmented
+        // UDP datagram carries its L4 header only in the first fragment,
+        // which NEEDS_CSUM can't describe. IPv4 *header* checksums (20-ish
+        // bytes) are always computed and verified — near-free and not
+        // covered by the L4 offload contract.
+        caps.checksum.tcp = match (self.guest_csum, self.csum_offload) {
+            (true, true) => Checksum::None,
+            (true, false) => Checksum::Tx,
+            (false, true) => Checksum::Rx,
+            (false, false) => Checksum::Both,
+        };
+        caps.checksum.udp = if self.guest_csum {
+            Checksum::Tx
+        } else {
+            Checksum::Both
+        };
         caps
     }
 }
