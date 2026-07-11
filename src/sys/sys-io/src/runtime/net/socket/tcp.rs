@@ -645,7 +645,7 @@ impl MotoSocket {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
-        let (socket_id, sender, subchannel_mask, rx_ready) = {
+        let (socket_id, sender, subchannel_mask, rx_ready, stats) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
             };
@@ -655,6 +655,7 @@ impl MotoSocket {
                 socket_ref.base.sender().clone(),
                 socket_ref.unwrap_tcp().subchannel_mask,
                 socket_ref.unwrap_tcp().rx_ready.clone(),
+                socket_ref.base.runtime.stats.clone(),
             )
         };
         rx_ready.notified().await;
@@ -704,6 +705,11 @@ impl MotoSocket {
             }
 
             // Step 3: allocate a page. This is where backpressure happens.
+            if !sender.may_alloc_page(subchannel_mask) {
+                stats
+                    .tcp_rx_alloc_waits
+                    .set(stats.tcp_rx_alloc_waits.get() + 1);
+            }
             let page = sender.alloc_page(subchannel_mask).await.unwrap();
 
             // Step 4: read bytes from the socket. Note that we read at most one page,
@@ -741,6 +747,8 @@ impl MotoSocket {
             // Step 5. Send bytes to the client.
             {
                 let (io_page, sz) = (rx_buf.page, rx_buf.consumed);
+                stats.tcp_rx_msgs.set(stats.tcp_rx_msgs.get() + 1);
+                stats.tcp_rx_bytes.set(stats.tcp_rx_bytes.get() + sz as u64);
                 let mut msg = moto_sys_io::api_net::tcp_stream_rx_msg(socket_id, io_page, sz, 0);
                 msg.status = moto_rt::E_OK;
                 let _ = sender.send(msg).await;
@@ -1274,6 +1282,14 @@ impl MotoSocket {
             }
 
             tcp_state.stat_tx_bytes += sz as u64;
+            runtime
+                .stats
+                .tcp_tx_msgs
+                .set(runtime.stats.tcp_tx_msgs.get() + 1);
+            runtime
+                .stats
+                .tcp_tx_bytes
+                .set(runtime.stats.tcp_tx_bytes.get() + sz as u64);
             tcp_state.tx_queue.push_back(TcpTxBuf {
                 page,
                 len: sz,
@@ -1292,6 +1308,10 @@ impl MotoSocket {
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
+        runtime
+            .stats
+            .tcp_rx_acks
+            .set(runtime.stats.tcp_rx_acks.get() + 1);
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
             return Err(ErrorKind::NotFound.into());
         };

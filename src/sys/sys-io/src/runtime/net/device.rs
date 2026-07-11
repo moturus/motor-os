@@ -9,6 +9,7 @@ use std::{
 };
 
 use super::config;
+use super::stats::NetStats;
 use virtio_async::virtio_net::NetDevice;
 
 use moto_tooling::iobuf::IoBuf;
@@ -53,7 +54,7 @@ pub(super) struct VirtioDevice {
 }
 
 impl VirtioDevice {
-    pub(super) fn new(inner: Rc<NetDevice>) -> Self {
+    pub(super) fn new(inner: Rc<NetDevice>, stats: Rc<NetStats>) -> Self {
         let mtu = inner.mtu().unwrap_or(1536);
         let this = Self {
             inner,
@@ -70,12 +71,14 @@ impl VirtioDevice {
             this.rx_queue.clone(),
             this.rx_notify.clone(),
             this.buf_cache.clone(),
+            stats.clone(),
         ));
         let _ = moto_async::LocalRuntime::spawn(Self::tx_task(
             this.inner.clone(),
             this.tx_queue.clone(),
             this.tx_notify.clone(),
             this.buf_cache.clone(),
+            stats,
         ));
 
         this
@@ -86,6 +89,7 @@ impl VirtioDevice {
         rx_queue: RxQueue,
         rx_notify: Rc<moto_async::LocalNotify>,
         buf_cache: BufCache,
+        stats: Rc<NetStats>,
     ) {
         // Submit RX buffers to net_dev. Wait. Once RX happens, push
         // the buffer into rx_queue, notify. Once RX buffer is consumed,
@@ -117,6 +121,12 @@ impl VirtioDevice {
             assert!(result.is_ok());
 
             log::debug!("NET: RX {} bytes.", packet.len());
+            stats
+                .device_rx_packets
+                .set(stats.device_rx_packets.get() + 1);
+            stats
+                .device_rx_bytes
+                .set(stats.device_rx_bytes.get() + packet.len() as u64);
             rx_queue.borrow_mut().push_back(packet);
             rx_notify.notify_one();
 
@@ -130,6 +140,7 @@ impl VirtioDevice {
         tx_queue: RxQueue,
         tx_notify: Rc<moto_async::LocalNotify>,
         buf_cache: BufCache,
+        stats: Rc<NetStats>,
     ) {
         let mut completions = VecDeque::new();
         let txq_sz = net_dev.txq_sz() as usize;
@@ -145,6 +156,12 @@ impl VirtioDevice {
 
             if let Some(packet) = maybe_tx_vec {
                 log::debug!("NET TX {} bytes", packet.len());
+                stats
+                    .device_tx_packets
+                    .set(stats.device_tx_packets.get() + 1);
+                stats
+                    .device_tx_bytes
+                    .set(stats.device_tx_bytes.get() + packet.len() as u64);
                 completions.push_back(net_dev.clone().post_write(packet).await);
             } else {
                 tx_notify.notified().await;

@@ -130,6 +130,7 @@ impl NetRuntime {
             let name = this.inner.borrow().devices[device_idx].name().to_owned();
 
             loop {
+                this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
                 match activity {
                     smoltcp::iface::PollResult::None => {
@@ -468,6 +469,9 @@ pub(super) async fn init(
     let config = config::load(&fs).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
+    // Created before the devices: their rx/tx tasks bump the device counters.
+    let net_stats = Rc::new(stats::NetStats::default());
+
     let mut devices = vec![];
 
     if config.loopback {
@@ -496,7 +500,7 @@ pub(super) async fn init(
             devices.push(device::NetDev::new(
                 device_name,
                 device_cfg,
-                device::SmoltcpDevice::VirtIo(device::VirtioDevice::new(dev)),
+                device::SmoltcpDevice::VirtIo(device::VirtioDevice::new(dev, net_stats.clone())),
             ));
         } else {
             log::warn!("Cannot find NET device {device_cfg:?}.");
@@ -537,7 +541,7 @@ pub(super) async fn init(
             ip_addresses,
             clients: HashMap::new(),
         })),
-        stats: Default::default(),
+        stats: net_stats,
         fs: fs.clone(),
     };
 

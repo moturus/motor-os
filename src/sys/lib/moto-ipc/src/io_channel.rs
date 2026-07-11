@@ -1194,6 +1194,16 @@ impl Sender {
         }
     }
 
+    /// True if [`Self::alloc_page`] would succeed without waiting. Racy by
+    /// nature (the peer frees pages concurrently); use for stats/heuristics.
+    pub fn may_alloc_page(&self, subchannel_mask: u64) -> bool {
+        self.raw_channel()
+            .may_alloc_page(match self.inner.endpoint_type {
+                EndpointType::Client => SubChannel::Client(subchannel_mask),
+                EndpointType::Server => SubChannel::Server(subchannel_mask),
+            })
+    }
+
     fn try_alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         if let Ok(raw_page) = self
             .raw_channel()

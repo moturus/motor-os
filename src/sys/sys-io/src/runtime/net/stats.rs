@@ -1,7 +1,7 @@
 //! Statistics for Net runtime, including devices and sockets.
 //!
 //! sys-io's stats provider (`crate::stats_server`) runs on its own thread, but
-//! the net stats live in this single-threaded async runtime (`Rc<Cell<..>>`) and
+//! the net stats live in this single-threaded async runtime (plain `Cell`s) and
 //! can't be read from there directly. Instead the stats-server thread *polls*
 //! them: it sends a request over a cross-thread channel that
 //! [`stats_responder_task`] (running in the net runtime) answers with a freshly
@@ -32,18 +32,66 @@ mod ids {
     pub const NET_TCP_LISTENING_SOCKETS: u32 = 5;
     pub const NET_UDP_SOCKETS: u32 = 6;
     pub const NET_TOTAL_UDP_SOCKETS: u32 = 7;
+
+    // Data-path performance counters (see [`super::NetStats`]), added to
+    // diagnose TCP throughput/latency (rnetbench). All always live.
+    pub const NET_DEVICE_RX_PACKETS: u32 = 8;
+    pub const NET_DEVICE_RX_BYTES: u32 = 9;
+    pub const NET_DEVICE_TX_PACKETS: u32 = 10;
+    pub const NET_DEVICE_TX_BYTES: u32 = 11;
+    pub const NET_TCP_RX_MSGS: u32 = 12;
+    pub const NET_TCP_RX_BYTES: u32 = 13;
+    pub const NET_TCP_TX_MSGS: u32 = 14;
+    pub const NET_TCP_TX_BYTES: u32 = 15;
+    pub const NET_TCP_RX_ACKS: u32 = 16;
+    pub const NET_TCP_RX_ALLOC_WAITS: u32 = 17;
+    pub const NET_POLL_RUNS: u32 = 18;
 }
 
+/// Net runtime statistics: socket-count gauges plus data-path performance
+/// counters. Everything that touches them runs on the single-threaded net
+/// runtime, so plain `Cell`s are race-free and cost a few ns to bump.
+/// Created once in [`super::init`] and shared via `Rc` (`NetRuntime::stats`);
+/// mirrors `runtime::fs::stats::FsStats`.
 #[derive(Default)]
 pub(super) struct NetStats {
-    pub num_devices: Rc<Cell<u64>>,
-    pub active_clients: Rc<Cell<u64>>,
-    pub total_clients: Rc<Cell<u64>>,
-    pub tcp_sockets: Rc<Cell<u64>>,
-    pub total_tcp_sockets: Rc<Cell<u64>>,
-    pub tcp_listening_sockets: Rc<Cell<u64>>,
-    pub udp_sockets: Rc<Cell<u64>>,
-    pub total_udp_sockets: Rc<Cell<u64>>,
+    pub num_devices: Cell<u64>,
+    pub active_clients: Cell<u64>,
+    pub total_clients: Cell<u64>,
+    pub tcp_sockets: Cell<u64>,
+    pub total_tcp_sockets: Cell<u64>,
+    pub tcp_listening_sockets: Cell<u64>,
+    pub udp_sockets: Cell<u64>,
+    pub total_udp_sockets: Cell<u64>,
+
+    // Data-path performance counters, added to diagnose TCP
+    // throughput/latency (rnetbench). All always live.
+    /// Ethernet frames received from virtio devices (excludes loopback).
+    pub device_rx_packets: Cell<u64>,
+    /// Bytes in those frames, headers included.
+    pub device_rx_bytes: Cell<u64>,
+    /// Ethernet frames submitted to virtio devices (excludes loopback).
+    pub device_tx_packets: Cell<u64>,
+    /// Bytes in those frames, headers included.
+    pub device_tx_bytes: Cell<u64>,
+    /// TcpStreamRx messages (io_pages) sent to clients.
+    pub tcp_rx_msgs: Cell<u64>,
+    /// Payload bytes in those messages. Page fill ratio =
+    /// tcp_rx_bytes / (tcp_rx_msgs * 4096).
+    pub tcp_rx_bytes: Cell<u64>,
+    /// TcpStreamTx messages received from clients.
+    pub tcp_tx_msgs: Cell<u64>,
+    /// Payload bytes in those messages. Page fill ratio =
+    /// tcp_tx_bytes / (tcp_tx_msgs * 4096).
+    pub tcp_tx_bytes: Cell<u64>,
+    /// TcpStreamRxAck messages received (vestigial protocol traffic:
+    /// only the first ack per stream gates anything).
+    pub tcp_rx_acks: Cell<u64>,
+    /// Times the TCP RX pump found the subchannel out of io_pages and
+    /// had to wait for the client to consume + free one.
+    pub tcp_rx_alloc_waits: Cell<u64>,
+    /// smoltcp `iface.poll()` calls (all devices, loopback included).
+    pub poll_runs: Cell<u64>,
 }
 
 impl NetStats {
@@ -62,6 +110,17 @@ impl NetStats {
             ),
             MetricEntry::global(ids::NET_UDP_SOCKETS, self.udp_sockets.get()),
             MetricEntry::global(ids::NET_TOTAL_UDP_SOCKETS, self.total_udp_sockets.get()),
+            MetricEntry::global(ids::NET_DEVICE_RX_PACKETS, self.device_rx_packets.get()),
+            MetricEntry::global(ids::NET_DEVICE_RX_BYTES, self.device_rx_bytes.get()),
+            MetricEntry::global(ids::NET_DEVICE_TX_PACKETS, self.device_tx_packets.get()),
+            MetricEntry::global(ids::NET_DEVICE_TX_BYTES, self.device_tx_bytes.get()),
+            MetricEntry::global(ids::NET_TCP_RX_MSGS, self.tcp_rx_msgs.get()),
+            MetricEntry::global(ids::NET_TCP_RX_BYTES, self.tcp_rx_bytes.get()),
+            MetricEntry::global(ids::NET_TCP_TX_MSGS, self.tcp_tx_msgs.get()),
+            MetricEntry::global(ids::NET_TCP_TX_BYTES, self.tcp_tx_bytes.get()),
+            MetricEntry::global(ids::NET_TCP_RX_ACKS, self.tcp_rx_acks.get()),
+            MetricEntry::global(ids::NET_TCP_RX_ALLOC_WAITS, self.tcp_rx_alloc_waits.get()),
+            MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
         ]
     }
 }
@@ -79,6 +138,17 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_LISTENING_SOCKETS, "net.tcp_listening_sockets"),
         MetricDescWire::new(ids::NET_UDP_SOCKETS, "net.udp_sockets"),
         MetricDescWire::new(ids::NET_TOTAL_UDP_SOCKETS, "net.total_udp_sockets"),
+        MetricDescWire::new(ids::NET_DEVICE_RX_PACKETS, "net.device.rx_packets"),
+        MetricDescWire::new(ids::NET_DEVICE_RX_BYTES, "net.device.rx_bytes"),
+        MetricDescWire::new(ids::NET_DEVICE_TX_PACKETS, "net.device.tx_packets"),
+        MetricDescWire::new(ids::NET_DEVICE_TX_BYTES, "net.device.tx_bytes"),
+        MetricDescWire::new(ids::NET_TCP_RX_MSGS, "net.tcp.rx_msgs"),
+        MetricDescWire::new(ids::NET_TCP_RX_BYTES, "net.tcp.rx_bytes"),
+        MetricDescWire::new(ids::NET_TCP_TX_MSGS, "net.tcp.tx_msgs"),
+        MetricDescWire::new(ids::NET_TCP_TX_BYTES, "net.tcp.tx_bytes"),
+        MetricDescWire::new(ids::NET_TCP_RX_ACKS, "net.tcp.rx_acks"),
+        MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
+        MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
     ]
 }
 
@@ -257,8 +327,7 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
         CMD_TCP_STATS => {
             let stats = query_tcp_socket_stats(start_id);
             let raw = conn.raw_channel();
-            let resp =
-                unsafe { raw.get_mut::<GetTcpSocketStatsResponse<MAX_TCP_SOCKET_STATS>>() };
+            let resp = unsafe { raw.get_mut::<GetTcpSocketStatsResponse<MAX_TCP_SOCKET_STATS>>() };
             debug_assert!(stats.len() <= MAX_TCP_SOCKET_STATS);
             resp.num_results = stats.len() as u64;
             resp.socket_stats[..stats.len()].copy_from_slice(&stats);
