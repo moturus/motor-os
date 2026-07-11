@@ -39,9 +39,7 @@ use moto_tooling::iobuf::IoBuf;
 
 const MAX_COMPLETIONS_IN_FLIGHT: usize = 64;
 
-/// The longest scatter-gather device read (blocks per request) issued by
-/// [`BlockCache::prefetch_range`]: 16 blocks = 64K.
-const MAX_READ_RUN: usize = 16;
+use crate::block_device::MAX_IO_RUN;
 
 pub struct BlockHolder {
     iobuf: IoBuf,
@@ -283,7 +281,8 @@ impl CachedBlock {
 }
 
 enum BackgroundMessage {
-    WriteBlock((u64, CheckpointedBlock)),
+    /// Write blocks to consecutive device blocks starting at the given one.
+    WriteBlocks((u64, Vec<CheckpointedBlock>)),
     Commit,
 
     #[cfg(target_os = "motor")]
@@ -296,7 +295,7 @@ enum BackgroundMessage {
 impl core::fmt::Debug for BackgroundMessage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::WriteBlock(_) => f.debug_tuple("WriteBlock").finish(),
+            Self::WriteBlocks(_) => f.debug_tuple("WriteBlocks").finish(),
             Self::Commit => write!(f, "Commit"),
             Self::Flush(_) => f.debug_tuple("Flush").finish(),
         }
@@ -346,8 +345,19 @@ pub struct AsyncStub {
 
 impl AsyncStub {
     pub async fn write_block(&self, block_no: u64, block: CheckpointedBlock) -> Result<()> {
+        self.write_blocks(block_no, Vec::from([block])).await
+    }
+
+    /// Write `blocks.len()` consecutive device blocks starting at
+    /// `first_block_no` (one scatter-gather request on devices that support
+    /// it). Durability is not awaited here; see [`Self::commit`].
+    pub async fn write_blocks(
+        &self,
+        first_block_no: u64,
+        blocks: Vec<CheckpointedBlock>,
+    ) -> Result<()> {
         self.completion_sink
-            .send(BackgroundMessage::WriteBlock((block_no, block)))
+            .send(BackgroundMessage::WriteBlocks((first_block_no, blocks)))
             .await
             .unwrap();
         Ok(())
@@ -489,20 +499,24 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
                 let mut completions: VecDeque<BD::Completion> = VecDeque::new();
                 while let Some(msg) = receiver.recv().await {
                     match msg {
-                        BackgroundMessage::WriteBlock((block_no, flushing_block)) => {
+                        BackgroundMessage::WriteBlocks((first_block_no, flushing_blocks)) => {
                             let c = bd
-                                .write_block_with_completion(block_no, flushing_block)
+                                .write_blocks_with_completion(first_block_no, flushing_blocks)
                                 .await
-                                .unwrap_or_else(|_| panic!("Error writing block to the device"));
+                                .unwrap_or_else(|_| panic!("Error writing blocks to the device"));
                             completions.push_back(c);
                         }
                         BackgroundMessage::Commit => {
                             while let Some(c) = completions.pop_front() {
-                                let (block, result) = c.await;
+                                let (blocks, result) = c.await;
                                 if let Err(err) = result {
                                     log::error!(
-                                        "Failed to write block 0x{:x}: {err:?}.",
-                                        block.inner.borrow().block_no
+                                        "Failed to write {} blocks at 0x{:x}: {err:?}.",
+                                        blocks.len(),
+                                        blocks
+                                            .first()
+                                            .map(|b| b.inner.borrow().block_no)
+                                            .unwrap_or(u64::MAX)
                                     );
                                 }
                             }
@@ -751,7 +765,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
     /// Read `count` consecutive device blocks starting at `first_block_no`
     /// into the cache with as few device requests as possible: blocks that
     /// are cached or already being read are skipped, and each remaining run
-    /// (up to [`MAX_READ_RUN`] blocks) is read with one scatter-gather
+    /// (up to [`MAX_IO_RUN`] blocks) is read with one scatter-gather
     /// device request. Best-effort: device errors are swallowed here —
     /// waiters retry via `get_block` and surface them there.
     pub async fn prefetch_range(&self, first_block_no: u64, count: u64) {
@@ -773,7 +787,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             let run_first = next;
             let mut guards: Vec<PendingReadGuard<'_, BD>> = Vec::new();
             while next < end
-                && guards.len() < MAX_READ_RUN
+                && guards.len() < MAX_IO_RUN
                 && self.get_cached(next).is_none()
                 && self.try_claim_pending_read(next)
             {

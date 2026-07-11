@@ -26,6 +26,7 @@ use crate::MAX_FLUSH_DELAY_MS;
 use crate::Superblock;
 use crate::TxnLogData;
 use async_fs::AsyncBlockDevice;
+use async_fs::MAX_IO_RUN;
 use async_fs::block_cache::BlockCache;
 use async_fs::block_cache::CachedBlock;
 use async_fs::block_cache::CheckpointedBlock;
@@ -436,18 +437,25 @@ impl TxnLogger {
 
         let mut sb = txn_batch.block_map.remove(&0).unwrap();
 
-        let mut idx = 1; // Start with "1" because "0" is for the superblock.
-        #[allow(clippy::explicit_counter_loop)]
-        for (block_no, block) in txn_batch.block_map.iter() {
-            txn_log_data.txn_blocks[idx] = *block_no;
-
+        // Write the batch to the log: log slots are consecutive by
+        // construction, so the whole batch goes out in scatter-gather chunks
+        // of up to MAX_IO_RUN blocks (slot 0 is for the superblock; the
+        // block at slot idx belongs at txn_blocks[idx]).
+        let mut log_blocks: Vec<CheckpointedBlock> = Vec::with_capacity(txn_batch.block_map.len());
+        for (idx, (block_no, block)) in txn_batch.block_map.iter().enumerate() {
+            txn_log_data.txn_blocks[idx + 1] = *block_no;
+            log_blocks.push(block.clone());
+        }
+        for (chunk_idx, chunk) in log_blocks.chunks(MAX_IO_RUN).enumerate() {
             #[cfg(test)]
             maybe_inject_test_error(error_pct)?;
 
             block_cache_stub
-                .write_block(txn_log_start + idx as u64, block.clone())
+                .write_blocks(
+                    txn_log_start + 1 + (chunk_idx * MAX_IO_RUN) as u64,
+                    chunk.to_vec(),
+                )
                 .await?;
-            idx += 1;
         }
 
         #[cfg(test)]
@@ -471,12 +479,37 @@ impl TxnLogger {
 
         block_cache_stub.commit().await;
 
-        // Then flush blocks to the main area.
-        for (block_no, block) in txn_batch.block_map.drain() {
+        // Then flush blocks to the main area: sorted and grouped into runs
+        // of consecutive block numbers, one scatter-gather write per run
+        // (streaming writes allocate data blocks sequentially, so most of a
+        // batch is a few long runs).
+        let mut main_blocks: Vec<(u64, CheckpointedBlock)> = txn_batch.block_map.drain().collect();
+        main_blocks.sort_unstable_by_key(|(block_no, _)| *block_no);
+
+        let mut run_first = 0_u64;
+        let mut run: Vec<CheckpointedBlock> = Vec::new();
+        for (block_no, block) in main_blocks {
+            if !run.is_empty() && block_no == run_first + run.len() as u64 && run.len() < MAX_IO_RUN
+            {
+                run.push(block);
+                continue;
+            }
+            if !run.is_empty() {
+                #[cfg(test)]
+                maybe_inject_test_error(error_pct)?;
+
+                block_cache_stub
+                    .write_blocks(run_first, core::mem::take(&mut run))
+                    .await?;
+            }
+            run_first = block_no;
+            run.push(block);
+        }
+        if !run.is_empty() {
             #[cfg(test)]
             maybe_inject_test_error(error_pct)?;
 
-            block_cache_stub.write_block(block_no, block).await?;
+            block_cache_stub.write_blocks(run_first, run).await?;
         }
 
         #[cfg(test)]

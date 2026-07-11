@@ -50,7 +50,7 @@ impl AsyncFileBlockDevice {
 
 #[async_trait(?Send)]
 impl AsyncBlockDevice for AsyncFileBlockDevice {
-    type Completion = core::future::Ready<(CheckpointedBlock, Result<()>)>;
+    type Completion = core::future::Ready<(Vec<CheckpointedBlock>, Result<()>)>;
 
     fn num_blocks(&self) -> u64 {
         self.num_blocks
@@ -111,13 +111,21 @@ impl AsyncBlockDevice for AsyncFileBlockDevice {
         (block, res)
     }
 
-    async fn write_block_with_completion(
+    async fn write_blocks_with_completion(
         &self,
-        block_no: u64,
-        block: CheckpointedBlock,
+        first_block_no: u64,
+        blocks: Vec<CheckpointedBlock>,
     ) -> Result<Self::Completion> {
-        let (block, res) = self.write_block(block_no, block).await;
-        Ok(core::future::ready((block, res)))
+        let mut result = Ok(());
+        for (idx, block) in blocks.iter().enumerate() {
+            if result.is_ok() {
+                let (_, res) = self
+                    .write_block(first_block_no + idx as u64, block.clone())
+                    .await;
+                result = res;
+            }
+        }
+        Ok(core::future::ready((blocks, result)))
     }
 
     async fn flush(&self) -> Result<()> {

@@ -12,10 +12,16 @@ use fittings::iobuf::IoBuf;
 #[cfg(target_os = "motor")]
 use moto_tooling::iobuf::IoBuf;
 
+/// The longest scatter-gather device transfer (blocks per request) callers
+/// should issue: 16 blocks = 64K. Keeps descriptor chains comfortably within
+/// any realistic virtio queue while amortizing the per-request cost
+/// (submission, queue notification, completion interrupt).
+pub const MAX_IO_RUN: usize = 16;
+
 /// Asynchronous Block Device.
 #[async_trait(?Send)]
 pub trait AsyncBlockDevice {
-    type Completion: core::future::Future<Output = (CheckpointedBlock, Result<()>)> + 'static;
+    type Completion: core::future::Future<Output = (Vec<CheckpointedBlock>, Result<()>)> + 'static;
 
     /// The number of blocks in this device.
     fn num_blocks(&self) -> u64;
@@ -53,10 +59,13 @@ pub trait AsyncBlockDevice {
         block: T,
     ) -> (T, Result<()>);
 
-    async fn write_block_with_completion(
+    /// Write `blocks.len()` consecutive blocks starting at `first_block_no`,
+    /// returning a completion future to await. Devices that support it
+    /// (virtio) issue ONE scatter-gather request for the whole run.
+    async fn write_blocks_with_completion(
         &self,
-        block_no: u64,
-        block: CheckpointedBlock,
+        first_block_no: u64,
+        blocks: Vec<CheckpointedBlock>,
     ) -> Result<Self::Completion>;
 
     /// Flush dirty blocks to the underlying storage.

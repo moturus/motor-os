@@ -41,11 +41,11 @@ impl VirtioPartition {
 }
 
 pub struct WrapperCompletion {
-    inner: virtio_async::WriteCompletion<async_fs::block_cache::CheckpointedBlock>,
+    inner: virtio_async::WriteCompletion<Vec<async_fs::block_cache::CheckpointedBlock>>,
 }
 
 impl Future for WrapperCompletion {
-    type Output = (async_fs::block_cache::CheckpointedBlock, Result<()>);
+    type Output = (Vec<async_fs::block_cache::CheckpointedBlock>, Result<()>);
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -136,20 +136,23 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
             .await
     }
 
-    async fn write_block_with_completion(
+    /// Write `blocks.len()` consecutive 4k blocks with one scatter-gather
+    /// virtio request; see `read_blocks`.
+    async fn write_blocks_with_completion(
         &self,
-        block_no: u64,
-        block: async_fs::block_cache::CheckpointedBlock,
+        first_block_no: u64,
+        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         super::perf::add(&super::perf::DEVICE_WRITES, 1);
+        super::perf::add(&super::perf::DEVICE_WRITE_BLOCKS, blocks.len() as u64);
         let first_sector_no =
-            block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
+            first_block_no * (VIRTIO_BLOCKS_IN_FS_BLOCK as u64) + self.virtio_block_offset;
 
         Ok(WrapperCompletion {
-            inner: virtio_async::BlockDevice::post_write(
+            inner: virtio_async::BlockDevice::post_write_many(
                 self.virtio_bd.clone(),
                 first_sector_no,
-                block,
+                blocks,
             )
             .await,
         })

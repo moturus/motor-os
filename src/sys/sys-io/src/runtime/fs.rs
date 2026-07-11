@@ -55,8 +55,11 @@ pub(crate) mod perf {
         pub static DEVICE_READ_BLOCKS: Cell<u64> = const { Cell::new(0) };
         /// Total TSC ticks from virtio read submission to completion.
         pub static DEVICE_READ_TICKS: Cell<u64> = const { Cell::new(0) };
-        /// 4k block writes submitted to the virtio device.
+        /// Write requests submitted to the virtio device (a scatter-gather
+        /// request covers up to 16 blocks; see DEVICE_WRITE_BLOCKS).
         pub static DEVICE_WRITES: Cell<u64> = const { Cell::new(0) };
+        /// 4k blocks written to the virtio device.
+        pub static DEVICE_WRITE_BLOCKS: Cell<u64> = const { Cell::new(0) };
     }
 
     pub fn add(counter: &'static std::thread::LocalKey<Cell<u64>>, delta: u64) {

@@ -2527,12 +2527,14 @@ impl async_fs::AsyncBlockDevice for CountingBlockDevice {
         self.inner.write_block(block_no, block).await
     }
 
-    async fn write_block_with_completion(
+    async fn write_blocks_with_completion(
         &self,
-        block_no: u64,
-        block: async_fs::block_cache::CheckpointedBlock,
+        first_block_no: u64,
+        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
-        self.inner.write_block_with_completion(block_no, block).await
+        self.inner
+            .write_blocks_with_completion(first_block_no, blocks)
+            .await
     }
 
     async fn flush(&self) -> Result<()> {
