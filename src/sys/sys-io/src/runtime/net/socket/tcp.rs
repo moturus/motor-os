@@ -225,8 +225,12 @@ impl MotoSocket {
         client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
     ) -> Rc<RefCell<MotoSocket>> {
-        let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 16384 * 2]);
-        let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; 16384 * 2]);
+        // 128KB buffers: the receive buffer caps the advertised TCP window and
+        // the send buffer caps unacked bytes in flight; 32KB sat exactly at the
+        // measured 321 MiB/s * ~100us BDP (see net-opportunities.md N1).
+        const TCP_SOCKET_BUFFER_SIZE: usize = 128 * 1024;
+        let rx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
+        let tx_buffer = smoltcp::socket::tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER_SIZE]);
 
         let mut smoltcp_socket = smoltcp::socket::tcp::Socket::new(rx_buffer, tx_buffer);
         // smoltcp_socket.bind(socket_addr).unwrap();
