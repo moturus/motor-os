@@ -645,7 +645,7 @@ impl MotoSocket {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
-        let (socket_id, sender, subchannel_mask, rx_ready, stats) = {
+        let (socket_id, sender, subchannel_mask, rx_ready, stats, device_notify) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
             };
@@ -656,6 +656,7 @@ impl MotoSocket {
                 socket_ref.unwrap_tcp().subchannel_mask,
                 socket_ref.unwrap_tcp().rx_ready.clone(),
                 socket_ref.base.runtime.stats.clone(),
+                socket_ref.base.device_notify(),
             )
         };
         rx_ready.notified().await;
@@ -743,6 +744,15 @@ impl MotoSocket {
             if rx_buf.consumed == 0 {
                 break;
             }
+
+            // Draining the buffer may reopen a closed receive window, but the
+            // window update is only ever *transmitted* by an `iface.poll()`,
+            // and the poll task may be asleep with a pre-drain `poll_delay()`.
+            // Without this wake a zero-window stall recovers only via the
+            // peer's persist probes (~32KB per probe; RX measured at
+            // 0.78 MiB/s instead of 16+). smoltcp's `window_to_update()`
+            // gates the actual emission, so this cannot cause an ACK storm.
+            device_notify.notify_one();
 
             // Step 5. Send bytes to the client.
             {
