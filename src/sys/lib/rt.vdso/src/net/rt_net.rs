@@ -564,6 +564,13 @@ pub struct NetChannel {
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
 
+    // Threads blocked in TcpStream::write() waiting for a free io_page.
+    // sys-io wakes this channel when it frees a page whose page-wait bit is
+    // set (the blocked writer's failed alloc sets it), which wakes the io
+    // thread, which drains + wakes these on its next pass. Stale entries
+    // are harmless: waking a running thread is a no-op.
+    page_waiters: Mutex<VecDeque<u64>>,
+
     // Fire-and-forget messages (e.g. TcpStreamClose) that could not be staged
     // into `send_queue` because it was full, and that were produced while
     // running on the IO thread itself (so blocking to wait for room would
@@ -646,6 +653,17 @@ impl NetChannel {
                 }
             } else {
                 self.wake_driver();
+            }
+
+            // Wake writers blocked on io_page exhaustion; they re-check and
+            // re-register if still stuck. This pass runs after every wake of
+            // this thread, including sys-io's page-freed wake.
+            {
+                let mut waiters = VecDeque::new();
+                core::mem::swap(&mut waiters, &mut *self.page_waiters.lock());
+                for waiter in waiters {
+                    let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
+                }
             }
 
             if should_sleep {
@@ -850,6 +868,13 @@ impl NetChannel {
         self.write_waiters.lock().push_back(stream.weak());
     }
 
+    /// Register a thread blocked in TcpStream::write() on io_page
+    /// exhaustion; the io thread wakes it on its next pass (see
+    /// `page_waiters`).
+    pub fn add_page_waiter(&self, thread_handle: u64) {
+        self.page_waiters.lock().push_back(thread_handle);
+    }
+
     pub fn maybe_wake_io_thread(&self) {
         self.io_thread_wake_requested.store(true, Ordering::Release);
         if self.io_thread_running.load(Ordering::SeqCst) {
@@ -895,6 +920,7 @@ impl NetChannel {
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
+            page_waiters: Mutex::new(VecDeque::new()),
             deferred_msgs: Mutex::new(VecDeque::new()),
             legacy_resp_waiters: Mutex::new(BTreeMap::new()),
             response_handlers: Mutex::new(BTreeMap::new()),

@@ -1366,6 +1366,21 @@ impl TcpStream {
                         // self.channel().conn.dump_state();
                     }
 
+                    // Register for a wake before sleeping: the failed alloc
+                    // set this subchannel's page-wait bits, so sys-io wakes
+                    // the channel (= the io thread) when it frees one of our
+                    // pages, and the io thread wakes us on its next pass.
+                    // The timed sleep below is a fallback, not the
+                    // mechanism — when it WAS the mechanism, the exponential
+                    // ladder governed stuck bulk TX at one write per rung
+                    // (18.8 MiB/s measured, 2026-07-11).
+                    self.channel()
+                        .add_page_waiter(moto_sys::UserThreadControlBlock::get().self_handle);
+                    // Close the race with pages freed before we registered.
+                    if let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
+                        break page;
+                    }
+
                     let _ = moto_sys::SysCpu::wait(
                         &mut [],
                         SysHandle::NONE,

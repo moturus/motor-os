@@ -77,25 +77,29 @@ pub const TCP_OPTION_LINGER: u64 = 1 << 4;
 /// and a 32-page-wide channel, and maybe later we will do that, but for now we
 /// hard-code the number of equal sized subchannels in IO_SUBCHANNELS).
 ///
-/// Eight subchannels (8 pages in-flight) are not much worse re: throughput vs four
-/// (16 pages in-flight), based on benchmarks.
-pub const IO_SUBCHANNELS: u8 = 8;
+/// Four subchannels of 16 pages (64KB in flight per socket). This was 8
+/// subchannels of 8 pages until 2026-07-11 ("not much worse than 4×16" per
+/// old benchmarks) — but with 128KB socket buffers and late-binding TX the
+/// 8-page pool measurably bound: the RX pump found the subchannel empty on
+/// 12.5% of page allocs (16.5K stalls/s at ~540 MiB/s), each stall setting
+/// the page-wait bits and turning every page free during it into a client
+/// wake syscall (~130K/s). Cost of 4×16: at most 4 sockets per channel.
+pub const IO_SUBCHANNELS: u8 = 4;
 
 pub const fn io_subchannel_mask(io_channel_idx: u8) -> u64 {
     debug_assert!(io_channel_idx < IO_SUBCHANNELS);
 
-    const IO_SUBCHANNEL_WIDTH: u8 = 8;
-    const IO_SUBCHANNEL_MASK: u64 = 0xFF;
+    const IO_SUBCHANNEL_WIDTH: u8 = 64 / IO_SUBCHANNELS;
+    const IO_SUBCHANNEL_MASK: u64 = (1_u64 << IO_SUBCHANNEL_WIDTH) - 1;
     const _A1: () = assert!((IO_SUBCHANNEL_WIDTH as usize) * (IO_SUBCHANNELS as usize) == 64);
-    const _A2: () = assert!(IO_SUBCHANNEL_MASK == ((1 << IO_SUBCHANNEL_WIDTH) - 1));
 
     IO_SUBCHANNEL_MASK << ((io_channel_idx as u64) * (IO_SUBCHANNEL_WIDTH as u64))
 }
 
-const _A1: () = assert!(io_subchannel_mask(0) == 0xFF);
-const _A2: () = assert!(io_subchannel_mask(1) == 0xFF00);
-const _A3: () = assert!(io_subchannel_mask(2) == 0xFF_0000);
-const _A4: () = assert!(io_subchannel_mask(7) == 0xFF00_0000_0000_0000);
+const _A1: () = assert!(io_subchannel_mask(0) == 0xFFFF);
+const _A2: () = assert!(io_subchannel_mask(1) == 0xFFFF_0000);
+const _A3: () = assert!(io_subchannel_mask(2) == 0xFFFF_0000_0000);
+const _A4: () = assert!(io_subchannel_mask(3) == 0xFFFF_0000_0000_0000);
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 #[repr(u32)]
