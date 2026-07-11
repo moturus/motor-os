@@ -18,6 +18,7 @@ use crate::virtio_queue::VqAlloc;
 
 // Feature bits.
 const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
+const VIRTIO_NET_F_GUEST_CSUM: u64 = 1_u64 << 1;
 const VIRTIO_NET_F_MTU: u64 = 1_u64 << 3;
 const VIRTIO_NET_F_MAC: u64 = 1_u64 << 5;
 #[allow(unused)]
@@ -180,6 +181,19 @@ impl NetDevice {
         }
         */
 
+        // VIRTIO_NET_F_GUEST_CSUM: the driver accepts packets with partial
+        // checksums. Once negotiated, the device may deliver packets flagged
+        // VIRTIO_NET_HDR_F_NEEDS_CSUM whose L4 checksum field holds only the
+        // pseudo-header sum (host-originated traffic; the host kernel vouches
+        // for the payload and skips its software checksum-completion pass) or
+        // VIRTIO_NET_HDR_F_DATA_VALID (the device already verified). Either
+        // way the driver must NOT software-verify L4 checksums on RX;
+        // sys-io keys smoltcp's ChecksumCapabilities off guest_csum().
+        if (features_available & VIRTIO_NET_F_GUEST_CSUM) != 0 {
+            features_acked |= VIRTIO_NET_F_GUEST_CSUM;
+            log::info!("virtio-net: VIRTIO_NET_F_GUEST_CSUM negotiated.");
+        }
+
         if (features_available & VIRTIO_NET_F_CSUM) == VIRTIO_NET_F_CSUM {
             // Note: in VirtIO 1.1. spec, section 5.1.6.2, it says:
             /*
@@ -238,6 +252,13 @@ impl NetDevice {
 
     pub fn mtu(&self) -> Option<u16> {
         self.mtu
+    }
+
+    /// True if VIRTIO_NET_F_GUEST_CSUM was negotiated: received TCP/UDP
+    /// packets must be accepted without software checksum verification
+    /// (their L4 checksum field may hold only the pseudo-header sum).
+    pub fn guest_csum(&self) -> bool {
+        (self.dev.borrow().virtio_features_negotiated & VIRTIO_NET_F_GUEST_CSUM) != 0
     }
 
     #[inline(never)]

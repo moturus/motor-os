@@ -1518,11 +1518,14 @@ impl TcpStream {
     /// IO thread when it pops a marker — the late length-binding that makes
     /// page fill adapt to load — and by [`Self::flush_pending_tx`].
     pub(super) fn claim_pending_tx(&self) -> Option<io_channel::Msg> {
-        // Multi-page messages matter in this direction: each client->sys-io
-        // message costs sys-io a task spawn + dispatch (A/B-measured
-        // 2026-07-11: capping claims at one full page dropped bulk TX
-        // 400 -> 342 MiB/s; the reverse direction measured no difference
-        // and stays single-page).
+        // Multi-page messages matter in this direction — A/B-measured twice
+        // (2026-07-11): capping claims at one full page dropped bulk TX
+        // 400 -> 342 MiB/s with sys-io's per-msg task spawn in place, and
+        // 616 -> 546 after the spawn was removed and Tx dispatched inline —
+        // the residual per-message machinery (ring pop, dispatch, socket
+        // lookup, stats, notify) still costs ~1-1.5µs, which binds at bulk
+        // message rates. The reverse direction measured no difference and
+        // stays single-page.
         let mut page_ids = [0_u16; api_net::TCP_TX_MAX_PAGES];
         let mut num_pages = 0_usize;
         let mut total = 0_usize;

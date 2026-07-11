@@ -49,6 +49,7 @@ pub(super) struct VirtioDevice {
     // The device will listen on tx_notify for tx_queue updates.
     tx_notify: Rc<moto_async::LocalNotify>,
     mtu: u16,
+    guest_csum: bool,
 
     buf_cache: BufCache,
 }
@@ -56,6 +57,7 @@ pub(super) struct VirtioDevice {
 impl VirtioDevice {
     pub(super) fn new(inner: Rc<NetDevice>, stats: Rc<NetStats>) -> Self {
         let mtu = inner.mtu().unwrap_or(1536);
+        let guest_csum = inner.guest_csum();
         let this = Self {
             inner,
             rx_queue: Default::default(),
@@ -63,6 +65,7 @@ impl VirtioDevice {
             rx_notify: Default::default(),
             tx_notify: Default::default(),
             mtu,
+            guest_csum,
             buf_cache: Default::default(),
         };
 
@@ -259,6 +262,18 @@ impl smoltcp::phy::Device for VirtioDevice {
         let mut caps = smoltcp::phy::DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ethernet;
         caps.max_transmission_unit = self.mtu as usize;
+        if self.guest_csum {
+            // VIRTIO_NET_F_GUEST_CSUM negotiated: host-originated packets
+            // arrive with partial (pseudo-header-only) L4 checksums that the
+            // host vouches for, so smoltcp must not verify them on RX — it
+            // would reject them — and gets to skip a full read pass over all
+            // RX payload. TX checksums are still computed in software until
+            // VIRTIO_NET_F_CSUM offload is wired up. IPv4 *header* checksums
+            // (20-ish bytes) are still verified — near-free and not covered
+            // by the L4 offload contract.
+            caps.checksum.tcp = smoltcp::phy::Checksum::Tx;
+            caps.checksum.udp = smoltcp::phy::Checksum::Tx;
+        }
         caps
     }
 }
