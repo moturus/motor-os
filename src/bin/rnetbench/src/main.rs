@@ -84,6 +84,21 @@ fn main() {
     }
 }
 
+// The data stream is the repeating 0,1,..,255 pattern: the byte at stream
+// offset i is (i & 0xff). PATTERN[j] == (j & 0xff), sized so that any chunk
+// of up to 1024 bytes starting at any offset & 0xff is a subslice: chunks are
+// filled and verified with one memcpy/memcmp instead of a per-byte loop (the
+// per-byte version cost ~a CPU core at 570 MB/s, masking the OS numbers).
+static PATTERN: [u8; 256 + 1024] = {
+    let mut table = [0u8; 256 + 1024];
+    let mut j = 0;
+    while j < table.len() {
+        table[j] = (j & 0xff) as u8;
+        j += 1;
+    }
+    table
+};
+
 fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Duration, usize) {
     let mut buffer = [0; 1024];
     let mut total_bytes_read = 0usize;
@@ -104,12 +119,15 @@ fn do_throughput_read(mut stream: TcpStream, client_args: Option<&Args>) -> (Dur
         if bytes_read == 0 {
             break;
         }
-        for b in &buffer[0..bytes_read] {
-            if ((counter & 0xff) as u8) != *b {
-                panic!("bad data: counter: {counter} data: {}", *b);
+        let expected = &PATTERN[(counter & 0xff)..][..bytes_read];
+        if &buffer[0..bytes_read] != expected {
+            for (k, b) in buffer[0..bytes_read].iter().enumerate() {
+                if expected[k] != *b {
+                    panic!("bad data: counter: {} data: {}", counter + k, *b);
+                }
             }
-            counter += 1;
         }
+        counter += bytes_read;
         total_bytes_read += bytes_read;
         assert_eq!(total_bytes_read, counter);
     }
@@ -150,10 +168,8 @@ fn do_throughput_write(mut stream: TcpStream, client_args: Option<&Args>) -> (Du
 
         let len = (rdrand() as usize) % data.len();
 
-        for b in &mut data[0..len] {
-            *b = (counter & 0xff) as u8;
-            counter += 1;
-        }
+        data[0..len].copy_from_slice(&PATTERN[(counter & 0xff)..][..len]);
+        counter += len;
 
         let mut written = 0;
         while written < len {
