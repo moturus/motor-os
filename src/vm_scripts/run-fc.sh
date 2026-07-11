@@ -31,8 +31,8 @@ cat <<EOF > /tmp/fc-config.json
     }
   ],
   "machine-config": {
-    "vcpu_count": 2,
-    "mem_size_mib": 256
+    "vcpu_count": 4,
+    "mem_size_mib": 1024
   },
   "logger": {
     "log_path": "/tmp/firecracker.log",

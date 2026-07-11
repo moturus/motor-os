@@ -35,7 +35,7 @@ pub const MAX_FILENAME_LEN: usize = 255;
 pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 8;
-pub(crate) const MAX_BLOCKS_IN_TXN_LOG: usize = 32; // 64 is faster with qemu, but chv hangs
+pub(crate) const MAX_BLOCKS_IN_TXN_LOG: usize = 64;
 
 #[cfg(test)]
 thread_local! {
@@ -688,8 +688,7 @@ impl DirEntryBlock {
         file_block_no: BlockNo,
         block_key: u64,
     ) -> Result<(Option<BlockNo>, BlockNo)> {
-        Node::<BTREE_ROOT_ORDER>::first_child_with_key_and_leaf(txn, file_block_no, block_key)
-            .await
+        Node::<BTREE_ROOT_ORDER>::first_child_with_key_and_leaf(txn, file_block_no, block_key).await
     }
 
     pub fn parent_id(&self) -> EntryIdInternal {
@@ -798,7 +797,9 @@ impl DirEntryBlock {
         {
             let mut entry_block = txn.get_block(file_id.block_no).await?;
             let mut entry_ref = entry_block.block_mut();
-            Self::from_block_mut(&mut entry_ref).btree_root.init_new_root();
+            Self::from_block_mut(&mut entry_ref)
+                .btree_root
+                .init_new_root();
         }
 
         // Move the captured bytes (if any) into data block key 0.

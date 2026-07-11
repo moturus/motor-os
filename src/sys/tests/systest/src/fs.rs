@@ -166,10 +166,16 @@ pub fn smoke_test() {
             moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
     }
 
+    // WRITE.
     let ts0 = std::time::Instant::now();
     std::fs::write("/bar", bytes.as_slice()).unwrap();
+    let dur_write = ts0.elapsed();
     let cpu_usage_write = crate::mpmc::get_cpu_usage();
 
+    // Sleep to let async writes to flush and not pollute read time/stats.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // READ.
     run_pstat("before");
     let ts1 = std::time::Instant::now();
     let bytes_back = std::fs::read("/bar").unwrap();
@@ -191,8 +197,6 @@ pub fn smoke_test() {
             stats_after[idx]
         );
     }
-
-    let dur_write = ts1 - ts0;
 
     assert_eq!(
         moto_rt::fnv1a_hash_64(bytes.as_slice()),

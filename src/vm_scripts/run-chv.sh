@@ -4,7 +4,7 @@ rm -f /tmp/chv
 
 WD="$(dirname $0)"
 
-cloud-hypervisor-static --cpus boot=2 --memory size=256M \
+cloud-hypervisor-static --cpus boot=4 --memory size=1024M \
     --api-socket /tmp/chv \
     --console off --serial tty \
     --log-file /tmp/cloud-hypervisor.log -v \
