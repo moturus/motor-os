@@ -34,7 +34,7 @@ pub struct FrusaStats {
 /// An allocator that manages allocations below 4K and uses
 /// the fallback allocator for the rest.
 pub struct Frusa4K {
-    inner: Frusa<8>,
+    inner: Frusa<9>,
 }
 
 unsafe impl Send for Frusa4K {}
@@ -53,7 +53,7 @@ unsafe impl GlobalAlloc for Frusa4K {
 impl Frusa4K {
     pub const fn new(fallback: &'static dyn GlobalAlloc) -> Self {
         Self {
-            inner: Frusa::<8>::new(fallback),
+            inner: Frusa::<9>::new(fallback),
         }
     }
 
