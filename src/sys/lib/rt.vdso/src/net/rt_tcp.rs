@@ -1359,10 +1359,9 @@ impl TcpStream {
         };
         let write_sz = unsafe { Self::tx_copy(bufs, io_page.bytes_mut()) };
 
-        let msg =
-            api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
+        let (msg, total_sz) = self.build_tx_msg(bufs, io_page, write_sz);
         self.channel().send_msg(msg);
-        Ok(write_sz)
+        Ok(total_sz)
     }
 
     unsafe fn tx_copy(src: &[&[u8]], mut dst: &mut [u8]) -> usize {
@@ -1381,6 +1380,106 @@ impl TcpStream {
         written
     }
 
+    /// Like [`Self::tx_copy`], but skipping the first `offset` bytes of `src`.
+    fn tx_copy_at(src: &[&[u8]], mut offset: usize, dst: &mut [u8]) -> usize {
+        let mut written = 0;
+        for buf in src {
+            if offset >= buf.len() {
+                offset -= buf.len();
+                continue;
+            }
+            let src_bytes = &buf[offset..];
+            offset = 0;
+
+            let to_write = src_bytes.len().min(dst.len() - written);
+            dst[written..(written + to_write)].copy_from_slice(&src_bytes[..to_write]);
+            written += to_write;
+
+            if written == dst.len() {
+                break;
+            }
+        }
+
+        written
+    }
+
+    /// Build the Tx message for `bufs`, whose first [`io_channel::PAGE_SIZE`]
+    /// bytes are already in `first_page` (`first_sz` of them). A write larger
+    /// than one page grows into a multi-page message (up to
+    /// [`api_net::TCP_TX_MAX_PAGES`] pages, see `tcp_stream_tx_multi_msg`);
+    /// the extra pages are allocated non-blocking, so a large write sends
+    /// what fits and returns a short count rather than stalling while it
+    /// holds pages. Returns the message and the total bytes it carries.
+    fn build_tx_msg(
+        &self,
+        bufs: &[&[u8]],
+        first_page: io_channel::IoPage,
+        first_sz: usize,
+    ) -> (io_channel::Msg, usize) {
+        let total_in: usize = bufs.iter().map(|b| b.len()).sum();
+        if first_sz < io_channel::PAGE_SIZE || first_sz == total_in {
+            let msg = api_net::tcp_stream_tx_msg(
+                self.handle(),
+                first_page,
+                first_sz,
+                Instant::now().as_u64(),
+            );
+            return (msg, first_sz);
+        }
+
+        let mut pages = alloc::vec![first_page];
+        let mut total = first_sz;
+        while total < total_in && pages.len() < api_net::TCP_TX_MAX_PAGES {
+            let Ok(page) = self.channel().alloc_page(self.subchannel_mask) else {
+                break;
+            };
+            let sz = Self::tx_copy_at(bufs, total, page.bytes_mut());
+            debug_assert!(sz > 0);
+            pages.push(page);
+            total += sz;
+            if sz < io_channel::PAGE_SIZE {
+                break;
+            }
+        }
+
+        if pages.len() == 1 {
+            let msg = api_net::tcp_stream_tx_msg(
+                self.handle(),
+                pages.pop().unwrap(),
+                total,
+                Instant::now().as_u64(),
+            );
+            return (msg, total);
+        }
+
+        let mut page_ids = [0_u16; api_net::TCP_TX_MAX_PAGES];
+        let num_pages = pages.len();
+        for (idx, page) in pages.into_iter().enumerate() {
+            page_ids[idx] = io_channel::IoPage::into_u16(page);
+        }
+        let msg = api_net::tcp_stream_tx_multi_msg(
+            self.handle(),
+            &page_ids[..num_pages],
+            total as u32,
+            Instant::now().as_u64(),
+        );
+        (msg, total)
+    }
+
+    /// Recover and drop (= free) every io_page referenced by a Tx message
+    /// that will not be sent.
+    fn tx_msg_free_pages(&self, msg: &io_channel::Msg) {
+        let num_pages = if msg.flags == 0 {
+            1
+        } else {
+            (msg.flags as usize).div_ceil(io_channel::PAGE_SIZE)
+        };
+        for idx in 0..num_pages {
+            // Recovering the page and dropping it frees it.
+            let _ = self.channel().get_page(msg.payload.shared_pages()[idx]);
+        }
+    }
+
     fn do_write_nonblocking(&self, iovec: &[&[u8]]) -> Result<usize, ErrorCode> {
         let Ok(io_page) = self.channel().alloc_page(self.subchannel_mask) else {
             self.channel().add_write_waiter(self);
@@ -1389,20 +1488,15 @@ impl TcpStream {
 
         let write_sz = unsafe { Self::tx_copy(iovec, io_page.bytes_mut()) };
 
-        let msg =
-            api_net::tcp_stream_tx_msg(self.handle(), io_page, write_sz, Instant::now().as_u64());
-        if let Err(msg) = self.try_tx(msg, write_sz) {
-            // Get the page back so that it can be released.
-            let io_page = self
-                .channel()
-                .get_page(msg.payload.shared_pages()[0])
-                .unwrap();
-            core::mem::drop(io_page);
+        let (msg, total_sz) = self.build_tx_msg(iovec, io_page, write_sz);
+        if let Err(msg) = self.try_tx(msg, total_sz) {
+            // Get the page(s) back so that they can be released.
+            self.tx_msg_free_pages(&msg);
             self.channel().add_write_waiter(self);
             return Err(moto_rt::E_NOT_READY);
         }
 
-        Ok(write_sz)
+        Ok(total_sz)
     }
 
     fn write_nonblocking(&self, iovec: &[&[u8]]) -> Result<usize, ErrorCode> {

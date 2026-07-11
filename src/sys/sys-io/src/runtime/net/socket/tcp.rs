@@ -1257,12 +1257,37 @@ impl MotoSocket {
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
-        // Note: we need to get the page so that it is freed.
-        let page_idx = msg.payload.shared_pages()[0];
-        let page = if let Ok(page) = sender.get_page(page_idx) {
-            page
+        // Recover the page(s) first, before any validation, so that they are
+        // freed on every return path. `flags` distinguishes the two request
+        // formats: zero = classic single page (size in args_64[1]), nonzero =
+        // multi-page (flags = total size, pages full except the last) — see
+        // api_net::tcp_stream_tx_multi_msg.
+        let mut pages: Vec<(moto_ipc::io_channel::IoPage, usize)> = if msg.flags == 0 {
+            let page_idx = msg.payload.shared_pages()[0];
+            let Ok(page) = sender.get_page(page_idx) else {
+                return Err(ErrorKind::InvalidInput.into());
+            };
+
+            let sz = msg.payload.args_64()[1] as usize;
+            if sz > moto_ipc::io_channel::PAGE_SIZE {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            vec![(page, sz)]
         } else {
-            return Err(ErrorKind::InvalidInput.into());
+            let Ok((pages, total_len)) = api_net::tcp_stream_tx_multi_decode(&msg, sender) else {
+                // TODO: drop the connection?
+                return Err(ErrorKind::InvalidInput.into());
+            };
+            let mut remaining = total_len as usize;
+            pages
+                .into_iter()
+                .map(|page| {
+                    let sz = remaining.min(moto_ipc::io_channel::PAGE_SIZE);
+                    remaining -= sz;
+                    (page, sz)
+                })
+                .collect()
         };
 
         let socket_id = msg.handle;
@@ -1274,12 +1299,6 @@ impl MotoSocket {
             let mut socket_ref = moto_socket.borrow_mut();
             if socket_ref.base.client_sender.remote_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
-            }
-
-            let sz = msg.payload.args_64()[1] as usize;
-            if sz > moto_ipc::io_channel::PAGE_SIZE {
-                // TODO: drop the connection?
-                return Err(ErrorKind::InvalidInput.into());
             }
 
             // Check that the socket is indeed tcp before unwrapping.
@@ -1295,7 +1314,8 @@ impl MotoSocket {
                 return Err(ErrorKind::NotConnected.into());
             }
 
-            tcp_state.stat_tx_bytes += sz as u64;
+            let total_sz: usize = pages.iter().map(|(_, sz)| *sz).sum();
+            tcp_state.stat_tx_bytes += total_sz as u64;
             runtime
                 .stats
                 .tcp_tx_msgs
@@ -1303,12 +1323,14 @@ impl MotoSocket {
             runtime
                 .stats
                 .tcp_tx_bytes
-                .set(runtime.stats.tcp_tx_bytes.get() + sz as u64);
-            tcp_state.tx_queue.push_back(TcpTxBuf {
-                page,
-                len: sz,
-                consumed: 0,
-            });
+                .set(runtime.stats.tcp_tx_bytes.get() + total_sz as u64);
+            for (page, sz) in pages.drain(..) {
+                tcp_state.tx_queue.push_back(TcpTxBuf {
+                    page,
+                    len: sz,
+                    consumed: 0,
+                });
+            }
 
             tcp_state.tx_queue_notify.notify_one();
         }

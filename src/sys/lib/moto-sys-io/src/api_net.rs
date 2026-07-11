@@ -5,6 +5,8 @@ use core::net::Ipv6Addr;
 use core::net::SocketAddr;
 use moto_ipc::io_channel;
 
+extern crate alloc;
+
 pub const CMD_MIN: u16 = io_channel::CMD_RESERVED_MAX; // 4352 == 0x1100
 
 #[derive(Debug, PartialEq, Eq)]
@@ -221,6 +223,66 @@ pub fn tcp_stream_tx_msg(
     msg.payload.args_64_mut()[2] = timestamp;
 
     msg
+}
+
+/// Multi-page TX, mirroring the FS multi-block writes: a TcpStreamTx message
+/// whose data spans more than one io_page carries up to [`TCP_TX_MAX_PAGES`]
+/// pages in `payload.shared_pages()[0..8]`, each full except possibly the
+/// last (so per-page lengths need no wire space); the total length travels
+/// in `Msg::flags` — a classic single-page Tx ([`tcp_stream_tx_msg`]) leaves
+/// `flags` zero, which is how the server tells the formats apart. The
+/// timestamp moves to `payload.args_64()[2]` (the page ids occupy the rest).
+/// Fire-and-forget, like the single-page form.
+pub const TCP_TX_MAX_PAGES: usize = 8;
+pub const TCP_TX_MAX_BYTES: usize = TCP_TX_MAX_PAGES * io_channel::PAGE_SIZE;
+
+/// Encode a multi-page TX message. `pages` are the io_page ids (from
+/// [`io_channel::IoPage::into_u16`]), full except possibly the last.
+pub fn tcp_stream_tx_multi_msg(
+    handle: u64,
+    pages: &[u16],
+    total_len: u32,
+    timestamp: u64,
+) -> io_channel::Msg {
+    debug_assert!(total_len > 0 && (total_len as usize) <= TCP_TX_MAX_BYTES);
+    debug_assert_eq!(
+        pages.len(),
+        (total_len as usize).div_ceil(io_channel::PAGE_SIZE)
+    );
+
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::TcpStreamTx as u16;
+    msg.handle = handle;
+    msg.flags = total_len;
+    msg.payload.shared_pages_mut()[..pages.len()].copy_from_slice(pages);
+    msg.payload.args_64_mut()[2] = timestamp;
+
+    msg
+}
+
+/// Decode a multi-page TX request (`msg.flags != 0`): the data pages and the
+/// total length. Page i holds bytes `[i * PAGE_SIZE..]` of the payload.
+pub fn tcp_stream_tx_multi_decode(
+    msg: &io_channel::Msg,
+    sender: &io_channel::Sender,
+) -> moto_rt::Result<(alloc::vec::Vec<io_channel::IoPage>, u32)> {
+    let total_len = msg.flags;
+
+    // The length comes from an untrusted client; bound it before recovering
+    // pages.
+    if total_len == 0 || total_len as usize > TCP_TX_MAX_BYTES {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+
+    let num_pages = (total_len as usize).div_ceil(io_channel::PAGE_SIZE);
+    let mut pages = alloc::vec::Vec::with_capacity(num_pages);
+    for idx in 0..num_pages {
+        // Note: pages already recovered are dropped (freed) if a later
+        // get_page fails.
+        pages.push(sender.get_page(msg.payload.shared_pages()[idx])?);
+    }
+
+    Ok((pages, total_len))
 }
 
 pub fn tcp_stream_rx_msg(
