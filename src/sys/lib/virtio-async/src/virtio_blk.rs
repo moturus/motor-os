@@ -39,7 +39,7 @@ pub const BLOCK_SIZE: usize = 4096;
  */
 // Virtio-Blk features used here.
 //const VIRTIO_BLK_F_SIZE_MAX : u64 = 1u64 << 1;
-//const VIRTIO_BLK_F_SEG_MAX  : u64 = 1u64 << 2;
+const VIRTIO_BLK_F_SEG_MAX: u64 = 1u64 << 2;
 const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
@@ -64,12 +64,23 @@ pub struct BlockDevice {
     capacity: u64, // The number of sectors of BLOCK_SIZE.
     read_only: bool,
     flush_enabled: bool,
+    seg_max: usize,
 }
 
 impl BlockDevice {
     /// The number of sectors (512 bytes) the device has.
     pub fn capacity(&self) -> u64 {
         self.capacity
+    }
+
+    /// The maximum number of data descriptors (segments) per request.
+    ///
+    /// From VIRTIO_BLK_F_SEG_MAX; when the device does not offer the feature
+    /// this is 1 (the convention Linux follows): e.g. Firecracker does not
+    /// offer it and rejects/mangles requests with more than one data
+    /// descriptor.
+    pub fn seg_max(&self) -> usize {
+        self.seg_max
     }
 
     pub fn from(dev: VirtioDevice) -> Result<Rc<Self>> {
@@ -94,17 +105,23 @@ impl BlockDevice {
         }
 
         dev_mut.acknowledge_driver(); // Step 3
-        let (capacity, read_only) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
+        let (capacity, read_only, seg_max) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         dev_mut.init_virtqueues(1, 1)?; // Step 7
         dev_mut.driver_ok(); // Step 8
 
         let virtqueue = dev_mut.virtqueues[0].clone();
 
+        // Requests also need a header and a status descriptor, and
+        // post_read_many/post_write_many keep chains within half the queue.
+        let queue_size = virtqueue.borrow().queue_size() as usize;
+        let seg_max = seg_max.clamp(1, queue_size / 2 - 2);
+
         log::debug!(
-            "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {}.",
+            "Initialized Virtio BLOCK device {:?}: capacity: 0x{:x} read only: {} seg_max: {}.",
             dev_mut.pci_device.id,
             capacity,
-            read_only
+            read_only,
+            seg_max
         );
 
         let flush_enabled = dev_mut.virtio_features_negotiated & VIRTIO_BLK_F_FLUSH != 0;
@@ -117,11 +134,12 @@ impl BlockDevice {
             read_only,
             virtqueue,
             flush_enabled,
+            seg_max,
         }))
     }
 
-    // Step 4; returns (capacity, read_only)
-    fn negotiate_features(dev: &mut VirtioDevice) -> Result<(u64, bool)> {
+    // Step 4; returns (capacity, read_only, seg_max)
+    fn negotiate_features(dev: &mut VirtioDevice) -> Result<(u64, bool, usize)> {
         let features_available = dev.get_available_features();
         log::debug!("BLK devices features: 0x{features_available:x}");
 
@@ -139,6 +157,17 @@ impl BlockDevice {
             log::debug!("VirtioBLK: VIRTIO_BLK_F_FLUSH feature is not available");
         } else {
             features_acked |= VIRTIO_BLK_F_FLUSH;
+        }
+
+        let seg_max_offered = (features_available & VIRTIO_BLK_F_SEG_MAX) != 0;
+        if seg_max_offered {
+            features_acked |= VIRTIO_BLK_F_SEG_MAX;
+        } else {
+            // Without the feature the device may support only a single data
+            // descriptor per request (Firecracker does exactly that).
+            log::info!(
+                "virtio-blk: VIRTIO_BLK_F_SEG_MAX not offered; limiting requests to one data descriptor."
+            );
         }
 
         /*
@@ -171,7 +200,15 @@ impl BlockDevice {
             .unwrap();
         let capacity = cfg_bar.read_u64(device_cfg.offset as u64);
 
-        Ok((capacity, read_only))
+        // struct virtio_blk_config: capacity: u64, size_max: u32, seg_max: u32.
+        // The seg_max field is valid only if the feature was offered.
+        let seg_max = if seg_max_offered {
+            cfg_bar.read_u32(device_cfg.offset as u64 + 12) as usize
+        } else {
+            1
+        };
+
+        Ok((capacity, read_only, seg_max))
     }
 
     #[inline(never)]
@@ -245,6 +282,7 @@ impl BlockDevice {
 
         let num_buffers = buffers.len();
         assert!(num_buffers > 0);
+        assert!(num_buffers <= self.seg_max);
         // Header + data descriptors + status must fit the queue (and leave
         // room for concurrent requests; callers keep chains short).
         let chain_len = (num_buffers + 2) as u16;
@@ -360,6 +398,7 @@ impl BlockDevice {
 
         let num_buffers = buffers.len();
         assert!(num_buffers > 0);
+        assert!(num_buffers <= self.seg_max);
         // Header + data descriptors + status must fit the queue (and leave
         // room for concurrent requests; callers keep chains short).
         let chain_len = (num_buffers + 2) as u16;
