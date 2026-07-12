@@ -46,6 +46,7 @@ struct VirtqAvail {
 
 unsafe impl Send for VirtqAvail {}
 
+#[derive(Clone, Copy)]
 pub struct UserData {
     pub phys_addr: u64,
     pub len: u32,
@@ -191,6 +192,10 @@ pub(super) struct Virtqueue {
 
     queue_size_mask: u16, // queue_size - 1
 
+    // The value of available_ring.next_available_idx at the last device
+    // notification (doorbell); see notify_device_if_needed.
+    last_kick_idx: u16,
+
     alloc_waiters: VecDeque<std::task::LocalWaker>,
 
     // For each slot we may have a waker.
@@ -277,6 +282,7 @@ impl Virtqueue {
             free_head_idx: 0,
             next_used_idx: 0,
             wait_handle: SysHandle::NONE,
+            last_kick_idx: 0,
             header_buffers,
             notify_bar: core::ptr::null(),
             notify_offset: 0,
@@ -394,16 +400,33 @@ impl Virtqueue {
         self.virtio_f_event_idx_negotiated = true;
     }
 
-    fn notify_device_if_needed(&self, avail_idx: u16) {
+    fn notify_device_if_needed(&mut self, new_idx: u16) {
         mfence();
         // Safety: safe by construction.
         unsafe {
             if self.virtio_f_event_idx_negotiated {
-                if avail_idx == self.used_ring.avail_event.read_volatile() {
+                // The spec's vring_need_event (virtio 1.1 §2.7.10): kick if
+                // avail_event falls anywhere in the window of entries
+                // published since the last kick, i.e. (last_kick, new_idx]
+                // in wrapping u16 arithmetic. An exact-equality check
+                // against the just-published index loses the doorbell when
+                // the device arms avail_event concurrently with a batch of
+                // publishes — survivable at high packet rates (the next
+                // publish re-races it) but a permanent stall once
+                // publishing itself waits for completions, as with
+                // multi-descriptor TX chains exhausting the table.
+                let event_idx = self.used_ring.avail_event.read_volatile();
+                if new_idx
+                    .wrapping_sub(event_idx)
+                    .wrapping_sub(1)
+                    < new_idx.wrapping_sub(self.last_kick_idx)
+                {
                     (*self.notify_bar).write_u16(self.notify_offset, 0);
+                    self.last_kick_idx = new_idx;
                 }
             } else if (self.used_ring.flags as *const u16).read_volatile() == 0 {
                 (*self.notify_bar).write_u16(self.notify_offset, 0);
+                self.last_kick_idx = new_idx;
             }
         }
         mfence();
@@ -444,22 +467,21 @@ impl Virtqueue {
         // Note: we can unconditionally add/increment available_idx
         //       because we successfully allocated (available) descriptors.
         mfence();
-        let prev_idx = unsafe {
+        let new_idx = unsafe {
             let idx = *self.available_ring.next_available_idx;
             ((&mut self.available_ring.ring[(idx & self.queue_size_mask) as usize]) as *mut u16)
                 .write_volatile(head);
             mfence();
 
-            let prev_idx = idx;
             // Note: we must wrap around at u16::MAX, not at queue_size, otherwise
             // both CHV and Qemu misbehave.
             let next_idx = idx.wrapping_add(1);
             self.available_ring
                 .next_available_idx
                 .write_volatile(next_idx);
-            prev_idx
+            next_idx
         };
-        self.notify_device_if_needed(prev_idx);
+        self.notify_device_if_needed(new_idx);
     }
 
     pub fn alloc_descriptor_chain(&mut self, chain_len: u16) -> Option<u16> {

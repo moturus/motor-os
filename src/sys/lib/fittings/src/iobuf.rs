@@ -67,6 +67,10 @@ impl IoBuf {
         self.len
     }
 
+    pub fn capacity(&self) -> usize {
+        self.layout_size_align
+    }
+
     pub fn set_len(&mut self, len: usize) {
         #[cfg(debug_assertions)]
         {

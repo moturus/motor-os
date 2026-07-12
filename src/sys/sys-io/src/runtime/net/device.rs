@@ -15,27 +15,47 @@ use virtio_async::virtio_net::NetDevice;
 use moto_tooling::iobuf::IoBuf;
 
 type RxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
-type TxQueue = Rc<RefCell<VecDeque<IoBuf>>>;
+// Egress packets travel with their TSO segment size (0 = a regular
+// MTU-bounded packet; nonzero = a TCP super-segment the device splits).
+type TxQueue = Rc<RefCell<VecDeque<(IoBuf, u16)>>>;
+
+/// Max TCP payload of one TSO super-segment we ask smoltcp to emit.
+/// Bounded by BIG_BUF_SIZE minus headers; 60K leaves comfortable room
+/// (the IPv4 total-length field caps a packet at 65535 anyway).
+const TSO_MAX_PAYLOAD: usize = 60 * 1024;
+
+const SMALL_BUF_SIZE: usize = 2048; // RX buffers + MTU-sized TX packets.
+const BIG_BUF_SIZE: usize = 65536; // TSO TX super-segments.
 
 #[derive(Default, Clone)]
 struct BufCache {
-    inner: Rc<RefCell<Vec<IoBuf>>>,
+    small: Rc<RefCell<Vec<IoBuf>>>,
+    big: Rc<RefCell<Vec<IoBuf>>>,
 }
 
 impl BufCache {
-    fn pop_buf(&self) -> IoBuf {
-        self.inner
-            .borrow_mut()
+    fn pop_buf(&self, len: usize) -> IoBuf {
+        let (pool, size) = if len <= SMALL_BUF_SIZE {
+            (&self.small, SMALL_BUF_SIZE)
+        } else {
+            assert!(len <= BIG_BUF_SIZE);
+            (&self.big, BIG_BUF_SIZE)
+        };
+        pool.borrow_mut()
             .pop()
             .map(|mut buf| {
-                buf.set_len(2048);
+                buf.set_len(size);
                 buf
             })
-            .unwrap_or_else(|| IoBuf::new_from_size_align(2048).unwrap())
+            .unwrap_or_else(|| IoBuf::new_from_size_align(size).unwrap())
     }
 
     fn push_buf(&self, buf: IoBuf) {
-        self.inner.borrow_mut().push(buf);
+        if buf.capacity() <= SMALL_BUF_SIZE {
+            self.small.borrow_mut().push(buf);
+        } else {
+            self.big.borrow_mut().push(buf);
+        }
     }
 }
 
@@ -51,6 +71,7 @@ pub(super) struct VirtioDevice {
     mtu: u16,
     guest_csum: bool,
     csum_offload: bool,
+    tso: bool,
 
     buf_cache: BufCache,
 }
@@ -60,6 +81,7 @@ impl VirtioDevice {
         let mtu = inner.mtu().unwrap_or(1536);
         let guest_csum = inner.guest_csum();
         let csum_offload = inner.csum_offload();
+        let tso = inner.tso();
         let this = Self {
             inner,
             rx_queue: Default::default(),
@@ -69,6 +91,7 @@ impl VirtioDevice {
             mtu,
             guest_csum,
             csum_offload,
+            tso,
             buf_cache: Default::default(),
         };
 
@@ -108,7 +131,12 @@ impl VirtioDevice {
         // Pre-submit blocks.
         let mut completions = VecDeque::with_capacity(rxq_sz);
         for _ in 0..rxq_sz {
-            completions.push_back(net_dev.clone().post_read(buf_cache.pop_buf()).await);
+            completions.push_back(
+                net_dev
+                    .clone()
+                    .post_read(buf_cache.pop_buf(SMALL_BUF_SIZE))
+                    .await,
+            );
         }
 
         #[cfg(debug_assertions)]
@@ -137,30 +165,47 @@ impl VirtioDevice {
             rx_notify.notify_one();
 
             log::debug!("NET: RX: posting read");
-            completions.push_back(net_dev.clone().post_read(buf_cache.pop_buf()).await);
+            completions.push_back(
+                net_dev
+                    .clone()
+                    .post_read(buf_cache.pop_buf(SMALL_BUF_SIZE))
+                    .await,
+            );
         }
     }
 
     async fn tx_task(
         net_dev: Rc<NetDevice>,
-        tx_queue: RxQueue,
+        tx_queue: TxQueue,
         tx_notify: Rc<moto_async::LocalNotify>,
         buf_cache: BufCache,
         stats: Rc<NetStats>,
     ) {
-        let mut completions = VecDeque::new();
-        let txq_sz = net_dev.txq_sz() as usize;
+        // (completion, descriptors it holds); descriptors are released
+        // only when the completion resolves AND is dropped here.
+        let mut completions: VecDeque<(_, usize)> = VecDeque::new();
+        // txq_sz() halves the queue size assuming 2-slot chains; the real
+        // descriptor count is what matters now that TSO chains span up to
+        // MAX_TX_DESCS slots.
+        let txq_descs = (net_dev.txq_sz() as usize) * 2;
+        let mut inflight_descs = 0_usize;
 
         loop {
-            // TODO: reap completions smarter.
-            if completions.len() == txq_sz {
-                let completion = completions.pop_front().unwrap();
+            // Guarantee descriptor headroom BEFORE post_write: post_write
+            // waits for descriptors internally, and if this task blocked
+            // there while every descriptor was owned by the resolved-but-
+            // undropped completions in our deque, nothing would ever free
+            // them — a self-deadlock (hit by the first TSO chain: the
+            // deque held 128 two-descriptor chains = the entire table).
+            while txq_descs - inflight_descs < virtio_async::virtio_net::MAX_TX_DESCS {
+                let (completion, descs) = completions.pop_front().unwrap();
                 let (buf, _) = completion.await;
                 buf_cache.push_buf(buf);
+                inflight_descs -= descs;
             }
             let maybe_tx_vec = tx_queue.borrow_mut().pop_front();
 
-            if let Some(packet) = maybe_tx_vec {
+            if let Some((packet, tso_seg_size)) = maybe_tx_vec {
                 log::debug!("NET TX {} bytes", packet.len());
                 stats
                     .device_tx_packets
@@ -168,7 +213,9 @@ impl VirtioDevice {
                 stats
                     .device_tx_bytes
                     .set(stats.device_tx_bytes.get() + packet.len() as u64);
-                completions.push_back(net_dev.clone().post_write(packet).await);
+                let (completion, descs) = net_dev.clone().post_write(packet, tso_seg_size).await;
+                inflight_descs += descs;
+                completions.push_back((completion, descs));
             } else {
                 tx_notify.notified().await;
             }
@@ -203,17 +250,26 @@ pub struct VirtioTxToken {
     tx_queue: TxQueue,
     tx_notify: Rc<moto_async::LocalNotify>,
     buf_cache: BufCache,
+    // From PacketMeta::tso_seg_size via set_meta (the iface calls it just
+    // before consume): nonzero marks a TCP super-segment.
+    tso_seg_size: u16,
 }
 
 impl smoltcp::phy::TxToken for VirtioTxToken {
+    fn set_meta(&mut self, meta: smoltcp::phy::PacketMeta) {
+        self.tso_seg_size = meta.tso_seg_size;
+    }
+
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut packet = self.buf_cache.pop_buf();
+        let mut packet = self.buf_cache.pop_buf(len);
         packet.set_len(len);
         let result = f(packet.as_mut());
-        self.tx_queue.borrow_mut().push_back(packet);
+        self.tx_queue
+            .borrow_mut()
+            .push_back((packet, self.tso_seg_size));
         self.tx_notify.notify_one();
         log::debug!("TxToken: consume {len}.");
         result
@@ -247,6 +303,7 @@ impl smoltcp::phy::Device for VirtioDevice {
                     tx_queue: self.tx_queue.clone(),
                     tx_notify: self.tx_notify.clone(),
                     buf_cache: self.buf_cache.clone(),
+                    tso_seg_size: 0,
                 },
             )
         })
@@ -258,6 +315,7 @@ impl smoltcp::phy::Device for VirtioDevice {
             tx_queue: self.tx_queue.clone(),
             tx_notify: self.tx_notify.clone(),
             buf_cache: self.buf_cache.clone(),
+            tso_seg_size: 0,
         })
     }
 
@@ -292,6 +350,14 @@ impl smoltcp::phy::Device for VirtioDevice {
         } else {
             Checksum::Both
         };
+        // TCP segmentation offload (VIRTIO_NET_F_HOST_TSO4+6): smoltcp may
+        // emit TCP super-segments up to this payload size; post_write marks
+        // them with gso_type/gso_size and the host segments them (or, for
+        // host-local delivery, consumes them whole). Requires csum_offload
+        // — a TSO packet is by definition NEEDS_CSUM.
+        if self.tso && self.csum_offload {
+            caps.max_tso_size = TSO_MAX_PAYLOAD;
+        }
         caps
     }
 }

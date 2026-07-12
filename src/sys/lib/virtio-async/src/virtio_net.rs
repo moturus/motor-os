@@ -20,6 +20,8 @@ use crate::virtio_queue::VqAlloc;
 const VIRTIO_NET_F_CSUM: u64 = 1_u64 << 0;
 const VIRTIO_NET_F_GUEST_CSUM: u64 = 1_u64 << 1;
 const VIRTIO_NET_F_MTU: u64 = 1_u64 << 3;
+const VIRTIO_NET_F_HOST_TSO4: u64 = 1_u64 << 11;
+const VIRTIO_NET_F_HOST_TSO6: u64 = 1_u64 << 12;
 const VIRTIO_NET_F_MAC: u64 = 1_u64 << 5;
 #[allow(unused)]
 const VIRTIO_NET_F_STATUS: u64 = 1_u64 << 16;
@@ -51,8 +53,32 @@ pub(super) const NET_HEADER_LEN: usize = core::mem::size_of::<NetHeader>();
 /// (or the host stack, lazily) completes the checksum.
 const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
 
+// NetHeader::gso_type values (virtio 1.1 §5.1.6.2).
+const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
+
+/// The most data descriptors one TX packet may need: buffers are
+/// physically contiguous only within 4K pages, so a 64K (max) buffer
+/// spans at most 17 pages (16 + 1 if the start is not page-aligned).
+const MAX_TX_RUNS: usize = 17;
+
+/// The most descriptors one post_write may consume (header + data runs).
+/// The caller MUST keep at least this many descriptors free (see
+/// post_write's return value) or post_write can deadlock: descriptors of
+/// completed chains are only released when their completions are dropped,
+/// so a task that blocks inside post_write while holding unreaped
+/// completions starves itself forever.
+pub const MAX_TX_DESCS: usize = 1 + MAX_TX_RUNS;
+
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const ETHERTYPE_IPV6: u16 = 0x86DD;
+
+/// What maybe_set_needs_csum learned about an egress TCP packet; feeds the
+/// TSO fields in post_write.
+struct TcpTxInfo {
+    csum_start: u16, // Ethernet + IP header lengths.
+    ipv6: bool,
+}
 
 /// TX checksum offload (VIRTIO_NET_F_CSUM): smoltcp is told (via sys-io's
 /// ChecksumCapabilities) not to compute TCP checksums — it zeroes the field
@@ -60,17 +86,17 @@ const ETHERTYPE_IPV6: u16 = 0x86DD;
 /// seed the checksum field with the TCP pseudo-header sum and point the
 /// device at it (virtio 1.1 §5.1.6.2). Everything else (ARP, ICMP, UDP,
 /// IPv4 headers) is still fully checksummed by smoltcp and passes through
-/// with flags == 0. UDP is deliberately not offloaded: a fragmented UDP
-/// datagram carries its L4 header only in the first fragment, which
-/// NEEDS_CSUM cannot describe.
-fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) {
+/// with flags == 0 (and `None` returned). UDP is deliberately not
+/// offloaded: a fragmented UDP datagram carries its L4 header only in the
+/// first fragment, which NEEDS_CSUM cannot describe.
+fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) -> Option<TcpTxInfo> {
     const ETH: usize = 14; // dst(6) + src(6) + ethertype(2)
     const TCP_CSUM_OFFSET: u16 = 16; // checksum position in the TCP header
     const TCP: u8 = 6;
 
     if packet.len() < ETH + 40 {
         // Smaller than the smallest (IPv4 + TCP) header pair.
-        return;
+        return None;
     }
 
     // (csum_start, ones'-complement pseudo-header sum), or not ours.
@@ -90,7 +116,7 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) {
                 // nonzero fragment offset (DF is fine).
                 || u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff != 0
             {
-                return;
+                return None;
             }
             let mut sum = TCP as u32 + (total_len - ihl) as u32; // proto + TCP len
             for word in ip[12..20].chunks_exact(2) {
@@ -109,7 +135,7 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) {
                 || payload_len < 20
                 || ETH + 40 + payload_len > packet.len()
             {
-                return;
+                return None;
             }
             let mut sum = TCP as u32 + payload_len as u32; // next-hdr + TCP len
             for word in ip[8..40].chunks_exact(2) {
@@ -118,7 +144,7 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) {
             }
             (ETH + 40, sum)
         }
-        _ => return, // ARP etc. — fully checksummed by the stack.
+        _ => return None, // ARP etc. — fully checksummed by the stack.
     };
 
     while sum > 0xffff {
@@ -135,6 +161,11 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) {
     header.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
     header.csum_start = csum_start as u16;
     header.csum_offset = TCP_CSUM_OFFSET;
+
+    Some(TcpTxInfo {
+        csum_start: csum_start as u16,
+        ipv6: packet[12] == 0x86,
+    })
 }
 
 pub struct NetDevice {
@@ -142,6 +173,7 @@ pub struct NetDevice {
     mac: [u8; 6],
     mtu: Option<u16>,
     csum_offload: bool,
+    tso: bool, // Both HOST_TSO4 and HOST_TSO6 negotiated.
     virtq_tx: Rc<RefCell<Virtqueue>>,
     virtq_rx: Rc<RefCell<Virtqueue>>,
 }
@@ -194,6 +226,9 @@ impl NetDevice {
         dev_mut.acknowledge_driver(); // Step 3
         let (mac, mtu) = Self::negotiate_features(&mut dev_mut)?; // Steps 4, 5, 6
         let csum_offload = (dev_mut.virtio_features_negotiated & VIRTIO_NET_F_CSUM) != 0;
+        let tso = (dev_mut.virtio_features_negotiated
+            & (VIRTIO_NET_F_HOST_TSO4 | VIRTIO_NET_F_HOST_TSO6))
+            == (VIRTIO_NET_F_HOST_TSO4 | VIRTIO_NET_F_HOST_TSO6);
         dev_mut.init_virtqueues(2, 2)?; // Step 7
         dev_mut.driver_ok(); // Step 8
 
@@ -212,6 +247,7 @@ impl NetDevice {
             mac,
             mtu,
             csum_offload,
+            tso,
             virtq_rx,
             virtq_tx,
         }))
@@ -302,6 +338,23 @@ impl NetDevice {
             log::info!("virtio-net: VIRTIO_NET_F_CSUM negotiated.");
         }
 
+        // VIRTIO_NET_F_HOST_TSO4/6: the device accepts TCP "super-segments"
+        // (up to 64K in one packet, NetHeader.gso_size = the wire MSS) and
+        // segments them itself; for host-local delivery the packet is
+        // typically consumed whole, never segmented at all. Requires F_CSUM
+        // (§5.1.3.1): per-segment checksum completion starts from the
+        // seeded pseudo-header sum.
+        if (features_acked & VIRTIO_NET_F_CSUM) != 0 {
+            if (features_available & VIRTIO_NET_F_HOST_TSO4) != 0 {
+                features_acked |= VIRTIO_NET_F_HOST_TSO4;
+                log::info!("virtio-net: VIRTIO_NET_F_HOST_TSO4 negotiated.");
+            }
+            if (features_available & VIRTIO_NET_F_HOST_TSO6) != 0 {
+                features_acked |= VIRTIO_NET_F_HOST_TSO6;
+                log::info!("virtio-net: VIRTIO_NET_F_HOST_TSO6 negotiated.");
+            }
+        }
+
         dev.write_enabled_features(features_acked);
         dev.confirm_features()?;
         dev.virtio_features_negotiated = features_acked;
@@ -356,6 +409,14 @@ impl NetDevice {
         self.csum_offload
     }
 
+    /// True if TCP segmentation offload was negotiated for BOTH IP versions
+    /// (VIRTIO_NET_F_HOST_TSO4 + HOST_TSO6): post_write accepts TCP
+    /// super-segments with a nonzero tso_seg_size. Both are required
+    /// because the network stack's TSO capability is not per-IP-version.
+    pub fn tso(&self) -> bool {
+        self.tso
+    }
+
     #[inline(never)]
     pub async fn post_read(self: Rc<Self>, mut bytes: IoBuf) -> ReadCompletion<IoBuf> {
         let chain_head = VqAlloc::new(self.virtq_rx.clone(), 2).await;
@@ -390,33 +451,97 @@ impl NetDevice {
         }
     }
 
+    /// Post one egress packet. `tso_seg_size != 0` marks a TCP
+    /// super-segment (payload larger than the connection's MSS) that the
+    /// device must split into wire segments of at most `tso_seg_size`
+    /// payload bytes each; the caller may only pass nonzero values when
+    /// `tso()` is true.
+    ///
+    /// Returns the completion and the number of descriptors the packet
+    /// occupies (released when the completion is dropped after resolving).
+    /// The caller must ensure MAX_TX_DESCS descriptors are free before
+    /// calling — see MAX_TX_DESCS.
     #[inline(never)]
-    pub async fn post_write(self: Rc<Self>, mut bytes: IoBuf) -> WriteCompletion<IoBuf> {
-        let chain_head = VqAlloc::new(self.virtq_tx.clone(), 2).await;
-        let mut virtqueue = self.virtq_tx.borrow_mut();
+    pub async fn post_write(
+        self: Rc<Self>,
+        mut bytes: IoBuf,
+        tso_seg_size: u16,
+    ) -> (WriteCompletion<IoBuf>, usize) {
+        use super::virtio_queue::UserData;
 
-        let (header, phys_addr, next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
-        *header = NetHeader::default();
-        if self.csum_offload {
-            maybe_set_needs_csum(bytes.as_mut(), header);
+        // Split the packet into physically-contiguous runs: the buffer is
+        // physically contiguous only within 4K pages (phys addrs are
+        // cached on the pooled buffer, so this loop does no syscalls in
+        // steady state). Runs that happen to be phys-adjacent merge.
+        let len = bytes.len();
+        let mut runs = [UserData {
+            phys_addr: 0,
+            len: 0,
+        }; MAX_TX_RUNS];
+        let mut num_runs = 0_usize;
+        let mut offset = 0_usize;
+        while offset < len {
+            let phys = bytes.phys_addr_at(offset);
+            let run_len = ((PAGE_SIZE_SMALL as usize) - (phys as usize & 0xfff)).min(len - offset);
+            if num_runs > 0
+                && runs[num_runs - 1].phys_addr + runs[num_runs - 1].len as u64 == phys
+            {
+                runs[num_runs - 1].len += run_len as u32;
+            } else {
+                runs[num_runs] = UserData {
+                    phys_addr: phys,
+                    len: run_len as u32,
+                };
+                num_runs += 1;
+            }
+            offset += run_len;
         }
 
-        use super::virtio_queue::UserData;
-        let buffs: [UserData; 2] = [
-            UserData {
-                phys_addr,
-                len: core::mem::size_of::<NetHeader>() as u32,
-            },
-            UserData {
-                phys_addr: bytes.phys_addr() as u64,
-                len: bytes.len() as u32,
-            },
-        ];
+        let chain_head = VqAlloc::new(self.virtq_tx.clone(), (1 + num_runs) as u16).await;
+        let mut virtqueue = self.virtq_tx.borrow_mut();
+
+        let (header, phys_addr, _next_idx) = virtqueue.get_buffer::<NetHeader>(chain_head);
+        *header = NetHeader::default();
+        if self.csum_offload {
+            let tcp_info = maybe_set_needs_csum(bytes.as_mut(), header);
+            if tso_seg_size != 0 {
+                // The stack only marks TCP packets as super-segments, and
+                // the parse above recognizes every TCP packet it emits.
+                let info = tcp_info.expect("TSO packet did not parse as TCP");
+                let packet: &[u8] = bytes.as_ref();
+                let csum_start = info.csum_start as usize;
+                // TCP data offset: header length including options.
+                let tcp_hdr_len = ((packet[csum_start + 12] >> 4) as u16) * 4;
+                header.gso_type = if info.ipv6 {
+                    VIRTIO_NET_HDR_GSO_TCPV6
+                } else {
+                    VIRTIO_NET_HDR_GSO_TCPV4
+                };
+                header.gso_size = tso_seg_size;
+                header.hdr_len = info.csum_start + tcp_hdr_len;
+            }
+        }
+
+        let mut buffs = [UserData {
+            phys_addr: 0,
+            len: 0,
+        }; 1 + MAX_TX_RUNS];
+        buffs[0] = UserData {
+            phys_addr,
+            len: core::mem::size_of::<NetHeader>() as u32,
+        };
+        buffs[1..1 + num_runs].copy_from_slice(&runs[..num_runs]);
 
         drop(virtqueue);
-        let vq_completion =
-            Virtqueue::add_buffs(self.virtq_tx.clone(), &buffs, 2, 0, chain_head, bytes);
+        let vq_completion = Virtqueue::add_buffs(
+            self.virtq_tx.clone(),
+            &buffs[..1 + num_runs],
+            (1 + num_runs) as u16,
+            0,
+            chain_head,
+            bytes,
+        );
 
-        WriteCompletion { vq_completion }
+        (WriteCompletion { vq_completion }, 1 + num_runs)
     }
 }
