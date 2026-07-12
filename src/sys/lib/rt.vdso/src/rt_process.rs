@@ -133,7 +133,10 @@ fn resolve_exe(exe: &str) -> Result<String, ErrorCode> {
         return Ok(exe.to_owned());
     }
 
-    let path = moto_rt::process::getenv("PATH").ok_or(moto_rt::E_INVALID_FILENAME)?;
+    let Some(path) = moto_rt::process::getenv("PATH") else {
+        log::warn!("$PATH not defined when spawning '{exe}'");
+        return Err(moto_rt::E_INVALID_FILENAME);
+    };
 
     // TODO: be smarter below (colons in quotes; escaped colons, etc.)
     let dirs: Vec<&str> = path.split(':').collect();
