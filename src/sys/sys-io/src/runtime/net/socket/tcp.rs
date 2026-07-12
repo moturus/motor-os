@@ -324,8 +324,8 @@ impl MotoSocket {
                 // Smoltcp does not expire SynReceived sockets without a timeout.
                 // Note: the numbers below are only for Listen/SynReceived sockets. They are
                 // re-set to different numbers on established sockets.
-                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(5_000)));
-                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(10_000)));
+                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(5_000)));
+                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(15_000)));
                 smoltcp_socket.listen(socket_addr).unwrap();
                 log::debug!(
                     "new TCP socket 0x{socket_id:x} listening on {socket_addr:?} for conn 0x{:x}",
@@ -481,8 +481,8 @@ impl MotoSocket {
 
                 // Same as on the connect side (on_socket_connected): without these,
                 // remotely dropped sockets may hang around indefinitely.
-                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(120_000)));
-                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(120_000)));
+                smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(20_000)));
+                smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(300_000)));
                 smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
                 // Delayed ACKs (also set on the connect side; keep in sync).
                 // Sub-MSS ACKs wait up to 10ms so a prompt reply carries the
@@ -624,8 +624,8 @@ impl MotoSocket {
         Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, _state| {
             log::debug!("Socket 0x{socket_id:x} connected.");
             // Without these, remotely dropped sockets may hang around indefinitely.
-            smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(120_000)));
-            smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(120_000)));
+            smoltcp_socket.set_keep_alive(Some(smoltcp::time::Duration::from_millis(20_000)));
+            smoltcp_socket.set_timeout(Some(smoltcp::time::Duration::from_millis(300_000)));
             smoltcp_socket.set_nagle_enabled(false); // A good idea, generally.
             // Delayed ACKs — see the comment on the accept side
             // (on_incoming_connection); keep the two in sync.
