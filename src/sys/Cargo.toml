@@ -54,7 +54,7 @@ moto-sys-io  = { path = "lib/moto-sys-io"     }
 
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }
 tokio        = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
-smoltcp      = { git = "https://github.com/moturus/smoltcp.git", branch = "arp_delay_configurable" }
+smoltcp      = { git = "https://github.com/moturus/smoltcp.git", branch = "motor-os" }
 
 [profile.dev]
 panic = "abort"
