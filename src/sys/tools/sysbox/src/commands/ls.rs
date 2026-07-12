@@ -1,7 +1,7 @@
 use std::{io::IsTerminal, path::Path};
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
-    eprintln!("usage:\n\tls [$DIR] [-l]\n");
+    eprintln!("usage:\n\tls [$DIR] [-l[h]]\n");
     std::process::exit(exit_code);
 }
 
@@ -10,6 +10,7 @@ pub fn do_command(args: &[String]) {
 
     let list_dots = false;
     let mut list_details = false;
+    let mut human_friendly = false;
     let mut dir: Option<&str> = None;
 
     for arg in &args[1..] {
@@ -22,6 +23,7 @@ pub fn do_command(args: &[String]) {
             for char in &bytes[1..] {
                 match char {
                     b'l' => list_details = true,
+                    b'h' => human_friendly = true,
                     // TODO: add "." and ".." manually.
                     // b'a' => list_dots = true,
                     _ => {
@@ -44,13 +46,13 @@ pub fn do_command(args: &[String]) {
     let dir = unsafe { dir.unwrap_unchecked() };
 
     if list_details {
-        list_detailed(dir, list_dots);
+        list_detailed(dir, list_dots, human_friendly);
     } else {
         list_plain(dir, list_dots);
     }
 }
 
-fn list_detailed(dir: &str, list_dots: bool) {
+fn list_detailed(dir: &str, list_dots: bool, human_friendly: bool) {
     let path = std::fs::canonicalize(Path::new(dir));
     if path.is_err() {
         eprintln!("error reading directory '{dir}'.\n");
@@ -116,7 +118,11 @@ fn list_detailed(dir: &str, list_dots: bool) {
                 } else if ft.is_file() {
                     println!(
                         "f {:width$} {}{}{}",
-                        e.metadata().unwrap().len(),
+                        if human_friendly {
+                            crate::format_bytes(e.metadata().unwrap().len())
+                        } else {
+                            format!("{}", e.metadata().unwrap().len())
+                        },
                         file_in,
                         fname,
                         file_out,
