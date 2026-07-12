@@ -446,13 +446,19 @@ impl PosixFile for ChildStdio {
         if self.event_source.is_closed() {
             return Ok(0);
         }
-        if self.nonblocking.load(Ordering::Acquire) {
+        let res = if self.nonblocking.load(Ordering::Acquire) {
             self.inner.nonblocking_read(buf).inspect_err(|_| {
                 self.event_source
                     .reset_interest(moto_rt::poll::POLL_READABLE);
             })
         } else {
             self.inner.read(buf)
+        };
+        match res {
+            // The remote end is gone (remote shutdowns are signalled via
+            // bad-remote-handle IPC errors): report EOF, not an error.
+            Err(moto_rt::E_BAD_HANDLE) => Ok(0),
+            other => other,
         }
     }
 

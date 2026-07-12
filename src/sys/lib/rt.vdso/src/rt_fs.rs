@@ -340,7 +340,7 @@ impl AsyncFsClient {
         };
 
         let pos = if (opts & moto_rt::fs::O_APPEND) != 0 {
-            todo!()
+            self.metadata(entry_id)?.size
         } else {
             0
         };
