@@ -105,6 +105,10 @@ impl TimersInner {
         }
     }
 
+    fn next_deadline(&self) -> Option<Instant> {
+        self.time_queue.first_key_value().map(|(when, _)| *when)
+    }
+
     // Returns Ok(timer) if there is a timer <= cutoff;
     // returns Err(earliest) otherwise.
     fn pop(&mut self, cutoff: Instant) -> Result<Timer, Instant> {
@@ -145,6 +149,11 @@ impl Timers {
 
     pub fn remove_timer(&self, timer_id: u64) {
         self.inner.lock(line!()).remove_timer(timer_id)
+    }
+
+    // The earliest pending deadline, if any.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.inner.lock(line!()).next_deadline()
     }
 
     // Returns Ok(timer) if there is a timer <= cutoff;

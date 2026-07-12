@@ -266,6 +266,11 @@ impl Scheduler {
         self.last_alive_check.store(now, Ordering::Release);
 
         let mut check = |cpu: uCpus, scheduler: &Scheduler| -> bool {
+            if scheduler.idle.load(Ordering::Acquire) {
+                // Idle CPUs quiesce completely (no timer ticks), so they may
+                // legitimately not update last_alive_check for a long time.
+                return false;
+            }
             let last_check = scheduler.last_alive_check.load(Ordering::Acquire);
             if now > (last_check + 10_000_000_000) && !scheduler.dying() {
                 log::error!(
@@ -280,6 +285,34 @@ impl Scheduler {
             }
         };
         PERCPU_SCHEDULERS.for_each_cpu(&mut check);
+    }
+
+    // Called when this CPU is about to go idle: non-BSP CPUs quiesce
+    // completely when idle, so arm the APIC timer for the earliest pending
+    // software timer, or disarm it if there are none. The BSP is exempt:
+    // it keeps its periodic tick to drive system time updates (and alive
+    // checks in debug builds).
+    //
+    // Note: it is OK if a stale timer IRQ (one that became pending just
+    // before the timer was reprogrammed here) wakes this CPU right up:
+    // on_timer_irq() re-arms a tick, the sched loop runs, and the next call
+    // here re-programs the timer from self.timers, the ground truth.
+    // Over-waking is fine; sleeping through a deadline is not, and cannot
+    // happen: PERCPU_TIMERS may only hold a future deadline if the hardware
+    // timer is actually armed for it.
+    fn program_idle_timer(&self) {
+        if self.cpu == crate::arch::bsp() {
+            return;
+        }
+
+        let percpu_timer = PERCPU_TIMERS.get_per_cpu();
+        // Instant::nan() is raw TSC zero, and writing zero to the TSC-deadline
+        // MSR disarms the timer, so set_timer(nan) means "no timer IRQs at all".
+        let deadline = self.timers.next_deadline().unwrap_or(Instant::nan());
+        if *percpu_timer != deadline {
+            crate::arch::irq::set_timer(deadline);
+            *percpu_timer = deadline;
+        }
     }
 
     fn sched_loop(&mut self) -> ! {
@@ -381,6 +414,7 @@ impl Scheduler {
 
             self.idle_start();
             if nosleep {
+                self.program_idle_timer();
                 self.idle.store(true, Ordering::Release);
                 while !self.wake.load(Ordering::Relaxed) {
                     core::hint::spin_loop();
@@ -400,10 +434,17 @@ impl Scheduler {
                         interrupts::enable();
                         self.idle.store(false, Ordering::Release);
                     } else {
-                        // Go to sleep.
+                        // Go to sleep. Interrupts are disabled, so the timer
+                        // can be reprogrammed without racing on_timer_irq().
+                        self.program_idle_timer();
                         crate::xray::tracing::trace("scheduler hlt", 0, 0, 0);
                         crate::xray::stats::system_stats_ref().start_cpu_usage_kernel();
                         interrupts::enable_and_hlt();
+                        #[cfg(debug_assertions)]
+                        self.last_alive_check.store(
+                            crate::arch::time::Instant::now().as_u64(),
+                            Ordering::Release,
+                        );
                         self.idle.store(false, Ordering::Release);
                         crate::xray::stats::system_stats_ref().stop_cpu_usage_kernel();
                         crate::xray::tracing::trace("scheduler hlt wake", 0, 0, 0);
@@ -578,6 +619,8 @@ pub fn get_irq_wait_handle(
     Ok(USER_IRQ_WAITERS[idx as usize].clone())
 }
 
+const SCHED_TICK_MILLIS: u64 = 10;
+
 // Note: may be called from IRQ. Always called, exactly once, when a timer IRQ happens:
 // if the timer IRQ happens in the kernel context, on_timer_irq() is called
 // from the IRQ handler directly; if the timer IRQ happens in the user context,
@@ -587,17 +630,38 @@ pub fn on_timer_irq() {
     let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
     scheduler.timer_irq_tick.store(true, Ordering::Relaxed);
 
-    const SCHED_TICK_MILLIS: u64 = 10;
     let when =
         crate::arch::time::Instant::now() + core::time::Duration::from_millis(SCHED_TICK_MILLIS);
 
     // Unlike the conditional vs curr_timer in maybe_program_timer() below, we set the timer
     // unconditionally here, because on_timer_irq() is called from the irq, that is the current timer
     // has fired.
+    //
+    // Re-arming here (rather than only when userspace work is present) is what
+    // guarantees preemption: a thread in user mode always has a live deadline
+    // armed, because the chain can only be broken in program_idle_timer(),
+    // when no thread is on this CPU. If the tick fired mid-syscall, this
+    // re-arm is what the thread returns to userspace with.
     crate::arch::irq::set_timer(when);
     *PERCPU_TIMERS.get_per_cpu() = when;
 
     scheduler.local_wake();
+}
+
+// Called before (re)entering userspace: makes sure the preemption tick is
+// armed. It may be disarmed (non-BSP CPUs kill the tick chain when they go
+// idle, see program_idle_timer()), or armed for a software timer too far in
+// the future to bound this thread's timeslice. In the common case (the armed
+// deadline is at most a tick away) this costs a load and rdtsc, no wrmsr.
+pub fn ensure_preemption_timer() {
+    let percpu_timer = PERCPU_TIMERS.get_per_cpu();
+    let curr = *percpu_timer;
+    let deadline =
+        crate::arch::time::Instant::now() + core::time::Duration::from_millis(SCHED_TICK_MILLIS);
+    if curr.is_nan() || curr > deadline {
+        crate::arch::irq::set_timer(deadline);
+        *percpu_timer = deadline;
+    }
 }
 
 fn maybe_program_timer(when: Instant) {

@@ -231,6 +231,7 @@ impl ThreadControlBlock {
     }
 
     pub fn spawn_usermode_thread(&mut self, arg: u64) -> ThreadOffCpuReason {
+        crate::sched::ensure_preemption_timer();
         self.owner().process_stats.start_cpu_usage_uspace();
 
         self.owner().trace("spawn_usermode_thread", arg, 0);
@@ -269,6 +270,10 @@ impl ThreadControlBlock {
 
     #[inline(never)]
     pub fn exit(&self) -> ! {
+        // Defense in depth: a tick that fires mid-syscall re-arms itself in
+        // on_timer_irq(), so the deadline should always be live here; this
+        // is a cheap check (no wrmsr unless something went wrong).
+        crate::sched::ensure_preemption_timer();
         self.owner().process_stats.stop_cpu_usage_kernel();
         self.owner().process_stats.start_cpu_usage_uspace();
         #[cfg(debug_assertions)]
@@ -351,6 +356,7 @@ impl ThreadControlBlock {
     #[inline(never)]
     pub fn resume(&self) -> ThreadOffCpuReason {
         self.owner().process_stats.start_cpu_usage_kernel();
+        crate::sched::ensure_preemption_timer();
         self.owner().trace("tcb::resume", self.syscall_rsp, 0);
         self.validate_rsp();
         self.check_sti();
@@ -434,6 +440,7 @@ impl ThreadControlBlock {
     }
 
     pub fn resume_preempted_thread(&self) -> ThreadOffCpuReason {
+        crate::sched::ensure_preemption_timer();
         self.owner().process_stats.start_cpu_usage_uspace();
         self.owner().trace("tcb::resume_preempted_thread", 0, 0);
         self.check_sti();
