@@ -1,0 +1,515 @@
+# Building rustc for Motor OS
+
+This guide assumes you have completed [build-llvm.md](build-llvm.md): `$MOTORH`
+contains the Motor OS repo, the `rust` checkout with the registered
+`dev-x86_64-unknown-motor` toolchain ([build.md](build.md)), the
+`llvm-project` checkout with the host cross toolchain in
+`$MOTORH/llvm-project/build/bin`, the `mlibc` checkout, and a populated
+C/C++ sysroot at `$MOTORH/motor-sysroot`.
+
+The end result is a Motor OS VM image that carries a **native `rustc`** — the
+real Rust compiler, statically linked with its own LLVM, running on Motor OS —
+plus a Rust sysroot (std and friends as rlibs) and a small `motor-cc` linker
+driver, so that, booted into the VM, you can compile and run Rust programs
+natively:
+
+```sh
+/sys/tools/rust/bin/rustc --version
+/sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs \
+    -o /sys/tmp/hello -C linker=/bin/motor-cc && /sys/tmp/hello
+```
+
+On the image the Rust toolchain lives at `/sys/tools/rust` (`bin/rustc`,
+`lib/rustlib/x86_64-unknown-motor/lib/*.rlib`, sample sources at `src/`), and
+the linker driver at `/bin/motor-cc`. Everything is cross-built on the host by
+Rust's own bootstrap (`x.py`) and staged into the image, exactly like the C
+toolchain in [build-llvm.md](build-llvm.md).
+
+This build runs **on top of build-llvm.md** and reuses everything it produced:
+the host cross-clang, the C/C++ sysroot (the `libc.a`/`crt1.o`/headers built
+from mlibc — the mlibc *source* tree is no longer needed and can be deleted),
+and — crucially — the **one** `llvm-project` checkout. All Motor OS support
+lives on **`motor-os-rustc` branches of `github.com/moturus` forks**. The
+checkouts on disk are just `rust` (from [build.md](build.md)) and `llvm-project`
+(from build-llvm.md). The four dependency forks (`libc`, `rust_libloading`,
+`stacker`, `rust-ctrlc`) are **fetched by cargo** from their git URLs — no
+local clones — and `moto-rt` comes straight from crates.io. `src/build-rustc.sh`
+performs every step below in one go (copy it into `$MOTORH` next to
+`build-base.sh`/`build-llvm.sh` and run it after those two); it carries no
+patches of its own.
+
+**One LLVM, version 23.** rustc builds its own copy of LLVM from its
+`src/llvm-project` submodule; this build points that submodule at the *same*
+`moturus/llvm-project` @ `motor-os-rustc` (LLVM 23) that build-llvm.md's cross
+toolchain is built from, sharing its git objects. So the toolchain LLVM and
+rustc's LLVM are one repo, one branch, one commit — no version split. (rustc's
+default pin is LLVM 22.1.7; 1.98-dev already carries the LLVM-23 support code,
+plus one four-line adaptation on the `moturus/rust` branch for a struct LLVM 23
+made non-copyable — see the appendix.)
+
+## How the pieces fit together
+
+A native rustc is one static-PIE binary with two C runtimes and two language
+runtimes inside, all of which must agree:
+
+```
+rustc  (≈98 MB stripped)
+  ├─ rustc crates + Rust std        compiled by x.py for x86_64-unknown-motor
+  │    └─ moto-rt (crates.io)       std's runtime, talks to the RT.VDSO
+  ├─ LLVM 23 static libs            cross-built by x.py from src/llvm-project
+  │    └─ libc++ / libc++abi / libunwind   (the C++ stack from build-llvm.md)
+  └─ mlibc crt1.o + libc.a          owns the entry point and the C runtime
+```
+
+The load-bearing decisions, each of which the stages below implement:
+
+- **mlibc owns the entry point.** rustc's LLVM half needs a full C runtime
+  (`.init_array` static constructors, C stdio, a C-level TCB). std's
+  `motor_start` is declared `weak`, so mlibc's `crt1.o` wins the link: it
+  initializes the VDSO vtable, the TCB and stdio, runs `.init_array`, then
+  calls the C `main` that rustc's codegen emits — which enters Rust's
+  `lang_start`. Pure-Rust programs (no mlibc in the link) keep std's entry.
+- **One emulated-TLS and one allocator.** The C side (LLVM, libc++) uses the
+  shim (`libmoto_rt_cabi.a`) from build-llvm.md stage 2; the Rust side talks
+  to the same VDSO. mlibc's strong `mem*` must beat moto-rt's weak ones — the
+  crates.io `moto-rt` ≥ 0.16.1 declares those `mem*` symbols weak, so no
+  `[patch]` is needed (earlier releases needed a local fork).
+- **Foreign threads get a lazy mlibc TCB.** rustc's worker threads are spawned
+  by Rust std, not `pthread_create`, so their `UTCB.libc_tcb` is zero. mlibc's
+  `get_current_tcb()` materializes a minimal TCB on first use
+  (`__mlibc_motor_lazy_tcb`); without it, the first *contended* `std::mutex`
+  on a Rust-spawned thread aborts (mutex owner bookkeeping reads the TCB tid).
+- **libc++abi provides `operator new/delete`.** mlibc's internal
+  `operator delete` panic stubs are **strong** symbols while libc++abi's real
+  operators are **weak** — whenever both objects are extracted, the panic stub
+  silently wins, and no link order can fix that. On Motor the stubs are
+  compiled out of mlibc (`#ifndef __motor__`).
+- **The host and motor LLVM builds must be component-identical.** rustc builds
+  LLVM 23 twice from the one submodule — once for the host stage compilers,
+  once cross-compiled for motor. `rustc_llvm`'s build script queries the *host*
+  `llvm-config` and rewrites host paths to target paths, so both use the same
+  `targets = "X86"`, `experimental-targets = ""` configuration.
+- **No dynamic linking anywhere.** `rustc_driver` gains an `rlib` crate type
+  (rustc drops the `dylib` with a warning on targets without dynamic linking);
+  proc-macro loading and dylib codegen backends are stubbed by the
+  `libloading` fork (a single 0.9 version — `rustc_metadata` was bumped off
+  0.8); there are no proc-macro or `-C prefer-dynamic` builds on the image.
+- **rustc drives the link through `motor-cc`.** rustc passes `-nostartfiles
+  -nodefaultlibs` to its linker. On the host, the `motor-rust-cc` wrapper
+  re-adds the mlibc/libc++ link group after rustc's inputs; on the image,
+  `/bin/motor-cc` (a ~30-line Rust program) does the same by invoking
+  `/bin/llvm clang`.
+
+Rough budget: a first build is ~1.5–2.5 h (two full LLVM builds plus the
+compiler crates dominate) and adds ~160 MB to the image. Re-runs are
+incremental.
+
+## Prerequisites and environment
+
+Everything from [build-llvm.md](build-llvm.md), plus the environment below:
+
+```sh
+export MOTORH=$HOME/motorh          # same root as build.md / build-llvm.md
+export MOTOR=$MOTORH/motor-os
+export LLVM=$MOTORH/llvm-project
+export MLIBC=$MOTORH/mlibc
+export B=$LLVM/build/bin            # host cross clang/lld/llvm-* (build-llvm stage 1)
+export SYSROOT=$MOTORH/motor-sysroot
+export RUST=$MOTORH/rust            # the rust checkout from build.md
+```
+
+Everything the port needs is on `moturus/*` forks, all on the **same
+`motor-os-rustc` branch**. build-llvm.md already checked out `mlibc` and
+`llvm-project` on that branch, so the only checkout this build *switches* is
+the rust tree:
+
+1. **The rust checkout** is set up by [build.md](build.md) against upstream
+   `rust-lang/rust`. This build adds the `moturus` remote and switches it to
+   `moturus/rust` branch `motor-os-rustc` (the Motor host-target patches; see
+   the appendix). Its `[patch.crates-io]` already carries the four dependency
+   forks as **git URLs** — cargo fetches them, so nothing is cloned by hand.
+2. **The `src/llvm-project` submodule** is repointed at build-llvm.md's
+   `$MOTORH/llvm-project` (moturus @ `motor-os-rustc`, **LLVM 23**) — the same
+   commit, its objects shared via `--reference`. `submodules = false` in
+   `bootstrap.toml` keeps bootstrap from resetting it to the upstream LLVM 22
+   pin.
+3. **mlibc source is not needed** — rustc links the sysroot `libc.a`
+   build-llvm.md already produced from mlibc `motor-os-rustc`. This build only
+   checks that `libc.a` carries the `operator delete` guard; it touches the
+   mlibc tree only in the unlikely case that stale `libc.a` must be rebuilt
+   (Stage R2).
+
+The Motor OS checkout must carry the rustc-era runtime fixes: the RT.VDSO
+`ChildStdio` EOF-on-closed-pipe mapping and `O_APPEND` support in `rt_fs.rs`,
+and a data partition of at least 512 MB in `src/imager/motor-os.yaml` (rustc
+plus the Rust and C sysroots need the room).
+
+Two dependencies need **no fork at all** anymore:
+
+- **getrandom** — upstream supports Motor OS since 0.4.3, and the compiler's
+  only getrandom route for the motor target is `rand` 0.10+ (the branch bumps
+  the three compiler crates off rand 0.9, whose rand_core still pulls
+  getrandom 0.3).
+- **memmap2** — the motor target does not depend on it at all:
+  `rustc_data_structures` gates the dependency out for motor and
+  `memmap.rs` falls back to `Vec<u8>` there.
+
+## Stage R1 — sources
+
+No dependency clones — the four forks are `[patch.crates-io]` git URLs cargo
+resolves on its own. Only the rust tree switches to the fork, and its LLVM
+submodule is pointed at build-llvm.md's LLVM-23 checkout:
+
+```sh
+# The rust tree: add the fork remote and switch to it (build.md left it on
+# upstream rust-lang/rust).
+cd $RUST
+git remote add moturus https://github.com/moturus/rust.git
+git fetch moturus motor-os-rustc
+git switch -c motor-os-rustc moturus/motor-os-rustc
+
+# Point the LLVM submodule at build-llvm.md's llvm-project (moturus @
+# motor-os-rustc, LLVM 23), sharing its objects. `submodules = false` in
+# bootstrap.toml (below) stops bootstrap from resetting it to the LLVM 22 pin.
+git -C src/llvm-project remote add moturus $LLVM 2>/dev/null || true
+git -C src/llvm-project fetch -q moturus motor-os-rustc
+git -C src/llvm-project checkout -q "$(git -C $LLVM rev-parse HEAD)"
+```
+
+mlibc and the deps need nothing here — build-llvm.md already checked out mlibc
+and built `libc.a`, and cargo fetches the dependency forks. moto-rt comes from
+crates.io (`cargo update -p moto-rt` picks up ≥ 0.16.1). The rust fork's
+`[patch.crates-io]` already holds the four git URLs, so there are no local
+paths to rewrite.
+
+Two Cargo behaviors worth knowing when maintaining the branch:
+
+- A `[patch.crates-io]` entry only takes effect when its version semver-matches
+  what dependents require *and* the lockfile agrees. After a version bump (the
+  branch moves rand 0.9 → 0.10 and libloading 0.8 → 0.9 in the compiler
+  manifests), run `cargo update -p <crate>` so the lock re-resolves onto the
+  patch; otherwise cargo silently reports `[patch.unused]`.
+- The compiler stays on a **single version of each patched crate** — that is
+  what makes one patch key per crate sufficient. `rustc_metadata` was bumped
+  from libloading 0.8 to 0.9 for this (patching two majors of one crate is
+  possible via `name-x-y = { package = ... }` keys, but keeping two forks
+  alive is strictly worse).
+
+## Stage R2 — the sysroot `libc.a` (mlibc source is optional)
+
+rustc links against the **sysroot** `libc.a` / `crt1.o` that build-llvm.md
+already built from mlibc `motor-os-rustc`. It does *not* read the mlibc source
+tree — you can delete `$MOTORH/mlibc` after build-llvm.md and this build still
+works, reusing the installed `libc.a`. (mlibc `motor-os-rustc` carries the two
+changes the native rustc needs — the foreign-thread lazy TCB in
+`sysdeps/motor/generic/thread.cpp` + `.../mlibc/thread.hpp`, and the
+`#ifndef __motor__` guard around the strong `operator delete` panic stubs in
+`options/internal/gcc-extra/cxxabi.cpp` — and build-llvm bakes them into that
+`libc.a`.)
+
+So the only thing to check here is that the installed `libc.a` carries the
+guard, i.e. has no strong `_ZdlPvm`:
+
+```sh
+$B/llvm-nm $SYSROOT/sys/tools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo STALE || echo ok
+```
+
+If it is stale (built from the older `motor` branch), rebuild it — which is the
+one step that *does* need the mlibc source checkout present — and refresh the
+on-image copy:
+
+```sh
+ninja -C $MLIBC/build
+( cd $MLIBC/build && DESTDIR=$SYSROOT meson install --no-rebuild )
+cp $SYSROOT/sys/tools/llvm/lib/libc.a $MOTOR/img_files/motor-os/sys/tools/llvm/lib/libc.a
+
+# The strong stubs must be gone (only U references may remain):
+$B/llvm-nm $SYSROOT/sys/tools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo BAD || echo ok
+```
+
+## Stage R3 — compiler wrappers and bootstrap.toml
+
+Rust's bootstrap needs a cc/cxx pair and a linker for the motor target. Three
+wrappers in `$SYSROOT/bin` (the script writes them):
+
+- `motor-clang` / `motor-clang++` — the host cross clang with
+  `--target=x86_64-unknown-motor --sysroot=$SYSROOT
+  -D_GNU_SOURCE -D_DEFAULT_SOURCE`, plus `--no-default-config` to bypass
+  `$B/x86_64-unknown-motor.cfg` (its `-nostdlib` is for build-llvm.md's
+  explicit link recipes; here the Motor clang driver must complete links
+  itself). cmake and cc-rs use these for compiling and for `try_compile`
+  probes.
+- `motor-rust-cc` — the linker rustc invokes. rustc passes `-nostartfiles
+  -nodefaultlibs` (suppressing the driver's automatic runtime group), so the
+  wrapper re-appends, *after* rustc's inputs:
+
+  ```
+  -Wl,--start-group $SYSROOT/sys/tools/llvm/lib/crt1.o
+    -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64
+  -Wl,--end-group
+  ```
+
+  Order inside the group still matters for archive-member selection: the C++
+  runtime archives come before `-lc` so their members are chosen first when a
+  symbol has several lazy definitions.
+
+`bootstrap.toml` replaces the one from [build.md](build.md) (superset; the
+`dev-x86_64-unknown-motor` toolchain keeps working):
+
+```toml
+change-id = "ignore"
+profile = "library"
+
+[build]
+host = ["x86_64-unknown-linux-gnu"]
+target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
+# src/llvm-project is repointed to moturus/llvm-project @ motor-os-rustc
+# (LLVM 23); keep bootstrap from resetting it to the upstream LLVM 22 pin.
+submodules = false
+
+[rust]
+deny-warnings = false
+incremental = true
+
+# LLVM (23) is built from src/llvm-project for both triples. X86-only keeps the
+# two builds' component lists identical — rustc_llvm's build.rs queries the
+# *host* llvm-config and rewrites host->target paths, so any component that
+# exists in one build but not the other breaks the link.
+[llvm]
+download-ci-llvm = false
+targets = "X86"
+experimental-targets = ""
+static-libstdcpp = false
+
+[target.x86_64-unknown-motor]
+cc = "<$SYSROOT>/bin/motor-clang"
+cxx = "<$SYSROOT>/bin/motor-clang++"
+ar = "<$B>/llvm-ar"
+ranlib = "<$B>/llvm-ranlib"
+linker = "<$SYSROOT>/bin/motor-rust-cc"
+```
+
+(The script writes real absolute paths for the `<$...>` placeholders.)
+
+## Stage R4 — build rustc
+
+```sh
+cd $RUST
+./x.py build --stage 2 compiler --host x86_64-unknown-motor --target x86_64-unknown-motor
+```
+
+`--host x86_64-unknown-motor` is what requests a compiler that *runs on*
+Motor; `--target` alone builds nothing new. This one command drives, in order:
+the host LLVM build, the motor LLVM build (the bootstrap `llvm.rs` motor
+branch sets `CMAKE_SYSTEM_NAME=Linux`, `LLVM_HOST_TRIPLE=x86_64-unknown-motor`,
+the `CMAKE_*_COMPILER_TARGET`s that key mlibc header probing in the patched
+`config-ix.cmake`, and turns off the two shared-library tools LTO/Remarks),
+stage1 rustc + std for both triples, and finally the stage2
+`x86_64-unknown-motor` compiler crates, linked by `motor-rust-cc`.
+
+The product is
+`build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main`
+(~154 MB unstripped, ~98 MB stripped) plus an assembled motor sysroot under
+`build/x86_64-unknown-motor/stage2`.
+
+Then build std for **both** targets in one invocation, and restore the clippy
+binaries (both are footguns, see Pitfalls):
+
+```sh
+./x.py build --stage 2 library --target x86_64-unknown-motor,x86_64-unknown-linux-gnu
+cp build/x86_64-unknown-linux-gnu/stage2-tools-bin/{cargo-clippy,clippy-driver} \
+   build/x86_64-unknown-linux-gnu/stage2/bin/
+```
+
+## Stage R5 — motor-cc, the on-image linker driver
+
+rustc on the image needs a `cc` to drive the link. `motor-cc` is a small Rust
+binary (built with the dev toolchain, source written by the script) that
+invokes the on-image `llvm` multicall as `clang` with the caller's arguments
+plus the same trailing link group as `motor-rust-cc`:
+
+```sh
+cd $MOTORH/motor-cc
+cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release
+```
+
+## Stage R6 — stage everything into the image
+
+```sh
+IMG=$MOTOR/img_files/motor-os
+RUSTLIB=$RUST/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/x86_64-unknown-motor/lib
+mkdir -p $IMG/bin $IMG/sys/tools/rust/bin $IMG/sys/tools/rust/src \
+         $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
+
+# The compiler, stripped (~154 MB -> ~98 MB).
+$B/llvm-strip -o $IMG/sys/tools/rust/bin/rustc \
+    $RUST/build/x86_64-unknown-linux-gnu/stage2-rustc/x86_64-unknown-motor/release/rustc-main
+
+# The Rust sysroot: rlibs AND their .rmeta siblings AND self-contained/.
+# Bootstrap builds std with -Zembed-metadata=no: each rlib carries only a
+# metadata *stub*, the full metadata lives in the .rmeta file next to it.
+# Staging only *.rlib yields "only metadata stub found for rlib dependency
+# `std`" at compile time.
+rm -rf $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
+mkdir -p $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
+cp -r $RUSTLIB/* $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib/
+
+# The linker driver.
+cp $MOTORH/motor-cc/target/x86_64-unknown-motor/release/motor-cc $IMG/bin/
+
+# A sample source (the script writes one exercising HashMap + threads).
+cp .../hello.rs $IMG/sys/tools/rust/src/hello.rs
+```
+
+rustc finds its sysroot relative to `current_exe()` (`bin/..` →
+`/sys/tools/rust`), so no `--sysroot` flag is needed on the image.
+
+## Stage R7 — rebuild the OS and the image
+
+**After any rustc relink, the Motor OS tree's cargo caches are poison** (see
+Pitfalls); clear them, then rebuild everything:
+
+```sh
+rm -rf $MOTOR/build/obj/release
+cd $MOTOR && make all BUILD=release -j$(nproc)
+```
+
+Confirm the output ends with `built Motor OS image in .../vm_images/release` —
+a failure in any component (e.g. the vdso step missing clippy) leaves the old
+image in place while looking superficially fine.
+
+## Verify in the VM
+
+Boot the image ([build.md](build.md), `run-qemu.sh`) and, at the Motor OS
+prompt:
+
+```sh
+mkdir /sys/tmp                      # scratch for outputs, if not present
+/sys/tools/rust/bin/rustc --version
+/sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs \
+    -o /sys/tmp/hello -C linker=/bin/motor-cc
+/sys/tmp/hello
+```
+
+Expected: `rustc 1.98.0-dev`, a silent successful compile (~1 min in a 1 GB
+VM), then the program prints its HashMap-ordered sentence and `10! = 3628800`
+from a spawned thread — Rust compiled, linked (via the native clang/lld), and
+executed entirely on Motor OS.
+
+## Pitfalls (each cost real debugging time)
+
+- **A rustc relink silently poisons every cargo cache that used the old
+  binary.** Two builds of the same tree produce byte-different compilers with
+  *identical* `rustc -vV` output, which is all cargo fingerprints. Cargo then
+  reuses stale rlibs and rustc rejects them — `error[E0463]: can't find crate
+  for <random dep>` in workspaces that were building fine minutes earlier.
+  Fix: `rm -rf $MOTOR/build/obj/release` (and any other target dir built with
+  the dev toolchain) after every relink.
+- **`x.py build library --target X` evicts the other target's std** from the
+  stage2 sysroot. Always pass both targets in one invocation, or the next
+  OS/motor-cc build dies with `can't find crate for std`/`core`.
+- **Every `x.py` build recreates `stage2/bin`**, dropping `cargo-clippy` and
+  `clippy-driver`. The Motor OS `make` runs clippy in its vdso step and fails
+  *before the imager runs*; and since qemu writes to a mounted image's file,
+  the image mtime keeps changing, looking freshly built while being stale. Re-copy
+  the two binaries from `stage2-tools-bin` after every `x.py` invocation, and
+  trust only the `built Motor OS image` line — never the image mtime.
+- **Stage the `.rmeta` files, not just `*.rlib`** (see stage R6).
+- **The `operator delete` trap cannot be fixed by link order.** mlibc's stubs
+  are strong `T` symbols; libc++abi's real operators are weak `W`. If the
+  staged rustc ever aborts with `operator delete called! delete expressions
+  cannot be used in mlibc`, the sysroot `libc.a` predates the stub guard —
+  rebuild mlibc (stage R2). `grep -a 'operator delete called' rustc` must find
+  nothing in a good binary.
+- **mlibc aborts print to the serial console, not the ssh session** — a
+  crashing program can look like a silent exit over ssh. Check the serial log.
+- **Re-running `x.py` after deleting `rustc-main` does nothing** — bootstrap
+  trusts its stamp file. Delete
+  `stage2-rustc/x86_64-unknown-motor/release/.rustc-stamp` alongside the
+  binary to force a relink.
+
+## Where the port lives (for maintainers)
+
+- **`moturus/rust` @ `motor-os-rustc`** (on top of upstream `8b6558a02b27`):
+  - `library/std/src/sys/pal/motor/mod.rs` — `motor_start` made weak (mlibc
+    entry wins when present).
+  - `library/std/src/sys/paths/{mod,motor}.rs` — real `:`-separated
+    `split_paths`/`join_paths` (rustc unwraps `join_paths` when building the
+    linker's `PATH`).
+  - `library/std/src/sys/process/motor.rs` — `getpid()` reads the pid from the
+    kernel's `ProcessStaticPage` (was a panic stub; rustc calls
+    `process::id()` while linking); `read_output` drains both child pipes
+    concurrently via a scoped thread (was `NotImplemented`; rustc uses
+    `wait_with_output` on the linker); a `self.stdout`/`self.stderr` spawn
+    typo fixed.
+  - `library/Cargo.toml` — unchanged; `moto-rt` comes from crates.io (≥ 0.16.1
+    has the weak `mem*`, so no patch is needed).
+  - `Cargo.toml` — `[patch.crates-io]` git URLs for the four dependency forks.
+  - `compiler/rustc_driver/Cargo.toml` — `crate-type = ["dylib", "rlib"]`.
+  - `compiler/rustc_metadata/Cargo.toml` — libloading 0.8 → 0.9 (single
+    version across the compiler; one call site adjusted for 0.9's
+    `AsFilename`).
+  - `compiler/rustc_{interface,incremental,abi}/Cargo.toml` — rand 0.9 → 0.10
+    (+ rand_xoshiro 0.7 → 0.8), which moves the compiler's randomness onto
+    getrandom 0.4.3 — the first upstream release with Motor OS support. The
+    only remaining getrandom-0.3 user on the motor target is the host-only
+    `test-float-parse` tool, which x.py never builds for motor.
+  - `compiler/rustc_data_structures/Cargo.toml` — memmap2 excluded for the
+    motor target (with `memmap.rs`'s `Vec<u8>` fallback selected there).
+  - `compiler/rustc_sanitizers/Cargo.toml` — `twox-hash` with
+    `default-features = false`. Its default `std` feature pulls `rand` 0.8 →
+    `rand_core` 0.6 → **getrandom 0.2** (which has no Motor support and no
+    fork), and feature unification would drag that onto the motor build even
+    though `rustc_sanitizers` only uses the fixed-seed `XxHash64`. This was
+    the one non-obvious getrandom-0.2 path; with it cut, the sole remaining
+    getrandom-0.2/0.3 users on the motor target are host-only test tools
+    (`test-float-parse`) that x.py never cross-compiles.
+  - `compiler/rustc_llvm/{build.rs,src/lib.rs}` — no C++ stdlib `-l` emitted
+    for motor (the linker driver owns the group); local `size_t` alias.
+  - `compiler/rustc_llvm/llvm-wrapper/PassWrapper.cpp` — a four-line LLVM-23
+    adaptation: this LLVM-23 snapshot privatized `SubtargetFeatureKV`/
+    `SubtargetSubTypeKV`'s `Key`/`Desc` and made them non-copyable, so the
+    CPU/feature listing uses the `key()`/`desc()` accessors and a reference
+    (guarded by `LLVM_VERSION_GE(23, 0)`). Everything else in rust's LLVM FFI
+    already compiled against LLVM 23 unchanged.
+  - `compiler/rustc_session/src/filesearch.rs` — `current_dll_path()` via
+    `current_exe()` (static-only; sysroot discovery).
+  - `compiler/rustc_fs_util/src/lib.rs` — `path_to_c_string` for motor.
+  - `compiler/rustc_data_structures/src/memmap.rs` — `Vec<u8>` fallback (no
+    file mmap on Motor).
+  - `src/bootstrap/src/core/build_steps/llvm.rs` — the motor LLVM cmake block
+    and `CMAKE_SYSTEM_NAME=Linux` mapping.
+- **`moturus/llvm-project` @ `motor-os-rustc`** (**LLVM 23** — the single LLVM
+  used by both build-llvm.md's cross toolchain and rustc's own LLVM; `motor-os-next`
+  is a legacy alias for the same commit): the `Motor` `Triple::OSType` (+ default
+  emulated TLS), the Clang `Motor` ToolChain, `config-ix.cmake` header probing
+  keyed on `CMAKE_*_COMPILER_TARGET matches motor`, `ADT/bit.h` endian include,
+  `Unix/Path.inc` (argv0 main-executable lookup, `is_local` = true),
+  `ExitCodes.h` (`EX_IOERR` without `sysexits.h`).
+- **Dependency forks** (each `motor-os-rustc`, branched from the exact version
+  rustc locks; **referenced as `[patch.crates-io]` git URLs — cargo fetches
+  them, nothing is cloned**; host targets compile byte-identical upstream code,
+  only `target_os = "motor"` paths differ):
+  - `moturus/rust_libloading` (0.9.0) — motor gated to graceful runtime
+    failure (no `dlopen`; proc macros unsupported).
+  - `moturus/stacker` (0.1.21) — motor uses the alloc-based stack-restore
+    guard (no file/anon mmap).
+  - `moturus/libc` (0.2.186) — the Motor module (`src/motor/`) transplanted
+    from the libc main-branch port; `extern_ty!` occurrences replaced with
+    empty enums.
+  - `moturus/rust-ctrlc` (3.5.1) — motor platform stub (no signals; the
+    waiter parks).
+- **`moturus/mlibc` @ `motor-os-rustc`** (on top of `motor`) — the lazy
+  foreign-thread TCB (`sysdeps/motor/generic/thread.cpp`, hook in
+  `options/internal/x86_64-include/mlibc/thread.hpp`) and the
+  `#ifndef __motor__` guard around the `operator delete` stubs
+  (`options/internal/gcc-extra/cxxabi.cpp`).
+- **motor-os** — RT.VDSO: `ChildStdio::read` maps the bad-remote-handle IPC
+  error to EOF (child exit is *signalled* by that error; without the mapping,
+  reading a finished linker's output fails with `BadHandle`); `rt_fs.rs`
+  implements `O_APPEND` (open positioned at size — rustc's ICE reporter uses
+  append). Imager: `data_partition_size_mb: 512`.
+- The Rust *libc crate* port on the libc main (1.0) branch is the
+  upstream-facing artifact of this work; rustc consumes the 0.2-series port
+  (`moturus/libc` @ `motor-os-rustc`, via the `[patch.crates-io]` git URL) and
+  does not build the 1.0 tree.

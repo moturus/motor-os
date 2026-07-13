@@ -81,25 +81,30 @@ export CLANG_MAJOR=23               # must match `$B/clang --version`; also bake
 
 Check out the two repos at the branches that carry the Motor OS support.
 
-mlibc — branch `motor` (a single squashed commit on top of upstream mlibc adds
-`sysdeps/motor` and the small generic hooks it needs):
+mlibc — branch `motor-os-rustc` (the `sysdeps/motor` port and its small generic
+hooks, plus the lazy foreign-thread TCB and the `operator delete` stub guard the
+native rustc needs — all harmless for a plain C/C++ toolchain, and using the
+same branch here means [build-rustc.md](build-rustc.md) never has to switch it):
 
 ```sh
 cd $MOTORH
 git clone https://github.com/moturus/mlibc.git
 cd mlibc
-git checkout motor
+git checkout motor-os-rustc
 ```
 
-llvm — branch `motor-os-next` (the Motor triple, the Clang driver/ToolChain,
-and a handful of `lib/Support` portability fixes, as separate commits on top of
-upstream llvm-project):
+llvm — branch `motor-os-rustc` (LLVM 23: the Motor triple, the Clang
+driver/ToolChain, and a handful of `lib/Support` portability fixes, on top of
+upstream llvm-project). This is the **same** repo, branch, and commit that
+rustc builds its own LLVM from (its `src/llvm-project` submodule is pointed
+here — see [build-rustc.md](build-rustc.md)), so there is one LLVM version
+across both builds:
 
 ```sh
 cd $MOTORH
 git clone https://github.com/moturus/llvm-project.git
 cd llvm-project
-git checkout motor-os-next
+git checkout motor-os-rustc
 ```
 
 ## Stage 1 — the cross toolchain (host clang/lld/llvm-\*)
@@ -543,17 +548,23 @@ toolchain, plus a real interpreter.
 
 ## Where the port lives (for maintainers)
 
-- Motor's mlibc support is one commit on the `motor` branch: `sysdeps/motor/*`
-  plus small generic hooks (a `ThreadJoin` sysdep and the `Tcb::sysdepThreadHandle`
-  field, so `pthread_join` waits on the kernel thread handle — which is signaled
-  only *after* C++ `thread_local` destructors run). It also routes mlibc's
+- Motor's mlibc support is on the `motor-os-rustc` branch (a superset of the
+  older `motor` branch): `sysdeps/motor/*` plus small generic hooks (a
+  `ThreadJoin` sysdep and the `Tcb::sysdepThreadHandle` field, so `pthread_join`
+  waits on the kernel thread handle — which is signaled only *after* C++
+  `thread_local` destructors run), the lazy foreign-thread TCB, and the
+  `operator delete` stub guard (the last two are needed by the native rustc and
+  documented in [build-rustc.md](build-rustc.md)). It also routes mlibc's
   hardcoded `/etc` config paths through `MLIBC_SYSCONFDIR`
   (`options/internal/include/mlibc/sysconfdir.hpp`), which the cross-file sets to
   `/sys/cfg/libc`; see [porting-libc/dirs.md](porting-libc/dirs.md).
-- Motor's LLVM support is a short series on `motor-os-next`: the `x86_64-unknown-motor`
-  triple (emulated-TLS by default), the Clang `Motor` ToolChain (static-PIE link
-  recipe, include paths, the `ld.lld` multicall fallback), and a few `lib/Support`
-  portability fixes.
+- Motor's LLVM support is a short series on `motor-os-rustc` (LLVM 23): the
+  `x86_64-unknown-motor` triple (emulated-TLS by default), the Clang `Motor`
+  ToolChain (static-PIE link recipe, include paths, the `ld.lld` multicall
+  fallback), and a few `lib/Support` portability fixes. rustc consumes this
+  same branch as its `src/llvm-project` submodule (see build-rustc.md), so the
+  toolchain and the compiler share one LLVM. (`motor-os-next` is a legacy alias
+  for the same commit.)
 - The design rationale and the milestone-by-milestone build history (M0–M10,
   with every pitfall and its fix) are in
   [docs/porting-libc/](porting-libc/porting-libc-by-fable.md).

@@ -77,7 +77,7 @@ ensure_meson() {
 	sudo DEBIAN_FRONTEND=noninteractive apt-get -y install meson
 }
 
-# --- clone mlibc @ motor and llvm-project @ motor-os-next -------------------
+# --- clone mlibc + llvm-project, both @ motor-os-rustc ----------------------
 clone_repo() {  # url dir branch
 	local url="$1" dir="$2" branch="$3"
 	if [ -d "$dir/.git" ]; then
@@ -89,8 +89,15 @@ clone_repo() {  # url dir branch
 	fi
 }
 clone_sources() {
-	clone_repo https://github.com/moturus/mlibc.git        "$MLIBC" motor
-	clone_repo https://github.com/moturus/llvm-project.git "$LLVM"  motor-os-next
+	# Everything on one branch, motor-os-rustc, so build-rustc.sh reuses these
+	# same checkouts without switching branches. mlibc motor-os-rustc is a
+	# superset of the old `motor` branch (extra lazy-TCB + operator-delete
+	# guard, harmless for C/C++). llvm-project motor-os-rustc is the LLVM 23
+	# line with the Clang Motor ToolChain; rustc builds its *own* copy of this
+	# same LLVM from its submodule (see build-rustc.md), so there is one LLVM
+	# repo and version across both builds.
+	clone_repo https://github.com/moturus/mlibc.git        "$MLIBC" motor-os-rustc
+	clone_repo https://github.com/moturus/llvm-project.git "$LLVM"  motor-os-rustc
 }
 
 # --- stage 1: the cross toolchain (host clang/lld/llvm-*) -------------------
