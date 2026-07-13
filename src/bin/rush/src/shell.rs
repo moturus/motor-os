@@ -114,7 +114,6 @@ impl Shell {
 
     /// Mark a variable exported (moving any shell-local value into the
     /// environment). With `value`, assign it too.
-    #[allow(dead_code)]
     pub fn export(&mut self, name: &str, value: Option<String>) -> Result<(), String> {
         if self.readonly.contains(name) && value.is_some() {
             return Err(format!("{name}: is read only"));

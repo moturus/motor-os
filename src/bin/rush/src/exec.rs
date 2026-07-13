@@ -232,6 +232,7 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         "return" => return builtin_return(&argv[1..], shell),
         "break" => return builtin_break(&argv[1..], shell),
         "continue" => return builtin_continue(&argv[1..], shell),
+        "export" => return builtin_export(&argv[1..], shell),
         _ => {}
     }
 
@@ -349,6 +350,68 @@ fn builtin_cd(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `export [-p] [name[=value]]...` — mark each `name` for export to the
+/// environment of subsequently executed commands (moving it out of the shell's
+/// unexported variable map into the real process environment), optionally
+/// assigning `value` first. This is what lets a config's `export PATH=/bin`
+/// reach children like `printenv`, whose command resolution consults only the
+/// process environment. With no operands (or `-p`), the current exported set is
+/// listed in a form that can be re-read as shell input.
+///
+/// `export` is a POSIX special built-in, so it is dispatched before function
+/// name resolution and cannot be shadowed. (Assignment field-splitting on the
+/// value — `export X=$y` — follows the same word-expansion path as any other
+/// argument for now; declaration-utility assignment semantics are a later
+/// refinement.)
+fn builtin_export(args: &[String], shell: &mut Shell) -> i32 {
+    // No operands, or the lone `-p` flag: list the exported variables.
+    if args.iter().all(|a| a == "-p") {
+        for (name, value) in std::env::vars() {
+            println!("export {name}={}", single_quote(&value));
+        }
+        return 0;
+    }
+
+    let mut status = 0;
+    for arg in args {
+        if arg == "-p" {
+            continue;
+        }
+        // `name=value` assigns then exports; a bare `name` exports whatever
+        // value the name currently holds (if any).
+        let (name, value) = match arg.split_once('=') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (arg.as_str(), None),
+        };
+        if !crate::is_valid_var_name(name) {
+            eprintln!("rush: export: `{arg}': not a valid identifier");
+            status = 1;
+            continue;
+        }
+        if let Err(e) = shell.export(name, value) {
+            eprintln!("rush: export: {e}");
+            status = 1;
+        }
+    }
+    status
+}
+
+/// Single-quote a value so `export -p` output round-trips as shell input:
+/// wrap in `'…'` and render any embedded quote as the `'\''` escape.
+fn single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 fn process_exit(args: &[String], shell: &Shell) -> ! {
