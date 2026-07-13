@@ -297,7 +297,10 @@ build_cxx_runtimes() {
 build_native_llvm() {
 	log "stage 6: building the native (on-image) LLVM toolchain"
 	# The STANDARD_LIBRARIES mirror the Motor ToolChain's link group (shim first
-	# so its __cxa_thread_atexit wins; -lunwind for the EH runtime). Note: if the
+	# so its __cxa_thread_atexit wins; -lunwind for the EH runtime). Both the C
+	# and C++ groups carry -lc++abi: mlibc is implemented in C++, so even a C link
+	# pulls `operator delete`/`new` from libc.a members (this matches the Motor
+	# ToolChain's ConstructJob, which adds -lc++abi unconditionally). Note: if the
 	# sysroot's *set* of archives ever changes, `rm -rf build-motor-native` first
 	# (the try-compile probe results are cached).
 	cmake -S "$LLVM/llvm" -B "$LLVM/build-motor-native" -G Ninja \
@@ -309,7 +312,7 @@ build_native_llvm() {
 		-DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
 		-DCMAKE_C_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
 		-DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/$TOOLS/include/c++/v1 -isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-		-DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+		-DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
 		-DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
 		-DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/$TOOLS/lib" \
 		-DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES="CMAKE_C_STANDARD_LIBRARIES;CMAKE_CXX_STANDARD_LIBRARIES" \
@@ -367,7 +370,7 @@ stage_image() {
 	# toolchain now lives entirely under /sys.
 	rm -rf "$img/usr" "$img/etc"
 
-	mkdir -p "$img/bin" "$img/$TOOLS/lib" "$img/$TOOLS/src" \
+	mkdir -p "$img/bin" "$img/$TOOLS/bin" "$img/$TOOLS/lib" "$img/$TOOLS/src" \
 		"$img/$CFG_LLVM" "$img/$CFG_LIBC"
 
 	# Headers: mlibc + libc++'s c++/v1 (rm+copy for a clean, stale-free tree).
@@ -389,9 +392,52 @@ stage_image() {
 	done
 	cp "$SYSROOT/$TOOLS/lib/crt1.o" "$img/$TOOLS/lib/"
 
-	# The on-image toolchain and interpreter, stripped. (Binaries stay in /bin.)
-	"$B/llvm-strip" -o "$img/bin/llvm" "$LLVM/build-motor-native/bin/llvm"
+	# The on-image LLVM multicall lives under /sys/tools/llvm/bin, mirroring the
+	# Rust toolchain at /sys/tools/rust/bin (build-rustc.md). Its clang config and
+	# resource dir are pinned by absolute path (the /sys/cfg/llvm .cfg + the baked
+	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
+	# exe's own path, so the binary works wherever it is placed. Drop any /bin/llvm
+	# from earlier layouts. Lua stays in /bin.
+	rm -f "$img/bin/llvm"
+	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$LLVM/build-motor-native/bin/llvm"
 	"$B/llvm-strip" -o "$img/bin/lua"  "$MOTORH/lua-$LUA_VER/src/lua"
+
+	# /bin/cc — the system C compiler / linker driver: a `#!/bin/rush` script (not
+	# a compiled binary) over the llvm multicall's clang. rustc's default linker
+	# is the bare name `cc`, resolved on PATH (=/bin on the image), so a native
+	# `rustc hello.rs -o hello` links with no `-C linker=` flag — exactly as rustc
+	# uses /usr/bin/cc on Linux. On a *link* step it re-adds the mlibc/libc++ group
+	# clang suppresses under -nostartfiles/-nodefaultlibs (rustc always passes
+	# those); it does so on every link because mlibc is C++ internally, so even a
+	# plain C link needs libc++abi (undefined `operator delete` otherwise) — which
+	# the Motor clang ToolChain omits for C. Compile-only invocations pass through.
+	# The branch uses `case`, not `[ ]`: the on-image rush has no `test` builtin.
+	cat > "$img/bin/cc" << 'EOF'
+#!/bin/rush
+# cc — Motor OS's system C compiler / linker driver. See docs/build-llvm.md.
+compile_only=n
+has_input=n
+for a in "$@"; do
+    case "$a" in
+        -c|-S|-E|-M|-MM|--version|-###|-dumpversion|-print*) compile_only=y ;;
+        -*) ;;
+        *) has_input=y ;;
+    esac
+done
+case "$has_input$compile_only" in
+    yn)
+        /sys/tools/llvm/bin/llvm clang "$@" \
+            -nostartfiles -nodefaultlibs \
+            -Wl,--start-group \
+            /sys/tools/llvm/lib/crt1.o \
+            -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 \
+            -Wl,--end-group
+        ;;
+    *)
+        /sys/tools/llvm/bin/llvm clang "$@"
+        ;;
+esac
+EOF
 
 	# The image driver config: only the resource dir needs pinning (the full
 	# link/include recipe lives in the Motor ToolChain now). Clang auto-loads it
@@ -456,6 +502,9 @@ main() {
 	build_image
 	log "done — the image at $MOTOR/vm_images/release now carries clang/lld/llvm, lua, and the C/C++ sysroot."
 	log "to run the VM:  cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
+	log "then, at the Motor OS prompt (the multicall lives at /sys/tools/llvm/bin/llvm):"
+	log "  /sys/tools/llvm/bin/llvm clang /sys/tools/llvm/src/hello.c -o /sys/tmp/hello && /sys/tmp/hello"
+	log "  cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello2 && /sys/tmp/hello2   # /bin/cc: same thing, conventional name"
 }
 
 main "$@"

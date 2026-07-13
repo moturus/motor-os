@@ -9,21 +9,29 @@ C/C++ sysroot at `$MOTORH/motor-sysroot`.
 
 The end result is a Motor OS VM image that carries a **native `rustc`** — the
 real Rust compiler, statically linked with its own LLVM, running on Motor OS —
-plus a Rust sysroot (std and friends as rlibs) and a small `motor-cc` linker
-driver, so that, booted into the VM, you can compile and run Rust programs
-natively:
+plus a Rust sysroot (std and friends as rlibs), so that, booted into the VM, you
+can compile and run Rust programs natively — a single `rustc`, no linker flag:
 
 ```sh
 /sys/tools/rust/bin/rustc --version
 /sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs \
-    -o /sys/tmp/hello -C linker=/bin/motor-cc && /sys/tmp/hello
+    -o /sys/tmp/hello && /sys/tmp/hello
 ```
 
+rustc does not link by itself — on every platform it drives an external C
+compiler, which it looks up by the bare name `cc`. On Linux that is
+`/usr/bin/cc`; on Motor it is `/bin/cc`, a small `#!/bin/rush` script over the
+`/sys/tools/llvm/bin/llvm` multicall's clang, **produced by
+[build-llvm.md](build-llvm.md)** (it belongs with the C toolchain it fronts).
+Because rustc finds `cc` on `PATH` (=`/bin`) on its own, no `-C linker=` flag is
+needed.
+
 On the image the Rust toolchain lives at `/sys/tools/rust` (`bin/rustc`,
-`lib/rustlib/x86_64-unknown-motor/lib/*.rlib`, sample sources at `src/`), and
-the linker driver at `/bin/motor-cc`. Everything is cross-built on the host by
-Rust's own bootstrap (`x.py`) and staged into the image, exactly like the C
-toolchain in [build-llvm.md](build-llvm.md).
+`lib/rustlib/x86_64-unknown-motor/lib/*.rlib`, sample sources at `src/`). The
+system C compiler / linker driver `/bin/cc` and the LLVM multicall it fronts come
+from build-llvm.md; this guide only builds and stages the Rust half. Everything
+is cross-built on the host by Rust's own bootstrap (`x.py`) and staged into the
+image, exactly like the C toolchain in [build-llvm.md](build-llvm.md).
 
 This build runs **on top of build-llvm.md** and reuses everything it produced:
 the host cross-clang, the C/C++ sysroot (the `libc.a`/`crt1.o`/headers built
@@ -94,11 +102,26 @@ The load-bearing decisions, each of which the stages below implement:
   proc-macro loading and dylib codegen backends are stubbed by the
   `libloading` fork (a single 0.9 version — `rustc_metadata` was bumped off
   0.8); there are no proc-macro or `-C prefer-dynamic` builds on the image.
-- **rustc drives the link through `motor-cc`.** rustc passes `-nostartfiles
-  -nodefaultlibs` to its linker. On the host, the `motor-rust-cc` wrapper
-  re-adds the mlibc/libc++ link group after rustc's inputs; on the image,
-  `/bin/motor-cc` (a ~30-line Rust program) does the same by invoking
-  `/bin/llvm clang`.
+- **rustc drives the link through a `cc`.** rustc passes `-nostartfiles
+  -nodefaultlibs` to its linker (it owns the runtime itself), which suppresses
+  the clang driver's automatic `crt1.o` + mlibc/libc++ link group. On the host,
+  the `motor-rust-cc` wrapper re-adds that group after rustc's inputs; on the
+  image, `/bin/cc` (a `#!/bin/rush` script from build-llvm.md) does the same by
+  invoking `/sys/tools/llvm/bin/llvm clang`. That `cc` supplies the group (with
+  `libc++abi`) on every *link* step, not just rustc's: mlibc is C++ internally,
+  so even a plain C program that touches stdio references `operator delete` and
+  needs `libc++abi`. (The Motor clang ToolChain now also adds `libc++abi`
+  unconditionally, so `cc`'s group matches what a bare `llvm clang` does — but
+  `cc` still has to supply it because rustc's `-nodefaultlibs` suppresses the
+  ToolChain's automatic group entirely.) So the one script is both rustc's linker
+  and a working C compiler (`cc hello.c -o hello`); compile-only invocations pass
+  straight through. Note
+  the two link contexts do **not**
+  share a target-spec change: `base/motor.rs` is left untouched (the same
+  built-in spec is compiled into the `dev` host toolchain that `make all` uses to
+  link the OS's own pure-Rust programs via the host `cc`, and must keep passing
+  `-nostartfiles -nodefaultlibs`); the mlibc group lives in the `cc` driver, not
+  the spec.
 
 Rough budget: a first build is ~1.5–2.5 h (two full LLVM builds plus the
 compiler crates dominate) and adds ~160 MB to the image. Re-runs are
@@ -321,17 +344,21 @@ cp build/x86_64-unknown-linux-gnu/stage2-tools-bin/{cargo-clippy,clippy-driver} 
    build/x86_64-unknown-linux-gnu/stage2/bin/
 ```
 
-## Stage R5 — motor-cc, the on-image linker driver
+## Stage R5 — `cc`, the on-image linker driver (from build-llvm.md)
 
-rustc on the image needs a `cc` to drive the link. `motor-cc` is a small Rust
-binary (built with the dev toolchain, source written by the script) that
-invokes the on-image `llvm` multicall as `clang` with the caller's arguments
-plus the same trailing link group as `motor-rust-cc`:
-
-```sh
-cd $MOTORH/motor-cc
-cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor --release
-```
+rustc on the image needs a `cc` to drive the link, and it looks for exactly that
+bare name on `PATH`. That `cc` is **not built here** — it is the `#!/bin/rush`
+script [build-llvm.md](build-llvm.md) stages at `/bin/cc`, because it belongs
+with the C toolchain it fronts (`/sys/tools/llvm/bin/llvm`'s clang plus the
+sysroot libs). It cannot be a symlink to `llvm`: motor-fs has no symlinks, and a
+spawned child always sees the resolved exe path as its argv[0], so the
+multicall's only entry is the subcommand form `llvm clang …`. On any *link* step
+it suppresses clang's automatic startfiles/default-libs and appends the same
+`crt1.o` + mlibc/libc++ group as `motor-rust-cc` (including `libc++abi`, which
+mlibc — being C++ internally — needs even from pure-C code); compile-only
+invocations pass straight through. So the one script is both rustc's linker and a
+working C compiler. Nothing to do in this stage beyond confirming build-llvm.md
+ran: `test -f $MOTOR/img_files/motor-os/bin/cc`.
 
 ## Stage R6 — stage everything into the image
 
@@ -354,8 +381,9 @@ rm -rf $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
 mkdir -p $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
 cp -r $RUSTLIB/* $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib/
 
-# The linker driver.
-cp $MOTORH/motor-cc/target/x86_64-unknown-motor/release/motor-cc $IMG/bin/
+# (/bin/cc — the linker driver rustc uses — is a rush script staged by
+# build-llvm.md, not here. Drop any stale motor-cc from an older layout.)
+rm -f $IMG/bin/motor-cc
 
 # A sample source (the script writes one exercising HashMap + threads).
 cp .../hello.rs $IMG/sys/tools/rust/src/hello.rs
@@ -386,10 +414,12 @@ prompt:
 ```sh
 mkdir /sys/tmp                      # scratch for outputs, if not present
 /sys/tools/rust/bin/rustc --version
-/sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs \
-    -o /sys/tmp/hello -C linker=/bin/motor-cc
+/sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs -o /sys/tmp/hello
 /sys/tmp/hello
 ```
+
+No `-C linker=` flag: rustc's default linker is the bare name `cc`, which it
+finds at `/bin/cc` via `PATH`.
 
 Expected: `rustc 1.98.0-dev`, a silent successful compile (~1 min in a 1 GB
 VM), then the program prints its HashMap-ordered sentence and `10! = 3628800`
@@ -407,7 +437,7 @@ executed entirely on Motor OS.
   the dev toolchain) after every relink.
 - **`x.py build library --target X` evicts the other target's std** from the
   stage2 sysroot. Always pass both targets in one invocation, or the next
-  OS/motor-cc build dies with `can't find crate for std`/`core`.
+  OS/`cc` build dies with `can't find crate for std`/`core`.
 - **Every `x.py` build recreates `stage2/bin`**, dropping `cargo-clippy` and
   `clippy-driver`. The Motor OS `make` runs clippy in its vdso step and fails
   *before the imager runs*; and since qemu writes to a mounted image's file,

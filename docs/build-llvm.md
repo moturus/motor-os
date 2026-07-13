@@ -18,14 +18,23 @@ so that, booted into the VM, you can compile and run C and C++ programs
 natively:
 
 ```sh
-llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
-llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
+/sys/tools/llvm/bin/llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
+/sys/tools/llvm/bin/llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
+cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello3 && /sys/tmp/hello3   # /bin/cc: the PATH shortcut
 ```
 
-On the image the toolchain lives under `/sys` — headers and libraries at
-`/sys/tools/llvm`, the clang driver config at `/sys/cfg/llvm`, and mlibc's
-config files (`resolv.conf`, ...) at `/sys/cfg/libc`. See
+On the image the toolchain lives under `/sys` — the multicall `llvm` binary at
+`/sys/tools/llvm/bin` (mirroring the Rust toolchain's `/sys/tools/rust/bin`, and
+invoked by full path just like `rustc`), headers and libraries at
+`/sys/tools/llvm`, the clang driver config at `/sys/cfg/llvm`, and mlibc's config
+files (`resolv.conf`, ...) at `/sys/cfg/libc`. See
 [porting-libc/dirs.md](porting-libc/dirs.md) for the rationale.
+
+For convenience, `/bin/cc` — a small `#!/bin/rush` script over `llvm clang` — is
+the PATH-accessible system C compiler (`cc hello.c -o hello`). It is also what
+`rustc` invokes as its default linker, so native `rustc` needs no `-C linker=`
+flag; see [build-rustc.md](build-rustc.md). `cc` is produced by this guide
+(stage 8) because it belongs with the C toolchain it fronts.
 
 ## How the pieces fit together
 
@@ -372,7 +381,9 @@ and dispatches `llvm clang`, `llvm ld.lld`, `llvm ar`, `llvm nm`, etc.
 The `CMAKE_*_STANDARD_LIBRARIES` values below complete the driver's own
 `-static-pie` link probes; they mirror the link group the Motor ToolChain emits
 (shim first so its `__cxa_thread_atexit` wins, `-lunwind` present for the EH
-runtime).
+runtime). Both the C and C++ groups carry `-lc++abi`: mlibc is C++ internally, so
+even a C link pulls `operator delete`/`new` from `libc.a` members, matching the
+ToolChain's `ConstructJob` (which adds `-lc++abi` unconditionally).
 
 ```sh
 cd $LLVM
@@ -385,7 +396,7 @@ cmake -S $LLVM/llvm -B $LLVM/build-motor-native -G Ninja \
   -DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
   -DCMAKE_C_FLAGS="-isystem $SYSROOT/sys/tools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
   -DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/sys/tools/llvm/include/c++/v1 -isystem $SYSROOT/sys/tools/llvm/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-  -DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/sys/tools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
+  -DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/sys/tools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
   -DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/sys/tools/llvm/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
   -DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/sys/tools/llvm/lib" \
   -DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES="CMAKE_C_STANDARD_LIBRARIES;CMAKE_CXX_STANDARD_LIBRARIES" \
@@ -451,15 +462,17 @@ $B/clang $CFLAGS lua.c liblua.a \
 
 `img_files/motor-os/` is a passthrough that maps to the **image root** (the
 imager yaml already lists it — never edit that yaml). Headers and libraries land
-at `/sys/tools/llvm`, the toolchain and interpreter at `/bin`, the clang driver
+at `/sys/tools/llvm`, the `llvm` multicall at `/sys/tools/llvm/bin` (mirroring
+`/sys/tools/rust/bin`), `lua` and the `cc` script at `/bin`, the clang driver
 config at `/sys/cfg/llvm`, and mlibc's config at `/sys/cfg/libc`. (If an earlier
-build left a `/usr` or `/etc` tree here, delete it — those locations are obsolete:
-`rm -rf $IMG/usr $IMG/etc`.)
+build left a `/usr` or `/etc` tree, or a `/bin/llvm` from the old layout, delete
+them: `rm -rf $IMG/usr $IMG/etc $IMG/bin/llvm`.)
 
 ```sh
 IMG=$MOTOR/img_files/motor-os
 rm -rf $IMG/usr $IMG/etc     # obsolete layout, if present
-mkdir -p $IMG/bin $IMG/sys/cfg/llvm $IMG/sys/cfg/libc \
+rm -f  $IMG/bin/llvm         # old location — the multicall now lives under /sys
+mkdir -p $IMG/bin $IMG/sys/tools/llvm/bin $IMG/sys/cfg/llvm $IMG/sys/cfg/libc \
          $IMG/sys/tools/llvm/lib/clang/$CLANG_MAJOR $IMG/sys/tools/llvm/src
 
 # 1. Headers: mlibc + libc++'s c++/v1.
@@ -476,9 +489,46 @@ for a in libc libc++ libc++abi libunwind libmoto_rt_cabi \
 done
 cp $SYSROOT/sys/tools/llvm/lib/crt1.o $IMG/sys/tools/llvm/lib/
 
-# 4. The on-image toolchain and interpreter, stripped. (Binaries stay in /bin.)
-$B/llvm-strip -o $IMG/bin/llvm $LLVM/build-motor-native/bin/llvm
+# 4. The on-image LLVM multicall, stripped, at /sys/tools/llvm/bin (like rustc
+#    at /sys/tools/rust/bin). Its clang config + resource dir are pinned by
+#    absolute path and its ld.lld self-dispatch uses the running exe's own path,
+#    so it works wherever it is placed. Lua stays in /bin.
+$B/llvm-strip -o $IMG/sys/tools/llvm/bin/llvm $LLVM/build-motor-native/bin/llvm
 $B/llvm-strip -o $IMG/bin/lua  $MOTORH/lua-5.4.8/src/lua
+
+# 4b. /bin/cc — the PATH-accessible system C compiler / linker driver: a
+#     `#!/bin/rush` script over `llvm clang`. rustc's default linker is the bare
+#     name `cc`, so native `rustc hello.rs -o hello` links with no `-C linker=`
+#     flag (like /usr/bin/cc on Linux). On a *link* step it re-adds the mlibc +
+#     libc++ group clang drops under -nostartfiles/-nodefaultlibs (which rustc
+#     always passes), on every link — mlibc is C++ internally so even a plain C
+#     link needs libc++abi. Compile-only invocations pass through. `case`, not
+#     `[ ]`: the on-image rush has no `test` builtin.
+cat > $IMG/bin/cc << 'EOF'
+#!/bin/rush
+compile_only=n
+has_input=n
+for a in "$@"; do
+    case "$a" in
+        -c|-S|-E|-M|-MM|--version|-###|-dumpversion|-print*) compile_only=y ;;
+        -*) ;;
+        *) has_input=y ;;
+    esac
+done
+case "$has_input$compile_only" in
+    yn)
+        /sys/tools/llvm/bin/llvm clang "$@" \
+            -nostartfiles -nodefaultlibs \
+            -Wl,--start-group \
+            /sys/tools/llvm/lib/crt1.o \
+            -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 \
+            -Wl,--end-group
+        ;;
+    *)
+        /sys/tools/llvm/bin/llvm clang "$@"
+        ;;
+esac
+EOF
 
 # 5. The image driver config. The full link/include recipe lives in the driver
 #    (the Motor ToolChain) now; only the resource dir needs pinning. Clang
@@ -536,12 +586,21 @@ prompt, compile and run natively:
 
 ```sh
 mkdir /sys/tmp                                            # scratch for outputs
-llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
-llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
+/sys/tools/llvm/bin/llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
+/sys/tools/llvm/bin/llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
+cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello3 && /sys/tmp/hello3
 lua -e 'print("lua on Motor:", 2^0.5)'
 ```
 
-Expected: `Hello from Motor-native clang!`, then
+Both C and C++ link directly: the Motor clang ToolChain adds `-lc++abi` to the
+link group unconditionally (mlibc is C++ internally, so even a C program pulls
+`operator delete` from a `libc.a` member — an omission here was the old
+`undefined symbol: operator delete` failure). The multicall is invoked by full
+path — it is no longer on `PATH` — exactly like `/sys/tools/rust/bin/rustc`;
+`cc`, on `/bin`, is the PATH-accessible C front-end and is equivalent to
+`/sys/tools/llvm/bin/llvm clang`.
+
+Expected: `Hello from Motor-native clang!` (twice — raw `llvm clang` and `cc`),
 `Hello from Motor-native clang++!`, then Lua prints the square root of 2 —
 C and C++ (with working exceptions) compiled and linked by the Motor-native
 toolchain, plus a real interpreter.

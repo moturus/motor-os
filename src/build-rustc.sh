@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# build-rustc.sh — build a native rustc for Motor OS (rustc + Rust sysroot +
-# the motor-cc linker driver) and bake it into the VM image.
+# build-rustc.sh — build a native rustc for Motor OS (rustc + Rust sysroot) and
+# bake it into the VM image. The linker driver rustc uses (/bin/cc) and the LLVM
+# multicall it fronts (/sys/tools/llvm/bin/llvm) are produced by build-llvm.sh.
 #
 # This assumes build-base.sh and build-llvm.sh have completed in the same
 # directory: the rust checkout with the dev-x86_64-unknown-motor toolchain,
@@ -19,8 +20,10 @@
 # and moto-rt comes from crates.io. No patches of its own.
 #
 # On-image layout: the Rust toolchain lives at /sys/tools/rust (bin/rustc,
-# lib/rustlib/x86_64-unknown-motor/lib, sample sources at src/), the linker
-# driver at /bin/motor-cc.
+# lib/rustlib/x86_64-unknown-motor/lib, sample sources at src/). rustc drives the
+# link through /bin/cc (from build-llvm.sh) — Motor's system C compiler — which
+# it finds on PATH by default, so no `-C linker=` flag is needed (just like
+# /usr/bin/cc on Linux).
 #
 # USAGE
 #   Copy this script next to build-base.sh and build-llvm.sh in $MOTORH and,
@@ -273,58 +276,16 @@ build_stds() {
 	fi
 }
 
-# --- motor-cc: the on-image linker driver -------------------------------------
-build_motor_cc() {
-	log "building motor-cc (the on-image linker driver)"
-	mkdir -p "$MOTORH/motor-cc/src"
-	cat > "$MOTORH/motor-cc/Cargo.toml" << 'EOF'
-[package]
-name = "motor-cc"
-version = "0.1.0"
-edition = "2021"
-
-[profile.release]
-opt-level = "s"
-EOF
-	cat > "$MOTORH/motor-cc/src/main.rs" << 'EOF'
-//! cc-style linker driver for rustc running natively on Motor OS.
-//!
-//! rustc invokes the linker with `-nostartfiles ... -nodefaultlibs`, which
-//! suppresses the Motor clang driver's automatic crt1.o + runtime link
-//! group. This wrapper re-invokes the on-image `llvm` multicall as `clang`
-//! and appends that group after rustc's own inputs, so mlibc owns the entry
-//! point (its crt1 initializes the C runtime and calls the Rust C main).
-
-use std::process::{exit, Command};
-
-const LIB: &str = "/sys/tools/llvm/lib";
-
-fn main() {
-    let mut cmd = Command::new("/bin/llvm");
-    cmd.arg("clang");
-    cmd.args(std::env::args().skip(1));
-    cmd.arg("-Wl,--start-group");
-    cmd.arg(format!("{LIB}/crt1.o"));
-    for lib in ["-lmoto_rt_cabi", "-lc++", "-lc++abi", "-lunwind", "-lc", "-lclang_rt.builtins-x86_64"] {
-        cmd.arg(lib);
-    }
-    cmd.arg("-Wl,--end-group");
-    match cmd.status() {
-        Ok(st) => exit(st.code().unwrap_or(1)),
-        Err(e) => {
-            eprintln!("motor-cc: failed to spawn /bin/llvm: {e}");
-            exit(1);
-        }
-    }
-}
-EOF
-	( cd "$MOTORH/motor-cc" && \
-		cargo +dev-x86_64-unknown-motor build --target "$TARGET" --release )
-}
+# cc — the system C compiler / linker driver rustc uses on the image — is not
+# built here: it is a `#!/bin/rush` script produced by build-llvm.sh (it belongs
+# with the C toolchain: it fronts /sys/tools/llvm/bin/llvm and the sysroot libs).
+# rustc's default linker is the bare name `cc`, resolved on PATH (=/bin on the
+# image), so a native `rustc hello.rs -o hello` links with no `-C linker=` flag,
+# exactly as rustc uses /usr/bin/cc on Linux. Nothing to do in this build.
 
 # --- stage everything into the image ------------------------------------------
 stage_image() {
-	log "staging rustc, the Rust sysroot, and motor-cc into img_files"
+	log "staging rustc, the Rust sysroot, and cc into img_files"
 	local rust_img="$IMG/sys/tools/rust"
 	mkdir -p "$IMG/bin" "$rust_img/bin" "$rust_img/src" \
 		"$rust_img/lib/rustlib/$TARGET"
@@ -347,8 +308,8 @@ stage_image() {
 	[ -n "$(ls "$rust_img/lib/rustlib/$TARGET/lib"/*.rmeta 2>/dev/null)" ] || \
 		die "no .rmeta files staged — rustc on the image would reject every rlib"
 
-	# The linker driver.
-	cp "$MOTORH/motor-cc/target/$TARGET/release/motor-cc" "$IMG/bin/"
+	# (/bin/cc, the linker driver rustc uses, is a rush script staged by
+	# build-llvm.sh — nothing to stage here.)
 
 	# A sample source exercising HashMap, sorting, and thread spawn/join.
 	cat > "$rust_img/src/hello.rs" << 'EOF'
@@ -393,14 +354,13 @@ main() {
 	write_bootstrap_toml
 	build_rustc
 	build_stds
-	build_motor_cc
 	stage_image
 	build_image
 	log "done — the image at $MOTOR/vm_images/release now carries a native rustc."
 	log "to run the VM:  cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
 	log "then, at the Motor OS prompt:"
 	log "  /sys/tools/rust/bin/rustc --version"
-	log "  /sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs -o /sys/tmp/hello -C linker=/bin/motor-cc"
+	log "  /sys/tools/rust/bin/rustc /sys/tools/rust/src/hello.rs -o /sys/tmp/hello"
 	log "  /sys/tmp/hello"
 }
 
