@@ -60,6 +60,32 @@ pub struct Shell {
     /// `set -f`: pathname expansion (globbing) disabled. Wired to the `set`
     /// builtin in Phase 6; default off.
     pub noglob: bool,
+    /// Command aliases (`alias name=value`), expanded in command position.
+    aliases: HashMap<String, String>,
+    /// `getopts` internal cursor: the 1-based index of the character within the
+    /// current argument still to be scanned (0 = start of a fresh argument).
+    /// Companion to the `OPTIND` shell variable.
+    getopts_char: usize,
+    /// File-creation mask, tracked by the `umask` builtin. Motor OS `std` exposes
+    /// no `umask` syscall, so this is display/bookkeeping only for now and does
+    /// not affect the mode of files the shell creates.
+    umask: u32,
+    /// Signal/`EXIT` traps set by the `trap` builtin, keyed by condition name
+    /// (`EXIT`, `INT`, …). Only the `EXIT` trap is fired (Phase 5); signal traps
+    /// are stored but not delivered until Phase 7.
+    traps: HashMap<String, String>,
+    /// Whether this is an interactive shell. A *non-interactive* shell exits on a
+    /// special-builtin usage/assignment error (POSIX §2.8.1); an interactive one
+    /// reports and continues.
+    interactive: bool,
+    /// A pending fatal error (a special-builtin usage/assignment error), carrying
+    /// the exit status. Set by the offending builtin/assignment and consumed by
+    /// the executor, which exits a non-interactive shell.
+    fatal: Option<i32>,
+    /// Depth of emulated subshells (`$(…)`, `( … )`, pipeline stages) currently
+    /// executing. A fatal error inside one must not take down the whole shell
+    /// (there is no `fork`), so the fatal-exit is suppressed when this is > 0.
+    subshell_depth: u32,
 }
 
 impl Shell {
@@ -75,6 +101,13 @@ impl Shell {
             flow: Flow::Normal,
             loop_depth: 0,
             noglob: false,
+            aliases: HashMap::new(),
+            getopts_char: 0,
+            umask: 0o022,
+            traps: HashMap::new(),
+            interactive: false,
+            fatal: None,
+            subshell_depth: 0,
         }
     }
 
@@ -128,16 +161,42 @@ impl Shell {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn set_readonly(&mut self, name: &str) {
         self.readonly.insert(name.to_string());
     }
 
-    #[allow(dead_code)]
-    pub fn unset(&mut self, name: &str) {
+    /// Remove a variable. Returns an error (without unsetting) if it is readonly.
+    pub fn unset(&mut self, name: &str) -> Result<(), String> {
+        if self.readonly.contains(name) {
+            return Err(format!("{name}: is read only"));
+        }
         self.vars.remove(name);
         // SAFETY: single-threaded control flow.
         unsafe { std::env::remove_var(name) };
+        Ok(())
+    }
+
+    /// Every variable name→value pair currently visible: unexported shell
+    /// variables plus the process environment (the shell value wins), sorted by
+    /// name. Backs the no-operand `set` and `readonly -p` listings.
+    pub fn vars_sorted(&self) -> Vec<(String, String)> {
+        let mut map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        for (k, v) in &self.vars {
+            map.insert(k.clone(), v.clone());
+        }
+        map.into_iter().collect()
+    }
+
+    /// Whether a name is currently exported (lives in the process environment).
+    pub fn is_exported(&self, name: &str) -> bool {
+        !self.vars.contains_key(name) && std::env::var_os(name).is_some()
+    }
+
+    /// Sorted names of the readonly-marked variables.
+    pub fn readonly_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.readonly.iter().cloned().collect();
+        v.sort();
+        v
     }
 
     /// `IFS`, or the POSIX default (space, tab, newline) when unset.
@@ -156,6 +215,114 @@ impl Shell {
     /// body can be executed while `self` is mutably borrowed.
     pub fn get_function(&self, name: &str) -> Option<Rc<FunctionBody>> {
         self.functions.get(name).cloned()
+    }
+
+    /// Remove a function definition; returns whether it existed.
+    pub fn unset_function(&mut self, name: &str) -> bool {
+        self.functions.remove(name).is_some()
+    }
+
+    // ---- aliases -----------------------------------------------------------
+
+    pub fn set_alias(&mut self, name: &str, value: String) {
+        self.aliases.insert(name.to_string(), value);
+    }
+
+    pub fn get_alias(&self, name: &str) -> Option<&str> {
+        self.aliases.get(name).map(String::as_str)
+    }
+
+    /// Remove an alias; returns whether it existed.
+    pub fn unset_alias(&mut self, name: &str) -> bool {
+        self.aliases.remove(name).is_some()
+    }
+
+    /// All aliases as (name, value) pairs, sorted by name (for `alias` listing).
+    pub fn aliases_sorted(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .aliases
+            .iter()
+            .map(|(k, val)| (k.clone(), val.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    // ---- getopts state -----------------------------------------------------
+
+    pub fn getopts_char(&self) -> usize {
+        self.getopts_char
+    }
+
+    pub fn set_getopts_char(&mut self, pos: usize) {
+        self.getopts_char = pos;
+    }
+
+    // ---- umask -------------------------------------------------------------
+
+    pub fn umask(&self) -> u32 {
+        self.umask
+    }
+
+    pub fn set_umask(&mut self, mask: u32) {
+        self.umask = mask;
+    }
+
+    // ---- interactivity & fatal errors --------------------------------------
+
+    pub fn set_interactive(&mut self, yes: bool) {
+        self.interactive = yes;
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        self.interactive
+    }
+
+    /// Flag a fatal special-builtin usage/assignment error with its exit status.
+    pub fn mark_fatal(&mut self, status: i32) {
+        self.fatal = Some(status);
+    }
+
+    /// Consume any pending fatal error.
+    pub fn take_fatal(&mut self) -> Option<i32> {
+        self.fatal.take()
+    }
+
+    pub fn enter_subshell(&mut self) {
+        self.subshell_depth += 1;
+    }
+
+    pub fn exit_subshell(&mut self) {
+        self.subshell_depth = self.subshell_depth.saturating_sub(1);
+    }
+
+    pub fn in_subshell(&self) -> bool {
+        self.subshell_depth > 0
+    }
+
+    // ---- traps -------------------------------------------------------------
+
+    pub fn set_trap(&mut self, cond: &str, action: String) {
+        self.traps.insert(cond.to_string(), action);
+    }
+
+    pub fn clear_trap(&mut self, cond: &str) {
+        self.traps.remove(cond);
+    }
+
+    pub fn get_trap(&self, cond: &str) -> Option<&str> {
+        self.traps.get(cond).map(String::as_str)
+    }
+
+    /// All traps as (condition, action) pairs, sorted by condition.
+    pub fn traps_sorted(&self) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .traps
+            .iter()
+            .map(|(k, val)| (k.clone(), val.clone()))
+            .collect();
+        v.sort();
+        v
     }
 
     // ---- control flow (break / continue / return) --------------------------
@@ -251,7 +418,14 @@ impl Shell {
             vars: self.vars.clone(),
             readonly: self.readonly.clone(),
             functions: self.functions.clone(),
+            aliases: self.aliases.clone(),
+            traps: self.traps.clone(),
             cwd: std::env::current_dir().ok(),
+            // `PWD`/`OLDPWD` are exported (they live in the environment), so the
+            // generic var restore would miss them; capture and restore them with
+            // the working directory so a subshell `cd` cannot leak.
+            pwd: std::env::var("PWD").ok(),
+            oldpwd: std::env::var("OLDPWD").ok(),
         }
     }
 
@@ -259,8 +433,23 @@ impl Shell {
         self.vars = snap.vars;
         self.readonly = snap.readonly;
         self.functions = snap.functions;
+        self.aliases = snap.aliases;
+        self.traps = snap.traps;
         if let Some(cwd) = snap.cwd {
             let _ = std::env::set_current_dir(cwd);
+        }
+        restore_env("PWD", snap.pwd);
+        restore_env("OLDPWD", snap.oldpwd);
+    }
+}
+
+/// Set or remove an environment variable to match a captured value.
+fn restore_env(name: &str, value: Option<String>) {
+    // SAFETY: single-threaded control flow.
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
         }
     }
 }
@@ -269,7 +458,11 @@ pub struct Snapshot {
     vars: HashMap<String, String>,
     readonly: HashSet<String>,
     functions: HashMap<String, Rc<FunctionBody>>,
+    aliases: HashMap<String, String>,
+    traps: HashMap<String, String>,
     cwd: Option<std::path::PathBuf>,
+    pwd: Option<String>,
+    oldpwd: Option<String>,
 }
 
 impl ArithEnv for Shell {
@@ -307,7 +500,7 @@ mod tests {
         // Reassigning an exported var keeps it in the environment.
         sh.set("EXP_ME", "2".into()).unwrap();
         assert_eq!(std::env::var("EXP_ME").as_deref(), Ok("2"));
-        sh.unset("EXP_ME");
+        sh.unset("EXP_ME").unwrap();
         assert!(std::env::var_os("EXP_ME").is_none());
     }
 

@@ -22,9 +22,9 @@
 //! abort; `exit` inside an emulated `( … )` subshell exits the whole shell.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,6 +33,7 @@ use crate::ast::{
     AndOr, AndOrOp, CaseClause, Command as AstCommand, CompoundCommand, ForClause, FunctionBody,
     IfClause, List, Pipeline, RedirOp, Redirect, SimpleCommand, WhileClause,
 };
+use crate::builtins::{self, Builtin};
 use crate::expand;
 use crate::parser::{self, Parsed};
 use crate::shell::{Flow, Shell};
@@ -42,6 +43,7 @@ use crate::shell::{Flow, Shell};
 pub fn run_command(args: Vec<String>, shell: &mut Shell) {
     let line = args.join(" ");
     let status = run_source(&line, shell);
+    fire_exit_trap(shell);
     crate::exit(status);
 }
 
@@ -54,6 +56,18 @@ pub fn run_script(fname: &str, shell: &mut Shell) -> i32 {
         }
     };
     run_source(&script, shell)
+}
+
+/// Run the `EXIT` trap action, if any, and clear it so it fires exactly once.
+/// Called when the shell itself is about to terminate (the `exit` builtin, the
+/// end of `-c`/script execution). Signal traps await Phase 7.
+pub fn fire_exit_trap(shell: &mut Shell) {
+    if let Some(action) = shell.get_trap("EXIT").map(String::from) {
+        shell.clear_trap("EXIT");
+        if !action.is_empty() {
+            run_source(&action, shell);
+        }
+    }
 }
 
 /// Parse and execute a source buffer with the default (inherited) I/O
@@ -98,17 +112,41 @@ enum FdSource {
 }
 
 impl FdSource {
-    fn to_stdio(&self) -> std::io::Result<Stdio> {
-        Ok(match self {
-            FdSource::Inherit => Stdio::inherit(),
-            FdSource::File(f) => Stdio::from(f.try_clone()?),
-            FdSource::Heredoc(_) => Stdio::piped(),
-        })
-    }
-    fn heredoc_body(&self) -> Option<Arc<String>> {
+    /// A writer for this fd used as *standard output*: `Inherit` → the process's
+    /// stdout. Backs builtin output so `echo hi > f` and `pwd` honor redirects.
+    fn out_writer(&self) -> Box<dyn Write> {
         match self {
-            FdSource::Heredoc(b) => Some(b.clone()),
-            _ => None,
+            FdSource::Inherit => Box::new(std::io::stdout()),
+            FdSource::File(f) => f
+                .try_clone()
+                .map(|x| Box::new(x) as Box<dyn Write>)
+                .unwrap_or_else(|_| Box::new(std::io::stdout())),
+            FdSource::Heredoc(_) => Box::new(std::io::sink()),
+        }
+    }
+
+    /// A writer for this fd used as *standard error*: `Inherit` → stderr.
+    fn err_writer(&self) -> Box<dyn Write> {
+        match self {
+            FdSource::Inherit => Box::new(std::io::stderr()),
+            FdSource::File(f) => f
+                .try_clone()
+                .map(|x| Box::new(x) as Box<dyn Write>)
+                .unwrap_or_else(|_| Box::new(std::io::stderr())),
+            FdSource::Heredoc(_) => Box::new(std::io::sink()),
+        }
+    }
+
+    /// A reader for this fd used as *standard input* (for `read`): `Inherit` →
+    /// stdin, a file → the file, a here-document → its body.
+    fn reader(&self) -> Box<dyn Read> {
+        match self {
+            FdSource::Inherit => Box::new(std::io::stdin()),
+            FdSource::File(f) => f
+                .try_clone()
+                .map(|x| Box::new(x) as Box<dyn Read>)
+                .unwrap_or_else(|_| Box::new(std::io::empty())),
+            FdSource::Heredoc(b) => Box::new(std::io::Cursor::new(b.as_bytes().to_vec())),
         }
     }
 }
@@ -204,8 +242,10 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         let mut status = 0;
         for (k, v) in &assigns {
             if let Err(e) = shell.set(k, v.clone()) {
+                // A variable assignment error aborts a non-interactive shell.
                 eprintln!("rush: {e}");
-                status = 1;
+                status = 2;
+                shell.mark_fatal(2);
             }
         }
         if !simple.redirects.is_empty() {
@@ -214,8 +254,14 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
                 status = code;
             }
         }
+        maybe_die_fatal(shell);
         return status;
     }
+
+    // Alias expansion in command position (a documented-limits approximation:
+    // the value is whitespace-split into words, without re-quoting or `$`
+    // re-expansion, and a name is expanded at most once to avoid loops).
+    expand_aliases(&mut argv, shell);
 
     // Redirections apply to every command, builtin or external; build them once
     // (this also gives the file-creation side effect for output-less builtins).
@@ -224,34 +270,307 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         Err(code) => return code,
     };
 
-    // Special built-ins that touch the shell process or its control flow; these
-    // cannot be shadowed by a function.
-    match argv[0].as_str() {
-        "exit" => process_exit(&argv[1..], shell),
-        "quit" => crate::exit(0),
-        "return" => return builtin_return(&argv[1..], shell),
-        "break" => return builtin_break(&argv[1..], shell),
-        "continue" => return builtin_continue(&argv[1..], shell),
-        "export" => return builtin_export(&argv[1..], shell),
-        _ => {}
+    // `quit` is a rush convenience, not POSIX; keep it.
+    if argv[0] == "quit" {
+        crate::exit(0);
     }
 
-    // A function shadows regular builtins and external commands.
+    // Dispatch order (POSIX §2.9.1): a *special* builtin is found before any
+    // function and cannot be shadowed; a *regular* builtin is found after
+    // functions, so a like-named function shadows it.
+    if let Some(b) = builtins::lookup(&argv[0]) {
+        if builtins::is_special(b) {
+            // A prefix assignment on a special builtin persists in the shell; an
+            // assignment error there is fatal to a non-interactive shell.
+            for (k, v) in &assigns {
+                if let Err(e) = shell.set(k, v.clone()) {
+                    eprintln!("rush: {e}");
+                    shell.mark_fatal(2);
+                }
+            }
+            maybe_die_fatal(shell);
+            let status = exec_builtin(b, &argv, &fds, shell);
+            maybe_die_fatal(shell);
+            return status;
+        }
+        if let Some(body) = shell.get_function(&argv[0]) {
+            return exec_function_call(&body, &argv, &assigns, &fds, shell);
+        }
+        // A regular builtin's prefix assignments are transient: visible to the
+        // builtin, then restored.
+        let saved = apply_temp_assigns(&assigns, shell);
+        let status = exec_builtin(b, &argv, &fds, shell);
+        restore_temp_assigns(saved, shell);
+        return status;
+    }
+
     if let Some(body) = shell.get_function(&argv[0]) {
         return exec_function_call(&body, &argv, &assigns, &fds, shell);
     }
 
-    match argv[0].as_str() {
-        "cd" => builtin_cd(&argv[1..]),
-        ":" | "true" => 0,
-        "false" => 1,
-        _ => match resolve_program(&argv[0], shell) {
-            Some(program) => spawn_external(&program, &argv[1..], &assigns, &fds),
-            None => {
-                eprintln!("rush: {}: command not found", argv[0]);
-                127
+    match resolve_program(&argv[0], shell) {
+        Some(program) => spawn_external(&program, &argv[1..], &assigns, &fds),
+        None => {
+            let mut err = fds[2].err_writer();
+            let _ = writeln!(err, "rush: {}: command not found", argv[0]);
+            127
+        }
+    }
+}
+
+/// If a special builtin or a variable assignment flagged a fatal error, a
+/// *non-interactive* shell exits (POSIX §2.8.1); an interactive one continues.
+fn maybe_die_fatal(shell: &mut Shell) {
+    if let Some(code) = shell.take_fatal()
+        && !shell.is_interactive()
+        && !shell.in_subshell()
+    {
+        fire_exit_trap(shell);
+        crate::exit(code);
+    }
+}
+
+/// Expand a leading command-position alias in place. See [`exec_simple`] for the
+/// documented approximation.
+fn expand_aliases(argv: &mut Vec<String>, shell: &Shell) {
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(value) = shell.get_alias(&argv[0]) {
+        if seen.iter().any(|n| n == &argv[0]) {
+            break;
+        }
+        seen.push(argv[0].clone());
+        let words: Vec<String> = value.split_whitespace().map(String::from).collect();
+        if words.is_empty() {
+            break;
+        }
+        let rest: Vec<String> = argv.split_off(1);
+        *argv = words;
+        argv.extend(rest);
+    }
+}
+
+/// Save the pre-existing values of names about to be temporarily assigned (for a
+/// regular builtin), so [`restore_temp_assigns`] can undo them.
+fn apply_temp_assigns(
+    assigns: &[(String, String)],
+    shell: &mut Shell,
+) -> Vec<(String, Option<String>, bool)> {
+    let mut saved = Vec::with_capacity(assigns.len());
+    for (k, v) in assigns {
+        let prev = shell.get(k);
+        let exported = shell.is_exported(k);
+        saved.push((k.clone(), prev, exported));
+        let _ = shell.set(k, v.clone());
+    }
+    saved
+}
+
+fn restore_temp_assigns(saved: Vec<(String, Option<String>, bool)>, shell: &mut Shell) {
+    for (k, prev, exported) in saved.into_iter().rev() {
+        match prev {
+            Some(v) => {
+                let _ = shell.set(&k, v);
+                if exported {
+                    let _ = shell.export(&k, None);
+                }
             }
-        },
+            None => {
+                let _ = shell.unset(&k);
+            }
+        }
+    }
+}
+
+// ---- builtin dispatch -------------------------------------------------------
+
+/// Run a builtin as a simple command with its redirections resolved into `fds`.
+/// The execution-coupled builtins (`.`, `eval`, `exec`, `command`, `read`) and
+/// the divergent ones (`exit`) are handled here; the rest go to
+/// [`builtins::dispatch`] with writers wired to fd 1 / fd 2.
+fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+    let args = &argv[1..];
+    match b {
+        Builtin::Exit => {
+            fire_exit_trap(shell);
+            process_exit(args, shell)
+        }
+        Builtin::Return => builtin_return(args, shell),
+        Builtin::Break => builtin_break(args, shell),
+        Builtin::Continue => builtin_continue(args, shell),
+        Builtin::Dot => builtin_dot(args, fds, shell),
+        Builtin::Eval => builtin_eval(args, fds, shell),
+        Builtin::Exec => builtin_exec(args, fds, shell),
+        Builtin::Command => builtin_command(args, fds, shell),
+        Builtin::Read => {
+            let mut out = fds[1].out_writer();
+            let mut err = fds[2].err_writer();
+            let mut reader = fds[0].reader();
+            let mut io = builtins::Io {
+                out: &mut out,
+                err: &mut err,
+            };
+            let status = builtins::read(args, &mut *reader, &mut io, shell);
+            let _ = io.out.flush();
+            status
+        }
+        _ => {
+            let mut out = fds[1].out_writer();
+            let mut err = fds[2].err_writer();
+            let mut io = builtins::Io {
+                out: &mut out,
+                err: &mut err,
+            };
+            let status = builtins::dispatch(b, args, &mut io, shell);
+            let _ = io.out.flush();
+            status
+        }
+    }
+}
+
+/// `. file` (source): read `file`, parse it, and execute it in the current
+/// shell. A `return` inside the sourced file returns from the `.`.
+fn builtin_dot(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+    let file = match args.first() {
+        Some(f) => f,
+        None => {
+            let mut err = fds[2].err_writer();
+            let _ = writeln!(err, "rush: .: filename argument required");
+            return 2;
+        }
+    };
+    let path = if file.contains('/') {
+        file.clone()
+    } else {
+        builtins::search_path(file, shell).unwrap_or_else(|| file.clone())
+    };
+    let src = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            let mut err = fds[2].err_writer();
+            let _ = writeln!(err, "rush: .: cannot open {file}: {e}");
+            // Failing to open the sourced file is fatal to a non-interactive shell.
+            shell.mark_fatal(2);
+            return 2;
+        }
+    };
+    let status = source_string(&src, shell, &IoEnv { fds: fds.clone() });
+    // A `return` unwinds to the `.` boundary.
+    if let Flow::Return(n) = shell.flow() {
+        shell.clear_flow();
+        return n;
+    }
+    status
+}
+
+/// `eval [args…]` — concatenate the arguments and execute the result in the
+/// current shell (control flow propagates outward: `eval return` returns).
+fn builtin_eval(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+    if args.is_empty() {
+        return 0;
+    }
+    let joined = args.join(" ");
+    source_string(&joined, shell, &IoEnv { fds: fds.clone() })
+}
+
+/// `exec [command [args…]]` — with a command, replace the shell: Motor OS has no
+/// `execve`, so this spawns the command with the current fds and exits with its
+/// status (a documented emulation). With only redirections, the fds were already
+/// opened by `build_fds`; persistent redirection of the shell is not supported.
+fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> ! {
+    if args.is_empty() {
+        // Redirection-only exec: no persistent effect (no dup2). The file
+        // side-effects already happened when the redirects were built.
+        crate::exit(shell.status());
+    }
+    match resolve_program(&args[0], shell) {
+        Some(program) => crate::exit(spawn_external(&program, &args[1..], &[], fds)),
+        None => {
+            let mut err = fds[2].err_writer();
+            let _ = writeln!(err, "rush: exec: {}: not found", args[0]);
+            crate::exit(127);
+        }
+    }
+}
+
+/// `command [-v|-V] [-p] name [args…]` — run `name` ignoring shell functions, or
+/// (with `-v`/`-V`) describe it.
+fn builtin_command(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
+    let mut verbose = false;
+    let mut describe = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-v" => describe = true,
+            "-V" => {
+                describe = true;
+                verbose = true;
+            }
+            "-p" => {} // use the default PATH; we do not special-case it
+            "--" => {
+                i += 1;
+                break;
+            }
+            s if s.starts_with('-') && s.len() > 1 => {
+                let mut err = fds[2].err_writer();
+                let _ = writeln!(err, "rush: command: {s}: invalid option");
+                return 2;
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    let rest = &args[i..];
+    if describe {
+        let mut out = fds[1].out_writer();
+        let mut err = fds[2].err_writer();
+        let mut status = 0;
+        for name in rest {
+            let (line, found) = builtins::command_describe(name, shell, verbose);
+            if let Some(l) = line {
+                let _ = writeln!(out, "{l}");
+            }
+            if !found {
+                // dash returns 127 for an unresolved name.
+                status = 127;
+                if verbose {
+                    let _ = writeln!(err, "rush: {name}: not found");
+                }
+            }
+        }
+        let _ = out.flush();
+        return status;
+    }
+    if rest.is_empty() {
+        return 0;
+    }
+    // Run `name`: a builtin (bypassing functions) or an external program.
+    if let Some(b) = builtins::lookup(&rest[0]) {
+        return exec_builtin(b, rest, fds, shell);
+    }
+    match resolve_program(&rest[0], shell) {
+        Some(program) => spawn_external(&program, &rest[1..], &[], fds),
+        None => {
+            let mut err = fds[2].err_writer();
+            let _ = writeln!(err, "rush: {}: command not found", rest[0]);
+            127
+        }
+    }
+}
+
+/// Parse and execute `src` in the current shell with the given I/O environment.
+/// Used by `.` (source) and `eval`.
+fn source_string(src: &str, shell: &mut Shell, io: &IoEnv) -> i32 {
+    match parser::parse_source(src) {
+        Parsed::Complete(list) => exec_list(&list, shell, io),
+        Parsed::Empty => 0,
+        Parsed::Incomplete => {
+            eprintln!("rush: syntax error: unexpected end of input");
+            2
+        }
+        Parsed::Error(msg) => {
+            eprintln!("rush: {msg}");
+            2
+        }
     }
 }
 
@@ -337,83 +656,6 @@ fn exec_function_call(
 
 // ---- builtins ---------------------------------------------------------------
 
-fn builtin_cd(args: &[String]) -> i32 {
-    // Full `cd` (no-arg → $HOME, `cd -`, CDPATH, PWD/OLDPWD) is Phase 5.
-    if args.len() != 1 {
-        eprintln!("rush: cd: expected a single argument.");
-        return 1;
-    }
-    match std::env::set_current_dir(Path::new(&args[0])) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("rush: cd: {}: {e}", args[0]);
-            1
-        }
-    }
-}
-
-/// `export [-p] [name[=value]]...` — mark each `name` for export to the
-/// environment of subsequently executed commands (moving it out of the shell's
-/// unexported variable map into the real process environment), optionally
-/// assigning `value` first. This is what lets a config's `export PATH=/bin`
-/// reach children like `printenv`, whose command resolution consults only the
-/// process environment. With no operands (or `-p`), the current exported set is
-/// listed in a form that can be re-read as shell input.
-///
-/// `export` is a POSIX special built-in, so it is dispatched before function
-/// name resolution and cannot be shadowed. (Assignment field-splitting on the
-/// value — `export X=$y` — follows the same word-expansion path as any other
-/// argument for now; declaration-utility assignment semantics are a later
-/// refinement.)
-fn builtin_export(args: &[String], shell: &mut Shell) -> i32 {
-    // No operands, or the lone `-p` flag: list the exported variables.
-    if args.iter().all(|a| a == "-p") {
-        for (name, value) in std::env::vars() {
-            println!("export {name}={}", single_quote(&value));
-        }
-        return 0;
-    }
-
-    let mut status = 0;
-    for arg in args {
-        if arg == "-p" {
-            continue;
-        }
-        // `name=value` assigns then exports; a bare `name` exports whatever
-        // value the name currently holds (if any).
-        let (name, value) = match arg.split_once('=') {
-            Some((n, v)) => (n, Some(v.to_string())),
-            None => (arg.as_str(), None),
-        };
-        if !crate::is_valid_var_name(name) {
-            eprintln!("rush: export: `{arg}': not a valid identifier");
-            status = 1;
-            continue;
-        }
-        if let Err(e) = shell.export(name, value) {
-            eprintln!("rush: export: {e}");
-            status = 1;
-        }
-    }
-    status
-}
-
-/// Single-quote a value so `export -p` output round-trips as shell input:
-/// wrap in `'…'` and render any embedded quote as the `'\''` escape.
-fn single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 fn process_exit(args: &[String], shell: &Shell) -> ! {
     let code = if args.is_empty() {
         shell.status()
@@ -491,60 +733,173 @@ fn loop_count(args: &[String], name: &str) -> Option<u32> {
 
 // ---- external commands ------------------------------------------------------
 
+/// Spawn an external command with the given fd sources and return its status.
+///
+/// Motor OS's process spawn only accepts `INHERIT` / `NULL` / `MAKE_PIPE` for a
+/// child's stdio — a real file descriptor cannot be handed to a child. So any
+/// file-backed or here-document stdio is wired as a pipe and *pumped by this
+/// process* on a thread (copying between the file/body and the child's pipe).
+/// `Inherit` stays a true inherit. Portable to the Unix host, which also accepts
+/// this.
 fn spawn_external(
     program: &str,
     args: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
 ) -> i32 {
+    let stdin = ExtIn::from_fd(&fds[0]);
+    let stdout = ExtOut::from_fd(&fds[1]);
+    let stderr = ExtOut::from_fd(&fds[2]);
+    run_external(program, args, env, stdin, stdout, stderr)
+}
+
+/// A child's standard input on Motor OS: inherited, or piped and fed by us.
+enum ExtIn {
+    Inherit,
+    File(Arc<File>),
+    Heredoc(Arc<String>),
+}
+
+/// A child's standard output/error on Motor OS: inherited, or pumped into a
+/// file (a captured pipeline stage's output is a temp file, so it is `File` too).
+enum ExtOut {
+    Inherit,
+    File(Arc<File>),
+}
+
+impl ExtIn {
+    fn from_fd(fd: &FdSource) -> Self {
+        match fd {
+            FdSource::Inherit => ExtIn::Inherit,
+            FdSource::File(f) => ExtIn::File(f.clone()),
+            FdSource::Heredoc(b) => ExtIn::Heredoc(b.clone()),
+        }
+    }
+}
+
+impl ExtOut {
+    fn from_fd(fd: &FdSource) -> Self {
+        match fd {
+            FdSource::Inherit => ExtOut::Inherit,
+            FdSource::File(f) => ExtOut::File(f.clone()),
+            // A here-document as *output* is meaningless; behave like inherit.
+            FdSource::Heredoc(_) => ExtOut::Inherit,
+        }
+    }
+}
+
+/// Spawn `program`, pumping any non-inherited stdio through pipes on helper
+/// threads (Motor OS children accept only inherit/null/pipe stdio). Returns the
+/// exit status.
+fn run_external(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    stdin: ExtIn,
+    stdout: ExtOut,
+    stderr: ExtOut,
+) -> i32 {
     let mut cmd = Command::new(program);
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
     }
+    // Motor OS's sys-io is not reentrant under concurrent filesystem access from
+    // one process, so rush keeps all of its own FS I/O on this thread: read any
+    // file-backed input into memory *before* the child runs, and write captured
+    // output to files *after* it exits. The helper threads below touch only
+    // pipes while the child is running.
+    let feed: Option<Vec<u8>> = match &stdin {
+        ExtIn::Inherit => None,
+        ExtIn::Heredoc(b) => Some(b.as_bytes().to_vec()),
+        ExtIn::File(f) => Some(read_all(f)),
+    };
+    let capture_out = matches!(stdout, ExtOut::File(_));
+    let capture_err = matches!(stderr, ExtOut::File(_));
 
-    let stdin = match fds[0].to_stdio() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("rush: {e}");
-            return 1;
-        }
-    };
-    let stdout = match fds[1].to_stdio() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("rush: {e}");
-            return 1;
-        }
-    };
-    let stderr = match fds[2].to_stdio() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("rush: {e}");
-            return 1;
-        }
-    };
-    cmd.stdin(stdin).stdout(stdout).stderr(stderr);
-    let heredoc = fds[0].heredoc_body();
+    cmd.stdin(if feed.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
+    cmd.stdout(if capture_out {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
+    cmd.stderr(if capture_err {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
 
-    match cmd.spawn() {
-        Ok(mut child) => {
-            if let Some(body) = heredoc
-                && let Some(mut sink) = child.stdin.take()
-            {
-                // Feeding the whole body then closing the pipe is deadlock-free
-                // for a lone command: its stdout drains concurrently.
-                let _ = sink.write_all(body.as_bytes());
-            }
-            match child.wait() {
-                Ok(status) => status.code().unwrap_or(128),
-                Err(err) => {
-                    eprintln!("rush: {err}");
-                    126
-                }
-            }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return spawn_error(program, e),
+    };
+
+    // Feed stdin bytes on a thread (pipe writes only).
+    let feed_thread = match (feed, child.stdin.take()) {
+        (Some(bytes), Some(mut sink)) => Some(std::thread::spawn(move || {
+            let _ = sink.write_all(&bytes);
+        })),
+        _ => None,
+    };
+    // Capture stdout / stderr on threads (pipe reads only).
+    let out_thread = child
+        .stdout
+        .take()
+        .filter(|_| capture_out)
+        .map(|mut o| std::thread::spawn(move || read_stream(&mut o)));
+    let err_thread = child
+        .stderr
+        .take()
+        .filter(|_| capture_err)
+        .map(|mut e| std::thread::spawn(move || read_stream(&mut e)));
+
+    let status = match child.wait() {
+        Ok(s) => s.code().unwrap_or(128),
+        Err(err) => {
+            eprintln!("rush: {err}");
+            126
         }
-        Err(e) => spawn_error(program, e),
+    };
+    if let Some(t) = feed_thread {
+        let _ = t.join();
+    }
+    let out_bytes = out_thread.map(|t| t.join().unwrap_or_default());
+    let err_bytes = err_thread.map(|t| t.join().unwrap_or_default());
+
+    // Now (child gone, no other FS in flight) write the captured output.
+    if let (ExtOut::File(f), Some(bytes)) = (stdout, out_bytes) {
+        write_all(&f, &bytes);
+    }
+    if let (ExtOut::File(f), Some(bytes)) = (stderr, err_bytes) {
+        write_all(&f, &bytes);
+    }
+    status
+}
+
+/// Read an entire file into memory (single-threaded FS access).
+fn read_all(f: &Arc<File>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Ok(mut c) = f.try_clone() {
+        let _ = c.read_to_end(&mut buf);
+    }
+    buf
+}
+
+/// Read a pipe to end (no FS).
+fn read_stream(r: &mut dyn Read) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = r.read_to_end(&mut buf);
+    buf
+}
+
+/// Append `bytes` to a file (single-threaded FS access).
+fn write_all(f: &Arc<File>, bytes: &[u8]) {
+    if let Ok(mut c) = f.try_clone() {
+        let _ = c.write_all(bytes);
     }
 }
 
@@ -660,145 +1015,222 @@ fn dev_null() -> Result<File, i32> {
 
 // ---- pipelines --------------------------------------------------------------
 
-/// Run a multi-stage pipeline. Stages are external commands wired together with
-/// `std::process` pipes; the pipeline status is the last stage's.
+/// What feeds a pipeline stage's standard input.
+enum StageInput {
+    /// The pipeline's own stdin (first stage).
+    Ambient,
+    /// Bytes produced by an upstream stage (captured through a temp file).
+    Buffer(Vec<u8>),
+}
+
+/// Run a multi-stage pipeline. Every stage runs in an emulated subshell whose
+/// stdin is staged through a temp file (so `read` in a `while` loop advances)
+/// and whose stdout is captured for the next stage — or the real fd 1 when it is
+/// last. External stages spawn the program (with file-backed stdio pumped
+/// through pipes, per Motor OS's constraints); builtins/compounds/functions run
+/// in-process. The pipeline's status is the last stage's.
 fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
     let n = cmds.len();
-    let mut children: Vec<Option<Child>> = Vec::with_capacity(n);
-    let mut prev: Option<ChildStdout> = None;
+    let mut prev = StageInput::Ambient;
+    let mut last_status = 0;
 
     for (i, command) in cmds.iter().enumerate() {
         let is_last = i == n - 1;
-        let simple = match command {
-            AstCommand::Simple(s) => s,
-            // Compound commands and function calls as pipeline stages need real
-            // fd wiring (a subshell writing to a pipe); not yet supported.
-            _ => {
-                eprintln!(
-                    "rush: compound commands / functions inside a multi-stage pipeline are not yet supported"
-                );
-                children.push(None);
-                prev = None;
-                continue;
-            }
-        };
+        let taken = std::mem::replace(&mut prev, StageInput::Ambient);
 
-        let assigns: Vec<(String, String)> = simple
-            .assigns
-            .iter()
-            .map(|a| (a.name.clone(), expand::to_string(&a.value, shell)))
-            .collect();
-        let mut argv = Vec::new();
-        for word in &simple.words {
-            argv.extend(expand::to_fields(word, shell));
-        }
-        if argv.is_empty() {
-            eprintln!("rush: pipeline stage {}: no command", i + 1);
-            children.push(None);
-            prev = None;
-            continue;
-        }
-        let program = match resolve_program(&argv[0], shell) {
-            Some(p) => p,
-            None => {
-                eprintln!("rush: {}: command not found", argv[0]);
-                children.push(None);
-                prev = None;
-                continue;
-            }
-        };
-
-        let stdin = match prev.take() {
-            Some(out) => Stdio::from(out),
-            None => io.fds[0].to_stdio().unwrap_or_else(|_| Stdio::inherit()),
-        };
-        let stdout = if is_last {
-            io.fds[1].to_stdio().unwrap_or_else(|_| Stdio::inherit())
-        } else {
-            Stdio::piped()
-        };
-        let stderr = io.fds[2].to_stdio().unwrap_or_else(|_| Stdio::inherit());
-
-        let mut cmd = Command::new(&program);
-        cmd.args(&argv[1..]).stdin(stdin).stdout(stdout).stderr(stderr);
-        for (k, v) in &assigns {
-            cmd.env(k, v);
-        }
-        // A stage's own file redirections override the pipe wiring (dup/heredoc
-        // inside a pipeline are a documented Phase 3 gap).
-        if let Err(code) = apply_stage_redirects(&mut cmd, &simple.redirects, shell) {
-            children.push(None);
-            prev = None;
-            let _ = code;
-            continue;
-        }
-
-        match cmd.spawn() {
-            Ok(mut child) => {
-                if !is_last {
-                    prev = child.stdout.take();
+        let (status, next) = match command {
+            AstCommand::Simple(simple) => {
+                let assigns: Vec<(String, String)> = simple
+                    .assigns
+                    .iter()
+                    .map(|a| (a.name.clone(), expand::to_string(&a.value, shell)))
+                    .collect();
+                let mut argv = Vec::new();
+                for word in &simple.words {
+                    argv.extend(expand::to_fields(word, shell));
                 }
-                children.push(Some(child));
-            }
-            Err(e) => {
-                let _ = spawn_error(&program, e);
-                children.push(None);
-                prev = None;
-            }
-        }
-    }
+                expand_aliases(&mut argv, shell);
 
-    // Wait for every stage; the pipeline's status is the last stage's.
-    let mut status = 127;
-    for (i, child) in children.into_iter().enumerate() {
-        let is_last = i == n - 1;
-        let stage_status = match child {
-            Some(mut c) => match c.wait() {
-                Ok(s) => s.code().unwrap_or(128),
-                Err(_) => 126,
-            },
-            None => 127,
+                let external = !argv.is_empty()
+                    && builtins::lookup(&argv[0]).is_none()
+                    && shell.get_function(&argv[0]).is_none();
+                let program = if external {
+                    resolve_program(&argv[0], shell)
+                } else {
+                    None
+                };
+
+                run_inproc_stage(taken, is_last, io, shell, |shell, sio| {
+                    if external {
+                        match &program {
+                            Some(p) => {
+                                let fds = match build_fds(sio, &simple.redirects, shell) {
+                                    Ok(f) => f,
+                                    Err(code) => return code,
+                                };
+                                spawn_external(p, &argv[1..], &assigns, &fds)
+                            }
+                            None => {
+                                eprintln!("rush: {}: command not found", argv[0]);
+                                127
+                            }
+                        }
+                    } else {
+                        run_simple_inproc(simple, &argv, &assigns, sio, shell)
+                    }
+                })
+            }
+            // A compound command as a pipeline stage.
+            _ => run_inproc_stage(taken, is_last, io, shell, |shell, sio| {
+                exec_command(command, shell, sio)
+            }),
         };
+
+        prev = next;
         if is_last {
-            status = stage_status;
+            last_status = status;
         }
     }
-    status
+    last_status
 }
 
-/// Apply a pipeline stage's file redirections over its base stdio.
-fn apply_stage_redirects(
-    cmd: &mut Command,
-    redirects: &[Redirect],
+/// Run one simple command (a builtin, function, or assignment-only) as an
+/// in-process pipeline stage, over the stage's I/O environment `sio`.
+fn run_simple_inproc(
+    simple: &SimpleCommand,
+    argv: &[String],
+    assigns: &[(String, String)],
+    sio: &IoEnv,
     shell: &mut Shell,
-) -> Result<(), i32> {
-    for redirect in redirects {
-        match redirect {
-            Redirect::File {
-                fd,
-                op: op @ (RedirOp::Read | RedirOp::Write | RedirOp::Clobber | RedirOp::Append | RedirOp::ReadWrite),
-                target,
-            } => {
-                let fd_num = fd.unwrap_or(default_fd(*op));
-                let path = expand::to_string(target, shell);
-                let file = open_for(*op, &path)?;
-                match fd_num {
-                    0 => cmd.stdin(file),
-                    1 => cmd.stdout(file),
-                    2 => cmd.stderr(file),
-                    other => {
-                        eprintln!("rush: redirection to fd {other} is not yet supported (Phase 3)");
-                        return Err(1);
-                    }
-                };
-            }
-            _ => {
-                eprintln!("rush: fd duplication / here-documents inside a pipeline are not yet supported (Phase 3)");
-                return Err(1);
-            }
+) -> i32 {
+    if argv.is_empty() {
+        // Assignment-only stage (subshell: discarded by the caller's restore).
+        for (k, v) in assigns {
+            let _ = shell.set(k, v.clone());
+        }
+        return 0;
+    }
+    let fds = match build_fds(sio, &simple.redirects, shell) {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+    if let Some(b) = builtins::lookup(&argv[0]) {
+        return run_builtin_pipeline_safe(b, argv, assigns, &fds, shell);
+    }
+    if let Some(body) = shell.get_function(&argv[0]) {
+        return exec_function_call(&body, argv, assigns, &fds, shell);
+    }
+    // Unreachable: run_pipeline only routes builtins/functions here.
+    127
+}
+
+/// Run a builtin as a pipeline-stage subshell, taming the builtins that would
+/// otherwise diverge or escape: `exit` yields the subshell's status without
+/// killing the shell; loop/function control is contained; and the
+/// execution-coupled `.`/`eval`/`exec`/`command` are refused (documented gap).
+fn run_builtin_pipeline_safe(
+    b: Builtin,
+    argv: &[String],
+    assigns: &[(String, String)],
+    fds: &[FdSource; 3],
+    shell: &mut Shell,
+) -> i32 {
+    match b {
+        Builtin::Exit => argv
+            .get(1)
+            .and_then(|a| a.parse::<i32>().ok())
+            .map(|n| n & 0xff)
+            .unwrap_or_else(|| shell.status()),
+        Builtin::Return | Builtin::Break | Builtin::Continue => 0,
+        Builtin::Dot | Builtin::Eval | Builtin::Exec | Builtin::Command => {
+            let mut err = fds[2].err_writer();
+            let _ = writeln!(err, "rush: {}: not supported as a pipeline stage", argv[0]);
+            2
+        }
+        _ => {
+            let saved = apply_temp_assigns(assigns, shell);
+            let status = exec_builtin(b, argv, fds, shell);
+            restore_temp_assigns(saved, shell);
+            status
         }
     }
-    Ok(())
+}
+
+/// Drive an in-process pipeline stage: materialize its upstream input into a
+/// temp file (a real file so successive `read`s share an advancing offset),
+/// capture its stdout for the next stage (or send it to the real fd 1 when
+/// last), and run `body` in an emulated subshell (state snapshot/restore so the
+/// stage cannot leak). Returns (status, input-for-next-stage).
+fn run_inproc_stage(
+    input: StageInput,
+    is_last: bool,
+    io: &IoEnv,
+    shell: &mut Shell,
+    body: impl FnOnce(&mut Shell, &IoEnv) -> i32,
+) -> (i32, StageInput) {
+    // Standard input: the ambient fd for the first stage, else the upstream
+    // bytes staged through a temp file.
+    let (stdin_fd, in_path) = match input {
+        StageInput::Ambient => (io.fds[0].clone(), None),
+        StageInput::Buffer(bytes) => bytes_to_fd(bytes),
+    };
+    // Standard output: the real fd 1 when last, else a capture temp file.
+    let (stdout_fd, out_path) = if is_last {
+        (io.fds[1].clone(), None)
+    } else {
+        match temp_capture_file() {
+            Some((fd, path)) => (fd, Some(path)),
+            None => (io.fds[1].clone(), None),
+        }
+    };
+    let sio = IoEnv {
+        fds: [stdin_fd, stdout_fd, io.fds[2].clone()],
+    };
+
+    let snapshot = shell.snapshot();
+    let saved_flow = shell.flow();
+    shell.enter_subshell();
+    let status = body(shell, &sio);
+    shell.exit_subshell();
+    shell.take_fatal(); // a fatal error stays inside the pipeline-stage subshell
+    shell.restore(snapshot);
+    shell.set_flow(saved_flow);
+    drop(sio); // close the temp-file handles before reading/removing them
+
+    if let Some(p) = in_path {
+        let _ = std::fs::remove_file(&p);
+    }
+    let next = match out_path {
+        Some(p) => {
+            let bytes = std::fs::read(&p).unwrap_or_default();
+            let _ = std::fs::remove_file(&p);
+            StageInput::Buffer(bytes)
+        }
+        None => StageInput::Ambient,
+    };
+    (status, next)
+}
+
+/// Stage `bytes` through a temp file opened for reading. Returns a file-backed
+/// [`FdSource`] (whose successive `try_clone`s share the read offset) and the
+/// path to clean up. Falls back to an empty here-doc reader on failure.
+fn bytes_to_fd(bytes: Vec<u8>) -> (FdSource, Option<PathBuf>) {
+    let path = temp_path("pin");
+    if std::fs::write(&path, &bytes).is_ok()
+        && let Ok(f) = File::open(&path)
+    {
+        return (FdSource::File(Arc::new(f)), Some(path));
+    }
+    (FdSource::Heredoc(Arc::new(String::new())), None)
+}
+
+/// Create a temp file to capture a stage's stdout, returning a writable
+/// [`FdSource`] and its path.
+fn temp_capture_file() -> Option<(FdSource, PathBuf)> {
+    let path = temp_path("pout");
+    File::create(&path)
+        .ok()
+        .map(|f| (FdSource::File(Arc::new(f)), path))
 }
 
 // ---- compound commands ------------------------------------------------------
@@ -834,7 +1266,10 @@ fn exec_compound(kind: &CompoundCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
 /// whole shell — a documented emulation limit.)
 fn exec_subshell(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     let snapshot = shell.snapshot();
+    shell.enter_subshell();
     let status = exec_list(list, shell, io);
+    shell.exit_subshell();
+    shell.take_fatal(); // a fatal error stays inside the subshell
     shell.restore(snapshot);
     shell.clear_flow();
     status
@@ -963,7 +1398,10 @@ fn loop_should_break(shell: &mut Shell) -> bool {
 pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     let snapshot = shell.snapshot();
     let saved_flow = shell.flow();
+    shell.enter_subshell();
     let output = capture(src, shell);
+    shell.exit_subshell();
+    shell.take_fatal(); // a fatal error stays inside the substitution subshell
     shell.restore(snapshot);
     // A subshell's control flow does not escape into the parent.
     shell.set_flow(saved_flow);

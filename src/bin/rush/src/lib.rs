@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 mod arith;
 mod ast;
+mod builtins;
 mod exec;
 mod expand;
 mod glob;
@@ -163,6 +164,9 @@ pub fn execute(args: Vec<String>, script: Option<String>) {
             }
         }
         Mode::Terminal | Mode::Piped => {
+            // Interactive: a special-builtin usage error reports and continues
+            // rather than aborting the shell.
+            sh.set_interactive(true);
             if let Some(script) = script {
                 // This is usually config, setting PATH and such.
                 exec::run_script(script.as_str(), &mut sh);

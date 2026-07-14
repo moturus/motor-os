@@ -221,6 +221,12 @@ impl Reserved {
     }
 }
 
+/// Whether `s` is a POSIX shell reserved word (§2.4). Used by `type`/`command`
+/// to classify a name as a shell keyword.
+pub fn is_reserved_word(s: &str) -> bool {
+    Reserved::from_text(s).is_some()
+}
+
 /// The reserved word a token spells, if it is a single unquoted-literal word
 /// matching one. (Whether it is *treated* as reserved is the caller's decision,
 /// based on position.)

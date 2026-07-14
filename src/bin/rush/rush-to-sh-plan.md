@@ -443,11 +443,81 @@ loop redirections, and `case` globbing covered by tests.
 
 ---
 
-## Phase 5 — Builtins  ⟵ **M2**
+## Phase 5 — Builtins  ⟵ **M2**  ✅ DONE (2026-07-14)
 **Goal:** the builtins POSIX requires, split into special vs. regular (§2.14).
 Special builtins have distinct semantics (assignments persist; a syntax/usage
 error aborts a non-interactive shell), so encode that property in the dispatch
 table.
+
+**Landed:** a new `src/builtins.rs` module (the *pure* builtins — those needing
+only the `Shell` and a place to write) plus execution-coupled dispatch in
+`exec.rs`, all wired through a `Builtin` enum with `lookup`/`is_special`.
+- **Special:** `:`, `.` (source, with `return` unwinding to the `.` boundary),
+  `eval`, `exec` (spawn+exit emulation — no `execve` on Motor), `exit`,
+  `export`, `readonly`, `set`, `shift`, `unset`, `times` (zeros), `trap`,
+  `break`/`continue`/`return`. A special-builtin **usage/assignment error is
+  fatal to a non-interactive shell** (via `Shell::mark_fatal` + a subshell-depth
+  guard so `$(…)`/`( … )`/pipeline stages don't take the whole shell down):
+  `shift` past end, `unset`/`export`/`readonly` bad name, `unset`/assignment of a
+  readonly, `set -Q`, `. missing` all exit 2 — matching dash.
+- **Regular** (found after functions, so a function shadows them): `cd` (full:
+  no-arg→`HOME`, `cd -`→`OLDPWD` w/ echo, `CDPATH`, `-L`/`-P`, maintains
+  `PWD`/`OLDPWD`), `pwd` (`-L` verifies `$PWD` names the cwd), `echo` (XSI: always
+  interprets escapes, `-n`, `\c`), `printf` (`%d %i %o %u %x %X %c %s %b %%` with
+  flags/width/precision + format recycling), `test`/`[` (full POSIX grammar incl.
+  the 0–4-arg special cases, `-a`/`-o`/`( )`, string/int/file predicates),
+  `read` (`-r`, `IFS` splitting with last-var-remainder, escaped-delimiter
+  handling, backslash continuation), `true`/`false`, `getopts` (`OPTIND`/`OPTARG`,
+  clustered flags, silent `:` mode), `command` (`-v`/`-V`, function bypass),
+  `type`, `hash` (no-op stub), `alias`/`unalias`, `umask` (display/bookkeeping).
+- Builtin output honors redirections (`echo hi >f`, `type x 2>err`) via
+  fd-1/fd-2 writers derived from the resolved `FdSource`s (no `dup2`).
+- **Builtins/compound/functions as pipeline stages now work**: every non-external
+  stage runs in-process in an emulated subshell, its stdin staged through a temp
+  file (so `read` in a `while` loop advances via shared file offset) and stdout
+  captured for the next stage — so `cmd | while read …; do … done` and
+  `printf … | { read a b; … }` run.
+- **Motor OS portability (found + fixed during VM testing):** children accept
+  only `INHERIT`/`NULL`/`MAKE_PIPE` stdio — a real fd cannot be handed to a
+  child (`Stdio::from(File)` *panics* on Motor). So external commands with
+  file-backed or here-doc stdio are wired as pipes and **pumped by rush**; and
+  because sys-io is **not reentrant under concurrent FS access from one process**
+  (a `RefCell` double-borrow in `motor-fs/txn_log`), rush keeps all of its own FS
+  I/O on the main thread (pre-read file input, post-write captured output; pump
+  threads touch only pipes). This also fixes command substitution of *external*
+  commands on Motor, which panicked before.
+
+Testing: `src/builtins.rs` unit tests + 40 host golden tests in `tests/phase5.rs`
+(cross-checked against dash); whole crate warning/clippy-clean (`--all-targets`),
+dev + release + `cargo +dev-x86_64-unknown-motor check --target x86_64-unknown-motor`
+all pass. **Verified end-to-end on a QEMU Motor OS VM**: a 39-case self-check
+script (all builtins + `while read` over a pipe, `read < file`, command
+substitution, external stdio pumping) passes 39/39 with no panics.
+
+**Documented M2 limits (revisited later):** `set -e/-u/-x/-n/-v/-C` are accepted
+but not *enforced* — only `-f`/noglob is live, and `$-` reflects only it (Phase
+6). `umask` is display-only (no Motor syscall); `times` reports zeros; signal
+`trap`s are stored but only `EXIT` fires (Phase 7), and `EXIT` does **not** fire
+at emulated-subshell boundaries (only at shell exit). Aliases expand at
+**execution** time (whitespace-split, no re-quoting / `$`-re-expansion), so
+`alias x=…; x` works even in a single `-c` string — a deliberate divergence from
+dash's parse-time aliasing. `kill`/`jobs`/`fg`/`bg`/`wait` are Phase 7 (`kill`
+resolves to external `/bin/kill` for now). A prefix assignment on a *function*
+call still persists (Phase 3/4 limit). **Lexer gap (Phase 1 territory):** a
+`case` with plain `pat)` patterns inside `$( … )` mis-balances the parens — use
+leading-paren `(pat)` patterns as a workaround.
+
+### ▶ Continue here: M3 then M4 (per the user's standing instruction)
+After M2 is reviewed/committed, continue with **Phase 6** (shell options
+`set -e/-u/-x/-n/-f/-C`, `$-`, invocation-parsing rewrite incl. `-c string name
+args` positional params, startup files, `PS1`/`PS2`/`PS4`) then **Phase 7 —
+M3** (traps, `^C`, background `&`/`wait`, `$!`). Keep testing each phase on a
+Motor OS VM (a reusable self-check harness lives in the scratchpad:
+`vmrun.py` boots QEMU over the serial console; `phase5-vmcheck.sh` is the M2
+script — copy its `t`/self-check pattern for M3/M4). Then **M4** (Phases 8–9:
+interactive UX, conformance corpus, docs). Watch the Motor traps recorded above:
+no fd-passing to children (pump File stdio through pipes), and keep rush's FS I/O
+single-threaded (sys-io isn't reentrant).
 
 - **Special builtins:** `:`, `.` (source a file into the current shell), `eval`,
   `exec` (replace shell / apply redirs), `exit`, `export`, `readonly`, `set`,
