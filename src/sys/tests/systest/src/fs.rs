@@ -380,8 +380,80 @@ fn resize_test() {
     println!("    ---- FS: resize_test PASS");
 }
 
+/// Regression test for a sys-io reentrancy panic: a `RefCell` double-borrow in
+/// motor-fs's txn_log committer (`spawn_txn_committer_task`).
+///
+/// sys-io is single-threaded but cooperatively concurrent. The txn committer,
+/// the timeout flushers, and `log_txn` all share one `Rc<RefCell<TxnBatch>>`.
+/// A `CMD_FLUSH` that found the txn batch already empty used to make the
+/// committer hold `borrow_mut()` across the block-device flush await
+/// (`AsyncStub::flush`, which suspends on a background-task oneshot). A timeout
+/// flusher waking in that window then called `borrow_mut()` again and panicked,
+/// taking sys-io — and thus all of the VM's I/O — down.
+///
+/// The race is internal to sys-io, so a single client stream can drive it:
+/// every write makes the batch non-empty (sys-io spawns a ~50ms timeout
+/// flusher); the first flush commits the batch, the second finds it empty and
+/// exercises the vulnerable branch. Hammering write+flush+flush keeps many
+/// timeout flushers firing while empty flushes are in flight, so the coincidence
+/// is hit within a fraction of a second. Extra threads just keep the sys-io
+/// pipeline full and interleave flushes across batches.
+///
+/// Without the fix sys-io panics (the serial console shows "RefCell already
+/// borrowed" pointing at txn_log.rs, and this test then hangs on an I/O that
+/// never completes). With the fix it runs to completion.
+pub fn concurrent_flush_stress_test() {
+    use std::io::{SeekFrom, Write};
+    use std::os::fd::AsRawFd;
+
+    println!("    ---- FS: concurrent_flush_stress_test starting...");
+
+    const THREADS: usize = 4;
+    const ITERS: usize = 4000;
+
+    let mut handles = Vec::with_capacity(THREADS);
+    for t in 0..THREADS {
+        handles.push(std::thread::spawn(move || {
+            let path = format!("/flush_stress_{t}");
+            let _ = std::fs::remove_file(&path);
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            // Flush directly via moto_rt so we always emit CMD_FLUSH regardless
+            // of how std maps `Write::flush` for files.
+            let fd = file.as_raw_fd();
+
+            for i in 0..ITERS {
+                // Keep the file a single block; each write dirties it, so sys-io
+                // opens a txn batch and (when it was empty) spawns a timeout
+                // flusher that fires ~MAX_FLUSH_DELAY_MS later.
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(&[i as u8, (i >> 8) as u8]).unwrap();
+
+                // First flush commits the (non-empty) batch; the second finds
+                // the batch empty -> the branch that used to double-borrow.
+                moto_rt::fs::flush(fd).unwrap();
+                moto_rt::fs::flush(fd).unwrap();
+            }
+
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    println!("    ---- FS: concurrent_flush_stress_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
+    concurrent_flush_stress_test();
     smoke_test();
     hot_cache_read_test();
     copy_test();

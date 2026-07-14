@@ -73,6 +73,36 @@ impl TxnBatch {
 
 type TxnBatchHolder = Rc<RefCell<TxnBatch>>;
 
+/// Take the in-flight batch (renewing the holder) iff it is non-empty.
+///
+/// The whole borrow lives inside this synchronous helper, so callers never
+/// hold the `RefCell` across an `.await`. That invariant is load-bearing:
+/// sys-io is single-threaded but cooperatively concurrent, and the holder is
+/// shared with the committer task and any pending timeout flushers. A borrow
+/// held across an await would double-borrow-panic (and crash sys-io) the
+/// moment one of those tasks is polled in that window.
+fn take_pending_batch(holder: &TxnBatchHolder) -> Option<TxnBatch> {
+    let mut lock = holder.borrow_mut();
+    if lock.block_map.is_empty() {
+        None
+    } else {
+        Some(lock.renew())
+    }
+}
+
+/// Like [`take_pending_batch`], but only when the in-flight batch is still the
+/// one identified by `txn_id`. Used by the timeout flusher, which must not
+/// renew a batch that another path (a full-log flush or an explicit flush) has
+/// already committed.
+fn take_pending_batch_if_current(holder: &TxnBatchHolder, txn_id: u64) -> Option<TxnBatch> {
+    let mut lock = holder.borrow_mut();
+    if lock.txn_id != txn_id || lock.block_map.is_empty() {
+        None
+    } else {
+        Some(lock.renew())
+    }
+}
+
 enum CommitterMessage {
     TxnBatch(TxnBatch),
 
@@ -139,7 +169,6 @@ impl TxnLogger {
         block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
     }
 
-    #[allow(clippy::await_holding_refcell_ref)]
     fn spawn_timeout_flusher(txn_batch_holder: TxnBatchHolder, sender: TxnBatchSender) {
         let holder_lock = txn_batch_holder.borrow();
 
@@ -154,15 +183,9 @@ impl TxnLogger {
             #[cfg(not(target_os = "motor"))]
             tokio::time::sleep_until(timeout).await;
 
-            let mut holder_lock = txn_batch_holder.borrow_mut();
-            if holder_lock.txn_id != txn_id {
-                return;
-            }
-
-            if !holder_lock.block_map.is_empty() {
-                let txn_batch = holder_lock.renew();
-                drop(holder_lock);
-
+            // Note: the borrow is confined to `take_pending_batch_if_current`;
+            // it must not be held across the `send().await` below.
+            if let Some(txn_batch) = take_pending_batch_if_current(&txn_batch_holder, txn_id) {
                 log::debug!("committing batch {txn_id} on timeout");
                 let _ = sender.send(CommitterMessage::TxnBatch(txn_batch)).await;
             }
@@ -175,7 +198,6 @@ impl TxnLogger {
         let _handle = tokio::task::spawn_local(timeout_task);
     }
 
-    #[allow(clippy::await_holding_refcell_ref)]
     fn spawn_txn_committer_task(
         block_cache_stub: async_fs::block_cache::AsyncStub,
         txn_batch_holder: TxnBatchHolder,
@@ -209,26 +231,27 @@ impl TxnLogger {
                         }
 
                         CommitterMessage::Flush(sender) => {
-                            let mut holder_lock = txn_batch_holder.borrow_mut();
-                            if !holder_lock.block_map.is_empty() {
-                                let txn_batch = holder_lock.renew();
-                                drop(holder_lock);
-
-                                if let Err(err) = Self::commit_txn_batch(
+                            // The borrow is confined to `take_pending_batch`: we
+                            // must not hold it across the awaits below, or a
+                            // concurrently-waking timeout flusher would
+                            // double-borrow and crash sys-io.
+                            if let Some(txn_batch) = take_pending_batch(&txn_batch_holder)
+                                && let Err(err) = Self::commit_txn_batch(
                                     txn_batch,
                                     block_cache_stub.clone(),
                                     #[cfg(test)]
                                     error_pct,
                                 )
                                 .await
-                                {
-                                    log::error!("FS error: {err:?}.");
-                                    return;
-                                }
+                            {
+                                log::error!("FS error: {err:?}.");
+                                return;
                             }
                             log::debug!("Motor FS: flushing the Block Device.");
                             let _ = block_cache_stub.flush().await;
-                            sender.send(()).unwrap();
+                            // The receiver may be gone if the flush requester was
+                            // cancelled; dropping the completion signal is fine.
+                            let _ = sender.send(());
                         }
 
                         #[cfg(test)]
