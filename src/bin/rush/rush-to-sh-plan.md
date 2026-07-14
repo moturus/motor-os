@@ -443,7 +443,7 @@ loop redirections, and `case` globbing covered by tests.
 
 ---
 
-## Phase 5 — Builtins  ⟵ **M2**  ✅ DONE (2026-07-14)
+## Phase 5 — Builtins  ⟵ **M2**  ✅ DONE (2026-07-14), committed (`5d63891`)
 **Goal:** the builtins POSIX requires, split into special vs. regular (§2.14).
 Special builtins have distinct semantics (assignments persist; a syntax/usage
 error aborts a non-interactive shell), so encode that property in the dispatch
@@ -507,18 +507,6 @@ call still persists (Phase 3/4 limit). **Lexer gap (Phase 1 territory):** a
 `case` with plain `pat)` patterns inside `$( … )` mis-balances the parens — use
 leading-paren `(pat)` patterns as a workaround.
 
-### ▶ Continue here: M3 then M4 (per the user's standing instruction)
-After M2 is reviewed/committed, continue with **Phase 6** (shell options
-`set -e/-u/-x/-n/-f/-C`, `$-`, invocation-parsing rewrite incl. `-c string name
-args` positional params, startup files, `PS1`/`PS2`/`PS4`) then **Phase 7 —
-M3** (traps, `^C`, background `&`/`wait`, `$!`). Keep testing each phase on a
-Motor OS VM (a reusable self-check harness lives in the scratchpad:
-`vmrun.py` boots QEMU over the serial console; `phase5-vmcheck.sh` is the M2
-script — copy its `t`/self-check pattern for M3/M4). Then **M4** (Phases 8–9:
-interactive UX, conformance corpus, docs). Watch the Motor traps recorded above:
-no fd-passing to children (pump File stdio through pipes), and keep rush's FS I/O
-single-threaded (sys-io isn't reentrant).
-
 - **Special builtins:** `:`, `.` (source a file into the current shell), `eval`,
   `exec` (replace shell / apply redirs), `exit`, `export`, `readonly`, `set`,
   `shift`, `unset`, `times`, `trap` (stub until Phase 7), `break`/`continue`/
@@ -536,9 +524,116 @@ configure/init script runs to completion using only builtins.
 
 ---
 
-## Phase 6 — Shell options, invocation, startup, prompts
+## Phase 6 — Shell options, invocation, startup, prompts  ✅ DONE (2026-07-14)
 **Goal:** make behavior configurable and fix invocation/startup gaps
 (`rush-to-sh-gaps.md` §2.10).
+
+**Landed:** a new `src/options.rs` whose single `SPECS` table is the source of
+truth for every option (letter, `-o` name, and whether rush enforces it);
+`Shell::noglob` is gone, replaced by `Shell::opts`. Enforcement lives with the
+feature each option gates, and **every case below was cross-checked against
+dash** (status *and* stdout):
+- **`-e` errexit** — a `Shell::errexit_suppress` *depth* marks condition
+  contexts (`if`/`while`/`until` conditions, non-final `&&`/`||` operands,
+  `!`-negated pipelines). A depth, not a flag, because those contexts nest and
+  must cover *inside* a compound operand (`{ false; } && x` must not exit) and
+  propagate into in-process function calls. Suppressed inside emulated
+  subshells, where there is no `fork` to confine an exit to — the subshell's
+  status surfaces in the parent, whose own check then fires, so `(false)` and
+  `x=$(false)` exit while `echo $(false)` correctly does not. Fires the `EXIT`
+  trap on the way out.
+- **`-u` nounset** and **`${x?}`** — both routed through the existing
+  `mark_fatal` path, with `exec_simple` abandoning a command whose *expansion*
+  failed. `-u` fires only when no modifier gives "unset" a meaning (so `${x-d}`,
+  `${x=d}`, `${x+y}`, `${x?}` are exempt but `${x#p}` and bare `$x` are not);
+  `$@`/`$*` with no parameters and `$((x))` are exempt. **This closes the
+  Phase 3 `${x:?}` limit** ("diagnoses but does not abort").
+- **`-x` xtrace** (expanded, unquoted words after `PS4`, on simple commands and
+  pipeline stages — which covers loop/`if` bodies), **`-n` noexec** (ignored
+  when interactive, else `set +n` could never run), **`-C` noclobber** (checks
+  for an existing *regular* file, so `> /dev/null` stays exempt; `>|`
+  overrides), **`-a` allexport** (in `Shell::set`, the single assignment
+  funnel), **`-v` verbose**, **`-f` noglob**, and **`-o pipefail`**.
+- **`$-`** now reports the real option set, and `set` gained `-o`/`+o` with
+  both dash listing formats and long names; an unknown option stays a fatal
+  special-builtin usage error.
+- **Invocation rewritten** (`parse_args` → an `Invocation` struct): clustered
+  (`-ex`), `+`-form, `-o name`, `--`, `-c string [name [args…]]`, `-s`, and
+  "no operands ⇒ `-s`" (so `echo cmd | rush` now works). **All six documented
+  breaking changes below are done**; `-c` takes its string from the *operands*,
+  which is what makes `rush -c -- 'echo hi'` — the form libc's `system()` emits
+  — parse correctly.
+- **Startup files:** an interactive shell expands and sources `$ENV`; a login
+  shell (`$0` starting with `-`) first reads `/etc/profile` and `$HOME/.profile`.
+- **Prompts:** `PS1`/`PS2`/`PS4` are real variables (defaults in
+  `shell::default_prompt`) expanded per POSIX; `term.rs` takes the drawn prompt
+  as an argument and computes its width by skipping ANSI/OSC escapes.
+  `Shell::init_environment` establishes `PWD` (validated against the cwd) and
+  the prompts at startup.
+- Bonus correctness fixes en route, each cross-checked against dash: an
+  assignment-only command now takes **the status of its last command
+  substitution** (`x=$(false)` → 1 — the mechanism `set -e` needs), a
+  redirection error exits **2** (was 1), and an unreadable script operand
+  exits 2.
+
+**Motor OS:** the old `-i <script>` flag was the image's boot path, so
+`sys-tty` learned to read leading `NAME=value` words from its config (it starts
+the shell with an empty environment, so that is the only way to hand it `$ENV`),
+and `sys-tty.cfg` became `ENV=/sys/cfg/rush.cfg /bin/rush -i` — the portable
+spelling of what the flag did. `/bin/sh` was a script that *ignored its
+arguments* and launched an interactive shell (so `sh -c '…'` never worked); it
+now forwards `"$@"` to rush.
+
+52 `tests/phase6.rs` golden tests + 5 `options.rs` unit tests (233 total);
+warning/clippy-clean (`--all-targets`), dev + release + `cargo
++dev-x86_64-unknown-motor check --target x86_64-unknown-motor`, and `make all`
+all pass. **Verified end-to-end on a QEMU Motor OS VM**: an 86-case self-check
+(`phase6-vmcheck.sh`, driven by `vmrun.py` over the serial console) passes
+**86/86**.
+
+> **A Motor OS bug found and fixed while testing this phase: `>>` silently lost
+> every append.** `echo one > f; echo two >> f; cat f` printed `one`. Chain:
+> std's `OpenOptions::append(true)` sets only `O_APPEND` (never `O_WRITE`) →
+> the VDSO's `file_open` marked the file **non-writable** (`rt_fs.rs`) → every
+> write failed with `E_NOT_ALLOWED` → and rush *swallowed* the error, so the
+> data vanished and the shell reported success. Fixed on both sides: `O_APPEND`
+> now grants write access on its own (documented at the `moto_rt::fs::O_APPEND`
+> definition — these are that ABI's own flags, not POSIX's, so there is no way
+> to express "append" other than to intend a write), and a builtin whose output
+> cannot be written now reports `I/O error` and exits 1, as dash does. Both are
+> covered by `tests/phase6.rs` (`append_redirection_appends` asserts the file
+> *contents*, not the status — the status was the thing that lied).
+>
+> Also noted about Motor, unfixed: `rm` has no `-f` flag (exits 1, keeps the
+> file) and there is no `/dev/null`, so a portable script on Motor cannot use
+> either — which is why the VM self-check sends noise to a temp file.
+
+**Documented Phase 6 limits / deliberate divergences:**
+- `-o pipefail` exists (POSIX.1-2024; dash rejects it) and `-h` is an accepted
+  no-op (POSIX reserves the letter for hashing; dash rejects it outright).
+- `$-` letter order is the table's canonical order (`set -efu` → `efu`; dash
+  prints `ufe`). POSIX leaves it unspecified.
+- `-v` echoes a *script* in one piece rather than interleaving line-by-line:
+  rush reads a whole script before parsing it. The interactive loop, which does
+  read a line at a time, echoes per line as dash does. A `-c` string is never
+  echoed (as in dash).
+- `monitor`/`notify`/`vi`/`nolog`/`hashall`/`ignoreeof` are accepted but inert —
+  asserted by an `options.rs` test so the table cannot drift from this list.
+- Default `PS1` is rush's colored `rush:$PWD$ ` rather than dash's `$ `; it is
+  an ordinary variable, so `PS1='$ '` restores dash's.
+- `~user` tilde expansion, prefix assignments scoping to a function call, and
+  `exit` inside an emulated `( … )` remain as documented in Phases 3–5.
+
+### ▶ Continue here: Phase 7 (**M3**) then M4
+Next is **Phase 7 — M3** (traps, `^C`, background `&`/`wait`, `$!`), then **M4**
+(Phases 8–9: interactive UX, conformance corpus, docs). Keep testing each phase
+on a Motor OS VM: the scratchpad harness `vmrun-ssh.sh` boots QEMU and drives
+the VM over **ssh** (far more robust than the serial console, whose 80-byte
+chunking splits ANSI escapes); `phase6-vmcheck.sh` is the self-check script —
+copy its `t`-function pattern. Note the VM needs `create-tap.sh` (sudo) once,
+and QEMU must be started so it outlives the launching shell. Watch the Motor
+traps recorded above: no fd-passing to children (pump File stdio through pipes),
+and keep rush's FS I/O single-threaded (sys-io isn't reentrant).
 
 - **`set` options** honored by the executor: `-e` (errexit), `-u` (nounset),
   `-x` (xtrace → `PS4`), `-n` (noexec/parse-only), `-f` (noglob), `-C`

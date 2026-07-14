@@ -18,6 +18,19 @@ fn _putc(c: u8) {
     serial::write_serial_raw(std::slice::from_ref(&c));
 }
 
+/// Whether a config word is a `NAME=value` environment assignment rather than
+/// the program name or an argument.
+fn is_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
 fn read_config() -> String {
     let config_path = "/sys/cfg/sys-tty.cfg";
     match std::fs::read_to_string(std::path::Path::new(config_path)) {
@@ -32,6 +45,16 @@ fn read_config() -> String {
 fn main() {
     let config = read_config();
     let words: Vec<_> = config.split_whitespace().collect();
+
+    // Leading `NAME=value` words set the child's environment, as in a shell
+    // command line: the config is the only place to hand the login shell its
+    // `$ENV` startup file, since sys-tty starts it with an empty environment.
+    let assignments: Vec<_> = words
+        .iter()
+        .take_while(|w| is_assignment(w))
+        .copied()
+        .collect();
+    let words = &words[assignments.len()..];
 
     if words.is_empty() {
         write_serial!("sys-tty: error: empty config.");
@@ -64,13 +87,17 @@ fn main() {
     let mut command = std::process::Command::new(fname);
     command.env_clear();
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+    for assignment in &assignments {
+        let (name, value) = assignment.split_once('=').unwrap();
+        command.env(name, value);
+    }
     command.stdin(std::process::Stdio::piped());
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
     command.current_dir("/");
 
-    for arg in &words.as_slice()[1..] {
+    for arg in &words[1..] {
         command.arg(*arg);
     }
 

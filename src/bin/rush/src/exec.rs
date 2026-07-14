@@ -35,26 +35,22 @@ use crate::ast::{
 };
 use crate::builtins::{self, Builtin};
 use crate::expand;
+use crate::options::Opt;
 use crate::parser::{self, Parsed};
 use crate::shell::{Flow, Shell};
 
 // ---- source-string entry points --------------------------------------------
 
-pub fn run_command(args: Vec<String>, shell: &mut Shell) {
-    let line = args.join(" ");
-    let status = run_source(&line, shell);
-    fire_exit_trap(shell);
-    crate::exit(status);
-}
-
 pub fn run_script(fname: &str, shell: &mut Shell) -> i32 {
     let script = match std::fs::read_to_string(Path::new(fname)) {
         Ok(text) => text,
         Err(err) => {
-            eprintln!("Error reading '{fname}': {err:?}");
-            std::process::exit(1);
+            eprintln!("rush: cannot open {fname}: {err}");
+            // dash exits 2 when it cannot read its script operand.
+            crate::exit(2);
         }
     };
+    crate::verbose_echo(&script, shell);
     run_source(&script, shell)
 }
 
@@ -180,18 +176,23 @@ fn exec_list(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 fn exec_and_or(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
-    let mut status = exec_pipeline(&and_or.first, shell, io);
+    // `set -e` applies only to the *last* command of an and-or list: in
+    // `false && echo x` the `false` is a condition, so it must not exit the
+    // shell (POSIX §2.8.1). `last` is the index of the final operand, with 0
+    // meaning `first` is it.
+    let last = and_or.rest.len();
+    let mut status = exec_operand(&and_or.first, shell, io, last == 0);
     shell.set_status(status);
     if shell.flow() != Flow::Normal {
         return status;
     }
-    for (op, pipeline) in &and_or.rest {
+    for (i, (op, pipeline)) in and_or.rest.iter().enumerate() {
         let run = match op {
             AndOrOp::And => status == 0,
             AndOrOp::Or => status != 0,
         };
         if run {
-            status = exec_pipeline(pipeline, shell, io);
+            status = exec_operand(pipeline, shell, io, i + 1 == last);
             shell.set_status(status);
             if shell.flow() != Flow::Normal {
                 return status;
@@ -199,6 +200,35 @@ fn exec_and_or(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
         }
     }
     status
+}
+
+/// Run one operand of an and-or list. A non-final operand — and any `!`-negated
+/// pipeline, wherever it sits — is a condition context: `set -e` is suppressed
+/// throughout it, including inside a compound operand such as `{ false; } && x`.
+/// The final, un-negated operand is the one `set -e` acts on.
+fn exec_operand(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv, is_last: bool) -> i32 {
+    if !is_last || pipeline.bang {
+        shell.enter_condition();
+        let status = exec_pipeline(pipeline, shell, io);
+        shell.exit_condition();
+        return status;
+    }
+    let status = exec_pipeline(pipeline, shell, io);
+    check_errexit(status, shell);
+    status
+}
+
+/// Under `set -e`, a command that fails outside a condition context exits the
+/// shell (running the `EXIT` trap first). Suppressed inside an emulated subshell,
+/// where there is no `fork` to confine the exit to: the subshell's status
+/// surfaces in the parent, whose own check then fires — so `(false)` and
+/// `x=$(false)` still exit, while `echo $(false)` correctly does not.
+fn check_errexit(status: i32, shell: &mut Shell) {
+    if status != 0 && shell.errexit_applies() && !shell.in_subshell() {
+        shell.set_status(status);
+        fire_exit_trap(shell);
+        crate::exit(status);
+    }
 }
 
 fn exec_pipeline(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv) -> i32 {
@@ -215,6 +245,12 @@ fn exec_pipeline(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 fn exec_command(command: &AstCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
+    // `set -n`: read and parse commands without executing them. An interactive
+    // shell ignores it (POSIX), otherwise a typo would wedge the session — and
+    // since `set +n` would itself not run, nothing could turn it back off.
+    if shell.opts.get(Opt::NoExec) && !shell.is_interactive() {
+        return 0;
+    }
     match command {
         AstCommand::Simple(simple) => exec_simple(simple, shell, io),
         AstCommand::Compound { kind, redirects } => exec_compound_cmd(kind, redirects, shell, io),
@@ -226,6 +262,10 @@ fn exec_command(command: &AstCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
+    // POSIX §2.9.1: with no command name, the command's status is that of the
+    // last command substitution it performed (`x=$(false)` fails), so watch for
+    // one across this command's expansions.
+    shell.clear_cmdsub_status();
     let assigns: Vec<(String, String)> = simple
         .assigns
         .iter()
@@ -237,9 +277,16 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         argv.extend(expand::to_fields(word, shell));
     }
 
+    // An expansion error (`set -u`, `${x?}`) aborts the command before it runs.
+    if shell.fatal_pending() {
+        maybe_die_fatal(shell);
+        return 2;
+    }
+
     if argv.is_empty() {
+        let mut status = shell.cmdsub_status().unwrap_or(0);
+        trace(shell, &assigns, &[]);
         // Assignment-only command: assignments persist in the shell.
-        let mut status = 0;
         for (k, v) in &assigns {
             if let Err(e) = shell.set(k, v.clone()) {
                 // A variable assignment error aborts a non-interactive shell.
@@ -257,6 +304,8 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         maybe_die_fatal(shell);
         return status;
     }
+
+    trace(shell, &assigns, &argv);
 
     // Alias expansion in command position (a documented-limits approximation:
     // the value is whitespace-split into words, without re-quoting or `$`
@@ -316,6 +365,26 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
             127
         }
     }
+}
+
+/// `set -x`: write the expanded command to stderr, prefixed by the expanded
+/// `PS4` (default `+ `). Like dash, the words are printed unquoted and only
+/// *simple* commands are traced — which covers loop and `if` bodies, since those
+/// are made of simple commands.
+fn trace(shell: &mut Shell, assigns: &[(String, String)], argv: &[String]) {
+    if !shell.opts.get(Opt::XTrace) {
+        return;
+    }
+    let ps4 = match shell.get("PS4") {
+        Some(raw) => expand::expand_prompt(&raw, shell),
+        None => "+ ".to_string(),
+    };
+    let words: Vec<String> = assigns
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(argv.iter().cloned())
+        .collect();
+    eprintln!("{ps4}{}", words.join(" "));
 }
 
 /// If a special builtin or a variable assignment flagged a fatal error, a
@@ -405,26 +474,30 @@ fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Sh
             let mut out = fds[1].out_writer();
             let mut err = fds[2].err_writer();
             let mut reader = fds[0].reader();
-            let mut io = builtins::Io {
-                out: &mut out,
-                err: &mut err,
-            };
+            let mut io = builtins::Io::new(&mut out, &mut err);
             let status = builtins::read(args, &mut *reader, &mut io, shell);
-            let _ = io.out.flush();
-            status
+            io_status(&mut io, &argv[0], status)
         }
         _ => {
             let mut out = fds[1].out_writer();
             let mut err = fds[2].err_writer();
-            let mut io = builtins::Io {
-                out: &mut out,
-                err: &mut err,
-            };
+            let mut io = builtins::Io::new(&mut out, &mut err);
             let status = builtins::dispatch(b, args, &mut io, shell);
-            let _ = io.out.flush();
-            status
+            io_status(&mut io, &argv[0], status)
         }
     }
+}
+
+/// Finish a builtin's output and fold an I/O failure into its exit status: a
+/// builtin whose output could not be written has *not* succeeded, however happy
+/// its own return value was (dash reports the same way). Without this, a broken
+/// redirection target loses the output and still reports success.
+fn io_status(io: &mut builtins::Io, name: &str, status: i32) -> i32 {
+    if io.finish() {
+        return status;
+    }
+    let _ = writeln!(io.err, "rush: {name}: I/O error");
+    1
 }
 
 /// `. file` (source): read `file`, parse it, and execute it in the current
@@ -453,6 +526,7 @@ fn builtin_dot(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i32 {
             return 2;
         }
     };
+    crate::verbose_echo(&src, shell); // `set -v` echoes a sourced file too
     let status = source_string(&src, shell, &IoEnv { fds: fds.clone() });
     // A `return` unwinds to the `.` boundary.
     if let Flow::Return(n) = shell.flow() {
@@ -954,7 +1028,7 @@ fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[F
                     }
                     _ => {
                         let path = expand::to_string(target, shell);
-                        let file = open_for(*op, &path)?;
+                        let file = open_for(*op, &path, shell)?;
                         fds[fd_num] = FdSource::File(Arc::new(file));
                     }
                 }
@@ -984,11 +1058,19 @@ fn default_fd(op: RedirOp) -> u32 {
     }
 }
 
-fn open_for(op: RedirOp, path: &str) -> Result<File, i32> {
+fn open_for(op: RedirOp, path: &str, shell: &Shell) -> Result<File, i32> {
+    // `set -C` (noclobber): `>` must not truncate an existing *regular* file,
+    // while `>|` overrides it. Non-regular targets (`> /dev/null`) are exempt,
+    // so this checks the file type rather than mere existence.
+    if op == RedirOp::Write
+        && shell.opts.get(Opt::NoClobber)
+        && std::fs::metadata(path).is_ok_and(|m| m.is_file())
+    {
+        eprintln!("rush: cannot create {path}: File exists");
+        return Err(2);
+    }
     let result = match op {
         RedirOp::Read => File::open(path),
-        // `>|` ignores noclobber, which is not implemented until Phase 6, so it
-        // behaves like `>` for now.
         RedirOp::Write | RedirOp::Clobber => File::create(path),
         RedirOp::Append => OpenOptions::new().create(true).append(true).open(path),
         RedirOp::ReadWrite => OpenOptions::new()
@@ -1001,7 +1083,7 @@ fn open_for(op: RedirOp, path: &str) -> Result<File, i32> {
     };
     result.map_err(|e| {
         eprintln!("rush: {path}: {e}");
-        1
+        2
     })
 }
 
@@ -1028,11 +1110,13 @@ enum StageInput {
 /// and whose stdout is captured for the next stage — or the real fd 1 when it is
 /// last. External stages spawn the program (with file-backed stdio pumped
 /// through pipes, per Motor OS's constraints); builtins/compounds/functions run
-/// in-process. The pipeline's status is the last stage's.
+/// in-process. The pipeline's status is the last stage's — or, under
+/// `set -o pipefail`, the last *failing* stage's.
 fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
     let n = cmds.len();
     let mut prev = StageInput::Ambient;
     let mut last_status = 0;
+    let mut pipefail_status = 0;
 
     for (i, command) in cmds.iter().enumerate() {
         let is_last = i == n - 1;
@@ -1050,6 +1134,7 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
                     argv.extend(expand::to_fields(word, shell));
                 }
                 expand_aliases(&mut argv, shell);
+                trace(shell, &assigns, &argv);
 
                 let external = !argv.is_empty()
                     && builtins::lookup(&argv[0]).is_none()
@@ -1087,9 +1172,15 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
         };
 
         prev = next;
+        if status != 0 {
+            pipefail_status = status;
+        }
         if is_last {
             last_status = status;
         }
+    }
+    if shell.opts.get(Opt::PipeFail) {
+        return pipefail_status;
     }
     last_status
 }
@@ -1276,7 +1367,7 @@ fn exec_subshell(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 fn exec_if(clause: &IfClause, shell: &mut Shell, io: &IoEnv) -> i32 {
-    exec_list(&clause.cond, shell, io);
+    exec_condition(&clause.cond, shell, io);
     if shell.flow() != Flow::Normal {
         return shell.status();
     }
@@ -1284,7 +1375,7 @@ fn exec_if(clause: &IfClause, shell: &mut Shell, io: &IoEnv) -> i32 {
         return exec_list(&clause.then_branch, shell, io);
     }
     for (cond, then) in &clause.elifs {
-        exec_list(cond, shell, io);
+        exec_condition(cond, shell, io);
         if shell.flow() != Flow::Normal {
             return shell.status();
         }
@@ -1331,7 +1422,7 @@ fn exec_while(clause: &WhileClause, shell: &mut Shell, io: &IoEnv) -> i32 {
     let mut status = 0;
     shell.enter_loop();
     loop {
-        exec_list(&clause.cond, shell, io);
+        exec_condition(&clause.cond, shell, io);
         if shell.flow() != Flow::Normal {
             break;
         }
@@ -1346,6 +1437,16 @@ fn exec_while(clause: &WhileClause, shell: &mut Shell, io: &IoEnv) -> i32 {
         }
     }
     shell.exit_loop();
+    status
+}
+
+/// Run an `if`/`while`/`until` condition list. `set -e` is ignored throughout it
+/// — including inside a compound condition like `if { false; }; then` — because
+/// the whole point of the condition is to test a status.
+fn exec_condition(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
+    shell.enter_condition();
+    let status = exec_list(list, shell, io);
+    shell.exit_condition();
     status
 }
 
@@ -1403,8 +1504,10 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the substitution subshell
     shell.restore(snapshot);
-    // A subshell's control flow does not escape into the parent.
+    // A subshell's control flow does not escape into the parent, but its status
+    // does: it becomes `$?` for a command that has no name of its own.
     shell.set_flow(saved_flow);
+    shell.set_cmdsub_status(shell.status());
     let trimmed = output.trim_end_matches('\n');
     trimmed.to_string()
 }

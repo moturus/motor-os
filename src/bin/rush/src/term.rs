@@ -226,9 +226,9 @@ impl Term {
         }
     }
 
-    fn readline(&mut self, continuation: bool) -> Option<String> {
+    fn readline(&mut self, prompt: &str, continuation: bool) -> Option<String> {
         self.term_impl.make_raw();
-        self.start_line(continuation);
+        self.start_line(prompt);
 
         if !self.history.is_empty() {
             let msg = format!(
@@ -284,10 +284,10 @@ impl Term {
                     if cmd.is_empty() {
                         // self.write("\r\n".as_bytes());
                         self.write("\n".as_bytes());
-                        self.start_line(false);
+                        self.start_line(prompt);
                         break;
                     }
-                    if self.process_locally(cmd.as_str()) {
+                    if self.process_locally(cmd.as_str(), prompt) {
                         break;
                     } else {
                         // self.write("\r\n".as_bytes());
@@ -426,7 +426,7 @@ impl Term {
                             }
                         }
                         self.write("^C\n\r".as_bytes());
-                        self.start_line(false);
+                        self.start_line(prompt);
                     }
                 },
                 ProcessByteResult::Clear => {
@@ -449,12 +449,8 @@ impl Term {
         stdout.flush().unwrap();
     }
 
-    fn start_line(&mut self, continuation: bool) {
-        let col = if continuation {
-            continuation_prompt()
-        } else {
-            prompt()
-        };
+    fn start_line(&mut self, prompt: &str) {
+        let col = write_prompt(prompt);
         self.line.clear();
         self.prev_line.clear();
         self.line_start = col as u32;
@@ -647,7 +643,7 @@ impl Term {
         }
     }
 
-    fn process_locally(&mut self, cmd: &str) -> bool {
+    fn process_locally(&mut self, cmd: &str, prompt: &str) -> bool {
         match cmd {
             "clear" => {
                 self.write("\x1b[2J".as_bytes()); // Clear screen.
@@ -657,7 +653,7 @@ impl Term {
                     self.move_cursor(1, 1);
                 }
                 self.maybe_add_to_history(cmd);
-                self.start_line(false);
+                self.start_line(prompt);
 
                 true
             }
@@ -672,7 +668,7 @@ impl Term {
                 }
                 stdout_lock.flush().unwrap();
                 self.maybe_add_to_history(cmd);
-                self.start_line(false);
+                self.start_line(prompt);
 
                 true
             }
@@ -680,7 +676,7 @@ impl Term {
                 self.debug = !self.debug;
                 self.maybe_add_to_history(cmd);
                 self.write("\r\n".as_bytes());
-                self.start_line(false);
+                self.start_line(prompt);
                 true
             }
             _ => false,
@@ -688,26 +684,57 @@ impl Term {
     }
 }
 
-fn prompt() -> usize {
+/// Draw an already-expanded prompt (`PS1`/`PS2`) and return the column the input
+/// starts at, which the line editor's cursor math is built on.
+fn write_prompt(prompt: &str) -> usize {
     std::io::stderr().flush().unwrap();
-    let prompt_str = crate::prompt();
-    let bytes = format!("\r\x1b[1;32mrush\x1b[0m:\x1b[1;34m{prompt_str}\x1b[0m$ ");
 
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(bytes.as_bytes()).unwrap();
+    stdout.write_all(b"\r").unwrap();
+    stdout.write_all(prompt.as_bytes()).unwrap();
     stdout.flush().unwrap();
 
-    prompt_str.len() + 8 // "rush:<prompt>$ "
+    display_width(prompt)
 }
 
-fn continuation_prompt() -> usize {
-    let bytes = "\r> ";
-
-    let mut stdout = std::io::stdout().lock();
-    stdout.write_all(bytes.as_bytes()).unwrap();
-    stdout.flush().unwrap();
-
-    2 // "> "
+/// The printable width of a prompt: escape sequences move no cursor, so they
+/// must not count toward the column the input starts at. Handles the CSI (`ESC[`
+/// … final byte) and OSC (`ESC]` … BEL/ST) forms a prompt can plausibly carry —
+/// including rush's own colored default `PS1`.
+fn display_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            width += 1;
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameter/intermediate bytes, then a final byte in @-~.
+            Some('[') => {
+                for f in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&f) {
+                        break;
+                    }
+                }
+            }
+            // OSC: a string terminated by BEL or ESC \.
+            Some(']') => {
+                while let Some(f) = chars.next() {
+                    if f == '\x07' {
+                        break;
+                    }
+                    if f == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // A two-character escape (or a stray ESC at the end): consumed.
+            _ => {}
+        }
+    }
+    width
 }
 
 static TERM: Mutex<Option<Term>> = Mutex::new(None);
@@ -717,18 +744,18 @@ pub fn init(piped: bool) {
     *TERM.lock().unwrap() = Some(Term::new(piped));
 }
 
-pub fn readline() -> String {
-    readline_inner(false)
+pub fn readline(prompt: &str) -> String {
+    readline_inner(prompt, false)
 }
 
-pub fn readline_continuation() -> String {
-    readline_inner(true)
+pub fn readline_continuation(prompt: &str) -> String {
+    readline_inner(prompt, true)
 }
 
-fn readline_inner(continuation: bool) -> String {
+fn readline_inner(prompt: &str, continuation: bool) -> String {
     let term = &mut *TERM.lock().unwrap();
     loop {
-        if let Some(line) = term.as_mut().unwrap().readline(continuation) {
+        if let Some(line) = term.as_mut().unwrap().readline(prompt, continuation) {
             return line;
         }
     }

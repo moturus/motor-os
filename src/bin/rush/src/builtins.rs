@@ -20,14 +20,16 @@
 //! wires each builtin's stdout/stderr to the command's redirections via the
 //! [`Io`] writers below (so `echo hi > f` and `pwd 2>err` behave).
 //!
-//! Documented M2 limits: option enforcement for `set -e/-u/-x/-n/-v/-C` is
-//! Phase 6 (only `-f`/noglob is live here, and `$-` reflects only it); `umask`
-//! is bookkeeping-only (no Motor OS syscall); signal `trap`s are stored but only
-//! `EXIT` fires; `times` reports zeros; `hash` is a no-op cache.
+//! Documented limits: `umask` is bookkeeping-only (no Motor OS syscall); signal
+//! `trap`s are stored but only `EXIT` fires; `times` reports zeros; `hash` is a
+//! no-op cache. Phase 6 moved the shell options behind [`crate::options`]: `set`
+//! parses them from that one table, and the executor and expansion engine
+//! enforce them.
 
 use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::options::Options;
 use crate::shell::Shell;
 
 /// The writers a builtin sends its normal and error output to. They are derived
@@ -36,17 +38,44 @@ use crate::shell::Shell;
 pub struct Io<'a> {
     pub out: &'a mut dyn Write,
     pub err: &'a mut dyn Write,
+    /// Whether any write to `out` failed. A builtin has nowhere useful to return
+    /// a per-write error to, but losing output silently is worse: the executor
+    /// consumes this via [`Io::finish`] and reports it, the way dash does.
+    out_failed: bool,
 }
 
-impl Io<'_> {
+impl<'a> Io<'a> {
+    pub fn new(out: &'a mut dyn Write, err: &'a mut dyn Write) -> Self {
+        Self {
+            out,
+            err,
+            out_failed: false,
+        }
+    }
+
+    /// Flush `out` and report whether this builtin's output was written intact.
+    /// A buffered writer can fail at flush time, so the flush counts too.
+    pub fn finish(&mut self) -> bool {
+        if self.out.flush().is_err() {
+            self.out_failed = true;
+        }
+        !self.out_failed
+    }
+
     fn out(&mut self, s: &str) {
-        let _ = self.out.write_all(s.as_bytes());
+        self.write_out(s.as_bytes());
     }
     fn outln(&mut self, s: &str) {
-        let _ = self.out.write_all(s.as_bytes());
-        let _ = self.out.write_all(b"\n");
+        self.write_out(s.as_bytes());
+        self.write_out(b"\n");
+    }
+    fn write_out(&mut self, bytes: &[u8]) {
+        if self.out.write_all(bytes).is_err() {
+            self.out_failed = true;
+        }
     }
     fn errln(&mut self, s: &str) {
+        // A failed write to stderr has nowhere left to be reported.
         let _ = self.err.write_all(s.as_bytes());
         let _ = self.err.write_all(b"\n");
     }
@@ -765,8 +794,8 @@ fn set(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
         }
         return 0;
     }
-    // Parse leading option arguments (`-f`, `+f`, `-e`, `-o name`, …). Only
-    // `-f`/`+f` is enforced today (noglob); the rest are accepted for Phase 6.
+    // Parse leading option arguments (`-f`, `+f`, `-eux`, `-o name`, …) against
+    // the one option table; `--` or a non-option operand ends them.
     let mut i = 0;
     let mut saw_dashdash = false;
     let mut saw_operand = false;
@@ -777,7 +806,8 @@ fn set(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
             i += 1;
             break;
         }
-        let (sign, letters) = match a.as_str() {
+        let (on, letters) = match a.as_str() {
+            // A bare `-`/`+` is an operand, not an option cluster.
             s if s.starts_with('-') && s.len() > 1 => (true, &s[1..]),
             s if s.starts_with('+') && s.len() > 1 => (false, &s[1..]),
             _ => {
@@ -786,29 +816,53 @@ fn set(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
             }
         };
         for ch in letters.chars() {
-            match ch {
-                'f' => shell.noglob = sign,
-                'o' => {
-                    // `-o name` / `+o name`: skip its argument (unenforced).
-                    i += 1;
+            if ch == 'o' {
+                // `-o [name]` / `+o [name]`: a bare `-o`/`+o` lists the options.
+                match args.get(i + 1) {
+                    None => {
+                        if on {
+                            io.outln("Current option settings");
+                            for line in &shell.opts.listing() {
+                                io.outln(line);
+                            }
+                        } else {
+                            for line in &shell.opts.listing_reinput() {
+                                io.outln(line);
+                            }
+                        }
+                    }
+                    Some(name) => {
+                        i += 1;
+                        match Options::by_name(name) {
+                            Some(opt) => shell.opts.set(opt, on),
+                            None => return illegal_option(&format!("o {name}"), on, io, shell),
+                        }
+                    }
                 }
-                // Other standard options are accepted here but enforced in
-                // Phase 6; an unknown letter is a fatal usage error (like dash).
-                'a' | 'b' | 'C' | 'e' | 'h' | 'm' | 'n' | 'u' | 'v' | 'x' => {}
-                _ => {
-                    io.errln(&format!("rush: set: illegal option -{ch}"));
-                    shell.mark_fatal(2);
-                    return 2;
-                }
+                continue;
+            }
+            match Options::by_letter(ch) {
+                Some(opt) => shell.opts.set(opt, on),
+                None => return illegal_option(&ch.to_string(), on, io, shell),
             }
         }
         i += 1;
     }
-    // Positional parameters change only when operands (or a bare `--`) appear.
+    // Positional parameters change only when operands (or a bare `--`) appear:
+    // `set -e` must not wipe `$1`, but `set --` clears them.
     if saw_operand || saw_dashdash {
         shell.set_params(args[i..].to_vec());
     }
     0
+}
+
+/// An unknown `set` option: a *special* builtin usage error, so it is fatal to a
+/// non-interactive shell.
+fn illegal_option(what: &str, on: bool, io: &mut Io, shell: &mut Shell) -> i32 {
+    let sign = if on { '-' } else { '+' };
+    io.errln(&format!("rush: set: illegal option {sign}{what}"));
+    shell.mark_fatal(2);
+    2
 }
 
 // ---- shift ------------------------------------------------------------------
@@ -1794,7 +1848,7 @@ mod tests {
     fn echo_escapes_and_n() {
         let mut o = Vec::new();
         let mut e = Vec::new();
-        let mut io = Io { out: &mut o, err: &mut e };
+        let mut io = Io::new(&mut o, &mut e);
         echo(&["-n".into(), "a\\tb".into()], &mut io);
         assert_eq!(String::from_utf8(o).unwrap(), "a\tb");
     }
@@ -1803,7 +1857,7 @@ mod tests {
     fn printf_basic() {
         let mut o = Vec::new();
         let mut e = Vec::new();
-        let mut io = Io { out: &mut o, err: &mut e };
+        let mut io = Io::new(&mut o, &mut e);
         printf(
             &["%s=%d\n".into(), "x".into(), "42".into()],
             &mut io,
@@ -1815,7 +1869,7 @@ mod tests {
     fn printf_recycles_format() {
         let mut o = Vec::new();
         let mut e = Vec::new();
-        let mut io = Io { out: &mut o, err: &mut e };
+        let mut io = Io::new(&mut o, &mut e);
         printf(&["[%s]".into(), "a".into(), "b".into(), "c".into()], &mut io);
         assert_eq!(String::from_utf8(o).unwrap(), "[a][b][c]");
     }
@@ -1824,7 +1878,7 @@ mod tests {
     fn printf_width_and_pad() {
         let mut o = Vec::new();
         let mut e = Vec::new();
-        let mut io = Io { out: &mut o, err: &mut e };
+        let mut io = Io::new(&mut o, &mut e);
         printf(&["%5d|%-5d|%05d\n".into(), "7".into(), "7".into(), "7".into()], &mut io);
         assert_eq!(String::from_utf8(o).unwrap(), "    7|7    |00007\n");
     }

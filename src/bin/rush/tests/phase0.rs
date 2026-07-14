@@ -36,19 +36,19 @@ fn run_c(script: &str) -> Run {
     }
 }
 
-/// Feed `input` to `rush -piped` on stdin and return the exit status.
+/// Feed `input` to `rush --piped` on stdin and return the exit status.
 ///
-/// `-piped` runs the interactive loop over a pipe, which — unlike `-c` — does
+/// `--piped` runs the interactive loop over a pipe, which — unlike `-c` — does
 /// not abort on a non-zero command, so it is currently the only way to exercise
 /// two sequential commands (real `;` sequencing arrives in Phase 2).
 fn run_piped_status(input: &str) -> i32 {
     let mut child = Command::new(RUSH)
-        .arg("-piped")
+        .arg("--piped")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to spawn rush -piped");
+        .expect("failed to spawn rush --piped");
     {
         let mut stdin = child.stdin.take().unwrap();
         // Ignore write errors: the shell may `exit` before draining stdin.

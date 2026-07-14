@@ -13,12 +13,17 @@
 //! Phase 4 adds shell functions and a [`Flow`] signal: `break`/`continue`/
 //! `return` set a pending flow that the executor propagates up through lists and
 //! loops (loops decrement `break n`/`continue n`, functions absorb `return`).
+//!
+//! Phase 6 adds the [`Options`] set (`set -e`/`-u`/`-x`/…), which the executor
+//! and the expansion engine consult, and the `-e` suppression depth that marks
+//! condition contexts where a failure must not exit the shell.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::arith::ArithEnv;
 use crate::ast::FunctionBody;
+use crate::options::{Opt, Options};
 
 /// A pending non-local control-flow transfer, set by the `break`/`continue`/
 /// `return` builtins and consumed by the executor. `Normal` means ordinary
@@ -57,9 +62,14 @@ pub struct Shell {
     /// `continue` are no-ops when this is 0 (matching dash), and it resets across
     /// a function-call boundary.
     loop_depth: u32,
-    /// `set -f`: pathname expansion (globbing) disabled. Wired to the `set`
-    /// builtin in Phase 6; default off.
-    pub noglob: bool,
+    /// Shell options (`set -e`, `-u`, `-x`, …) — see [`crate::options`].
+    pub opts: Options,
+    /// Nesting depth of contexts where `set -e` must be ignored: the condition
+    /// of an `if`/`while`/`until`, a non-final operand of an `&&`/`||` list, and
+    /// a `!`-negated pipeline (POSIX §2.8.1). A counter rather than a flag
+    /// because those contexts nest, and it propagates naturally into function
+    /// calls (which run in-process).
+    errexit_suppress: u32,
     /// Command aliases (`alias name=value`), expanded in command position.
     aliases: HashMap<String, String>,
     /// `getopts` internal cursor: the 1-based index of the character within the
@@ -82,6 +92,10 @@ pub struct Shell {
     /// the exit status. Set by the offending builtin/assignment and consumed by
     /// the executor, which exits a non-interactive shell.
     fatal: Option<i32>,
+    /// Status of the most recent command substitution performed while expanding
+    /// the current command; `None` if it performed none. See
+    /// [`Shell::cmdsub_status`].
+    cmdsub_status: Option<i32>,
     /// Depth of emulated subshells (`$(…)`, `( … )`, pipeline stages) currently
     /// executing. A fatal error inside one must not take down the whole shell
     /// (there is no `fork`), so the fatal-exit is suppressed when this is > 0.
@@ -100,14 +114,43 @@ impl Shell {
             pid: crate::sys::pid(),
             flow: Flow::Normal,
             loop_depth: 0,
-            noglob: false,
+            opts: Options::new(),
+            errexit_suppress: 0,
             aliases: HashMap::new(),
             getopts_char: 0,
             umask: 0o022,
             traps: HashMap::new(),
             interactive: false,
             fatal: None,
+            cmdsub_status: None,
             subshell_depth: 0,
+        }
+    }
+
+    /// Establish the variables POSIX expects a shell to maintain: `PWD` (and
+    /// `OLDPWD`, which `cd` needs), and the `PS1`/`PS2`/`PS4` prompts. Existing
+    /// (inherited) values win, so `PS1=… rush` and a `PWD` from the parent
+    /// survive. Call once, at startup.
+    pub fn init_environment(&mut self) {
+        // An inherited `PWD` is only trustworthy if it still names the cwd: a
+        // parent that chdir'd without updating it would otherwise mislead
+        // every relative path `cd` computes.
+        let pwd_ok = std::env::var("PWD").is_ok_and(|p| {
+            std::path::Path::new(&p).is_absolute()
+                && std::fs::canonicalize(&p).ok() == std::env::current_dir().ok()
+        });
+        if !pwd_ok && let Ok(cwd) = std::env::current_dir() {
+            let _ = self.export("PWD", Some(cwd.to_string_lossy().into_owned()));
+        }
+        for name in ["PS1", "PS2", "PS4"] {
+            if self.get(name).is_none() {
+                // Inserted directly rather than via `set`: these are the shell's
+                // own defaults, not a user assignment, so `set -a` must not
+                // export them to children (as in dash). Safe because `get`
+                // above proved the name is unset, so nothing is being shadowed.
+                self.vars
+                    .insert(name.to_string(), default_prompt(name).to_string());
+            }
         }
     }
 
@@ -131,9 +174,15 @@ impl Shell {
     }
 
     /// Assign a value, preserving export status. Errors if the name is readonly.
+    ///
+    /// Under `set -a` (allexport) an assignment also exports the name, which is
+    /// why this — rather than each caller — is the single assignment funnel.
     pub fn set(&mut self, name: &str, value: String) -> Result<(), String> {
         if self.readonly.contains(name) {
             return Err(format!("{name}: is read only"));
+        }
+        if self.opts.get(Opt::AllExport) {
+            return self.export(name, Some(value));
         }
         if std::env::var_os(name).is_some() {
             // Already exported: keep it in the environment.
@@ -272,10 +321,32 @@ impl Shell {
 
     pub fn set_interactive(&mut self, yes: bool) {
         self.interactive = yes;
+        // `$-` reports interactivity via the `i` option; keep the two in step so
+        // there is only one answer to "is this shell interactive".
+        self.opts.set(Opt::Interactive, yes);
     }
 
     pub fn is_interactive(&self) -> bool {
         self.interactive
+    }
+
+    // ---- `set -e` suppression ----------------------------------------------
+
+    /// Enter a context where a failing command must not trigger `set -e`
+    /// (an `if`/`while`/`until` condition, a non-final `&&`/`||` operand, a
+    /// `!`-negated pipeline). Pair with [`Shell::exit_condition`].
+    pub fn enter_condition(&mut self) {
+        self.errexit_suppress += 1;
+    }
+
+    pub fn exit_condition(&mut self) {
+        self.errexit_suppress = self.errexit_suppress.saturating_sub(1);
+    }
+
+    /// Whether a non-zero status here should exit the shell: `set -e` is on and
+    /// we are not inside a condition context.
+    pub fn errexit_applies(&self) -> bool {
+        self.opts.get(Opt::ErrExit) && self.errexit_suppress == 0
     }
 
     /// Flag a fatal special-builtin usage/assignment error with its exit status.
@@ -286,6 +357,30 @@ impl Shell {
     /// Consume any pending fatal error.
     pub fn take_fatal(&mut self) -> Option<i32> {
         self.fatal.take()
+    }
+
+    /// Whether a fatal error is flagged but not yet consumed. Lets the executor
+    /// abandon a command whose *expansion* failed (`set -u`, `${x?}`) before
+    /// running it.
+    pub fn fatal_pending(&self) -> bool {
+        self.fatal.is_some()
+    }
+
+    // ---- command-substitution status ---------------------------------------
+
+    /// The status of the most recent command substitution, if one has run since
+    /// [`Shell::clear_cmdsub_status`]. POSIX gives a command with no name but a
+    /// substitution (`x=$(false)`) that substitution's status.
+    pub fn cmdsub_status(&self) -> Option<i32> {
+        self.cmdsub_status
+    }
+
+    pub fn clear_cmdsub_status(&mut self) {
+        self.cmdsub_status = None;
+    }
+
+    pub fn set_cmdsub_status(&mut self, status: i32) {
+        self.cmdsub_status = Some(status);
     }
 
     pub fn enter_subshell(&mut self) {
@@ -420,6 +515,9 @@ impl Shell {
             functions: self.functions.clone(),
             aliases: self.aliases.clone(),
             traps: self.traps.clone(),
+            // A subshell's `set -e`/`set -f`/… must not leak out: `(set -f)`
+            // leaves the parent's `$-` alone.
+            opts: self.opts,
             cwd: std::env::current_dir().ok(),
             // `PWD`/`OLDPWD` are exported (they live in the environment), so the
             // generic var restore would miss them; capture and restore them with
@@ -435,11 +533,28 @@ impl Shell {
         self.functions = snap.functions;
         self.aliases = snap.aliases;
         self.traps = snap.traps;
+        self.opts = snap.opts;
         if let Some(cwd) = snap.cwd {
             let _ = std::env::set_current_dir(cwd);
         }
         restore_env("PWD", snap.pwd);
         restore_env("OLDPWD", snap.oldpwd);
+    }
+}
+
+/// The default value of a prompt variable.
+///
+/// `PS2`/`PS4` match dash. `PS1` deliberately does not: rush keeps its colored
+/// `rush:<cwd>$ ` prompt (dash's is a bare `$ `). It is an ordinary variable
+/// holding ordinary ANSI escapes, so `PS1='$ '` gets dash's prompt back, and
+/// `$PWD` in it tracks the working directory through the normal expansion the
+/// prompt already undergoes.
+pub fn default_prompt(name: &str) -> &'static str {
+    match name {
+        "PS1" => "\x1b[1;32mrush\x1b[0m:\x1b[1;34m$PWD\x1b[0m$ ",
+        "PS2" => "> ",
+        "PS4" => "+ ",
+        _ => "",
     }
 }
 
@@ -460,6 +575,7 @@ pub struct Snapshot {
     functions: HashMap<String, Rc<FunctionBody>>,
     aliases: HashMap<String, String>,
     traps: HashMap<String, String>,
+    opts: Options,
     cwd: Option<std::path::PathBuf>,
     pwd: Option<String>,
     oldpwd: Option<String>,

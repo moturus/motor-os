@@ -19,6 +19,7 @@
 use crate::arith;
 use crate::glob;
 use crate::lexer;
+use crate::options::Opt;
 use crate::shell::Shell;
 use crate::token::{Token, Word, WordPart};
 
@@ -49,7 +50,7 @@ pub fn to_fields(word: &Word, shell: &mut Shell) -> Vec<String> {
     let elems = build(word, shell, true);
     let ifs = shell.ifs();
     let fields = split_fields(&elems, &ifs);
-    let noglob = shell.noglob;
+    let noglob = shell.opts.get(Opt::NoGlob);
 
     let mut out = Vec::new();
     for field in fields {
@@ -304,7 +305,9 @@ fn param_eval(raw: &str, shell: &mut Shell) -> PVal {
         let len = if inner == "@" || inner == "*" {
             shell.param_count()
         } else {
-            resolve_scalar(inner, shell).unwrap_or_default().chars().count()
+            let value = resolve_scalar(inner, shell);
+            check_nounset(inner, &value, shell);
+            value.unwrap_or_default().chars().count()
         };
         return PVal::Scalar(len.to_string());
     }
@@ -312,7 +315,8 @@ fn param_eval(raw: &str, shell: &mut Shell) -> PVal {
     let (head, modifier) = split_head_and_modifier(raw);
 
     if head == "@" || head == "*" {
-        // Modifiers on `$@`/`$*` are unusual; Phase 3 ignores them.
+        // `$@`/`$*` with no positional parameters is NOT a `set -u` error.
+        // Modifiers on them are unusual; Phase 3 ignores them.
         return if head == "@" {
             PVal::Fields(shell.params().to_vec())
         } else {
@@ -321,7 +325,31 @@ fn param_eval(raw: &str, shell: &mut Shell) -> PVal {
     }
 
     let value = resolve_scalar(head, shell);
+    // `set -u` fires only when no modifier gives the unset case a meaning:
+    // `${x-d}`/`${x=d}`/`${x+y}`/`${x?}` handle it themselves, while the
+    // trimming modifiers (`${x#p}`, `${x%p}`) and a bare `$x` do not.
+    if !matches!(
+        modifier,
+        Some((
+            ModKind::UseDefault | ModKind::UseAlt | ModKind::AssignDefault | ModKind::ErrorIfUnset,
+            _,
+            _
+        ))
+    ) {
+        check_nounset(head, &value, shell);
+    }
     PVal::Scalar(apply_modifier(head, value, modifier, shell))
+}
+
+/// Under `set -u`, expanding an unset parameter is an error that terminates a
+/// non-interactive shell (POSIX §2.5.2). Flagged via [`Shell::mark_fatal`] so
+/// the executor kills the shell at the next command boundary — the expansion
+/// itself continues and yields the empty string, exactly as it would unset.
+fn check_nounset(name: &str, value: &Option<String>, shell: &mut Shell) {
+    if value.is_none() && shell.opts.get(Opt::NoUnset) {
+        eprintln!("rush: {name}: parameter not set");
+        shell.mark_fatal(2);
+    }
 }
 
 /// Join the positional parameters for `$*`: with the first character of `IFS`
@@ -347,19 +375,10 @@ fn resolve_scalar(head: &str, shell: &Shell) -> Option<String> {
         "?" => Some(shell.status().to_string()),
         "$" => Some(shell.pid().to_string()),
         "!" => Some(String::new()), // last background pid — Phase 7
-        "-" => Some(option_flags(shell)),
+        "-" => Some(shell.opts.dash_flags()),
         "#" => Some(shell.param_count().to_string()),
         _ => shell.get(head),
     }
-}
-
-fn option_flags(shell: &Shell) -> String {
-    // `$-`: currently only `set -f` is representable (Phase 6 adds the rest).
-    let mut s = String::new();
-    if shell.noglob {
-        s.push('f');
-    }
-    s
 }
 
 #[derive(Clone, Copy)]
@@ -470,13 +489,19 @@ fn apply_modifier(
         ModKind::ErrorIfUnset => {
             if trigger {
                 let msg = if word.is_empty() {
-                    "parameter null or not set".to_string()
+                    // dash distinguishes the `:?` (null-or-unset) wording.
+                    if colon {
+                        "parameter not set or null".to_string()
+                    } else {
+                        "parameter not set".to_string()
+                    }
                 } else {
                     expand_raw_to_string(&word, shell)
                 };
-                // POSIX exits a non-interactive shell here; deferred — we
-                // diagnose and substitute nothing.
                 eprintln!("rush: {head}: {msg}");
+                // POSIX: a non-interactive shell exits here. Phase 6 wires this
+                // to the same fatal-error path as `set -u`.
+                shell.mark_fatal(2);
                 String::new()
             } else {
                 value.unwrap_or_default()
@@ -569,6 +594,14 @@ pub fn eval_arith(raw: &str, shell: &mut Shell) -> String {
 /// field splitting or globbing.
 pub fn expand_heredoc_body(body: &str, shell: &mut Shell) -> String {
     expand_double_quoted(body, shell)
+}
+
+/// Expand a prompt string (`PS1`, `PS2`, `PS4`). POSIX §2.5.3 says these undergo
+/// parameter expansion, which is what the double-quote rules give — so a `PS1`
+/// of `$PWD$ ` tracks the working directory. bash's `\w`/`\h` backslash escapes
+/// are not POSIX and are not interpreted (dash does not either).
+pub fn expand_prompt(raw: &str, shell: &mut Shell) -> String {
+    expand_double_quoted(raw, shell)
 }
 
 /// The shared double-quote-context expander used by here-documents and by

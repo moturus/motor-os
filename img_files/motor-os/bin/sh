@@ -1,4 +1,6 @@
 #!/bin/rush
 
-/bin/rush -i /sys/cfg/rush.cfg
-
+# /bin/sh: the POSIX shell. Motor OS has no symlinks, so this forwards every
+# argument to rush -- `sh -c '...'` (what libc's system()/popen() emit), `sh
+# script args`, and a bare interactive `sh` all work.
+exec /bin/rush "$@"

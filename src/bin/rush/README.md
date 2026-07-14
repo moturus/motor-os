@@ -32,7 +32,7 @@ shell. A full plan to get there lives in the crate root:
 - [`rush-to-sh-plan.md`](./rush-to-sh-plan.md) — phased implementation plan
   (P0–P9, milestones M1–M4) and target architecture.
 
-Done so far: Phases 0–5. Phase 0 (a `sys/` platform-abstraction layer with
+Done so far: Phases 0–6. Phase 0 (a `sys/` platform-abstraction layer with
 termios confined to the Linux host backend; correctness fixes; a golden test
 suite), Phase 1 (a POSIX lexer, `src/lexer.rs`), Phase 2 (a recursive-descent
 parser + AST, `src/parser.rs`/`src/ast.rs`), **Phase 3 — milestone M1**: a
@@ -41,13 +41,13 @@ word-expansion engine (`src/expand.rs`), arithmetic (`src/arith.rs`), in-crate
 globbing (`src/glob.rs`), and an executor (`src/exec.rs`) with working
 multi-stage pipelines, the full fd 0/1/2 redirection set, here-documents, and
 command substitution — **Phase 4**: compound commands and functions — and
-**Phase 5 — milestone M2**: the POSIX builtins (`src/builtins.rs`), verified
-end-to-end on a Motor OS VM.
+**Phase 5 — milestone M2**: the POSIX builtins (`src/builtins.rs`) — and
+**Phase 6**: shell options (`src/options.rs`), POSIX invocation parsing,
+startup files, and prompts. Both verified end-to-end on a Motor OS VM.
 
-**Next step — Phase 6:** shell options (`set -e`/`-u`/`-x`/`-f`…), invocation
-parsing (incl. `-c string name args` positional params), startup files, and
-`PS1`/`PS2`/`PS4`. Then **Phase 7 — M3** (traps, background `&`/`wait`). See the
-plan for details.
+**Next step — Phase 7 — M3:** signal traps, `^C`, background `&`/`wait`, and
+`$!`. Then **M4** (Phases 8–9: interactive UX, a conformance corpus, docs). See
+the plan for details.
 
 ## What works today
 
@@ -72,19 +72,41 @@ plan for details.
 - **Builtins**: special — `:` `.` `eval` `exec` `exit` `export` `readonly` `set`
   `shift` `unset` `times` `trap` `break` `continue` `return`; regular — `cd`
   (full) `pwd` `echo` `printf` `test`/`[` `read` `true` `false` `getopts`
-  `command` `type` `hash` `alias`/`unalias` `umask`; `-c <string>` and running a
-  script file.
+  `command` `type` `hash` `alias`/`unalias` `umask`;
+- **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
+  rules), `-u` (nounset), `-x` (xtrace via `PS4`), `-n` (noexec), `-f` (noglob),
+  `-C` (noclobber, with `>|`), `-a` (allexport), `-v` (verbose), `-o pipefail`,
+  `set -o`/`+o` listings, and `$-`;
+- **POSIX invocation**: `rush [options] script [args…]`, `-c string [name
+  [args…]]`, `-s`/stdin, clustered (`-ex`) and `+`-form options, `-o name`,
+  `--`; positional parameters from operands in every form;
+- **Startup & prompts**: an interactive shell sources `$ENV` (a login shell also
+  reads `/etc/profile` and `~/.profile`); `PS1`/`PS2`/`PS4` are expanded
+  variables, and `PWD`/`OLDPWD` are maintained.
 
 ## Not yet working (see the gap analysis)
 
-- Shell-option **enforcement** (`set -e`/`-u`/`-x`/`-C`; only `-f`/noglob is
-  live) and full invocation parsing (positional params for `-c string name
-  args`) — Phase 6;
 - Signal traps (only `EXIT` fires), `^C`, background `&`/`wait`, `kill`, job
   control — Phase 7;
-- `umask` affecting file creation, `times` accounting (both display-only); a
-  `case` with plain `pat)` patterns *inside* `$( … )` (lexer paren-balancing —
-  use `(pat)`).
+- Tab completion, UTF-8 input editing, persistent history, `^D` at an empty
+  prompt, and multi-row line wrapping — Phase 8;
+- `umask` affecting file creation, `times` accounting (both display-only); the
+  `monitor`/`notify`/`vi`/`nolog`/`hashall`/`ignoreeof` options are accepted but
+  inert; a `case` with plain `pat)` patterns *inside* `$( … )` (lexer
+  paren-balancing — use `(pat)`).
+
+### Deliberate divergences from `dash`
+
+`dash` is rush's reference for POSIX behavior, but a few things differ on
+purpose: `set -o pipefail` exists (POSIX.1-2024 added it; dash has no such
+option); `-h` is accepted as an inert option rather than rejected (POSIX
+reserves the letter for command hashing, so rush's old "`-h` prints usage" is
+gone); `$-` lists option letters in a canonical order (POSIX leaves the order
+unspecified); `set -v` echoes a script in one piece rather than interleaving it
+line-by-line (rush reads a whole script before parsing it — the interactive
+loop, which reads a line at a time, does interleave); and the default `PS1` is
+rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
+variable, so `PS1='$ '` restores dash's).
 
 ## Contributions:
 
