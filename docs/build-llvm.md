@@ -451,11 +451,20 @@ for f in $(ls *.c | grep -v -e '^lua\.c$' -e '^luac\.c$'); do
 done
 $B/llvm-ar rcs liblua.a *.o
 
-# Link the interpreter.
-$B/clang $CFLAGS lua.c liblua.a \
-  $SYSROOT/sys/tools/llvm/lib/crt1.o $SYSROOT/sys/tools/llvm/lib/libc.a \
+# Link the interpreter. mlibc is C++ internally (its stdio FILE machinery —
+# cookie_file, memstream, fmemopen — has C++ destructors that call
+# `operator delete`), so even this pure-C program pulls libc++abi/libunwind out
+# of libc.a and must link them: the same C link group the Motor ToolChain emits
+# (suppressed here by the host cfg's -nostdlib, so listed explicitly).
+# --start-group resolves the libc <-> libc++abi <-> shim back-references.
+$B/clang $CFLAGS lua.c liblua.a $SYSROOT/sys/tools/llvm/lib/crt1.o \
+  -Wl,--start-group \
   $SYSROOT/sys/tools/llvm/lib/libmoto_rt_cabi.a \
-  $SYSROOT/sys/tools/llvm/lib/libclang_rt.builtins-x86_64.a -o lua
+  $SYSROOT/sys/tools/llvm/lib/libc++abi.a \
+  $SYSROOT/sys/tools/llvm/lib/libunwind.a \
+  $SYSROOT/sys/tools/llvm/lib/libc.a \
+  $SYSROOT/sys/tools/llvm/lib/libclang_rt.builtins-x86_64.a \
+  -Wl,--end-group -o lua
 ```
 
 ## Stage 8 — stage everything into the image

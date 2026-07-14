@@ -354,11 +354,23 @@ build_lua() {
 			"$B/clang" $cflags -c "$f"
 		done
 		"$B/llvm-ar" rcs liblua.a ./*.o
+		# mlibc is C++ internally (its stdio FILE machinery — cookie_file,
+		# memstream, fmemopen — has C++ destructors that call `operator delete`),
+		# so even this pure-C program pulls libc++abi/libunwind out of libc.a and
+		# must link them. Mirror the C link group the Motor ToolChain emits: the
+		# host cfg forces -nostdlib, suppressing that default group, so it is listed
+		# explicitly. --start-group resolves the libc <-> libc++abi <-> shim
+		# back-references regardless of order.
 		# shellcheck disable=SC2086
 		"$B/clang" $cflags lua.c liblua.a \
-			"$SYSROOT/$TOOLS/lib/crt1.o" "$SYSROOT/$TOOLS/lib/libc.a" \
+			"$SYSROOT/$TOOLS/lib/crt1.o" \
+			-Wl,--start-group \
 			"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" \
-			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" -o lua )
+			"$SYSROOT/$TOOLS/lib/libc++abi.a" \
+			"$SYSROOT/$TOOLS/lib/libunwind.a" \
+			"$SYSROOT/$TOOLS/lib/libc.a" \
+			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" \
+			-Wl,--end-group -o lua )
 }
 
 # --- stage 8: stage everything into the image -------------------------------
