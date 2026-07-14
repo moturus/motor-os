@@ -350,7 +350,13 @@ impl AsyncFsClient {
             entry_id,
             pos: AtomicU64::new(pos),
             readable: (opts & moto_rt::fs::O_READ) != 0,
-            writable: (opts & moto_rt::fs::O_WRITE) != 0,
+            // `O_APPEND` grants write access on its own: appending *is* writing,
+            // and unlike POSIX's `open()` — where `O_APPEND` is a modifier on a
+            // separate access mode — these are this ABI's own flags, with no way
+            // to express "append" other than to intend a write. Requiring
+            // `O_WRITE` here made every `>>` redirection silently lose its data:
+            // the open succeeded, then each write failed with `E_NOT_ALLOWED`.
+            writable: (opts & (moto_rt::fs::O_WRITE | moto_rt::fs::O_APPEND)) != 0,
             nonblocking: AtomicBool::new(false),
         })
     }

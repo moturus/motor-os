@@ -45,6 +45,11 @@ pub const PERM_WRITE: u64 = 2;
 // Open options.
 pub const O_READ: u32 = 1 << 0;
 pub const O_WRITE: u32 = 1 << 1;
+/// Open for appending: every write goes to the end of the file.
+///
+/// Unlike POSIX's `O_APPEND` — a modifier on a separate access mode — this
+/// grants write access by itself, so `O_APPEND` alone is a valid way to open a
+/// file for appending and does not need `O_WRITE`. (Both together are fine.)
 pub const O_APPEND: u32 = 1 << 2;
 pub const O_TRUNCATE: u32 = 1 << 3;
 pub const O_CREATE: u32 = 1 << 4;
