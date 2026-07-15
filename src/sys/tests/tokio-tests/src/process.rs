@@ -15,19 +15,12 @@ async fn smoke_test() {
     if cfg!(windows) {
         cmd = Command::new("cmd");
         cmd.arg("/c");
-    } else if cfg!(target_os = "motor") {
-        cmd = Command::new("rush");
-        cmd.arg("-c");
     } else {
         cmd = Command::new("sh");
         cmd.arg("-c");
     }
 
-    #[cfg(not(target_os = "motor"))]
     let mut child = cmd.arg("exit 2").spawn().unwrap();
-
-    #[cfg(target_os = "motor")]
-    let mut child = cmd.arg("exit").arg("2").spawn().unwrap();
 
     let _id = child.id().expect("missing id");
     // assert!(id > 0);
@@ -54,9 +47,6 @@ async fn piped_stdio_test() {
     if cfg!(windows) {
         cmd = Command::new("cmd");
         cmd.arg("/c");
-    } else if cfg!(target_os = "motor") {
-        cmd = Command::new("rush");
-        cmd.arg("-c");
     } else {
         cmd = Command::new("sh");
         cmd.arg("-c");
@@ -66,11 +56,7 @@ async fn piped_stdio_test() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    #[cfg(not(target_os = "motor"))]
     let mut child = cmd.arg("exit 2").spawn().unwrap();
-
-    #[cfg(target_os = "motor")]
-    let mut child = cmd.arg("exit").arg("2").spawn().unwrap();
 
     let _id = child.id().expect("missing id");
     // assert!(id > 0);
