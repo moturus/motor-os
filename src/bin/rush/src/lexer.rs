@@ -37,9 +37,31 @@ fn inc(i: Incomplete) -> LexError {
     LexError::Incomplete(i)
 }
 
+/// Whether `input` is the whole input, or a buffer that may still grow.
+///
+/// Two lexical constructs end differently depending on the answer, and both
+/// follow dash:
+///
+/// - An unterminated **here-document** is an error only if more input could
+///   still arrive. At end of input the body simply ends there, so
+///   `rush -c 'cat <<EOT\nhi'` prints `hi` rather than complaining.
+/// - A **trailing backslash** is a line continuation only if there is a line to
+///   continue onto. At end of input it is an ordinary literal backslash, so
+///   `rush -c 'echo a\'` prints `a\`.
+///
+/// An unterminated quote or expansion is incomplete either way — at end of input
+/// the parser turns it into the syntax error it has become.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AtEof {
+    /// This is all the input there is (a script, a `-c` string, `^D`).
+    Yes,
+    /// More may follow (the interactive loop, which will prompt with PS2).
+    No,
+}
+
 /// Tokenize a (possibly multi-line) input string.
-pub fn tokenize(input: &str) -> Result<Vec<Token>, LexError> {
-    let mut lx = Lexer::new(input);
+pub fn tokenize(input: &str, at_eof: AtEof) -> Result<Vec<Token>, LexError> {
+    let mut lx = Lexer::new(input, at_eof);
     lx.run()?;
     Ok(lx.tokens)
 }
@@ -55,6 +77,7 @@ struct Lexer {
     pos: usize,
     tokens: Vec<Token>,
     pending: Vec<Pending>,
+    at_eof: bool,
 }
 
 fn is_name_start(c: char) -> bool {
@@ -86,12 +109,13 @@ fn push_lit(parts: &mut Vec<WordPart>, ch: char, quoted: bool) {
 }
 
 impl Lexer {
-    fn new(input: &str) -> Self {
+    fn new(input: &str, at_eof: AtEof) -> Self {
         Self {
             chars: input.chars().collect(),
             pos: 0,
             tokens: Vec::new(),
             pending: Vec::new(),
+            at_eof: at_eof == AtEof::Yes,
         }
     }
 
@@ -149,9 +173,15 @@ impl Lexer {
             }
         }
 
-        if let Some(p) = self.pending.first() {
-            // A `<<` was seen but its body/terminator never arrived.
-            return Err(inc(Incomplete::HereDoc(p.delim.clone())));
+        if !self.pending.is_empty() {
+            // A `<<` was seen but no newline ever followed to start its body.
+            if !self.at_eof {
+                let p = &self.pending[0];
+                return Err(inc(Incomplete::HereDoc(p.delim.clone())));
+            }
+            // At end of input the body is simply empty: `rush -c 'cat <<EOT'`
+            // runs `cat` on nothing, as dash does.
+            self.collect_heredocs()?;
         }
         Ok(())
     }
@@ -296,6 +326,12 @@ impl Lexer {
             let mut body = String::new();
             loop {
                 if self.pos >= self.chars.len() {
+                    // The delimiter never came. At end of input that is the end
+                    // of the body (dash accepts it silently); otherwise more
+                    // input may still bring it.
+                    if self.at_eof {
+                        break;
+                    }
                     return Err(inc(Incomplete::HereDoc(p.delim)));
                 }
                 let (line, had_nl) = self.read_raw_line();
@@ -308,10 +344,16 @@ impl Lexer {
                     break; // terminator line: consumed, not part of the body
                 }
                 body.push_str(compare);
-                body.push('\n');
                 if !had_nl {
+                    // A last line with no newline of its own: at end of input it
+                    // goes into the body as it stands (`cat <<EOT\nhi` feeds
+                    // `hi`, unterminated, exactly as dash does).
+                    if self.at_eof {
+                        break;
+                    }
                     return Err(inc(Incomplete::HereDoc(p.delim)));
                 }
+                body.push('\n');
             }
             if let Some(Token::HereDoc(hd)) = self.tokens.get_mut(p.idx) {
                 hd.body = body;
@@ -338,6 +380,11 @@ impl Lexer {
                 '\\' => {
                     self.pos += 1;
                     match self.peek() {
+                        // Nothing left to escape. At end of input there is no
+                        // line to continue onto, so the backslash is a literal
+                        // one (`rush -c 'echo a\'` prints `a\`, as dash does);
+                        // otherwise it is a continuation awaiting its line.
+                        None if self.at_eof => push_lit(&mut parts, '\\', true),
                         None => return Err(inc(Incomplete::Backslash)),
                         Some('\n') => {
                             // Line continuation inside a word.
@@ -844,14 +891,20 @@ fn heredoc_delim(w: &Word) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, Incomplete, LexError};
+    use super::{tokenize, AtEof, Incomplete, LexError};
     use crate::token::{ExpansionKind, HereDoc, Operator, Token, Word, WordPart};
 
+    /// Lex a buffer that may still grow — the interactive loop's view, and the
+    /// stricter one: it is here that "incomplete" exists at all.
     fn toks(s: &str) -> Vec<Token> {
-        tokenize(s).unwrap_or_else(|e| panic!("expected complete, got {e:?} for {s:?}"))
+        tokenize(s, AtEof::No).unwrap_or_else(|e| panic!("expected complete, got {e:?} for {s:?}"))
+    }
+    /// Lex a buffer that is all the input there will ever be.
+    fn toks_eof(s: &str) -> Vec<Token> {
+        tokenize(s, AtEof::Yes).unwrap_or_else(|e| panic!("expected complete, got {e:?} for {s:?}"))
     }
     fn err(s: &str) -> Incomplete {
-        match tokenize(s) {
+        match tokenize(s, AtEof::No) {
             Err(LexError::Incomplete(i)) => i,
             other => panic!("expected Incomplete, got {other:?} for {s:?}"),
         }
@@ -1123,5 +1176,52 @@ mod tests {
         assert_eq!(err("$((1+2"), Incomplete::Expansion);
         assert_eq!(err("`cmd"), Incomplete::Expansion);
         assert_eq!(err("cat <<EOF\nbody\n"), Incomplete::HereDoc("EOF".into()));
+    }
+
+    /// At end of input there is no more input to wait for, so two of the
+    /// "incomplete" constructs above are not incomplete at all — they are
+    /// finished, and dash runs them. (The quote/expansion cases stay errors;
+    /// the parser reports them.)
+    #[test]
+    fn a_here_doc_with_no_delimiter_ends_at_end_of_input() {
+        // Body collected, terminator never seen.
+        assert_eq!(
+            toks_eof("cat <<EOF\nbody\n"),
+            [
+                uword("cat"),
+                Token::HereDoc(HereDoc {
+                    strip_tabs: false,
+                    quoted: false,
+                    delim: "EOF".into(),
+                    body: "body\n".into(),
+                }),
+                Token::Newline,
+            ]
+        );
+        // A last line with no newline of its own keeps none: `cat <<EOF\nhi`
+        // feeds exactly "hi", as dash does.
+        match &toks_eof("cat <<EOF\nhi")[1] {
+            Token::HereDoc(hd) => assert_eq!(hd.body, "hi"),
+            other => panic!("expected a here-doc, got {other:?}"),
+        }
+        // No body at all: an empty here-doc, not an error.
+        match &toks_eof("cat <<EOF")[1] {
+            Token::HereDoc(hd) => assert_eq!(hd.body, ""),
+            other => panic!("expected a here-doc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_trailing_backslash_at_end_of_input_is_a_literal() {
+        // Nothing left to continue onto: `rush -c 'echo a\'` prints `a\`.
+        assert_eq!(
+            toks_eof("echo a\\"),
+            [
+                uword("echo"),
+                word(vec![lit("a", false), lit("\\", true)]),
+            ]
+        );
+        // But a backslash-newline is still a continuation, even at end of input.
+        assert_eq!(toks_eof("echo a\\\n"), [uword("echo"), uword("a")]);
     }
 }

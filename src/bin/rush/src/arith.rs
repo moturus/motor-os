@@ -19,6 +19,9 @@ pub trait ArithEnv {
     fn set(&mut self, name: &str, value: i64);
 }
 
+/// How deeply arithmetic may nest, counting both parenthesised sub-expressions
+/// and variable references that are themselves expressions (`x=y+1; y=2`).
+/// Bounds the recursion in both, so that deep input is an error and not a crash.
 const MAX_DEPTH: usize = 64;
 
 /// Evaluate an arithmetic expression, returning its value or an error message.
@@ -443,8 +446,19 @@ impl Eval<'_> {
                 self.var_value(&name)
             }
             Some(Tok::Op(Op::LParen)) => {
+                // `(` recurses back into the grammar, so a parenthesised
+                // expression nests the stack as deeply as the input asks. The
+                // same budget that bounds recursive *variable* references bounds
+                // this: unguarded, `$(( ((((…)))) ))` is a stack overflow on
+                // input a user typed. (Found by Phase 9's fuzzer at 5 000.)
+                if self.depth >= MAX_DEPTH {
+                    return Err("arithmetic nested too deeply".to_string());
+                }
+                self.depth += 1;
                 self.bump();
-                let v = self.assignment(active)?;
+                let v = self.assignment(active);
+                self.depth -= 1;
+                let v = v?;
                 self.expect(Op::RParen, ")")?;
                 Ok(v)
             }

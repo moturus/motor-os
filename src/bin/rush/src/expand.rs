@@ -103,6 +103,19 @@ pub fn to_pattern(word: &Word, shell: &mut Shell) -> String {
 // ---- prefield construction (steps 1–4) -------------------------------------
 
 fn build(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
+    // Every level of nested expansion comes back through here — a `${x:-…}`
+    // default, a `$(…)`, the words inside them — so this is where the recursion
+    // is bounded. Past the limit the word expands to nothing and the shell is
+    // told why, the same way `set -u` reports an unset one.
+    if !shell.enter_expansion() {
+        return Vec::new();
+    }
+    let out = build_inner(word, shell, splitting);
+    shell.exit_expansion();
+    out
+}
+
+fn build_inner(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
     let mut out = Vec::new();
     for (i, part) in word.0.iter().enumerate() {
         match part {
@@ -565,7 +578,7 @@ fn trim(subject: &str, pattern: &str, kind: ModKind) -> String {
 /// Expand a raw substring (a modifier word or pattern) to a string: lex it and
 /// concatenate the expansion of each resulting word with single spaces.
 fn expand_raw_to_string(raw: &str, shell: &mut Shell) -> String {
-    match lexer::tokenize(raw) {
+    match lexer::tokenize(raw, lexer::AtEof::Yes) {
         Ok(tokens) => {
             let mut parts = Vec::new();
             for t in tokens {
@@ -589,6 +602,12 @@ pub fn eval_arith(raw: &str, shell: &mut Shell) -> String {
         Ok(n) => n.to_string(),
         Err(e) => {
             eprintln!("rush: arithmetic: {e}");
+            // An expansion error is *fatal* to a non-interactive shell (POSIX
+            // §2.8.1) — `x=$((1/0))` stops a script rather than quietly
+            // assigning nothing, which is what rush used to do. Same path as
+            // `set -u` and `${x?}`; the executor abandons the command and exits
+            // a script, and an interactive shell reports and carries on.
+            shell.mark_fatal(2);
             String::new()
         }
     }
@@ -747,7 +766,7 @@ mod tests {
     use crate::token::{Token, Word};
 
     fn word(src: &str) -> Word {
-        match lexer::tokenize(src).unwrap().into_iter().next() {
+        match lexer::tokenize(src, lexer::AtEof::Yes).unwrap().into_iter().next() {
             Some(Token::Word(w)) => w,
             other => panic!("expected a single word, got {other:?}"),
         }

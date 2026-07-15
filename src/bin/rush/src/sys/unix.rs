@@ -63,6 +63,18 @@ impl super::TermImpl for HostTerm {
     fn on_exit(&mut self) {
         self.make_cooked(); // Restore termios.
     }
+
+    /// `TIOCGWINSZ` — the host can answer without asking the terminal, which is
+    /// both exact and free of a round-trip the terminal might never answer.
+    fn width(&mut self) -> Option<usize> {
+        let mut ws: libc::winsize = unsafe { core::mem::zeroed() };
+        let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+        if rc != 0 || ws.ws_col == 0 {
+            // Not a terminal, or one that does not know its own size.
+            return None;
+        }
+        Some(ws.ws_col as usize)
+    }
 }
 
 // ---- signals ---------------------------------------------------------------

@@ -72,8 +72,12 @@ pub struct PumpedChild {
     status: Option<i32>,
 }
 
-/// Spawn `program`, returning the running child, or `Err(status)` (already
-/// diagnosed) if it could not be started: 127 not found, 126 otherwise.
+/// Spawn `program`, returning the running child, or the error that stopped it.
+///
+/// The *caller* reports a failure, because only it knows where the failing
+/// command's stderr was pointed: `nosuchcommand 2>/dev/null` must say nothing,
+/// and a diagnostic printed from here would go to the shell's own stderr
+/// regardless. See `exec::report_spawn_error`.
 pub fn spawn(
     program: &str,
     args: &[String],
@@ -81,7 +85,7 @@ pub fn spawn(
     stdin: ChildIn,
     stdout: ChildOut,
     stderr: ChildOut,
-) -> Result<PumpedChild, i32> {
+) -> Result<PumpedChild, std::io::Error> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     for (k, v) in env {
@@ -119,10 +123,7 @@ pub fn spawn(
         Stdio::inherit()
     });
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return Err(spawn_error(program, e)),
-    };
+    let mut child = cmd.spawn()?;
 
     // Pipe-only work from here on, so it is safe to hand to threads.
     let feed = match (feed, child.stdin.take()) {
@@ -260,23 +261,6 @@ fn read_stream(r: &mut dyn Read) -> Vec<u8> {
 fn write_all(f: &Arc<File>, bytes: &[u8]) {
     if let Ok(mut c) = f.try_clone() {
         let _ = c.write_all(bytes);
-    }
-}
-
-fn spawn_error(program: &str, e: std::io::Error) -> i32 {
-    match e.kind() {
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => {
-            eprintln!("rush: {program}: command not found");
-            127
-        }
-        std::io::ErrorKind::PermissionDenied => {
-            eprintln!("rush: {program}: permission denied");
-            126
-        }
-        _ => {
-            eprintln!("rush: {program}: {e}");
-            126
-        }
     }
 }
 

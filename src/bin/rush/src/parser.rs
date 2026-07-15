@@ -12,19 +12,23 @@
 //! simple    := (assignment | word | redirect)+   // assignment only before 1st word
 //! ```
 //!
-//! [`parse_source`] is the single entry point used by both the interactive loop
-//! and the `-c`/script paths: it lexes then parses, folding the lexer's
-//! "incomplete input" and the parser's own "needs another operand / closing
-//! keyword" cases into one [`Parsed::Incomplete`] result that drives PS2
-//! continuation. Reserved words (`if`, `for`, `{`, `}`, `!`, …) are recognized
-//! only in *command position*; elsewhere they are ordinary words.
+//! There are two entry points, differing only in whether more input could still
+//! arrive. [`parse_source`] parses input that is *complete* — a script, a `-c`
+//! string, a command substitution — and so never reports "incomplete": input
+//! that ends mid-construct is a syntax error. [`parse_partial`] is the
+//! interactive loop's, and folds the lexer's "incomplete input" and the parser's
+//! own "needs another operand / closing keyword" cases into one
+//! [`Parsed::Incomplete`] that drives PS2 continuation.
+//!
+//! Reserved words (`if`, `for`, `{`, `}`, `!`, …) are recognized only in
+//! *command position*; elsewhere they are ordinary words.
 
 use crate::ast::{
     AndOr, AndOrOp, Assignment, CaseClause, CaseItem, Command, CompoundCommand, ForClause,
     FunctionBody, IfClause, List, ListItem, Pipeline, RedirOp, Redirect, Separator, SimpleCommand,
     WhileClause,
 };
-use crate::lexer::{self, LexError};
+use crate::lexer::{self, AtEof, Incomplete, LexError};
 use crate::token::{Operator, Token, Word, WordPart};
 
 /// Outcome of parsing a source buffer.
@@ -32,9 +36,8 @@ pub enum Parsed {
     /// A complete parse; ready to execute.
     Complete(List),
     /// The buffer ends mid-construct (open quote, dangling `&&`/`|`, unfinished
-    /// here-doc, …). The interactive loop should read another line (PS2) and
-    /// re-parse the accumulated buffer; non-interactive callers treat this as a
-    /// syntax error (unexpected end of input).
+    /// here-doc, …) and more input would finish it. Only [`parse_partial`]
+    /// reports this; the interactive loop answers it with a PS2 prompt.
     Incomplete,
     /// Nothing to do (blank input or comments only).
     Empty,
@@ -42,13 +45,40 @@ pub enum Parsed {
     Error(String),
 }
 
-/// Lex and parse a source buffer into a [`Parsed`] outcome.
+/// Lex and parse a **complete** source buffer — a script, a `-c` string, the
+/// text of a command substitution — into a [`Parsed`] outcome.
+///
+/// Never returns [`Parsed::Incomplete`]: nothing more is coming, so input that
+/// ends mid-construct is the syntax error it has become.
 pub fn parse_source(src: &str) -> Parsed {
-    let tokens = match lexer::tokenize(src) {
+    match parse(src, AtEof::Yes) {
+        Parsed::Incomplete => Parsed::Error("syntax error: unexpected end of file".to_string()),
+        other => other,
+    }
+}
+
+/// Lex and parse a buffer that may still grow, reporting [`Parsed::Incomplete`]
+/// when more input would finish it. For the interactive loop's PS2 continuation.
+pub fn parse_partial(src: &str) -> Parsed {
+    parse(src, AtEof::No)
+}
+
+fn parse(src: &str, at_eof: AtEof) -> Parsed {
+    let tokens = match lexer::tokenize(src, at_eof) {
         Ok(t) => t,
+        // An unterminated quote reads better named than as a bare "end of file"
+        // (it is what dash says, too, and the one lexical error a user makes
+        // often enough to deserve its own words).
+        Err(LexError::Incomplete(Incomplete::Quote(_))) if at_eof == AtEof::Yes => {
+            return Parsed::Error("syntax error: unterminated quoted string".to_string());
+        }
         Err(LexError::Incomplete(_)) => return Parsed::Incomplete,
     };
-    let mut p = Parser { toks: tokens, pos: 0 };
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        depth: 0,
+    };
     match p.parse_program() {
         Ok(list) if list.0.is_empty() => Parsed::Empty,
         Ok(list) => Parsed::Complete(list),
@@ -64,9 +94,25 @@ enum PErr {
 }
 type PResult<T> = Result<T, PErr>;
 
+/// How deep commands may nest before the parser gives up.
+///
+/// A recursive-descent parser turns nesting into stack, and a shell reads its
+/// input from whoever is typing at it: with no limit, a long enough line of
+/// `((((…` is not a syntax error but a **stack overflow**, which takes the
+/// session down. (Phase 9's fuzzer found exactly that at 10 000.)
+///
+/// The number is set by the *smallest* stack rush runs on, not the roomiest:
+/// measured on Motor OS, 192 frames parse cleanly and 256 crash — so a limit of
+/// 256, which the Linux host swallowed without complaint, still crashed there.
+/// 64 keeps a ~3x margin below that, and is still far past anything real: dash
+/// refuses well before 100, and no script nests compound commands even ten deep.
+const MAX_NESTING: u32 = 64;
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// Nesting depth, to keep the recursion below [`MAX_NESTING`].
+    depth: u32,
 }
 
 fn is_redirect_op(op: Operator) -> bool {
@@ -382,6 +428,19 @@ impl Parser {
     }
 
     fn parse_command(&mut self) -> PResult<Command> {
+        // Every nesting construct comes through here, so this is the one place
+        // the depth has to be counted.
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            self.depth -= 1;
+            return Err(PErr::Syntax("syntax error: too deeply nested".to_string()));
+        }
+        let r = self.parse_command_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_command_inner(&mut self) -> PResult<Command> {
         // Subshell `( … )`.
         if matches!(self.peek(), Some(Token::Op(Operator::LParen))) {
             return self.parse_subshell();
@@ -842,7 +901,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_source, Parsed};
+    use super::{parse_partial, parse_source, Parsed};
     use crate::ast::{AndOrOp, Command, CompoundCommand, List, RedirOp, Redirect, Separator};
     use crate::token::WordPart;
 
@@ -1013,11 +1072,11 @@ mod tests {
 
     #[test]
     fn incomplete_when_operator_dangles() {
-        assert!(matches!(parse_source("echo a &&"), Parsed::Incomplete));
-        assert!(matches!(parse_source("echo a |"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("echo a &&"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("echo a |"), Parsed::Incomplete));
         // Lexer-level incompleteness surfaces the same way.
-        assert!(matches!(parse_source("echo 'unterminated"), Parsed::Incomplete));
-        assert!(matches!(parse_source("cat <<EOF\nbody"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("echo 'unterminated"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("cat <<EOF\nbody"), Parsed::Incomplete));
     }
 
     #[test]
@@ -1162,11 +1221,11 @@ mod tests {
 
     #[test]
     fn multiline_compound_is_incomplete() {
-        assert!(matches!(parse_source("if true; then"), Parsed::Incomplete));
-        assert!(matches!(parse_source("for i in a b"), Parsed::Incomplete));
-        assert!(matches!(parse_source("while x; do y"), Parsed::Incomplete));
-        assert!(matches!(parse_source("case x in a)"), Parsed::Incomplete));
-        assert!(matches!(parse_source("{ echo hi;"), Parsed::Incomplete));
-        assert!(matches!(parse_source("f() {"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("if true; then"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("for i in a b"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("while x; do y"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("case x in a)"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("{ echo hi;"), Parsed::Incomplete));
+        assert!(matches!(parse_partial("f() {"), Parsed::Incomplete));
     }
 }

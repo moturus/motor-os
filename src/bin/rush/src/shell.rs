@@ -41,7 +41,26 @@ pub enum Flow {
     Continue(u32),
     /// `return n`: leave the current function (or sourced script) with status `n`.
     Return(i32),
+    /// `exit n` inside an emulated subshell: unwind to the subshell's boundary,
+    /// which is standing in for the process a `fork` would have given it.
+    ///
+    /// Unlike [`Flow::Return`], nothing *inside* the subshell absorbs this — not
+    /// a function call, not a loop — because on a real shell it would be a dead
+    /// process by now. And it never escapes: the boundary that created the
+    /// subshell turns it back into that subshell's exit status. A top-level
+    /// `exit` does not use this at all; it simply exits.
+    Exit(i32),
 }
+
+/// How deeply word expansion may nest.
+///
+/// Like the parser's `MAX_NESTING`, and for the same reason: one level of
+/// nesting is a handful of stack frames (`build` -> `param_eval` ->
+/// `apply_modifier` -> `expand_raw_to_string` -> `to_string` -> `build`), and
+/// unbounded that is a stack overflow on input a user typed. Sized against the
+/// smallest stack rush runs on (Motor OS), with a wide margin -- and still far
+/// past anything real.
+const MAX_EXPANSION_DEPTH: u32 = 64;
 
 pub struct Shell {
     /// Unexported shell variables; these shadow the process environment.
@@ -110,6 +129,9 @@ pub struct Shell {
     /// executing. A fatal error inside one must not take down the whole shell
     /// (there is no `fork`), so the fatal-exit is suppressed when this is > 0.
     subshell_depth: u32,
+    /// Depth of nested word expansions currently in flight — see
+    /// [`Shell::enter_expansion`].
+    expansion_depth: u32,
 }
 
 impl Shell {
@@ -136,6 +158,7 @@ impl Shell {
             fatal: None,
             cmdsub_status: None,
             subshell_depth: 0,
+            expansion_depth: 0,
         }
     }
 
@@ -283,6 +306,14 @@ impl Shell {
         self.functions.remove(name).is_some()
     }
 
+    /// The names of every defined function, sorted. (Command completion offers
+    /// them alongside builtins and `$PATH`.)
+    pub fn function_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.functions.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     // ---- aliases -----------------------------------------------------------
 
     pub fn set_alias(&mut self, name: &str, value: String) {
@@ -393,6 +424,29 @@ impl Shell {
 
     pub fn set_cmdsub_status(&mut self, status: i32) {
         self.cmdsub_status = Some(status);
+    }
+
+    /// Enter one level of *expansion*, refusing past [`MAX_EXPANSION_DEPTH`].
+    ///
+    /// Expansion is mutually recursive — a `${x:-…}` default, a `$(…)`, and the
+    /// arithmetic inside them all expand words of their own — so nesting in the
+    /// input becomes nesting on the stack. Unbounded, that is a stack overflow
+    /// on input a user typed, which is a crash rather than the syntax error it
+    /// should be. (Phase 9's fuzzer found it at a nesting of 5 000.)
+    ///
+    /// Returns `false` when the limit is reached, having flagged the error.
+    pub fn enter_expansion(&mut self) -> bool {
+        if self.expansion_depth >= MAX_EXPANSION_DEPTH {
+            eprintln!("rush: expansion nested too deeply");
+            self.mark_fatal(2);
+            return false;
+        }
+        self.expansion_depth += 1;
+        true
+    }
+
+    pub fn exit_expansion(&mut self) {
+        self.expansion_depth = self.expansion_depth.saturating_sub(1);
     }
 
     pub fn enter_subshell(&mut self) {

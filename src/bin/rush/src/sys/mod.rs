@@ -38,6 +38,17 @@ pub trait TermImpl: Send + Sync {
     fn make_raw(&mut self) {}
     fn make_cooked(&mut self) {}
     fn on_exit(&mut self) {}
+
+    /// The terminal's width in columns, if the *platform* can say.
+    ///
+    /// The Unix host can (`TIOCGWINSZ`), which makes the answer free and exact,
+    /// and — because it needs no reply from the terminal — makes the line editor
+    /// testable over a pty. Motor OS has no ioctl and no terminal-size call at
+    /// all, so it returns `None` and the editor asks the terminal itself with an
+    /// ANSI query (see `term::probe_width`).
+    fn width(&mut self) -> Option<usize> {
+        None
+    }
 }
 
 /// No-op terminal backend used whenever there is no real terminal to configure:

@@ -20,9 +20,11 @@
 mod arith;
 mod ast;
 mod builtins;
+mod complete;
 mod exec;
 mod expand;
 mod glob;
+mod history;
 mod jobs;
 mod lexer;
 mod options;
@@ -306,7 +308,7 @@ fn source_if_present(raw: &str, sh: &mut Shell) {
 /// parses to completion, another line is read with the `PS2` prompt.
 fn interactive_loop(sh: &mut Shell, piped: bool) -> ! {
     let _cleanup = Cleanup {}; // On panic, restore the terminal state.
-    term::init(piped);
+    term::init(piped, sh);
 
     let mut buf = String::new();
     loop {
@@ -321,17 +323,37 @@ fn interactive_loop(sh: &mut Shell, piped: bool) -> ! {
 
         let prompt = prompt_string(if buf.is_empty() { "PS1" } else { "PS2" }, sh);
         let line = if buf.is_empty() {
-            term::readline(&prompt)
+            term::readline(&prompt, sh)
         } else {
-            term::readline_continuation(&prompt)
+            term::readline_continuation(&prompt, sh)
         };
-        let Some(line) = line else {
-            // `^C`. Abandon the whole command being typed, not just the line it
-            // was on, and report the status a shell gives an interrupted
-            // command (128 + SIGINT). The trap runs at the top of the loop.
-            buf.clear();
-            sh.set_status(128 + signal::SIGINT);
-            continue;
+        let line = match line {
+            term::Input::Line(line) => line,
+            term::Input::Interrupted => {
+                // `^C`. Abandon the whole command being typed, not just the line
+                // it was on, and report the status a shell gives an interrupted
+                // command (128 + SIGINT). The trap runs at the top of the loop.
+                buf.clear();
+                sh.set_status(128 + signal::SIGINT);
+                continue;
+            }
+            term::Input::Eof => {
+                if buf.is_empty() {
+                    // `^D` at the prompt: the shell is done. POSIX §2.5.2 —
+                    // a shell's exit status on end of input is that of the last
+                    // command it ran, not 0 (dash: `false` then `^D` exits 1).
+                    break;
+                }
+                // `^D` part-way through a command: what is there is now all
+                // there will ever be, so parse it as final input. That is
+                // enough for some of it — an unterminated here-doc, a trailing
+                // backslash — to be perfectly good input after all, exactly as
+                // in dash. The rest is the syntax error it has become; an
+                // interactive shell reports it and carries on to a fresh PS1.
+                run_or_report(&format!("{buf}\n"), sh);
+                buf.clear();
+                continue;
+            }
         };
         verbose_echo(&line, sh);
         if !buf.is_empty() {
@@ -339,24 +361,48 @@ fn interactive_loop(sh: &mut Shell, piped: bool) -> ! {
         }
         buf.push_str(line.as_str());
 
-        match parser::parse_source(&buf) {
+        // History is recorded here rather than by the editor, and only once the
+        // command is whole: a multi-line construct is one entry, so recalling it
+        // recalls the loop and not the `for i in 1 2` it started with. A command
+        // that does not parse is recorded too — a typo is the thing you most
+        // want to press Up on.
+        match parser::parse_partial(&buf) {
             parser::Parsed::Incomplete => continue, // read a PS2 line
             parser::Parsed::Empty => buf.clear(),
             parser::Parsed::Error(msg) => {
+                term::add_to_history(buf.as_str());
                 eprintln!("rush: {msg}");
                 buf.clear();
             }
             parser::Parsed::Complete(list) => {
-                if buf.contains('\n') {
-                    // Multi-line command: readline only recorded the first line,
-                    // so add the merged command to history.
-                    term::add_to_history(buf.as_str());
-                }
+                term::add_to_history(buf.as_str());
                 // Interactive mode ignores the overall status.
                 exec::run_list(&list, sh);
                 buf.clear();
             }
         }
+    }
+    let status = sh.status();
+    signal::fire_exit_trap(sh);
+    exit(status);
+}
+
+/// Parse `src` as complete input and run it, reporting a syntax error rather
+/// than letting it end the session — the interactive shell's answer to `^D`
+/// mid-command.
+fn run_or_report(src: &str, sh: &mut Shell) {
+    match parser::parse_source(src) {
+        parser::Parsed::Complete(list) => {
+            term::add_to_history(src.trim_end());
+            exec::run_list(&list, sh);
+        }
+        parser::Parsed::Empty => {}
+        parser::Parsed::Error(msg) => {
+            eprintln!("rush: {msg}");
+            sh.set_status(2);
+        }
+        // parse_source never reports this.
+        parser::Parsed::Incomplete => unreachable!("parse_source is final"),
     }
 }
 

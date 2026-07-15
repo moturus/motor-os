@@ -22,38 +22,35 @@ A: Existing shell projects (a) aim to be 'a better shell', and (b) have a lot of
 - File bug reports;
 - Type 'exit' or 'quit'.
 
+Tab completes commands, filenames and `$variables`; Up/Down and `^R` search the
+history, which persists across sessions when `$HISTFILE` is set; the usual emacs
+keys work (`^A` `^E` `^K` `^U` `^W` `^Y` `^L`, `M-b`/`M-f`, `^R`).
+
 ## Status
 
-**Work in progress.** Today `rush` is a minimal command runner, not yet a POSIX
-shell. A full plan to get there lives in the crate root:
+**A working POSIX-ish shell.**
 
-- [`rush-to-sh-gaps.md`](./rush-to-sh-gaps.md) — analysis of what works vs. every
-  POSIX gap, grouped by spec area.
-- [`rush-to-sh-plan.md`](./rush-to-sh-plan.md) — phased implementation plan
-  (P0–P9, milestones M1–M4) and target architecture.
-
-Done so far: Phases 0–6. Phase 0 (a `sys/` platform-abstraction layer with
-termios confined to the Linux host backend; correctness fixes; a golden test
-suite), Phase 1 (a POSIX lexer, `src/lexer.rs`), Phase 2 (a recursive-descent
-parser + AST, `src/parser.rs`/`src/ast.rs`), **Phase 3 — milestone M1**: a
-persistent `Shell` (`src/shell.rs`) plus the real execution core — the seven-step
-word-expansion engine (`src/expand.rs`), arithmetic (`src/arith.rs`), in-crate
-globbing (`src/glob.rs`), and an executor (`src/exec.rs`) with working
-multi-stage pipelines, the full fd 0/1/2 redirection set, here-documents, and
-command substitution — **Phase 4**: compound commands and functions — and
-**Phase 5 — milestone M2**: the POSIX builtins (`src/builtins.rs`) — and
-**Phase 6**: shell options (`src/options.rs`), POSIX invocation parsing,
-startup files, and prompts — and **Phase 7 — milestone M3**: signals and traps
-(`src/signal.rs`), background jobs and `wait` (`src/jobs.rs`). Each verified
-end-to-end on a Motor OS VM.
-
-**Next step — M4 (Phases 8–9):** interactive UX (tab completion, UTF-8 editing,
-persistent history), then a conformance corpus and docs. See the plan for
-details.
+Conformance is measured, not asserted: `tests/conformance.rs` runs a corpus of
+POSIX snippets through **both rush and `dash`** and requires them to agree on
+stdout and exit status. What rush answers differently is listed, with reasons, in
+that file's `DIVERGENCES` — and each entry is itself tested, so a divergence
+cannot be quietly fixed or quietly introduced.
 
 ## What works today
 
-- Basic line editing (arrows, home/end, del/backspace, in-memory history);
+- **Interactive editing**: arrows, Home/End, Del/Backspace, and emacs bindings
+  (`^A` `^E` `^B` `^F` `^K` `^U` `^W` `^Y` `^T` `^L` `^D`, `M-b`/`M-f`/`M-d`,
+  word-wise Ctrl/Alt-arrows); **UTF-8** input edited by character (including
+  double-width CJK and emoji); lines that **wrap across rows**; `^C` to abandon a
+  line and `^D` to end the session (with `$?`, as POSIX asks). The editor paints
+  only what changed — a character typed at the end of a line costs the one byte
+  that character is — so a slow console does not flicker;
+- **Tab completion** of commands (builtins, functions, aliases, `$PATH`),
+  filenames, and `$variables`, quoting-aware in both directions — it matches
+  `ls 'my fi<TAB>` against the real name and escapes what it inserts;
+- **History**: Up/Down, reverse-i-search (`^R`), the `history` builtin, and
+  persistence via `$HISTFILE`/`$HISTSIZE` — a multi-line command is stored as
+  *one* entry and recalled whole;
 - External commands and **multi-stage pipelines** (`ls | sort | wc -l`),
   including **builtins, compound commands, and functions as pipeline stages**
   (`cmd | while read …; do … done`, `printf … | { read a b; … }`);
@@ -95,17 +92,19 @@ details.
   reads `/etc/profile` and `~/.profile`); `PS1`/`PS2`/`PS4` are expanded
   variables, and `PWD`/`OLDPWD` are maintained.
 
-## Not yet working (see the gap analysis)
+## Not yet working
 
 - Interactive **job control** — `^Z`/suspend, `bg`/resume, and foreground-group
   handoff — which Motor OS cannot support (no termios, no tty signals); `&` on a
   builtin/compound command gives isolation but not concurrency (no `fork`);
-- Tab completion, UTF-8 input editing, persistent history, `^D` at an empty
-  prompt, and multi-row line wrapping — Phase 8;
+- **Redirections to fds above 2** (`exec 3>file`, `>&3`): Motor OS hands a child
+  only inherit/null/pipe as its stdio, so an arbitrary fd cannot reach one at all;
 - `umask` affecting file creation, `times` accounting (both display-only); the
   `monitor`/`notify`/`vi`/`nolog`/`hashall`/`ignoreeof` options are accepted but
   inert; a `case` with plain `pat)` patterns *inside* `$( … )` (lexer
-  paren-balancing — use `(pat)`).
+  paren-balancing — use `(pat)`);
+- `~user` tilde expansion (Motor OS has no user database), `fc`, and history
+  expansion (`!!`, `!n`) — a bash-ism, deliberately skipped.
 
 ### Deliberate divergences from `dash`
 
@@ -118,4 +117,8 @@ unspecified); `set -v` echoes a script in one piece rather than interleaving it
 line-by-line (rush reads a whole script before parsing it — the interactive
 loop, which reads a line at a time, does interleave); and the default `PS1` is
 rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
-variable, so `PS1='$ '` restores dash's).
+variable, so `PS1='$ '` restores dash's). rush also answers `history`, `clear`
+and `quit` as builtins — extensions, and `clear` is one the Motor OS image needs
+because it ships no external `clear`. Aliases expand at execution rather than
+parse time, so `alias e=echo; e hi` works in a single `-c` string where dash
+needs a second parse unit.

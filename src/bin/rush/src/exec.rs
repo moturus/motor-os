@@ -19,11 +19,16 @@
 //! command substitution captures through a temp file. No `fork`/`dup2` syscalls,
 //! keeping the executor portable to Motor OS.
 //!
+//! Phase 9 made the emulated subshell a real boundary for `exit`: with no `fork`
+//! there is no process to end, so `exit` inside one unwinds to that boundary
+//! ([`Flow::Exit`]) and becomes the subshell's status — `(exit 42)` reports 42
+//! rather than killing the shell.
+//!
 //! Documented limits: per-stage `<&` `>&` and here-docs inside a pipeline, and
-//! redirections to fds > 2, are not wired; `exit` inside an emulated `( … )`
-//! subshell exits the whole shell; `&` on anything but a lone external command
-//! delivers isolation but not concurrency (there is no `fork` —
-//! see [`exec_background`]).
+//! redirections to fds > 2, are not wired (Motor OS cannot hand a child an
+//! arbitrary fd at all); `&` on anything but a lone external command delivers
+//! isolation but not concurrency (there is no `fork` — see
+//! [`exec_background`]).
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -189,7 +194,21 @@ fn exec_list(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
 fn exec_background(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
     let started = shell.jobs.started();
     let status = match lone_simple(and_or) {
-        Some(simple) => exec_simple(simple, shell, io, Background::Yes),
+        Some(simple) => {
+            // POSIX §2.9.3: `&` runs the command in a subshell. For a lone
+            // external command that subshell is a real child; for a builtin or
+            // function rush runs it right here — but it is still marked as a
+            // subshell, so an `exit` ends *that* and not the whole shell
+            // (`exit 3 & echo hi` prints hi, as in dash).
+            shell.enter_subshell();
+            let mut status = exec_simple(simple, shell, io, Background::Yes);
+            if let Flow::Exit(code) = shell.flow() {
+                shell.clear_flow();
+                status = code;
+            }
+            shell.exit_subshell();
+            status
+        }
         None => {
             let list = List(vec![ListItem {
                 and_or: and_or.clone(),
@@ -421,11 +440,6 @@ fn exec_simple(
         Err(code) => return code,
     };
 
-    // `quit` is a rush convenience, not POSIX; keep it.
-    if argv[0] == "quit" {
-        crate::exit(0);
-    }
-
     // Dispatch order (POSIX §2.9.1): a *special* builtin is found before any
     // function and cannot be shadowed; a *regular* builtin is found after
     // functions, so a like-named function shadows it.
@@ -497,7 +511,10 @@ fn spawn_background(
         // dash forks before it discovers the command is missing, so `$!` is set
         // and `wait` reports 127. Record the same, already-finished, job rather
         // than losing `$!` entirely.
-        Err(status) => shell.jobs.add(cmd, None, JobState::Done(status)),
+        Err(e) => {
+            let status = report_spawn_error(program, e, &fds[2]);
+            shell.jobs.add(cmd, None, JobState::Done(status))
+        }
     };
 }
 
@@ -536,6 +553,13 @@ fn maybe_die_fatal(shell: &mut Shell) {
 /// Expand a leading command-position alias in place. See [`exec_simple`] for the
 /// documented approximation.
 fn expand_aliases(argv: &mut Vec<String>, shell: &Shell) {
+    // A command whose words all expanded to nothing (`$unset | cat`) has no
+    // name to look an alias up by. The caller then treats it as the empty
+    // command it is; reaching in for `argv[0]` here would panic — as it did,
+    // until Phase 9's fuzzer typed `$x|*&-};~` at it.
+    if argv.is_empty() {
+        return;
+    }
     let mut seen: Vec<String> = Vec::new();
     while let Some(value) = shell.get_alias(&argv[0]) {
         if seen.iter().any(|n| n == &argv[0]) {
@@ -594,8 +618,13 @@ fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Sh
     let args = &argv[1..];
     match b {
         Builtin::Exit => {
-            signal::fire_exit_trap(shell);
-            process_exit(args, shell)
+            // The EXIT trap fires for the shell this ends — which, inside an
+            // emulated subshell, is that subshell (its boundary fires the trap
+            // it set for itself; see `fire_subshell_exit_trap`).
+            if !shell.in_subshell() {
+                signal::fire_exit_trap(shell);
+            }
+            builtin_exit(args, shell)
         }
         Builtin::Return => builtin_return(args, shell),
         Builtin::Break => builtin_break(args, shell),
@@ -855,6 +884,9 @@ fn exec_function_call(
             shell.clear_flow();
             status
         }
+        // An `exit` is not the function's to catch — it ends the shell, or the
+        // emulated subshell standing in for one — so it passes straight through.
+        Flow::Exit(n) => n,
         Flow::Normal => status,
     };
 
@@ -864,7 +896,15 @@ fn exec_function_call(
 
 // ---- builtins ---------------------------------------------------------------
 
-fn process_exit(args: &[String], shell: &Shell) -> ! {
+/// `exit [n]` — end the shell with status `n` (default: `$?`).
+///
+/// Inside an emulated subshell it ends *that*, via [`Flow::Exit`]: with no
+/// `fork`, the subshell has no process of its own to end, but its boundary is
+/// standing in for one and can turn the unwind back into an exit status. This is
+/// what makes `(exit 42); echo $?` print 42 instead of killing the shell, and
+/// `x=$(exit 7)` set `$?` to 7 — both of which rush got wrong until Phase 9's
+/// corpus put it next to dash.
+fn builtin_exit(args: &[String], shell: &mut Shell) -> i32 {
     let code = if args.is_empty() {
         shell.status()
     } else if let Ok(exit_val) = args[0].as_str().parse::<i32>() {
@@ -873,6 +913,10 @@ fn process_exit(args: &[String], shell: &Shell) -> ! {
         eprintln!("rush: exit: {}: numeric argument required", args[0]);
         2
     };
+    if shell.in_subshell() {
+        shell.set_flow(Flow::Exit(code));
+        return code;
+    }
     crate::exit(code);
 }
 
@@ -962,7 +1006,7 @@ fn spawn_external(
         child_out(&fds[2]),
     ) {
         Ok(child) => child,
-        Err(status) => return status,
+        Err(e) => return report_spawn_error(program, e, &fds[2]),
     };
     let status = loop {
         match child.wait() {
@@ -977,6 +1021,28 @@ fn spawn_external(
     };
     child.finish();
     status
+}
+
+/// Report a command that could not be started, to *its* standard error — which
+/// `2>/dev/null` may well have pointed elsewhere — and give the status POSIX
+/// §2.8.2 asks for: 127 when the command was not found, 126 when it was found
+/// but could not be run.
+fn report_spawn_error(program: &str, e: std::io::Error, err_fd: &FdSource) -> i32 {
+    let mut err = err_fd.err_writer();
+    match e.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => {
+            let _ = writeln!(err, "rush: {program}: command not found");
+            127
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            let _ = writeln!(err, "rush: {program}: permission denied");
+            126
+        }
+        _ => {
+            let _ = writeln!(err, "rush: {program}: {e}");
+            126
+        }
+    }
 }
 
 /// The child stdin for an fd source. Background jobs read from nothing rather
@@ -1360,12 +1426,18 @@ fn exec_compound(kind: &CompoundCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 /// `( list )` — run in an emulated subshell: variable/cwd/function mutations and
-/// any pending control flow are rolled back afterwards. (`exit` still exits the
-/// whole shell — a documented emulation limit.)
+/// any pending control flow are rolled back afterwards.
+///
+/// This boundary stands in for the process a `fork` would have made, which is
+/// what lets an `exit` inside it be the *subshell's* exit: `(exit 42)` reports
+/// 42 and the shell lives on, as in dash.
 fn exec_subshell(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     let snapshot = shell.snapshot();
     shell.enter_subshell();
-    let status = exec_list(list, shell, io);
+    let mut status = exec_list(list, shell, io);
+    if let Flow::Exit(code) = shell.flow() {
+        status = code;
+    }
     fire_subshell_exit_trap(shell, io);
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the subshell
@@ -1521,7 +1593,9 @@ fn loop_should_break(shell: &mut Shell) -> bool {
             shell.set_flow(Flow::Continue(n - 1));
             true
         }
-        Flow::Return(_) => true,
+        // Neither is the loop's to act on: leave them pending for the function
+        // call / subshell boundary above, and stop iterating.
+        Flow::Return(_) | Flow::Exit(_) => true,
     }
 }
 
@@ -1535,6 +1609,11 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     let saved_flow = shell.flow();
     shell.enter_subshell();
     let output = capture(src, shell);
+    if let Flow::Exit(code) = shell.flow() {
+        // `x=$(exit 7)`: the substitution's shell exited, and its status is what
+        // the substitution reports.
+        shell.set_status(code);
+    }
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the substitution subshell
     shell.restore(snapshot);

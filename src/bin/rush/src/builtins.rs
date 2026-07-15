@@ -127,71 +127,96 @@ pub enum Builtin {
     Fg,
     Bg,
     Kill,
+    /// A rush extension (see [`crate::history`]).
+    History,
+    /// A rush extension: the Motor OS image ships no external `clear`.
+    Clear,
 }
+
+/// One builtin's identity: the name it is invoked by, which builtin that is, and
+/// whether POSIX calls it *special*.
+struct BuiltinSpec {
+    name: &'static str,
+    builtin: Builtin,
+    /// A *special* builtin (§2.14) is dispatched before functions, keeps a
+    /// prefixed assignment, and makes a usage error fatal to a script.
+    special: bool,
+}
+
+/// Every builtin rush recognizes — the single source of truth for the name, the
+/// dispatch, and the special/regular split. [`lookup`], [`is_special`] and
+/// [`names`] all read this table, so a builtin cannot be dispatchable but
+/// invisible to completion, or named but not special where it should be.
+#[rustfmt::skip]
+const TABLE: &[BuiltinSpec] = &[
+    // ---- special (POSIX §2.14) ----
+    BuiltinSpec { name: ":",        builtin: Builtin::Colon,    special: true },
+    BuiltinSpec { name: ".",        builtin: Builtin::Dot,      special: true },
+    BuiltinSpec { name: "eval",     builtin: Builtin::Eval,     special: true },
+    BuiltinSpec { name: "exec",     builtin: Builtin::Exec,     special: true },
+    BuiltinSpec { name: "exit",     builtin: Builtin::Exit,     special: true },
+    BuiltinSpec { name: "export",   builtin: Builtin::Export,   special: true },
+    BuiltinSpec { name: "readonly", builtin: Builtin::Readonly, special: true },
+    BuiltinSpec { name: "set",      builtin: Builtin::Set,      special: true },
+    BuiltinSpec { name: "shift",    builtin: Builtin::Shift,    special: true },
+    BuiltinSpec { name: "unset",    builtin: Builtin::Unset,    special: true },
+    BuiltinSpec { name: "times",    builtin: Builtin::Times,    special: true },
+    BuiltinSpec { name: "trap",     builtin: Builtin::Trap,     special: true },
+    BuiltinSpec { name: "break",    builtin: Builtin::Break,    special: true },
+    BuiltinSpec { name: "continue", builtin: Builtin::Continue, special: true },
+    BuiltinSpec { name: "return",   builtin: Builtin::Return,   special: true },
+    // ---- regular ----
+    BuiltinSpec { name: "cd",       builtin: Builtin::Cd,       special: false },
+    BuiltinSpec { name: "pwd",      builtin: Builtin::Pwd,      special: false },
+    BuiltinSpec { name: "echo",     builtin: Builtin::Echo,     special: false },
+    BuiltinSpec { name: "printf",   builtin: Builtin::Printf,   special: false },
+    BuiltinSpec { name: "test",     builtin: Builtin::Test,     special: false },
+    BuiltinSpec { name: "[",        builtin: Builtin::Test,     special: false },
+    BuiltinSpec { name: "read",     builtin: Builtin::Read,     special: false },
+    BuiltinSpec { name: "true",     builtin: Builtin::True,     special: false },
+    BuiltinSpec { name: "false",    builtin: Builtin::False,    special: false },
+    BuiltinSpec { name: "getopts",  builtin: Builtin::Getopts,  special: false },
+    BuiltinSpec { name: "command",  builtin: Builtin::Command,  special: false },
+    BuiltinSpec { name: "type",     builtin: Builtin::Type,     special: false },
+    BuiltinSpec { name: "hash",     builtin: Builtin::Hash,     special: false },
+    BuiltinSpec { name: "alias",    builtin: Builtin::Alias,    special: false },
+    BuiltinSpec { name: "unalias",  builtin: Builtin::Unalias,  special: false },
+    BuiltinSpec { name: "umask",    builtin: Builtin::Umask,    special: false },
+    BuiltinSpec { name: "wait",     builtin: Builtin::Wait,     special: false },
+    BuiltinSpec { name: "jobs",     builtin: Builtin::Jobs,     special: false },
+    BuiltinSpec { name: "fg",       builtin: Builtin::Fg,       special: false },
+    BuiltinSpec { name: "bg",       builtin: Builtin::Bg,       special: false },
+    BuiltinSpec { name: "kill",     builtin: Builtin::Kill,     special: false },
+    // A rush extension, not POSIX: the interactive history list (see
+    // `crate::history`). Named here so it composes — `history | tail`, and
+    // `command -v history` — rather than being intercepted by the line editor.
+    BuiltinSpec { name: "history",  builtin: Builtin::History,  special: false },
+    BuiltinSpec { name: "clear",    builtin: Builtin::Clear,    special: false },
+    // Another rush extension, kept because rush has always answered it: a
+    // second name for `exit`, and now the same builtin rather than a special
+    // case outside the table — so it takes `$?` and an argument like `exit`
+    // does, and `type quit` and completion can both see it.
+    BuiltinSpec { name: "quit",     builtin: Builtin::Exit,     special: true },
+];
 
 /// Map a command name to its builtin, if any.
 pub fn lookup(name: &str) -> Option<Builtin> {
-    Some(match name {
-        ":" => Builtin::Colon,
-        "." => Builtin::Dot,
-        "eval" => Builtin::Eval,
-        "exec" => Builtin::Exec,
-        "exit" => Builtin::Exit,
-        "export" => Builtin::Export,
-        "readonly" => Builtin::Readonly,
-        "set" => Builtin::Set,
-        "shift" => Builtin::Shift,
-        "unset" => Builtin::Unset,
-        "times" => Builtin::Times,
-        "trap" => Builtin::Trap,
-        "break" => Builtin::Break,
-        "continue" => Builtin::Continue,
-        "return" => Builtin::Return,
-        "cd" => Builtin::Cd,
-        "pwd" => Builtin::Pwd,
-        "echo" => Builtin::Echo,
-        "printf" => Builtin::Printf,
-        "test" | "[" => Builtin::Test,
-        "read" => Builtin::Read,
-        "true" => Builtin::True,
-        "false" => Builtin::False,
-        "getopts" => Builtin::Getopts,
-        "command" => Builtin::Command,
-        "type" => Builtin::Type,
-        "hash" => Builtin::Hash,
-        "alias" => Builtin::Alias,
-        "unalias" => Builtin::Unalias,
-        "umask" => Builtin::Umask,
-        "wait" => Builtin::Wait,
-        "jobs" => Builtin::Jobs,
-        "fg" => Builtin::Fg,
-        "bg" => Builtin::Bg,
-        "kill" => Builtin::Kill,
-        _ => return None,
-    })
+    TABLE.iter().find(|s| s.name == name).map(|s| s.builtin)
 }
 
 /// Whether a builtin is a POSIX *special* builtin (dispatched before functions;
 /// prefixed assignments persist; usage errors are fatal to a script).
 pub fn is_special(b: Builtin) -> bool {
-    matches!(
-        b,
-        Builtin::Colon
-            | Builtin::Dot
-            | Builtin::Eval
-            | Builtin::Exec
-            | Builtin::Exit
-            | Builtin::Export
-            | Builtin::Readonly
-            | Builtin::Set
-            | Builtin::Shift
-            | Builtin::Unset
-            | Builtin::Times
-            | Builtin::Trap
-            | Builtin::Break
-            | Builtin::Continue
-            | Builtin::Return
-    )
+    TABLE
+        .iter()
+        .find(|s| s.builtin == b)
+        .map(|s| s.special)
+        .unwrap_or(false)
+}
+
+/// Every name a builtin answers to, for command completion and `type`.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    TABLE.iter().map(|s| s.name)
 }
 
 /// Run one of the *pure* builtins (those the executor does not intercept). The
@@ -222,6 +247,8 @@ pub fn dispatch(b: Builtin, args: &[String], io: &mut Io, shell: &mut Shell) -> 
         Builtin::Alias => alias(args, io, shell),
         Builtin::Unalias => unalias(args, io, shell),
         Builtin::Test => test_main(args),
+        Builtin::History => history_cmd(args, io),
+        Builtin::Clear => clear_cmd(io),
         // Handled by the executor; see module docs.
         Builtin::Colon | Builtin::True => 0,
         Builtin::False => 1,
@@ -1596,6 +1623,62 @@ fn hash(args: &[String], _io: &mut Io) -> i32 {
     0
 }
 
+// ---- history (a rush extension) ---------------------------------------------
+
+/// `history [-c] [n]` — list the interactive history, newest last.
+///
+/// Not POSIX (which offers only `fc`), and only a subset of what bash spells the
+/// same way: enough to see the list, trim it to the last `n`, and clear it. It
+/// is a builtin rather than something the line editor intercepts, so its output
+/// is an ordinary stream: `history > file` and `history | …` work, and it
+/// answers to `command -v`.
+///
+/// The list lives in the line editor ([`crate::term`]), so a non-interactive
+/// shell — which never starts one — has nothing to show.
+fn history_cmd(args: &[String], io: &mut Io) -> i32 {
+    let mut count: Option<usize> = None;
+    for arg in args {
+        match arg.as_str() {
+            "-c" => {
+                crate::term::clear_history();
+                return 0;
+            }
+            n if n.parse::<usize>().is_ok() => count = Some(n.parse().unwrap()),
+            other => {
+                io.errln(&format!("history: bad argument: {other}"));
+                return 2;
+            }
+        }
+    }
+    let entries = crate::term::history_entries();
+    let first = match count {
+        Some(n) => entries.len().saturating_sub(n),
+        None => 0,
+    };
+    for (i, entry) in entries.iter().enumerate().skip(first) {
+        // Numbered from 1, as bash does. A multi-line entry is printed as it
+        // was typed; the number column is only on its first line.
+        io.outln(&format!("{:5}  {}", i + 1, entry));
+    }
+    0
+}
+
+/// `clear` — a rush extension, and one it would rather not need.
+///
+/// Shadowing an external command with a builtin is exactly what this shell tries
+/// not to do; it is here because the Motor OS image ships no `clear` at all, and
+/// because rush already answered `clear` before Phase 8 (as a line-editor
+/// meta-command, which could not be redirected or piped and shadowed the
+/// external one just as thoroughly). This at least composes. `^L` does the same
+/// thing from the keyboard, and is the binding to reach for.
+///
+/// The escape sequences, not terminfo: home the cursor, erase the screen, and
+/// erase the scrollback — what `clear` sends to any ANSI terminal.
+fn clear_cmd(io: &mut Io) -> i32 {
+    io.out("\x1b[H\x1b[2J\x1b[3J");
+    0
+}
+
 // ---- alias / unalias --------------------------------------------------------
 
 fn alias(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
@@ -2099,6 +2182,33 @@ fn is_executable(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `path` is something the shell could *run*: an executable regular
+/// file.
+///
+/// Distinct from [`is_executable`], which backs `test -x` and must say true for
+/// a searchable directory (`test -x /tmp`). Command completion wants only the
+/// files, so it asks this instead.
+pub fn is_executable_file(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) if !m.is_file() => false,
+        Ok(m) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o111 != 0
+            }
+            // Motor OS has no execute permission bit; any regular file on
+            // `$PATH` is a command there, as command resolution also assumes.
+            #[cfg(not(unix))]
+            {
+                let _ = m;
+                true
+            }
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(unix)]
 fn special_file(op: &str, path: &str) -> bool {
     use std::os::unix::fs::FileTypeExt;
@@ -2134,6 +2244,33 @@ fn err_str(e: &std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`TABLE`] is the single source of truth for every builtin's name,
+    /// dispatch, and special/regular status — so the three readers of it must
+    /// not be able to disagree.
+    #[test]
+    fn every_name_in_the_table_resolves() {
+        for name in names() {
+            assert!(lookup(name).is_some(), "{name} is named but not dispatchable");
+        }
+    }
+
+    /// [`is_special`] finds a builtin's entry by *variant*, which is only
+    /// well-defined while every name for a variant agrees on the flag. Two
+    /// variants have two names each today (`exit`/`quit`, `test`/`[`); this
+    /// fails the moment a third arrives with a different answer.
+    #[test]
+    fn names_sharing_a_builtin_agree_on_special() {
+        for spec in TABLE {
+            let by_variant = is_special(spec.builtin);
+            assert_eq!(
+                by_variant, spec.special,
+                "`{}` is special={} in the table but is_special() says {by_variant}: \
+                 another name for {:?} disagrees",
+                spec.name, spec.special, spec.builtin
+            );
+        }
+    }
 
     #[test]
     fn sh_quote_forms() {
