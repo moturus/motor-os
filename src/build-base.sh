@@ -46,8 +46,16 @@ NIGHTLY="nightly-2026-06-19"
 HOST_TRIPLE="x86_64-unknown-linux-gnu"
 # Build deps from docs/build.md, plus qemu-system so the host is ready to run
 # the VM (this script still stops short of actually running it).
+#
+# zlib1g-dev, not the libz-dev that docs/build.md names: libz-dev is a pure
+# virtual package (zlib1g-dev "Provides: libz-dev"), and dpkg-query never
+# reports a virtual package as installed. Listing it here made the "missing"
+# probe below always fire, so every single run — including a fully provisioned
+# re-run — did `apt-get update` plus a full `apt-get -y upgrade`, needing sudo
+# and defeating this script's own "skipped if already present" promise (and any
+# unattended re-run). Naming the real package makes the probe work.
 PACKAGES=(git build-essential nasm clang cmake ninja-build \
-          libz-dev libssl-dev pkg-config curl qemu-system)
+          zlib1g-dev libssl-dev pkg-config curl qemu-system)
 
 # --- 1. host packages -------------------------------------------------------
 install_packages() {

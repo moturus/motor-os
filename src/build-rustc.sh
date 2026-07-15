@@ -89,6 +89,16 @@ verify_prereqs() {
 	rustup toolchain list | grep -q '^dev-x86_64-unknown-motor' || \
 		die "dev-x86_64-unknown-motor toolchain not registered — run build-base.sh first"
 
+	# rustc's default linker is the bare name `cc`, resolved on the image's PATH
+	# (=/bin), and that script fronts the llvm multicall. Both are build-llvm.sh's
+	# staging, and this build only adds the Rust half on top. Without them the
+	# image ships a rustc that cannot link anything, and nothing here would notice
+	# — the failure would surface only in the VM, at the end of a 2 h build.
+	[ -f "$IMG/bin/cc" ] || \
+		die "$IMG/bin/cc is missing — build-llvm.sh stages the linker driver rustc needs; re-run it"
+	[ -f "$IMG/sys/tools/llvm/bin/llvm" ] || \
+		die "$IMG/sys/tools/llvm/bin/llvm is missing — build-llvm.sh stages the LLVM multicall that /bin/cc fronts; re-run it"
+
 	# The Motor OS checkout must carry the rustc-era runtime fixes (RT.VDSO
 	# ChildStdio EOF mapping + O_APPEND, and a 512 MB data partition).
 	grep -q 'E_BAD_HANDLE) => Ok(0)' "$MOTOR/src/sys/lib/rt.vdso/src/stdio.rs" || \
@@ -153,11 +163,26 @@ update_rust() {
 	fi
 
 	# The fork's .gitmodules points src/llvm-project at moturus/llvm-project @
-	# motor-os-rustc (LLVM 23) with the gitlink at the right commit, so a plain
-	# submodule update checks out the LLVM 23 tree. --reference reuses the
-	# objects of build-llvm's $MOTORH/llvm-project (the same commit), so nothing
-	# is re-downloaded. bootstrap.toml sets submodules = false so bootstrap
-	# leaves this checkout alone afterwards.
+	# motor-os-rustc (LLVM 23), so a plain submodule update checks out the LLVM 23
+	# tree. --reference reuses the objects of build-llvm's $MOTORH/llvm-project,
+	# so almost nothing is re-downloaded. bootstrap.toml sets submodules = false
+	# so bootstrap leaves this checkout alone afterwards.
+	#
+	# FRAGILE, and this line is where it would break: the fork's gitlink
+	# (4c0679b5a854 as of this writing) is NOT the tip of moturus/llvm-project @
+	# motor-os-rustc (88ea5aa2a7b4) — the tip was amended in place, which orphaned
+	# the gitlink commit, and `git branch -r --contains 4c0679b5a854` now lists
+	# nothing. This still works only because GitHub serves unreachable SHAs on
+	# request; if it is ever GC'd, this step fails with "Server does not allow
+	# request for unadvertised object" / "Direct fetch of that commit failed".
+	# The two commits differ only in clang/lib/Driver/ToolChains/Motor.cpp — a
+	# file rustc's LLVM build never compiles (it builds LLVM, not clang) — so the
+	# permanent fix is to fast-forward the fork's gitlink onto the branch tip:
+	#     cd $RUST && git -C src/llvm-project checkout motor-os-rustc \
+	#       && git add src/llvm-project && git commit -m 'llvm: sync submodule'
+	# Until then the LLVM rustc links is 4c0679b and the cross clang is 88ea5aa,
+	# which is harmless but makes docs/build-rustc.md's "one commit" literally
+	# false.
 	git -C "$RUST" submodule update --init --progress --reference "$LLVM" src/llvm-project
 	grep -q 'Motor, // Motor OS' "$RUST/src/llvm-project/llvm/include/llvm/TargetParser/Triple.h" || \
 		die "src/llvm-project is not on the Motor triple — does moturus/rust $BRANCH pin moturus/llvm-project @ $BRANCH?"
@@ -266,34 +291,93 @@ build_rustc() {
 }
 
 build_stds() {
-	log "building std for both targets (single invocation — one target evicts the other)"
-	( cd "$RUST" && ./x.py build --stage 2 library --target "$TARGET,$HOST" )
-	[ -n "$(ls "$RUSTLIB_SRC"/libstd-*.rlib 2>/dev/null)" ] || \
-		die "motor std rlibs missing from $RUSTLIB_SRC"
-
-	# Every x.py build recreates stage2/bin, dropping the clippy binaries the
-	# Motor OS vdso build step needs; rebuild and restore them.
+	# ONE x.py INVOCATION, BOTH TARGETS, CLIPPY INCLUDED. This single line is
+	# load-bearing in a way that is easy to "tidy" into a broken build, so:
 	#
-	# This must be an unconditional x.py invocation, not a "copy if present"
-	# shortcut: build-base.sh already built clippy from the tree as it cloned it
-	# (upstream rust-lang/rust), so stage2-tools-bin is *populated with binaries
-	# from a different source tree* by the time update_rust switches the checkout
-	# to the fork. clippy-driver dynamically loads the hash-suffixed
-	# librustc_driver-*.so out of stage2/lib, so copying that stale pair over the
-	# freshly built stage2 hands `cargo +dev-x86_64-unknown-motor clippy` a
-	# driver that cannot load (or cannot resolve against) this compiler — and the
-	# Motor OS build then dies in its vdso step (rt.vdso/build.sh runs clippy),
-	# looking like a Motor OS breakage with a perfectly registered toolchain.
-	# Rebuilding is incremental: a no-op when clippy is already current.
-	log "rebuilding clippy (stage2/bin is recreated by every x.py build)"
-	( cd "$RUST" && ./x.py build --stage 2 clippy )
-	cp "$RUST/build/$HOST/stage2-tools-bin/"{cargo-clippy,clippy-driver} \
-		"$RUST/build/$HOST/stage2/bin/"
+	# Bootstrap's Sysroot step opens with an unconditional
+	# `remove_dir_all(build/$HOST/stage2)` ("Removing sysroot ... to avoid
+	# caching bugs", src/bootstrap/src/core/build_steps/compile.rs). That is the
+	# *dev-x86_64-unknown-motor toolchain directory* — the one `make all` runs
+	# on. So every x.py invocation empties the whole stage2 sysroot, bin/ and
+	# lib/rustlib/ alike, and re-links only what that invocation builds. The
+	# wipe happens once per invocation, so everything named in a single command
+	# survives together, while a *later* invocation silently throws away what an
+	# earlier one produced:
+	#
+	#   x.py build library --target A,B   then   x.py build clippy
+	#       -> the clippy run wipes the sysroot and puts NO std back. Both
+	#          targets lose core+std, and the next `cargo
+	#          +dev-x86_64-unknown-motor` — i.e. all of `make all` — dies with
+	#          `error[E0463]: can't find crate for core`/`std` ... "target may
+	#          not be installed", on whatever dependency it compiles first
+	#          (futures-io, futures-sink, ...). It reads as a Motor OS or a
+	#          toolchain-registration failure; it is neither, and re-registering
+	#          the toolchain cannot help.
+	#   x.py build library --target A     then   x.py build library --target B
+	#       -> B evicts A's std, same E0463 for A.
+	#
+	# Naming clippy and library together (exactly what build-base.sh does) makes
+	# the whole set survive one wipe, so no ordering can be wrong and nothing has
+	# to be copied back afterwards. Do not split this into two commands.
+	#
+	# clippy must be *rebuilt* here rather than reused: build-base.sh already
+	# built it from the tree as it cloned it (upstream rust-lang/rust), so
+	# stage2-tools-bin holds binaries from a *different source tree* by the time
+	# update_rust switches the checkout to the fork. clippy-driver dynamically
+	# loads the hash-suffixed librustc_driver-*.so out of stage2/lib, so a stale
+	# pair cannot load (or resolve against) this compiler and the Motor OS build
+	# dies in its vdso step (rt.vdso/build.sh runs clippy). Naming clippy here
+	# rebuilds it from the fork; it is incremental, and a no-op when current.
+	log "building std for both targets + clippy (ONE x.py — each invocation wipes the stage2 sysroot)"
+	( cd "$RUST" && ./x.py build --stage 2 clippy library --target "$TARGET,$HOST" )
+
+	# Belt and braces: bootstrap installs the clippy pair into stage2/bin itself,
+	# but stage2-tools-bin is the copy that survives a sysroot wipe, so top up
+	# from it if a future bootstrap ever stops populating bin/.
+	local tb="$RUST/build/$HOST/stage2-tools-bin"
+	local b
+	for b in cargo-clippy clippy-driver; do
+		[ -f "$STAGE2/bin/$b" ] || cp "$tb/$b" "$STAGE2/bin/$b"
+	done
+
+	verify_stage2_sysroot
+}
+
+# The dev-x86_64-unknown-motor toolchain is exactly build/$HOST/stage2, and
+# `make all` compiles every Motor OS component with it. Check here — while the
+# rust tree that produced it is still in hand — that it carries everything that
+# build needs, rather than letting a gap surface an hour later as an E0463 deep
+# inside a dependency crate.
+verify_stage2_sysroot() {
+	log "verifying the stage2 sysroot the dev toolchain points at"
+	local t
+	for t in "$TARGET" "$HOST"; do
+		[ -n "$(ls "$STAGE2/lib/rustlib/$t/lib"/libcore-*.rlib 2>/dev/null)" ] || \
+			die "no core rlib for $t in $STAGE2 — an x.py build ran after the library build and wiped the sysroot (see the ordering note in build_stds)"
+		[ -n "$(ls "$STAGE2/lib/rustlib/$t/lib"/libstd-*.rlib 2>/dev/null)" ] || \
+			die "no std rlib for $t in $STAGE2 — an x.py build ran after the library build and wiped the sysroot (see the ordering note in build_stds)"
+	done
 
 	# clippy-driver links librustc_driver-<hash>.so out of stage2/lib, so this
 	# also proves the pair matches the rustc `make all` is about to use.
-	"$RUST/build/$HOST/stage2/bin/clippy-driver" --version >/dev/null || \
+	"$STAGE2/bin/clippy-driver" --version >/dev/null || \
 		die "clippy-driver does not run against the freshly built rustc — Motor OS's vdso step would fail; see the clippy pitfall in docs/build-rustc.md"
+
+	# The end-to-end check: actually compile something for each target with the
+	# very toolchain make will use. This is what catches an E0463 here, in one
+	# second, instead of an hour into `make all` inside some dependency crate.
+	local probe
+	probe="$(mktemp -d)"
+	printf 'pub fn f() -> u32 { 1 }\n' > "$probe/probe.rs"
+	for t in "$TARGET" "$HOST"; do
+		"$STAGE2/bin/rustc" --edition 2021 --crate-type rlib --target "$t" \
+			-o "$probe/probe-$t.rlib" "$probe/probe.rs" || {
+				rm -rf "$probe"
+				die "the dev toolchain's rustc cannot compile for $t — the stage2 sysroot is incomplete; make all would fail with E0463 (see the ordering note in build_stds)"
+			}
+	done
+	rm -rf "$probe"
+	log "stage2 sysroot OK: std for $TARGET and $HOST, clippy matches rustc"
 }
 
 # cc — the system C compiler / linker driver rustc uses on the image — is not

@@ -47,13 +47,24 @@ performs every step below in one go (copy it into `$MOTORH` next to
 patches of its own.
 
 **One LLVM, version 23.** rustc builds its own copy of LLVM from its
-`src/llvm-project` submodule; this build points that submodule at the *same*
-`moturus/llvm-project` @ `motor-os-rustc` (LLVM 23) that build-llvm.md's cross
-toolchain is built from, sharing its git objects. So the toolchain LLVM and
-rustc's LLVM are one repo, one branch, one commit — no version split. (rustc's
-default pin is LLVM 22.1.7; 1.98-dev already carries the LLVM-23 support code,
-plus one four-line adaptation on the `moturus/rust` branch for a struct LLVM 23
-made non-copyable — see the appendix.)
+`src/llvm-project` submodule; this build points that submodule at
+`moturus/llvm-project` @ `motor-os-rustc` (LLVM 23) — the same repo and branch
+build-llvm.md's cross toolchain is built from, sharing its git objects. So there
+is one LLVM repo and one LLVM version, no version split. (rustc's default pin is
+LLVM 22.1.7; 1.98-dev already carries the LLVM-23 support code, plus one
+four-line adaptation on the `moturus/rust` branch for a struct LLVM 23 made
+non-copyable — see the appendix.)
+
+One wrinkle, worth knowing before it bites: it is one branch but currently *not*
+one commit. The fork's gitlink (`4c0679b5a854`) is not the branch tip
+(`88ea5aa2a7b4`) — the tip was amended in place, orphaning the gitlink, so
+`git branch -r --contains 4c0679b5a854` lists nothing. `git submodule update`
+still succeeds only because GitHub serves unreachable SHAs on request; should
+that object ever be GC'd, Stage R1's submodule step is where the build stops.
+The two differ solely in `clang/lib/Driver/ToolChains/Motor.cpp`, which rustc's
+LLVM build never compiles (it builds LLVM, not clang) — so the difference is
+inert, and the permanent fix is simply to fast-forward the fork's gitlink onto
+the branch tip and commit it.
 
 ## How the pieces fit together
 
@@ -359,20 +370,52 @@ The product is
 (~154 MB unstripped, ~98 MB stripped) plus an assembled motor sysroot under
 `build/x86_64-unknown-motor/stage2`.
 
-Then build std for **both** targets in one invocation, and rebuild and restore
-the clippy binaries (both are footguns, see Pitfalls):
+Then build std for **both** targets and clippy — in **one** invocation. That
+this is a single command is load-bearing, not stylistic (see Pitfalls):
 
 ```sh
-./x.py build --stage 2 library --target x86_64-unknown-motor,x86_64-unknown-linux-gnu
-./x.py build --stage 2 clippy
-cp build/x86_64-unknown-linux-gnu/stage2-tools-bin/{cargo-clippy,clippy-driver} \
-   build/x86_64-unknown-linux-gnu/stage2/bin/
+./x.py build --stage 2 clippy library --target x86_64-unknown-motor,x86_64-unknown-linux-gnu
 ```
 
-Rebuild clippy rather than copying whatever `stage2-tools-bin` happens to hold:
-[build.md](build.md) built clippy from this tree **before** Stage R1 switched it
-to the fork, so those binaries belong to a different compiler (see Pitfalls).
-The rebuild is incremental — a no-op once clippy is current.
+Every `x.py` invocation **wipes the entire stage2 sysroot** and re-links only
+what that invocation builds: bootstrap's `Sysroot` step opens with
+`remove_dir_all(build/x86_64-unknown-linux-gnu/stage2)` ("Removing sysroot …
+to avoid caching bugs"), and that directory *is* the `dev-x86_64-unknown-motor`
+toolchain `make all` runs on. The wipe happens once per invocation, so
+everything named in one command survives together, while a **later** invocation
+silently discards what an earlier one produced:
+
+- `x.py build library --target A,B` followed by `x.py build clippy` — the clippy
+  run wipes the sysroot and puts **no** std back, leaving *both* targets without
+  core+std. `make all` then dies with `error[E0463]: can't find crate for
+  core`/`std` … "target may not be installed" on whatever dependency it compiles
+  first. This looks like a Motor OS or toolchain-registration failure; it is
+  neither, and re-registering the toolchain cannot help.
+- `x.py build library --target A` followed by the same for `B` — `B` evicts
+  `A`'s std.
+
+Naming `clippy` and `library` together (exactly what [build.md](build.md)'s
+`x.py build --stage 2 clippy library …` does) makes the whole set survive the one
+wipe, so no ordering can be wrong and nothing needs copying back afterwards.
+
+clippy must be **rebuilt** here rather than reused: [build.md](build.md) built it
+from this tree *before* Stage R1 switched the checkout to the fork, so
+`stage2-tools-bin` holds binaries from a different compiler (see Pitfalls).
+Naming it above rebuilds it from the fork — incremental, and a no-op once
+current.
+
+Then confirm the sysroot the dev toolchain points at is actually complete —
+one second here versus an hour into `make all`:
+
+```sh
+S=build/x86_64-unknown-linux-gnu/stage2
+echo 'pub fn f() -> u32 { 1 }' > /tmp/probe.rs
+for t in x86_64-unknown-motor x86_64-unknown-linux-gnu; do
+  $S/bin/rustc --crate-type rlib --target $t -o /tmp/probe-$t.rlib /tmp/probe.rs \
+      || echo "BROKEN: $t"
+done
+$S/bin/clippy-driver --version      # must match the rustc just built
+```
 
 ## Stage R5 — `cc`, the on-image linker driver (from build-llvm.md)
 
@@ -467,15 +510,31 @@ executed entirely on Motor OS.
   for <random dep>` in workspaces that were building fine minutes earlier.
   Fix: `rm -rf $MOTOR/build/obj/release` (and any other target dir built with
   the dev toolchain) after every relink.
-- **`x.py build library --target X` evicts the other target's std** from the
-  stage2 sysroot. Always pass both targets in one invocation, or the next
-  OS/`cc` build dies with `can't find crate for std`/`core`.
-- **Every `x.py` build recreates `stage2/bin`**, dropping `cargo-clippy` and
-  `clippy-driver`. The Motor OS `make` runs clippy in its vdso step and fails
-  *before the imager runs*; and since qemu writes to a mounted image's file,
-  the image mtime keeps changing, looking freshly built while being stale. Restore
-  the two binaries after every `x.py` invocation, and trust only the `built Motor
-  OS image` line — never the image mtime.
+- **Every `x.py` invocation wipes the whole stage2 sysroot — so the *last* one
+  decides what the dev toolchain has.** Bootstrap's `Sysroot` step begins with an
+  unconditional `remove_dir_all(build/x86_64-unknown-linux-gnu/stage2)` ("Removing
+  sysroot … to avoid caching bugs"), then re-links only what *that* invocation
+  builds. This is the single sharpest edge in this build, because
+  `build/x86_64-unknown-linux-gnu/stage2` **is** the `dev-x86_64-unknown-motor`
+  toolchain that `make all` runs on. Consequences:
+  - `x.py build --stage 2 clippy` run *after* the library build leaves
+    `stage2/lib/rustlib` with no std for *either* target, and `make all` then dies
+    with `error[E0463]: can't find crate for core` (motor) and `for std`/`core`
+    (linux-gnu) on whatever dependency it happens to compile first — `futures-io`,
+    `futures-sink`, … It reads as a Motor OS or a toolchain-registration breakage;
+    it is neither, and re-registering the toolchain cannot help. Only a `library`
+    build puts std back.
+  - `x.py build library --target X` alone evicts the *other* target's std.
+  - A `library` build on its own drops `cargo-clippy`/`clippy-driver` from
+    `stage2/bin` (the Motor OS `make` runs clippy in its vdso step and fails
+    *before the imager runs*).
+
+  The fix for all three is the same and is the only robust one: name everything
+  in **one** invocation — `x.py build --stage 2 clippy library --target <both>` —
+  so it all survives the single wipe. Then verify the sysroot before trusting it
+  (compile a probe rlib for each target). Since qemu writes to a mounted image's
+  file, the image mtime keeps changing, looking freshly built while being stale —
+  trust only the `built Motor OS image` line, never the image mtime.
 - **Restoring clippy means rebuilding it, not copying whatever is in
   `stage2-tools-bin`.** On a machine that has run [build.md](build.md), that
   directory already holds a `cargo-clippy`/`clippy-driver` pair built from the
