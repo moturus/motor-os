@@ -162,6 +162,28 @@ the rust tree:
    mlibc tree only in the unlikely case that stale `libc.a` must be rebuilt
    (Stage R2).
 
+### This build repurposes the dev toolchain
+
+Step 1 is not a private detail: `$MOTORH/rust` is the checkout that
+[build.md](build.md)'s `dev-x86_64-unknown-motor` toolchain is registered
+against, and `make all` compiles every Motor OS component with that toolchain
+(`cargo +dev-x86_64-unknown-motor …`). Switching the tree to the fork therefore
+**re-points the whole Motor OS build at the fork's compiler and std** — the
+rustup link still resolves to `build/x86_64-unknown-linux-gnu/stage2`, but what
+lives there is now built from `moturus/rust`. Two consequences:
+
+- Everything previously built with the dev toolchain is stale — the Motor OS
+  cargo caches (Stage R7 clears them) and anything else in `stage2` that an
+  earlier build left behind, clippy above all (Stage R4, and the Pitfalls).
+- If a fresh `make all` breaks right after this build while it worked before it,
+  suspect this handover — not the Motor OS sources. Re-registering the toolchain
+  cannot help: the link was never wrong.
+
+[build.md](build.md) clones `rust-lang/rust` unpinned, so on a new machine the
+tree starts at master-of-today and this build rewinds it to the fork's base
+(`8b6558a02b27`). The two are only guaranteed to agree on the machines where the
+fork is the tree.
+
 The Motor OS checkout must carry the rustc-era runtime fixes: the RT.VDSO
 `ChildStdio` EOF-on-closed-pipe mapping and `O_APPEND` support in `rt_fs.rs`,
 and a data partition of at least 512 MB in `src/imager/motor-os.yaml` (rustc
@@ -276,8 +298,10 @@ wrappers in `$SYSROOT/bin` (the script writes them):
   runtime archives come before `-lc` so their members are chosen first when a
   symbol has several lazy definitions.
 
-`bootstrap.toml` replaces the one from [build.md](build.md) (superset; the
-`dev-x86_64-unknown-motor` toolchain keeps working):
+`bootstrap.toml` replaces the one from [build.md](build.md) — a superset of it,
+so the `dev-x86_64-unknown-motor` toolchain keeps being produced at the path it
+is registered at (but built from the fork now — see *This build repurposes the
+dev toolchain* above):
 
 ```toml
 change-id = "ignore"
@@ -335,14 +359,20 @@ The product is
 (~154 MB unstripped, ~98 MB stripped) plus an assembled motor sysroot under
 `build/x86_64-unknown-motor/stage2`.
 
-Then build std for **both** targets in one invocation, and restore the clippy
-binaries (both are footguns, see Pitfalls):
+Then build std for **both** targets in one invocation, and rebuild and restore
+the clippy binaries (both are footguns, see Pitfalls):
 
 ```sh
 ./x.py build --stage 2 library --target x86_64-unknown-motor,x86_64-unknown-linux-gnu
+./x.py build --stage 2 clippy
 cp build/x86_64-unknown-linux-gnu/stage2-tools-bin/{cargo-clippy,clippy-driver} \
    build/x86_64-unknown-linux-gnu/stage2/bin/
 ```
+
+Rebuild clippy rather than copying whatever `stage2-tools-bin` happens to hold:
+[build.md](build.md) built clippy from this tree **before** Stage R1 switched it
+to the fork, so those binaries belong to a different compiler (see Pitfalls).
+The rebuild is incremental — a no-op once clippy is current.
 
 ## Stage R5 — `cc`, the on-image linker driver (from build-llvm.md)
 
@@ -395,10 +425,12 @@ rustc finds its sysroot relative to `current_exe()` (`bin/..` →
 ## Stage R7 — rebuild the OS and the image
 
 **After any rustc relink, the Motor OS tree's cargo caches are poison** (see
-Pitfalls); clear them, then rebuild everything:
+Pitfalls); clear them, then rebuild everything. `src/sys/target` is the workspace
+target dir [build-llvm.md](build-llvm.md)'s shim stage builds into with the same
+dev toolchain, so it is poisoned too:
 
 ```sh
-rm -rf $MOTOR/build/obj/release
+rm -rf $MOTOR/build/obj/release $MOTOR/src/sys/target
 cd $MOTOR && make all BUILD=release -j$(nproc)
 ```
 
@@ -441,9 +473,19 @@ executed entirely on Motor OS.
 - **Every `x.py` build recreates `stage2/bin`**, dropping `cargo-clippy` and
   `clippy-driver`. The Motor OS `make` runs clippy in its vdso step and fails
   *before the imager runs*; and since qemu writes to a mounted image's file,
-  the image mtime keeps changing, looking freshly built while being stale. Re-copy
-  the two binaries from `stage2-tools-bin` after every `x.py` invocation, and
-  trust only the `built Motor OS image` line — never the image mtime.
+  the image mtime keeps changing, looking freshly built while being stale. Restore
+  the two binaries after every `x.py` invocation, and trust only the `built Motor
+  OS image` line — never the image mtime.
+- **Restoring clippy means rebuilding it, not copying whatever is in
+  `stage2-tools-bin`.** On a machine that has run [build.md](build.md), that
+  directory already holds a `cargo-clippy`/`clippy-driver` pair built from the
+  *upstream* tree, before Stage R1 switched the checkout to the fork. Copying
+  that stale pair into the freshly built `stage2/bin` puts a `clippy-driver` there
+  that cannot load this compiler's hash-suffixed `librustc_driver-*.so` (or cannot
+  resolve against it), so `make all` dies in the vdso step — which reads as a
+  *Motor OS* build failure even though the toolchain is registered correctly, and
+  re-registering it changes nothing. `./x.py build --stage 2 clippy` before the
+  copy is incremental and rules this out.
 - **Stage the `.rmeta` files, not just `*.rlib`** (see stage R6).
 - **The `operator delete` trap cannot be fixed by link order.** mlibc's stubs
   are strong `T` symbols; libc++abi's real operators are weak `W`. If the

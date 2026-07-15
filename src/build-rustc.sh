@@ -19,6 +19,13 @@
 # dependency forks are [patch.crates-io] git URLs cargo fetches — not cloned —
 # and moto-rt comes from crates.io. No patches of its own.
 #
+# NOTE: $MOTORH/rust is also what build-base.sh registered the
+# dev-x86_64-unknown-motor toolchain against, and `make all` builds every Motor
+# OS component with that toolchain. So switching the tree to the fork hands the
+# whole Motor OS build over to the fork's compiler and std, and everything built
+# with the toolchain beforehand — cargo caches, the clippy binaries in stage2 —
+# goes stale. See "This build repurposes the dev toolchain" in docs/build-rustc.md.
+#
 # On-image layout: the Rust toolchain lives at /sys/tools/rust (bin/rustc,
 # lib/rustlib/x86_64-unknown-motor/lib, sample sources at src/). rustc drives the
 # link through /bin/cc (from build-llvm.sh) — Motor's system C compiler — which
@@ -66,6 +73,7 @@ BRANCH=motor-os-rustc
 RUSTC_MAIN="$RUST/build/$HOST/stage2-rustc/$TARGET/release/rustc-main"
 STAGE2="$RUST/build/$HOST/stage2"
 RUSTLIB_SRC="$STAGE2/lib/rustlib/$TARGET/lib"
+MAKE_LOG="$MOTORH/build-rustc-make.log"
 
 # --- prerequisites ------------------------------------------------------------
 verify_prereqs() {
@@ -264,16 +272,28 @@ build_stds() {
 		die "motor std rlibs missing from $RUSTLIB_SRC"
 
 	# Every x.py build recreates stage2/bin, dropping the clippy binaries the
-	# Motor OS vdso build step needs; restore them.
-	if [ -f "$RUST/build/$HOST/stage2-tools-bin/cargo-clippy" ]; then
-		cp "$RUST/build/$HOST/stage2-tools-bin/"{cargo-clippy,clippy-driver} \
-			"$RUST/build/$HOST/stage2/bin/"
-	else
-		log "building clippy (stage2-tools-bin is empty)"
-		( cd "$RUST" && ./x.py build --stage 2 clippy )
-		cp "$RUST/build/$HOST/stage2-tools-bin/"{cargo-clippy,clippy-driver} \
-			"$RUST/build/$HOST/stage2/bin/"
-	fi
+	# Motor OS vdso build step needs; rebuild and restore them.
+	#
+	# This must be an unconditional x.py invocation, not a "copy if present"
+	# shortcut: build-base.sh already built clippy from the tree as it cloned it
+	# (upstream rust-lang/rust), so stage2-tools-bin is *populated with binaries
+	# from a different source tree* by the time update_rust switches the checkout
+	# to the fork. clippy-driver dynamically loads the hash-suffixed
+	# librustc_driver-*.so out of stage2/lib, so copying that stale pair over the
+	# freshly built stage2 hands `cargo +dev-x86_64-unknown-motor clippy` a
+	# driver that cannot load (or cannot resolve against) this compiler — and the
+	# Motor OS build then dies in its vdso step (rt.vdso/build.sh runs clippy),
+	# looking like a Motor OS breakage with a perfectly registered toolchain.
+	# Rebuilding is incremental: a no-op when clippy is already current.
+	log "rebuilding clippy (stage2/bin is recreated by every x.py build)"
+	( cd "$RUST" && ./x.py build --stage 2 clippy )
+	cp "$RUST/build/$HOST/stage2-tools-bin/"{cargo-clippy,clippy-driver} \
+		"$RUST/build/$HOST/stage2/bin/"
+
+	# clippy-driver links librustc_driver-<hash>.so out of stage2/lib, so this
+	# also proves the pair matches the rustc `make all` is about to use.
+	"$RUST/build/$HOST/stage2/bin/clippy-driver" --version >/dev/null || \
+		die "clippy-driver does not run against the freshly built rustc — Motor OS's vdso step would fail; see the clippy pitfall in docs/build-rustc.md"
 }
 
 # cc — the system C compiler / linker driver rustc uses on the image — is not
@@ -335,14 +355,18 @@ build_image() {
 	# Two builds of the same rust tree produce byte-different compilers with
 	# identical `rustc -vV`, which is all cargo fingerprints — every cache
 	# built with the previous dev toolchain is silently poisoned (E0463
-	# "can't find crate" for random deps). Clear before rebuilding.
+	# "can't find crate" for random deps). Clear before rebuilding. src/sys/target
+	# is the workspace target dir build-llvm.sh's shim stage builds into with the
+	# same dev toolchain, so it is poisoned too.
 	log "clearing the Motor OS cargo caches (stale after the rustc rebuild)"
-	rm -rf "$MOTOR/build/obj/release"
+	rm -rf "$MOTOR/build/obj/release" "$MOTOR/src/sys/target"
 
 	log "rebuilding Motor OS + image (make all BUILD=release)"
-	( cd "$MOTOR" && make all BUILD=release -j"$(nproc)" ) | tee /tmp/build-rustc-make.log | tail -2
-	grep -q 'built Motor OS image' /tmp/build-rustc-make.log || \
-		die "make finished without the imager running — see /tmp/build-rustc-make.log"
+	# Keep make's output visible: when a component fails, the compiler diagnostic
+	# is the whole diagnosis, and the log alone is easy to overlook.
+	( cd "$MOTOR" && make all BUILD=release -j"$(nproc)" ) 2>&1 | tee "$MAKE_LOG"
+	grep -q 'built Motor OS image' "$MAKE_LOG" || \
+		die "make finished without the imager running — see $MAKE_LOG"
 }
 
 main() {
