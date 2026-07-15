@@ -11,7 +11,7 @@ use russh::server::{Msg, Server as _, Session};
 use russh::*;
 
 use russhd::config;
-use russhd::local_session::StdinTx;
+use russhd::local_session::{self, StdinTx};
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 #[cfg(target_os = "motor")]
@@ -137,15 +137,12 @@ impl ConnectionHandler {
     }
 
     async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
-        #[cfg(target_os = "motor")]
-        let cmd = "/bin/rush -i";
-        #[cfg(not(target_os = "motor"))]
-        let cmd = "/bin/bash -i";
+        let command = local_session::Command::shell();
 
         let (channel, session) = self.channel.take().unwrap();
         let session_clone = session.clone();
         self.stdin_tx =
-            Some(russhd::local_session::spawn(cmd, channel.id(), session, &self.config).await?);
+            Some(local_session::spawn(command, channel.id(), session, &self.config).await?);
 
         // Show a greeting.
         #[cfg(target_os = "motor")]
@@ -198,9 +195,13 @@ impl ConnectionHandler {
             return Ok(());
         }
 
+        // Only `ssh -t host cmd` asks for a terminal; a plain `ssh host cmd`
+        // gets the command's bytes as they are.
+        let command = local_session::Command::exec(cmdline, self.pty_request.is_some());
+
         let (channel, session) = self.channel.take().unwrap();
         self.stdin_tx =
-            Some(russhd::local_session::spawn(cmdline, channel.id(), session, &self.config).await?);
+            Some(local_session::spawn(command, channel.id(), session, &self.config).await?);
 
         Ok(())
     }
@@ -355,15 +356,24 @@ impl server::Handler for ConnectionHandler {
         channel_id: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.sftp_channel_id.is_none() {
-            // After a client has sent an EOF, indicating that they don't want
-            // to send more data in this session, the channel can be closed.
-            session.close(channel_id)
-        } else {
+        // An EOF means the client will send no more stdin. It does not mean the
+        // channel can be closed: the command may still have output to send, and
+        // its exit status has not been reported yet. `ssh host cmd` sends EOF as
+        // soon as its own stdin is empty, so closing here lost the command's
+        // entire output. Close the child's stdin instead, by dropping the sender
+        // -- the child exiting is what closes the channel (see local_session).
+        if self.stdin_tx.take().is_some() {
+            return Ok(());
+        }
+
+        if self.sftp_channel_id.is_some() {
             // It seems that sftp_server takes care of this: scp sometimes
             // complained of double close requests if we did session.close() here.
-            Ok(())
+            return Ok(());
         }
+
+        // Nothing is running on the channel, so nobody else will close it.
+        session.close(channel_id)
     }
 
     #[allow(unused_variables, clippy::too_many_arguments)]
