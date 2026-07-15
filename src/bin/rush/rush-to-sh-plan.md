@@ -624,17 +624,6 @@ all pass. **Verified end-to-end on a QEMU Motor OS VM**: an 86-case self-check
 - `~user` tilde expansion, prefix assignments scoping to a function call, and
   `exit` inside an emulated `( … )` remain as documented in Phases 3–5.
 
-### ▶ Continue here: Phase 7 (**M3**) then M4
-Next is **Phase 7 — M3** (traps, `^C`, background `&`/`wait`, `$!`), then **M4**
-(Phases 8–9: interactive UX, conformance corpus, docs). Keep testing each phase
-on a Motor OS VM: the scratchpad harness `vmrun-ssh.sh` boots QEMU and drives
-the VM over **ssh** (far more robust than the serial console, whose 80-byte
-chunking splits ANSI escapes); `phase6-vmcheck.sh` is the self-check script —
-copy its `t`-function pattern. Note the VM needs `create-tap.sh` (sudo) once,
-and QEMU must be started so it outlives the launching shell. Watch the Motor
-traps recorded above: no fd-passing to children (pump File stdio through pipes),
-and keep rush's FS I/O single-threaded (sys-io isn't reentrant).
-
 - **`set` options** honored by the executor: `-e` (errexit), `-u` (nounset),
   `-x` (xtrace → `PS4`), `-n` (noexec/parse-only), `-f` (noglob), `-C`
   (noclobber, gates `>` vs `>|`), `-v` (verbose), `-o pipefail`, and `$-`
@@ -686,27 +675,136 @@ behavior tested.
 
 ---
 
-## Phase 7 — Signals, traps, background & wait  ⟵ **M3**
+## Phase 7 — Signals, traps, background & wait  ⟵ **M3**  ✅ DONE (2026-07-15)
 **Goal:** signal handling and asynchronous execution, within Motor OS's limits
 (§0.1). This phase is explicitly **platform-gated**.
 
-- **`trap`**: register handlers for signals, `EXIT`, and (best-effort) the shell's
-  own interrupt; run `EXIT` trap on shell exit. Requires a `sys::on_signal` /
-  self-`kill` capability; where Motor OS lacks a signal a trap targets, `trap`
-  degrades gracefully and is documented.
-- **Interactive `^C`:** since no tty generates SIGINT (§0.1), the reader detects
-  the 0x03 **byte** and, if a child is running, asks `sys` to signal it (needs
-  Motor OS `kill`); otherwise cancels the current input line.
-- **Background jobs `&`** and **`wait`**, with `$!` set to the last background
-  PID. A simple job table tracks async children.
-- **Deferred (write down explicitly):** full interactive **job control** —
-  `^Z`/SIGTSTP suspend, `fg`/`bg` resume, `tcsetpgrp` foreground-group handoff —
-  depends on terminal/process-group facilities Motor OS does not provide without
-  termios/tty ioctls. `jobs`/`fg`/`bg` are implemented as far as the platform
-  allows (likely: list/wait for background jobs; no suspend/resume).
+**The constraint that shaped everything:** *Motor OS has no signals at all.* Not
+"no tty signals" — no delivery of any kind. A process cannot ask to be notified
+of anything, and the only thing one process may do to another is terminate it
+(`SysCpu::kill_pid`; there is no catchable `TERM`). Nor is there a pid to aim at:
+Motor's `std` pal returns **0** from `Child::id()` and holds a child as an opaque
+handle, with no handle→pid mapping. The design follows from those two facts.
 
-**Exit criteria:** trap/background/`wait` tests on the Linux host; Motor OS
-capabilities documented with graceful degradation.
+**Landed:** two new modules plus the `sys` signal seam.
+- `src/sys/` — the signal surface: a shared **pending bitmap** (`note_signal` /
+  `take_pending_signals`, atomics only, so it is callable from a handler),
+  `set_disposition`, `kill`, and an interruptible `wait_child`. `sys/unix.rs`
+  installs real handlers with `sigaction` **without `SA_RESTART`** and waits via
+  `waitid(WNOWAIT)` — which reports an exit *without reaping*, so `Child::wait`
+  still owns the reaping and a trap need not wait out a long foreground command.
+  `sys/motor.rs` is the honest counterpart: `set_disposition` always reports
+  failure, and `kill` honors only `KILL`/`TERM` (signal 0 = an existence check via
+  the process list), **refusing** anything else rather than silently turning a
+  `USR1` into a kill.
+- `src/signal.rs` — the platform-independent core: the POSIX signal
+  name/number table (the same vocabulary on both platforms), `Condition`
+  parsing (`INT`/`SIGINT`/`2`/`EXIT`/`0`, case-insensitively), dispositions, and
+  trap **dispatch at safe points** (between list commands, around a foreground
+  wait, before each interactive prompt). `$?` is saved across a trap action.
+- `src/jobs.rs` — every child rush runs: `PumpedChild` (spawn + the stdio
+  pumping Motor forces, now shared by foreground *and* background commands) and
+  the `Jobs` table. **Job identity is rush's own**, which is what makes `$!`,
+  `wait`, `kill %1` and `fg` work identically on both platforms despite Motor
+  having no pid; synthetic ids start at `1 << 40` so that misusing `$!` outside
+  rush fails to find a process rather than finding the wrong one.
+- `exec.rs` — `Separator::Async` is honored: a lone external command becomes a
+  real concurrent child (stdin from `Null`, per POSIX §2.9.3); anything else
+  runs in an emulated subshell and is recorded as an already-finished job.
+- Builtins: `wait` (pid/`%job`/none, unknown → 127, `128+signo` when a trap
+  interrupts it), `jobs` (dash's format; reports a finished job once, then
+  forgets it), `fg`, `bg`, `kill` (`-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`), and
+  `trap` rewritten onto the signal layer.
+- **`^C` (`term.rs`)**: the reader synthesizes SIGINT itself on the 0x03 byte —
+  no tty generates one on *either* platform (rush's raw mode clears `ISIG`), so
+  this path is identical everywhere and is what makes `trap … INT` work on Motor.
+  `readline` now reports the interruption instead of silently redrawing, so the
+  trap runs at once, a half-typed continuation is abandoned, and `$?` becomes 130.
+
+**Closed a documented Phase 5 limit:** the `EXIT` trap now fires at
+emulated-subshell boundaries. dash's actual rule (verified) is subtler than
+"a subshell resets traps": a subshell runs the `EXIT` trap **it** set, while an
+inherited one remains the parent's — so `Shell` tracks the depth at which the
+trap was set, which a real `fork` would get for free.
+
+44 `tests/phase7.rs` golden tests, all cross-checked against dash (280 total);
+`signal.rs` unit tests; warning/clippy-clean (`--all-targets`), dev + release +
+`cargo +dev-x86_64-unknown-motor check --target x86_64-unknown-motor`, and
+`make all` all pass. **Verified end-to-end on a QEMU Motor OS VM**: a 42-case
+self-check (`phase7-vmcheck.sh`) passes **42/42**, including real background
+concurrency and every documented degradation.
+
+> **Two traps found while testing, both worth remembering.** (1) A golden test
+> that timed a trap firing during `sleep 3` measured **3s** — not a rush bug:
+> rush exits at 0.2s, but the orphaned `sleep` inherits the harness's stdout
+> pipe and holds it open, so the *reader* blocks. dash behaves identically. The
+> fix is `>/dev/null 2>&1` on the orphan, and the lesson is that capturing a
+> shell's output measures its children's lifetimes too. (2) The VM self-check's
+> one failure, `sleep 0.2 & wait` reporting 1, was **Motor's `sleep` rejecting a
+> fractional argument** — rush faithfully relaying a real exit status. Motor's
+> `sleep` takes whole seconds only.
+
+**Documented Phase 7 limits / deliberate divergences:**
+- **On Motor OS, a trap on a signal never fires** unless rush synthesizes the
+  signal itself (`^C` → `INT`). The trap is stored and listed as usual — the
+  platform simply has no delivery. `EXIT` traps are unaffected and work fully.
+- **On Motor OS, `kill` can only terminate.** `KILL`/`TERM` work (and `TERM`
+  cannot be caught or ignored by the target); every other signal is refused with
+  a diagnostic. `$!` is not a real pid there, so it is meaningful only to rush.
+- **`&` gives concurrency only to a lone external command.** A builtin,
+  function, compound command, pipeline or `&&` chain would have to run shell code
+  concurrently with the shell, which needs a `fork` to isolate (§3.4): those run
+  to completion in an emulated subshell and are recorded as finished jobs, so
+  `{ sleep 5; } &` blocks where `sleep 5 &` does not. `&` still delivers the
+  subshell's *isolation*.
+- A background job's **redirected output is flushed when it is reaped**, not as
+  it is produced (sys-io is not reentrant, so rush's FS I/O stays on one thread).
+  An interactive shell reaps at each prompt, so this is bounded in practice.
+- **`exit &` exits the whole shell** — the same emulation limit as `(exit)`
+  (Phase 4): with no `fork`, the `exit` builtin has no subshell to confine
+  itself to. dash's `exit 3 & echo hi` prints `hi`; rush's exits 3.
+- **No process groups**, so a negative pid (`kill -TERM -123`, POSIX's "signal
+  the process group") is refused as "no such job" rather than honored. Motor OS
+  has no process groups at all. Worth keeping in mind: `kill -1` on a signalling
+  host means *every process you may signal* — dash will do it.
+- `fg` waits for a job and reports its status — dash instead refuses it without
+  job control, but with no suspend/resume to offer, waiting is the half of `fg`
+  that still means something. `bg` always fails: nothing can ever be stopped.
+- `jobs` prints the command text reconstructed from the AST (quoting lost,
+  expansions unexpanded); dash prints the original source, but only when
+  interactive.
+- rush does not print dash's `Killed`/`Terminated` line for a signal-killed
+  child, though it reports the same `128 + signo` status.
+- **Deferred, as planned:** full interactive **job control** — `^Z`/SIGTSTP
+  suspend, `fg`/`bg` resume, `tcsetpgrp` foreground-group handoff. It needs
+  terminal/process-group facilities Motor OS does not have (§0.1), and on the
+  host it would be a feature the primary platform could never run.
+
+### ▶ Continue here: M4 (Phases 8–9)
+Next is **Phase 8** (interactive UX: clean `^D`, UTF-8 editing, tab completion,
+emacs bindings, persistent history, multi-row redraw) and **Phase 9**
+(conformance corpus, fuzzing, README/gaps updates) — together **M4**.
+
+Keep testing each phase on a Motor OS VM. The harness: `make img` then
+`vm_images/debug/run-qemu.sh`, started with `setsid nohup … &` so QEMU outlives
+the launching shell, and driven over **ssh** (`mssh.sh` in the scratchpad —
+port 2222, `vm_images/debug/test.key`), which is far more robust than the serial
+console, whose 80-byte chunking splits ANSI escapes. `phase7-vmcheck.sh` is the
+self-check — copy its `t`/`tc` function pattern, and **dry-run it on the host
+first** (retarget `T=`/`R=`), which catches script bugs far faster than the VM
+does. Note: the VM needs `create-tap.sh` (sudo) once; **scp/sftp do not work**
+(russhd answers `Operation unsupported`) and `ssh 'cat > file'` hangs, so put a
+test script on the image via `img_files/motor-os/sys/tmp/` and rebuild. To stop
+QEMU, `pkill -f "[q]emu-system-x86_64 -m 1024M"` — the bracket keeps the pattern
+from matching the killing command itself.
+
+Motor traps to keep in mind, beyond those above: no fd-passing to children (pump
+`File` stdio through pipes), rush's FS I/O stays single-threaded (sys-io is not
+reentrant), there is no `/dev/null`, `rm` has no `-f`, and `sleep` takes whole
+seconds only.
+
+**Exit criteria (M3):** ✅ trap/background/`wait` tests on the Linux host; Motor
+OS capabilities documented with graceful degradation.
 
 ---
 

@@ -17,12 +17,16 @@
 //! Phase 6 adds the [`Options`] set (`set -e`/`-u`/`-x`/…), which the executor
 //! and the expansion engine consult, and the `-e` suppression depth that marks
 //! condition contexts where a failure must not exit the shell.
+//!
+//! Phase 7 adds the background [`Jobs`] table (backing `$!`, `wait` and `jobs`)
+//! and gives the stored traps real teeth — see [`crate::signal`].
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::arith::ArithEnv;
 use crate::ast::FunctionBody;
+use crate::jobs::Jobs;
 use crate::options::{Opt, Options};
 
 /// A pending non-local control-flow transfer, set by the `break`/`continue`/
@@ -80,10 +84,16 @@ pub struct Shell {
     /// no `umask` syscall, so this is display/bookkeeping only for now and does
     /// not affect the mode of files the shell creates.
     umask: u32,
-    /// Signal/`EXIT` traps set by the `trap` builtin, keyed by condition name
-    /// (`EXIT`, `INT`, …). Only the `EXIT` trap is fired (Phase 5); signal traps
-    /// are stored but not delivered until Phase 7.
+    /// Traps set by the `trap` builtin, keyed by canonical condition name
+    /// (`EXIT`, `INT`, …) — the key [`crate::signal::condition_name`] produces,
+    /// so `trap 'x' 2` and `trap 'x' SIGINT` are the same entry. An empty action
+    /// means "ignore". [`crate::signal`] dispatches them.
     traps: HashMap<String, String>,
+    /// The subshell depth at which the `EXIT` trap was set — see
+    /// [`Shell::exit_trap_set_here`].
+    exit_trap_depth: u32,
+    /// Background jobs (`&`), backing `$!`, `wait`, `jobs` and `kill %n`.
+    pub jobs: Jobs,
     /// Whether this is an interactive shell. A *non-interactive* shell exits on a
     /// special-builtin usage/assignment error (POSIX §2.8.1); an interactive one
     /// reports and continues.
@@ -120,6 +130,8 @@ impl Shell {
             getopts_char: 0,
             umask: 0o022,
             traps: HashMap::new(),
+            exit_trap_depth: 0,
+            jobs: Jobs::new(),
             interactive: false,
             fatal: None,
             cmdsub_status: None,
@@ -398,11 +410,29 @@ impl Shell {
     // ---- traps -------------------------------------------------------------
 
     pub fn set_trap(&mut self, cond: &str, action: String) {
+        if cond == "EXIT" {
+            // Remember where this one was set, so a subshell can tell its own
+            // `EXIT` trap from the parent's — see [`Shell::exit_trap_set_here`].
+            self.exit_trap_depth = self.subshell_depth;
+        }
         self.traps.insert(cond.to_string(), action);
     }
 
     pub fn clear_trap(&mut self, cond: &str) {
         self.traps.remove(cond);
+    }
+
+    /// Whether the current `EXIT` trap was set at the current subshell depth,
+    /// rather than inherited from an enclosing one.
+    ///
+    /// POSIX gives a subshell a copy of its parent's traps, but that copy is the
+    /// *parent's* obligation: `trap 'x' EXIT; (true)` runs `x` when the shell
+    /// exits, not when the subshell ends, while `(trap 'x' EXIT; true)` runs it
+    /// at the subshell's end (both verified against dash). A real `fork` gets
+    /// this for free — the child's copy dies with it — so the emulated subshell
+    /// has to remember which one it is holding.
+    pub fn exit_trap_set_here(&self) -> bool {
+        self.traps.contains_key("EXIT") && self.exit_trap_depth == self.subshell_depth
     }
 
     pub fn get_trap(&self, cond: &str) -> Option<&str> {
@@ -515,6 +545,7 @@ impl Shell {
             functions: self.functions.clone(),
             aliases: self.aliases.clone(),
             traps: self.traps.clone(),
+            exit_trap_depth: self.exit_trap_depth,
             // A subshell's `set -e`/`set -f`/… must not leak out: `(set -f)`
             // leaves the parent's `$-` alone.
             opts: self.opts,
@@ -533,6 +564,7 @@ impl Shell {
         self.functions = snap.functions;
         self.aliases = snap.aliases;
         self.traps = snap.traps;
+        self.exit_trap_depth = snap.exit_trap_depth;
         self.opts = snap.opts;
         if let Some(cwd) = snap.cwd {
             let _ = std::env::set_current_dir(cwd);
@@ -575,6 +607,7 @@ pub struct Snapshot {
     functions: HashMap<String, Rc<FunctionBody>>,
     aliases: HashMap<String, String>,
     traps: HashMap<String, String>,
+    exit_trap_depth: u32,
     opts: Options,
     cwd: Option<std::path::PathBuf>,
     pwd: Option<String>,

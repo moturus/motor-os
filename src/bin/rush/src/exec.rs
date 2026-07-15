@@ -10,34 +10,41 @@
 //! substitution and `( … )` subshells run the inner script in an in-process
 //! subshell whose variable/cwd/function mutations are rolled back.
 //!
+//! Phase 7 adds asynchronous execution: `&` starts a background job (see
+//! [`exec_background`] and [`crate::jobs`]), and a trap runs at the safe points
+//! between commands (see [`crate::signal`]).
+//!
 //! Portability: everything is built on `std::process` + `std::fs` — pipelines
 //! chain child stdio, redirections open files, here-docs feed a pipe, and
 //! command substitution captures through a temp file. No `fork`/`dup2` syscalls,
 //! keeping the executor portable to Motor OS.
 //!
-//! Documented limits: multi-stage pipeline stages must be external commands
-//! (builtins/compound commands mid-pipeline are not wired); per-stage `<&` `>&`
-//! and here-docs inside a pipeline, and redirections to fds > 2, are not wired;
-//! background `&` runs synchronously (Phase 7); `${x:?}` diagnoses but does not
-//! abort; `exit` inside an emulated `( … )` subshell exits the whole shell.
+//! Documented limits: per-stage `<&` `>&` and here-docs inside a pipeline, and
+//! redirections to fds > 2, are not wired; `exit` inside an emulated `( … )`
+//! subshell exits the whole shell; `&` on anything but a lone external command
+//! delivers isolation but not concurrency (there is no `fork` —
+//! see [`exec_background`]).
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{
     AndOr, AndOrOp, CaseClause, Command as AstCommand, CompoundCommand, ForClause, FunctionBody,
-    IfClause, List, Pipeline, RedirOp, Redirect, SimpleCommand, WhileClause,
+    IfClause, List, ListItem, Pipeline, RedirOp, Redirect, Separator, SimpleCommand, WhileClause,
 };
 use crate::builtins::{self, Builtin};
 use crate::expand;
+use crate::jobs::{self, ChildIn, ChildOut, JobState};
 use crate::options::Opt;
 use crate::parser::{self, Parsed};
 use crate::shell::{Flow, Shell};
+use crate::signal;
+use crate::sys::WaitOutcome;
+use crate::token::{ExpansionKind, WordPart};
 
 // ---- source-string entry points --------------------------------------------
 
@@ -52,18 +59,6 @@ pub fn run_script(fname: &str, shell: &mut Shell) -> i32 {
     };
     crate::verbose_echo(&script, shell);
     run_source(&script, shell)
-}
-
-/// Run the `EXIT` trap action, if any, and clear it so it fires exactly once.
-/// Called when the shell itself is about to terminate (the `exit` builtin, the
-/// end of `-c`/script execution). Signal traps await Phase 7.
-pub fn fire_exit_trap(shell: &mut Shell) {
-    if let Some(action) = shell.get_trap("EXIT").map(String::from) {
-        shell.clear_trap("EXIT");
-        if !action.is_empty() {
-            run_source(&action, shell);
-        }
-    }
 }
 
 /// Parse and execute a source buffer with the default (inherited) I/O
@@ -164,15 +159,108 @@ impl IoEnv {
 fn exec_list(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     let mut status = 0;
     for item in &list.0 {
-        // `Separator::Async` (`&`) is honored in Phase 7; runs synchronously now.
-        status = exec_and_or(&item.and_or, shell, io);
+        status = match item.sep {
+            Separator::Seq => exec_and_or(&item.and_or, shell, io),
+            Separator::Async => exec_background(&item.and_or, shell, io),
+        };
         shell.set_status(status);
         // A pending `break`/`continue`/`return` stops the rest of the list.
         if shell.flow() != Flow::Normal {
             break;
         }
+        // A safe point: run the trap for any signal that arrived while the
+        // command ran (a handler can only set a flag — see `crate::signal`).
+        signal::run_pending_traps(shell);
     }
     status
+}
+
+/// Run an and-or list asynchronously (`&`). Its status is 0 regardless, since
+/// the shell does not wait for it (POSIX §2.9.3).
+///
+/// Only a lone external command can genuinely run in the background. Anything
+/// else — a builtin, function, compound command, pipeline, or `&&` chain — would
+/// have to keep executing shell code concurrently with the shell itself, which
+/// needs a `fork` to isolate; rush has none (§3.4). Those run to completion
+/// *here*, in an emulated subshell, and are then recorded as an already-finished
+/// job. So on such a command `&` delivers isolation but not concurrency: a
+/// documented degradation, and the reason `{ sleep 5; } &` blocks where
+/// `sleep 5 &` does not.
+fn exec_background(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
+    let started = shell.jobs.started();
+    let status = match lone_simple(and_or) {
+        Some(simple) => exec_simple(simple, shell, io, Background::Yes),
+        None => {
+            let list = List(vec![ListItem {
+                and_or: and_or.clone(),
+                sep: Separator::Seq,
+            }]);
+            exec_subshell(&list, shell, io)
+        }
+    };
+    // The spawn path registers its own job; this counter is how we tell that it
+    // did, since the command may have turned out to be a builtin or a function
+    // and run in place. Whatever ran in place is recorded as a finished job, so
+    // that `$!` and `wait` still have something to name.
+    if shell.jobs.started() == started {
+        shell
+            .jobs
+            .add(describe(and_or), None, JobState::Done(status));
+    }
+    announce_job(shell);
+    0
+}
+
+/// The lone simple command of an and-or list, if that is all it is — the only
+/// shape [`exec_background`] can start asynchronously.
+fn lone_simple(and_or: &AndOr) -> Option<&SimpleCommand> {
+    if !and_or.rest.is_empty() || and_or.first.bang {
+        return None;
+    }
+    match and_or.first.commands.as_slice() {
+        [AstCommand::Simple(simple)] => Some(simple),
+        _ => None,
+    }
+}
+
+/// An interactive shell reports a job as it starts: `[1] 12345`.
+fn announce_job(shell: &mut Shell) {
+    if !shell.is_interactive() {
+        return;
+    }
+    if let Some(job) = shell.jobs.iter().last() {
+        println!("[{}] {}", job.id, job.pid);
+    }
+}
+
+/// A short label for a backgrounded command, for `jobs` to print.
+///
+/// Reconstructed from the AST rather than kept as source text, which rush does
+/// not retain: quoting is gone and an expansion is shown in its unexpanded form.
+/// dash prints the real source text — but only when interactive, and rush's
+/// approximation is more useful than dash's non-interactive blank.
+fn describe(and_or: &AndOr) -> String {
+    let Some(simple) = lone_simple(and_or) else {
+        return "(subshell)".to_string();
+    };
+    simple
+        .words
+        .iter()
+        .map(|word| {
+            word.0
+                .iter()
+                .map(|part| match part {
+                    WordPart::Literal { text, .. } => text.clone(),
+                    WordPart::Expansion { kind, raw, .. } => match kind {
+                        ExpansionKind::Parameter => format!("${raw}"),
+                        ExpansionKind::Command => format!("$({raw})"),
+                        ExpansionKind::Arithmetic => format!("$(({raw}))"),
+                    },
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn exec_and_or(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
@@ -226,7 +314,7 @@ fn exec_operand(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv, is_last: boo
 fn check_errexit(status: i32, shell: &mut Shell) {
     if status != 0 && shell.errexit_applies() && !shell.in_subshell() {
         shell.set_status(status);
-        fire_exit_trap(shell);
+        signal::fire_exit_trap(shell);
         crate::exit(status);
     }
 }
@@ -252,7 +340,7 @@ fn exec_command(command: &AstCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         return 0;
     }
     match command {
-        AstCommand::Simple(simple) => exec_simple(simple, shell, io),
+        AstCommand::Simple(simple) => exec_simple(simple, shell, io, Background::No),
         AstCommand::Compound { kind, redirects } => exec_compound_cmd(kind, redirects, shell, io),
         AstCommand::Function { name, body } => {
             shell.define_function(name, Rc::new(body.clone()));
@@ -261,7 +349,21 @@ fn exec_command(command: &AstCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
     }
 }
 
-fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
+/// Whether a simple command is being started in the background (`&`). Only
+/// reaches as far as the external-command spawn: everything else runs the same
+/// either way, and [`exec_background`] deals with the difference afterwards.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Background {
+    No,
+    Yes,
+}
+
+fn exec_simple(
+    simple: &SimpleCommand,
+    shell: &mut Shell,
+    io: &IoEnv,
+    background: Background,
+) -> i32 {
     // POSIX §2.9.1: with no command name, the command's status is that of the
     // last command substitution it performed (`x=$(false)` fails), so watch for
     // one across this command's expansions.
@@ -357,14 +459,46 @@ fn exec_simple(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
         return exec_function_call(&body, &argv, &assigns, &fds, shell);
     }
 
-    match resolve_program(&argv[0], shell) {
-        Some(program) => spawn_external(&program, &argv[1..], &assigns, &fds),
-        None => {
+    match (resolve_program(&argv[0], shell), background) {
+        (Some(program), Background::Yes) => {
+            spawn_background(&program, &argv, &assigns, &fds, shell);
+            0
+        }
+        (Some(program), Background::No) => {
+            spawn_external(&program, &argv[1..], &assigns, &fds, shell)
+        }
+        (None, _) => {
             let mut err = fds[2].err_writer();
             let _ = writeln!(err, "rush: {}: command not found", argv[0]);
             127
         }
     }
+}
+
+/// Start an external command as a background job, registering it so `$!`,
+/// `jobs` and `wait` can see it.
+fn spawn_background(
+    program: &str,
+    argv: &[String],
+    env: &[(String, String)],
+    fds: &[FdSource; 3],
+    shell: &mut Shell,
+) {
+    let cmd = argv.join(" ");
+    match jobs::spawn(
+        program,
+        &argv[1..],
+        env,
+        child_in(&fds[0], true),
+        child_out(&fds[1]),
+        child_out(&fds[2]),
+    ) {
+        Ok(child) => shell.jobs.add(cmd, Some(child), JobState::Running),
+        // dash forks before it discovers the command is missing, so `$!` is set
+        // and `wait` reports 127. Record the same, already-finished, job rather
+        // than losing `$!` entirely.
+        Err(status) => shell.jobs.add(cmd, None, JobState::Done(status)),
+    };
 }
 
 /// `set -x`: write the expanded command to stderr, prefixed by the expanded
@@ -394,7 +528,7 @@ fn maybe_die_fatal(shell: &mut Shell) {
         && !shell.is_interactive()
         && !shell.in_subshell()
     {
-        fire_exit_trap(shell);
+        signal::fire_exit_trap(shell);
         crate::exit(code);
     }
 }
@@ -460,7 +594,7 @@ fn exec_builtin(b: Builtin, argv: &[String], fds: &[FdSource; 3], shell: &mut Sh
     let args = &argv[1..];
     match b {
         Builtin::Exit => {
-            fire_exit_trap(shell);
+            signal::fire_exit_trap(shell);
             process_exit(args, shell)
         }
         Builtin::Return => builtin_return(args, shell),
@@ -557,7 +691,7 @@ fn builtin_exec(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> ! {
         crate::exit(shell.status());
     }
     match resolve_program(&args[0], shell) {
-        Some(program) => crate::exit(spawn_external(&program, &args[1..], &[], fds)),
+        Some(program) => crate::exit(spawn_external(&program, &args[1..], &[], fds, shell)),
         None => {
             let mut err = fds[2].err_writer();
             let _ = writeln!(err, "rush: exec: {}: not found", args[0]);
@@ -622,7 +756,7 @@ fn builtin_command(args: &[String], fds: &[FdSource; 3], shell: &mut Shell) -> i
         return exec_builtin(b, rest, fds, shell);
     }
     match resolve_program(&rest[0], shell) {
-        Some(program) => spawn_external(&program, &rest[1..], &[], fds),
+        Some(program) => spawn_external(&program, &rest[1..], &[], fds, shell),
         None => {
             let mut err = fds[2].err_writer();
             let _ = writeln!(err, "rush: {}: command not found", rest[0]);
@@ -807,190 +941,61 @@ fn loop_count(args: &[String], name: &str) -> Option<u32> {
 
 // ---- external commands ------------------------------------------------------
 
-/// Spawn an external command with the given fd sources and return its status.
+/// Spawn an external command with the given fd sources, wait for it, and return
+/// its status. Pending traps run if a signal interrupts the wait.
 ///
-/// Motor OS's process spawn only accepts `INHERIT` / `NULL` / `MAKE_PIPE` for a
-/// child's stdio — a real file descriptor cannot be handed to a child. So any
-/// file-backed or here-document stdio is wired as a pipe and *pumped by this
-/// process* on a thread (copying between the file/body and the child's pipe).
-/// `Inherit` stays a true inherit. Portable to the Unix host, which also accepts
-/// this.
+/// The spawning itself — and the stdio pumping Motor OS forces — lives in
+/// [`crate::jobs`], which a background job shares.
 fn spawn_external(
     program: &str,
     args: &[String],
     env: &[(String, String)],
     fds: &[FdSource; 3],
+    shell: &mut Shell,
 ) -> i32 {
-    let stdin = ExtIn::from_fd(&fds[0]);
-    let stdout = ExtOut::from_fd(&fds[1]);
-    let stderr = ExtOut::from_fd(&fds[2]);
-    run_external(program, args, env, stdin, stdout, stderr)
-}
-
-/// A child's standard input on Motor OS: inherited, or piped and fed by us.
-enum ExtIn {
-    Inherit,
-    File(Arc<File>),
-    Heredoc(Arc<String>),
-}
-
-/// A child's standard output/error on Motor OS: inherited, or pumped into a
-/// file (a captured pipeline stage's output is a temp file, so it is `File` too).
-enum ExtOut {
-    Inherit,
-    File(Arc<File>),
-}
-
-impl ExtIn {
-    fn from_fd(fd: &FdSource) -> Self {
-        match fd {
-            FdSource::Inherit => ExtIn::Inherit,
-            FdSource::File(f) => ExtIn::File(f.clone()),
-            FdSource::Heredoc(b) => ExtIn::Heredoc(b.clone()),
-        }
-    }
-}
-
-impl ExtOut {
-    fn from_fd(fd: &FdSource) -> Self {
-        match fd {
-            FdSource::Inherit => ExtOut::Inherit,
-            FdSource::File(f) => ExtOut::File(f.clone()),
-            // A here-document as *output* is meaningless; behave like inherit.
-            FdSource::Heredoc(_) => ExtOut::Inherit,
-        }
-    }
-}
-
-/// Spawn `program`, pumping any non-inherited stdio through pipes on helper
-/// threads (Motor OS children accept only inherit/null/pipe stdio). Returns the
-/// exit status.
-fn run_external(
-    program: &str,
-    args: &[String],
-    env: &[(String, String)],
-    stdin: ExtIn,
-    stdout: ExtOut,
-    stderr: ExtOut,
-) -> i32 {
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    // Motor OS's sys-io is not reentrant under concurrent filesystem access from
-    // one process, so rush keeps all of its own FS I/O on this thread: read any
-    // file-backed input into memory *before* the child runs, and write captured
-    // output to files *after* it exits. The helper threads below touch only
-    // pipes while the child is running.
-    let feed: Option<Vec<u8>> = match &stdin {
-        ExtIn::Inherit => None,
-        ExtIn::Heredoc(b) => Some(b.as_bytes().to_vec()),
-        ExtIn::File(f) => Some(read_all(f)),
+    let mut child = match jobs::spawn(
+        program,
+        args,
+        env,
+        child_in(&fds[0], false),
+        child_out(&fds[1]),
+        child_out(&fds[2]),
+    ) {
+        Ok(child) => child,
+        Err(status) => return status,
     };
-    let capture_out = matches!(stdout, ExtOut::File(_));
-    let capture_err = matches!(stderr, ExtOut::File(_));
-
-    cmd.stdin(if feed.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::inherit()
-    });
-    cmd.stdout(if capture_out {
-        Stdio::piped()
-    } else {
-        Stdio::inherit()
-    });
-    cmd.stderr(if capture_err {
-        Stdio::piped()
-    } else {
-        Stdio::inherit()
-    });
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return spawn_error(program, e),
-    };
-
-    // Feed stdin bytes on a thread (pipe writes only).
-    let feed_thread = match (feed, child.stdin.take()) {
-        (Some(bytes), Some(mut sink)) => Some(std::thread::spawn(move || {
-            let _ = sink.write_all(&bytes);
-        })),
-        _ => None,
-    };
-    // Capture stdout / stderr on threads (pipe reads only).
-    let out_thread = child
-        .stdout
-        .take()
-        .filter(|_| capture_out)
-        .map(|mut o| std::thread::spawn(move || read_stream(&mut o)));
-    let err_thread = child
-        .stderr
-        .take()
-        .filter(|_| capture_err)
-        .map(|mut e| std::thread::spawn(move || read_stream(&mut e)));
-
-    let status = match child.wait() {
-        Ok(s) => s.code().unwrap_or(128),
-        Err(err) => {
-            eprintln!("rush: {err}");
-            126
+    let status = loop {
+        match child.wait() {
+            WaitOutcome::Exited(status) => break status,
+            // A trapped signal arrived; run it and resume waiting, so a trap
+            // does not have to wait out a long-running foreground command.
+            // (Only `wait` reports the interruption itself, per POSIX.)
+            WaitOutcome::Interrupted => {
+                signal::run_pending_traps(shell);
+            }
         }
     };
-    if let Some(t) = feed_thread {
-        let _ = t.join();
-    }
-    let out_bytes = out_thread.map(|t| t.join().unwrap_or_default());
-    let err_bytes = err_thread.map(|t| t.join().unwrap_or_default());
-
-    // Now (child gone, no other FS in flight) write the captured output.
-    if let (ExtOut::File(f), Some(bytes)) = (stdout, out_bytes) {
-        write_all(&f, &bytes);
-    }
-    if let (ExtOut::File(f), Some(bytes)) = (stderr, err_bytes) {
-        write_all(&f, &bytes);
-    }
+    child.finish();
     status
 }
 
-/// Read an entire file into memory (single-threaded FS access).
-fn read_all(f: &Arc<File>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Ok(mut c) = f.try_clone() {
-        let _ = c.read_to_end(&mut buf);
-    }
-    buf
-}
-
-/// Read a pipe to end (no FS).
-fn read_stream(r: &mut dyn Read) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let _ = r.read_to_end(&mut buf);
-    buf
-}
-
-/// Append `bytes` to a file (single-threaded FS access).
-fn write_all(f: &Arc<File>, bytes: &[u8]) {
-    if let Ok(mut c) = f.try_clone() {
-        let _ = c.write_all(bytes);
+/// The child stdin for an fd source. Background jobs read from nothing rather
+/// than competing with the shell for the terminal (POSIX §2.9.3).
+fn child_in(fd: &FdSource, background: bool) -> ChildIn {
+    match fd {
+        FdSource::Inherit if background => ChildIn::Null,
+        FdSource::Inherit => ChildIn::Inherit,
+        FdSource::File(f) => ChildIn::File(f.clone()),
+        FdSource::Heredoc(b) => ChildIn::Heredoc(b.clone()),
     }
 }
 
-fn spawn_error(program: &str, e: std::io::Error) -> i32 {
-    match e.kind() {
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename => {
-            eprintln!("rush: {program}: command not found");
-            127
-        }
-        std::io::ErrorKind::PermissionDenied => {
-            eprintln!("rush: {program}: permission denied");
-            126
-        }
-        _ => {
-            eprintln!("rush: {program}: {e}");
-            126
-        }
+fn child_out(fd: &FdSource) -> ChildOut {
+    match fd {
+        FdSource::Inherit => ChildOut::Inherit,
+        FdSource::File(f) => ChildOut::File(f.clone()),
+        // A here-document as *output* is meaningless; behave like inherit.
+        FdSource::Heredoc(_) => ChildOut::Inherit,
     }
 }
 
@@ -1017,7 +1022,9 @@ fn build_fds(io: &IoEnv, redirects: &[Redirect], shell: &mut Shell) -> Result<[F
                             fds[fd_num] = FdSource::File(Arc::new(dev_null()?));
                         } else if let Ok(m) = t.parse::<usize>() {
                             if m > 2 {
-                                eprintln!("rush: fd {m}: duplication of fds > 2 is not yet supported (Phase 3)");
+                                eprintln!(
+                                    "rush: fd {m}: duplication of fds > 2 is not yet supported (Phase 3)"
+                                );
                                 return Err(1);
                             }
                             fds[fd_num] = fds[m].clone();
@@ -1153,7 +1160,7 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
                                     Ok(f) => f,
                                     Err(code) => return code,
                                 };
-                                spawn_external(p, &argv[1..], &assigns, &fds)
+                                spawn_external(p, &argv[1..], &assigns, &fds, shell)
                             }
                             None => {
                                 eprintln!("rush: {}: command not found", argv[0]);
@@ -1359,11 +1366,38 @@ fn exec_subshell(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     let snapshot = shell.snapshot();
     shell.enter_subshell();
     let status = exec_list(list, shell, io);
+    fire_subshell_exit_trap(shell, io);
     shell.exit_subshell();
     shell.take_fatal(); // a fatal error stays inside the subshell
     shell.restore(snapshot);
     shell.clear_flow();
     status
+}
+
+/// Run an `EXIT` trap that a subshell set for itself, at the subshell's
+/// boundary and with the subshell's own I/O environment — so
+/// `x=$(trap 'echo t' EXIT; echo v)` captures both lines, as dash does.
+///
+/// A trap merely *inherited* from the parent is left alone: it is the parent's
+/// to run when the parent exits (see [`Shell::exit_trap_set_here`]). Call this
+/// while still inside the subshell, before its snapshot is restored.
+fn fire_subshell_exit_trap(shell: &mut Shell, io: &IoEnv) {
+    if !shell.exit_trap_set_here() {
+        return;
+    }
+    let Some(action) = shell.get_trap("EXIT").map(String::from) else {
+        return;
+    };
+    shell.clear_trap("EXIT");
+    if action.is_empty() {
+        return;
+    }
+    // The action sees, and cannot change, the status the subshell is ending with.
+    let saved = shell.status();
+    if let Parsed::Complete(list) = parser::parse_source(&action) {
+        exec_list(&list, shell, io);
+    }
+    shell.set_status(saved);
 }
 
 fn exec_if(clause: &IfClause, shell: &mut Shell, io: &IoEnv) -> i32 {
@@ -1535,9 +1569,14 @@ fn capture(src: &str, shell: &mut Shell) -> String {
         }
     };
     let io = IoEnv {
-        fds: [FdSource::Inherit, FdSource::File(Arc::new(file)), FdSource::Inherit],
+        fds: [
+            FdSource::Inherit,
+            FdSource::File(Arc::new(file)),
+            FdSource::Inherit,
+        ],
     };
     exec_list(&list, shell, &io);
+    fire_subshell_exit_trap(shell, &io);
     // All stages have exited; re-read the captured output from the start.
     let output = std::fs::read_to_string(&path).unwrap_or_default();
     let _ = std::fs::remove_file(&path);

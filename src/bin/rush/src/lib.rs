@@ -23,10 +23,12 @@ mod builtins;
 mod exec;
 mod expand;
 mod glob;
+mod jobs;
 mod lexer;
 mod options;
 mod parser;
 mod shell;
+mod signal;
 mod sys;
 mod term;
 mod token;
@@ -222,8 +224,8 @@ pub fn execute(inv: Invocation) {
     // commands from a terminal (POSIX §2.5.1) — which `--piped` stands in for.
     // An interactive shell reports and continues where a script would abort.
     let stdin_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
-    let interactive = sh.opts.get(Opt::Interactive)
-        || (inv.mode == Mode::Stdin && (inv.piped || stdin_is_tty));
+    let interactive =
+        sh.opts.get(Opt::Interactive) || (inv.mode == Mode::Stdin && (inv.piped || stdin_is_tty));
     sh.set_interactive(interactive);
 
     if interactive {
@@ -253,7 +255,7 @@ pub fn execute(inv: Invocation) {
             }
         }
     };
-    exec::fire_exit_trap(&mut sh);
+    signal::fire_exit_trap(&mut sh);
     exit(status);
 }
 
@@ -308,14 +310,33 @@ fn interactive_loop(sh: &mut Shell, piped: bool) -> ! {
 
     let mut buf = String::new();
     loop {
+        // A safe point: run the trap for a `^C` at the prompt, or for a signal
+        // that arrived while the last command ran.
+        signal::run_pending_traps(sh);
+        // Collect any background job that finished while we were busy. Nothing
+        // else reaps in an interactive session — `wait`/`jobs` might never be
+        // run — and an unreaped child costs a process slot until the shell
+        // exits (on Motor OS, also its handle and pump threads).
+        sh.jobs.poll();
+
         let prompt = prompt_string(if buf.is_empty() { "PS1" } else { "PS2" }, sh);
         let line = if buf.is_empty() {
             term::readline(&prompt)
         } else {
-            buf.push('\n');
             term::readline_continuation(&prompt)
         };
+        let Some(line) = line else {
+            // `^C`. Abandon the whole command being typed, not just the line it
+            // was on, and report the status a shell gives an interrupted
+            // command (128 + SIGINT). The trap runs at the top of the loop.
+            buf.clear();
+            sh.set_status(128 + signal::SIGINT);
+            continue;
+        };
         verbose_echo(&line, sh);
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
         buf.push_str(line.as_str());
 
         match parser::parse_source(&buf) {

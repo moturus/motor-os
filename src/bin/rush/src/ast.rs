@@ -23,9 +23,7 @@ pub struct List(pub Vec<ListItem>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListItem {
     pub and_or: AndOr,
-    /// The terminator that followed this and-or list. `Async` (`&`) means the
-    /// list runs in the background; honored in Phase 7 (until then it runs
-    /// synchronously, like `Seq`).
+    /// The terminator that followed this and-or list.
     pub sep: Separator,
 }
 
@@ -33,7 +31,8 @@ pub struct ListItem {
 pub enum Separator {
     /// `;` or a newline: run sequentially, waiting for completion.
     Seq,
-    /// `&`: run asynchronously (Phase 7).
+    /// `&`: run asynchronously — see [`crate::jobs`] for what that can mean
+    /// without a `fork`.
     Async,
 }
 

@@ -43,11 +43,13 @@ multi-stage pipelines, the full fd 0/1/2 redirection set, here-documents, and
 command substitution — **Phase 4**: compound commands and functions — and
 **Phase 5 — milestone M2**: the POSIX builtins (`src/builtins.rs`) — and
 **Phase 6**: shell options (`src/options.rs`), POSIX invocation parsing,
-startup files, and prompts. Both verified end-to-end on a Motor OS VM.
+startup files, and prompts — and **Phase 7 — milestone M3**: signals and traps
+(`src/signal.rs`), background jobs and `wait` (`src/jobs.rs`). Each verified
+end-to-end on a Motor OS VM.
 
-**Next step — Phase 7 — M3:** signal traps, `^C`, background `&`/`wait`, and
-`$!`. Then **M4** (Phases 8–9: interactive UX, a conformance corpus, docs). See
-the plan for details.
+**Next step — M4 (Phases 8–9):** interactive UX (tab completion, UTF-8 editing,
+persistent history), then a conformance corpus and docs. See the plan for
+details.
 
 ## What works today
 
@@ -72,7 +74,16 @@ the plan for details.
 - **Builtins**: special — `:` `.` `eval` `exec` `exit` `export` `readonly` `set`
   `shift` `unset` `times` `trap` `break` `continue` `return`; regular — `cd`
   (full) `pwd` `echo` `printf` `test`/`[` `read` `true` `false` `getopts`
-  `command` `type` `hash` `alias`/`unalias` `umask`;
+  `command` `type` `hash` `alias`/`unalias` `umask` `wait` `jobs` `fg` `bg`
+  `kill`;
+- **Signals & traps**: `trap` on `EXIT` and any signal (by name, `SIG`-prefixed
+  name, or number), `trap ''` to ignore and `trap -` to restore; `^C` at the
+  prompt raises `INT` (rush detects the byte itself — no platform generates the
+  signal); `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
+- **Background jobs**: `cmd &` runs concurrently, with `$!`, `wait`
+  (pid/`%job`/all), `jobs`, and `fg`. On Motor OS, which has neither signals nor
+  a child pid, job identity is rush's own and `kill` can only terminate — see
+  the plan's Phase 7 for the exact degradations;
 - **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
   rules), `-u` (nounset), `-x` (xtrace via `PS4`), `-n` (noexec), `-f` (noglob),
   `-C` (noclobber, with `>|`), `-a` (allexport), `-v` (verbose), `-o pipefail`,
@@ -86,8 +97,9 @@ the plan for details.
 
 ## Not yet working (see the gap analysis)
 
-- Signal traps (only `EXIT` fires), `^C`, background `&`/`wait`, `kill`, job
-  control — Phase 7;
+- Interactive **job control** — `^Z`/suspend, `bg`/resume, and foreground-group
+  handoff — which Motor OS cannot support (no termios, no tty signals); `&` on a
+  builtin/compound command gives isolation but not concurrency (no `fork`);
 - Tab completion, UTF-8 input editing, persistent history, `^D` at an empty
   prompt, and multi-row line wrapping — Phase 8;
 - `umask` affecting file creation, `times` accounting (both display-only); the
@@ -107,8 +119,3 @@ line-by-line (rush reads a whole script before parsing it — the interactive
 loop, which reads a line at a time, does interleave); and the default `PS1` is
 rush's colored `rush:$PWD$ ` rather than a bare `$ ` (it is an ordinary
 variable, so `PS1='$ '` restores dash's).
-
-## Contributions:
-
-- Are welcome;
-- If you plan to add a large feature or make a non-trivial refactoring, please discuss your approach first.

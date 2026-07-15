@@ -32,6 +32,16 @@ enum ProcessByteResult {
     Escape(EscapesIn),
 }
 
+/// What one pass of the line editor produced.
+enum ReadOutcome {
+    Line(String),
+    /// `^C`: the line (and any command it was continuing) is abandoned.
+    Interrupted,
+    /// Nothing to hand back yet — an empty line, or one the editor handled
+    /// itself — so read another.
+    Again,
+}
+
 struct Term {
     history: Vec<Vec<u8>>,
     mode: ProcessingMode,
@@ -226,7 +236,7 @@ impl Term {
         }
     }
 
-    fn readline(&mut self, prompt: &str, continuation: bool) -> Option<String> {
+    fn readline(&mut self, prompt: &str, continuation: bool) -> ReadOutcome {
         self.term_impl.make_raw();
         self.start_line(prompt);
 
@@ -296,7 +306,7 @@ impl Term {
                         if !continuation {
                             self.maybe_add_to_history(cmd.as_str());
                         }
-                        return Some(cmd);
+                        return ReadOutcome::Line(cmd);
                     }
                 }
                 ProcessByteResult::Continue => {}
@@ -425,8 +435,20 @@ impl Term {
                                 self.show_cursor();
                             }
                         }
-                        self.write("^C\n\r".as_bytes());
-                        self.start_line(prompt);
+                        // No terminal driver turns this byte into a signal — not
+                        // on Motor OS, which has none, and not on the Linux host
+                        // either, where the raw mode rush installs clears ISIG
+                        // (see `sys`). So the shell raises SIGINT itself, and
+                        // any `trap … INT` fires from the interactive loop's
+                        // safe point exactly as it would on a signalling
+                        // platform.
+                        crate::sys::note_signal(crate::signal::SIGINT);
+                        self.write("^C\n".as_bytes());
+                        self.term_impl.make_cooked();
+                        // Hand control back rather than just redrawing: the trap
+                        // has to run now, and an abandoned *continuation* line
+                        // must drop the rest of the half-typed command with it.
+                        return ReadOutcome::Interrupted;
                     }
                 },
                 ProcessByteResult::Clear => {
@@ -436,7 +458,7 @@ impl Term {
             }
         } // loop
 
-        None
+        ReadOutcome::Again
     }
 
     fn beep(&mut self) {
@@ -744,19 +766,24 @@ pub fn init(piped: bool) {
     *TERM.lock().unwrap() = Some(Term::new(piped));
 }
 
-pub fn readline(prompt: &str) -> String {
+/// Read one line, or `None` if `^C` abandoned it.
+pub fn readline(prompt: &str) -> Option<String> {
     readline_inner(prompt, false)
 }
 
-pub fn readline_continuation(prompt: &str) -> String {
+/// Read a `PS2` continuation line, or `None` if `^C` abandoned the command.
+pub fn readline_continuation(prompt: &str) -> Option<String> {
     readline_inner(prompt, true)
 }
 
-fn readline_inner(prompt: &str, continuation: bool) -> String {
+fn readline_inner(prompt: &str, continuation: bool) -> Option<String> {
     let term = &mut *TERM.lock().unwrap();
     loop {
-        if let Some(line) = term.as_mut().unwrap().readline(prompt, continuation) {
-            return line;
+        match term.as_mut().unwrap().readline(prompt, continuation) {
+            ReadOutcome::Line(line) => return Some(line),
+            ReadOutcome::Interrupted => return None,
+            // An empty line, or one the editor handled itself: read again.
+            ReadOutcome::Again => {}
         }
     }
 }

@@ -122,12 +122,10 @@ fn build(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
                 }
             }
             WordPart::Expansion { kind, raw, quoted } => match kind {
-                crate::token::ExpansionKind::Parameter => {
-                    match param_eval(raw, shell) {
-                        PVal::Scalar(s) => push_scalar(&mut out, &s, *quoted, splitting),
-                        PVal::Fields(list) => push_fields(&mut out, &list, *quoted, splitting),
-                    }
-                }
+                crate::token::ExpansionKind::Parameter => match param_eval(raw, shell) {
+                    PVal::Scalar(s) => push_scalar(&mut out, &s, *quoted, splitting),
+                    PVal::Fields(list) => push_fields(&mut out, &list, *quoted, splitting),
+                },
                 crate::token::ExpansionKind::Command => {
                     let s = crate::exec::command_substitution(raw, shell);
                     push_scalar(&mut out, &s, *quoted, splitting);
@@ -374,7 +372,10 @@ fn resolve_scalar(head: &str, shell: &Shell) -> Option<String> {
     match head {
         "?" => Some(shell.status().to_string()),
         "$" => Some(shell.pid().to_string()),
-        "!" => Some(String::new()), // last background pid — Phase 7
+        // `$!` is unset until something has been backgrounded (dash expands it
+        // to nothing then). On Motor OS it is rush's own job id rather than a
+        // pid — see `crate::jobs`.
+        "!" => shell.jobs.last_pid().map(|pid| pid.to_string()),
         "-" => Some(shell.opts.dash_flags()),
         "#" => Some(shell.param_count().to_string()),
         _ => shell.get(head),
@@ -394,7 +395,10 @@ enum ModKind {
 }
 
 fn starts_with_modifier(s: &str) -> bool {
-    matches!(s.chars().next(), Some(':' | '-' | '=' | '?' | '+' | '#' | '%'))
+    matches!(
+        s.chars().next(),
+        Some(':' | '-' | '=' | '?' | '+' | '#' | '%')
+    )
 }
 
 fn is_name_char(c: char) -> bool {
@@ -519,7 +523,8 @@ fn apply_modifier(
 }
 
 fn is_assignable_name(head: &str) -> bool {
-    !head.is_empty() && (head.chars().next().unwrap().is_ascii_alphabetic() || head.starts_with('_'))
+    !head.is_empty()
+        && (head.chars().next().unwrap().is_ascii_alphabetic() || head.starts_with('_'))
         && head.chars().all(is_name_char)
 }
 

@@ -20,9 +20,12 @@ path = "src/main.rs"
 libc = "0.2"
 
 # On Motor OS, `std::process::id()` panics (Motor pids are u64), so pids come
-# from moto-sys instead — see `sys::pid()`.
+# from moto-sys instead — see `sys::pid()`. moto-rt is where the `E_*` error
+# constants live (`ErrorCode` is a bare `u16`, not an enum); moto-sys re-exports
+# the type but not the constants, so `kill` names the crate directly.
 [target.'cfg(not(unix))'.dependencies]
 moto-sys = { path = "../../sys/lib/moto-sys" }
+moto-rt = { path = "../../sys/lib/moto-rt" }
 
 [profile.release]
 panic = "abort"

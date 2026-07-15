@@ -4,6 +4,14 @@ This document inventories what `rush` currently supports and, more importantly,
 where it diverges from a POSIX-conformant `sh`. It is a **gap list**, not a plan:
 it describes the current state so future work can be prioritized.
 
+> **Status: this is the analysis of the *original* shell, kept as the baseline
+> the plan was written against.** It describes code that no longer exists
+> (`line_parser.rs`, `redirect.rs`, and `term_impl_unix.rs` are gone; `exec.rs`
+> is a different file), so its file:line references are historical. Sections
+> closed by Phases 0–7 are marked **✅ CLOSED** inline. What is still open is
+> Phase 8's interactive UX (§3) and the odds and ends in §2.12. A full rewrite
+> is Phase 9's job; see `rush-to-sh-plan.md` for the current state.
+
 - Reference spec: POSIX.1-2017 Shell Command Language —
   <https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html>
 - Scope: analysis is based on reading the source as of this writing
@@ -97,8 +105,9 @@ POSIX §2.9.4, §2.9.5. rush is a command runner, not a language interpreter.
 - No compound grouping `{ …; }` or subshells `( … )`.
 - No `!` pipeline negation.
 
-### 2.4 Command lists / separators & operators
-POSIX §2.9.3.
+### 2.4 Command lists / separators & operators  ✅ CLOSED (Phases 1–2, 7)
+POSIX §2.9.3. `;`, `||` and `&` are all recognized and executed; `&` starts a
+real background job (Phase 7).
 
 - **`;` sequential separator — not recognized.** The parser has no `;` case
   (`line_parser.rs:30`), so `;` becomes a literal character inside a token.
@@ -108,8 +117,12 @@ POSIX §2.9.3.
   character (`line_parser.rs:53`), not an async-list operator.
 - No `;;` (needs `case`).
 
-### 2.5 Pipelines & job control
-POSIX §2.9.2, §2.9.1.
+### 2.5 Pipelines & job control  ✅ CLOSED (Phases 3, 5–7), except suspension
+POSIX §2.9.2, §2.9.1. Multi-stage pipelines work (including builtins/compound
+commands as stages), `$?` and `set -o pipefail` exist, and `jobs`/`fg`/`wait`/
+`kill %n`/`%1` specs landed in Phase 7. **Still open, permanently:** `^Z`/SIGTSTP
+suspension and `bg` resume — Motor OS has no termios and no tty signals, so
+nothing can ever be stopped (see the plan, §0.1 and Phase 7).
 
 - **Multi-stage pipelines panic.** `run()` hits
   `todo!("piping needs better stdio treatment")` whenever `commands.len() > 1`
@@ -192,13 +205,16 @@ POSIX §2.5.3, `sh` invocation (XCU).
 - No `PATH` management by the shell itself: no `hash` table, relies entirely on
   the OS `execvp`-style lookup inside `std::process::Command`.
 
-### 2.11 Signals & traps
-POSIX §2.11.
+### 2.11 Signals & traps  ✅ CLOSED (Phase 7), with platform limits
+POSIX §2.11. `trap` handles `EXIT` and signals by name/number, with dispositions
+managed through `sys::set_disposition`; `^C` raises `INT` because the reader
+detects the *byte* (which is still the only way, on either platform — raw mode
+clears `ISIG` on the host, and Motor OS has no tty signals at all).
 
-- No `trap` builtin; no signal disposition management.
-- Raw mode clears `ISIG` (`term_impl_unix.rs:26`), so within the line editor
-  Ctrl+C/Ctrl+\ do not raise signals (handled manually as line-cancel); there is
-  no shell-level SIGINT/SIGQUIT/EXIT trap handling for scripts.
+The observation below turned out to be the key insight of the phase, and it
+generalizes further than first written: **Motor OS has no signal delivery
+whatsoever**, so a trap there fires only for a `^C` rush spots itself, and `kill`
+can only terminate. See the plan's Phase 7 for the full list of degradations.
 
 ---
 

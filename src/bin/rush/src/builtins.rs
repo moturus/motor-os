@@ -10,8 +10,9 @@
 //!   shell; and a syntax/usage error aborts a non-interactive shell.
 //! - A **regular** builtin (`cd`, `pwd`, `echo`, `printf`, `test`/`[`, `read`,
 //!   `true`, `false`, `getopts`, `command`, `type`, `hash`, `alias`, `unalias`,
-//!   `umask`, `kill`) is found *after* functions, so a like-named function
-//!   shadows it, and a prefixed assignment is transient.
+//!   `umask`, and the Phase 7 job builtins `wait`, `jobs`, `fg`, `bg`, `kill`)
+//!   is found *after* functions, so a like-named function shadows it, and a
+//!   prefixed assignment is transient.
 //!
 //! This module owns the *pure* builtins — those that only need the [`Shell`] and
 //! a place to write output. The executor ([`crate::exec`]) owns the ones coupled
@@ -20,17 +21,22 @@
 //! wires each builtin's stdout/stderr to the command's redirections via the
 //! [`Io`] writers below (so `echo hi > f` and `pwd 2>err` behave).
 //!
-//! Documented limits: `umask` is bookkeeping-only (no Motor OS syscall); signal
-//! `trap`s are stored but only `EXIT` fires; `times` reports zeros; `hash` is a
-//! no-op cache. Phase 6 moved the shell options behind [`crate::options`]: `set`
-//! parses them from that one table, and the executor and expansion engine
-//! enforce them.
+//! Documented limits: `umask` is bookkeeping-only (no Motor OS syscall); `times`
+//! reports zeros; `hash` is a no-op cache. Phase 6 moved the shell options behind
+//! [`crate::options`]: `set` parses them from that one table, and the executor
+//! and expansion engine enforce them. Phase 7 gave `trap` real delivery via
+//! [`crate::signal`] and added the job builtins over [`crate::jobs`] — where the
+//! platform's limits live (Motor OS cannot deliver a signal, so a trap there
+//! fires only for a `^C` rush spots itself).
 
 use std::io::{Read, Write};
 use std::path::Path;
 
+use crate::jobs::{JobState, JobWait};
 use crate::options::Options;
 use crate::shell::Shell;
+use crate::signal;
+use crate::sys;
 
 /// The writers a builtin sends its normal and error output to. They are derived
 /// from the command's effective fd 1 / fd 2, so builtin output honors
@@ -116,6 +122,11 @@ pub enum Builtin {
     Alias,
     Unalias,
     Umask,
+    Wait,
+    Jobs,
+    Fg,
+    Bg,
+    Kill,
 }
 
 /// Map a command name to its builtin, if any.
@@ -151,6 +162,11 @@ pub fn lookup(name: &str) -> Option<Builtin> {
         "alias" => Builtin::Alias,
         "unalias" => Builtin::Unalias,
         "umask" => Builtin::Umask,
+        "wait" => Builtin::Wait,
+        "jobs" => Builtin::Jobs,
+        "fg" => Builtin::Fg,
+        "bg" => Builtin::Bg,
+        "kill" => Builtin::Kill,
         _ => return None,
     })
 }
@@ -195,6 +211,11 @@ pub fn dispatch(b: Builtin, args: &[String], io: &mut Io, shell: &mut Shell) -> 
         Builtin::Getopts => getopts(args, io, shell),
         Builtin::Type => type_cmd(args, io, shell),
         Builtin::Umask => umask(args, io, shell),
+        Builtin::Wait => wait(args, io, shell),
+        Builtin::Jobs => jobs_cmd(args, io, shell),
+        Builtin::Fg => fg(args, io, shell),
+        Builtin::Bg => bg(args, io, shell),
+        Builtin::Kill => kill(args, io, shell),
         Builtin::Times => times(io),
         Builtin::Trap => trap(args, io, shell),
         Builtin::Hash => hash(args, io),
@@ -213,7 +234,9 @@ pub fn dispatch(b: Builtin, args: &[String], io: &mut Io, shell: &mut Shell) -> 
         | Builtin::Break
         | Builtin::Continue
         | Builtin::Return => {
-            io.errln(&format!("rush: internal: builtin {b:?} not dispatched here"));
+            io.errln(&format!(
+                "rush: internal: builtin {b:?} not dispatched here"
+            ));
             2
         }
     }
@@ -483,7 +506,8 @@ fn parse_printf_int(arg: &str, status: &mut i32) -> i64 {
         i64::from_str_radix(hex, 16)
     } else if let Some(neg) = arg.strip_prefix("-0x").or_else(|| arg.strip_prefix("-0X")) {
         i64::from_str_radix(neg, 16).map(|v| -v)
-    } else if arg.len() > 1 && arg.starts_with('0') && arg[1..].bytes().all(|b| b.is_ascii_digit()) {
+    } else if arg.len() > 1 && arg.starts_with('0') && arg[1..].bytes().all(|b| b.is_ascii_digit())
+    {
         i64::from_str_radix(&arg[1..], 8)
     } else {
         arg.parse::<i64>()
@@ -711,9 +735,11 @@ fn cd(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
         }
     };
 
-    let old = shell
-        .get("PWD")
-        .or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
+    let old = shell.get("PWD").or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
 
     if let Err(e) = std::env::set_current_dir(Path::new(&target)) {
         io.errln(&format!("rush: cd: {target}: {}", err_str(&e)));
@@ -1016,7 +1042,10 @@ fn getopts(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
         shell.params().to_vec()
     };
 
-    let mut optind: usize = shell.get("OPTIND").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let mut optind: usize = shell
+        .get("OPTIND")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     if optind == 0 {
         optind = 1;
     }
@@ -1104,7 +1133,12 @@ fn getopts(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
 
 /// An option was processed: persist OPTIND / the intra-argument cursor. If the
 /// current argument is exhausted, advance to the next. Returns 0 (success).
-fn persist_getopts(shell: &mut Shell, mut optind: usize, mut charpos: usize, arg_len: usize) -> i32 {
+fn persist_getopts(
+    shell: &mut Shell,
+    mut optind: usize,
+    mut charpos: usize,
+    arg_len: usize,
+) -> i32 {
     if charpos >= arg_len {
         optind += 1;
         charpos = 0;
@@ -1267,6 +1301,17 @@ fn times(io: &mut Io) -> i32 {
 
 // ---- trap -------------------------------------------------------------------
 
+/// `trap [action] condition…` — POSIX §2.14.
+///
+/// With no operands, list the traps in a form the shell can re-read.
+/// `trap - COND…` restores the default action, `trap '' COND…` ignores the
+/// signal, and any other first operand is the action to run.
+///
+/// Setting a trap also establishes the platform disposition, which is what makes
+/// the signal arrive at all — or, on Motor OS, what quietly cannot: a trap there
+/// is stored and never fires unless rush itself synthesizes the signal (`^C`).
+/// A trap on a signal no one may catch (`KILL`) is likewise accepted and inert,
+/// as it is in dash. See [`crate::signal`].
 fn trap(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
     if args.is_empty() {
         for (cond, action) in shell.traps_sorted() {
@@ -1274,13 +1319,13 @@ fn trap(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
         }
         return 0;
     }
-    // `trap - sig…` resets; `trap action sig…` sets; a numeric/`-` first word
-    // that is itself a condition means "reset with default action" is implied by
-    // dash only via `trap - sig`. Treat the first operand as the action.
+    // Only a literal `-` resets; every other first operand is the action — so
+    // `trap 2` runs the action `2` on no conditions, as in dash, rather than
+    // resetting INT.
     let (action, conds) = if args[0] == "-" {
         (None, &args[1..])
     } else {
-        (Some(args[0].clone()), &args[1..])
+        (Some(args[0].as_str()), &args[1..])
     };
     if conds.is_empty() {
         io.errln("rush: trap: usage: trap [action] condition…");
@@ -1288,35 +1333,258 @@ fn trap(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
     }
     let mut status = 0;
     for cond in conds {
-        let norm = normalize_sig(cond);
-        match &action {
-            None => shell.clear_trap(&norm),
-            Some(a) if a.is_empty() => shell.set_trap(&norm, String::new()),
-            Some(a) => {
-                if !is_known_condition(&norm) {
-                    io.errln(&format!("rush: trap: {cond}: bad trap"));
-                    status = 1;
-                    continue;
+        let Some(parsed) = signal::parse_condition(cond) else {
+            io.errln(&format!("rush: trap: {cond}: bad trap"));
+            status = 1;
+            continue;
+        };
+        signal::apply_disposition(parsed, action);
+        let name = signal::condition_name(parsed);
+        match action {
+            None => shell.clear_trap(&name),
+            Some(a) => shell.set_trap(&name, a.to_string()),
+        }
+    }
+    status
+}
+
+// ---- job control ------------------------------------------------------------
+
+/// Wait for one job, running traps if a signal interrupts the wait.
+///
+/// Returns the job's exit status, or `128 + signo` if a trapped signal cut the
+/// wait short — POSIX requires `wait` to return above 128 then, and dash reports
+/// 138 for a `USR1` trap (verified).
+fn wait_one(shell: &mut Shell, idx: usize) -> i32 {
+    loop {
+        match shell.jobs.wait_step(idx) {
+            JobWait::Done(status) => return status,
+            JobWait::Gone => return 127,
+            JobWait::Interrupted => {
+                if let Some(signo) = signal::run_pending_traps(shell) {
+                    return 128 + signo;
                 }
-                shell.set_trap(&norm, a.clone());
+                // Nothing to run after all: resume waiting.
+            }
+        }
+    }
+}
+
+/// `wait [pid|%job …]` — wait for background jobs.
+///
+/// With no operands, wait for all of them and report 0. With operands, report
+/// the status of the last one waited for. A finished job's status stays
+/// available to repeated `wait`s until `jobs` reports it (dash behaves the same;
+/// see [`jobs_cmd`]).
+fn wait(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
+    shell.jobs.poll();
+    if args.is_empty() {
+        while let Some(&idx) = shell.jobs.running_indices().first() {
+            let status = wait_one(shell, idx);
+            if status > 128 {
+                return status; // a trap interrupted the wait
+            }
+        }
+        return 0;
+    }
+    let mut status = 0;
+    for spec in args {
+        match shell.jobs.find(spec) {
+            Some(idx) => status = wait_one(shell, idx),
+            None => {
+                if !spec.starts_with('%') && spec.parse::<u64>().is_err() {
+                    io.errln(&format!("rush: wait: Illegal number: {spec}"));
+                    return 2;
+                }
+                // A pid or job rush never started, or one already forgotten:
+                // POSIX (and dash) report 127.
+                status = 127;
             }
         }
     }
     status
 }
 
-/// Normalize a signal/condition name to its bare, upper-case form (`SIGINT` →
-/// `INT`, `2` → the name is left as-is for storage/listing).
-fn normalize_sig(cond: &str) -> String {
-    let up = cond.to_ascii_uppercase();
-    up.strip_prefix("SIG").unwrap_or(&up).to_string()
+/// `jobs [-l|-p]` — list background jobs, newest first (as dash does).
+///
+/// Reports each finished job once and then forgets it, which is what makes a
+/// later `wait` on it report 127 — dash's rule, and the reason `wait` itself
+/// does not discard anything.
+fn jobs_cmd(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
+    let mut long = false;
+    let mut pids_only = false;
+    for arg in args {
+        match arg.as_str() {
+            "-l" => long = true,
+            "-p" => pids_only = true,
+            _ => {
+                io.errln(&format!("rush: jobs: {arg}: invalid option"));
+                return 2;
+            }
+        }
+    }
+    shell.jobs.poll();
+    let count = shell.jobs.iter().count();
+    let mut lines = Vec::new();
+    for (i, job) in shell.jobs.iter().enumerate() {
+        if pids_only {
+            lines.push(job.pid.to_string());
+            continue;
+        }
+        // `+` marks the most recent job, `-` the one before it.
+        let marker = match count - i {
+            1 => '+',
+            2 => '-',
+            _ => ' ',
+        };
+        let state = match job.state {
+            JobState::Running => "Running".to_string(),
+            JobState::Done(0) => "Done".to_string(),
+            JobState::Done(status) => format!("Done({status})"),
+        };
+        let pid = if long {
+            format!("{} ", job.pid)
+        } else {
+            String::new()
+        };
+        lines.push(format!("[{}] {marker} {pid}{state:<27}{}", job.id, job.cmd));
+    }
+    for line in lines.iter().rev() {
+        io.outln(line.trim_end());
+    }
+    shell.jobs.retain_unfinished();
+    0
 }
 
-fn is_known_condition(cond: &str) -> bool {
-    matches!(
-        cond,
-        "EXIT" | "INT" | "TERM" | "QUIT" | "HUP" | "USR1" | "USR2" | "PIPE" | "ALRM" | "CHLD"
-    ) || cond.chars().all(|c| c.is_ascii_digit())
+/// `fg [job]` — run a job in the foreground.
+///
+/// Motor OS has no terminal process groups to hand a job (§0.1) and rush can
+/// never suspend one, so "foreground" can only mean "wait for it and report its
+/// status" — which is the half that still has meaning. dash instead refuses `fg`
+/// unless job control is on; rush's version is a documented divergence, and a
+/// useful one.
+fn fg(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
+    shell.jobs.poll();
+    let spec = args.first().map(String::as_str).unwrap_or("%%");
+    let Some(idx) = shell.jobs.find(spec) else {
+        io.errln(&format!("rush: fg: {spec}: no such job"));
+        return 1;
+    };
+    // Echo the command, as a job control shell does when it resumes one.
+    if let Some(cmd) = shell.jobs.get(idx).map(|job| job.cmd.clone()) {
+        io.outln(&cmd);
+    }
+    wait_one(shell, idx)
+}
+
+/// `bg [job]` — resume a stopped job in the background.
+///
+/// Nothing can ever be stopped: with no termios there is no `^Z`, and neither
+/// platform can deliver SIGTSTP (§0.1), so no job is ever in the one state `bg`
+/// exists to leave. It therefore always fails — as dash's does without job
+/// control — rather than pretending.
+fn bg(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
+    let _ = (args, shell);
+    io.errln("rush: bg: no job control: a job can never be stopped");
+    2
+}
+
+/// `kill [-s sigspec | -sigspec] pid|%job …` and `kill -l`.
+///
+/// A `%job` — and, on Motor OS, any `$!` — is resolved through rush's own job
+/// table (see [`crate::jobs`]); a bare pid the shell did not start goes to the
+/// platform, which on Motor OS can only ever terminate it.
+fn kill(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
+    const SIGTERM: i32 = 15;
+
+    if args.is_empty() {
+        io.errln("rush: kill: usage: kill [-s sigspec | -sigspec] pid | %job …");
+        return 2;
+    }
+    if args[0] == "-l" {
+        for signo in 1..(sys::NSIG as i32) {
+            if let Some(name) = signal::signo_to_name(signo) {
+                io.outln(name);
+            }
+        }
+        return 0;
+    }
+
+    let mut signo = SIGTERM;
+    let mut targets: &[String] = args;
+    if args[0] == "-s" {
+        let Some(spec) = args.get(1) else {
+            io.errln("rush: kill: -s requires a signal name");
+            return 2;
+        };
+        match signal_number(spec) {
+            Some(n) => signo = n,
+            None => {
+                io.errln(&format!("rush: kill: {spec}: invalid signal specification"));
+                return 2;
+            }
+        }
+        targets = &args[2..];
+    } else if let Some(spec) = args[0].strip_prefix('-') {
+        match signal_number(spec) {
+            Some(n) => signo = n,
+            None => {
+                io.errln(&format!("rush: kill: {spec}: invalid signal specification"));
+                return 2;
+            }
+        }
+        targets = &args[1..];
+    }
+    if targets.is_empty() {
+        io.errln("rush: kill: usage: kill [-s sigspec | -sigspec] pid | %job …");
+        return 2;
+    }
+
+    let mut status = 0;
+    for target in targets {
+        let result = match shell.jobs.find(target) {
+            Some(idx) => shell.jobs.signal(idx, signo),
+            None => match target.parse::<u64>() {
+                Ok(pid) => Some(sys::kill(pid, signo)),
+                Err(_) => {
+                    io.errln(&format!("rush: kill: {target}: no such job"));
+                    status = 1;
+                    continue;
+                }
+            },
+        };
+        match result {
+            None | Some(Ok(())) => {}
+            Some(Err(err)) => {
+                io.errln(&format!("rush: kill: {target}: {}", kill_error(err)));
+                status = 1;
+            }
+        }
+    }
+    status
+}
+
+/// A signal number from a `kill` sigspec: a name (`TERM`, `SIGTERM`) or a number.
+/// Unlike a trap condition, `0` is the "check only" signal rather than `EXIT`.
+fn signal_number(spec: &str) -> Option<i32> {
+    if spec == "0" {
+        return Some(0);
+    }
+    match signal::parse_condition(spec) {
+        Some(signal::Condition::Signal(signo)) => Some(signo),
+        // `EXIT` is not a signal one can send.
+        Some(signal::Condition::Exit) | None => None,
+    }
+}
+
+fn kill_error(err: sys::KillError) -> &'static str {
+    match err {
+        sys::KillError::NoSuchProcess => "no such process",
+        sys::KillError::PermissionDenied => "operation not permitted",
+        // Reached on Motor OS for every signal but KILL/TERM: there is no signal
+        // delivery to degrade to, so say so rather than killing something.
+        sys::KillError::Unsupported => "signal not supported on this platform",
+    }
 }
 
 // ---- hash -------------------------------------------------------------------
@@ -1688,16 +1956,45 @@ impl<'a> TestParser<'a> {
 fn is_unary_op(op: &str) -> bool {
     matches!(
         op,
-        "-z" | "-n" | "-e" | "-f" | "-d" | "-r" | "-w" | "-x" | "-s" | "-h" | "-L" | "-p" | "-S"
-            | "-b" | "-c" | "-t" | "-g" | "-u" | "-k" | "-O" | "-G"
+        "-z" | "-n"
+            | "-e"
+            | "-f"
+            | "-d"
+            | "-r"
+            | "-w"
+            | "-x"
+            | "-s"
+            | "-h"
+            | "-L"
+            | "-p"
+            | "-S"
+            | "-b"
+            | "-c"
+            | "-t"
+            | "-g"
+            | "-u"
+            | "-k"
+            | "-O"
+            | "-G"
     )
 }
 
 fn is_binary_op(op: &str) -> bool {
     matches!(
         op,
-        "=" | "==" | "!=" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-ef"
-            | "-nt" | "-ot"
+        "=" | "=="
+            | "!="
+            | "<"
+            | ">"
+            | "-eq"
+            | "-ne"
+            | "-lt"
+            | "-le"
+            | "-gt"
+            | "-ge"
+            | "-ef"
+            | "-nt"
+            | "-ot"
     )
 }
 
@@ -1797,7 +2094,9 @@ fn is_executable(path: &str) -> bool {
 fn is_executable(path: &str) -> bool {
     // Motor OS has no execute permission bit; treat any existing file as
     // executable (matching how command resolution accepts it).
-    std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 #[cfg(unix)]
@@ -1858,10 +2157,7 @@ mod tests {
         let mut o = Vec::new();
         let mut e = Vec::new();
         let mut io = Io::new(&mut o, &mut e);
-        printf(
-            &["%s=%d\n".into(), "x".into(), "42".into()],
-            &mut io,
-        );
+        printf(&["%s=%d\n".into(), "x".into(), "42".into()], &mut io);
         assert_eq!(String::from_utf8(o).unwrap(), "x=42\n");
     }
 
@@ -1870,7 +2166,10 @@ mod tests {
         let mut o = Vec::new();
         let mut e = Vec::new();
         let mut io = Io::new(&mut o, &mut e);
-        printf(&["[%s]".into(), "a".into(), "b".into(), "c".into()], &mut io);
+        printf(
+            &["[%s]".into(), "a".into(), "b".into(), "c".into()],
+            &mut io,
+        );
         assert_eq!(String::from_utf8(o).unwrap(), "[a][b][c]");
     }
 
@@ -1879,7 +2178,10 @@ mod tests {
         let mut o = Vec::new();
         let mut e = Vec::new();
         let mut io = Io::new(&mut o, &mut e);
-        printf(&["%5d|%-5d|%05d\n".into(), "7".into(), "7".into(), "7".into()], &mut io);
+        printf(
+            &["%5d|%-5d|%05d\n".into(), "7".into(), "7".into(), "7".into()],
+            &mut io,
+        );
         assert_eq!(String::from_utf8(o).unwrap(), "    7|7    |00007\n");
     }
 
@@ -1922,8 +2224,13 @@ mod tests {
             vec!["a".to_string(), "".to_string(), "".to_string()]
         );
         // An escaped space is literal, not a field delimiter: `a\ b c` → 2 fields.
-        let escaped: Vec<ReadChar> =
-            vec![('a', false), (' ', true), ('b', false), (' ', false), ('c', false)];
+        let escaped: Vec<ReadChar> = vec![
+            ('a', false),
+            (' ', true),
+            ('b', false),
+            (' ', false),
+            ('c', false),
+        ];
         assert_eq!(
             split_read_fields(&escaped, " \t\n", 2),
             vec!["a b".to_string(), "c".to_string()]
