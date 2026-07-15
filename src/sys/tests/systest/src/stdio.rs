@@ -377,6 +377,30 @@ fn test_stdio_reader_wake_on_writer_drop() {
     println!("test_stdio_reader_wake_on_writer_drop PASS");
 }
 
+fn test_stdio_reader_drains_after_writer_drop() {
+    use moto_sys::SysHandle;
+
+    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+
+    let reader = unsafe { StdioPipe::new_reader(d1) };
+    let writer = unsafe { StdioPipe::new_writer(d2) };
+
+    let _ = writer.write(b"left behind").unwrap();
+    core::mem::drop(writer);
+
+    // The writer is gone, but its bytes are still ours to deliver: a short-lived
+    // child (`echo hi`) has usually exited by the time its output is read, so
+    // losing them here loses the output of `foo | cat` and `ssh host 'echo hi'`.
+    let mut buf = [0; 64];
+    let sz = reader.nonblocking_read(&mut buf).unwrap();
+    assert_eq!(&buf[0..sz], b"left behind");
+
+    // Only once there is nothing left does the reader learn the writer is gone.
+    assert!(reader.nonblocking_read(&mut buf).is_err());
+
+    println!("test_stdio_reader_drains_after_writer_drop PASS");
+}
+
 fn test_stdio_writer_wake_on_reader_drop() {
     use moto_sys::SysHandle;
 
@@ -415,5 +439,6 @@ pub fn run_all_tests() {
     test_stdio_pipe_flush();
     test_stdio_is_terminal();
     test_stdio_reader_wake_on_writer_drop();
+    test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();
 }
