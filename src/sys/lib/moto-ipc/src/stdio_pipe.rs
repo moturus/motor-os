@@ -286,19 +286,26 @@ impl StdioPipe {
         };
 
         let mut buffer = buffer.lock();
-        if buffer.error_code != moto_rt::E_OK {
-            return Err(buffer.error_code);
-        }
 
+        // Read before looking at error_code: bytes the remote left in the buffer
+        // are ours to deliver even once it is gone, so an error is reported only
+        // after the buffer has been drained. read_timeout_impl() does the same.
         let sz = buffer.read(buf);
         if sz == 0 {
+            if buffer.error_code != moto_rt::E_OK {
+                return Err(buffer.error_code);
+            }
             return Err(moto_rt::E_NOT_READY);
         }
 
-        if let Err(e) = SysCpu::wake(self.handle) {
-            // Cache the error.
-            buffer.error_code = e;
-            return Err(e);
+        if buffer.error_code == moto_rt::E_OK {
+            if let Err(e) = SysCpu::wake(self.handle) {
+                // Cache the error: this read succeeded, so the error surfaces on
+                // a later call, once there is nothing left to hand out. Returning
+                // it now would drop the bytes already copied into the caller's
+                // buffer.
+                buffer.error_code = e;
+            }
         }
 
         Ok(sz)
