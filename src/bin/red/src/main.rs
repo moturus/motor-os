@@ -1,9 +1,11 @@
 pub mod buffer;
+pub mod config;
 pub mod editor;
 pub mod input;
 pub mod terminal;
 pub mod syntax;
 
+use config::Config;
 use editor::Editor;
 use input::{read_key, Key};
 use terminal::TerminalGuard;
@@ -18,10 +20,17 @@ fn main() {
         Vec::new()
     };
 
+    // Read the config before raw mode, but report any complaint about it through
+    // the status bar once the editor is up.
+    let (config, config_complaint) = Config::load();
+
     // Instantiate terminal guard to safely enter raw mode and restore it on drop
     let _guard = TerminalGuard::new();
 
-    let mut editor = Editor::new(filenames);
+    let mut editor = Editor::new(filenames, config);
+    if let Some(complaint) = config_complaint {
+        editor.set_status(&complaint);
+    }
     let mut last_query = Instant::now();
 
     while !editor.quit_requested {

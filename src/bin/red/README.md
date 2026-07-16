@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Core Architectural Highlights
+## Core Architectural Highlights
 
 *   **Zero Dependencies**: Written without crates like `crossterm`, `termion`, `libc`, or `nix`. It is powered entirely by raw, standard ANSI/ASCII escape sequences.
 *   **Cell-Level Frame Diffing**:
@@ -24,11 +24,11 @@
     *   Launches in the terminal's Alternate Screen Buffer (`\x1b[?1049h`), leaving the user's terminal scrollback history perfectly clean upon exit.
 *   **UTF-8 & Tab rendering**:
     *   Fully decodes multi-byte UTF-8 characters from raw stdin bytes.
-    *   Converts tabs (`\t`) to dynamic 8-space tab stops during screen rendering, while preserving raw tab characters in the buffer.
+    *   Converts tabs (`\t`) to dynamic tab stops (`tabstop` columns wide, see [Configuration](#configuration)) during screen rendering, while preserving raw tab characters in the buffer.
 
 ---
 
-## 🛠️ Feature & Command Reference
+## Feature & Command Reference
 
 ### 1. Modes
 Like Vim, **red** operates in five distinct modes:
@@ -86,7 +86,7 @@ Like Vim, **red** operates in five distinct modes:
 | `Backspace` | Delete character before the cursor; merges lines if at the start of a line |
 | `Delete` | Delete character under the cursor; merges next line if at the end of a line |
 | `Enter` | Split the current line at the cursor and move to the next line |
-| `Tab` | Insert a tab character (`\t`) |
+| `Tab` | Indent to the next tab stop: spaces if `expandtab` is set, otherwise a tab character (`\t`) |
 | `←` / `→` / `↑` / `↓` | Navigate cursor Left / Right / Up / Down |
 
 ---
@@ -130,7 +130,7 @@ Like Vim, **red** operates in five distinct modes:
 
 ---
 
-## 📂 Project Module Structure
+## Project Module Structure
 
 The project has been refactored into a highly clean and modular structure:
 *   `src/main.rs`: The application entrypoint. Declares modules, instantiates the `TerminalGuard`, and runs the primary interactive event loop.
@@ -142,7 +142,32 @@ The project has been refactored into a highly clean and modular structure:
 
 ---
 
-## 🎨 Syntax Highlighting
+## Configuration
+
+On startup **red** reads an optional config file:
+
+| Platform | Location |
+| :--- | :--- |
+| Motor OS | `/user/cfg/red.toml` |
+| Unix | `$HOME/.config/red.toml` |
+
+The file is not required — without one, red uses the defaults below. Options are named after their vim equivalents, and the vim short names work too:
+
+| Option | Default | Meaning |
+| :--- | :--- | :--- |
+| `tabstop` (`ts`) | `4` | Width of a tab character, in columns (must be 1-32) |
+| `expandtab` (`et`) | `true` | Insert spaces up to the next tab stop when Tab is pressed, instead of a tab character |
+
+```toml
+tabstop = 4
+expandtab = true
+```
+
+Only the `key = value` subset of TOML is understood (plus `#` comments) — red has no dependencies, so there is no TOML crate behind this. A malformed entry is skipped and reported in the status bar; the rest of the file still applies.
+
+---
+
+## Syntax Highlighting
 
 **red** comes with a high-performance, zero-dependency, **State-Cascading Incremental Syntax Highlighting** engine!
 
@@ -157,7 +182,7 @@ The project has been refactored into a highly clean and modular structure:
 
 ---
 
-## 🧪 Unit Testing
+## Unit Testing
 
 We maintain a comprehensive suite of unit tests verifying all core buffer modifications, cursor boundaries, page scrolling, line splitting, line merging, and mode transitions completely independently of terminal I/O.
 
@@ -168,7 +193,7 @@ cargo test
 
 ---
 
-## 📦 How to Build and Run
+## How to Build and Run
 
 1.  **Build the project**:
     ```bash

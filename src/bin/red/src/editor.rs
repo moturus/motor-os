@@ -1,4 +1,5 @@
-use crate::buffer::{Line, Buffer, HighlightType, LexerState};
+use crate::buffer::{char_width, Line, Buffer, HighlightType, LexerState};
+use crate::config::Config;
 use crate::input::Key;
 use crate::terminal::get_terminal_size;
 use crate::syntax::SyntaxManager;
@@ -73,6 +74,8 @@ fn cell_syntax_style(hl: HighlightType) -> &'static str {
 }
 
 pub struct Editor {
+    pub config: Config,
+
     pub buffers: Vec<Buffer>,
     pub current_buffer_idx: usize,
     pub next_buffer_id: usize,
@@ -115,7 +118,10 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(filenames: Vec<String>) -> Self {
+    /// The config is passed in rather than loaded here so that `new` does no
+    /// file I/O and tests are not at the mercy of the config file on the machine
+    /// running them. `main` loads it via `Config::load`.
+    pub fn new(filenames: Vec<String>, config: Config) -> Self {
         let (rows, cols) = get_terminal_size().unwrap_or((24, 80));
         let screen_rows = if rows > 2 { rows - 2 } else { 1 };
         let screen_cols = cols;
@@ -134,6 +140,7 @@ impl Editor {
         }
 
         let mut editor = Editor {
+            config,
             buffers,
             current_buffer_idx: 0,
             next_buffer_id,
@@ -193,18 +200,13 @@ impl Editor {
     }
 
     pub fn update_rx(&mut self) {
-        let mut rx = 0;
+        let tab_stop = self.config.tabstop;
         let buf = self.current_buffer_mut();
-        if buf.cy < buf.lines.len() {
-            for &ch in &buf.lines[buf.cy].chars[..buf.cx] {
-                if ch == '\t' {
-                    rx += 8 - (rx % 8);
-                } else {
-                    rx += 1;
-                }
-            }
-        }
-        buf.rx = rx;
+        buf.rx = if buf.cy < buf.lines.len() {
+            buf.lines[buf.cy].display_width_to(buf.cx, tab_stop)
+        } else {
+            0
+        };
     }
 
     pub fn scroll(&mut self) {
@@ -215,6 +217,7 @@ impl Editor {
         let text_cols = self.screen_cols.saturating_sub(gutter_w);
         let screen_rows = self.screen_rows;
         let wrap = self.wrap; // Copy wrap to avoid borrow conflict
+        let tab_stop = self.config.tabstop;
 
         let buf = self.current_buffer_mut();
         
@@ -244,20 +247,12 @@ impl Editor {
                         if i == buf.cx {
                             break;
                         }
-                        let char_w = if ch == '\t' {
-                            8 - (current_segment_rx % 8)
-                        } else {
-                            1
-                        };
+                        let char_w = char_width(ch, current_segment_rx, tab_stop);
                         if current_segment_rx > 0 && current_segment_rx + char_w > text_cols {
                             cursor_segment_idx += 1;
                             current_segment_rx = 0;
                         }
-                        if ch == '\t' {
-                            current_segment_rx += 8 - (current_segment_rx % 8);
-                        } else {
-                            current_segment_rx += 1;
-                        }
+                        current_segment_rx += char_width(ch, current_segment_rx, tab_stop);
                     }
                 }
 
@@ -269,7 +264,7 @@ impl Editor {
                     let mut screen_y = 0;
                     for r in buf.row_offset..buf.cy {
                         if r < buf.lines.len() {
-                            screen_y += buf.lines[r].wrapped_segments_count(text_cols);
+                            screen_y += buf.lines[r].wrapped_segments_count(text_cols, tab_stop);
                         }
                     }
                     screen_y += cursor_segment_idx;
@@ -294,7 +289,7 @@ impl Editor {
                         // Scan upwards from buf.cy - 1
                         while target_row_offset > 0 {
                             let r = target_row_offset - 1;
-                            let line_rows = buf.lines[r].wrapped_segments_count(text_cols);
+                            let line_rows = buf.lines[r].wrapped_segments_count(text_cols, tab_stop);
                             if line_rows <= remaining_rows {
                                 remaining_rows -= line_rows;
                                 target_row_offset = r;
@@ -384,7 +379,7 @@ impl Editor {
         while r < buf.lines.len() && visible.len() < self.screen_rows {
             let line = &buf.lines[r];
             if self.wrap {
-                let segments = line.wrapped_segments(text_cols);
+                let segments = line.wrapped_segments(text_cols, self.config.tabstop);
                 for (seg_idx, (seg_chars, seg_hl)) in segments.into_iter().enumerate() {
                     if visible.len() >= self.screen_rows {
                         break;
@@ -407,12 +402,8 @@ impl Editor {
                         seg_chars.push(ch);
                         seg_hl.push(line.highlights.get(i).copied().unwrap_or(HighlightType::Normal));
                     }
-                    
-                    if ch == '\t' {
-                        rx += 8 - (rx % 8);
-                    } else {
-                        rx += 1;
-                    }
+
+                    rx += char_width(ch, rx, self.config.tabstop);
                 }
                 
                 visible.push(VisibleRow {
@@ -440,7 +431,7 @@ impl Editor {
         let mut screen_y = 0;
         for r in buf.row_offset..buf.cy {
             if r < buf.lines.len() {
-                let segments = buf.lines[r].wrapped_segments(text_cols);
+                let segments = buf.lines[r].wrapped_segments(text_cols, self.config.tabstop);
                 screen_y += segments.len();
             }
         }
@@ -457,23 +448,14 @@ impl Editor {
                     break;
                 }
                 
-                let char_w = if ch == '\t' {
-                    8 - (current_segment_rx % 8)
-                } else {
-                    1
-                };
+                let char_w = char_width(ch, current_segment_rx, self.config.tabstop);
 
                 if current_segment_rx > 0 && current_segment_rx + char_w > text_cols {
                     segment_idx += 1;
                     current_segment_rx = 0;
                 }
 
-                if ch == '\t' {
-                    let w = 8 - (current_segment_rx % 8);
-                    current_segment_rx += w;
-                } else {
-                    current_segment_rx += 1;
-                }
+                current_segment_rx += char_width(ch, current_segment_rx, self.config.tabstop);
             }
             rx_in_segment = current_segment_rx;
         }
@@ -657,7 +639,7 @@ impl Editor {
             let mut char_start_idx = 0;
             if self.wrap {
                 let buf = self.current_buffer();
-                let segments = buf.lines[vr.buffer_line_idx].wrapped_segments(text_cols);
+                let segments = buf.lines[vr.buffer_line_idx].wrapped_segments(text_cols, self.config.tabstop);
                 for seg in segments.iter().take(vr.segment_idx) {
                     char_start_idx += seg.0.len();
                 }
@@ -670,11 +652,7 @@ impl Editor {
                         char_start_idx = idx;
                         break;
                     }
-                    if ch == '\t' {
-                        rx += 8 - (rx % 8);
-                    } else {
-                        rx += 1;
-                    }
+                    rx += char_width(ch, rx, self.config.tabstop);
                 }
             }
 
@@ -716,7 +694,7 @@ impl Editor {
                 let style = if is_selected { STYLE_INVERT } else { cell_syntax_style(char_hl) };
 
                 if ch == '\t' {
-                    let spaces = 8 - (rx % 8);
+                    let spaces = char_width(ch, rx, self.config.tabstop);
                     for _ in 0..spaces {
                         cells.push(Cell { ch: ' ', style });
                         rx += 1;
@@ -1543,10 +1521,21 @@ impl Editor {
             }
             Key::Tab => {
                 let (cy, redraw) = {
+                    let (tab_stop, expandtab) = (self.config.tabstop, self.config.expandtab);
                     let buf = self.current_buffer_mut();
                     if buf.cy < buf.lines.len() {
-                        buf.lines[buf.cy].chars.insert(buf.cx, '\t');
-                        buf.cx += 1;
+                        if expandtab {
+                            // Fill to the next tab stop, as vim does: with
+                            // tabstop=4, Tab at column 2 inserts 2 spaces, not 4.
+                            let rx = buf.lines[buf.cy].display_width_to(buf.cx, tab_stop);
+                            for _ in 0..(tab_stop - (rx % tab_stop)) {
+                                buf.lines[buf.cy].chars.insert(buf.cx, ' ');
+                                buf.cx += 1;
+                            }
+                        } else {
+                            buf.lines[buf.cy].chars.insert(buf.cx, '\t');
+                            buf.cx += 1;
+                        }
                         buf.dirty = true;
                         (Some(buf.cy), Some(RedrawTarget::Line(buf.cy)))
                     } else {
@@ -2182,7 +2171,7 @@ mod tests {
 
     #[test]
     fn test_editor_initial_state() {
-        let editor = Editor::new(Vec::new());
+        let editor = Editor::new(Vec::new(), Config::default());
         assert_eq!(editor.buffers.len(), 1);
         let buf = editor.current_buffer();
         assert_eq!(buf.lines.len(), 1);
@@ -2195,7 +2184,7 @@ mod tests {
 
     #[test]
     fn test_insert_mode_typing() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.process_keypress(Key::Char('i'));
         assert_eq!(editor.mode, Mode::Insert);
 
@@ -2212,7 +2201,7 @@ mod tests {
 
     #[test]
     fn test_backspace() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.process_keypress(Key::Char('i'));
         for ch in "hello".chars() {
             editor.process_keypress(Key::Char(ch));
@@ -2227,7 +2216,7 @@ mod tests {
 
     #[test]
     fn test_enter_splits_lines() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.process_keypress(Key::Char('i'));
         for ch in "hello".chars() {
             editor.process_keypress(Key::Char(ch));
@@ -2248,7 +2237,7 @@ mod tests {
 
     #[test]
     fn test_backspace_merges_lines() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.process_keypress(Key::Char('i'));
         for ch in "hello".chars() {
             editor.process_keypress(Key::Char(ch));
@@ -2268,7 +2257,7 @@ mod tests {
 
     #[test]
     fn test_normal_mode_motions() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("line one"),
             Line::new("line two"),
@@ -2298,7 +2287,7 @@ mod tests {
 
     #[test]
     fn test_page_scrolling() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.wrap = false; // Disable wrap to test classic page scrolling
         editor.screen_rows = 5;
         editor.current_buffer_mut().lines = (1..=20)
@@ -2327,7 +2316,7 @@ mod tests {
 
     #[test]
     fn test_command_mode_transition() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         assert_eq!(editor.mode, Mode::Normal);
         
         editor.process_keypress(Key::Char(':'));
@@ -2338,7 +2327,7 @@ mod tests {
 
     #[test]
     fn test_line_numbers() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         assert!(editor.show_line_numbers);
         assert_eq!(editor.get_gutter_width(), 4);
 
@@ -2359,7 +2348,7 @@ mod tests {
 
     #[test]
     fn test_visual_char_mode_yank_paste() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![Line::new("hello world")];
         
         editor.process_keypress(Key::Char('v'));
@@ -2384,7 +2373,7 @@ mod tests {
 
     #[test]
     fn test_visual_line_mode_yank_paste() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("line one"),
             Line::new("line two"),
@@ -2408,7 +2397,7 @@ mod tests {
 
     #[test]
     fn test_visual_mode_delete() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![Line::new("hello world")];
         
         editor.process_keypress(Key::Char('v'));
@@ -2425,7 +2414,7 @@ mod tests {
 
     #[test]
     fn test_insert_mode_arrow_navigation() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("hello"),
             Line::new("world"),
@@ -2458,7 +2447,7 @@ mod tests {
 
     #[test]
     fn test_join_lines() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("hello"),
             Line::new("   world"),
@@ -2490,7 +2479,7 @@ mod tests {
 
     #[test]
     fn test_multi_buffer_switching_and_editing() {
-        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()]);
+        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()], Config::default());
         assert_eq!(editor.buffers.len(), 2);
         assert_eq!(editor.current_buffer_idx, 0);
         assert_eq!(editor.current_buffer().id, 1);
@@ -2538,7 +2527,7 @@ mod tests {
 
     #[test]
     fn test_buffer_deletion() {
-        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()]);
+        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()], Config::default());
         assert_eq!(editor.buffers.len(), 2);
 
         // Delete buffer 1 (it's clean, so it should succeed immediately)
@@ -2565,7 +2554,7 @@ mod tests {
 
     #[test]
     fn test_normal_mode_arrow_buffer_switching() {
-        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()]);
+        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()], Config::default());
         assert_eq!(editor.current_buffer_idx, 0);
 
         // Press Right arrow in Normal Mode -> switch to next buffer
@@ -2583,7 +2572,7 @@ mod tests {
 
     #[test]
     fn test_syntax_highlighting_rust() {
-        let mut editor = Editor::new(vec!["test.rs".to_string()]);
+        let mut editor = Editor::new(vec!["test.rs".to_string()], Config::default());
         editor.process_keypress(Key::Char('i'));
         
         // Type a Rust keyword: "let"
@@ -2618,7 +2607,7 @@ mod tests {
 
     #[test]
     fn test_syntax_highlighting_rust_lifetimes() {
-        let mut editor = Editor::new(vec!["test.rs".to_string()]);
+        let mut editor = Editor::new(vec!["test.rs".to_string()], Config::default());
         editor.process_keypress(Key::Char('i'));
         
         // Type a line containing both a lifetime and a character literal
@@ -2650,7 +2639,7 @@ mod tests {
 
     #[test]
     fn test_syntax_highlighting_toml() {
-        let mut editor = Editor::new(vec!["Cargo.toml".to_string()]);
+        let mut editor = Editor::new(vec!["Cargo.toml".to_string()], Config::default());
         editor.process_keypress(Key::Char('i'));
         
         for ch in "[package]".chars() {
@@ -2702,7 +2691,7 @@ mod tests {
 
     #[test]
     fn test_soft_line_wrapping() {
-        let mut editor = Editor::new(vec!["test.rs".to_string()]);
+        let mut editor = Editor::new(vec!["test.rs".to_string()], Config::default());
         editor.wrap = true;
         editor.show_line_numbers = true; // Gutter width = 4
         editor.screen_cols = 14;         // text_cols = 14 - 4 = 10
@@ -2711,7 +2700,7 @@ mod tests {
         editor.current_buffer_mut().lines = vec![Line::new("abcdefghijklmnopqrstuvwxy")];
         
         // Verify wrapping segment lengths
-        let segments = editor.current_buffer().lines[0].wrapped_segments(10);
+        let segments = editor.current_buffer().lines[0].wrapped_segments(10, editor.config.tabstop);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].0.len(), 10); // "abcdefghij"
         assert_eq!(segments[1].0.len(), 10); // "klmnopqrst"
@@ -2738,7 +2727,7 @@ mod tests {
 
     #[test]
     fn test_line_jump_command() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("line one"),
             Line::new("line two"),
@@ -2764,7 +2753,7 @@ mod tests {
 
     #[test]
     fn test_search_mode_and_navigation() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("rust rust rust"),
             Line::new("cpp"),
@@ -2820,7 +2809,7 @@ mod tests {
 
     #[test]
     fn test_backward_search_mode_and_navigation() {
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![
             Line::new("rust"),
             Line::new("cpp"),
@@ -2870,7 +2859,7 @@ mod tests {
     #[test]
     fn test_unchanged_terminal_size_does_not_force_full_redraw() {
         // During tests get_terminal_size() reports (24, 80) -> screen_rows 22, cols 80.
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         let (rows, cols) = (editor.screen_rows, editor.screen_cols);
 
         // Simulate the periodic size poll returning the *same* dimensions.
@@ -2899,7 +2888,7 @@ mod tests {
         // must not cause every screen row to be repainted. The damage-tracked
         // renderer should only change the edited line's row (and the status bar,
         // whose cursor readout moves).
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         assert!(editor.wrap, "test assumes wrap defaults to on");
 
         // A handful of distinct lines so a full repaint would be obvious.
@@ -2951,7 +2940,7 @@ mod tests {
         // the "row:col" readout near the right edge, so the diff must reposition
         // into the right half of the bar and rewrite just a couple of characters
         // -- never the whole inverted line.
-        let mut editor = Editor::new(Vec::new());
+        let mut editor = Editor::new(Vec::new(), Config::default());
         editor.screen_cols = 40;
         editor.current_buffer_mut().lines = vec![Line::new("abcdefghij")];
 
@@ -2997,5 +2986,126 @@ mod tests {
         );
         // The unchanged left portion must not be re-emitted.
         assert!(!out.contains("No Name"));
+    }
+
+    // --- Configuration ---
+
+    fn editor_with(config: Config) -> Editor {
+        Editor::new(Vec::new(), config)
+    }
+
+    #[test]
+    fn test_tabstop_drives_cursor_column() {
+        // A tab renders as a jump to the next tab stop, whatever the width.
+        for (tabstop, expected_rx) in [(4, 4), (8, 8), (2, 2), (3, 3)] {
+            let mut editor = editor_with(Config {
+                tabstop,
+                expandtab: false,
+            });
+            editor.current_buffer_mut().lines = vec![Line::new("\tx")];
+            editor.current_buffer_mut().cx = 1; // just past the tab
+            editor.update_rx();
+            assert_eq!(editor.current_buffer().rx, expected_rx, "tabstop {tabstop}");
+        }
+    }
+
+    #[test]
+    fn test_tab_advances_to_next_tab_stop_not_a_full_width() {
+        // With tabstop=4, a tab in column 2 is 2 columns wide, not 4.
+        let mut editor = editor_with(Config {
+            tabstop: 4,
+            expandtab: false,
+        });
+        editor.current_buffer_mut().lines = vec![Line::new("ab\tc")];
+        editor.current_buffer_mut().cx = 3; // past 'a', 'b', tab
+        editor.update_rx();
+        assert_eq!(editor.current_buffer().rx, 4);
+    }
+
+    #[test]
+    fn test_expandtab_inserts_spaces() {
+        let mut editor = editor_with(Config {
+            tabstop: 4,
+            expandtab: true,
+        });
+        editor.process_keypress(Key::Char('i'));
+        editor.process_keypress(Key::Tab);
+
+        let line: String = editor.current_buffer().lines[0].chars.iter().collect();
+        assert_eq!(line, "    ");
+        assert_eq!(editor.current_buffer().cx, 4);
+        assert!(editor.current_buffer().dirty);
+    }
+
+    #[test]
+    fn test_expandtab_fills_only_to_the_next_tab_stop() {
+        // vim's behavior: with tabstop=4, Tab at column 2 inserts 2 spaces.
+        let mut editor = editor_with(Config {
+            tabstop: 4,
+            expandtab: true,
+        });
+        editor.process_keypress(Key::Char('i'));
+        for ch in "ab".chars() {
+            editor.process_keypress(Key::Char(ch));
+        }
+        editor.process_keypress(Key::Tab);
+
+        let line: String = editor.current_buffer().lines[0].chars.iter().collect();
+        assert_eq!(line, "ab  ");
+        assert_eq!(editor.current_buffer().cx, 4);
+
+        // A second Tab spans a whole tab stop.
+        editor.process_keypress(Key::Tab);
+        let line: String = editor.current_buffer().lines[0].chars.iter().collect();
+        assert_eq!(line, "ab      ");
+        assert_eq!(editor.current_buffer().cx, 8);
+    }
+
+    #[test]
+    fn test_noexpandtab_inserts_a_tab_character() {
+        let mut editor = editor_with(Config {
+            tabstop: 4,
+            expandtab: false,
+        });
+        editor.process_keypress(Key::Char('i'));
+        editor.process_keypress(Key::Tab);
+
+        let line: String = editor.current_buffer().lines[0].chars.iter().collect();
+        assert_eq!(line, "\t");
+        assert_eq!(editor.current_buffer().cx, 1);
+    }
+
+    #[test]
+    fn test_expandtab_inserts_at_the_cursor_not_the_line_end() {
+        let mut editor = editor_with(Config {
+            tabstop: 4,
+            expandtab: true,
+        });
+        editor.current_buffer_mut().lines = vec![Line::new("abcd")];
+        editor.current_buffer_mut().cx = 0;
+        editor.process_keypress(Key::Char('i'));
+        editor.process_keypress(Key::Tab);
+
+        let line: String = editor.current_buffer().lines[0].chars.iter().collect();
+        assert_eq!(line, "    abcd");
+        assert_eq!(editor.current_buffer().cx, 4);
+    }
+
+    #[test]
+    fn test_tabstop_drives_rendered_width() {
+        // The tab must paint as spaces up to the next tab stop.
+        let mut editor = editor_with(Config {
+            tabstop: 4,
+            expandtab: false,
+        });
+        editor.show_line_numbers = false;
+        editor.screen_cols = 12;
+        editor.current_buffer_mut().lines = vec![Line::new("\tx")];
+        editor.highlight_buffer_from(0, true);
+
+        let rows = editor.gather_visible_rows();
+        let cells = editor.render_text_row(0, &rows, 12, 0);
+        let painted: String = cells.iter().map(|c| c.ch).collect();
+        assert!(painted.starts_with("    x"), "painted: {painted:?}");
     }
 }
