@@ -2133,12 +2133,7 @@ impl Editor {
 
         match path_to_save {
             Some(path) => {
-                let content: String = buf
-                    .lines
-                    .iter()
-                    .map(|l| l.chars.iter().collect::<String>())
-                    .collect::<Vec<String>>()
-                    .join("\n");
+                let content = buf.to_file_content();
 
                 match std::fs::write(&path, content) {
                     Ok(_) => {
@@ -2986,6 +2981,66 @@ mod tests {
         );
         // The unchanged left portion must not be re-emitted.
         assert!(!out.contains("No Name"));
+    }
+
+    // --- Saving ---
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("red_save_{}_{tag}_{n}", std::process::id()))
+    }
+
+    /// Load `original` from a real file, save it back, return the bytes on disk.
+    fn round_trip(tag: &str, original: &str) -> String {
+        let path = temp_path(tag);
+        std::fs::write(&path, original).unwrap();
+        let mut editor = Editor::new(
+            vec![path.to_string_lossy().into_owned()],
+            Config::default(),
+        );
+        assert!(editor.save_to_file(None), "save failed for {tag}");
+        let got = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        got
+    }
+
+    #[test]
+    fn test_saving_an_untouched_file_leaves_it_byte_identical() {
+        // The bug this guards: red used to join lines with "\n", so every save
+        // silently ate the file's final newline.
+        for (tag, original) in [
+            ("plain", "hello\nworld\n"),
+            ("single", "hello\n"),
+            ("trailing_blank", "a\n\n"),
+            ("leading_blank", "\na\n"),
+            ("interior_blanks", "a\n\nb\n"),
+            ("empty", ""),
+        ] {
+            assert_eq!(round_trip(tag, original), original, "case: {tag}");
+        }
+    }
+
+    #[test]
+    fn test_saving_restores_a_missing_final_newline() {
+        // vim's 'fixendofline' default restores the EOL rather than preserving
+        // its absence -- measured against vim 9.1, which does exactly this.
+        assert_eq!(round_trip("no_eol", "hello\nworld"), "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_saving_an_edited_buffer_terminates_the_last_line() {
+        let path = temp_path("edited");
+        let mut editor = Editor::new(Vec::new(), Config::default());
+        editor.process_keypress(Key::Char('i'));
+        for ch in "abc".chars() {
+            editor.process_keypress(Key::Char(ch));
+        }
+        assert!(editor.save_to_file(Some(&path.to_string_lossy())));
+        let got = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(got, "abc\n");
     }
 
     // --- Configuration ---

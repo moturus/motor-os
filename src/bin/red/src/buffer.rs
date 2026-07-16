@@ -157,6 +157,31 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// The bytes to write out for this buffer.
+    ///
+    /// Follows vim's default (`'fixendofline'` on): every line is *terminated*
+    /// by a newline rather than separated by one, so a file keeps its final
+    /// newline, keeps its trailing blank lines, and gains a final newline if it
+    /// was missing one. A buffer with no lines writes an empty file.
+    ///
+    /// Where this parts ways with vim: vim's buffer can hold zero lines, which
+    /// is how it tells an empty file from a file containing a single newline.
+    /// red always keeps at least one line, so a lone empty line has to stand in
+    /// for "no lines" -- and an empty file is far commoner than a file that is
+    /// just a newline. A file containing exactly "\n" therefore saves as empty.
+    pub fn to_file_content(&self) -> String {
+        if self.lines.len() == 1 && self.lines[0].chars.is_empty() {
+            return String::new();
+        }
+
+        let mut content = String::new();
+        for line in &self.lines {
+            content.extend(line.chars.iter());
+            content.push('\n');
+        }
+        content
+    }
+
     pub fn new(id: usize, filename: Option<String>) -> Self {
         let mut lines = Vec::new();
         if let Some(ref path) = filename {
@@ -182,5 +207,56 @@ impl Buffer {
             row_offset: 0,
             col_offset: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_of(lines: &[&str]) -> Buffer {
+        let mut buf = Buffer::new(1, None);
+        buf.lines = lines.iter().map(|l| Line::new(l)).collect();
+        buf
+    }
+
+    // The expectations below are what vim 9.1 actually writes, measured by
+    // round-tripping each file through `vim -es -u NONE -c wq`.
+
+    #[test]
+    fn test_lines_are_terminated_not_separated() {
+        // The whole point: the final newline must survive a save.
+        assert_eq!(buffer_of(&["hello", "world"]).to_file_content(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_single_line_gets_a_newline() {
+        assert_eq!(buffer_of(&["hello"]).to_file_content(), "hello\n");
+    }
+
+    #[test]
+    fn test_trailing_blank_lines_survive() {
+        // "a\n\n" loads as ["a", ""] and must write back as "a\n\n".
+        assert_eq!(buffer_of(&["a", ""]).to_file_content(), "a\n\n");
+        assert_eq!(buffer_of(&["a", "", ""]).to_file_content(), "a\n\n\n");
+    }
+
+    #[test]
+    fn test_leading_and_interior_blank_lines_survive() {
+        assert_eq!(buffer_of(&["", "a", "", "b"]).to_file_content(), "\na\n\nb\n");
+    }
+
+    #[test]
+    fn test_empty_buffer_writes_an_empty_file() {
+        // vim writes 0 bytes for a buffer with no lines; red's lone empty line
+        // stands in for that, so a new/empty file does not gain a newline.
+        assert_eq!(buffer_of(&[""]).to_file_content(), "");
+        assert_eq!(Buffer::new(1, None).to_file_content(), "");
+    }
+
+    #[test]
+    fn test_line_of_only_whitespace_is_not_an_empty_buffer() {
+        // A space is content: this is a real line and gets terminated.
+        assert_eq!(buffer_of(&[" "]).to_file_content(), " \n");
     }
 }

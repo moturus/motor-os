@@ -25,6 +25,9 @@
 *   **UTF-8 & Tab rendering**:
     *   Fully decodes multi-byte UTF-8 characters from raw stdin bytes.
     *   Converts tabs (`\t`) to dynamic tab stops (`tabstop` columns wide, see [Configuration](#configuration)) during screen rendering, while preserving raw tab characters in the buffer.
+*   **POSIX line termination on save**:
+    *   Every line is written *terminated* by a newline, matching vim's `'fixendofline'` default: a file keeps its final newline and any trailing blank lines, and a file that was missing its final newline gains one. Saving an untouched file leaves it byte-for-byte identical.
+    *   An empty buffer writes an empty file. Unlike vim, red's buffer always holds at least one line, so it cannot tell an empty file from a file containing a single newline; the latter therefore saves as empty.
 
 ---
 
