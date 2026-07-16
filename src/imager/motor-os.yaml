@@ -4,6 +4,7 @@ input_files:
   - "/bin/russhd"
   - "/bin/kibim"
   - "/bin/red"
+  - "/bin/rmux"
   - "/bin/rnetbench"
   - "/bin/rush"
   - "/sys/mdbg"

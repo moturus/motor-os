@@ -27,14 +27,14 @@ boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys: strobe sys-io sys-init sys-tty
 user: sysbox systest mio-test tokio-tests \
-	rush kibim mdbg red rnetbench crossbench \
+	rush kibim mdbg red rmux rnetbench crossbench \
 	russhd httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty
 .PHONY: sysbox systest mio-test tokio-tests
-.PHONY: rush kibim red russhd httpd httpd-axum
+.PHONY: rush kibim red rmux russhd httpd httpd-axum
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
 
@@ -148,6 +148,11 @@ red:
 	cd src/bin/red && CARGO_TARGET_DIR="$(OBJ_DIR)/red" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/red" "$(OBJ_DIR)/red/$(SUB_DIR)/red"
 
+rmux:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/rmux && CARGO_TARGET_DIR="$(OBJ_DIR)/rmux" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/rmux" "$(OBJ_DIR)/rmux/$(SUB_DIR)/rmux"
+
 rnetbench:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/rnetbench && CARGO_TARGET_DIR="$(OBJ_DIR)/rnetbench" $(DO_BUILD)
@@ -180,6 +185,7 @@ clippy: vdso
 	cd src/bin/httpd-axum && $(DO_CLIPPY)
 	cd src/bin/kibim && $(DO_CLIPPY)
 	cd src/bin/red && $(DO_CLIPPY)
+	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
 	cd src/imager && cargo clippy $(CARGO_RELEASE)
 

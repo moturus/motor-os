@@ -1,0 +1,21 @@
+[package]
+name = "rmux"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Nothing here, and the goal is to keep it that way: rmux is std-only on both
+# platforms (plan.md §4.6). The one Motor-specific thing it needs is the
+# `MOTURUS_STDIO_IS_TERMINAL` env var, which is a string literal passed to
+# `Command::env`, not a dependency.
+#
+# A host-only `libc` will arrive with the test harness, which needs TIOCGWINSZ
+# and a pty to drive rmux over (§9.1) — as in rush, under
+# `[target.'cfg(unix)'.dependencies]`, never reaching the Motor build.
+[dependencies]
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
