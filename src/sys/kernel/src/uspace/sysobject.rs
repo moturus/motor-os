@@ -273,6 +273,13 @@ fn add_object_to_wake_queue(woken: &Arc<SysObject>) {
 }
 
 pub fn process_wake_events() {
+    // This is called on every sched-loop iteration on every CPU; an
+    // unconditional swap acquires the cacheline exclusively even when the
+    // queue is empty (the common case), so check with a plain load first.
+    if WAKE_QUEUE.load(Ordering::Acquire) == 0 {
+        return;
+    }
+
     let mut next = WAKE_QUEUE.swap(0, Ordering::AcqRel);
 
     while next != 0 {

@@ -140,7 +140,9 @@ macro_rules! naked_irq_handler {
         #[unsafe(naked)]
         unsafe extern "C" fn $handler_name() {
             naked_asm!(
-                "cli",
+                // No cli: all IDT entries are interrupt gates, so IF is
+                // already cleared by the CPU on entry.
+                //
                 // Some IRQs have error code on stack, some don't. This handler
                 // deals with those that don't. As we use the same struct IrqStack,
                 // which has error code, we manually adjust rsp to accommodate
@@ -506,11 +508,45 @@ extern "x86-interrupt" fn gpf_handler(stack_frame: InterruptStackFrame, error_co
     }
 }
 
+// External (asynchronous) interrupt vectors: device IRQs, the APIC timer and
+// the wakeup/TLB-shootdown IPIs. These are only ever delivered with IF=1, and
+// every kernel window that runs with the *user* GS active runs with IF=0
+// (FMASK masks IF at syscall entry, and all exit paths cli before restoring
+// the user GS via swapgs). So for these vectors CS.RPL == 3 <=> the user GS
+// is live, and the two rdmsr's of slow_swapgs() can be skipped. Synchronous
+// exceptions (#PF, #GP, #DB, #BP, NMI, ...) *can* hit the user-GS kernel
+// windows and must keep the paranoid slow_swapgs() entry.
+const fn is_external_irq(irq_num: u8) -> bool {
+    matches!(
+        irq_num,
+        IRQ_SERIAL | 64..=79 | IRQ_APIC_TIMER | IRQ_WAKEUP | IRQ_TLB_SHOOTDOWN
+    )
+}
+
 #[no_mangle]
 pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
     let irq_stack = unsafe { (rsp as usize as *const IrqStack).as_ref().unwrap() };
     let uspace = irq_stack.cs & 0x3 == 3;
-    let swapgs = super::slow_swapgs();
+    let swapgs = if is_external_irq(irq_num as u8) {
+        if uspace {
+            unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) }
+            true
+        } else {
+            false
+        }
+    } else {
+        super::slow_swapgs()
+    };
+
+    // Debug builds verify the invariant the external-IRQ fast path (and
+    // everything else here) relies on: the kernel GS must be live after the
+    // swap decision. Note that "uspace => swapgs needed" would be the wrong
+    // thing to assert: Motor runs userspace with GS_BASE == KERNEL_GSBASE
+    // (both hold the kernel per-CPU GS), so the fast path's swapgs pair is
+    // a balanced value-level no-op when interrupting userspace, and
+    // slow_swapgs() reports "no swap needed" even with CS.RPL == 3.
+    #[cfg(debug_assertions)]
+    super::validate_kernel_gs();
 
     crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqFired, 1);
     if uspace {
@@ -614,7 +650,7 @@ naked_irq_handler!(irq_handler_68, 68);
 naked_irq_handler!(irq_handler_69, 69);
 naked_irq_handler!(irq_handler_70, 70);
 naked_irq_handler!(irq_handler_71, 71);
-naked_irq_handler!(irq_handler_72, 71);
+naked_irq_handler!(irq_handler_72, 72);
 naked_irq_handler!(irq_handler_73, 73);
 naked_irq_handler!(irq_handler_74, 74);
 naked_irq_handler!(irq_handler_75, 75);

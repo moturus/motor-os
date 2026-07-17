@@ -238,8 +238,11 @@ impl GS {
         let gsval2 = rdmsr(Self::MSR_IA32_KERNEL_GSBASE);
         if gsval1 != gsval2 {
             unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) }
-            let gsval1 = rdmsr(Self::MSR_IA32_GS_BASE);
-            assert_eq!(gsval1, gsval2);
+            #[cfg(debug_assertions)]
+            {
+                let gsval1 = rdmsr(Self::MSR_IA32_GS_BASE);
+                assert_eq!(gsval1, gsval2);
+            }
             true
         } else {
             false
@@ -308,6 +311,17 @@ impl GS {
 
 pub fn slow_swapgs() -> bool {
     GS::slow_swapgs()
+}
+
+// Asserts that the kernel GS is live: GS.gs_val (gs:[8]) is the GS base
+// itself, so a self-referential read must match the MSR.
+#[cfg(debug_assertions)]
+pub fn validate_kernel_gs() {
+    let gs_self: u64;
+    unsafe {
+        core::arch::asm!("mov {0}, gs:[8]", out(reg) gs_self, options(nostack));
+    }
+    assert_eq!(gs_self, rdmsr(GS::MSR_IA32_GS_BASE));
 }
 
 #[cfg(debug_assertions)]

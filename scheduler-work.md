@@ -19,13 +19,13 @@ changes applied, uncommitted).
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
 | S6 | Every demand page fault costs the full preempt/deschedule machinery | perf | ~2–5 µs per minor fault | medium |
 | S7 | `swap` (IPC handoff) round-trips through the job queue instead of switching threads directly | perf | queue + locks + latency per message | large |
-| S8 | `slow_swapgs()`: 2–3 rdmsr on every IRQ and #PF entry | perf | ~200–500 cyc per IRQ | small |
-| S9 | Vector 72 is registered with irqnum 71 (`naked_irq_handler!(irq_handler_72, 71)`) ⇒ devices on vector 72 wake the wrong waiter | **bug** | correctness | trivial |
+| S8 | `slow_swapgs()`: 2–3 rdmsr on every IRQ and #PF entry — **done, Round 1** (see the GS-model correction there) | perf | ~200–500 cyc per IRQ | small |
+| S9 | Vector 72 is registered with irqnum 71 (`naked_irq_handler!(irq_handler_72, 71)`) ⇒ devices on vector 72 wake the wrong waiter — **fixed, Round 1** | **bug** | correctness | trivial |
 | S10 | MXCSR / x87 CW are not preserved across blocking syscalls (pause/resume skips FPU entirely) ⇒ another thread's FP env can leak in | **bug** (latent) | correctness | small |
 | S11 | No priorities, FIFO everywhere; sys-io competes equally with bulk compute; a many-threaded process starves others | isolation | I/O latency under load | medium |
 | S12 | All device IRQs (virtio MSI-X) + serial + system-time duty target CPU 0 | isolation/perf | CPU 0 saturation (seen in FS rounds) | medium |
 | S13 | Per-wait heap churn: `Vec` allocs + per-object `BTreeMap` insert/remove on every wait | perf | allocs on the hottest path | medium |
-| S14 | Every sched-loop iteration on every CPU does an atomic **swap** on the global `WAKE_QUEUE` and takes the global-queue spinlock every 3rd iteration even when empty | perf | cross-CPU cacheline traffic | trivial |
+| S14 | Every sched-loop iteration on every CPU does an atomic **swap** on the global `WAKE_QUEUE` and takes the global-queue spinlock every 3rd iteration even when empty — **done, Round 1** | perf | cross-CPU cacheline traffic | trivial |
 | S15 | No NX (EFER.NXE never set, no XD PTE bit), no SMEP/SMAP ⇒ all user memory is W+X; kernel can execute/read user pages freely | security | policy decision | small–medium |
 | S16 | Wake IPIs (`IRQ_WAKEUP`) do not preempt userspace ⇒ a cross-CPU wake targeting a busy CPU waits for the next tick (up to 10 ms) | latency semantics | tail latency under load | small (policy) |
 
@@ -45,6 +45,147 @@ Verified: systest passes release+debug; debug watchdog exempts idle CPUs.
 Relevant to this plan because the invariant it introduced — *"thread in user
 mode ⇒ live tick armed; the tick chain is only broken when a CPU goes idle"* —
 must be preserved by every change below.
+
+---
+
+## Round 1 (done 2026-07-17): roadmap step 1 — W4-prep trivial fixes (S9, S14, S8)
+
+All uncommitted, on top of Round 0. Files: `arch/x64/irq.rs`, `arch/x64/mod.rs`,
+`sched/scheduler.rs`, `uspace/sysobject.rs`, plus a new `bench_page_faults()`
+microbench in systest (`tests/systest/src/main.rs`).
+
+### Changes
+
+- **S9 (bug)**: `naked_irq_handler!(irq_handler_72, 72)` — was 71. The IDT
+  registration (irq.rs:310) already pointed vector 72 at this handler; only
+  the number passed to `irq_handler_inner` was wrong. No compile-time
+  handler↔vector assertion added: `macro_rules!` can't paste identifiers on
+  stable, so tying the fn name to the literal would need the `paste` crate or
+  a proc macro — left open.
+- **S14**: `process_wake_events()` now does a plain load of `WAKE_QUEUE` and
+  returns if 0, instead of an unconditional atomic swap (exclusive cacheline
+  acquisition per iteration per CPU). The sched loop peeks both job queues
+  via atomic length counters before taking their spinlocks: the local queue
+  reuses the existing `queue_length` (which had no readers until now), the
+  global queue gets a new `GLOBAL_QUEUE_LENGTH` maintained on push/pop. No
+  lost-wakeup risk: local-queue pushers always `wake()` *after* the
+  increment, and global-queue pushers keep polling themselves (pre-existing
+  "poster will pop it" invariant, post() only uses the global queue when no
+  CPU is idle).
+- **S8**: external IRQ vectors (36 serial, 64..=79 custom/MSI-X, 192 timer,
+  193 wakeup, 194 TLB shootdown) now decide swapgs from the interrupted CS
+  (`is_external_irq()` in irq.rs): swapgs iff CS.RPL == 3 — zero rdmsr on
+  the hot path. Synchronous exceptions (#PF/#GP/#DB/#BP/NMI/...) keep the
+  paranoid `slow_swapgs()`, whose post-swap verification rdmsr is now
+  debug-only (uspace #PF entry: 3 rdmsr → 2). The redundant `cli` in
+  `naked_irq_handler!` was dropped (all IDT entries are interrupt gates —
+  gate type 0b1110, `disable_interrupts()` never called — so IF is already
+  clear on entry).
+
+### Correction to the S8 analysis: Motor's GS model is not Linux's
+
+Found by a debug assertion that instantly panicked at boot ("timer IRQ from
+uspace, but slow_swapgs says the kernel GS is already live"). The S8 finding
+claimed "CS.RPL == 3 ⇔ user GS live". That is Linux's discipline, not
+Motor's:
+
+- `GS::init` sets **GS_BASE == KERNEL_GSBASE == gs_val** (mod.rs:224), and
+  every kernel↔user transition does an *unconditional* swapgs
+  (`spawn_usermode_thread` syscall.rs:622, syscall entry :639, syscall exit
+  :707). So **userspace runs with the kernel per-CPU GS value in GS_BASE**,
+  every swapgs is a value-level no-op, and `slow_swapgs()` has never
+  actually swapped — its swap branch is dead code unless user code repoints
+  GS_BASE (CR4.FSGSBASE is enabled, so `wrgsbase` from ring 3 *can*).
+- The CS-based fast path is correct anyway: its entry/exit swapgs pair is
+  balanced (the preempt paths are noreturn, but there the swap exchanged
+  equal values), and under the unconditional-swapgs discipline the invariant
+  "kernel window ⇒ GS_BASE = kernel GS" holds *even if* user repoints GS.
+- Better: the old paranoid check was itself **wrong** in the one scenario it
+  defends against. User `wrgsbase(X)` + syscall (entry swapgs leaves
+  KERNEL_GSBASE = X) + external IRQ inside the IF=1 syscall window →
+  `slow_swapgs` sees the MSRs differ → swaps → the handler runs with GS = X
+  (user-controlled). The CS check (kernel CS → don't touch GS) fixes this
+  latent bug for external IRQs; sync exceptions keep `slow_swapgs` and keep
+  the latent wrongness — irrelevant until something actually sets a user GS,
+  but worth fixing whenever S15/W6-era hardening happens.
+- Debug builds now assert the *real* invariant after the swap decision on
+  every IRQ: `validate_kernel_gs()` (mod.rs) checks the self-referential
+  `gs:[8]` (GS.gs_val) against `rdmsr(GS_BASE)`.
+- Side-finding (S10-adjacent): user GS_BASE is not context-switched — a
+  preempt leaves the user's GS value in KERNEL_GSBASE of the *old* CPU, and
+  resume elsewhere installs that CPU's kernel value. `wrgsbase` from user
+  code is silently unsupported today. Fine, but remember it if FSGSBASE is
+  ever exposed as a feature.
+- Consequence for **W1** (IRQ fast-return): the iretq fast path needs *no*
+  GS work at all beyond the entry/exit pair this round added — the invariant
+  is maintained by construction.
+
+### Verification
+
+- Release: full systest pass ×5 (two extra attempts hit the pre-existing
+  flaky logging test — logging.rs's 30 ms flush-timing assumptions; it also
+  flaked once during the baseline runs, so the rate is unchanged).
+- Debug: full systest pass with `validate_kernel_gs()` asserting on every
+  external IRQ, then 40 s idle with no watchdog false-death.
+- Tickless-idle invariant (Round 0): idle-ish `irq_timer_fired` ≈ 153/s with
+  two live ssh sessions (broken tickless would show ~400/s on 4 CPUs).
+- S9 is verified by inspection only: the qemu config only exercises custom
+  IRQs 0–2 (vectors 64–66), so vector 72 has no runtime repro here.
+
+### Benchmarks
+
+Setup: qemu/KVM `-smp 4` (run-qemu.sh), release, host otherwise idle;
+systest over ssh, sequential runs within one boot; rnetbench server in
+guest, client on host, defaults (5 s/test, 1 KB buffers). New microbench:
+`bench_page_faults` = 8192 first-touch faults on a lazy mapping (the
+uspace-#PF preempt path, S6/S8).
+
+Result in one line: **no measurable macro change, as predicted** — the
+fixes remove ~2 rdmsr (~200–500 cycles) per external IRQ, 1 rdmsr per
+uspace #PF, and empty-queue lock traffic; at the 1–10 K IRQs/s these
+benchmarks generate, that is <0.1 % of any macro number, far below this
+rig's run-to-run spread. The value of the round is the S9 correctness fix,
+the latent slow_swapgs bug fix, the GS-model correction (changes W1's
+design), and removing dead-weight costs that would otherwise pollute
+Phase-A A/B measurements.
+
+Page-fault microbench (ns/fault; first-in-boot run always slow — new
+bench-trap, same class as the FS one):
+
+| | first full run in boot | steady-state samples |
+|---|---|---|
+| baseline | 15466 | 7080, 7061, 8224, 7041 |
+| after | 15136 | 7306, 12377, 7100, 7242 |
+
+Steady-state medians 7071 vs 7242 (+2.4 %): within spread (each side has
+one high outlier; the after-boot also caught two runs where the host was
+visibly interfering — see FS numbers below).
+
+FS smoke / hot-cache (mbps) and liveness, per run — noise-dominated on this
+rig (same-kernel spread far exceeds any plausible effect; recorded for
+completeness only):
+
+| run | baseline w/r/hot | after w/r/hot |
+|---|---|---|
+| first-in-boot | 166/284/807 | 142/234/229 |
+| 2nd | 224/75/1027 | 57/25/259 |
+| 3rd | 106/426/241 | 226/40/957 |
+| 4th | 252/322/217 | 123/400/215 |
+
+liveness p50/p99 (ms): baseline 5–6/7–10, after 5–6/7–9 — unchanged.
+
+rnetbench, 3 runs each (RR µs/iter; guest-RX; guest-TX MiB/s):
+
+| | RR | guest RX | guest TX |
+|---|---|---|---|
+| baseline | 508 / 421 / 414 | 146 / 120 / 194 | 16 / 48 / 37 |
+| after | 438 / 454 / 510 | 162 / 189 / 248 | 42 / 40 / 6 |
+
+All within spread. Note: these absolute numbers are far off the net-perf
+round records (RR 152.6 µs, default TX 336) — an environmental condition of
+this session affecting baseline and after equally, not a regression from
+these changes (baseline was measured on the pre-change kernel in the same
+session).
 
 ---
 
@@ -401,6 +542,9 @@ measured, since they shrink the same path.
 
 ### S8 — `slow_swapgs`
 
+**Done in Round 1 — but note the premise below ("CS.RPL == 3 ⇔ user GS")
+turned out to be wrong for Motor; see the Round 1 GS-model correction.**
+
 Where: mod.rs:236, called at the top of `irq_handler_inner`,
 `page_fault_handler_inner`, and every exception handler.
 
@@ -519,6 +663,7 @@ measurable individually):
 
 1. **W4-prep (trivial fixes)**: S9 vector-72 bug; S14 lock-free empty checks;
    S8 CS-based swapgs for external IRQs. Low risk, immediate.
+   **Done — see "Round 1" above** (incl. a correction to the S8 GS analysis).
 2. **W1: IRQ fast-return (need_resched)** — the centerpiece. Includes S4's
    sub-issue (stop re-arming the tick on non-timer preemptions) and the
    kill/debuggee flag plumbing. Metrics to add: preempts by cause,

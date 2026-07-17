@@ -47,6 +47,12 @@ static PERCPU_TIMERS: StaticRef<StaticPerCpu<Instant>> = StaticRef::default_cons
 static GLOBAL_READY_QUEUE_NORMAL: StaticRef<crate::util::SpinLock<VecDeque<Job>>> =
     StaticRef::default_const();
 
+// The number of jobs in GLOBAL_READY_QUEUE_NORMAL, maintained on push/pop.
+// Lets sched-loop iterations skip taking the global spinlock when the queue
+// is empty (the common case): an unlocked read of a rarely-written line stays
+// shared in all caches instead of bouncing the lock cacheline between CPUs.
+static GLOBAL_QUEUE_LENGTH: AtomicU32 = AtomicU32::new(0);
+
 /*
 pub enum Priority {
     High,   // Always picked; may starve lower-priority jobs.
@@ -358,7 +364,17 @@ impl Scheduler {
             }
 
             // Round robit between queues.
-            if curr_iteration.is_multiple_of(3) {
+            //
+            // Both queues are peeked via their (atomic) length counters before
+            // taking the spinlock: other CPUs push to both queues, and locking
+            // an empty queue on every iteration bounces the lock cacheline
+            // across CPUs for nothing. A job pushed right after the peek is
+            // not lost: the pusher either wakes this CPU (local queue) or
+            // keeps polling itself (global queue), and the next iteration
+            // sees the counter.
+            if curr_iteration.is_multiple_of(3)
+                && self.queue_length.load(Ordering::Acquire) != 0
+            {
                 // Note: we cannot combine the two statements below into one, like this:
                 //     if let Some(job) = self.normal_queue.lock().pop_front() {
                 //         job.run();
@@ -368,16 +384,17 @@ impl Scheduler {
                 // to a deadlock.
                 let maybe_job = self.local_queue.lock(line!()).pop_front();
                 if let Some(job) = maybe_job {
-                    job.run();
                     self.queue_length.fetch_sub(1, Ordering::Relaxed);
+                    job.run();
                     last_job_iter = curr_iteration;
                     continue;
                 }
             }
 
-            if curr_iteration % 3 == 1 {
+            if curr_iteration % 3 == 1 && GLOBAL_QUEUE_LENGTH.load(Ordering::Acquire) != 0 {
                 let maybe_job = { GLOBAL_READY_QUEUE_NORMAL.lock(line!()).pop_front() };
                 if let Some(job) = maybe_job {
+                    GLOBAL_QUEUE_LENGTH.fetch_sub(1, Ordering::Relaxed);
                     job.run();
                     last_job_iter = curr_iteration;
                     continue;
@@ -557,6 +574,7 @@ pub fn post(job: Job) {
         // woken, because _this_ cpu, the cpu on which this code is currently
         // running, is not sleeping and will eventually pop the job.
         GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job);
+        GLOBAL_QUEUE_LENGTH.fetch_add(1, Ordering::Release);
     } else {
         assert!(job.cpu < crate::arch::num_cpus());
         let scheduler = PERCPU_SCHEDULERS.get_for_cpu(job.cpu);

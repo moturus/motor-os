@@ -230,6 +230,38 @@ fn test_lazy_memory_map_write() {
     println!("test_lazy_memory_map_write: done");
 }
 
+// First-touch fault throughput: maps a lazy region and writes one u64 per
+// page. Each touch takes the full uspace #PF path (preempt machinery, see
+// scheduler-work.md S6/S8), so ns/fault tracks kernel #PF-entry costs.
+fn bench_page_faults() {
+    use moto_sys::*;
+
+    const NUM_PAGES: u64 = 8192; // 32 MiB.
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        NUM_PAGES,
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    for page in 0..NUM_PAGES {
+        let ptr = (addr + page * sys_mem::PAGE_SIZE_SMALL) as *mut u64;
+        unsafe { ptr.write_volatile(page) };
+    }
+    let elapsed = start.elapsed();
+    SysMem::free(addr).unwrap();
+
+    println!(
+        "bench_page_faults: {NUM_PAGES} first-touch faults: {:.0} ns/fault, {:.0} faults/s",
+        elapsed.as_nanos() as f64 / NUM_PAGES as f64,
+        NUM_PAGES as f64 / elapsed.as_secs_f64()
+    );
+}
+
 fn test_file_write() {
     const WRITTEN: &str = "Lorem Ipsum";
 
@@ -458,6 +490,7 @@ fn main() {
     logging::run_all_tests();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
+    bench_page_faults();
     fs::run_tests();
     // return;
 
