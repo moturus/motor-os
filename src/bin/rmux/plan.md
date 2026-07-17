@@ -1033,14 +1033,20 @@ terminal, and it is the path that does not eat `C-a`.
 
 Each phase ends with something demonstrable and tested.
 
-**M0 — Spikes and scaffolding.** The measurements this plan rests on, both cheap
-and both disqualifying if wrong:
-1. Orphan survival (§4.4) — detach is worthless without it.
-2. The actual key bytes for `S-`/`M-` arrows, serial and SSH (§8.3).
-Plus: qemu `-echr` in a run-script variant (§9.4); the crate skeleton; the
-`sys::` seam; Makefile + `src/imager/motor-os.yaml` wiring (five edits, see
-rush/red's entries); and the sys-tty `^C` patch (§3.5). Loopback TCP needs no
-spike — systest already proves it (§4.2).
+**M0 — Spikes and scaffolding. Done.** The measurements this plan rests on, both
+cheap and both disqualifying if wrong:
+1. Orphan survival (§4.4) — detach is worthless without it. Measured: a plain
+   orphan *is* reaped on Motor, which forced a new OS primitive — detached spawn,
+   gated by `CAP_SPAWN_DETACHED`.
+2. The actual key bytes for `S-`/`M-` arrows, serial and SSH (§8.3). Measured: the
+   xterm encodings arrive intact on both paths, but the serial console fragments
+   them across reads, so the key decoder must be incremental.
+Also landed: qemu `-echr` in a run-script variant (§9.4); the crate skeleton; the
+`sys::` seam; Makefile + `src/imager/motor-os.yaml` wiring; and the sys-tty `^C`
+patch (§3.5). Loopback TCP needed no spike — systest already proves it (§4.2). The
+two `spike-` subcommands were deleted once their answers were recorded above, per
+the plan; the crate is now a clean library seam over a placeholder `run`, ready
+for M1.
 
 **M1 — One pane, no UI.** Spawn `sh` (§4.3) on piped stdio with the is-terminal
 env var; pump bytes both ways; drain on exit. This is sys-tty reimplemented inside

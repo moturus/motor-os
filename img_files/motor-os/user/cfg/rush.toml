@@ -1,0 +1,8 @@
+# rush configuration.
+#
+# spawn-detached: programs rush will hand CAP_SPAWN_DETACHED, letting them start
+# background servers (daemons) that outlive the shell and the login session. Keep
+# this list short and trusted: anything here can leave processes running after
+# you log out. rush must itself hold the capability (it does when launched by the
+# console or over ssh) for this to have any effect.
+spawn-detached = ["rmux"]
