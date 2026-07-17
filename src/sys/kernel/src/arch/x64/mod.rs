@@ -199,12 +199,13 @@ impl GS {
         assert!(this_cpu <= crate::config::MAX_CPUS as u64);
         assert_eq!(crate::arch::apic_cpu_id_32() as u64, this_cpu);
 
-        // Enable WRGSBASE.
+        // Enable WRGSBASE (bit 16) and global pages (PGE, bit 7 — see
+        // PTE::GLOBAL in paging.rs).
         unsafe {
             core::arch::asm!(
                 "
                 mov rax, cr4
-                or  rax, 1 << 16
+                or  rax, (1 << 16) | (1 << 7)
                 mov cr4, rax
                 ",
                 out("rax") _

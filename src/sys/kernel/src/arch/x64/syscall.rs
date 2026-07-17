@@ -367,7 +367,8 @@ impl ThreadControlBlock {
     pub fn validate_rsp(&self) {
         #[cfg(debug_assertions)]
         if !self.do_validate_rsp() {
-            super::paging::flush_kpt();
+            // Kernel leaves are GLOBAL: a CR3 reload would not flush them.
+            super::paging::flush_all_including_global();
             if self.do_validate_rsp() {
                 log::error!("invalid rsp fixed by flushing KPT");
             } else {

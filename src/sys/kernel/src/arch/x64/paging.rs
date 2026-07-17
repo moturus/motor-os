@@ -63,6 +63,11 @@ impl PTE {
     const USER: u64 = 0b_0000_0100; // bit 2.
     const ACCESSED: u64 = 0b_0010_0000; // bit 5.
     const HUGE: u64 = 0b_1000_0000; // bit 7.
+    // Leaf-only: the translation survives `mov cr3` (needs CR4.PGE). Set on
+    // all kernel leaves (W6a) so syscall/preempt CR3 switches stop wiping
+    // the kernel TLB. Kernel unmaps MUST then invalidate explicitly on every
+    // CPU — see tlb.rs / `invalidate()`: kernel-PT shootdowns never skip.
+    const GLOBAL: u64 = 0b1_0000_0000; // bit 8.
     const MMIO_RW: u64 = 0b_0011_1011; // bit 0: present; bit 1: writable;
                                        // bit 3: write through; bit 4: no cache; bit 5: accessed.
 
@@ -270,6 +275,15 @@ impl PageTableImpl {
         assert_eq!(0, phys_addr & (kind.page_size() - 1));
         assert_eq!(0, virt_addr & (kind.page_size() - 1));
 
+        // Kernel leaves are GLOBAL (W6a). Only in the kernel page table: a
+        // global leaf in a user table would be invalidated via that table's
+        // shootdown, which is skipped on CPUs with a different CR3.
+        let pte_flags = if !self.userspace && (pte_flags & PTE::USER) == 0 {
+            pte_flags | PTE::GLOBAL
+        } else {
+            pte_flags
+        };
+
         let page_directory_flags = if (pte_flags & PTE::USER) != 0 {
             // TODO: maybe this is too permissive?
             PTE::PRESENT | PTE::WRITABLE | PTE::USER | PTE::ACCESSED
@@ -450,29 +464,68 @@ pub fn flush_kpt() {
     }
 }
 
-// Called from IRQ.
-pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
-    let mut current_page_table: u64;
+// Flushes the whole TLB *including* GLOBAL entries by toggling CR4.PGE
+// (a plain CR3 reload leaves global translations in place).
+pub fn flush_all_including_global() {
     unsafe {
         asm!(
-            "mov rax, cr3",
-            out("rax") current_page_table,
+            "mov rax, cr4",
+            "mov rcx, rax",
+            "and rax, -129", // Clear bit 7 (PGE); sign-extended imm32.
+            "mov cr4, rax",
+            "mov cr4, rcx",
+            out("rax") _,
+            out("rcx") _,
             options(nostack)
         )
     }
+}
 
-    if current_page_table != page_table {
-        return;
+// The kernel L4 table's physical address, stashed while CR3 is known to
+// point at it (kpt_phys_addr() just reads CR3, which at runtime is usually
+// a user page table).
+static KPT_PHYS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn kernel_pt_phys() -> u64 {
+    KPT_PHYS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// Called from IRQ.
+pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
+    // Kernel translations are valid in every address space (the kernel L3s
+    // are shared into all user L4 tables) and, being GLOBAL, survive CR3
+    // writes — so kernel-PT invalidations must run regardless of the CPU's
+    // current CR3. User-PT invalidations only matter on CPUs running that
+    // table right now: user entries are non-global, so a CPU that switches
+    // to the table later starts from a clean TLB via the CR3 write itself.
+    let is_kernel = page_table == kernel_pt_phys();
+    if !is_kernel {
+        let mut current_page_table: u64;
+        unsafe {
+            asm!(
+                "mov rax, cr3",
+                out("rax") current_page_table,
+                options(nostack)
+            )
+        }
+        if current_page_table != page_table {
+            return;
+        }
     }
 
     // For large ranges a full TLB flush is cheaper than per-page invlpg
     // (same ballpark as Linux's tlb_single_page_flush_ceiling).
     const FULL_FLUSH_PAGES: u64 = 33;
     if num_pages > FULL_FLUSH_PAGES {
-        flush_kpt(); // Reloads CR3, flushing all non-global translations.
+        if is_kernel {
+            flush_all_including_global(); // CR3 reload spares global entries.
+        } else {
+            flush_kpt(); // Reloads CR3, flushing all non-global translations.
+        }
         return;
     }
 
+    // invlpg invalidates matching translations regardless of the G bit.
     let mut vaddr = first_page_vaddr;
     for _ in 0..num_pages {
         unsafe {
@@ -496,9 +549,60 @@ pub fn init_paging_bsp() {
 
     table_l4.set(0, PTE::empty());
 
+    // CR3 still points at the kernel L4 here; stash its address for
+    // invalidate()'s kernel-PT check.
+    KPT_PHYS.store(kpt_phys_addr(), core::sync::atomic::Ordering::Release);
+
+    // W6a: mark every kernel leaf GLOBAL (runs before the APs boot; new
+    // kernel mappings get the bit in map_page). Only flush behavior changes
+    // — the translations themselves are identical — so no flush is needed
+    // here; entries cached pre-retrofit age out on the next CR3 write.
+    set_global_on_kernel_leaves(table_l4);
+
     crate::util::full_fence();
     flush_kpt();
     crate::util::full_fence();
+}
+
+// Sets PTE::GLOBAL on all present leaf entries of the (kernel-only, after
+// the L4[0] clear above) boot page tables: kernel text/data, direct map,
+// early heap. MMIO etc. mapped later gets the bit via map_page.
+fn set_global_on_kernel_leaves(table_l4: &mut HwPageTable) {
+    for idx_l4 in 1..HwPageTable::PTE_COUNT as u64 {
+        let pte_l4 = table_l4.get(idx_l4);
+        if !pte_l4.is_present() {
+            continue;
+        }
+        let table_l3 = HwPageTable::from_pte(pte_l4);
+        for idx_l3 in 0..HwPageTable::PTE_COUNT as u64 {
+            let pte_l3 = table_l3.get(idx_l3);
+            if !pte_l3.is_present() {
+                continue;
+            }
+            if pte_l3.is_huge_page() {
+                table_l3.set(idx_l3, PTE::from_u64(pte_l3.entry | PTE::GLOBAL));
+                continue;
+            }
+            let table_l2 = HwPageTable::from_pte(pte_l3);
+            for idx_l2 in 0..HwPageTable::PTE_COUNT as u64 {
+                let pte_l2 = table_l2.get(idx_l2);
+                if !pte_l2.is_present() {
+                    continue;
+                }
+                if pte_l2.is_huge_page() {
+                    table_l2.set(idx_l2, PTE::from_u64(pte_l2.entry | PTE::GLOBAL));
+                    continue;
+                }
+                let table_l1 = HwPageTable::from_pte(pte_l2);
+                for idx_l1 in 0..HwPageTable::PTE_COUNT as u64 {
+                    let pte_l1 = table_l1.get(idx_l1);
+                    if pte_l1.is_present() {
+                        table_l1.set(idx_l1, PTE::from_u64(pte_l1.entry | PTE::GLOBAL));
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct PageTable {

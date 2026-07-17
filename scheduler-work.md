@@ -13,7 +13,7 @@ changes applied, uncommitted).
 | # | Finding | Type | Cost today | Fix effort |
 |---|---------|------|-----------|-----------|
 | S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable — **done, Round 2** (86–96 % of uspace IRQs now fast-return; RR 2.2×, TX stabilized) | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
-| S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume | perf | dominant hidden cost of IPC | medium–large |
+| S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume — **W6a done, Round 5** (kernel TLB survives CR3 writes; #PF −7 %; W6b/W6c remain) | perf | dominant hidden cost of IPC | medium–large |
 | S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait — **done, Round 4** (22 % of waits skip the pause; RR −25 %, new all-time record) | perf | ~2×5 µs per IPC RTT | small |
 | S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs — **done, Round 3** (52 % of placements now land on the warm CPU; timer IRQs −26 %; bench-neutral otherwise) | perf | unquantified, likely large | small–medium |
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
@@ -421,7 +421,7 @@ watchdog-quiet on debug.
 
 ## Round 4 (done 2026-07-17): roadmap step 4 — W5 wait fast path (S3) + S10 fix
 
-Uncommitted, on top of Round 3 (9b83538).
+Committed as addccf1, on top of Round 3 (9b83538).
 
 ### What was done
 
@@ -492,9 +492,84 @@ test passes on release; debug systest 69 PASS + 40 s idle watchdog-quiet.
 - W3 (lazy FPU) got cheaper to reason about: pause/resume now carries the
   *control* env explicitly, so a future lazy-FPU scheme only concerns the
   bulk register state.
-- Next: roadmap step 5 — W3 lazy FPU (measure first; W1 may have captured
-  most of the win), or jump to Phase B (W6a GLOBAL pages) where the larger
-  IPC costs now live.
+
+---
+
+## Round 5 (done 2026-07-17): W3 skipped on measurement; roadmap step 6 — W6a GLOBAL kernel pages (S2 part 1)
+
+Uncommitted, on top of Round 4 (addccf1).
+
+### W3 (lazy FPU) — skipped, with the measurement the roadmap asked for
+
+Roadmap step 5 gated W3 on "measure first — W1 may capture most of the
+win". It did: xsave/xrstor only happens on IRQ-preempts and #PF-preempts
+(syscalls/pause/resume never touch the FPU), and after W1/W2 a whole
+release bench boot shows only ~23 K IRQ-preempts + ~25 K #PFs ≈ 48 K
+xsave/xrstor pairs × ~0.2–0.4 µs ≈ **10–20 ms per boot (~0.005 % of CPU)**.
+Lazy-FPU bookkeeping (per-CPU owner tracking, cross-CPU flush IPIs before
+migration) cannot pay for itself at that rate. Revisit only if preempt
+rates rise by orders of magnitude.
+
+### W6a — what was done
+
+Kernel translations now survive CR3 writes; kernel-range TLB invalidation
+made correct first (it was a real, pre-existing hole):
+
+1. **The correctness fix** (`paging::invalidate`, called on every CPU by
+   the shootdown IRQ): it used to skip whenever the CPU's current CR3
+   differed from the target page table. Correct for user tables; wrong for
+   the kernel table — kernel VAs are valid in *every* address space via
+   the shared L3s, so a CPU running a user process skipped kernel-range
+   invalidations (e.g. a recycled kernel stack freed by another CPU) and
+   kept stale entries until its next incidental CR3 wipe. That masking is
+   exactly the `validate_rsp`/"invalid rsp fixed by flushing KPT" bug
+   class. Now: kernel-PT invalidations (`page_table == kernel_pt_phys()`,
+   a new static stashed at `init_paging_bsp`) run unconditionally;
+   large-range kernel flushes use a new `flush_all_including_global()`
+   (CR4.PGE toggle — a CR3 reload no longer flushes kernel entries);
+   `invlpg` handles global entries natively. The debug `validate_rsp`
+   canary now uses the global-capable flush too.
+2. **PTE::GLOBAL (bit 8)** on kernel leaves: set automatically in
+   `map_page` for non-USER mappings in the kernel table only (a global
+   leaf in a *user* table would dodge that table's CR3-gated shootdown —
+   deliberately excluded), plus a one-time boot walk
+   (`set_global_on_kernel_leaves`, from `init_paging_bsp`, before APs
+   boot) that retrofits the boot-time mappings: kernel text/data, direct
+   map, early heap.
+3. **CR4.PGE (bit 7)** enabled in `GS::init`'s existing CR4 write on every
+   CPU. Ordering is a non-issue: the G bit changes flush behavior, not the
+   translation, and unmap correctness is carried by (1).
+
+Syscall/preempt/resume asm is untouched — the CR3 switches remain (W6b
+drops them); they just stop destroying the kernel TLB.
+
+### Results
+
+Baseline = the Round 4 "after" run (identical binary to committed
+addccf1). rnetbench RR 141.3/155.2/186.9 µs vs 137.4/155.3/179.4 — within
+noise, as expected (RR is user-TLB and wait-path bound). The real signals:
+
+- **bench_page_faults steady-state: 6568/6529 ns vs a ~7000–7180 ns floor
+  across the entire session (−7 %)** — the #PF path's two CR3 switches no
+  longer wipe the kernel TLB, so the fault handler runs warm.
+- test_liveness p99/max improved again (5–7 ms vs 6–9).
+- Hot-cache/FS/throughput unchanged within noise (syscall-path kernel-TLB
+  benefits are mostly deferred until W6b removes the switch itself and the
+  software user-copy walks).
+
+Verified: release systest ×3 + tokio-tests + mio-test + FP-env test pass;
+debug systest ×2 (thread churn exercises kernel-stack recycling — the
+fixed shootdown path) all PASS; idle watchdog-quiet; zero
+"invalid rsp" canary hits in the debug serial log.
+
+### Consequences for the roadmap
+
+- W6a is deliberately the *small* half of S2: its value is correctness
+  (the stale-kernel-TLB class is now fixed rather than masked) plus the
+  #PF/liveness gains. The dominant S2 cost — the switch itself and the
+  per-4K-page spinlocked software walks in `read_from_user` — falls to
+  **W6b**, which is now unblocked and is the next round.
+- After W6b, re-measure before considering W6c (PCID).
 
 ---
 
@@ -995,11 +1070,17 @@ measurable individually):
    all-time record).
 5. **W3: lazy FPU** for the remaining deschedules (after W1/W2 establish
    same-CPU-resume; measure first — W1 may capture most of the win).
+   **Skipped — the Round 4 metrics settle the "measure first" gate**:
+   post-W1 only ~23 K IRQ-preempts + ~25 K #PF-preempts per whole bench
+   boot still xsave/xrstor (≈48 K pairs × ~0.2–0.4 µs ≈ 10–20 ms/boot,
+   ~0.005 % CPU). W1 captured the win; lazy-FPU complexity (cross-CPU
+   owner flush IPIs) is not worth it. Revisit only if preempt rates rise.
 
 Phase B — TLB/syscall cost (S2), sequenced:
 
 6. **W6a: GLOBAL kernel pages** (+ make kernel-region shootdowns correct —
    fixes the `validate_rsp` bug class properly).
+   **Done — see "Round 5" above.**
 7. **W6b: drop the KPT switch on syscalls**; replace software-walk user
    copies with direct access + checks. Re-measure IPC (FS smoke, rnetbench
    RR, getpid-style microbench).
