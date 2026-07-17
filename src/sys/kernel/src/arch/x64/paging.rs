@@ -490,6 +490,32 @@ pub fn kernel_pt_phys() -> u64 {
     KPT_PHYS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+// See tlb::evict_user_page_table(). Called on every CPU (IRQ context on
+// remotes, directly on the broadcaster): if this CPU still runs on the
+// dying user page table, switch to the kernel one. Reads the real CR3 (not
+// the gs:[64] shadow) so an interrupted install_page_table() mid-sequence
+// cannot confuse it; the shadow is updated together with CR3 here, which is
+// safe because eviction only targets tables of fully-dead processes — no
+// concurrent install can be targeting the same table.
+pub fn evict_if_current(page_table: u64) {
+    let mut current: u64;
+    unsafe {
+        asm!("mov {}, cr3", out(reg) current, options(nostack));
+    }
+    if current != page_table {
+        return;
+    }
+    let kpt = kernel_pt_phys();
+    unsafe {
+        asm!(
+            "mov cr3, {0}",
+            "mov gs:[64], {0}",
+            in(reg) kpt,
+            options(nostack)
+        );
+    }
+}
+
 // Called from IRQ.
 pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
     // Kernel translations are valid in every address space (the kernel L3s
@@ -618,6 +644,11 @@ impl Drop for PageTable {
             {
                 let guard = self.inst.get().lock(1);
                 assert!(guard.userspace);
+                // W6b: all CPUs were evicted from this table at the start
+                // of UserAddressSpace::drop, before teardown began mutating
+                // it. Local backstop for tables that never reached that
+                // path (e.g. spawn failures).
+                evict_if_current(guard.table_l4.self_phys_addr());
                 guard.table_l4.dealloc();
             }
 

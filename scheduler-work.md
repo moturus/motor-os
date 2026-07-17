@@ -13,7 +13,7 @@ changes applied, uncommitted).
 | # | Finding | Type | Cost today | Fix effort |
 |---|---------|------|-----------|-----------|
 | S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable — **done, Round 2** (86–96 % of uspace IRQs now fast-return; RR 2.2×, TX stabilized) | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
-| S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume — **W6a done, Round 5** (kernel TLB survives CR3 writes; #PF −7 %; W6b/W6c remain) | perf | dominant hidden cost of IPC | medium–large |
+| S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume — **W6a done R5; W6b (CR3-switch removal) done R6** (RR 118 µs record; user-copy software walks + W6c remain) | perf | dominant hidden cost of IPC | medium–large |
 | S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait — **done, Round 4** (22 % of waits skip the pause; RR −25 %, new all-time record) | perf | ~2×5 µs per IPC RTT | small |
 | S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs — **done, Round 3** (52 % of placements now land on the warm CPU; timer IRQs −26 %; bench-neutral otherwise) | perf | unquantified, likely large | small–medium |
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
@@ -497,7 +497,7 @@ test passes on release; debug systest 69 PASS + 40 s idle watchdog-quiet.
 
 ## Round 5 (done 2026-07-17): W3 skipped on measurement; roadmap step 6 — W6a GLOBAL kernel pages (S2 part 1)
 
-Uncommitted, on top of Round 4 (addccf1).
+Committed as aad92a5, on top of Round 4 (addccf1).
 
 ### W3 (lazy FPU) — skipped, with the measurement the roadmap asked for
 
@@ -570,6 +570,96 @@ fixed shootdown path) all PASS; idle watchdog-quiet; zero
   per-4K-page spinlocked software walks in `read_from_user` — falls to
   **W6b**, which is now unblocked and is the next round.
 - After W6b, re-measure before considering W6c (PCID).
+
+---
+
+## Round 6 (done 2026-07-17): roadmap step 7 (part 1) — W6b: no CR3 switch on syscalls/preempts (S2 part 2)
+
+Uncommitted, on top of Round 5 (aad92a5).
+
+### What was done
+
+Syscalls, preempts and in-kernel pauses no longer touch CR3 at all; CR3
+changes only when a *different* address space's thread goes on-CPU:
+
+1. **Syscall entry/exit** (`syscall_handler_asm`): the KPT load on entry
+   and the UPT reload before `sysretq` are gone. The kernel is fully
+   mapped in every user table (two shared L4 slots) and IRQ handlers have
+   always run on UPTs; syscalls now do too. A thread's own user TLB
+   survives its syscalls.
+2. **Per-CPU CR3 shadow** (`GS` offset 64) + `install_page_table()`:
+   reads the shadow, skips the `mov cr3` when the target table is already
+   installed. Called from `spawn_usermode_thread()`, `resume()` (covers
+   blocked-syscall migration: the thread sysrets on whatever CPU resumed
+   it) and `resume_preempted_thread()` — the asm no longer loads CR3.
+   Same-process pause→resume on one CPU: **zero CR3 writes**.
+3. **Preempt path** (`preempt_current_thread_asm`): stays on the
+   interrupted thread's UPT; the sched loop only touches kernel memory.
+   `kill_current_thread` keeps its KPT switch (thread dying — leave the
+   table immediately) and updates the shadow.
+4. **Dead-table eviction** (`tlb::evict_user_page_table`): with sched
+   loops idling on parked threads' tables, a dying process's table can
+   still be some CPU's CR3. Broadcast via the existing shootdown IPI; each
+   CPU switches to the KPT iff its CR3 matches (checked against the real
+   CR3, not the shadow — safe vs a concurrently interrupted
+   `install_page_table`, which can never target a dead process's table).
+
+### The bug found on first boot: teardown-order triple fault
+
+The first W6b build wedged the whole VM at the *first process exit* (first
+ssh exec), with nothing on serial — qemu exited on a **triple fault**.
+Cause: eviction originally ran in `PageTable::drop`, but teardown mutates
+the table much earlier — in particular `unmap_kernel_from_user()` removes
+the dying table's *kernel* L4 entries while the teardown CPU (and any
+idle CPU) may still be standing on it. W6a's global TLB entries mask the
+mutilation until the first cold kernel address misses the TLB → page walk
+finds no kernel L4 entry → #PF handler unreachable → #DF unreachable →
+triple fault. (Ironically, without W6a's global pages it would have died
+instantly rather than lasting until a TLB miss.) Fix: the eviction
+broadcast moved to the *start* of `UserAddressSpace::drop`, before
+`mark_dead()` and any table mutation; `PageTable::drop` keeps a local
+`evict_if_current` backstop for never-installed tables (spawn failures).
+Verified by the exact reproducer (repeated ssh execs = process
+spawn/exit cycles).
+
+### Results
+
+Baseline = the Round 5 "after" run (identical binary to committed
+aad92a5). rnetbench:
+
+| metric | baseline (W6a) | W6b |
+|---|---|---|
+| RR µs | 141.3 / 155.2 / 186.9 | **118.4 / 140.6 / 182.7** |
+| client⇒server MiB/s | 309.2 / 303.1 / 436.0 | 303.1 / 251.9 / 460.1 |
+| server⇒client MiB/s | 335.8 / 274.8 / 330.7 | 324.5 / 295.6 / 333.1 |
+
+**RR 118.4 µs — the all-time record falls again** (152.6 → 137.4 (R4) →
+118.4; −16 % vs W6a, −22 % vs the pre-series record on a degraded rig).
+bench_page_faults dropped further to **6316/6362 ns** (≈7100 before W6a —
+the #PF round trip now does zero CR3 writes). FS read hit 409 mbps.
+Throughput/hot-cache/liveness within noise — bulk paths are bounded by
+sys-io per-message machinery, not TLB.
+
+Verified: release systest ×3 + tokio + mio + FP-env test pass; repeated
+process spawn/exit smoke; debug: systest ×6 → **5 clean (70 PASS), 1 hung
+in test_peek** (TCP peek, 420 s timeout; no watchdog trip, no panic, VM
+stayed healthy — tokio passed right after; not reproduced in 4 targeted
+reruns); tokio pass; idle watchdog-quiet; zero "invalid rsp"/oops/panic
+in debug serial. The test_peek hang is unattributed — possibly a rare
+pre-existing net-test race (this round sampled debug systest more than
+any before), possibly W6b-related; **watch in future rounds**.
+
+### Consequences for the roadmap
+
+- The remaining S2 items: the `read_from_user`/`write_to_user` software
+  walks (need #PF-fixup machinery for lazy user pages before they can be
+  direct copies — the doc's W6b "part 2"), and W6c (PCID) for user-TLB
+  survival across *process* switches. Re-measure IPC before either.
+- W7 (direct-switch swap) is now the biggest remaining IPC lever: with
+  CR3 costs mostly gone, the queue round trip is the wait-path cost.
+- S15 note: syscalls now run with user memory mapped — SMEP/SMAP (S15)
+  gains relevance as defense-in-depth for the kernel-touches-user-memory
+  bug class (it was already the case for IRQs).
 
 ---
 
@@ -1084,6 +1174,9 @@ Phase B — TLB/syscall cost (S2), sequenced:
 7. **W6b: drop the KPT switch on syscalls**; replace software-walk user
    copies with direct access + checks. Re-measure IPC (FS smoke, rnetbench
    RR, getpid-style microbench).
+   **CR3-switch removal done — see "Round 6" above** (RR 118.4 µs record).
+   The user-copy software walks remain: direct copies need #PF fixup
+   machinery (user pages are lazily mapped) — future round.
 8. **W7: direct-switch swap** (after A+B shrink the path; biggest surgery).
 9. **W6c: PCID** — only if post-W6b profiles still show user-TLB pain.
 10. **W8/S13: wait-path allocation elimination** (can run parallel to B).

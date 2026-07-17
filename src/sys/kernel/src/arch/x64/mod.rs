@@ -53,6 +53,38 @@ pub fn current_cpu() -> uCpus {
     GS::current_cpu()
 }
 
+// Installs `page_table` (a physical L4 address) as this CPU's CR3 unless it
+// is already installed (per the gs:[64] shadow) — a CR3 write wipes all
+// non-global TLB translations, so redundant loads are worth skipping (the
+// same-process wait/resume lockstep case). Safe against the concurrent
+// evict IPI (tlb::evict_user_page_table): eviction only targets page tables
+// of fully-dead processes, which no caller can be installing.
+pub fn install_page_table(page_table: u64) {
+    let current: u64;
+    unsafe {
+        core::arch::asm!("mov {}, gs:[64]", out(reg) current, options(nostack));
+    }
+    if current == page_table {
+        return;
+    }
+    unsafe {
+        core::arch::asm!(
+            "mov cr3, {0}",
+            "mov gs:[64], {0}",
+            in(reg) page_table,
+            options(nostack)
+        );
+    }
+}
+
+pub fn install_kernel_page_table() {
+    let kpt: u64;
+    unsafe {
+        core::arch::asm!("mov {}, gs:[24]", out(reg) kpt, options(nostack));
+    }
+    install_page_table(kpt);
+}
+
 pub fn bsp() -> uCpus {
     0
 }
@@ -189,6 +221,13 @@ struct GS {
     rsp: u64,       // offset 40
     scratch_0: u64, // offset 48
     scratch_1: u64, // offset 56
+    // offset 64: shadow of this CPU's CR3 (W6b). Every CR3 write goes
+    // through install_page_table()/install_kernel_page_table() or one of
+    // the few asm paths that update gs:[64] alongside `mov cr3`, so the
+    // shadow is always accurate. Lets kernel->user resume paths skip the
+    // CR3 load (= a full non-global TLB wipe) when the right table is
+    // already installed - the common lockstep case.
+    current_cr3: u64,
 }
 
 impl GS {
@@ -221,6 +260,7 @@ impl GS {
         gs.gs_val = gs_val;
         gs.this_cpu = this_cpu;
         gs.kpt = paging::kpt_phys_addr();
+        gs.current_cr3 = gs.kpt; // CR3 == KPT during init.
 
         wrmsr(Self::MSR_IA32_GS_BASE, gs_val); // Same as asm!("wrgsbase {gsval}").
         wrmsr(Self::MSR_IA32_KERNEL_GSBASE, gs_val);

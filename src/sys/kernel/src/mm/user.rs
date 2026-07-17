@@ -47,6 +47,14 @@ unsafe impl Sync for UserAddressSpace {}
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
+        // W6b: CPUs no longer leave a process's page table on syscall/
+        // preempt, so this CPU (running the teardown) and idle remote CPUs
+        // may still have it as CR3. Teardown mutates the table — including
+        // removing its *kernel* L4 entries (unmap_kernel_from_user), which
+        // triple-faults any CPU still standing on it as soon as a kernel
+        // address misses the (global) TLB. Move everyone off first.
+        crate::arch::tlb::evict_user_page_table(self.inner.page_table_ref().phys_addr());
+
         self.inner.page_table_ref().mark_dead();
 
         // We manually clear caches instead of relying on drops

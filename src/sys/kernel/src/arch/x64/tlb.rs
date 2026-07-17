@@ -41,6 +41,20 @@ pub fn setup() {
     PERCPU_PROCESSED_GENERATION.set(Box::leak(Box::new(vec)));
 }
 
+// num_pages sentinel: the message is not a range invalidation but a page
+// table eviction — see evict_user_page_table().
+pub(super) const EVICT_PAGE_TABLE: u64 = u64::MAX;
+
+// W6b: syscalls and preempts no longer switch CR3, so a CPU's sched loop
+// can idle on the page table of a parked (or dead) thread's process. Before
+// a user page table's L4 page is freed, every CPU still running on it must
+// be moved off — otherwise the hardware page walker would read freed and
+// reused memory as page tables. Broadcasts to all CPUs; each switches to
+// the kernel page table iff its current CR3 matches.
+pub fn evict_user_page_table(page_table: u64) {
+    invalidate(page_table, 0, EVICT_PAGE_TABLE)
+}
+
 pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
     crate::xray::tracing::trace(
         "tlb::invalidate: will lock",
@@ -99,7 +113,11 @@ pub(super) fn shoot_from_irq() {
     let num_pages = MESSAGE.num_pages.load(Ordering::Relaxed);
 
     // Do the work.
-    super::paging::invalidate(page_table, first_page_vaddr, num_pages);
+    if num_pages == EVICT_PAGE_TABLE {
+        super::paging::evict_if_current(page_table);
+    } else {
+        super::paging::invalidate(page_table, first_page_vaddr, num_pages);
+    }
 
     // Signal that we got the message.
     MESSAGE

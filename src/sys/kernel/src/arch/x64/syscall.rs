@@ -285,6 +285,7 @@ impl ThreadControlBlock {
         assert!(!self.in_syscall.load(Ordering::Relaxed));
         self.check_sti();
 
+        super::install_page_table(self.user_page_table);
         self.set_fs();
         self.xrstor();
 
@@ -409,6 +410,10 @@ impl ThreadControlBlock {
 
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
 
+        // The thread continues its syscall and sysrets from it without any
+        // CR3 switch (W6b) — install its page table now (no-op when it is
+        // already current, e.g. same-process lockstep on one CPU).
+        super::install_page_table(self.user_page_table);
         self.restore_fp_env();
 
         // Note: we don't call self.set_fs() here because it is called
@@ -501,6 +506,7 @@ impl ThreadControlBlock {
         }
         let stack_addr = &self.irq_stack as *const _ as usize as u64;
 
+        super::install_page_table(self.user_page_table);
         self.set_fs();
         self.xrstor();
 
@@ -641,10 +647,8 @@ unsafe extern "C" fn spawn_usermode_thread_asm() {
         "mov rcx, [rdx]",      //  ; user RIP
         "mov rsp, [rdx + 8]",  //  ; user SP
         "mov r11, [rdx + 40]", // rflags
-        // switch to the user's page table
-        "mov rax, [rdx + 16]", //  ; UPT
-        // DO NOT access TCB or GS below, as we are going to switch to UPT
-        "mov cr3, rax",
+        // CR3 already holds the UPT: installed by install_page_table() in
+        // spawn_usermode_thread() (W6b).
         // "
         // 2:
         // mov eax, $36
@@ -688,10 +692,11 @@ unsafe extern "C" fn syscall_handler_asm() {
         // nr_version: rax
         "swapgs",
 
-        // restore the kernel page
-        "mov gs:[48], rax",  // scratch0
-        "mov rax, gs:[24]",  // KPT
-        "mov cr3, rax",
+        // W6b: no CR3 switch — the kernel is fully mapped in user page
+        // tables (two shared L4 slots) and IRQ handlers have always run on
+        // them; syscalls now do too. The kernel TLB is GLOBAL (W6a), the
+        // user TLB survives the thread's own syscalls.
+        "mov gs:[48], rax",  // scratch0: nr_version
 
         "mov rax, gs:[32]", // TCB
         "mov [rax], rcx",  // Save user RIP in TCB for validation.
@@ -738,21 +743,16 @@ unsafe extern "C" fn syscall_handler_asm() {
     #    ; don't clear r11 - user rflags
     */
 
-        // Switch to the user's page table:
-        // gs:[48] - scratch 0
-        // gs:[56] - scratch 1
-        // gs:[32] - TCB
+        // No CR3 switch on exit either: CR3 is the thread's UPT — unchanged
+        // since syscall entry, or (re)installed by TCB::resume() if the
+        // thread blocked and migrated.
+        // gs:[56] - scratch 1; gs:[32] - TCB
         "
-        mov gs:[48], rax
         mov gs:[56], rbx
         mov rbx, gs:[32]
         mov rsp, [rbx + 8]",  // Restore user RSP.
-    "mov rax, [rbx + 16]", // ; UPT
     "mov r11, [rbx + 40]", // rflags
-        "
-        mov cr3, rax
-        mov rax, gs:[48]
-        mov rbx, gs:[56]",
+        "mov rbx, gs:[56]",
         // "fninit",
         "swapgs",
         "sysretq",
@@ -821,9 +821,12 @@ unsafe extern "C" fn syscall_exit_asm() -> ! {
 pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) -> ! {
     naked_asm!(
         "cli",
-        // Restore the kernel page table.
+        // Switch to the kernel page table (and update the gs:[64] CR3
+        // shadow): the thread is dying and its process may be torn down —
+        // leave its page table immediately.
         "mov rax, gs:[24]", // KPT
         "mov cr3, rax",
+        "mov gs:[64], rax",
         // Restore kernel RSP.
         "mov rsp, gs:[40]",
         // eoi.
@@ -844,9 +847,10 @@ pub extern "C" fn kill_current_thread(tocr: u64 /* rdi */, addr: u64 /* rsi */) 
 pub extern "C" fn preempt_current_thread_asm() -> ! {
     naked_asm!(
         "cli",
-        // Restore the kernel page table.
-        "mov rax, gs:[24]",  // KPT
-        "mov cr3, rax",
+        // W6b: stay on the interrupted thread's UPT — the scheduler only
+        // touches kernel memory (fully mapped everywhere), and the next
+        // resume skips the CR3 load if it is for the same address space.
+        // Dying page tables are evicted via tlb::evict_user_page_table().
         // Restore kernel RSP.
         "mov rsp, gs:[40]",
         // eoi.
@@ -879,20 +883,8 @@ unsafe extern "C" fn resume_preempted_thread_asm() {
         ",
         super::irq::pop_irq_registers!(),
         "add rsp, 8", // See "naked_irq_handler".
-        // Switch to the user's page table:
-        // gs:[48] - scratch 0
-        // gs:[56] - scratch 1
-        // gs:[32] - TCB
-        "
-        mov gs:[48], rax
-        mov gs:[56], rbx
-        mov rbx, gs:[32]
-        ",
-        "mov rax, [rbx + 16]", // ; UPT
-        "
-        mov cr3, rax
-        mov rax, gs:[48]
-        mov rbx, gs:[56]",
+        // CR3 already holds the UPT: installed by install_page_table() in
+        // resume_preempted_thread() (W6b).
         "
         swapgs
         iretq
