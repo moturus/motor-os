@@ -284,7 +284,7 @@ fn test_caps() {
         std::process::Command::new(std::env::args().next().unwrap())
             .arg("subcommand")
             .env(
-                moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
+                moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
                 format!("0x{:x}", moto_sys::caps::CAP_SYS),
             )
             .spawn()

@@ -66,6 +66,20 @@ pub async fn spawn(
     #[cfg(target_os = "motor")]
     cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
 
+    // Pass CAP_SPAWN_DETACHED down to the shell (on top of the usual defaults), so
+    // a program the shell trusts can start a server that outlives this ssh
+    // session. russhd holds the bit via its service capabilities (sys-init.cfg).
+    #[cfg(target_os = "motor")]
+    cmd.env(
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        format!(
+            "0x{:x}",
+            moto_sys::caps::CAP_SPAWN
+                | moto_sys::caps::CAP_LOG
+                | moto_sys::caps::CAP_SPAWN_DETACHED
+        ),
+    );
+
     let argv = command.argv.join(" ");
     let mut child = cmd
         .stdin(Stdio::piped())

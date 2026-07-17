@@ -622,9 +622,13 @@ fn run_elf(
 
     // TODO: remove CAP_LOG when the runtime is stabilized.
     let mut caps = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG;
-    // Find MOTURUS_CAPS env var.
+    // Whether to spawn the child detached (owner = kernel, survives our exit).
+    // Requested by an env var and consumed here, the same way caps are; the
+    // kernel enforces that we actually hold CAP_SPAWN_DETACHED.
+    let mut detached = false;
+    // Find the MOTOR_OS_CAPS and MOTOR_OS_DETACHED env vars.
     for (k, v) in &mut env {
-        if *k == moto_sys::caps::MOTURUS_CAPS_ENV_KEY.as_bytes() {
+        if *k == moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY.as_bytes() {
             *k = "".as_bytes(); // Clear the key: see env::create_remote_env().
             let v = core::str::from_utf8(v).map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
             if let Ok(env_caps) = u64::from_str_radix(v.trim_start_matches("0x"), 16) {
@@ -632,11 +636,19 @@ fn run_elf(
             } else {
                 crate::moto_log!("could not parse caps {v}");
             }
+        } else if *k == moto_sys::caps::MOTOR_OS_DETACHED_ENV_KEY.as_bytes() {
+            *k = "".as_bytes(); // Clear the key so the child never sees it.
+            if let Ok(s) = core::str::from_utf8(v) {
+                detached = s == "true" || s == "TRUE";
+            }
         }
     }
 
     // Create the process from the address space.
-    let proc_url = alloc::format!("process:entry_point={load_result};capabilities={caps}");
+    let proc_url = alloc::format!(
+        "process:entry_point={load_result};capabilities={caps};detached={}",
+        if detached { 1 } else { 0 }
+    );
     let process = moto_sys::syscalls::RaiiHandle::from(moto_sys::SysObj::create(
         address_space.syshandle(),
         0,

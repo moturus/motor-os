@@ -380,6 +380,7 @@ pub fn start_userspace_processes() {
         address_space,
         entry_point,
         0xffff_ffff_ffff_ffff, // All possible caps.
+        false,
         alloc::string::String::from("sys-io"),
     )
     .unwrap();

@@ -21,13 +21,55 @@
 //! [`Jobs::next_pid`]) so such a mistake fails to find a process rather than
 //! finding the wrong one.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread::JoinHandle;
 
 use crate::sys::{self, WaitOutcome};
+
+// ---- detached-spawn policy --------------------------------------------------
+
+/// Which programs the shell will hand `CAP_SPAWN_DETACHED` to, and the env
+/// assignment that does it.
+///
+/// A program named here is granted the capability to spawn detached children —
+/// daemons that outlive this shell — when it is run. The list comes from
+/// `/user/cfg/rush.toml`'s `spawn-detached` key; the grant itself is `None`
+/// unless the shell holds the capability to pass on (off Motor, always). This is
+/// how a program like `rmux` gets to run a server that survives logout without
+/// every program being able to.
+struct DetachPolicy {
+    grant: Option<(&'static str, String)>,
+    programs: HashSet<String>,
+}
+
+static DETACH_POLICY: OnceLock<DetachPolicy> = OnceLock::new();
+
+/// Install the detached-spawn pass-list (from `rush.toml`). Called once at
+/// startup; a second call is ignored.
+pub fn init_detach_policy(programs: HashSet<String>) {
+    let _ = DETACH_POLICY.set(DetachPolicy {
+        grant: sys::detach_cap_grant(),
+        programs,
+    });
+}
+
+/// If `program` is on the pass-list and the shell can grant it, the env
+/// assignment that hands it `CAP_SPAWN_DETACHED`.
+fn detach_grant_for(program: &str) -> Option<(&'static str, String)> {
+    let policy = DETACH_POLICY.get()?;
+    let (key, val) = policy.grant.as_ref()?;
+    let base = program.rsplit('/').next().unwrap_or(program);
+    if policy.programs.contains(base) {
+        Some((key, val.clone()))
+    } else {
+        None
+    }
+}
 
 // ---- child stdio ------------------------------------------------------------
 
@@ -90,6 +132,13 @@ pub fn spawn(
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
+    }
+
+    // Trusted programs (rush.toml's `spawn-detached`) get CAP_SPAWN_DETACHED.
+    // Set after the env loop so a stray MOTURUS_CAPS in the shell environment
+    // cannot override the grant.
+    if let Some((key, val)) = detach_grant_for(program) {
+        cmd.env(key, val);
     }
 
     // Read file-backed input up front: FS access must stay on this thread.

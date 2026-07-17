@@ -175,6 +175,7 @@ impl Process {
         address_space: Arc<UserAddressSpace>,
         entry_point: u64,
         capabilities: u64,
+        detached: bool,
         debug_name: String,
     ) -> Result<Arc<Self>, ErrorCode> {
         if !crate::mm::virt::is_user(entry_point) {
@@ -208,6 +209,7 @@ impl Process {
                 parent,
                 ProcessId::new(),
                 debug_name,
+                detached,
                 user_mem_stats,
                 kernel_mem_stats,
                 me.clone(),
@@ -255,6 +257,7 @@ impl Process {
         let args: alloc::vec::Vec<&str> = url_part.split(';').collect();
         let entry_point: Option<u64> = crate::util::decode_arg::<u64>(&args, "entry_point");
         let capabilities: u64 = crate::util::decode_arg::<u64>(&args, "capabilities").unwrap_or(0);
+        let detached: bool = crate::util::decode_arg::<u64>(&args, "detached").unwrap_or(0) != 0;
 
         if entry_point.is_none() {
             log::debug!("missing entry_point");
@@ -272,6 +275,11 @@ impl Process {
                 // Non-system processes cannot grant themseves caps they don't have.
                 return Err(moto_rt::E_NOT_ALLOWED);
             }
+        }
+
+        if detached && (parent_caps & moto_sys::caps::CAP_SPAWN_DETACHED == 0) {
+            log::debug!("detached spawn denied: spawner lacks CAP_SPAWN_DETACHED");
+            return Err(moto_rt::E_NOT_ALLOWED);
         }
 
         let (address_space, url) = match parent.get_object(&address_space_handle) {
@@ -294,6 +302,7 @@ impl Process {
             address_space,
             entry_point.unwrap(),
             capabilities,
+            detached,
             url,
         )
         .map_err(|_| moto_rt::E_INTERNAL_ERROR)?;

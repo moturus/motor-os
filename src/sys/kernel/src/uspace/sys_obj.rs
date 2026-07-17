@@ -67,16 +67,22 @@ fn sys_handle_create(
                 return Ok(thread.owner().add_object(sys_object));
             }
             "process" => {
-                if let Ok(process) = super::process::Process::new_child(
+                match super::process::Process::new_child(
                     thread,
                     parent,
                     &moto_sys::url_decode(suffix),
                 ) {
-                    log::debug!("created {url}");
-                    return Ok(thread.owner().add_object(process.self_object().unwrap()));
-                } else {
-                    log::debug!("Error creating process '{url}'");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                    Ok(process) => {
+                        log::debug!("created {url}");
+                        return Ok(thread.owner().add_object(process.self_object().unwrap()));
+                    }
+                    Err(err) => {
+                        // Propagate the real error (e.g. E_NOT_ALLOWED for a
+                        // detached spawn without CAP_SPAWN_DETACHED) rather than
+                        // flattening every failure to E_INVALID_ARGUMENT.
+                        log::debug!("Error creating process '{url}': {err:?}");
+                        return Err(err);
+                    }
                 }
             }
             "shared" => {

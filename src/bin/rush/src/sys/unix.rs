@@ -158,6 +158,13 @@ pub fn wait_child(child: &mut Child) -> std::io::Result<WaitOutcome> {
 
 /// The shell status for a child's exit: its exit code, or `128 + signo` when a
 /// signal killed it (POSIX §2.8.2 — `sh -c 'kill -9 $$'` reports 137).
+/// The Unix host has no capability model, so there is nothing to grant; the
+/// `spawn-detached` list is inert here (the env var it would set means nothing
+/// off Motor). Present so the shell core stays free of `cfg`.
+pub fn detach_cap_grant() -> Option<(&'static str, String)> {
+    None
+}
+
 pub fn exit_status_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status

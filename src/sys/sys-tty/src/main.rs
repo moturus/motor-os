@@ -87,6 +87,18 @@ fn main() {
     let mut command = std::process::Command::new(fname);
     command.env_clear();
     command.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+    // The shell gets CAP_SPAWN_DETACHED on top of the usual defaults, so it
+    // (and, transitively, programs it is configured to trust) can start daemons
+    // that outlive the console session. See moto_sys::caps.
+    command.env(
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        format!(
+            "0x{:x}",
+            moto_sys::caps::CAP_SPAWN
+                | moto_sys::caps::CAP_LOG
+                | moto_sys::caps::CAP_SPAWN_DETACHED
+        ),
+    );
     for assignment in &assignments {
         let (name, value) = assignment.split_once('=').unwrap();
         command.env(name, value);

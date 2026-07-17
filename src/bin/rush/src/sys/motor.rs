@@ -83,6 +83,26 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
     })
 }
 
+// ---- detached spawn --------------------------------------------------------
+
+/// The env assignment that grants a child `CAP_SPAWN_DETACHED` on top of the
+/// usual defaults, or `None` if this shell does not itself hold the capability
+/// and so cannot pass it on.
+///
+/// Used for the programs the shell is configured to trust with detaching (the
+/// `spawn-detached` list in `/user/cfg/rush.toml`). The capability is granted
+/// only where the shell has it — the kernel would refuse a grant of a capability
+/// the parent lacks anyway, so this just avoids setting a doomed env var.
+pub fn detach_cap_grant() -> Option<(&'static str, String)> {
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    if own & moto_sys::caps::CAP_SPAWN_DETACHED == 0 {
+        return None;
+    }
+    let child =
+        moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_SPAWN_DETACHED;
+    Some((moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{child:x}")))
+}
+
 // ---- process control -------------------------------------------------------
 
 /// Wait for `child`. Nothing can interrupt this on Motor OS (no signals), so the

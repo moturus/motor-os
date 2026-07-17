@@ -78,7 +78,7 @@ fn main() {
         #[allow(clippy::zombie_processes)]
         let _ = std::process::Command::new(strobe.as_str())
             .env(
-                moto_sys::caps::MOTURUS_CAPS_ENV_KEY,
+                moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
                 format!("0x{:x}", moto_sys::caps::CAP_LOG),
             )
             .stdin(std::process::Stdio::null())
@@ -115,7 +115,7 @@ fn main() {
     }
 
     let mut tty = std::process::Command::new(config.tty.as_str())
-        .env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, "0xffffffffffffffff")
+        .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, "0xffffffffffffffff")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -166,7 +166,7 @@ fn spawn_service(caps: u64, cmd: &str) {
     command.args(&words[1..]);
 
     if caps != 0 {
-        command.env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, format!("0x{caps:x}"));
+        command.env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"));
     }
 
     let _child = command

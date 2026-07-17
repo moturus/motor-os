@@ -75,7 +75,7 @@ fn main() {
     cmd.current_dir("/");
 
     // Give init the full caps.
-    cmd.env(moto_sys::caps::MOTURUS_CAPS_ENV_KEY, "0xffffffffffffffff");
+    cmd.env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, "0xffffffffffffffff");
 
     // Start sys-init and wait on it (exit when sys-init exits).
     let mut init_join_handle = cmd.spawn().expect("Error starting sys-init: ");

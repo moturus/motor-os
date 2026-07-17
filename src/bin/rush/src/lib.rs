@@ -215,6 +215,10 @@ pub fn execute(inv: Invocation) {
         std::env::set_current_dir(std::path::Path::new("/")).unwrap();
     }
 
+    // Which programs may be handed CAP_SPAWN_DETACHED, from rush.toml. Loaded
+    // once, before anything is spawned.
+    jobs::init_detach_policy(load_detach_programs());
+
     // The single persistent shell state, carried across the whole session.
     let mut sh = Shell::new();
     sh.set_name(inv.name);
@@ -299,6 +303,53 @@ fn source_if_present(raw: &str, sh: &mut Shell) {
         return;
     }
     exec::run_script(&path, sh);
+}
+
+/// The programs `rush.toml` lists under `spawn-detached` — the ones the shell
+/// will hand `CAP_SPAWN_DETACHED` (see [`jobs::init_detach_policy`]).
+///
+/// The config is optional and only the one key is read. The parse is deliberately
+/// small — `spawn-detached = ["rmux", "foo"]`, one line — because rush has no
+/// TOML crate; anything it does not recognize is ignored. Off Motor the list is
+/// still read (so tests can exercise it) but inert, since there is no capability
+/// to grant.
+fn load_detach_programs() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let Some(path) = rush_toml_path() else {
+        return set;
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return set;
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("spawn-detached") else {
+            continue;
+        };
+        // Expect `= [ ... ]`; take what is between the brackets.
+        let Some(open) = rest.find('[') else { continue };
+        let Some(close) = rest[open..].find(']') else {
+            continue;
+        };
+        for item in rest[open + 1..open + close].split(',') {
+            let item = item.trim().trim_matches(['"', '\'']).trim();
+            if !item.is_empty() {
+                set.insert(item.to_string());
+            }
+        }
+    }
+    set
+}
+
+fn rush_toml_path() -> Option<std::path::PathBuf> {
+    #[cfg(not(unix))]
+    {
+        Some(std::path::PathBuf::from("/user/cfg/rush.toml"))
+    }
+    #[cfg(unix)]
+    {
+        std::env::home_dir().map(|home| home.join(".config/rush.toml"))
+    }
 }
 
 /// The read-parse-execute loop.

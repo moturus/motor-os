@@ -317,6 +317,7 @@ pub struct KProcessStats {
     active_children: AtomicU64,
     children: SpinLock<BTreeMap<ProcessId, Weak<KProcessStats>>>,
     active: AtomicBool,
+    detached: bool,
 
     mem_stats_user: Arc<MemStats>,
     mem_stats_kernel: Arc<MemStats>,
@@ -345,6 +346,7 @@ impl KProcessStats {
         parent: Arc<KProcessStats>,
         pid: ProcessId,
         debug_name: String,
+        detached: bool,
         mem_stats_user: Arc<MemStats>,
         mem_stats_kernel: Arc<MemStats>,
         owner: Weak<crate::uspace::Process>,
@@ -353,6 +355,7 @@ impl KProcessStats {
             Some(parent),
             pid,
             debug_name,
+            detached,
             mem_stats_user,
             mem_stats_kernel,
             owner,
@@ -363,6 +366,7 @@ impl KProcessStats {
         parent: Option<Arc<KProcessStats>>,
         pid: ProcessId,
         debug_name: String,
+        detached: bool,
         mem_stats_user: Arc<MemStats>,
         mem_stats_kernel: Arc<MemStats>,
         owner: Weak<crate::uspace::Process>,
@@ -377,6 +381,7 @@ impl KProcessStats {
             active_children: AtomicU64::new(0),
             children: SpinLock::new(BTreeMap::new()),
             active: AtomicBool::new(true),
+            detached,
             mem_stats_user,
             mem_stats_kernel,
             owner,
@@ -430,8 +435,16 @@ impl KProcessStats {
         // Kill child processes. Do it asynchronously to avoid stack overflow.
         // Do it here because this is the only place where child processes
         // are tracked.
+        //
+        // Detached children are the exception: they are owned by the kernel and
+        // outlive us on purpose (CAP_SPAWN_DETACHED), so they are left running.
         let children = self.children.lock(line!());
-        for pid in children.keys() {
+        for (pid, weak) in children.iter() {
+            if let Some(child) = weak.upgrade() {
+                if child.detached {
+                    continue;
+                }
+            }
             crate::uspace::process::post_kill_by_pid(pid.as_u64());
         }
     }
@@ -704,6 +717,7 @@ pub fn init() {
         None,
         ProcessId::from_u64(PID_SYSTEM),
         "(total)".to_owned(),
+        false,
         Arc::new(MemStats::new_user()),
         Arc::new(MemStats::new_kernel()),
         Weak::new(),
@@ -713,6 +727,7 @@ pub fn init() {
         Some(system_stats()),
         ProcessId::from_u64(PID_KERNEL),
         "kernel".to_owned(),
+        false,
         Arc::new(MemStats::new_user()),
         crate::mm::virt::kernel_mem_stats(),
         Weak::new(),
