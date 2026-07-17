@@ -379,6 +379,7 @@ pub(super) struct NetDev<'a> {
     udp_addresses_in_use: std::collections::HashSet<SocketAddr>,
 
     tcp_ports_in_use: std::collections::HashSet<u16>,
+    icmp_identifiers_in_use: std::collections::HashSet<u16>,
 
     // This is the notify that drives smoltcp device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
@@ -451,6 +452,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
             tcp_ports_in_use: std::collections::HashSet::new(),
+            icmp_identifiers_in_use: std::collections::HashSet::new(),
             device_runtime_notify: notify,
         }
     }
@@ -491,6 +493,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
+            icmp_identifiers_in_use,
             device_runtime_notify: notify,
         } = self;
         match device {
@@ -513,6 +516,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
+            icmp_identifiers_in_use,
             device_runtime_notify: notify,
         } = self;
         match device {
@@ -586,5 +590,23 @@ impl<'a> NetDev<'a> {
 
     pub(super) fn free_ephemeral_tcp_port(&mut self, port: u16) {
         self.tcp_ports_in_use.remove(&port);
+    }
+
+    pub(super) fn ip_mtu(&self) -> usize {
+        use smoltcp::phy::Device;
+
+        match &self.device {
+            SmoltcpDevice::VirtIo(device) => device.capabilities().ip_mtu(),
+            SmoltcpDevice::Loopback(device) => device.capabilities().ip_mtu(),
+        }
+    }
+
+    pub(super) fn get_icmp_identifier(&mut self) -> Option<u16> {
+        (1..=u16::MAX)
+            .find(|identifier| self.icmp_identifiers_in_use.insert(*identifier))
+    }
+
+    pub(super) fn free_icmp_identifier(&mut self, identifier: u16) {
+        assert!(self.icmp_identifiers_in_use.remove(&identifier));
     }
 }

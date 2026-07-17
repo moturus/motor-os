@@ -7,4 +7,7 @@ pub mod api_fs_legacy;
 pub mod api_net;
 
 #[cfg(feature = "std")]
+pub mod icmp;
+
+#[cfg(feature = "std")]
 pub mod stats;

@@ -16,6 +16,7 @@ use crate::util::map_err_into_native;
 
 mod config;
 mod device;
+mod icmp;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
@@ -52,7 +53,6 @@ impl ClientConnection {
 /// we never hold a reference over .await, and any cross-references
 /// happen via Rc<RefCell<NetRuntime>>.
 struct NetRuntimeInner {
-    config: config::NetConfig,
     next_socket_id: u64,
 
     sockets: HashMap<u64, Rc<RefCell<socket::MotoSocket>>>,
@@ -61,9 +61,6 @@ struct NetRuntimeInner {
     // In the future, Motor OS may use Vec<Option<NetDev>>, but at the moment
     // Motor OS does not support device hot (un)plug.
     devices: Vec<device::NetDev<'static>>,
-
-    // Dev name => Dev idx in Self::devices.
-    device_map: HashMap<String, usize>,
 
     // IP => Dev idx.
     ip_addresses: HashMap<IpAddr, usize>,
@@ -382,14 +379,14 @@ impl NetRuntime {
             return Some((*device_idx, *ip_addr));
         }
 
-        // If not found, look through routes.
-        let (dev_name, ip_addr) = inner.config.find_route(ip_addr)?;
-
-        inner
-            .devices
-            .iter()
-            .position(|dev| dev.name() == dev_name)
-            .map(|dev_idx| (dev_idx, ip_addr))
+        config::find_route(
+            inner
+                .devices
+                .iter()
+                .enumerate()
+                .map(|(device_idx, device)| (device_idx, device.config())),
+            *ip_addr,
+        )
     }
 
     fn get_ephemeral_tcp_port(
@@ -454,6 +451,7 @@ impl NetRuntime {
             NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
             NetCmd::UdpSocketDrop => socket::MotoSocket::udp_socket_drop(self, msg, &sender).await,
+            NetCmd::IcmpEcho => icmp::echo(self, msg, &sender).await,
 
             cmd => {
                 log::warn!(
@@ -531,15 +529,9 @@ pub(super) async fn init(
         return Ok(());
     }
 
-    let mut device_map = HashMap::new();
     let mut device_idx = 0;
     let mut ip_addresses = HashMap::new();
     for device in &devices {
-        assert!(
-            device_map
-                .insert(device.name().to_owned(), device_idx)
-                .is_none()
-        );
         for address in device.ip_addesses() {
             ip_addresses.insert(address, device_idx);
         }
@@ -548,12 +540,10 @@ pub(super) async fn init(
 
     let runtime = NetRuntime {
         inner: Rc::new(RefCell::new(NetRuntimeInner {
-            config,
             next_socket_id: 1,
             sockets: HashMap::new(),
             tcp_listeners: HashMap::new(),
             devices,
-            device_map,
             ip_addresses,
             clients: HashMap::new(),
         })),

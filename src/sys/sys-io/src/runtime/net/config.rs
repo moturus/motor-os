@@ -108,23 +108,62 @@ pub(super) struct NetConfig {
     pub devices: BTreeMap<String, DeviceCfg>,
 }
 
-// Find the device name and the local IP address to route to dst.
-impl NetConfig {
-    pub(super) fn find_route(&self, dst: &IpAddr) -> Option<(String, IpAddr)> {
-        for (dev_name, dev_cfg) in &self.devices {
-            for route in &dev_cfg.routes {
-                if route.ip_network.contains(*dst) {
-                    for cidr in &dev_cfg.cidrs {
-                        if cidr.contains(*dst) && route.ip_network.contains(cidr.ip()) {
-                            return Some((dev_name.to_owned(), cidr.ip()));
-                        }
-                    }
-                }
+fn same_family(left: IpAddr, right: IpAddr) -> bool {
+    matches!(
+        (left, right),
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+    )
+}
+
+/// Select an active device and source address for `dst`.
+///
+/// Directly connected networks and configured routes compete by prefix length.
+/// A configured gateway must itself be reachable through one of the device's
+/// directly connected CIDRs.
+pub(super) fn find_route<'a>(
+    devices: impl Iterator<Item = (usize, &'a DeviceCfg)>,
+    dst: IpAddr,
+) -> Option<(usize, IpAddr)> {
+    let mut best: Option<(u8, bool, usize, IpAddr)> = None;
+
+    let mut consider = |prefix: u8, direct: bool, device_idx: usize, source: IpAddr| {
+        let replace = best.is_none_or(|(best_prefix, best_direct, _, _)| {
+            prefix > best_prefix || (prefix == best_prefix && direct && !best_direct)
+        });
+        if replace {
+            best = Some((prefix, direct, device_idx, source));
+        }
+    };
+
+    for (device_idx, device) in devices {
+        for cidr in &device.cidrs {
+            if same_family(cidr.ip(), dst) && cidr.contains(dst) {
+                consider(cidr.prefix(), true, device_idx, cidr.ip());
             }
         }
 
-        None
+        for route in &device.routes {
+            if !same_family(route.ip_network.ip(), dst) || !route.ip_network.contains(dst) {
+                continue;
+            }
+            if route.gateway.is_unspecified() || !same_family(route.gateway, dst) {
+                continue;
+            }
+
+            let source = device
+                .cidrs
+                .iter()
+                .filter(|cidr| same_family(cidr.ip(), dst) && cidr.contains(route.gateway))
+                .max_by_key(|cidr| cidr.prefix())
+                .map(IpNetwork::ip);
+
+            if let Some(source) = source {
+                consider(route.ip_network.prefix(), false, device_idx, source);
+            }
+        }
     }
+
+    best.map(|(_, _, device_idx, source)| (device_idx, source))
 }
 
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
@@ -210,5 +249,76 @@ fn addr_to_octets(addr: std::net::IpAddr) -> [u8; 16] {
             octets
         }
         IpAddr::V6(addr) => addr.octets(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(cidr: &str, routes: &[(&str, &str)]) -> DeviceCfg {
+        let mut device = DeviceCfg::new("02:00:00:00:00:01");
+        device.cidrs.push(cidr.parse().unwrap());
+        for (network, gateway) in routes {
+            device.routes.push(IpRoute {
+                ip_network: network.parse().unwrap(),
+                gateway: gateway.parse().unwrap(),
+            });
+        }
+        device
+    }
+
+    #[test]
+    fn route_selection_handles_connected_and_default_routes() {
+        let net0 = device("192.168.4.2/24", &[("0.0.0.0/0", "192.168.4.1")]);
+        let devices = [(0, &net0)];
+
+        assert_eq!(
+            find_route(devices.into_iter(), "192.168.4.99".parse().unwrap()),
+            Some((0, "192.168.4.2".parse().unwrap()))
+        );
+        assert_eq!(
+            find_route(devices.into_iter(), "1.1.1.1".parse().unwrap()),
+            Some((0, "192.168.4.2".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn route_selection_prefers_the_longest_prefix() {
+        let net0 = device("192.168.4.2/24", &[("0.0.0.0/0", "192.168.4.1")]);
+        let net1 = device("192.168.6.2/24", &[("203.0.113.0/24", "192.168.6.1")]);
+        let devices = [(0, &net0), (1, &net1)];
+
+        assert_eq!(
+            find_route(devices.into_iter(), "203.0.113.7".parse().unwrap()),
+            Some((1, "192.168.6.2".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn route_selection_rejects_wrong_family_and_off_link_gateway() {
+        let wrong_family = device("192.168.4.2/24", &[("::/0", "2001:db8::1")]);
+        let off_link = device("192.168.4.2/24", &[("0.0.0.0/0", "10.0.0.1")]);
+
+        assert_eq!(
+            find_route(
+                [(0, &wrong_family)].into_iter(),
+                "2001:db8::7".parse().unwrap()
+            ),
+            None
+        );
+        assert_eq!(
+            find_route([(0, &off_link)].into_iter(), "1.1.1.1".parse().unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn route_selection_includes_loopback_cidr() {
+        let loopback = device("127.0.0.1/8", &[]);
+        assert_eq!(
+            find_route([(3, &loopback)].into_iter(), "127.0.0.2".parse().unwrap()),
+            Some((3, "127.0.0.1".parse().unwrap()))
+        );
     }
 }

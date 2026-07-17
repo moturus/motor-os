@@ -29,6 +29,7 @@ pub enum NetCmd {
     UdpSocketTxRx,
     UdpSocketTxRxAck,
     UdpSocketDrop,
+    IcmpEcho,
     NetCmdMax,
 }
 
@@ -66,6 +67,23 @@ pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
 pub const TCP_OPTION_NODELAY: u64 = 1 << 2;
 pub const TCP_OPTION_TTL: u64 = 1 << 3;
 pub const TCP_OPTION_LINGER: u64 = 1 << 4;
+
+pub const ICMP_ECHO_MAX_TIMEOUT_MS: u32 = 60_000;
+pub const ICMP_ECHO_MAX_DATA_LEN: u16 = 65_507;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcmpEchoRequest {
+    pub destination: IpAddr,
+    pub sequence: u16,
+    pub data_len: u16,
+    pub timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcmpEchoResponse {
+    pub source: IpAddr,
+    pub rtt_ns: u64,
+}
 
 /// The number of subchannels per channel.
 ///
@@ -336,24 +354,32 @@ pub fn udp_socket_tx_rx_empty_msg(handle: u64, addr: &SocketAddr) -> io_channel:
     msg
 }
 
-pub fn get_socket_addr(payload: &io_channel::Payload) -> SocketAddr {
+pub fn get_ip_addr(payload: &io_channel::Payload) -> IpAddr {
     let octets: [u8; 16] = payload.args_8()[0..16].try_into().unwrap();
     let ipv6 = Ipv6Addr::from(octets);
-    let port = payload.args_16()[8];
     if let Some(ipv4) = ipv6.to_ipv4_mapped() {
-        SocketAddr::new(IpAddr::V4(ipv4), port)
+        IpAddr::V4(ipv4)
     } else {
-        SocketAddr::new(IpAddr::V6(ipv6), port)
+        IpAddr::V6(ipv6)
     }
+}
+
+pub fn put_ip_addr(payload: &mut io_channel::Payload, addr: &IpAddr) {
+    let ipv6 = match addr {
+        IpAddr::V4(ipv4_addr) => ipv4_addr.to_ipv6_mapped(),
+        IpAddr::V6(ipv6_addr) => *ipv6_addr,
+    };
+    payload.args_8_mut()[0..16].copy_from_slice(&ipv6.octets());
+}
+
+pub fn get_socket_addr(payload: &io_channel::Payload) -> SocketAddr {
+    let port = payload.args_16()[8];
+    SocketAddr::new(get_ip_addr(payload), port)
 }
 
 // Uses the first 18 bytes (= 9 u16).
 pub fn put_socket_addr(payload: &mut io_channel::Payload, addr: &SocketAddr) {
-    let ipv6 = match addr.ip() {
-        IpAddr::V4(ipv4_addr) => ipv4_addr.to_ipv6_mapped(),
-        IpAddr::V6(ipv6_addr) => ipv6_addr,
-    };
-    payload.args_8_mut()[0..16].clone_from_slice(&ipv6.octets());
+    put_ip_addr(payload, &addr.ip());
     payload.args_16_mut()[8] = addr.port();
 }
 
@@ -365,6 +391,173 @@ fn test_get_put_socket_addr() {
     put_socket_addr(&mut payload, &addr_in);
     let addr_out = get_socket_addr(&payload);
     assert_eq!(addr_in, addr_out);
+}
+
+pub fn icmp_echo_request(
+    destination: IpAddr,
+    sequence: u16,
+    data_len: u16,
+    timeout: core::time::Duration,
+) -> moto_rt::Result<io_channel::Msg> {
+    if timeout > core::time::Duration::from_millis(ICMP_ECHO_MAX_TIMEOUT_MS as u64) {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let timeout_ms = timeout.as_millis();
+    if timeout_ms == 0 || timeout_ms > ICMP_ECHO_MAX_TIMEOUT_MS as u128 {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    if data_len > ICMP_ECHO_MAX_DATA_LEN || destination.is_unspecified() {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::IcmpEcho as u16;
+    msg.flags = timeout_ms as u32;
+    put_ip_addr(&mut msg.payload, &destination);
+    msg.payload.args_16_mut()[8] = sequence;
+    msg.payload.args_16_mut()[9] = data_len;
+    Ok(msg)
+}
+
+pub fn decode_icmp_echo_request(msg: &io_channel::Msg) -> moto_rt::Result<IcmpEchoRequest> {
+    if msg.command != NetCmd::IcmpEcho as u16
+        || msg.id == 0
+        || msg.flags == 0
+        || msg.flags > ICMP_ECHO_MAX_TIMEOUT_MS
+    {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+
+    let destination = get_ip_addr(&msg.payload);
+    let data_len = msg.payload.args_16()[9];
+    if destination.is_unspecified() || data_len > ICMP_ECHO_MAX_DATA_LEN {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+
+    Ok(IcmpEchoRequest {
+        destination,
+        sequence: msg.payload.args_16()[8],
+        data_len,
+        timeout_ms: msg.flags,
+    })
+}
+
+pub fn encode_icmp_echo_response(
+    mut msg: io_channel::Msg,
+    source: IpAddr,
+    rtt: core::time::Duration,
+) -> io_channel::Msg {
+    debug_assert_eq!(msg.command, NetCmd::IcmpEcho as u16);
+    put_ip_addr(&mut msg.payload, &source);
+    msg.payload.args_64_mut()[2] = rtt.as_nanos().min(u64::MAX as u128) as u64;
+    msg.status = moto_rt::E_OK;
+    msg
+}
+
+pub fn decode_icmp_echo_response(msg: &io_channel::Msg) -> moto_rt::Result<IcmpEchoResponse> {
+    if msg.command != NetCmd::IcmpEcho as u16 || msg.id == 0 {
+        return Err(moto_rt::Error::InvalidData);
+    }
+    msg.status()?;
+
+    let source = get_ip_addr(&msg.payload);
+    if source.is_unspecified() {
+        return Err(moto_rt::Error::InvalidData);
+    }
+
+    Ok(IcmpEchoResponse {
+        source,
+        rtt_ns: msg.payload.args_64()[2],
+    })
+}
+
+#[test]
+fn test_get_put_ip_addr() {
+    let mut payload = io_channel::Payload::new_zeroed();
+
+    for addr_in in ["192.0.2.7", "2001:db8::7"] {
+        let addr_in: IpAddr = addr_in.parse().unwrap();
+        put_ip_addr(&mut payload, &addr_in);
+        assert_eq!(addr_in, get_ip_addr(&payload));
+    }
+}
+
+#[test]
+fn test_icmp_echo_codec() {
+    let destination: IpAddr = "2001:db8::7".parse().unwrap();
+    let mut msg =
+        icmp_echo_request(destination, 42, 56, core::time::Duration::from_millis(1500)).unwrap();
+    msg.id = 9;
+
+    assert_eq!(
+        decode_icmp_echo_request(&msg).unwrap(),
+        IcmpEchoRequest {
+            destination,
+            sequence: 42,
+            data_len: 56,
+            timeout_ms: 1500,
+        }
+    );
+
+    let source: IpAddr = "2001:db8::8".parse().unwrap();
+    let msg = encode_icmp_echo_response(msg, source, core::time::Duration::from_nanos(123_456));
+    assert_eq!(
+        decode_icmp_echo_response(&msg).unwrap(),
+        IcmpEchoResponse {
+            source,
+            rtt_ns: 123_456,
+        }
+    );
+}
+
+#[test]
+fn test_icmp_echo_rejects_bad_bounds() {
+    assert!(matches!(
+        icmp_echo_request(
+            "192.0.2.1".parse().unwrap(),
+            0,
+            0,
+            core::time::Duration::ZERO,
+        ),
+        Err(moto_rt::Error::InvalidArgument)
+    ));
+    assert!(matches!(
+        icmp_echo_request(
+            "0.0.0.0".parse().unwrap(),
+            0,
+            0,
+            core::time::Duration::from_secs(1),
+        ),
+        Err(moto_rt::Error::InvalidArgument)
+    ));
+    assert!(matches!(
+        icmp_echo_request(
+            "192.0.2.1".parse().unwrap(),
+            0,
+            0,
+            core::time::Duration::from_millis(ICMP_ECHO_MAX_TIMEOUT_MS as u64)
+                + core::time::Duration::from_nanos(1),
+        ),
+        Err(moto_rt::Error::InvalidArgument)
+    ));
+}
+
+#[test]
+fn test_icmp_echo_error_response() {
+    let mut msg = icmp_echo_request(
+        "192.0.2.1".parse().unwrap(),
+        1,
+        8,
+        core::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    msg.id = 1;
+    msg.status = moto_rt::E_TIMED_OUT;
+
+    assert!(matches!(
+        decode_icmp_echo_response(&msg),
+        Err(moto_rt::Error::TimedOut)
+    ));
 }
 
 pub fn bind_udp_socket_request(addr: &SocketAddr, subchannel_idx: u8) -> io_channel::Msg {
