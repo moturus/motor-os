@@ -482,10 +482,12 @@ impl ThreadControlBlock {
 
     fn set_fs(&self) {
         unsafe {
+            let cpu = crate::arch::current_cpu();
+            self.owner().set_last_cpu(cpu);
             self.owner()
                 .user_tcb_mut()
                 .current_cpu
-                .store(crate::arch::current_cpu() as u32, Ordering::Relaxed);
+                .store(cpu as u32, Ordering::Relaxed);
             let fsbase = self.owner().user_tcb_user_addr();
             asm!("wrfsbase {}", in(reg) fsbase, options(nostack, preserves_flags));
         }

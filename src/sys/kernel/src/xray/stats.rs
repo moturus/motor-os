@@ -102,7 +102,12 @@ pub enum MetricType {
     IrqPreemptTimer = 39,
     IrqPreemptWake = 40,
 
-    TotalMetricTypes = 41,
+    // Job placement (W2): where unaffined resume/wake jobs landed.
+    PlacementHintIdle = 41,    // The thread's last CPU was idle (best case).
+    PlacementOtherIdle = 42,   // Migrated to some other idle CPU.
+    PlacementQueueGlobal = 43, // No idle CPU: global queue (stealable).
+
+    TotalMetricTypes = 44,
 }
 
 impl MetricType {
@@ -166,6 +171,9 @@ impl MetricType {
             MetricType::IrqFastReturnWake => "irq_fast_return_wake",
             MetricType::IrqPreemptTimer => "irq_preempt_timer",
             MetricType::IrqPreemptWake => "irq_preempt_wake",
+            MetricType::PlacementHintIdle => "placement_hint_idle",
+            MetricType::PlacementOtherIdle => "placement_other_idle",
+            MetricType::PlacementQueueGlobal => "placement_queue_global",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }

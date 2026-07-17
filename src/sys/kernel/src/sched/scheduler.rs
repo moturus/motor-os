@@ -553,36 +553,52 @@ fn update_system_time() {
 
 pub fn post(job: Job) {
     if job.cpu == uCpus::MAX {
-        // Hand the job directly to an idle CPU if there is one. Pushing it to
+        // Placement policy (W2): prefer the CPU the thread last ran on — its
+        // caches are warm there, and without PCID a migration means a fully
+        // cold TLB after the first CR3 load.
+        //
+        // Hand the job directly to an idle CPU if there is one (pushing it to
         // the global queue and waking an idle CPU is racy: any CPU may pop the
         // job, and in a request-response lockstep between two processes the
         // poster's CPU always wins, so both processes end up sharing one CPU
-        // (with TLB flushes on every switch) while the woken CPU finds the
-        // queue empty and goes back to sleep.
-        let mut job = Some(job);
-        let mut hand_off = |_: uCpus, scheduler: &Scheduler| -> bool {
+        // while the woken CPU finds the queue empty and goes back to sleep),
+        // scanning from last_cpu so the home CPU wins ties.
+        //
+        // If nothing is idle the job MUST go to the global queue: it is the
+        // only stealable place. Queueing it on last_cpu instead (tried, badly
+        // regressed) is not work-conserving — a CPU that goes idle a moment
+        // after the scan can never steal from another CPU's local queue, so
+        // convoys form on one CPU (one 10ms tick per queued thread) while
+        // the rest of the machine sleeps; RR latency went 0.2ms -> 55ms.
+        let hint = job.thread.upgrade().and_then(|t| t.last_cpu());
+        let num_cpus = crate::arch::num_cpus() as usize;
+        let start = hint.unwrap_or(0) as usize;
+        for i in 0..num_cpus {
+            let cpu = ((start + i) % num_cpus) as uCpus;
+            let scheduler = PERCPU_SCHEDULERS.get_for_cpu(cpu);
             if scheduler.idle.load(Ordering::Acquire) {
-                scheduler
-                    .local_queue
-                    .lock(line!())
-                    .push_back(job.take().unwrap());
+                scheduler.local_queue.lock(line!()).push_back(job);
                 scheduler.queue_length.fetch_add(1, Ordering::Relaxed);
                 scheduler.wake();
-                return true;
+                crate::xray::stats::kernel_stats().adjust_metric(
+                    if hint == Some(cpu) {
+                        crate::xray::stats::MetricType::PlacementHintIdle
+                    } else {
+                        crate::xray::stats::MetricType::PlacementOtherIdle
+                    },
+                    1,
+                );
+                return;
             }
-            false
-        };
-        PERCPU_SCHEDULERS.for_each_cpu(&mut hand_off);
-
-        let Some(job) = job else {
-            return; // Handed off to an idle CPU.
-        };
+        }
 
         // No idle CPUs: post to the global queue. It's OK that nobody is
         // woken, because _this_ cpu, the cpu on which this code is currently
         // running, is not sleeping and will eventually pop the job.
         GLOBAL_READY_QUEUE_NORMAL.lock(line!()).push_back(job);
         GLOBAL_QUEUE_LENGTH.fetch_add(1, Ordering::Release);
+        crate::xray::stats::kernel_stats()
+            .adjust_metric(crate::xray::stats::MetricType::PlacementQueueGlobal, 1);
     } else {
         assert!(job.cpu < crate::arch::num_cpus());
         let scheduler = PERCPU_SCHEDULERS.get_for_cpu(job.cpu);

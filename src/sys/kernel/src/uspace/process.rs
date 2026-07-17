@@ -1061,6 +1061,12 @@ impl Thread {
         }
     }
 
+    // Called from TCB::set_fs(), the choke point of every kernel->user
+    // transition (spawn, preempt-resume, syscall exit incl. wait-resume).
+    pub fn set_last_cpu(&self, cpu: uCpus) {
+        self.last_cpu.store(cpu as u32, Ordering::Relaxed);
+    }
+
     pub fn trace(&self, event: &'static str, arg1: u64, arg2: u64) {
         crate::xray::tracing::trace(event, self.tid.as_u64(), arg1, arg2);
     }

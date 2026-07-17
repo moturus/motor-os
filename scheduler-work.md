@@ -15,7 +15,7 @@ changes applied, uncommitted).
 | S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable — **done, Round 2** (86–96 % of uspace IRQs now fast-return; RR 2.2×, TX stabilized) | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
 | S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume | perf | dominant hidden cost of IPC | medium–large |
 | S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait | perf | ~2×5 µs per IPC RTT | small |
-| S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs | perf | unquantified, likely large | small–medium |
+| S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs — **done, Round 3** (52 % of placements now land on the warm CPU; timer IRQs −26 %; bench-neutral otherwise) | perf | unquantified, likely large | small–medium |
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
 | S6 | Every demand page fault costs the full preempt/deschedule machinery | perf | ~2–5 µs per minor fault | medium |
 | S7 | `swap` (IPC handoff) round-trips through the job queue instead of switching threads directly | perf | queue + locks + latency per message | large |
@@ -191,7 +191,7 @@ session).
 
 ## Round 2 (done 2026-07-17): roadmap step 2 — W1 IRQ fast-return
 
-All uncommitted, on top of Round 1 (committed as 643aaf5). Files:
+Committed as 97f97f0, on top of Round 1 (643aaf5). Files:
 `arch/x64/irq.rs`, `sched/scheduler.rs`, `sched/timers.rs`,
 `uspace/process.rs`, `xray/stats.rs`.
 
@@ -317,6 +317,105 @@ gone for the 86–96 % fast-return majority; W2 (placement) and W3 (lazy FPU)
 now only concern the remaining real deschedules; W5/W6/W7 (wait fast path,
 CR3/TLB policy, direct swap) are the next big levers for the IPC lockstep,
 which still pays full price.
+
+---
+
+## Round 3 (done 2026-07-17): roadmap step 3 — W2 placement (S4)
+
+Uncommitted, on top of Round 2 (97f97f0).
+
+### What was done
+
+`Thread::last_cpu` (process.rs), dead since it was added, is now maintained
+and drives job placement:
+
+1. **Stamp**: `TCB::set_fs()` — the choke point of every kernel→user
+   transition (spawn, preempt-resume, and syscall exit; the latter also
+   covers wait-resume, since a syscall that blocked exits through the same
+   path on whatever CPU it resumed on) — stores `current_cpu` into
+   `Thread::last_cpu`. One extra Relaxed store next to the `current_cpu`
+   store the function already does.
+2. **Placement** (`post()`, scheduler.rs): for unaffined jobs
+   (`job.cpu == MAX`), the idle-CPU scan now starts at the thread's
+   `last_cpu` and wraps, so the home CPU wins ties instead of
+   first-idle-by-index. The no-idle fallback remains the global queue
+   (see the negative result below for why it must). The hint is read by
+   upgrading the job's `Weak<Thread>`; detached jobs have no hint and
+   keep the old scan-from-0.
+3. **Metrics 41–43**: `placement_hint_idle` / `placement_other_idle` /
+   `placement_queue_global`. `PerCpuStatsEntry` had exactly three free
+   metric slots, so its size is unchanged (384 B).
+
+### Negative result: a non-work-conserving fallback convoys
+
+The plan's original direction ("prefer last_cpu-if-idle → any-idle →
+*last_cpu's queue*") was implemented first: with no CPU idle, the job was
+pushed onto `last_cpu`'s local queue (+wake) instead of the global queue —
+nominally the same worst case (one tick, since the W1 fast path checks
+`queue_length`), but with warm caches and no cross-CPU stealing.
+
+Measured: RR 178 µs → **55 481 µs** (~300×), guest TX/RX ~300 →
+1.6 MiB/s, two of three systest runs hit the 420 s timeout, and
+`irq_preempt_timer` exploded 4.4 K → 141 K (≈ every other tick a preempt).
+The new `placement_queue_last` counter fired 386 K times.
+
+Root cause: local queues are private to their CPU, so the fallback is
+**not work-conserving**. "No CPU idle" at post time is routinely a few µs
+stale: in the IPC lockstep the poster blocks right after posting, and
+under the old policy its own CPU popped the job from the global queue
+within microseconds. Parked on another CPU's local queue instead, the job
+waits out that CPU's current thread (up to a full 10 ms tick) — while the
+CPUs that went idle a moment later find nothing to steal and hlt. Convoys
+form on one CPU as the rest of the machine sleeps; an RR iteration crossed
+~5 such parking events (55 ms ≈ 5.5 ticks).
+
+The rule, now also recorded at the fallback site in `post()`: **the
+no-idle path must stay stealable**, and the global queue is the only
+stealable structure. If targeted queueing is ever wanted (it is the right
+cache policy!), idle-time work stealing from other CPUs' local queues has
+to be built first — relevant to W10 (priorities) too.
+
+### Results (final policy: scan-from-last_cpu, global fallback)
+
+Same rig and method as Rounds 1–2; fresh same-session baseline at 97f97f0.
+rnetbench (3 host-client runs, in run order):
+
+| metric | baseline | W2 |
+|---|---|---|
+| RR µs | 177.7 / 206.9 / 223.3 | 182.5 / 203.9 / 227.5 |
+| client⇒server MiB/s | 305.7 / 271.5 / 434.2 | 324.7 / 287.8 / 404.9 |
+| server⇒client MiB/s | 340.1 / 263.8 / 336.2 | 343.2 / 262.3 / 338.4 |
+
+All within run-to-run noise, as are the FS smoke / hot-cache / page-fault
+numbers. test_liveness improved slightly (p99/max 8–9 → 6 ms on runs 2–3).
+Scheduler-machinery activity dropped measurably (same whole-boot suite):
+
+| counter | baseline | W2 |
+|---|---|---|
+| irq_timer_fired | 87 632 | 65 094 (−26 %) |
+| irq_preempt_wake | 15 924 | 11 553 (−27 %) |
+| irq_preempt_timer | 4 433 | 3 619 |
+
+Placement counters (whole boot, 4.7 M unaffined placements): **52 % land
+exactly on the thread's last CPU** (`placement_hint_idle` 2 469 033 = 75 %
+of idle-handoffs), 17 % on another idle CPU, 30 % global fallback.
+
+Verified: release systest ×3 + tokio-tests + mio-test all pass; debug
+systest passes with the per-IRQ GS assert live; 40 s idle stays
+watchdog-quiet on debug.
+
+### Consequences for the roadmap
+
+- S4's "constant migrations, likely large cost" was overstated for this
+  rig: ~70 % of placements find an idle CPU anyway, and the fix is
+  latency-neutral here. The measurable wins are −26 % timer IRQs and
+  −27 % preempt-wakes (stickiness ⇒ fewer forced preemptions), plus
+  counters to watch placement under heavier load. Bigger machines and
+  saturated CPUs should benefit more.
+- W3 (lazy FPU) now has its precondition ("W1+W2 establish same-CPU
+  resume") in place, with 52 % exact-home placement as the floor.
+- Next: roadmap step 4 — W5 wait-with-pending-wakers fast path (+ S10
+  MXCSR fix folded in).
 
 ---
 
@@ -809,6 +908,9 @@ measurable individually):
    fast-returns don't touch the tick deadline, so the S4 sub-issue is moot).
 3. **W2: placement** — maintain `last_cpu`; same-CPU resume preference;
    idle-scan starting from last_cpu instead of 0.
+   **Done — see "Round 3" above** (incl. a measured negative result: the
+   "no idle CPU → queue on last_cpu" fallback convoys; the no-idle path
+   must stay stealable).
 4. **W5: wait-with-pending-wakers fast path** (+ S10 MXCSR fix folded in).
 5. **W3: lazy FPU** for the remaining deschedules (after W1/W2 establish
    same-CPU-resume; measure first — W1 may capture most of the win).
