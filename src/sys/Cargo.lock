@@ -1531,6 +1531,7 @@ dependencies = [
  "moto-rt",
  "moto-stats",
  "moto-sys",
+ "moto-sys-io",
 ]
 
 [[package]]

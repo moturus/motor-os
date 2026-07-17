@@ -1,0 +1,3 @@
+#!/bin/rush
+
+/sys/sysbox ping $@

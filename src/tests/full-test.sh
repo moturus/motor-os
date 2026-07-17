@@ -43,6 +43,8 @@ echo ""
 
 ssh -p 2222 -o IdentitiesOnly=yes -o ConnectTimeout=30 -o ConnectionAttempts=10 -i "$WD/test.key" motor@192.168.4.2 /bin/echo " "
 
+ssh -p 2222 -o IdentitiesOnly=yes -i "$WD/test.key" motor@192.168.4.2 /bin/ping -c 1 127.0.0.1
+
 ssh -p 2222 -o IdentitiesOnly=yes -i "$WD/test.key" motor@192.168.4.2 sys/tests/systest
 
 # SFTP integration test against the running VM (before the trap shuts it down).
@@ -51,4 +53,3 @@ ssh -p 2222 -o IdentitiesOnly=yes -i "$WD/test.key" motor@192.168.4.2 sys/tests/
 ssh -p 2222 -o IdentitiesOnly=yes -i "$WD/test.key" motor@192.168.4.2 sys/tests/mio-test
 
 ssh -p 2222 -o IdentitiesOnly=yes -i "$WD/test.key" motor@192.168.4.2 sys/tests/tokio-tests
-

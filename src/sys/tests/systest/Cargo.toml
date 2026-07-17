@@ -14,6 +14,7 @@ moto-log     = { path = "../../lib/moto-log"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-stats   = { path = "../../lib/moto-stats"  }
 moto-mpmc    = { path = "../../lib/moto-mpmc"   }
+moto-sys-io  = { path = "../../lib/moto-sys-io", features = ["std"] }
 
 crossbeam = "0.8.4"
 futures = "0.3"

@@ -4,6 +4,7 @@
 
 // mod channel_test;
 mod fs;
+mod icmp;
 mod io_channel;
 mod logging;
 mod moto_async;
@@ -551,6 +552,7 @@ fn main() {
     test_rt_mutex();
     tcp::run_all_tests();
     udp::run_all_tests();
+    icmp::run_all_tests();
 
     mpmc::test_mpmc();
     mpmc::test_array_queue();

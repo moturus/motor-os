@@ -25,7 +25,10 @@ The "full" Motor OS VM will boot into a unix-like shell [rush](https://github.co
 The shell is somewhat barebones now (contributions are welcome!).
 
 - `ls bin` will show all commands in the `$PATH`;
-- `free`, `kill`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
+- `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
+- `ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION` supports
+  numeric IPv4 and IPv6 addresses and `localhost`; general DNS lookup is not
+  implemented yet;
 - `/sys/tests/systest`, `/sys/tests/mio-test`, and `/sys/tests/tokio-tests` are useful
   to make sure everything is working as expected;
 - `/sys/logs` directory contains some occasionally useful logs;
