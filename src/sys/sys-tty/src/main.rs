@@ -133,9 +133,6 @@ fn main() {
                     SysCpu::wait(&mut waiters, SysHandle::NONE, SysHandle::NONE, None).unwrap();
 
                     while let Some(c) = serial::read_serial() {
-                        if c == 3 {
-                            write_serial_raw(b"^C");
-                        }
                         if c != 13 {
                             child_stdin.write_all(&[c]).ok();
                         } else {

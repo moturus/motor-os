@@ -339,13 +339,13 @@ pty expects.
 
 ### 3.5 sys-tty's `^C` echo must go (prerequisite)
 
-`sys-tty/src/main.rs:124-126` writes a literal `"^C"` **straight to the serial
-port** when it sees byte 3, bypassing whatever program owns the screen:
+sys-tty's read loop used to write a literal `"^C"` **straight to the serial
+port** when it saw byte 3, bypassing whatever program owns the screen:
 
 ```rust
 while let Some(c) = serial::read_serial() {
     if c == 3 {
-        write_serial_raw(b"^C");
+        write_serial_raw(b"^C");   // removed in M0
     }
 ```
 
@@ -354,10 +354,11 @@ position the cursor happens to be, invisible to the frame diff, which will then
 never repair it. It is also redundant today: `rush` prints its own `^C`
 (`rush/src/term.rs:906-922`), so the serial console appears to double-echo it.
 
-**Phase 0 task:** confirm the double-echo on the VM, then remove the echo from
-sys-tty, leaving it a clean byte pump. This is a change to the OS, agreed as a
-prerequisite. If it is ever reverted, rmux's fallback is a full repaint after any
-`^C` — a full-screen repaint over a UART, for a keystroke.
+**Done (M0).** The double-echo was confirmed on the VM (a `^C` at the prompt
+printed `^C` twice), then the echo was removed from sys-tty's read loop, leaving
+it a clean byte pump; a re-run confirms one `^C` (rush's). This is a change to the
+OS, agreed as a prerequisite. If it is ever reverted, rmux's fallback is a full
+repaint after any `^C` — a full-screen repaint over a UART, for a keystroke.
 
 ### 3.6 Signals: there are none
 
@@ -493,9 +494,27 @@ spawns `strobe` with `Stdio::null()` on all three fds and neither tracks nor
 waits for it. rmux's server starts the same way — the client spawns it with null
 stdio and does not wait — so it has no console and nothing to die with.
 
-**Phase 0 spike:** confirm a process survives its parent's exit on Motor. The
-sys-init precedent strongly suggests yes, but detach/attach is worthless if
-orphans are reaped, so it must be verified, not assumed.
+**Measured (M0), and it forced an OS change.** An *ordinary* orphan does **not**
+survive on Motor: unlike Unix's reparent-to-init, the kernel *actively* kills a
+process's children when that process is reaped (`KProcessStats::process_dropped`
+in `xray/stats.rs`). The `sys-init`/`strobe` precedent works only because `sys-init`
+is never reaped — it is the init process and lives forever. A client that spawns
+a server and then exits is reaped the moment its parent (the shell) collects it,
+and the server dies with it. So detach/attach could not rest on plain orphaning.
+
+The fix, added in M0, is a **detached-spawn primitive**: a spawn flag that reparents
+the child to the *kernel*, so it outlives the spawner's exit and reaping — Motor's
+equivalent of reparent-to-init. It is gated by a new, non-inherited capability
+`CAP_SPAWN_DETACHED` (`moto_sys::caps`): only a spawner that holds the bit may
+detach a child, and the bit is passed down explicitly, never by default. rmux's
+server is therefore spawned **detached**, and the client can only do that if it
+was granted the capability — which is why `rush` reads a `spawn-detached` list
+from `/user/cfg/rush.toml` (§2.2) and rmux is on it, and why the root shell and
+`russhd` are launched holding the bit (`sys-init.cfg`, sys-tty, russhd's `exec`).
+
+Verified on the VM: a non-detached child is reaped with its parent (its tick log
+stops at once), a detached child keeps ticking after the parent exits, and a
+spawner lacking `CAP_SPAWN_DETACHED` is refused with `E_NOT_ALLOWED`.
 
 ### 4.5 Threads, not polling
 
@@ -879,9 +898,35 @@ Motor's console actually delivers depends on whatever is on the far end of the
 serial line or the SSH session. The config's four `M-` bindings and two `S-`
 bindings are useless if the bytes never arrive in the form rmux expects.
 
-**Phase 0 spike:** capture the actual bytes for `S-Left`/`S-Right` and the four
-`M-` arrows, on the serial console *and* over SSH, and write them down. Do not
-guess; this is cheap to measure and expensive to get wrong.
+**Measured (M0).** `rmux spike-keys` (a stdin hex dump) was fed the xterm
+encodings on both paths — the serial console (qemu → sys-tty) and over SSH
+(russhd, which bypasses sys-tty). Both deliver every byte **intact and in order**:
+nothing mangles `[`, `;`, the digits, or the `ESC`-prefix form. What differs is
+the *framing*.
+
+| Combo    | Bytes                | Serial (sys-tty)              | SSH (russhd)      |
+|----------|----------------------|-------------------------------|-------------------|
+| `Left`   | `1b 5b 44`           | intact, split across reads    | intact, one read  |
+| `S-Left` | `1b 5b 31 3b 32 44`  | intact, split across reads    | intact, one read  |
+| `S-Right`| `1b 5b 31 3b 32 43`  | intact, split across reads    | intact, one read  |
+| `M-Left` | `1b 5b 31 3b 33 44`  | intact, split across reads    | intact, one read  |
+| `M-Right`| `1b 5b 31 3b 33 43`  | intact, split across reads    | intact, one read  |
+| `M-Up`   | `1b 5b 31 3b 33 41`  | intact, split across reads    | intact, one read  |
+| `M-Down` | `1b 5b 31 3b 33 42`  | intact, split across reads    | intact, one read  |
+| `M-Left` (`ESC`-pfx) | `1b 1b 5b 44` | intact, split across reads | intact, one read  |
+
+Two conclusions the decoder is built on:
+
+1. **The xterm encodings are what arrives.** `S-`arrow is `ESC[1;2<D/C>`, `M-`arrow
+   is `ESC[1;3<A-D>`, and the alternate Alt form `ESC` `ESC[<A-D>` also arrives
+   untouched. rmux emits and decodes exactly these; no Motor-specific dialect.
+2. **The decoder must be incremental.** On the serial console sys-tty forwards a
+   byte at a time (`main.rs:140`), so a read splits the sequence at *unpredictable*
+   points — `1b 5b` then `31 3b 32 44`, or `1b` then `5b 31 3b 32 43`, run to run.
+   SSH delivers each sequence whole (one channel packet → one write → one read),
+   but rmux cannot depend on that: the key parser buffers bytes and never assumes
+   a sequence lands in a single read. This is the same trap rush's VM harness
+   documents for `ESC[6n`, now measured for input.
 
 ---
 
