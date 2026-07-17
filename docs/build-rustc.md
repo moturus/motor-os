@@ -20,11 +20,32 @@ can compile and run Rust programs natively — a single `rustc`, no linker flag:
 
 rustc does not link by itself — on every platform it drives an external C
 compiler, which it looks up by the bare name `cc`. On Linux that is
-`/usr/bin/cc`; on Motor it is `/bin/cc`, a small `#!/bin/rush` script over the
+`/usr/bin/cc`; on Motor it is `/bin/cc`, a `#!/bin/rush` pass-through to the
 `/sys/tools/llvm/bin/llvm` multicall's clang, **produced by
 [build-llvm.md](build-llvm.md)** (it belongs with the C toolchain it fronts).
 Because rustc finds `cc` on `PATH` (=`/bin`) on its own, no `-C linker=` flag is
 needed.
+
+**Pure Rust links no libc.** rustc passes `-nostartfiles -nodefaultlibs`
+(structural: the target spec sets `link_self_contained` and rustc defaults to
+`-C default-linker-libraries=no`), and the clang Motor ToolChain honors both,
+so a pure-Rust `hello.rs` is ~113 KB — std's weak `motor_start` owns the entry
+point, zero mlibc. A Rust program that **links C / wants mlibc** opts back into
+the ToolChain's C runtime recipe (mlibc's `crt1.o` + the full runtime group,
+fully initialized, mlibc's strong `motor_start` takes the entry point) with two
+stock flags:
+
+```sh
+/sys/tools/rust/bin/rustc -C link-self-contained=no \
+    -C default-linker-libraries=yes foo.rs -o foo
+```
+
+(For cargo cross-builds: put the pair in `rustflags` under
+`[target.x86_64-unknown-motor]`, and point `-C linker=` at
+`$SYSROOT/bin/motor-clang`.) Rust code calling real C++ additionally needs
+`-C link-arg=-lc++` — rustc drives `cc` in C mode, which links libc++abi but
+not libc++. Forgetting the pair in a Rust+C link fails loudly with undefined C
+symbols; see [libc_start_redesign.md](libc_start_redesign.md) for the design.
 
 On the image the Rust toolchain lives at `/sys/tools/rust` (`bin/rustc`,
 `lib/rustlib/x86_64-unknown-motor/lib/*.rlib`, sample sources at `src/`). The
@@ -115,24 +136,22 @@ The load-bearing decisions, each of which the stages below implement:
   0.8); there are no proc-macro or `-C prefer-dynamic` builds on the image.
 - **rustc drives the link through a `cc`.** rustc passes `-nostartfiles
   -nodefaultlibs` to its linker (it owns the runtime itself), which suppresses
-  the clang driver's automatic `crt1.o` + mlibc/libc++ link group. On the host,
-  the `motor-rust-cc` wrapper re-adds that group after rustc's inputs; on the
-  image, `/bin/cc` (a `#!/bin/rush` script from build-llvm.md) does the same by
-  invoking `/sys/tools/llvm/bin/llvm clang`. That `cc` supplies the group (with
-  `libc++abi`) on every *link* step, not just rustc's: mlibc is C++ internally,
-  so even a plain C program that touches stdio references `operator delete` and
-  needs `libc++abi`. (The Motor clang ToolChain now also adds `libc++abi`
-  unconditionally, so `cc`'s group matches what a bare `llvm clang` does — but
-  `cc` still has to supply it because rustc's `-nodefaultlibs` suppresses the
-  ToolChain's automatic group entirely.) So the one script is both rustc's linker
-  and a working C compiler (`cc hello.c -o hello`); compile-only invocations pass
-  straight through. Note
-  the two link contexts do **not**
-  share a target-spec change: `base/motor.rs` is left untouched (the same
-  built-in spec is compiled into the `dev` host toolchain that `make all` uses to
-  link the OS's own pure-Rust programs via the host `cc`, and must keep passing
-  `-nostartfiles -nodefaultlibs`); the mlibc group lives in the `cc` driver, not
-  the spec.
+  the clang driver's automatic `crt1.o` + mlibc/libc++ link group. On the
+  host, the `motor-rust-cc` wrapper re-adds that group after rustc's inputs —
+  rustc *is* a C++/LLVM program and genuinely needs mlibc, entry point
+  included. On the image, `/bin/cc` (from build-llvm.md) is a pure
+  pass-through to `/sys/tools/llvm/bin/llvm clang`: the Motor ToolChain owns
+  the recipe and honors rustc's flags, so a native pure-Rust `rustc hello.rs`
+  links **no** mlibc (~113 KB, std's entry point), a native `cc hello.c` gets
+  the full C runtime from the ToolChain, and a native Rust+C link opts back in
+  with `-C link-self-contained=no -C default-linker-libraries=yes` (see the
+  intro; the design is argued in
+  [libc_start_redesign.md](libc_start_redesign.md)). Note the two link
+  contexts do **not** share a target-spec change: `base/motor.rs` is left
+  untouched (the same built-in spec is compiled into the `dev` host toolchain
+  that `make all` uses to link the OS's own pure-Rust programs via the host
+  `cc`, and must keep passing `-nostartfiles -nodefaultlibs`); the mlibc group
+  lives in the host's `motor-rust-cc` wrapper, not the spec.
 
 Rough budget: a first build is ~1.5–2.5 h (two full LLVM builds plus the
 compiler crates dominate) and adds ~160 MB to the image. Re-runs are
@@ -425,13 +444,14 @@ script [build-llvm.md](build-llvm.md) stages at `/bin/cc`, because it belongs
 with the C toolchain it fronts (`/sys/tools/llvm/bin/llvm`'s clang plus the
 sysroot libs). It cannot be a symlink to `llvm`: motor-fs has no symlinks, and a
 spawned child always sees the resolved exe path as its argv[0], so the
-multicall's only entry is the subcommand form `llvm clang …`. On any *link* step
-it suppresses clang's automatic startfiles/default-libs and appends the same
-`crt1.o` + mlibc/libc++ group as `motor-rust-cc` (including `libc++abi`, which
-mlibc — being C++ internally — needs even from pure-C code); compile-only
-invocations pass straight through. So the one script is both rustc's linker and a
-working C compiler. Nothing to do in this stage beyond confirming build-llvm.md
-ran: `test -f $MOTOR/img_files/motor-os/bin/cc`.
+multicall's only entry is the subcommand form `llvm clang …`. The script is a
+pure pass-through: the clang Motor ToolChain owns the `crt1.o` + mlibc/libc++
+recipe (including `libc++abi`, which mlibc — being C++ internally — needs even
+from pure-C code) and honors the `-nostartfiles -nodefaultlibs` rustc passes,
+so pure-Rust links stay mlibc-free while `cc hello.c` gets the full C runtime.
+So the one script is both rustc's linker and a working C compiler. Nothing to
+do in this stage beyond confirming build-llvm.md ran:
+`test -f $MOTOR/img_files/motor-os/bin/cc`.
 
 ## Stage R6 — stage everything into the image
 

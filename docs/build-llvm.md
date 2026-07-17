@@ -21,6 +21,7 @@ natively:
 /sys/tools/llvm/bin/llvm clang   /sys/tools/llvm/src/hello.c   -o /sys/tmp/hello   && /sys/tmp/hello
 /sys/tools/llvm/bin/llvm clang++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hellopp && /sys/tmp/hellopp
 cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello3 && /sys/tmp/hello3   # /bin/cc: the PATH shortcut
+c++ /sys/tools/llvm/src/hello.cpp -o /sys/tmp/hello4 && /sys/tmp/hello4  # /bin/c++: same for C++
 ```
 
 On the image the toolchain lives under `/sys` — the multicall `llvm` binary at
@@ -30,11 +31,17 @@ invoked by full path just like `rustc`), headers and libraries at
 files (`resolv.conf`, ...) at `/sys/cfg/libc`. See
 [porting-libc/dirs.md](porting-libc/dirs.md) for the rationale.
 
-For convenience, `/bin/cc` — a small `#!/bin/rush` script over `llvm clang` — is
-the PATH-accessible system C compiler (`cc hello.c -o hello`). It is also what
-`rustc` invokes as its default linker, so native `rustc` needs no `-C linker=`
-flag; see [build-rustc.md](build-rustc.md). `cc` is produced by this guide
-(stage 8) because it belongs with the C toolchain it fronts.
+For convenience, `/bin/cc` — a `#!/bin/rush` pass-through to `llvm clang` — is
+the PATH-accessible system C compiler (`cc hello.c -o hello`), with `/bin/c++`
+(`--driver-mode=g++`) as its C++ counterpart. `cc` is also what `rustc` invokes
+as its default linker, so native `rustc` needs no `-C linker=` flag; see
+[build-rustc.md](build-rustc.md). Both scripts are produced by this guide
+(stage 8) because they belong with the C toolchain they front. The clang Motor
+ToolChain owns the whole link recipe (crt1.o + the mlibc/libc++ runtime group)
+and gates it on `-nostdlib`/`-nostartfiles`/`-nodefaultlibs`, so plain C/C++
+links get the full runtime while rustc's pure-Rust links (which pass
+`-nostartfiles -nodefaultlibs`) stay mlibc-free — a pure-Rust binary is ~113 KB
+(see [libc_start_redesign.md](libc_start_redesign.md)).
 
 ## How the pieces fit together
 
@@ -296,8 +303,12 @@ DESTDIR=$SYSROOT ninja -C build-headers install
 
 # The real static build: libc.a, crt1.o, all headers, and the empty companion
 # stubs (libm/libpthread/libdl/librt/... — everything lives in libc.a on Motor).
+# -Ddebug=false: mlibc's own meson.build pins buildtype=debugoptimized (-O2 -g);
+# the flag keeps -O2 and drops only -g. Without it libc.a is 18 MB (59% DWARF)
+# and every mlibc-linked binary carries ~6.6 MB of debug info — .text is
+# byte-identical either way (see libc_start_redesign.md).
 meson setup --cross-file $MOTORH/motor.cross-file --prefix=/sys/tools/llvm \
-    -Ddefault_library=static -Dbuild_tests=false build
+    -Ddefault_library=static -Dbuild_tests=false -Ddebug=false build
 ninja -C build
 DESTDIR=$SYSROOT ninja -C build install
 
@@ -505,38 +516,32 @@ cp $SYSROOT/sys/tools/llvm/lib/crt1.o $IMG/sys/tools/llvm/lib/
 $B/llvm-strip -o $IMG/sys/tools/llvm/bin/llvm $LLVM/build-motor-native/bin/llvm
 $B/llvm-strip -o $IMG/bin/lua  $MOTORH/lua-5.4.8/src/lua
 
-# 4b. /bin/cc — the PATH-accessible system C compiler / linker driver: a
-#     `#!/bin/rush` script over `llvm clang`. rustc's default linker is the bare
-#     name `cc`, so native `rustc hello.rs -o hello` links with no `-C linker=`
-#     flag (like /usr/bin/cc on Linux). On a *link* step it re-adds the mlibc +
-#     libc++ group clang drops under -nostartfiles/-nodefaultlibs (which rustc
-#     always passes), on every link — mlibc is C++ internally so even a plain C
-#     link needs libc++abi. Compile-only invocations pass through. `case`, not
-#     `[ ]`: the on-image rush has no `test` builtin.
+# 4b. /bin/cc and /bin/c++ — the PATH-accessible system C / C++ compiler and
+#     linker drivers: `#!/bin/rush` pass-throughs over `llvm clang`. rustc's
+#     default linker is the bare name `cc`, so native `rustc hello.rs -o hello`
+#     links with no `-C linker=` flag (like /usr/bin/cc on Linux). The Motor
+#     ToolChain owns the whole link recipe (crt1.o + the mlibc/libc++ group,
+#     incl. libc++abi even for C links — mlibc is C++ internally) and gates it
+#     on -nostdlib/-nostartfiles/-nodefaultlibs, so `cc hello.c` gets the full
+#     C runtime while rustc's pure-Rust links (which pass those flags) get
+#     nothing forced on them (~113 KB, not 8 MB — libc_start_redesign.md).
+#     Rust programs that want mlibc opt back in with
+#     `-C link-self-contained=no -C default-linker-libraries=yes`
+#     (build-rustc.md). /bin/c++ uses --driver-mode=g++ rather than a `clang++`
+#     subcommand: the multicall dispatches on the first argument, and `clang++`
+#     is not a registered subcommand name.
 cat > $IMG/bin/cc << 'EOF'
 #!/bin/rush
-compile_only=n
-has_input=n
-for a in "$@"; do
-    case "$a" in
-        -c|-S|-E|-M|-MM|--version|-###|-dumpversion|-print*) compile_only=y ;;
-        -*) ;;
-        *) has_input=y ;;
-    esac
-done
-case "$has_input$compile_only" in
-    yn)
-        /sys/tools/llvm/bin/llvm clang "$@" \
-            -nostartfiles -nodefaultlibs \
-            -Wl,--start-group \
-            /sys/tools/llvm/lib/crt1.o \
-            -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 \
-            -Wl,--end-group
-        ;;
-    *)
-        /sys/tools/llvm/bin/llvm clang "$@"
-        ;;
-esac
+# cc — Motor OS's system C compiler / linker driver. See docs/build-llvm.md.
+# A pass-through: clang's Motor ToolChain owns the link recipe and honors
+# -nostartfiles/-nodefaultlibs (rustc's pure-Rust links stay mlibc-free).
+/sys/tools/llvm/bin/llvm clang "$@"
+EOF
+
+cat > $IMG/bin/c++ << 'EOF'
+#!/bin/rush
+# c++ — Motor OS's system C++ compiler / linker driver. See docs/build-llvm.md.
+/sys/tools/llvm/bin/llvm clang --driver-mode=g++ "$@"
 EOF
 
 # 5. The image driver config. The full link/include recipe lives in the driver
