@@ -716,6 +716,20 @@ pub fn ensure_preemption_timer() {
 // and no BSP housekeeping is owed. The caller must re-arm the tick via
 // rearm_tick_from_irq() before returning to userspace (Round 0 invariant:
 // thread in user mode => live deadline armed).
+// W5 (sys_wait pending-wakers fast path): true if this CPU has nothing
+// scheduled to run — no pending wake (the flag means someone wants this
+// CPU's sched loop, e.g. to drain WAKE_QUEUE), no local jobs, no global
+// jobs. When true, pausing a thread that already has wakes queued would be
+// a no-op round trip through the scheduler (on_thread_paused() re-posts it
+// immediately). A swap target woken onto this CPU shows up in queue_length,
+// so a swap-wait never fast-returns. Called from syscall context.
+pub fn this_cpu_has_no_ready_work() -> bool {
+    let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
+    !scheduler.wake.load(Ordering::Acquire)
+        && scheduler.queue_length.load(Ordering::Acquire) == 0
+        && GLOBAL_QUEUE_LENGTH.load(Ordering::Acquire) == 0
+}
+
 pub fn timer_irq_fast_path_ok() -> bool {
     let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
 

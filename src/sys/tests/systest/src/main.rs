@@ -262,6 +262,32 @@ fn bench_page_faults() {
     );
 }
 
+// MXCSR and the x87 control word are callee-saved in the SysV ABI, so they
+// must survive a blocking syscall (S10: the kernel's pause/resume path skips
+// xsave/xrstor; before the fix another thread's FP env could leak in).
+fn test_fp_env_across_blocking_syscall() {
+    use core::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+
+    const FTZ_DAZ: u32 = 0x8040; // Flush-to-zero + denormals-are-zero.
+
+    let orig_mxcsr = unsafe { _mm_getcsr() };
+    assert_eq!(orig_mxcsr & FTZ_DAZ, 0);
+    unsafe { _mm_setcsr(orig_mxcsr | FTZ_DAZ) };
+
+    // Blocks in sys_wait with a timeout => TCB::pause()/resume() round trip.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    let mxcsr = unsafe { _mm_getcsr() };
+    unsafe { _mm_setcsr(orig_mxcsr) };
+    assert_eq!(
+        mxcsr & FTZ_DAZ,
+        FTZ_DAZ,
+        "MXCSR FTZ/DAZ lost across a blocking syscall"
+    );
+
+    println!("test_fp_env_across_blocking_syscall PASS");
+}
+
 fn test_file_write() {
     const WRITTEN: &str = "Lorem Ipsum";
 
@@ -491,6 +517,7 @@ fn main() {
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
     bench_page_faults();
+    test_fp_env_across_blocking_syscall();
     fs::run_tests();
     // return;
 

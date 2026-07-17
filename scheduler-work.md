@@ -14,14 +14,14 @@ changes applied, uncommitted).
 |---|---------|------|-----------|-----------|
 | S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable — **done, Round 2** (86–96 % of uspace IRQs now fast-return; RR 2.2×, TX stabilized) | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
 | S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume | perf | dominant hidden cost of IPC | medium–large |
-| S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait | perf | ~2×5 µs per IPC RTT | small |
+| S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait — **done, Round 4** (22 % of waits skip the pause; RR −25 %, new all-time record) | perf | ~2×5 µs per IPC RTT | small |
 | S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs — **done, Round 3** (52 % of placements now land on the warm CPU; timer IRQs −26 %; bench-neutral otherwise) | perf | unquantified, likely large | small–medium |
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
 | S6 | Every demand page fault costs the full preempt/deschedule machinery | perf | ~2–5 µs per minor fault | medium |
 | S7 | `swap` (IPC handoff) round-trips through the job queue instead of switching threads directly | perf | queue + locks + latency per message | large |
 | S8 | `slow_swapgs()`: 2–3 rdmsr on every IRQ and #PF entry — **done, Round 1** (see the GS-model correction there) | perf | ~200–500 cyc per IRQ | small |
 | S9 | Vector 72 is registered with irqnum 71 (`naked_irq_handler!(irq_handler_72, 71)`) ⇒ devices on vector 72 wake the wrong waiter — **fixed, Round 1** | **bug** | correctness | trivial |
-| S10 | MXCSR / x87 CW are not preserved across blocking syscalls (pause/resume skips FPU entirely) ⇒ another thread's FP env can leak in | **bug** (latent) | correctness | small |
+| S10 | MXCSR / x87 CW are not preserved across blocking syscalls (pause/resume skips FPU entirely) ⇒ another thread's FP env can leak in — **fixed, Round 4** (saved/restored in pause/resume; systest coverage added) | **bug** (latent) | correctness | small |
 | S11 | No priorities, FIFO everywhere; sys-io competes equally with bulk compute; a many-threaded process starves others | isolation | I/O latency under load | medium |
 | S12 | All device IRQs (virtio MSI-X) + serial + system-time duty target CPU 0 | isolation/perf | CPU 0 saturation (seen in FS rounds) | medium |
 | S13 | Per-wait heap churn: `Vec` allocs + per-object `BTreeMap` insert/remove on every wait | perf | allocs on the hottest path | medium |
@@ -322,7 +322,7 @@ which still pays full price.
 
 ## Round 3 (done 2026-07-17): roadmap step 3 — W2 placement (S4)
 
-Uncommitted, on top of Round 2 (97f97f0).
+Committed as 9b83538, on top of Round 2 (97f97f0).
 
 ### What was done
 
@@ -416,6 +416,85 @@ watchdog-quiet on debug.
   resume") in place, with 52 % exact-home placement as the floor.
 - Next: roadmap step 4 — W5 wait-with-pending-wakers fast path (+ S10
   MXCSR fix folded in).
+
+---
+
+## Round 4 (done 2026-07-17): roadmap step 4 — W5 wait fast path (S3) + S10 fix
+
+Uncommitted, on top of Round 3 (9b83538).
+
+### What was done
+
+**W5 — sys_wait pending-wakers fast path.** The kernel already had the key
+fact in `on_thread_paused()`: a thread that pauses with pending wakes is
+*not* parked — it is flipped back to Runnable and re-posted immediately, so
+the whole pause/deschedule/queue/(often migrate)/resume trip is observable
+only as cost. `sys_wait_impl` now short-circuits it: after
+`process_wait_handles` (validation + registration unchanged, including its
+funneling of unconsumed object wakes into the thread's waker list), if
+
+- the thread has pending wakes (`Thread::has_pending_wakes()` — the exact
+  negation of `on_thread_paused()`'s park condition), and
+- this CPU has nothing ready to run (`sched::this_cpu_has_no_ready_work()`
+  — wake flag clear, local queue empty, global queue empty),
+
+it takes the wakers and returns without descheduling. The "wait is at
+least a yield" semantic is preserved: if anything is runnable on this CPU
+the pause happens as before. The F_SWAP_TARGET exclusion falls out
+automatically — the swap wakee is posted to *this* CPU's local queue right
+before the check, so `queue_length != 0` forces the handoff pause. The
+fast path sits before timeout registration, so no timer is created and
+cancelled for nothing. Metrics 44/45: `wait_fast_path` / `wait_paused`.
+
+**S10 — FP-environment leak across blocking syscalls, fixed.** MXCSR and
+the x87 control word are callee-saved in the SysV ABI, but the
+pause/resume path never touched FPU state, so a thread that blocked could
+resume with another thread's (or init) FP env. `TCB::pause()` now saves
+MXCSR+FCW (`stmxcsr`+`fnstcw`) into a new `fp_env` field at the end of the
+TCB, and `TCB::resume()` restores them (`ldmxcsr`+`fldcw`) before
+re-entering the thread — ~20 cycles per blocking round trip, zero effect
+on the W5 fast path (which never leaves the CPU). New systest
+`test_fp_env_across_blocking_syscall` sets FTZ/DAZ, sleeps 30 ms (a real
+pause/resume), and asserts they survived.
+
+### Results
+
+Same rig; baseline = the Round 3 "after" run (identical binary to the
+committed 9b83538, measured under an hour earlier). rnetbench:
+
+| metric | baseline (R3) | W5 |
+|---|---|---|
+| RR µs | 182.5 / 203.9 / 227.5 | **137.4 / 155.3 / 179.4** |
+| client⇒server MiB/s | 324.7 / 287.8 / 404.9 | 325.3 / 260.4 / 468.6 |
+| server⇒client MiB/s | 343.2 / 262.3 / 338.4 | 336.0 / 270.7 / 336.0 |
+
+**RR improved ~25 % and 137.4 µs is a new all-time record** (previous:
+152.6 µs from the net-perf delayed-ack round — beaten by 10 % despite this
+session's environment running ~3× worse than that round's). Throughput,
+FS, hot-cache, page-fault and liveness numbers all within noise (best
+client⇒server of the whole session, 468.6, appeared here).
+
+Engagement (whole benchmark boot): `wait_fast_path` 1 417 888 vs
+`wait_paused` 5 136 035 — **21.6 % of blocking-capable waits skip the
+deschedule entirely**. The IPC-lockstep prediction in S3 ("removes ~half
+the descheduling from lockstep") shows up as the RR win; bulk throughput
+is unaffected because its waits genuinely park (server ahead of client or
+vice versa).
+
+Verified: release systest ×3 + tokio-tests + mio-test pass; new FP-env
+test passes on release; debug systest 69 PASS + 40 s idle watchdog-quiet.
+
+### Consequences for the roadmap
+
+- The remaining 78 % of waits genuinely park; their cost is the
+  pause/resume machinery itself — that is W6 (CR3/TLB policy) and W7
+  (direct-switch swap) territory, now the clear next levers for IPC.
+- W3 (lazy FPU) got cheaper to reason about: pause/resume now carries the
+  *control* env explicitly, so a future lazy-FPU scheme only concerns the
+  bulk register state.
+- Next: roadmap step 5 — W3 lazy FPU (measure first; W1 may have captured
+  most of the win), or jump to Phase B (W6a GLOBAL pages) where the larger
+  IPC costs now live.
 
 ---
 
@@ -912,6 +991,8 @@ measurable individually):
    "no idle CPU → queue on last_cpu" fallback convoys; the no-idle path
    must stay stealable).
 4. **W5: wait-with-pending-wakers fast path** (+ S10 MXCSR fix folded in).
+   **Done — see "Round 4" above** (22 % engagement; RR 182 → 137 µs, a new
+   all-time record).
 5. **W3: lazy FPU** for the remaining deschedules (after W1/W2 establish
    same-CPU-resume; measure first — W1 may capture most of the win).
 

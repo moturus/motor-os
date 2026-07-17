@@ -2,7 +2,7 @@ use crate::uspace::process::Thread;
 use crate::uspace::process::ThreadOffCpuReason;
 use core::arch::asm;
 use core::arch::naked_asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[macro_export]
 macro_rules! push_preserved_registers {
@@ -158,6 +158,12 @@ pub struct ThreadControlBlock {
 
     in_syscall: AtomicBool,
     xsave: xsave::XSave,
+
+    // MXCSR (low 32 bits) + x87 control word (next 16), saved in pause()
+    // and restored in resume(): both are callee-saved in the SysV ABI, so
+    // user code legally assumes they survive a syscall wrapper, but the
+    // pause/resume path skips xsave/xrstor entirely (S10).
+    fp_env: AtomicU64,
 }
 
 impl ThreadControlBlock {
@@ -176,6 +182,44 @@ impl ThreadControlBlock {
             in_syscall: AtomicBool::new(false),
             irq_stack: IrqStack::default(),
             xsave: xsave::XSave::default(),
+            fp_env: AtomicU64::new(0),
+        }
+    }
+
+    // See the fp_env field comment. The kernel is soft-float, so between
+    // syscall entry and pause() (and between resume() and sysret) nothing
+    // touches the FP environment: the values saved/restored here are the
+    // user thread's.
+    fn save_fp_env(&self) {
+        let mut mxcsr: u32 = 0;
+        let mut fcw: u16 = 0;
+        unsafe {
+            asm!(
+                "stmxcsr [{0}]",
+                "fnstcw [{1}]",
+                in(reg) &mut mxcsr,
+                in(reg) &mut fcw,
+                options(nostack, preserves_flags)
+            );
+        }
+        self.fp_env.store(
+            (mxcsr as u64) | ((fcw as u64) << 32),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn restore_fp_env(&self) {
+        let fp_env = self.fp_env.load(Ordering::Relaxed);
+        let mxcsr: u32 = fp_env as u32;
+        let fcw: u16 = (fp_env >> 32) as u16;
+        unsafe {
+            asm!(
+                "ldmxcsr [{0}]",
+                "fldcw [{1}]",
+                in(reg) &mxcsr,
+                in(reg) &fcw,
+                options(nostack, preserves_flags)
+            );
         }
     }
 
@@ -342,6 +386,7 @@ impl ThreadControlBlock {
         self.owner().process_stats.start_cpu_usage_uspace(); // see tocr re: why
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
         self.owner().trace("pause", self.syscall_rsp, 0);
+        self.save_fp_env();
         crate::util::full_fence();
         self.validate_gs();
         unsafe {
@@ -362,6 +407,8 @@ impl ThreadControlBlock {
         self.check_sti();
 
         debug_assert!(self.in_syscall.load(Ordering::Relaxed));
+
+        self.restore_fp_env();
 
         // Note: we don't call self.set_fs() here because it is called
         // in syscall handler (after resume)

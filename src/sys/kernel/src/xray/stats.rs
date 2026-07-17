@@ -107,7 +107,13 @@ pub enum MetricType {
     PlacementOtherIdle = 42,   // Migrated to some other idle CPU.
     PlacementQueueGlobal = 43, // No idle CPU: global queue (stealable).
 
-    TotalMetricTypes = 44,
+    // sys_wait (W5): waits that returned pending wakes without descheduling
+    // vs waits that paused. (IO-manager non-blocking polls count as
+    // WaitFastPath only when they had pending wakes.)
+    WaitFastPath = 44,
+    WaitPaused = 45,
+
+    TotalMetricTypes = 46,
 }
 
 impl MetricType {
@@ -174,6 +180,8 @@ impl MetricType {
             MetricType::PlacementHintIdle => "placement_hint_idle",
             MetricType::PlacementOtherIdle => "placement_other_idle",
             MetricType::PlacementQueueGlobal => "placement_queue_global",
+            MetricType::WaitFastPath => "wait_fast_path",
+            MetricType::WaitPaused => "wait_paused",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -245,7 +253,7 @@ impl MemStats {
     }
 }
 
-const PCPU_STATS_CNT: usize = 44; // 8 * N + 4: see below.
+const PCPU_STATS_CNT: usize = 52; // 8 * N + 4: see below.
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
@@ -258,7 +266,7 @@ pub struct PerCpuStatsEntry {
 
 const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
 
-const _: () = assert!(384 == core::mem::size_of::<PerCpuStatsEntry>()); // 48 * 8
+const _: () = assert!(448 == core::mem::size_of::<PerCpuStatsEntry>()); // 56 * 8
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {

@@ -1420,6 +1420,14 @@ impl Thread {
         core::mem::drop(wait_objects); // Must drop before resuming the thread.
     }
 
+    // The negation of on_thread_paused()'s park condition: a thread that
+    // pauses with pending wakes is re-posted immediately instead of parking,
+    // so callers seeing `true` may skip the pause entirely (W5).
+    pub fn has_pending_wakes(&self) -> bool {
+        !self.wakers.lock(line!()).is_empty()
+            || self.wakes_taken.load(Ordering::Relaxed) != self.wakes_queued.load(Ordering::Relaxed)
+    }
+
     // Called for IO threads on non-blocking waits.
     pub fn take_wakers(&self) -> Vec<SysHandle> {
         self.clear_wait_objects_on_wake();

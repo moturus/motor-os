@@ -253,6 +253,21 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         return result;
     }
 
+    // W5 fast path: wait is "at least a yield()" — but when wakes are
+    // already queued and this CPU has nothing else ready to run, the pause
+    // is a pure no-op round trip through the scheduler (on_thread_paused()
+    // re-posts the thread immediately, often with a migration): take the
+    // wakers without descheduling. When something IS runnable on this CPU —
+    // including a swap target woken onto it above — the yield is real and
+    // the pause is kept. Placed before the timeout registration so no timer
+    // is created and cancelled for nothing.
+    if curr.has_pending_wakes() && crate::sched::this_cpu_has_no_ready_work() {
+        crate::xray::stats::kernel_stats()
+            .adjust_metric(crate::xray::stats::MetricType::WaitFastPath, 1);
+        let wakers = curr.take_wakers();
+        return process_wake_handles(curr, args, next_arg, wakers, false);
+    }
+
     if timeout != u64::MAX {
         curr.new_timeout(crate::arch::time::Instant::from_u64(timeout));
     }
@@ -264,6 +279,8 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     let (timed_out, wakers) = if (timeout == 0) && (curr.capabilities() & CAP_IO_MANAGER != 0) {
         (false, curr.take_wakers())
     } else {
+        crate::xray::stats::kernel_stats()
+            .adjust_metric(crate::xray::stats::MetricType::WaitPaused, 1);
         curr.wait()
     };
 
