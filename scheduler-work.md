@@ -12,7 +12,7 @@ changes applied, uncommitted).
 
 | # | Finding | Type | Cost today | Fix effort |
 |---|---------|------|-----------|-----------|
-| S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
+| S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable — **done, Round 2** (86–96 % of uspace IRQs now fast-return; RR 2.2×, TX stabilized) | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
 | S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume | perf | dominant hidden cost of IPC | medium–large |
 | S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait | perf | ~2×5 µs per IPC RTT | small |
 | S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs | perf | unquantified, likely large | small–medium |
@@ -189,6 +189,137 @@ session).
 
 ---
 
+## Round 2 (done 2026-07-17): roadmap step 2 — W1 IRQ fast-return
+
+All uncommitted, on top of Round 1 (committed as 643aaf5). Files:
+`arch/x64/irq.rs`, `sched/scheduler.rs`, `sched/timers.rs`,
+`uspace/process.rs`, `xray/stats.rs`.
+
+### Changes
+
+Userspace interrupts now return straight to the interrupted thread (plain
+`iretq` through the existing naked-handler epilogue — no TCB writes, no
+xsave/xrstor, no CR3 switches, no job-queue round trip) unless this CPU
+actually has something else to do:
+
+- **Timer IRQ in uspace** (`timer_irq_fast_path_ok()`, scheduler.rs):
+  fast-return iff the wake flag is clear, both job queues are empty (the
+  Round-1 atomic length counters made this free), no software timer on this
+  CPU is due, and the BSP doesn't owe a housekeeping pass. The fast path
+  re-arms the tick itself (`rearm_tick_from_irq()`) — preserving both the
+  Round-0 invariant (*thread in user mode ⇒ live deadline armed*) and any
+  armed-early software deadline (without the sched loop's
+  `maybe_program_timer()` pass, re-arming blindly to now+10 ms would stretch
+  wait-timeouts to the next tick). It deliberately does NOT set the wake
+  flag (on_timer_irq() does, and that would make every other tick preempt).
+- **Custom/serial IRQ in uspace** (`irq_wake_fast_path_ok()`): the SysObject
+  wake is queued as before (`queue_custom_irq_wake()` — the old
+  `on_custom_irq()` minus the unconditional `local_wake()`); then
+  fast-return iff nothing is runnable on this CPU AND an idle CPU exists —
+  that CPU is woken by IPI to drain `WAKE_QUEUE` (it typically then runs
+  sys-io itself; no thread is CPU-affined today, so no placement loss).
+  With no idle CPU, preempt as before: this CPU's loop must do the work.
+- **Kill/debuggee plumbing**: contrary to the S1 analysis, `post_kill` on a
+  Running thread never IPI'd anyone (a `TODO` comment) — it silently relied
+  on the tick always preempting, as did `dbg_pause`. Both now poke the
+  relevant CPUs' wake flags (`poke_cpu()` reading the victim's
+  `utcb.current_cpu`, best-effort but sufficient: a Running thread stays on
+  its CPU until it passes through the scheduler, which sees Killed anyway;
+  `poke_all_cpus()` for dbg_pause). A set wake flag forces the next tick to
+  preempt, so kill/pause latency stays ≤1 tick, as today.
+- **BSP housekeeping**: `update_system_time()` cadence moved from a
+  sched-loop local into `LAST_SYSTEM_TIME_UPDATE` (atomic) so the timer
+  fast path can refuse to fast-return when the BSP owes an update (>3 s
+  stale). Debug builds also stamp the watchdog's `last_alive_check` from
+  the fast path — a fast-returning CPU is alive but never iterates its
+  loop, which would otherwise false-trigger the watchdog.
+- **Timers**: `Timers` grew an atomic raw-TSC mirror of the earliest
+  deadline (`next_deadline_tsc`, maintained under its lock) — the fast path
+  runs in IRQ context where taking the timers spinlock could deadlock
+  against a same-CPU holder running with IRQs enabled.
+- **Metrics**: `irq_fast_return_timer/wake`, `irq_preempt_timer/wake`.
+- **Adjacent fix**: `MetricType::from_custom_irq` accepted index 8 (which
+  transmutes to `TotalChildren`) and only vectors 64–71 have dedicated
+  metrics — after the Round-1 S9 fix, a device on vector 72 would have
+  corrupted the TotalChildren metric and vectors 73–79 would have panicked
+  (assert) in IRQ context. The assert is now `< 8` and the dispatch arm
+  skips the per-vector metric for 72–79 (`IrqFired` still counts them).
+
+Known bounded race (accepted, same class as S16): the idle CPU chosen for
+wake-handoff can pick up other work before the IPI lands and re-enter
+userspace; the wake then sits until that CPU's next kernel entry (≤1 tick).
+Same worst case as today's wake-to-busy-CPU path; fix belongs to
+S16/priority work.
+
+### Verification
+
+- Release: systest ×3 full pass, tokio-tests PASS, mio-test pass — same
+  suite as the baseline run below.
+- Debug: full systest pass (69 PASS lines) with the per-IRQ
+  `validate_kernel_gs()` assertion live and fast paths engaged (6.5 K
+  timer + 5.9 K wake fast-returns during the run); 40 s idle with no
+  watchdog false-death. Kill paths exercised by systest's spawn_wait_kill +
+  test_pid_kill (now going through `poke_cpu`).
+- Round-0 invariant: the tick chain is re-armed by the fast path itself;
+  idle CPUs still quiesce (post-benchmark timer-IRQ totals *dropped* vs
+  baseline, see below).
+
+### Benchmarks
+
+Same rig and methodology as Round 1 (fresh baseline captured immediately
+before the change, same boot pattern, same host session). **This time the
+effect is far above the noise floor.**
+
+rnetbench (3 runs; RR µs/iter; guest-RX / guest-TX MiB/s):
+
+| | RR | guest RX | guest TX |
+|---|---|---|---|
+| baseline (Round 1) | 407 / 451 / 551 | 196 / 120 / 203 | 74 / 26 / 7 |
+| **W1** | **184 / 206 / 226** | **324 / 298 / 408** | **346 / 266 / 331** |
+
+- RR latency ≈ **2.2× better**. The baseline's erratic guest-TX (7–74,
+  wildly unstable across the whole session) is *gone*: TX is now stable at
+  ~300 MiB/s — the instability was the preempt storm itself (every RX/ack
+  IRQ evicted the sending thread through xsave/2×CR3/queue/xrstor with a
+  likely migration).
+- This session's environment ran ~3× worse than the historical records
+  (baseline RR ~450 µs vs the 152.6 µs record); W1's 184 µs approaches the
+  all-time record *under the degraded conditions*.
+
+systest (per boot, sequential runs; FS write/read, hot-cache mbps):
+
+| run | baseline w/r/hot | W1 w/r/hot |
+|---|---|---|
+| 1st clean | 138/48/849 | 203/266/957 |
+| 2nd | 195/214/142 | 239/415/1110 |
+| 3rd | — (flake) | 256/375/1116 |
+
+Hot-cache 1110–1116 mbps are the best numbers seen this session; FS
+smoke reads/writes all up. Page-fault bench unchanged (6987–7052 ns steady
+vs 7180 — #PF path not touched by W1). test_liveness p50/p99: 5–6/7–8 ms
+vs 6–7/9 ms — no regression, slightly better.
+
+Fast-path engagement (whole release-benchmark boot):
+
+| counter | value |
+|---|---|
+| irq_fast_return_wake | 313 049 (**96 %** of uspace device IRQs) |
+| irq_preempt_wake | 12 629 |
+| irq_fast_return_timer | 28 977 (**86 %** of uspace ticks) |
+| irq_preempt_timer | 4 597 |
+
+Total IRQs doubled vs baseline (5.2 M vs 2.6 M — the same benchmarks moved
+~2× the data), while timer IRQs *fell* 104 K → 88 K: work finishes sooner
+and tickless idle keeps the quiet CPUs quiet.
+
+Consequences for the roadmap: S5 (xsave/xrstor) and much of S1's cost are
+gone for the 86–96 % fast-return majority; W2 (placement) and W3 (lazy FPU)
+now only concern the remaining real deschedules; W5/W6/W7 (wait fast path,
+CR3/TLB policy, direct swap) are the next big levers for the IPC lockstep,
+which still pays full price.
+
+---
+
 ## How things work today (reference)
 
 ### Execution model
@@ -357,6 +488,12 @@ call site costs a load+branch when off — fine.
 ## Findings in detail
 
 ### S1 — every uspace IRQ is a full deschedule
+
+**Done in Round 2** — implemented essentially as designed below, with two
+corrections found en route: (1) kills/dbg_pause never actually IPI'd the
+victim CPU (the doc's precondition assumed they did) — both now poke wake
+flags; (2) no separate `need_resched` flag was needed — the existing per-CPU
+`wake` flag has exactly those semantics.
 
 Where: irq.rs:540-575 (`IRQ_SERIAL`, `64..=79`, `IRQ_APIC_TIMER` all call
 `preempt_current_thread_irq` when `uspace`).
@@ -668,6 +805,8 @@ measurable individually):
    sub-issue (stop re-arming the tick on non-timer preemptions) and the
    kill/debuggee flag plumbing. Metrics to add: preempts by cause,
    fast-returns by cause.
+   **Done — see "Round 2" above** (the wake flag serves as need_resched;
+   fast-returns don't touch the tick deadline, so the S4 sub-issue is moot).
 3. **W2: placement** — maintain `last_cpu`; same-CPU resume preference;
    idle-scan starting from last_cpu instead of 0.
 4. **W5: wait-with-pending-wakers fast path** (+ S10 MXCSR fix folded in).

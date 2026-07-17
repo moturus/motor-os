@@ -358,6 +358,10 @@ impl Process {
             ProcessStatus::Running => {
                 *status_lock = ProcessStatus::PausedDebuggee;
                 assert!(!self.paused_debuggee.swap(true, Ordering::SeqCst));
+                // With IRQ fast-return, running threads only notice
+                // paused_debuggee when they pass through the scheduler; poke
+                // all CPUs so their next tick preempts into it.
+                crate::sched::poke_all_cpus();
                 Ok(())
             }
             ProcessStatus::PausedDebuggee => Err(moto_rt::E_ALREADY_IN_USE),
@@ -1227,7 +1231,19 @@ impl Thread {
                 ThreadStatus::Live(live_status) => match live_status {
                     LiveThreadStatus::Running => {
                         *status = ThreadStatus::Killed(reason);
-                        // log::warn!("TODO: preempt the running thread");
+                        // With IRQ fast-return, a busy thread on a CPU with an
+                        // empty run queue never re-enters the kernel on its
+                        // own; poke its CPU so the next tick preempts it and
+                        // the kill is processed. The CPU read is best-effort:
+                        // a Running thread stays on its CPU until it passes
+                        // through the scheduler, which would see Killed.
+                        let utcb = unsafe {
+                            (self.user_tcb_kernel_addr as usize
+                                as *const UserThreadControlBlock)
+                                .as_ref()
+                                .unwrap_unchecked()
+                        };
+                        crate::sched::poke_cpu(utcb.current_cpu.load(Ordering::Relaxed));
                     }
                     LiveThreadStatus::Runnable(_, _) | LiveThreadStatus::Syscall(_, _) => {
                         *status = ThreadStatus::Killed(reason);

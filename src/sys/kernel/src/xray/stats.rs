@@ -95,12 +95,21 @@ pub enum MetricType {
     MemHeapTotal = 35,
     MemUsedPages = 36,
 
-    TotalMetricTypes = 37,
+    // IRQ fast-return (W1): userspace interrupts that returned straight to
+    // the interrupted thread vs those that preempted it.
+    IrqFastReturnTimer = 37,
+    IrqFastReturnWake = 38,
+    IrqPreemptTimer = 39,
+    IrqPreemptWake = 40,
+
+    TotalMetricTypes = 41,
 }
 
 impl MetricType {
     pub fn from_custom_irq(irq_num: u8) -> Self {
-        assert!(irq_num <= 8);
+        // Only 8 custom vectors have dedicated metrics; index 8 would
+        // silently transmute into TotalChildren.
+        assert!(irq_num < 8);
         // SAFETY: safe by construction.
         unsafe { core::mem::transmute(Self::IrqCustom0Fired as u32 + (irq_num as u32)) }
     }
@@ -153,6 +162,10 @@ impl MetricType {
             MetricType::MemUsed => "mem.used",
             MetricType::MemHeapTotal => "mem.heap_total",
             MetricType::MemUsedPages => "mem.used_pages",
+            MetricType::IrqFastReturnTimer => "irq_fast_return_timer",
+            MetricType::IrqFastReturnWake => "irq_fast_return_wake",
+            MetricType::IrqPreemptTimer => "irq_preempt_timer",
+            MetricType::IrqPreemptWake => "irq_preempt_wake",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }

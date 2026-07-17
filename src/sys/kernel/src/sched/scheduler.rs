@@ -53,6 +53,12 @@ static GLOBAL_READY_QUEUE_NORMAL: StaticRef<crate::util::SpinLock<VecDeque<Job>>
 // shared in all caches instead of bouncing the lock cacheline between CPUs.
 static GLOBAL_QUEUE_LENGTH: AtomicU32 = AtomicU32::new(0);
 
+// Raw TSC of the last update_system_time() call (BSP only). An atomic (not a
+// sched_loop local) so the timer-IRQ fast path can tell when the BSP owes a
+// housekeeping pass and must enter its sched loop instead of fast-returning.
+static LAST_SYSTEM_TIME_UPDATE: AtomicU64 = AtomicU64::new(0);
+const SYSTEM_TIME_UPDATE_TSC: u64 = 1_000_000_000;
+
 /*
 pub enum Priority {
     High,   // Always picked; may starve lower-priority jobs.
@@ -338,7 +344,7 @@ impl Scheduler {
             Ordering::Release,
         );
 
-        let mut last_system_time_update = now_tsc;
+        LAST_SYSTEM_TIME_UPDATE.store(now_tsc, Ordering::Relaxed);
 
         loop {
             #[cfg(debug_assertions)]
@@ -349,8 +355,10 @@ impl Scheduler {
             if self.cpu == 0 {
                 // TODO: should we do this more often? less often?
                 let now_tsc = crate::arch::time::Instant::now().as_u64();
-                if now_tsc - last_system_time_update > 1_000_000_000 {
-                    last_system_time_update = now_tsc;
+                if now_tsc - LAST_SYSTEM_TIME_UPDATE.load(Ordering::Relaxed)
+                    > SYSTEM_TIME_UPDATE_TSC
+                {
+                    LAST_SYSTEM_TIME_UPDATE.store(now_tsc, Ordering::Relaxed);
                     update_system_time();
                 }
             }
@@ -610,10 +618,12 @@ pub fn local_wake() {
     PERCPU_SCHEDULERS.get_per_cpu().local_wake();
 }
 
-pub fn on_custom_irq(irq: u8) {
+// Queues the SysObject wake for a userspace IRQ waiter. Unlike the wake
+// itself, what happens to the interrupted context is the caller's decision:
+// fast-return, or local_wake() + preempt (see irq_wake_fast_path_ok()).
+pub fn queue_custom_irq_wake(irq: u8) {
     // This is called from an IRQ context: don't do anything dangerous.
     SysObject::wake_irq(&USER_IRQ_WAITERS[(irq - crate::arch::irq::IRQ_CUSTOM_START) as usize]);
-    local_wake();
 }
 
 pub fn get_irq_wait_handle(
@@ -680,6 +690,123 @@ pub fn ensure_preemption_timer() {
         crate::arch::irq::set_timer(deadline);
         *percpu_timer = deadline;
     }
+}
+
+// ---- IRQ fast-return (W1, scheduler-work.md). Everything below is called
+// ---- from IRQ context and must be lock-free.
+
+// True if the timer IRQ that interrupted a userspace thread may return
+// straight to it: nothing is runnable on this CPU, no software timer is due,
+// and no BSP housekeeping is owed. The caller must re-arm the tick via
+// rearm_tick_from_irq() before returning to userspace (Round 0 invariant:
+// thread in user mode => live deadline armed).
+pub fn timer_irq_fast_path_ok() -> bool {
+    let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
+
+    // A pending wake means someone posted work for this CPU, or a kill /
+    // debugger-pause poked it: enter the scheduler.
+    if scheduler.wake.load(Ordering::Acquire) {
+        return false;
+    }
+    if scheduler.queue_length.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    if GLOBAL_QUEUE_LENGTH.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    let now = crate::arch::time::Instant::now().as_u64();
+    // A software timer on this CPU is due: the sched loop must pop it.
+    if scheduler.timers.next_deadline_tsc() <= now {
+        return false;
+    }
+    // The BSP updates system time from its sched loop about once a second;
+    // don't starve that (or, in debug builds, the watchdog's alive() scan).
+    if scheduler.cpu == 0
+        && now - LAST_SYSTEM_TIME_UPDATE.load(Ordering::Relaxed) > 3 * SYSTEM_TIME_UPDATE_TSC
+    {
+        return false;
+    }
+    true
+}
+
+// Re-arms the preemption timer from the timer-IRQ fast path: the earliest
+// pending software timer, or the next tick, whichever is sooner. Unlike
+// on_timer_irq() this does NOT set the wake flag - doing so would make the
+// next tick preempt, halving the fast path.
+pub fn rearm_tick_from_irq() {
+    let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
+    scheduler.timer_irq_tick.store(true, Ordering::Relaxed);
+
+    let tick =
+        crate::arch::time::Instant::now() + core::time::Duration::from_millis(SCHED_TICK_MILLIS);
+    // Without the sched loop's maybe_program_timer() pass, an armed-early
+    // software deadline must be preserved here, or a wait-timeout could
+    // silently stretch to the next tick.
+    let soft_tsc = scheduler.timers.next_deadline_tsc();
+    let when = if soft_tsc < tick.as_u64() {
+        Instant::from_u64(soft_tsc)
+    } else {
+        tick
+    };
+    crate::arch::irq::set_timer(when);
+    *PERCPU_TIMERS.get_per_cpu() = when;
+
+    // The debug watchdog tracks liveness via sched-loop iterations; a CPU
+    // fast-returning for a long time is alive but never iterates.
+    #[cfg(debug_assertions)]
+    scheduler
+        .last_alive_check
+        .store(Instant::now().as_u64(), Ordering::Release);
+}
+
+// After a device IRQ queued its wake, decides whether the interrupted
+// userspace thread may keep this CPU: only if nothing else is runnable here
+// AND an idle CPU exists to process the wake queue promptly - that CPU is
+// woken here. Otherwise the caller preempts, and this CPU's sched loop
+// drains the wake queue itself.
+pub fn irq_wake_fast_path_ok() -> bool {
+    let scheduler = PERCPU_SCHEDULERS.get_per_cpu();
+    if scheduler.wake.load(Ordering::Acquire) {
+        return false;
+    }
+    if scheduler.queue_length.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    if GLOBAL_QUEUE_LENGTH.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+
+    let mut woken = false;
+    let mut wake_idle = |_cpu: uCpus, sched: &Scheduler| -> bool {
+        if sched.idle.load(Ordering::Acquire) {
+            sched.wake();
+            woken = true;
+            true
+        } else {
+            false
+        }
+    };
+    PERCPU_SCHEDULERS.for_each_cpu(&mut wake_idle);
+    woken
+}
+
+// Wakes a CPU's scheduler so its next tick preempts whatever userspace
+// thread runs there. Used by the kill and debugger-pause paths: they set
+// state that a running thread only notices when it passes through the
+// scheduler, and with IRQ fast-return a busy thread on an otherwise empty
+// CPU never enters the kernel on its own.
+pub fn poke_cpu(cpu: u32) {
+    if (cpu as usize) < (crate::arch::num_cpus() as usize) {
+        PERCPU_SCHEDULERS.get_for_cpu(cpu as uCpus).wake();
+    }
+}
+
+pub fn poke_all_cpus() {
+    let mut poke = |_cpu: uCpus, sched: &Scheduler| -> bool {
+        sched.wake();
+        false
+    };
+    PERCPU_SCHEDULERS.for_each_cpu(&mut poke);
 }
 
 fn maybe_program_timer(when: Instant) {

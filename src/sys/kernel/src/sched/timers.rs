@@ -134,21 +134,39 @@ impl TimersInner {
 
 pub(super) struct Timers {
     inner: SpinLock<TimersInner>,
+
+    // Raw-TSC mirror of next_deadline() (u64::MAX when there are no timers),
+    // maintained under the lock on every mutation. The timer-IRQ fast-return
+    // path reads it from IRQ context, where taking `inner` could deadlock
+    // against a holder on this CPU running with interrupts enabled.
+    next_deadline_tsc: core::sync::atomic::AtomicU64,
 }
 
 impl Timers {
     pub fn new() -> Self {
         Self {
             inner: SpinLock::new(TimersInner::new()),
+            next_deadline_tsc: core::sync::atomic::AtomicU64::new(u64::MAX),
         }
     }
 
+    fn update_deadline_mirror(&self, inner: &TimersInner) {
+        self.next_deadline_tsc.store(
+            inner.next_deadline().map_or(u64::MAX, |when| when.as_u64()),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
     pub fn add_timer(&self, timer: Timer) {
-        self.inner.lock(line!()).add_timer(timer)
+        let mut inner = self.inner.lock(line!());
+        inner.add_timer(timer);
+        self.update_deadline_mirror(&inner);
     }
 
     pub fn remove_timer(&self, timer_id: u64) {
-        self.inner.lock(line!()).remove_timer(timer_id)
+        let mut inner = self.inner.lock(line!());
+        inner.remove_timer(timer_id);
+        self.update_deadline_mirror(&inner);
     }
 
     // The earliest pending deadline, if any.
@@ -156,9 +174,19 @@ impl Timers {
         self.inner.lock(line!()).next_deadline()
     }
 
+    // The earliest pending deadline as raw TSC, u64::MAX if none. Lock-free;
+    // safe to call from IRQ context.
+    pub fn next_deadline_tsc(&self) -> u64 {
+        self.next_deadline_tsc
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
+
     // Returns Ok(timer) if there is a timer <= cutoff;
     // returns Err(earliest) otherwise.
     pub fn pop(&self, cutoff: Instant) -> Result<Timer, Instant> {
-        self.inner.lock(line!()).pop(cutoff)
+        let mut inner = self.inner.lock(line!());
+        let result = inner.pop(cutoff);
+        self.update_deadline_mirror(&inner);
+        result
     }
 }

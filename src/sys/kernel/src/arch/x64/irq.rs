@@ -574,37 +574,72 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
             }
         }
         IRQ_SERIAL => {
-            crate::sched::local_wake();
             crate::uspace::serial_console::on_irq(); // Console.
             if uspace {
-                ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
+                if crate::sched::irq_wake_fast_path_ok() {
+                    // An idle CPU was woken to process the wake queue; return
+                    // straight to the interrupted thread.
+                    crate::xray::stats::kernel_stats()
+                        .adjust_metric(MetricType::IrqFastReturnWake, 1);
+                } else {
+                    crate::sched::local_wake();
+                    crate::xray::stats::kernel_stats()
+                        .adjust_metric(MetricType::IrqPreemptWake, 1);
+                    ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn, EOIs.
+                }
+            } else {
+                crate::sched::local_wake();
             }
             eoi();
         }
         64..=79 => {
-            crate::xray::stats::kernel_stats().adjust_metric(
-                MetricType::from_custom_irq((irq_num as u8) - IRQ_CUSTOM_START),
-                1,
-            );
-            crate::sched::on_custom_irq(irq_num as u8);
+            let custom_idx = (irq_num as u8) - IRQ_CUSTOM_START;
+            // Only the first 8 custom vectors have dedicated metrics;
+            // IrqFired above counts them all.
+            if custom_idx < 8 {
+                crate::xray::stats::kernel_stats()
+                    .adjust_metric(MetricType::from_custom_irq(custom_idx), 1);
+            }
+            crate::sched::queue_custom_irq_wake(irq_num as u8);
             if uspace {
-                // These are I/O IRQs, make sure the driver is running.
-                //if !ThreadControlBlock::io_thread() {
-                ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
-                                                                           //}
+                if crate::sched::irq_wake_fast_path_ok() {
+                    // An idle CPU was woken to process the wake queue; return
+                    // straight to the interrupted thread.
+                    crate::xray::stats::kernel_stats()
+                        .adjust_metric(MetricType::IrqFastReturnWake, 1);
+                } else {
+                    crate::sched::local_wake();
+                    crate::xray::stats::kernel_stats()
+                        .adjust_metric(MetricType::IrqPreemptWake, 1);
+                    ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn, EOIs.
+                }
+            } else {
+                crate::sched::local_wake();
             }
             eoi();
         }
         IRQ_APIC_TIMER => {
             crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqTimerFired, 1);
             // Timer.
-            crate::sched::local_wake();
             if uspace {
-                ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn
+                if crate::sched::timer_irq_fast_path_ok() {
+                    // Nothing else to run on this CPU: re-arm the tick and
+                    // return straight to the interrupted thread.
+                    crate::sched::rearm_tick_from_irq();
+                    crate::xray::stats::kernel_stats()
+                        .adjust_metric(MetricType::IrqFastReturnTimer, 1);
+                    eoi();
+                } else {
+                    crate::sched::local_wake();
+                    crate::xray::stats::kernel_stats()
+                        .adjust_metric(MetricType::IrqPreemptTimer, 1);
+                    // The preempted thread ends up in
+                    // super::syscall::thread_off_cpu_reason(), which then
+                    // calls on_timer_irq() to re-arm the tick.
+                    ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn, EOIs.
+                }
             } else {
-                // If the timer fires when the CPU is running a userspace thread,
-                // it is preempted and ends up in super::syscall::thread_off_cpu_reason(),
-                // which then calls on_timer_irq().
+                crate::sched::local_wake();
                 crate::sched::on_timer_irq();
                 eoi();
             }
