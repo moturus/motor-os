@@ -449,6 +449,9 @@ impl NetRuntime {
             NetCmd::TcpStreamClose => socket::MotoSocket::tcp_close(self, msg, &sender).await,
 
             NetCmd::UdpSocketBind => socket::MotoSocket::udp_bind(self, msg, &sender).await,
+            NetCmd::UdpSocketBindForRemote => {
+                socket::MotoSocket::udp_bind_for_remote(self, msg, &sender).await
+            }
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
             NetCmd::UdpSocketDrop => socket::MotoSocket::udp_socket_drop(self, msg, &sender).await,
             NetCmd::IcmpEcho => icmp::echo(self, msg, &sender).await,

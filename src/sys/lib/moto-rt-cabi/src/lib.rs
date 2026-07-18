@@ -456,6 +456,13 @@ pub unsafe extern "C" fn moto_rt_net_bind(proto: u8, addr: *const moto_rt::netc:
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn moto_rt_net_udp_bind_for_remote(
+    addr: *const moto_rt::netc::sockaddr,
+) -> i64 {
+    ret_fd(moto_rt::net::udp_bind_for_remote(unsafe { &*addr }))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn moto_rt_net_listen(fd: i32, backlog: u32) -> i32 {
     ret0(moto_rt::net::listen(fd, backlog))
 }

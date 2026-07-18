@@ -551,10 +551,14 @@ cat > $IMG/sys/cfg/llvm/x86_64-unknown-motor.cfg << EOF
 -resource-dir /sys/tools/llvm/lib/clang/$CLANG_MAJOR
 EOF
 
-# 6. mlibc reads its config from /sys/cfg/libc (MLIBC_SYSCONFDIR). A resolv.conf
-#    gives getaddrinfo a nameserver.
+# 6. mlibc reads its config from /sys/cfg/libc (MLIBC_SYSCONFDIR). Its generic
+#    DNS client needs both a nameserver and the domain service entry.
 cat > $IMG/sys/cfg/libc/resolv.conf << 'EOF'
 nameserver 8.8.8.8
+EOF
+cat > $IMG/sys/cfg/libc/services << 'EOF'
+domain 53/tcp
+domain 53/udp
 EOF
 
 # 7. A couple of sample sources to compile natively in the VM.

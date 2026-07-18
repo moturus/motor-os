@@ -40,6 +40,7 @@ impl MotoSocket {
         runtime: &NetRuntime,
         device_idx: usize,
         socket_addr: SocketAddr,
+        ephemeral_port: Option<u16>,
         client_sender: moto_ipc::io_channel::Sender,
         subchannel_mask: u64,
     ) -> Rc<RefCell<MotoSocket>> {
@@ -75,7 +76,7 @@ impl MotoSocket {
         MotoSocket::new(
             base,
             SocketState::Udp(UdpState {
-                ephemeral_port: None,
+                ephemeral_port,
                 tx_queue: UdpDefragmentingQueue::new(),
                 rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
                     socket_id,
@@ -210,33 +211,61 @@ impl MotoSocket {
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
+    pub async fn udp_bind_for_remote(
+        runtime: &NetRuntime,
+        mut msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let remote_addr = api_net::get_socket_addr(&msg.payload);
+        if remote_addr.ip().is_unspecified() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        let Some((device_idx, local_ip_addr)) = runtime.find_route(&remote_addr.ip()) else {
+            log::debug!(
+                "sys-io: 0x{:x}: UDP route to {:?} not found",
+                sender.remote_handle().as_u64(),
+                remote_addr
+            );
+            return Err(ErrorKind::NetworkUnreachable.into());
+        };
+
+        let local_addr = SocketAddr::new(local_ip_addr, 0);
+        api_net::put_socket_addr(&mut msg.payload, &local_addr);
+        Self::udp_bind_on_device(runtime, msg, sender, local_addr, device_idx).await
+    }
+
     pub async fn udp_bind(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
         sender: &moto_ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
-        let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
-        let mut runtime_mut = runtime.inner.borrow_mut();
-        let mut resp = msg;
-
-        // Verify that the IP is valid (if present) before the socket is created.
+        let socket_addr = api_net::get_socket_addr(&msg.payload);
         let ip_addr = socket_addr.ip();
-
         if ip_addr.is_unspecified() {
             // We don't allow binding to an unspecified addr (yet?).
             return Err(ErrorKind::InvalidInput.into());
         }
-        let device_idx = {
-            match runtime_mut.ip_addresses.get(&ip_addr) {
-                Some(idx) => *idx,
-                None => {
-                    #[cfg(debug_assertions)]
-                    log::debug!("IP addr {ip_addr:?} not found");
 
-                    return Err(ErrorKind::InvalidInput.into());
-                }
-            }
+        let Some(device_idx) = runtime.inner.borrow().ip_addresses.get(&ip_addr).copied() else {
+            #[cfg(debug_assertions)]
+            log::debug!("IP addr {ip_addr:?} not found");
+            return Err(ErrorKind::InvalidInput.into());
         };
+
+        Self::udp_bind_on_device(runtime, msg, sender, socket_addr, device_idx).await
+    }
+
+    async fn udp_bind_on_device(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+        mut socket_addr: SocketAddr,
+        device_idx: usize,
+    ) -> std::io::Result<()> {
+        let mut runtime_mut = runtime.inner.borrow_mut();
+        let mut resp = msg;
+        let ip_addr = socket_addr.ip();
 
         // Allocate/assign port, if needed.
         let mut allocated_port = None;
@@ -264,6 +293,7 @@ impl MotoSocket {
             runtime,
             device_idx,
             socket_addr,
+            allocated_port,
             sender.clone(),
             subchannel_mask,
         );

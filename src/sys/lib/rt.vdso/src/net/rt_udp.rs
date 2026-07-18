@@ -77,27 +77,49 @@ impl UdpSocket {
     }
 
     pub fn bind(socket_addr: &SocketAddr) -> Result<Arc<UdpSocket>, ErrorCode> {
-        let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
             // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
+        Self::bind_inner(socket_addr, false)
+    }
 
+    pub fn bind_for_remote(remote_addr: &SocketAddr) -> Result<Arc<UdpSocket>, ErrorCode> {
+        if remote_addr.ip().is_unspecified() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        Self::bind_inner(remote_addr, true)
+    }
+
+    fn bind_inner(
+        requested_addr: &SocketAddr,
+        select_route: bool,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
         let mut channel_reservation = super::rt_net::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
-        let req =
-            api_net::bind_udp_socket_request(&socket_addr, channel_reservation.subchannel_idx());
+        let req = if select_route {
+            api_net::bind_udp_socket_for_remote_request(
+                requested_addr,
+                channel_reservation.subchannel_idx(),
+            )
+        } else {
+            api_net::bind_udp_socket_request(requested_addr, channel_reservation.subchannel_idx())
+        };
         let resp = channel_reservation.channel().send_receive(req);
         if resp.status().is_err() {
             return Err(resp.status);
         }
 
-        if socket_addr.port() == 0 {
-            let actual_addr = api_net::get_socket_addr(&resp.payload);
-            assert_eq!(socket_addr.ip(), actual_addr.ip());
-            assert_ne!(0, actual_addr.port());
-            socket_addr.set_port(actual_addr.port());
+        let socket_addr = api_net::get_socket_addr(&resp.payload);
+        assert_ne!(0, socket_addr.port());
+        if select_route {
+            assert_eq!(requested_addr.is_ipv4(), socket_addr.is_ipv4());
+        } else {
+            assert_eq!(requested_addr.ip(), socket_addr.ip());
+            if requested_addr.port() != 0 {
+                assert_eq!(requested_addr.port(), socket_addr.port());
+            }
         }
 
         let udp_socket = Arc::new_cyclic(|me| UdpSocket {

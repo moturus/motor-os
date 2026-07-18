@@ -31,6 +31,8 @@ pub const SHUTDOWN_WRITE: u8 = 2;
 
 pub const PROTO_TCP: u8 = 1;
 pub const PROTO_UDP: u8 = 2;
+// Internal bind selector: create a UDP socket using the route to `addr`.
+pub const PROTO_UDP_FOR_REMOTE: u8 = 3;
 
 pub const SO_RCVTIMEO: u64 = 1;
 pub const SO_SNDTIMEO: u64 = 2;
@@ -89,6 +91,10 @@ pub fn bind(proto: u8, addr: &netc::sockaddr) -> Result<RtFd> {
     };
 
     to_result!(vdso_bind(proto, addr))
+}
+
+pub fn udp_bind_for_remote(addr: &netc::sockaddr) -> Result<RtFd> {
+    bind(PROTO_UDP_FOR_REMOTE, addr)
 }
 
 pub fn listen(rt_fd: RtFd, max_backlog: u32) -> Result<()> {

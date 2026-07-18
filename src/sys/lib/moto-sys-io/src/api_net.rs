@@ -30,6 +30,7 @@ pub enum NetCmd {
     UdpSocketTxRxAck,
     UdpSocketDrop,
     IcmpEcho,
+    UdpSocketBindForRemote,
     NetCmdMax,
 }
 
@@ -55,6 +56,7 @@ impl NetCmd {
         matches!(
             self,
             NetCmd::UdpSocketBind
+                | NetCmd::UdpSocketBindForRemote
                 | NetCmd::UdpSocketTxRx
                 | NetCmd::UdpSocketTxRxAck
                 | NetCmd::UdpSocketDrop
@@ -567,4 +569,27 @@ pub fn bind_udp_socket_request(addr: &SocketAddr, subchannel_idx: u8) -> io_chan
     put_socket_addr(&mut msg.payload, addr);
 
     msg
+}
+
+pub fn bind_udp_socket_for_remote_request(
+    remote_addr: &SocketAddr,
+    subchannel_idx: u8,
+) -> io_channel::Msg {
+    let mut msg = io_channel::Msg::new();
+    msg.command = NetCmd::UdpSocketBindForRemote as u16;
+    msg.payload.args_8_mut()[23] = subchannel_idx;
+    put_socket_addr(&mut msg.payload, remote_addr);
+
+    msg
+}
+
+#[test]
+fn test_bind_udp_socket_for_remote_request() {
+    let remote_addr = "[2001:db8::1]:53".parse().unwrap();
+    let msg = bind_udp_socket_for_remote_request(&remote_addr, 3);
+
+    assert_eq!(msg.command, NetCmd::UdpSocketBindForRemote as u16);
+    assert_eq!(get_socket_addr(&msg.payload), remote_addr);
+    assert_eq!(msg.payload.args_8()[23], 3);
+    assert!(NetCmd::UdpSocketBindForRemote.is_udp());
 }

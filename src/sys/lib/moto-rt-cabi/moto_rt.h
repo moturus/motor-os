@@ -162,6 +162,7 @@ typedef union {
 
 /* creation / lifecycle (fd or -err unless noted) */
 int64_t moto_rt_net_bind(uint8_t proto, const moto_sockaddr_t *addr);
+int64_t moto_rt_net_udp_bind_for_remote(const moto_sockaddr_t *remote_addr);
 int32_t moto_rt_net_listen(int32_t fd, uint32_t backlog);
 int64_t moto_rt_net_accept(int32_t fd, moto_sockaddr_t *peer);
 int64_t moto_rt_net_tcp_connect(const moto_sockaddr_t *addr,

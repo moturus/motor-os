@@ -72,6 +72,13 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
+    } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
+        let addr = unsafe { (*addr).into() };
+        let udp_socket = match super::rt_udp::UdpSocket::bind_for_remote(&addr) {
+            Ok(socket) => socket,
+            Err(err) => return -(err as RtFd),
+        };
+        posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
         let listener = match super::rt_tcp::TcpListener::bind(&addr) {
