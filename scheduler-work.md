@@ -22,12 +22,12 @@ changes applied, uncommitted).
 | S8 | `slow_swapgs()`: 2–3 rdmsr on every IRQ and #PF entry — **done, Round 1** (see the GS-model correction there) | perf | ~200–500 cyc per IRQ | small |
 | S9 | Vector 72 is registered with irqnum 71 (`naked_irq_handler!(irq_handler_72, 71)`) ⇒ devices on vector 72 wake the wrong waiter — **fixed, Round 1** | **bug** | correctness | trivial |
 | S10 | MXCSR / x87 CW are not preserved across blocking syscalls (pause/resume skips FPU entirely) ⇒ another thread's FP env can leak in — **fixed, Round 4** (saved/restored in pause/resume; systest coverage added) | **bug** (latent) | correctness | small |
-| S11 | No priorities, FIFO everywhere; sys-io competes equally with bulk compute; a many-threaded process starves others | isolation | I/O latency under load | medium |
-| S12 | All device IRQs (virtio MSI-X) + serial + system-time duty target CPU 0 | isolation/perf | CPU 0 saturation (seen in FS rounds) | medium |
+| S11 | No priorities, FIFO everywhere; sys-io competes equally with bulk compute; a many-threaded process starves others — **latency slice measured-skip R11** (loaded RR ≡ unloaded RR at full 4-CPU saturation); full W10 parked until a workload demands isolation | isolation | I/O latency under load | medium |
+| S12 | All device IRQs (virtio MSI-X) + serial + system-time duty target CPU 0 — **measured-skip R11** (872K device IRQs/suite ≈ 0.2-0.3 % of one CPU; the FS-round saturation was message processing, since fixed) | isolation/perf | CPU 0 saturation (seen in FS rounds) | medium |
 | S13 | Per-wait heap churn: `Vec` allocs + per-object `BTreeMap` insert/remove on every wait — **done, Round 8** (stack staging + retained lists + single-waiter slot; ~5 alloc pairs → 0 on the common path; swap bench −3 %) | perf | allocs on the hottest path | medium |
 | S14 | Every sched-loop iteration on every CPU does an atomic **swap** on the global `WAKE_QUEUE` and takes the global-queue spinlock every 3rd iteration even when empty — **done, Round 1** | perf | cross-CPU cacheline traffic | trivial |
 | S15 | No NX (EFER.NXE never set, no XD PTE bit), no SMEP/SMAP ⇒ all user memory is W+X; kernel can execute/read user pages freely | security | policy decision | small–medium |
-| S16 | Wake IPIs (`IRQ_WAKEUP`) do not preempt userspace ⇒ a cross-CPU wake targeting a busy CPU waits for the next tick (up to 10 ms) | latency semantics | tail latency under load | small (policy) |
+| S16 | Wake IPIs (`IRQ_WAKEUP`) do not preempt userspace ⇒ a cross-CPU wake targeting a busy CPU waits for the next tick (up to 10 ms) — **measured non-issue R11** (io-manager park cadence self-drains the queue; loaded RR unchanged) | latency semantics | tail latency under load | small (policy) |
 
 Concern 1 from the session brief ("every IRQ and many syscalls deschedule") = S1 + S3 + S6.
 Concern 2 ("every IRQ and syscall trigger xsave+xrstor") = S5 (IRQs/#PF yes; plain
@@ -1091,6 +1091,89 @@ signature, not a kernel effect. 68 PASS ×3, tokio PASS, mio ALL PASS.
   priorities** (phase C — sys-io vs bulk compute isolation), **S12
   IRQ spreading** (device MSI-X all target CPU 0), io_channel
   in-process swap adoption (R7 leftover), SMEP/SMAP (S15).
+
+---
+
+## Round 11 (done 2026-07-18): phase C closed by measurement — no code changes
+
+The remaining perf candidates all resolved the same way W3 did: measure
+first, and the measurement says no. On top of 35142d5 (R10); this round
+produced data, decisions, and a new harness scenario — zero kernel diff.
+
+### S11/S16 slice (priority wakes that preempt on no-idle): skip
+
+The feared pathology: `post()` with no idle CPU pushes to the global
+queue and wakes nobody, so a woken thread waits for the next tick or
+syscall on any CPU (≤10 ms) — under full CPU load, I/O latency should
+collapse. Design was ready (HIGH global queue folded into
+`GLOBAL_QUEUE_LENGTH` so every fast-return check keeps working;
+urgency = poster holds CAP_IO_MANAGER; victim = woken thread's warm
+CPU). Then the scenario was measured on HEAD first:
+
+- New harness scenario (scratchpad `vmloaded.sh`): rnetbench against a
+  VM whose 4 vCPUs run rush spin loops (verified saturated: qemu at
+  400.0-400.5 % host CPU).
+- **Loaded RR: 81.4 / 101.3 / 106.2 µs. Unloaded control (same boot,
+  same evening host): 90.6 / 88.0 / 105.6 µs.** Identical bands —
+  full 4-CPU saturation costs RR nothing measurable.
+
+Why the hole doesn't bite: the device-IRQ side already preempts when
+no CPU is idle (R2's `irq_wake_fast_path_ok`), and on the wake side
+the io-manager parks/polls at chain speed, so the CPU it releases
+drains the global queue immediately — the lockstep self-drain the
+`post()` comment describes. The preempt-IPI machinery would add
+preempt-storm risk (the R2 lesson) for a gain no constructible
+workload shows. Revisit only with a workload where the io-manager
+itself stays CPU-bound while latency-sensitive wakes queue behind
+compute — today that shape is bulk TX/RX, which is sys-io-throughput
+bound, not queue-latency bound.
+
+- Side observation, recorded: **RR 81.4-90.6 µs is the best ever
+  measured on this rig** (prior record 118.4 µs, R6). The morning's
+  145-173 µs runs were host-steal-inflated; on the quiet evening host
+  the accumulated R7-R9 work shows its real value (~25 % under the R6
+  record).
+
+### S12 (device MSI-X all on CPU 0): skip
+
+No per-CPU tooling needed — the aggregates bound it. Device IRQs
+(custom0-2) totaled 872K over the entire ~9-minute suite; at ~1-2 µs
+each (96 % fast-return) that is ~0.2-0.3 % of one CPU. Wakeup IPIs
+(3.8M) already target the woken CPU by design. The FS rounds' CPU-0
+saturation was message processing (fixed in FS rounds 17-20), not IRQ
+entry cost. Spreading MSI-X would recover noise and lose the cache
+locality of one CPU handling all virtio rings.
+
+### io_channel in-process swap adoption (R7 leftover): skip
+
+R7 measured the heavyweight direction negative (+16 % set_nodelay
+when parking swapped to sys-io). The remaining in-process hops (app
+worker ↔ moto-async reactor) are a few µs of ops that cost 69+ µs
+end-to-end — low single-digit percent upside, and the reactor is a
+mini-multiplexer, the exact shape R7's rule says prefers placement
+over handoff. Revisit only if a profile isolates the in-process hop.
+
+### Where this leaves the effort
+
+Phases A-C of the roadmap are done or closed with data: W1-W8 landed
+(R1-R8), the reply-wake fold (R9) and user-copy trim (R10) closed the
+IPC path, and every remaining perf candidate now has a measured skip
+on record. Cumulative headlines since R0: RR 407-551 → 81-91 µs
+best-observed, cross-process RPC 25 → 1.3 µs, same-process swap 1.21
+→ 0.85 µs, #PF 7.1 → 6.3 µs, idle ticks 373 → 95/s, plus the
+correctness harvest (S9, S10, MXCSR, stale-kernel-TLB, triple-fault,
+GS/swapgs latent bug, wait-path panic, xor livelock).
+
+Remaining open items are not scheduler-perf work:
+
+- **S15 security hardening (NX, SMEP/SMAP)** — likely the natural
+  next round. Note W6b+R10 made SMAP nearly free: syscalls keep user
+  memory mapped but the kernel only ever touches it through the
+  direct map (R10 verified every copy path), so CR4.SMAP should be
+  enableable without a single stac/clac pair; SMEP similarly. NX
+  needs EFER.NXE + PTE plumbing and a W^X policy decision.
+- **W10 full priorities** — parked until a workload demands isolation
+  (needs idle-time work stealing per the R3 rule).
 
 ---
 
