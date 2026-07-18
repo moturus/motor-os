@@ -31,6 +31,13 @@ impl elfloader::ElfLoader for Loader<'_> {
             if header.flags().is_write() {
                 mapping_options |= MappingOptions::WRITABLE;
             }
+            // W^X: text is executable, and only text (a W+X segment would
+            // stay NX; well-formed binaries have none). The kernel writes
+            // the segment bytes via copy_to_user (the direct map), so the
+            // user-side W bit doesn't matter for loading.
+            if header.flags().is_execute() && !header.flags().is_write() {
+                mapping_options |= MappingOptions::EXECUTABLE;
+            }
 
             let num_pages = (vaddr_end - vaddr_start) >> PAGE_SIZE_SMALL_LOG2;
             self.address_space

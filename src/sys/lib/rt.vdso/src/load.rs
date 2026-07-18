@@ -182,6 +182,11 @@ impl elfloader::ElfLoader for RemoteLoader {
             if header.flags().is_write() {
                 flags |= SysMem::F_WRITABLE;
             }
+            // W^X: the remote side of text is R+X; segment bytes are
+            // written through our local side, which is always R+W.
+            if header.flags().is_execute() && !header.flags().is_write() {
+                flags |= SysMem::F_EXECUTABLE;
+            }
 
             let num_pages = (vaddr_end - vaddr_start) >> sys_mem::PAGE_SIZE_SMALL_LOG2;
 

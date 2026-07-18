@@ -283,8 +283,10 @@ impl elfloader::ElfLoader for Loader {
                 moto_sys::sys_mem::PAGE_SIZE_SMALL,
             );
 
-            // TODO: Implement proper RelRo.
-            /*
+            // The remote side gets the segment's own protection (so text is
+            // R+X, rodata R, data R+W, everything non-EXECUTABLE is NX);
+            // loading and relocation write through our local side of the
+            // sharing, which is always mapped R+W regardless.
             let mut flags = moto_sys::SysMem::F_SHARE_SELF;
             if header.flags().is_read() {
                 flags |= moto_sys::SysMem::F_READABLE;
@@ -292,10 +294,9 @@ impl elfloader::ElfLoader for Loader {
             if header.flags().is_write() {
                 flags |= moto_sys::SysMem::F_WRITABLE;
             }
-            */
-            let flags = moto_sys::SysMem::F_SHARE_SELF
-                | moto_sys::SysMem::F_READABLE
-                | moto_sys::SysMem::F_WRITABLE;
+            if header.flags().is_execute() && !header.flags().is_write() {
+                flags |= moto_sys::SysMem::F_EXECUTABLE;
+            }
 
             let num_pages = (vaddr_end - vaddr_start) >> moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2;
 

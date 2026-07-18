@@ -95,10 +95,14 @@ pub fn init() {
 
     unsafe {
         asm!(
-            // IA32_FMASK. Purpose unknown.
+            // IA32_FMASK: RFLAGS bits cleared on syscall entry. TF (bit 8),
+            // IF (bit 9), and AC (bit 18) — AC must be masked or a user
+            // thread could set it and enter the kernel with SMAP suppressed
+            // (interrupt gates don't clear AC either, but IRQ handlers
+            // dereference no user-controlled pointers; syscalls do).
             "
                 mov ecx, 0xc0000084
-                mov eax, 0x300
+                mov eax, 0x40300
                 xor edx, edx
                 wrmsr
             ",

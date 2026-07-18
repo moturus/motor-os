@@ -26,7 +26,7 @@ changes applied, uncommitted).
 | S12 | All device IRQs (virtio MSI-X) + serial + system-time duty target CPU 0 — **measured-skip R11** (872K device IRQs/suite ≈ 0.2-0.3 % of one CPU; the FS-round saturation was message processing, since fixed) | isolation/perf | CPU 0 saturation (seen in FS rounds) | medium |
 | S13 | Per-wait heap churn: `Vec` allocs + per-object `BTreeMap` insert/remove on every wait — **done, Round 8** (stack staging + retained lists + single-waiter slot; ~5 alloc pairs → 0 on the common path; swap bench −3 %) | perf | allocs on the hottest path | medium |
 | S14 | Every sched-loop iteration on every CPU does an atomic **swap** on the global `WAKE_QUEUE` and takes the global-queue spinlock every 3rd iteration even when empty — **done, Round 1** | perf | cross-CPU cacheline traffic | trivial |
-| S15 | No NX (EFER.NXE never set, no XD PTE bit), no SMEP/SMAP ⇒ all user memory is W+X; kernel can execute/read user pages freely | security | policy decision | small–medium |
+| S15 | ~~No NX (EFER.NXE never set, no XD PTE bit), no SMEP/SMAP ⇒ all user memory is W+X; kernel can execute/read user pages freely~~ **R12: DONE — user NX/W^X + SMEP + SMAP, zero stac/clac; kernel-side W^X left as follow-up** | security | policy decision | small–medium |
 | S16 | Wake IPIs (`IRQ_WAKEUP`) do not preempt userspace ⇒ a cross-CPU wake targeting a busy CPU waits for the next tick (up to 10 ms) — **measured non-issue R11** (io-manager park cadence self-drains the queue; loaded RR unchanged) | latency semantics | tail latency under load | small (policy) |
 
 Concern 1 from the session brief ("every IRQ and many syscalls deschedule") = S1 + S3 + S6.
@@ -1166,14 +1166,132 @@ GS/swapgs latent bug, wait-path panic, xor livelock).
 
 Remaining open items are not scheduler-perf work:
 
-- **S15 security hardening (NX, SMEP/SMAP)** — likely the natural
-  next round. Note W6b+R10 made SMAP nearly free: syscalls keep user
-  memory mapped but the kernel only ever touches it through the
-  direct map (R10 verified every copy path), so CR4.SMAP should be
-  enableable without a single stac/clac pair; SMEP similarly. NX
-  needs EFER.NXE + PTE plumbing and a W^X policy decision.
+- **S15 security hardening (NX, SMEP/SMAP)** — ~~likely the natural
+  next round~~ **done in Round 12** (see below); the "SMAP without a
+  single stac/clac pair" prediction held. Residuals: kernel-side W^X,
+  swapgs sync-exception hardening.
 - **W10 full priorities** — parked until a workload demands isolation
   (needs idle-time work stealing per the R3 rule).
+
+---
+
+## Round 12 (done 2026-07-18): S15 — NX/W^X + SMEP + SMAP
+
+The security round the R11 notes pointed at. All of user memory was W+X
+(EFER.NXE never set, so PTE bit 63 was reserved, and the program loader
+mapped every ELF segment R+W); the kernel could execute and read/write
+user pages through their user mappings. Now: every user page that is
+not ELF text is NX, program/vdso text is no longer writable, W+X is
+rejected at the syscall API, and SMEP/SMAP are on. Benches are neutral
+(zero instructions added to any hot path).
+
+### NX + W^X plumbing
+
+- `EFER.NXE` set per-CPU in `GS::init` (the first per-CPU init step,
+  so it beats any user-page-table walk); `PTE::NX` (bit 63) set on
+  every user leaf not mapped `MappingOptions::EXECUTABLE`
+  (paging.rs `map_page` — the one choke point every user PTE goes
+  through; the once-planned zero-page shortcut turned out to be a dead
+  enum variant, so there really is just one). Kernel leaves untouched
+  this round.
+- `MappingOptions` widened u8 → u16; `EXECUTABLE = 256`. Userspace:
+  `SysMem::F_EXECUTABLE = 0x80`, accepted only in the `F_SHARE_SELF`
+  path (ELF loading), applies to the target side only; W+X is rejected
+  with `E_INVALID_ARGUMENT`.
+- All four ELF loaders now honor `PF_X` (mapping text `R+X` and only
+  text; a hypothetical W+X segment maps as data):
+  - kernel `util/loader.rs` (loads sys-io; writes bytes via
+    `copy_to_user` = the direct map, so user-side W is irrelevant);
+  - vdso `load.rs` (children's vdso; writes through the caller-side
+    alias of the sharing, which the kernel always maps R+W);
+  - vdso `rt_process.rs` (program binaries) — this **closes the
+    "TODO: implement proper RelRo"**: program text/rodata were mapped
+    R+W remote since forever; now segments get their own protections
+    (the alias side carries the writes, so relocations still work);
+  - sys-io `rt_vdso.rs` (its own vdso, see below).
+- sys-io's `VsdoLoader` rewritten from "map R+W at the fixed address
+  and write in place" to the same share-self pattern the other loaders
+  use (`map2(SELF, F_SHARE_SELF|R|X, ...)` → write via the R+W alias →
+  unmap the alias). Two things had to give:
+  - `share_with`'s self==self branch assumed both segments live in the
+    same vmem region and looked both up under one region lock; the
+    vdso target is in the custom region while the alias comes from the
+    normal region. Now it takes both region locks (fixed order: normal
+    first) when the segments' regions differ — mirroring what the
+    cross-space path already did per side.
+  - **Boot bug (fun one):** the first rewrite kept segment bookkeeping
+    in a `BTreeMap` — whose first insert allocates — but sys-io's
+    global allocator dispatches through the vdso vtable, which is
+    initialized only *after* this loader runs. First boot died with
+    sys-io #PF at `RT_VDSO_VTABLE_VADDR+0x10` (rip = the vtable-alloc
+    dispatch read). The loader now uses a fixed 16-slot array and a
+    NO-HEAP-ALLOCATIONS comment.
+
+### The pre-existing infinite-#PF-loop bug
+
+`fix_pagefault`'s concurrent-fault shortcut (`!page.frame.is_null()` →
+`Ok`) ignored the error code, and `Ok` means "retry the instruction".
+Any protection-violation fault on a present page — a write to rodata
+*today*, or any NX fetch once NX exists — would be "fixed" into an
+eternal #PF loop (user-triggerable busy spin; the thread stayed
+killable, so a nuisance, not corruption). Present (P) and
+instruction-fetch (I/D) faults are now rejected up front: there are no
+CoW/lazy-present mappings and nothing executable is lazily mapped, so
+neither is ever fixable. This is what turns an NX violation into a
+clean kill.
+
+### SMEP + SMAP
+
+- CR4.SMEP (bit 20) + CR4.SMAP (bit 21), CPUID.(7,0):EBX-gated, set in
+  `GS::init` per CPU.
+- **Zero stac/clac pairs**, as predicted by the R10 audit: the kernel
+  touches user memory only through the direct map (kernel PTEs), so
+  SMAP never needs to be suspended. SMAP is now the *enforcement* of
+  that R10 invariant — any future raw user-pointer deref in the kernel
+  panics instead of silently working.
+- One real hole closed on the way: `syscall` masks only IA32_FMASK
+  bits, and AC wasn't in it — a user thread could `popfq` AC=1 and
+  enter the kernel with SMAP suppressed for the whole syscall. FMASK
+  is now `0x40300` (TF|IF|AC). Interrupt gates don't clear AC either;
+  left as-is deliberately — IRQ handlers dereference no
+  user-controlled pointers (and a cpuid-gated `clac` in the IRQ entry
+  asm isn't worth the patching machinery). Noted here as the residual.
+
+### What this round does NOT cover
+
+- Kernel-side W^X: kernel text/data/heap/direct-map are all still
+  executable (no NX on kernel leaves). Follow-up if wanted; needs the
+  early boot mappings audited.
+- The R2-era swapgs residual (sync exceptions + user `wrgsbase`) —
+  still irrelevant (nothing sets user GS), still on the list.
+- No `mprotect`: W→X transitions are impossible by construction, which
+  is exactly right until something needs a JIT; that something will
+  need a new (capability-gated?) API.
+
+### Verification
+
+- ELF audit: all prebuilt img_files binaries (lua, llvm 109 MB, rustc
+  92 MB) + tree-built (sys-io, systest, rush, the clang/mlibc-linked
+  dns-resolver) + rt.vdso: no W+X `PT_LOAD` anywhere, every segment
+  page-separated (lld separate-code layout) — nothing breaks under
+  flag-honoring loaders.
+- On-VM end-to-end: `lua` runs; `rustc` compiles hello.rs and the
+  freshly-linked binary runs (exercises rustc + `/bin/cc` rush script
+  + llvm clang/lld + spawn of a brand-new binary, all under W^X).
+- New `test_nx` in systest (73 PASS lines now): child `exec_heap`
+  (SysMem page, write `ret`, call) and `exec_stack` (stack-array
+  `ret`) both die; parent asserts `!success()`. The two serial-log
+  `#PF ... killed` lines are the test working.
+- Release systest ×3 + tokio + mio: all PASS. Bench A/B vs same-day
+  baseline (w12before/w12after): thread_swap 848/851/846 → 838/836/840
+  ns, test_ipc 1357/1313/1324 → 1341/1409/1315 ns, #PF 6.5 → 6.3-6.4
+  µs, FS/hot-cache/RR inside their usual bands (daytime host steal on
+  RR). Direct_switch and user_copy counters identical. Neutral, as
+  expected.
+- Debug systest ×2 + serial scan: exit 0, 69 PASS lines each (68 +
+  test_nx), zero panic/rsp/watchdog/canary/assert lines in serial —
+  i.e. every debug_assert and the GS/kernel-TLB canaries survived a
+  full suite under NX+SMEP+SMAP.
 
 ---
 
@@ -1631,6 +1749,9 @@ trivial; they matter because 5 polling iterations precede every halt and
 busy CPUs iterate constantly.
 
 ### S15 — security hardening gaps (policy list, not a scheduler item)
+
+**Done in Round 12 — see above** (user NX/W^X + SMEP + SMAP + AC in
+FMASK; kernel-side W^X and the swapgs sync-exception residual remain).
 
 No NX (EFER.NXE unset, PTE bit 63 never used): all user mappings are
 executable, W^X is impossible for userspace to even opt into. No SMEP/SMAP:

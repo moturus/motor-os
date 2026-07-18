@@ -866,13 +866,37 @@ impl UserAddressSpaceBase {
             // TODO: here we duplicate the mapping code below, as
             // we have only one mutex guard, not two. Can this be
             // easily refactored to avoid duplicate code?
-            let lock_both = if self.normal_memory.segment.contains(addr_here) {
-                self.normal_memory.used_segments.lock(line!())
+            let here_in_normal = self.normal_memory.segment.contains(addr_here);
+            let there_in_normal = self.normal_memory.segment.contains(addr_there);
+
+            // One lock when both segments live in the same region; both
+            // locks (normal first, then custom — keep this order fixed)
+            // when they don't, e.g. sys-io loading its own vdso: text at a
+            // fixed custom-region address, the write alias in the normal
+            // region.
+            let lock_a;
+            let lock_b;
+            let map_here_segment;
+            let map_there_segment;
+            if here_in_normal == there_in_normal {
+                lock_a = if here_in_normal {
+                    self.normal_memory.used_segments.lock(line!())
+                } else {
+                    self.custom_memory.used_segments.lock(line!())
+                };
+                map_here_segment = lock_a.get(&addr_here);
+                map_there_segment = lock_a.get(&addr_there);
             } else {
-                self.custom_memory.used_segments.lock(line!())
-            };
-            let map_here_segment = lock_both.get(&addr_here);
-            let map_there_segment = lock_both.get(&addr_there);
+                lock_a = self.normal_memory.used_segments.lock(line!());
+                lock_b = self.custom_memory.used_segments.lock(line!());
+                if here_in_normal {
+                    map_here_segment = lock_a.get(&addr_here);
+                    map_there_segment = lock_b.get(&addr_there);
+                } else {
+                    map_here_segment = lock_b.get(&addr_here);
+                    map_there_segment = lock_a.get(&addr_there);
+                }
+            }
 
             if map_there_segment.is_none() || map_here_segment.is_none() {
                 log::debug!("map_shared: can't find the segments to map");
@@ -893,7 +917,8 @@ impl UserAddressSpaceBase {
 
             // Rust does not allow concurrent mutable access to elements of
             // a collection, so we need to remove const "unsafely". This is
-            // actually safe, as everything is protected by lock_both.
+            // actually safe, as everything is protected by the lock(s)
+            // taken above.
             let there_mut = unsafe {
                 (map_there_segment as *const _ as usize as *mut VmemSegment)
                     .as_mut()
