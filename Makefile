@@ -17,9 +17,9 @@ else
 endif
 
 ROOT_DIR := $(CURDIR)
-MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
-MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
-MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
+MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../../llvm-project/build/bin/clang)
+MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../../motor-sysroot)
+MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../../motor-sysroot/sys/tools/llvm)
 MOTOR_DNS_RUSTFLAGS := -C linker=$(MOTOR_DNS_CLANG) \
 	-C link-arg=--no-default-config \
 	-C link-arg=--target=x86_64-unknown-motor \
