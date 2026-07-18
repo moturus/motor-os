@@ -34,9 +34,9 @@ trap 'die "failed at line $LINENO"' ERR
 
 # --- paths (same scheme as docs/build-llvm.md) ------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-MOTORH="$SCRIPT_DIR"
+MOTORH="$(readlink -f "${MOTORH:-$SCRIPT_DIR}")"
 export MOTORH
-MOTOR="$MOTORH/motor-os"
+MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
 LLVM="$MOTORH/llvm-project"
 MLIBC="$MOTORH/mlibc"
 B="$LLVM/build/bin"                 # the cross toolchain, built in stage 1
@@ -55,8 +55,8 @@ CFG_LIBC="sys/cfg/libc"           # mlibc config files (resolv.conf, ...)
 run_build_base() {
 	local base="$SCRIPT_DIR/build-base.sh"
 	[ -x "$base" ] || die "build-base.sh not found next to this script ($base). Copy both scripts into the same directory."
-	log "running build-base.sh (base environment + Motor OS build)"
-	"$base"
+	log "running build-base.sh (host environment + bootstrap Rust target)"
+	MOTOR_SKIP_OS_BUILD=1 "$base"
 	# build-base installs rustup in $HOME/.cargo; bring it onto PATH for the
 	# cargo invocation in stage 2 (the subprocess above can't export into us).
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
@@ -379,13 +379,17 @@ build_lua() {
 
 # --- stage 8: stage everything into the image -------------------------------
 stage_image() {
-	log "stage 8: staging the toolchain, sysroot, and Lua into img_files"
-	local img="$MOTOR/img_files/motor-os"
+	log "stage 8: staging the toolchain, sysroot, and Lua into img_files/generated/llvm"
+	local img="$MOTOR/img_files/generated/llvm"
+	local legacy="$MOTOR/img_files/motor-os"
 
-	# Remove any obsolete /usr + /etc staging from earlier layouts — the
-	# toolchain now lives entirely under /sys.
-	rm -rf "$img/usr" "$img/etc"
-
+	# Migrate worktrees that ran an older version of this script. These paths
+	# were generated and untracked; leaving them in the source tree would make
+	# the imager see the same destination from two static roots.
+	rm -rf "$legacy/sys/tools/llvm" "$legacy/sys/cfg/llvm" \
+		"$legacy/sys/cfg/libc"
+	rm -f "$legacy/bin/cc" "$legacy/bin/c++" "$legacy/bin/lua"
+	rm -rf "$img"
 	mkdir -p "$img/bin" "$img/$TOOLS/bin" "$img/$TOOLS/lib" "$img/$TOOLS/src" \
 		"$img/$CFG_LLVM" "$img/$CFG_LIBC"
 
@@ -506,7 +510,12 @@ build_image() {
 
 main() {
 	log "Motor OS + LLVM build starting; MOTORH = $MOTORH"
-	run_build_base
+	if [ "${MOTOR_SKIP_BASE:-0}" = "1" ]; then
+		skip "build-base stage (already completed by the unified build)"
+		[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+	else
+		run_build_base
+	fi
 	ensure_meson
 	clone_sources
 	build_cross_toolchain
@@ -517,9 +526,14 @@ main() {
 	build_native_llvm
 	build_lua
 	stage_image
-	build_image
-	log "done — the image at $MOTOR/vm_images/release now carries clang/lld/llvm, lua, and the C/C++ sysroot."
-	log "to run the VM:  cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
+	if [ "${MOTOR_SKIP_IMAGE_BUILD:-0}" = "1" ]; then
+		skip "intermediate image build (deferred until native rustc is staged)"
+		log "done — generated LLVM, C/C++, and Lua image inputs are staged."
+	else
+		build_image
+		log "done — the image at $MOTOR/vm_images/release now carries clang/lld/llvm, lua, and the C/C++ sysroot."
+		log "to run the VM:  cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
+	fi
 	log "then, at the Motor OS prompt (the multicall lives at /sys/tools/llvm/bin/llvm):"
 	log "  /sys/tools/llvm/bin/llvm clang /sys/tools/llvm/src/hello.c -o /sys/tmp/hello && /sys/tmp/hello"
 	log "  cc /sys/tools/llvm/src/hello.c -o /sys/tmp/hello2 && /sys/tmp/hello2   # /bin/cc: same thing, conventional name"

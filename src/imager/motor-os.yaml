@@ -20,5 +20,7 @@ input_files:
   - "/sys/tests/crossbench"
 static_dirs:
   - "img_files/motor-os"
+  - "img_files/generated/llvm"
+  - "img_files/generated/rustc"
 filesystem: "motor-fs"
 data_partition_size_mb: 512

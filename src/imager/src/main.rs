@@ -387,7 +387,12 @@ fn main() {
     }
 
     for dir in &config.static_dirs {
-        add_static_dir(&mut files, motorh.join(dir), Path::new("/"));
+        let path = motorh.join(dir);
+        if path.is_dir() {
+            add_static_dir(&mut files, path, Path::new("/"));
+        } else {
+            println!("static image directory {path:?} is absent; skipping it");
+        }
     }
 
     let fs_partition = tmp_img_dir.join("fs_part");

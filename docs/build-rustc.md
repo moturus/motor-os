@@ -296,7 +296,8 @@ on-image copy:
 ```sh
 ninja -C $MLIBC/build
 ( cd $MLIBC/build && DESTDIR=$SYSROOT meson install --no-rebuild )
-cp $SYSROOT/sys/tools/llvm/lib/libc.a $MOTOR/img_files/motor-os/sys/tools/llvm/lib/libc.a
+cp $SYSROOT/sys/tools/llvm/lib/libc.a \
+  $MOTOR/img_files/generated/llvm/sys/tools/llvm/lib/libc.a
 
 # The strong stubs must be gone (only U references may remain):
 $B/llvm-nm $SYSROOT/sys/tools/llvm/lib/libc.a | grep 'T _ZdlPvm' && echo BAD || echo ok
@@ -451,14 +452,22 @@ from pure-C code) and honors the `-nostartfiles -nodefaultlibs` rustc passes,
 so pure-Rust links stay mlibc-free while `cc hello.c` gets the full C runtime.
 So the one script is both rustc's linker and a working C compiler. Nothing to
 do in this stage beyond confirming build-llvm.md ran:
-`test -f $MOTOR/img_files/motor-os/bin/cc`.
+`test -f $MOTOR/img_files/generated/llvm/bin/cc`.
+
+Before staging, `build-rustc.sh` rebuilds `libmoto_rt_cabi.a` in a fresh Cargo
+target directory with the final stage-2 toolchain. It verifies that
+`motor_start`, `memcpy`, `memmove`, `memset`, and `memcmp` are not strong
+definitions in either the target libraries or the rebuilt shim, then refreshes
+the cross sysroot and `img_files/generated/llvm`. This is what permits the
+final DNS resolver link to reject duplicate symbols instead of masking them.
 
 ## Stage R6 — stage everything into the image
 
 ```sh
-IMG=$MOTOR/img_files/motor-os
+IMG=$MOTOR/img_files/generated/rustc
 RUSTLIB=$RUST/build/x86_64-unknown-linux-gnu/stage2/lib/rustlib/x86_64-unknown-motor/lib
-mkdir -p $IMG/bin $IMG/sys/tools/rust/bin $IMG/sys/tools/rust/src \
+rm -rf $IMG
+mkdir -p $IMG/sys/tools/rust/bin $IMG/sys/tools/rust/src \
          $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
 
 # The compiler, stripped (~154 MB -> ~98 MB).
@@ -474,9 +483,8 @@ rm -rf $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
 mkdir -p $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib
 cp -r $RUSTLIB/* $IMG/sys/tools/rust/lib/rustlib/x86_64-unknown-motor/lib/
 
-# (/bin/cc — the linker driver rustc uses — is a rush script staged by
-# build-llvm.md, not here. Drop any stale motor-cc from an older layout.)
-rm -f $IMG/bin/motor-cc
+# (/bin/cc — the linker driver rustc uses — is staged in the separate
+# img_files/generated/llvm tree by build-llvm.md, not here.)
 
 # A sample source (the script writes one exercising HashMap + threads).
 cp .../hello.rs $IMG/sys/tools/rust/src/hello.rs
@@ -494,7 +502,7 @@ dev toolchain, so it is poisoned too:
 
 ```sh
 rm -rf $MOTOR/build/obj/release $MOTOR/src/sys/target
-cd $MOTOR && make all BUILD=release -j$(nproc)
+cd $MOTOR && make all BUILD=release MOTOR_DNS_STRICT_LINK=1 -j$(nproc)
 ```
 
 Confirm the output ends with `built Motor OS image in .../vm_images/release` —

@@ -57,9 +57,9 @@ trap 'die "failed at line $LINENO"' ERR
 
 # --- paths (same scheme as docs/build-rustc.md) ------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-MOTORH="$SCRIPT_DIR"
+MOTORH="$(readlink -f "${MOTORH:-$SCRIPT_DIR}")"
 export MOTORH
-MOTOR="$MOTORH/motor-os"
+MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
 LLVM="$MOTORH/llvm-project"
 MLIBC="$MOTORH/mlibc"
 RUST="$MOTORH/rust"
@@ -67,7 +67,8 @@ B="$LLVM/build/bin"                  # host cross toolchain (build-llvm stage 1)
 SYSROOT="$MOTORH/motor-sysroot"
 HOST=x86_64-unknown-linux-gnu
 TARGET=x86_64-unknown-motor
-IMG="$MOTOR/img_files/motor-os"
+LLVM_IMG="$MOTOR/img_files/generated/llvm"
+RUSTC_IMG="$MOTOR/img_files/generated/rustc"
 BRANCH=motor-os-rustc
 
 RUSTC_MAIN="$RUST/build/$HOST/stage2-rustc/$TARGET/release/rustc-main"
@@ -94,10 +95,10 @@ verify_prereqs() {
 	# staging, and this build only adds the Rust half on top. Without them the
 	# image ships a rustc that cannot link anything, and nothing here would notice
 	# — the failure would surface only in the VM, at the end of a 2 h build.
-	[ -f "$IMG/bin/cc" ] || \
-		die "$IMG/bin/cc is missing — build-llvm.sh stages the linker driver rustc needs; re-run it"
-	[ -f "$IMG/sys/tools/llvm/bin/llvm" ] || \
-		die "$IMG/sys/tools/llvm/bin/llvm is missing — build-llvm.sh stages the LLVM multicall that /bin/cc fronts; re-run it"
+	[ -f "$LLVM_IMG/bin/cc" ] || \
+		die "$LLVM_IMG/bin/cc is missing — build-llvm.sh stages the linker driver rustc needs; re-run it"
+	[ -f "$LLVM_IMG/sys/tools/llvm/bin/llvm" ] || \
+		die "$LLVM_IMG/sys/tools/llvm/bin/llvm is missing — build-llvm.sh stages the LLVM multicall that /bin/cc fronts; re-run it"
 
 	# The Motor OS checkout must carry the rustc-era runtime fixes (RT.VDSO
 	# ChildStdio EOF mapping + O_APPEND, and a 512 MB data partition).
@@ -140,8 +141,10 @@ check_mlibc() {
 		die "sysroot libc.a predates the operator-delete guard and mlibc is not cloned at $MLIBC — re-run build-llvm.sh (or clone moturus/mlibc @ $BRANCH and rebuild)"
 	fi
 	# Keep the on-image copy in sync (build-llvm stage 8 staged it).
-	if [ -f "$IMG/sys/tools/llvm/lib/libc.a" ]; then
-		cp "$SYSROOT/sys/tools/llvm/lib/libc.a" "$IMG/sys/tools/llvm/lib/libc.a"
+	if [ -f "$LLVM_IMG/sys/tools/llvm/lib/libc.a" ]; then
+		"$B/llvm-objcopy" --strip-debug \
+			"$SYSROOT/sys/tools/llvm/lib/libc.a" \
+			"$LLVM_IMG/sys/tools/llvm/lib/libc.a"
 	fi
 }
 
@@ -380,6 +383,46 @@ verify_stage2_sysroot() {
 	log "stage2 sysroot OK: std for $TARGET and $HOST, clippy matches rustc"
 }
 
+# build-llvm initially creates the C ABI shim with the bootstrap Motor
+# toolchain. Rebuild it after the forked stage2 toolchain is complete so the
+# DNS resolver and every later mixed Rust+C link use the final std/moto-rt
+# implementation. A fresh target directory avoids cargo accepting artifacts
+# fingerprinted by the compiler that the rustc stage just replaced.
+rebuild_shim() {
+	log "rebuilding moto-rt-cabi with the final Motor Rust toolchain"
+	local rustlibs=("$RUSTLIB_SRC"/*.rlib)
+	local symbol
+	for symbol in motor_start memcpy memmove memset memcmp; do
+		if "$B/llvm-nm" --defined-only "${rustlibs[@]}" 2>/dev/null |
+				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
+			die "final Motor target libraries still define strong $symbol; update the motor-os-rustc toolchain before the strict DNS resolver link"
+		fi
+	done
+
+	local target_dir="$MOTOR/build/native-toolchain/moto-rt-cabi"
+	rm -rf "$target_dir"
+	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
+		&& CARGO_TARGET_DIR="$target_dir" \
+			cargo +dev-x86_64-unknown-motor build \
+				--target "$TARGET" --release )
+	local shim="$target_dir/$TARGET/release/libmoto_rt_cabi.a"
+	[ -f "$shim" ] || die "final moto-rt-cabi archive was not produced: $shim"
+	for symbol in motor_start memcpy memmove memset memcmp; do
+		if "$B/llvm-nm" --defined-only "$shim" 2>/dev/null |
+				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
+			die "final moto-rt-cabi still defines strong $symbol; the strict DNS resolver link would be unsafe"
+		fi
+	done
+	cp "$shim" "$SYSROOT/sys/tools/llvm/lib/libmoto_rt_cabi.a"
+
+	# build-llvm has already staged the C sysroot. Keep that generated image
+	# tree synchronized with the final shim before the imager consumes it.
+	[ -d "$LLVM_IMG/sys/tools/llvm/lib" ] ||
+		die "generated LLVM image tree is missing: $LLVM_IMG"
+	"$B/llvm-objcopy" --strip-debug \
+		"$shim" "$LLVM_IMG/sys/tools/llvm/lib/libmoto_rt_cabi.a"
+}
+
 # cc — the system C compiler / linker driver rustc uses on the image — is not
 # built here: it is a `#!/bin/rush` script produced by build-llvm.sh (it belongs
 # with the C toolchain: it fronts /sys/tools/llvm/bin/llvm and the sysroot libs).
@@ -389,9 +432,14 @@ verify_stage2_sysroot() {
 
 # --- stage everything into the image ------------------------------------------
 stage_image() {
-	log "staging rustc, the Rust sysroot, and cc into img_files"
-	local rust_img="$IMG/sys/tools/rust"
-	mkdir -p "$IMG/bin" "$rust_img/bin" "$rust_img/src" \
+	log "staging rustc and the Rust sysroot into img_files/generated/rustc"
+	# Remove generated files left in the tracked static root by the old
+	# workflow; duplicate destinations across static roots are invalid.
+	rm -rf "$MOTOR/img_files/motor-os/sys/tools/rust"
+	rm -f "$MOTOR/img_files/motor-os/bin/motor-cc"
+	rm -rf "$RUSTC_IMG"
+	local rust_img="$RUSTC_IMG/sys/tools/rust"
+	mkdir -p "$rust_img/bin" "$rust_img/src" \
 		"$rust_img/lib/rustlib/$TARGET"
 
 	# The compiler, stripped (~154 MB -> ~98 MB).
@@ -448,7 +496,9 @@ build_image() {
 	log "rebuilding Motor OS + image (make all BUILD=release)"
 	# Keep make's output visible: when a component fails, the compiler diagnostic
 	# is the whole diagnosis, and the log alone is easy to overlook.
-	( cd "$MOTOR" && make all BUILD=release -j"$(nproc)" ) 2>&1 | tee "$MAKE_LOG"
+	( cd "$MOTOR" && \
+		make all BUILD=release MOTOR_DNS_STRICT_LINK=1 -j"$(nproc)" ) \
+		2>&1 | tee "$MAKE_LOG"
 	grep -q 'built Motor OS image' "$MAKE_LOG" || \
 		die "make finished without the imager running — see $MAKE_LOG"
 }
@@ -462,6 +512,7 @@ main() {
 	write_bootstrap_toml
 	build_rustc
 	build_stds
+	rebuild_shim
 	stage_image
 	build_image
 	log "done — the image at $MOTOR/vm_images/release now carries a native rustc."
