@@ -503,6 +503,13 @@ impl UserAddressSpace {
     }
 
     pub fn copy_to_user(&self, bytes: &[u8], user_vaddr_start: u64) -> Result<(), ErrorCode> {
+        let stats = crate::xray::stats::kernel_stats_ref();
+        stats.adjust_metric(crate::xray::stats::MetricType::UserCopyWrite, 1);
+        stats.adjust_metric(
+            crate::xray::stats::MetricType::UserCopyWriteBytes,
+            bytes.len() as i64,
+        );
+
         let mut source_start = 0_u64;
         let mut dst_start = user_vaddr_start;
         let mut bytes_left = bytes.len() as u64;
@@ -517,6 +524,9 @@ impl UserAddressSpace {
                 }
             };
 
+            // vaddr_map_status (not a raw page-table walk) is the authority
+            // here: it rejects zero-page/CoW mappings, which must never be
+            // written through the direct map.
             let mapping = self.inner.vaddr_map_status(dst_start);
             let phys_start = match mapping {
                 VaddrMapStatus::Private(addr) => addr,
@@ -526,9 +536,6 @@ impl UserAddressSpace {
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
             };
-
-            let phys_start_2 = self.inner.page_table_ref().virt_to_phys(dst_start).unwrap();
-            assert_eq!(phys_start, phys_start_2);
 
             unsafe {
                 core::intrinsics::copy_nonoverlapping(
@@ -556,17 +563,14 @@ impl UserAddressSpace {
             VaddrMapStatus::Private(addr) => addr,
             VaddrMapStatus::Shared(addr) => addr,
             _ => {
-                log::error!("{}:{} - copy_to_user: bad mapping.", file!(), line!());
+                log::error!(
+                    "{}:{} - get_user_page_as_kernel: bad mapping.",
+                    file!(),
+                    line!()
+                );
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             }
         };
-
-        let phys_start_2 = self
-            .inner
-            .page_table_ref()
-            .virt_to_phys(user_page_addr)
-            .unwrap();
-        assert_eq!(phys_start, phys_start_2);
 
         Ok(phys_start + crate::arch::paging::PAGING_DIRECT_MAP_OFFSET)
     }
@@ -582,6 +586,13 @@ impl UserAddressSpace {
     }
 
     pub fn read_from_user_into(&self, vaddr_start: u64, buf: &mut [u8]) -> Result<(), ErrorCode> {
+        let stats = crate::xray::stats::kernel_stats_ref();
+        stats.adjust_metric(crate::xray::stats::MetricType::UserCopyRead, 1);
+        stats.adjust_metric(
+            crate::xray::stats::MetricType::UserCopyReadBytes,
+            buf.len() as i64,
+        );
+
         let mut source_start = vaddr_start;
         let mut remaining_bytes = buf.len() as u64;
 

@@ -171,26 +171,36 @@ fn process_wake_handles(
     let h_sz = args.args[next_arg + 1];
     assert!(wakers.len() <= h_sz as usize);
 
-    let mut idx = 0;
-    for handle in wakers {
-        let val = u64::from(handle);
-        let buf: &[u8] =
-            unsafe { core::slice::from_raw_parts(&val as *const _ as usize as *const u8, 8) };
-        curr.owner()
+    // The whole array is written back (wakers, then zero fill) exactly as
+    // before, but batched through a stack buffer — not one spinlocked page
+    // walk per 8-byte slot. A failed write (e.g. another thread of the
+    // process unmapped the array mid-wait) fails the call instead of
+    // panicking the kernel; the already-consumed wakes are lost, which is
+    // the caller's own contract violation.
+    const CHUNK: usize = 64;
+    let mut chunk = [0_u64; CHUNK];
+    let mut slot = 0_u64;
+    while slot < h_sz {
+        let n = core::cmp::min(CHUNK as u64, h_sz - slot) as usize;
+        for (i, val) in chunk[..n].iter_mut().enumerate() {
+            let idx = slot as usize + i;
+            *val = if idx < wakers.len() {
+                wakers[idx].as_u64()
+            } else {
+                0
+            };
+        }
+        let bytes: &[u8] =
+            unsafe { core::slice::from_raw_parts(chunk.as_ptr() as *const u8, n * 8) };
+        if curr
+            .owner()
             .address_space()
-            .copy_to_user(buf, h_ptr + 8 * idx)
-            .unwrap();
-        idx += 1;
-    }
-
-    let zero = 0_u64;
-    let buf_zero: &[u8] =
-        unsafe { core::slice::from_raw_parts(&zero as *const _ as usize as *const u8, 8) };
-    for pos in idx..h_sz {
-        curr.owner()
-            .address_space()
-            .copy_to_user(buf_zero, h_ptr + 8 * pos)
-            .unwrap();
+            .copy_to_user(bytes, h_ptr + 8 * slot)
+            .is_err()
+        {
+            return ResultBuilder::invalid_argument();
+        }
+        slot += n as u64;
     }
 
     let mut result = ResultBuilder::ok();

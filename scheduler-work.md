@@ -13,7 +13,7 @@ changes applied, uncommitted).
 | # | Finding | Type | Cost today | Fix effort |
 |---|---------|------|-----------|-----------|
 | S1 | Every IRQ landing in userspace fully deschedules the thread (xsave, 2×CR3, job queue round trip, xrstor) — even when nothing else is runnable — **done, Round 2** (86–96 % of uspace IRQs now fast-return; RR 2.2×, TX stabilized) | perf | ~1–3 µs direct + TLB refill (dominant) per IRQ | medium |
-| S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume — **W6a done R5; W6b (CR3-switch removal) done R6** (RR 118 µs record; user-copy software walks + W6c remain) | perf | dominant hidden cost of IPC | medium–large |
+| S2 | Every syscall switches CR3 to KPT and back; no PCID, no GLOBAL pages ⇒ 2 full TLB wipes per syscall, 2 more per preempt/resume — **CLOSED: W6a done R5; W6b done R6** (RR 118 µs record); user-copy walks measured cold + trimmed R10; W6c (PCID) parked with a <0.4 µs/RPC bound R9 | perf | dominant hidden cost of IPC | medium–large |
 | S3 | `sys_wait` always pauses, even with wakers already pending ("wait is at least a yield") ⇒ full deschedule + job round trip + possible CPU migration for a no-op wait — **done, Round 4** (22 % of waits skip the pause; RR −25 %, new all-time record) | perf | ~2×5 µs per IPC RTT | small |
 | S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs — **done, Round 3** (52 % of placements now land on the warm CPU; timer IRQs −26 %; bench-neutral otherwise) | perf | unquantified, likely large | small–medium |
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
@@ -1014,6 +1014,86 @@ engaged only by xor_server/test_ipc). 3 release systest runs per side:
 
 ---
 
+## Round 10 (done 2026-07-18): W6b part 2 settled by measurement — user copies are cold, direct copies skipped
+
+Kernel-only, on top of 3cd5789 (R9). The roadmap's remaining S2 item was
+"replace the software-walk user copies with direct access + #PF fixup".
+Per the W3 precedent, engagement was measured first — and the answer is
+a clear skip, plus three small keepers found en route.
+
+### What was done
+
+1. **Instrumentation**: metrics 48-51 `user_copy_read`/`_bytes`,
+   `user_copy_write`/`_bytes`, counted in `read_from_user_into` and
+   `copy_to_user` (including the loader's writes into child address
+   spaces). Fills `PCPU_STATS_CNT = 52` exactly; no array growth.
+2. **`copy_to_user` single-walk** (same for `get_user_page_as_kernel`):
+   dropped the redundant *second* full page-table walk + release-mode
+   assert it did per 4K page. `vaddr_map_status` remains the sole
+   authority — it rejects zero-page/CoW mappings, which must never be
+   written through the direct map, so the semantics are unchanged.
+3. **Handle-array writeback batched + a real bug fixed**: the >6-wakers
+   writeback wrote the user's array one spinlocked 8-byte
+   `copy_to_user` per slot (including the zero fill of every unused
+   slot) and `unwrap()`ed each — a **user-triggerable kernel panic**,
+   since another thread of the process can unmap the array while the
+   waiter is blocked. Now: chunked through a 64-slot stack buffer
+   (one copy per 512 B), and a failed write fails the call with
+   E_INVALID_ARGUMENT instead of panicking (the consumed wakes are
+   lost; that is the caller's own contract violation).
+
+En-route discovery that reframes the writeback: it is nearly cold —
+up to 6 wakers return inline in the syscall result registers (that is
+what the wrapper's `F_HANDLE_ARRAY`-flag branch is for), so the array
+writeback only runs when >6 handles wake at once.
+
+### The measurement (one full bench boot: 3 systest + tokio + mio + 3 rnetbench)
+
+| counter | value | reading |
+|---|---|---|
+| user_copy_read | 1,404,922 calls | one per array-wait entry (sys-io's reactor) |
+| user_copy_read_bytes | 296.9 MB | avg 211 B ≈ 26-handle arrays |
+| user_copy_write | 2,414 calls | loader ELF + serial console + stats |
+| user_copy_write_bytes | 2.3 MB | |
+
+The read path is already lock-free (`virt_to_phys` = 4 dependent
+loads, no spinlock — the plan's "spinlock per 4K page" only ever
+applied to `copy_to_user`'s `vaddr_map_status`). So the entire
+achievable win from direct copies is ~1.4M × ~30-50 ns ≈ **40-70 ms
+per ~9-minute suite, < 0.02 %**.
+
+**Decision: direct copies + #PF fixup = skip, with data.** (a)
+Engagement is too low by 3 orders of magnitude; (b) the only
+heavy-bytes writers (loader, debugger) copy into **non-current**
+address spaces, where direct copies are impossible by construction;
+(c) the #PF-fixup machinery (kernel copy windows + fixup in the #PF
+handler, later complicated further by SMAP) is high-risk surface.
+Motor's design already keeps bulk data out of syscalls — moto-ipc
+shared pages, io_channel shared memory — which is exactly why the
+counters are small. Revisit only if a syscall-buffer-heavy workload
+ever appears.
+
+### Results
+
+A/B vs the w9after runs (identical source, same day, same userspace
+image; kernel-only diff): all flat. test_ipc 1,319/1,320/1,408 vs
+1,299/1,329/1,344 ns (run-1-in-boot high on both sides),
+bench_thread_swap 840/843/843 vs 838/840/847 ns, FS/page-faults/
+hot-cache overlapping. rnetbench RR 169-173 vs 145-167 µs with the
+client→server throughput simultaneously +30 % — the known host-steal
+signature, not a kernel effect. 68 PASS ×3, tokio PASS, mio ALL PASS.
+
+### Consequences for the roadmap
+
+- **S2 is now fully closed**: W6a (R5), W6b (R6), user-copy walks
+  measured cold + trimmed (R10), W6c parked with a bound (R9).
+- Remaining candidates, in expected-value order: **W10/S11
+  priorities** (phase C — sys-io vs bulk compute isolation), **S12
+  IRQ spreading** (device MSI-X all target CPU 0), io_channel
+  in-process swap adoption (R7 leftover), SMEP/SMAP (S15).
+
+---
+
 ## How things work today (reference)
 
 ### Execution model
@@ -1530,8 +1610,9 @@ Phase B — TLB/syscall cost (S2), sequenced:
    copies with direct access + checks. Re-measure IPC (FS smoke, rnetbench
    RR, getpid-style microbench).
    **CR3-switch removal done — see "Round 6" above** (RR 118.4 µs record).
-   The user-copy software walks remain: direct copies need #PF fixup
-   machinery (user pages are lazily mapped) — future round.
+   **User-copy walks measured cold in Round 10 — direct copies + #PF
+   fixup skipped with data** (1.4M calls / 297 MB per full bench boot,
+   read path already lock-free; < 0.02 % of the suite).
 8. **W7: direct-switch swap** (after A+B shrink the path; biggest surgery).
    **Done — see "Round 7" above** (claim + switch_to + finish hook;
    engaged by moto-ipc sync RPC; sys-io park path folds wake into wait

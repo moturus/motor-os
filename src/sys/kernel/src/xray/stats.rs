@@ -119,7 +119,15 @@ pub enum MetricType {
     DirectSwitch = 46,
     DirectSwitchMiss = 47,
 
-    TotalMetricTypes = 48,
+    // User-copy engagement (S2/W6b part 2 gate): syscall-path copies
+    // between user and kernel memory (read_from_user_into/copy_to_user,
+    // including the loader's writes into a child's address space).
+    UserCopyRead = 48,
+    UserCopyReadBytes = 49,
+    UserCopyWrite = 50,
+    UserCopyWriteBytes = 51,
+
+    TotalMetricTypes = 52,
 }
 
 impl MetricType {
@@ -190,6 +198,10 @@ impl MetricType {
             MetricType::WaitPaused => "wait_paused",
             MetricType::DirectSwitch => "direct_switch",
             MetricType::DirectSwitchMiss => "direct_switch_miss",
+            MetricType::UserCopyRead => "user_copy_read",
+            MetricType::UserCopyReadBytes => "user_copy_read_bytes",
+            MetricType::UserCopyWrite => "user_copy_write",
+            MetricType::UserCopyWriteBytes => "user_copy_write_bytes",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
