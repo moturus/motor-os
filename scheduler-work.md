@@ -24,7 +24,7 @@ changes applied, uncommitted).
 | S10 | MXCSR / x87 CW are not preserved across blocking syscalls (pause/resume skips FPU entirely) ⇒ another thread's FP env can leak in — **fixed, Round 4** (saved/restored in pause/resume; systest coverage added) | **bug** (latent) | correctness | small |
 | S11 | No priorities, FIFO everywhere; sys-io competes equally with bulk compute; a many-threaded process starves others | isolation | I/O latency under load | medium |
 | S12 | All device IRQs (virtio MSI-X) + serial + system-time duty target CPU 0 | isolation/perf | CPU 0 saturation (seen in FS rounds) | medium |
-| S13 | Per-wait heap churn: `Vec` allocs + per-object `BTreeMap` insert/remove on every wait | perf | allocs on the hottest path | medium |
+| S13 | Per-wait heap churn: `Vec` allocs + per-object `BTreeMap` insert/remove on every wait — **done, Round 8** (stack staging + retained lists + single-waiter slot; ~5 alloc pairs → 0 on the common path; swap bench −3 %) | perf | allocs on the hottest path | medium |
 | S14 | Every sched-loop iteration on every CPU does an atomic **swap** on the global `WAKE_QUEUE` and takes the global-queue spinlock every 3rd iteration even when empty — **done, Round 1** | perf | cross-CPU cacheline traffic | trivial |
 | S15 | No NX (EFER.NXE never set, no XD PTE bit), no SMEP/SMAP ⇒ all user memory is W+X; kernel can execute/read user pages freely | security | policy decision | small–medium |
 | S16 | Wake IPIs (`IRQ_WAKEUP`) do not preempt userspace ⇒ a cross-CPU wake targeting a busy CPU waits for the next tick (up to 10 ms) | latency semantics | tail latency under load | small (policy) |
@@ -797,6 +797,223 @@ the 6 debug runs**.
 
 ---
 
+## Round 8 (done 2026-07-18): roadmap step 10 — W8/S13: wait-path allocation elimination
+
+Uncommitted, on top of Round 7 (f5ba2c5; baseline also includes the
+user's c94f567/4e91d01 — rt.vdso wake-fold split-out and dns prep).
+
+### What was done
+
+Every wait/wake cycle used to pay ~5 heap alloc/free pairs; the common
+path (1-3 handles, 0-2 wakers, single waiter per object) now pays zero:
+
+1. **`process_wait_handles` runs off the stack** (sys_cpu.rs): the
+   handles come straight from the syscall args slice (the old code
+   built a `Vec::with_capacity(6)` on *every* wait — including waits
+   with no handles at all), or, for `F_HANDLE_ARRAY`, are read into a
+   16-entry stack buffer via `read_from_user_into` (heap only beyond
+   16). Validated objects are staged in a 16-slot stack array (spill
+   Vec beyond), then registered and handed to the thread in one pass —
+   the old handles/objects/wait_objects triple Vec is gone.
+2. **The thread's wait list retains its capacity**
+   (`Thread::sys_wait_objects`): `clear_wait_objects_on_wake` clears
+   instead of dropping the Vec, so steady-state re-registration never
+   allocates regardless of handle count (sys-io's reactor passes one
+   handle per registered channel); capacity is capped at 64 entries so
+   one huge wait cannot pin memory per-thread. `add_wait_objects`
+   takes an iterator and extends the retained Vec under one lock.
+3. **Wakers live inline** (`WakerVec = util::InlineVec<SysHandle, 4>`):
+   a small-vec (new `util/inline_vec.rs`) with 4 inline slots and a
+   contiguous heap spill; push/take/sort+dedup allocation-free for ≤4
+   distinct wakers. `process_wake_handles` takes a slice.
+4. **Single-waiter fast slot in `SysObject`** (sysobject.rs): the
+   waiter registry is now `Empty | One(tid, weak, handle) | Map(...)`;
+   a BTreeMap (node alloc/free per wait/wake cycle) is only
+   materialized when a second concurrent waiter appears (futexes,
+   completion objects) and is dropped again when it empties.
+
+Semantics preserved byte-for-byte: zero handles skipped, bad handles
+fail before anything is registered, duplicate handles overwrite,
+wake-count catch-up checks unchanged, lock order (thread wait list →
+object waiters) documented at the one place it now nests.
+
+### Results
+
+Same userspace image on both kernels (kernel-only diff):
+
+| bench | stock f5ba2c5 | S13 |
+|---|---|---|
+| bench_thread_swap ns/roundtrip (3 runs) | 881 / 877 / 886 | **852 / 853 / 851** |
+| test_ipc ns/RPC (cross-process sync RPC) | 25248 / 27703 / 27517 | 25261 / 27664 / 27311 |
+
+- **Swap bench −3 %** (tight non-overlapping bands): that path passes
+  zero handles, so the delta ≈ the one `Vec::with_capacity(6)` pair the
+  old code paid per wait — i.e. ~28 ns per alloc/free pair on this rig.
+  A 1-handle IPC wait cycle saved ~4-5 such pairs (~
+  0.1-0.15 µs/cycle).
+- Everything else flat / in noise (same-run-number compared): FS smoke,
+  page faults, hot cache, liveness p50/p99 5-7/7-9, RR 141-192 µs both
+  sides (host steal was elevated all session), bulk TX/RX overlapping.
+- All suites green on the S13 kernel: release systest ×3 (68
+  PASS-tagged lines each by the round's grep), tokio PASS, mio ALL
+  PASS.
+
+### The finding that reframes the next rounds: test_ipc anatomy
+
+test_ipc (100K xor-service RPCs) measures **25-28 µs/RPC** while the
+same-machinery same-process swap bench does 0.85 µs — and S13 didn't
+move it, because the RPC never gets the clean handoff on the reply:
+
+- `finish_rpc` (moto-ipc sync.rs) issues a **standalone
+  `SysCpu::wake(client)` syscall** before the server re-enters
+  `LocalServer::wait(swap_target = client)`. The eager wake makes the
+  client Runnable → W2 places it on an idle CPU (IPI + HLT-exit
+  pickup, µs-scale) → the server's swap claim **misses** (this is the
+  bulk of the ~365-393K `direct_switch_miss` per bench boot vs ~900K
+  hits).
+- The client, now on a *different* CPU, sends the next request with a
+  swap that succeeds — dragging the server cross-CPU every iteration
+  (cold caches + cross-process CR3 each way).
+
+So today's cross-process RPC cost is dominated by one queue-wake with
+idle-CPU pickup plus per-iteration CPU migration — not by TLB and not
+by allocation. Consequences:
+
+- **Round 9 candidate (high value, small diff): fold the reply wake
+  into the server's wait** — `finish_rpc` variant that skips the eager
+  wake for the last-served connection so the server's
+  `wait(swap_target)` claim lands (the client is a lightweight
+  dedicated peer: exactly the case the R7 rule says SHOULD swap; the
+  eager wake stays for multi-client fairness on all but the last
+  reply). Expected: test_ipc 25 µs → low single-digit µs, lockstep on
+  one CPU like bench_thread_swap. moto-ipc sync RPC = stdio pipes =
+  every shell pipeline on Motor.
+- **W6c (PCID) gate refined**: the cross- vs same-process delta cannot
+  be attributed to TLB until the handoff is fixed; re-measure test_ipc
+  after the fold — the remaining (fold-RPC − 0.85 µs − protocol cost)
+  gap is the real PCID upside bound.
+
+### Consequences for the roadmap
+
+- S13 closes roadmap step 10. The wait path allocates only for >16
+  handles (one buffer), >16 objects (spill), >4 distinct wakers
+  (spill), or a second concurrent waiter on one object (map) — all
+  rare by design.
+- Remaining wait-path allocation: the per-timeout `Timer` box
+  (`new_timeout`) — untouched; only timed waits pay it.
+- Next candidates, in expected-value order: the finish_rpc reply fold
+  (above — **done, Round 9**: test_ipc 25 µs → 1.3 µs), then re-gate
+  W6c (PCID — **demoted in Round 9**, see there), then user-copy
+  software walks (W6b part 2), W10/S11 priorities (phase C).
+
+---
+
+## Round 9 (done 2026-07-18): the reply-wake fold — cross-process RPC 25 µs → 1.3 µs
+
+The Round 8 candidate, implemented. **Userspace-only** (moto-ipc + the
+bench server; zero kernel changes — the R7 machinery already did
+everything needed). Uncommitted, on top of 73f7908 (R8).
+
+### What was done
+
+The two directions of a moto-ipc sync RPC were asymmetric:
+
+- Request: `do_rpc` never issues a standalone wake — the client's
+  `SysCpu::wait(&[handle], swap_target = handle, ..)` wakes the server
+  and hands it the CPU (direct switch) when it is blocked. One
+  syscall, no IPI.
+- Reply: `finish_rpc` fired a **standalone `SysCpu::wake(client)`
+  syscall** before the server re-entered
+  `LocalServer::wait(swap_target = client)` — W2 placed the
+  now-Runnable client on an idle CPU (IPI + HLT-exit pickup), the
+  server's swap claim missed, and the next request dragged the server
+  cross-CPU (Round 8's test_ipc anatomy).
+
+Changes:
+
+1. sync.rs: **`finish_rpc_deferred()`** — completes the RPC (response
+   seq bump) without the wake. Caller contract: pass the connection's
+   handle as `swap_target` to the next `LocalServer::wait()` (or wake
+   explicitly). `finish_rpc` = deferred + eager wake; every existing
+   caller (strobe log/stats servers, sys-io stats servers, systest
+   stats test) keeps the eager semantics unchanged.
+2. xor_server: defers the reply wake of the last-served connection
+   into the next wait's swap slot; earlier replies in a multi-request
+   batch still get eager wakes (only one reply can ride the swap).
+   Also fixes a **latent livelock**: the swap target is now reset to
+   NONE after every wait — previously a client that died mid-RPC left
+   its dead handle as the swap target forever (`wait` returns
+   E_BAD_HANDLE for the swap target before registering anything, so
+   the loop would spin on the error path without ever clearing it).
+
+Why it is safe (no kernel change needed):
+
+- `SysObject::wake_for_switch` bumps the object's wake counter before
+  attempting the claim; a failed claim leaves exactly the state of a
+  wake on a non-InWait thread (waker recorded, nothing posted). A
+  client that is not blocked at that instant (spurious wake, seq-check
+  loop) reads the already-published response seq directly, and the
+  surplus wake-counter bump is consumed by the wake-count catch-up in
+  its next wait — the same race, resolved the same way, as today's
+  eager wake firing before the client re-enters wait.
+- A dead client handle is reported by the server's wait as
+  E_BAD_HANDLE with the handle written back (the kernel wakes the
+  swap/wake target even when wait handles are bad, and vice versa) —
+  the same error path as a dead waiter, which LocalServer::wait
+  already handles.
+
+### Results
+
+A/B on the same kernel binary (userspace-only diff; behavior change
+engaged only by xor_server/test_ipc). 3 release systest runs per side:
+
+| metric | before | after |
+|---|---|---|
+| **test_ipc ns/RPC** | **24,856 / 26,861 / 27,197** | **1,344 / 1,329 / 1,299** |
+| bench_thread_swap ns/roundtrip | 852 / 842 / 919 | 847 / 838 / 840 |
+| direct_switch (bench-boot total) | 911,090 | 1,213,633 |
+| direct_switch_miss | 366,772 | 61,331 |
+| irq_wakeup_fired | 3,830,315 | 3,532,001 |
+| placement_queue_global | 1,318,444 | 974,561 |
+| placement_other_idle | 608,478 | 337,935 |
+| wait_paused | 5,454,133 | 4,830,935 |
+| rnetbench RR µs | 147.6 / 146.1 / 169.2 | 144.5 / 155.4 / 166.6 |
+
+- **test_ipc 25-27 µs → 1.30-1.34 µs per RPC (19-20x)**. Cross-process
+  sync RPC now runs client and server in lockstep on one warm CPU,
+  like bench_thread_swap — every prediction of the Round 8 anatomy
+  confirmed by the counters: misses −83 % (the residual ~61K are other
+  users' swap attempts), wake IPIs −300K, global-queue placements
+  −345K, pauses −620K.
+- Everything else in noise: swap bench identical (it never used
+  finish_rpc), RR/FS/page-faults/hot-cache overlapping bands, 68
+  PASS-tagged lines ×3, tokio PASS, mio ALL PASS.
+- Debug verification: systest ×2, exit 0, 68 PASS lines each, zero
+  panic/invalid-rsp/watchdog/canary/assert lines in serial. Debug
+  xor_server sleeps 0-100 µs (random) before each reply, so the
+  deferred wake fires against a client in arbitrary states — the
+  claim-miss fallback (wake-count catch-up) gets real coverage, not
+  just the lockstep happy path.
+
+### Consequences for the roadmap
+
+- **W6c (PCID) demoted.** The fold gives the clean measurement the
+  gate asked for: RPC roundtrip 1.31 µs vs 0.85 µs same-process swap.
+  The ≈0.46 µs residual contains the protocol work (2 seq atomics +
+  fences) **plus** two address-space switches (CR3 write + user-TLB
+  refill each way) for a minimal working set — so PCID's upside on
+  this path is bounded well under ~0.4 µs/RPC unless the client's
+  working set is large. Park W6c until a real TLB-heavy workload shows
+  the pain; the syscall/IRQ paths already keep the kernel TLB via
+  global pages (W6a) and skip CR3 entirely (W6b).
+- Adoption elsewhere is mechanical for any LocalServer loop that
+  serves one request per wake (strobe log server, stats servers) —
+  all low-rate today, converted on demand.
+- Next candidates, in expected-value order: user-copy software walks
+  (W6b part 2), W10/S11 priorities (phase C), S12 IRQ spreading.
+
+---
+
 ## How things work today (reference)
 
 ### Execution model
@@ -1229,6 +1446,8 @@ urgency here.
 
 ### S13 — allocation/BTreeMap churn per wait
 
+**Done in Round 8.**
+
 `process_wait_handles`: `Vec<SysHandle>` + `Vec<WaitObject>` per call;
 `add_wait_objects` clones into a `Vec` under a lock; every waited object gets
 a `BTreeMap<ThreadId, …>` insert, and `clear_wait_objects_on_wake` removes
@@ -1319,6 +1538,9 @@ Phase B — TLB/syscall cost (S2), sequenced:
    as a WAKE target — swap-to-sys-io measured negative, placement wins).
 9. **W6c: PCID** — only if post-W6b profiles still show user-TLB pain.
 10. **W8/S13: wait-path allocation elimination** (can run parallel to B).
+    **Done — see "Round 8" above** (stack staging + retained wait list +
+    inline wakers + single-waiter slot; ~5 alloc pairs → 0 per cycle;
+    also produced the test_ipc reply-wake anatomy finding).
 
 Phase C — policy/isolation:
 

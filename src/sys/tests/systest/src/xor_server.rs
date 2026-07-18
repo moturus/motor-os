@@ -14,9 +14,15 @@ fn thread_fn() {
     use moto_sys::SysHandle;
     let mut xor_server = LocalServer::new("xor-service", ChannelSize::Small, 2, 2).unwrap();
 
+    // The reply wake of the last-served connection is deferred into the
+    // next wait's swap_target (see finish_rpc_deferred): the kernel
+    // performs the wake and hands this CPU to the client directly when
+    // it is blocked on the reply.
     let mut client = SysHandle::NONE;
     loop {
         let wait_result = xor_server.wait(client, &[]);
+        // The swap target has been consumed (woken or reported dead).
+        client = SysHandle::NONE;
         let wakers = match wait_result {
             Ok(wakers) => wakers,
             Err(_) => {
@@ -43,8 +49,14 @@ fn thread_fn() {
                 std::random::random::<u64>(..) % 100,
             ));
 
-            let _ = conn.finish_rpc();
-            client = *waker;
+            if conn.finish_rpc_deferred().is_ok() {
+                // Only one reply can ride the next wait's swap slot; wake
+                // the previously deferred one eagerly.
+                if client != SysHandle::NONE {
+                    let _ = moto_sys::SysCpu::wake(client);
+                }
+                client = *waker;
+            }
         }
     }
 }

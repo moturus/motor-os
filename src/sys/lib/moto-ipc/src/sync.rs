@@ -475,6 +475,22 @@ impl LocalServerConnection {
     }
 
     pub fn finish_rpc(&mut self) -> Result<(), ErrorCode> {
+        self.finish_rpc_deferred()?;
+        SysCpu::wake(self.handle).inspect_err(|err| {
+            assert_eq!(*err, moto_rt::E_BAD_HANDLE);
+            self.disconnect();
+        })
+    }
+
+    /// Completes the RPC without waking the client: the caller must pass
+    /// this connection's handle as `swap_target` to its next
+    /// `LocalServer::wait()` (or wake it explicitly), or the client may
+    /// block indefinitely. The wait syscall performs the deferred wake,
+    /// and a client blocked on the reply is handed this CPU directly
+    /// instead of being IPI'd onto another one — one syscall per reply
+    /// instead of two, and no cross-CPU round trip. A dead client handle
+    /// is reported by that wait like any dead waiter.
+    pub fn finish_rpc_deferred(&mut self) -> Result<(), ErrorCode> {
         if self.connected() {
             self.seq += 2;
             let seq = self
@@ -483,10 +499,7 @@ impl LocalServerConnection {
                 .fetch_add(1, Ordering::SeqCst);
             assert_eq!(self.seq, seq + 1);
             assert_eq!(0, self.seq & 1);
-            SysCpu::wake(self.handle).inspect_err(|err| {
-                assert_eq!(*err, moto_rt::E_BAD_HANDLE);
-                self.disconnect();
-            })
+            Ok(())
         } else {
             Err(moto_rt::E_INVALID_ARGUMENT)
         }
