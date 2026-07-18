@@ -15,6 +15,51 @@ use super::Process;
 /// Intrusive atomic queue.
 static WAKE_QUEUE: AtomicU64 = AtomicU64::new(0);
 
+// The dominant case is zero or one thread waiting on an object (a single
+// IPC peer), and waiters re-register on every wait/wake cycle; a plain
+// BTreeMap would allocate/free a node per cycle on the hottest path. The
+// One variant keeps the single-waiter cycle allocation-free; the map is
+// only materialized when a second waiter appears (futexes, process/thread
+// completion objects).
+#[derive(Default)]
+enum WaitingThreads {
+    #[default]
+    Empty,
+    One(ThreadId, Weak<Thread>, SysHandle),
+    Map(BTreeMap<ThreadId, (Weak<Thread>, SysHandle)>),
+}
+
+enum WaitingThreadsIter {
+    Empty,
+    One(Option<(Weak<Thread>, SysHandle)>),
+    Map(alloc::collections::btree_map::IntoIter<ThreadId, (Weak<Thread>, SysHandle)>),
+}
+
+impl Iterator for WaitingThreadsIter {
+    type Item = (Weak<Thread>, SysHandle);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::One(item) => item.take(),
+            Self::Map(iter) => iter.next().map(|(_, v)| v),
+        }
+    }
+}
+
+impl IntoIterator for WaitingThreads {
+    type Item = (Weak<Thread>, SysHandle);
+    type IntoIter = WaitingThreadsIter;
+
+    fn into_iter(self) -> WaitingThreadsIter {
+        match self {
+            Self::Empty => WaitingThreadsIter::Empty,
+            Self::One(_, thread, handle) => WaitingThreadsIter::One(Some((thread, handle))),
+            Self::Map(map) => WaitingThreadsIter::Map(map.into_iter()),
+        }
+    }
+}
+
 // Represents a system object that SysHandle points to.
 #[repr(align(8))]
 pub struct SysObject {
@@ -25,7 +70,7 @@ pub struct SysObject {
     wake_queue_intrusive_ptr: AtomicU64,
     wake_queue_ptr_guard: AtomicBool,
 
-    waiting_threads: SpinLock<BTreeMap<ThreadId, (Weak<Thread>, SysHandle)>>,
+    waiting_threads: SpinLock<WaitingThreads>,
 
     url: Arc<String>,
     owner: Arc<dyn Any + Sync + Send>,
@@ -75,7 +120,7 @@ impl SysObject {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
         Arc::new(Self {
-            waiting_threads: SpinLock::new(BTreeMap::new()),
+            waiting_threads: SpinLock::new(WaitingThreads::Empty),
             wake_queue_intrusive_ptr: AtomicU64::new(0),
             wake_queue_ptr_guard: AtomicBool::new(false),
             url,
@@ -133,13 +178,49 @@ impl SysObject {
 
     #[inline(always)]
     pub fn add_waiting_thread(&self, thread: &Thread, handle: SysHandle) {
-        self.waiting_threads
-            .lock(line!())
-            .insert(thread.tid(), (thread.get_weak(), handle));
+        let tid = thread.tid();
+        let mut waiting = self.waiting_threads.lock(line!());
+        match &mut *waiting {
+            WaitingThreads::Empty => {
+                *waiting = WaitingThreads::One(tid, thread.get_weak(), handle)
+            }
+            WaitingThreads::One(tid0, thread0, handle0) => {
+                if *tid0 == tid {
+                    // Same semantics as BTreeMap::insert: overwrite.
+                    *thread0 = thread.get_weak();
+                    *handle0 = handle;
+                } else {
+                    let mut map = BTreeMap::new();
+                    map.insert(*tid0, (thread0.clone(), *handle0));
+                    map.insert(tid, (thread.get_weak(), handle));
+                    *waiting = WaitingThreads::Map(map);
+                }
+            }
+            WaitingThreads::Map(map) => {
+                map.insert(tid, (thread.get_weak(), handle));
+            }
+        }
     }
 
     pub fn remove_waiting_thread(&self, thread: &Thread) {
-        self.waiting_threads.lock(line!()).remove(&thread.tid());
+        let tid = thread.tid();
+        let mut waiting = self.waiting_threads.lock(line!());
+        match &mut *waiting {
+            WaitingThreads::Empty => {}
+            WaitingThreads::One(tid0, ..) => {
+                if *tid0 == tid {
+                    *waiting = WaitingThreads::Empty;
+                }
+            }
+            WaitingThreads::Map(map) => {
+                map.remove(&tid);
+                if map.is_empty() {
+                    // Drop the map's node allocation; the next waiter
+                    // starts on the allocation-free One path again.
+                    *waiting = WaitingThreads::Empty;
+                }
+            }
+        }
     }
 
     fn dequeue_woken_head(&self) -> u64 {
@@ -156,7 +237,7 @@ impl SysObject {
         next
     }
 
-    fn take_waiting_threads(&self) -> BTreeMap<ThreadId, (Weak<Thread>, SysHandle)> {
+    fn take_waiting_threads(&self) -> WaitingThreads {
         core::mem::take(&mut *self.waiting_threads.lock(line!()))
     }
 
@@ -212,7 +293,7 @@ impl SysObject {
 
         // See process_wake_events.
         let threads_and_handles = self.take_waiting_threads();
-        for (_, (thread, handle)) in threads_and_handles {
+        for (thread, handle) in threads_and_handles {
             if let Some(thread) = thread.upgrade() {
                 thread.wake_by_object(handle, this_cpu);
             }
@@ -242,7 +323,7 @@ impl SysObject {
 
         let threads_and_handles = self.take_waiting_threads();
         let mut claimed: Option<Arc<super::process::Thread>> = None;
-        for (_, (thread, handle)) in threads_and_handles {
+        for (thread, handle) in threads_and_handles {
             if let Some(thread) = thread.upgrade() {
                 if claimed.is_none() {
                     // A failed claim leaves the same state as wake_by_object
@@ -326,7 +407,7 @@ pub fn process_wake_events() {
 
         loop {
             let threads_and_handles = obj.take_waiting_threads();
-            for (_, (thread, handle)) in threads_and_handles {
+            for (thread, handle) in threads_and_handles {
                 if let Some(thread) = thread.upgrade() {
                     thread.wake_by_object(handle, false);
                 }

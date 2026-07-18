@@ -121,6 +121,10 @@ impl ProcessStatus {
     }
 }
 
+// A wait typically returns 1-2 wakers; the inline capacity keeps the
+// per-wait waker accounting allocation-free (S13).
+pub(super) type WakerVec = crate::util::InlineVec<SysHandle, 4>;
+
 #[derive(Clone)]
 pub struct WaitObject {
     pub sys_object: Arc<SysObject>,
@@ -856,10 +860,12 @@ pub struct Thread {
     timer_cpu: AtomicU32,
 
     // The list of objects this thread is currently in sys_wait() for.
+    // Cleared (not dropped) on wake so its capacity is reused by the next
+    // wait: steady-state waits register handles without allocating (S13).
     sys_wait_objects: SpinLock<Vec<WaitObject>>,
 
     timed_out: AtomicBool,
-    wakers: SpinLock<Vec<SysHandle>>,
+    wakers: SpinLock<WakerVec>,
 
     last_cpu: AtomicU32,
     affined_to: AtomicU32,
@@ -916,7 +922,7 @@ impl Thread {
             timer_cpu: AtomicU32::new(u32::MAX),
             sys_wait_objects: SpinLock::new(Vec::new()),
             timed_out: AtomicBool::new(false),
-            wakers: SpinLock::new(alloc::vec![]),
+            wakers: SpinLock::new(WakerVec::new(SysHandle::NONE)),
             last_cpu: AtomicU32::new(u32::MAX),
             affined_to: AtomicU32::new(uCpus::MAX as u32),
             process_stats: owner.stats.clone(),
@@ -1036,10 +1042,10 @@ impl Thread {
         }
     }
 
-    pub(super) fn add_wait_objects(&self, objects: Vec<WaitObject>) {
+    pub(super) fn add_wait_objects(&self, objects: impl Iterator<Item = WaitObject>) {
         let mut list = self.sys_wait_objects.lock(line!());
         assert!(list.is_empty());
-        *list = objects;
+        list.extend(objects); // Reuses the capacity retained by clear_wait_objects_on_wake().
     }
 
     pub(super) fn add_waker(&self, waker: SysHandle) {
@@ -1436,11 +1442,21 @@ impl Thread {
         // may seem that requiring a full list of wait objects on each wait
         // is wasteful and does not scale, this is done consciously so that
         // we avoid synchronous designs (where many wait objects are needed).
-        let wait_objects = core::mem::take(&mut *self.sys_wait_objects.lock(line!()));
-        for obj in &wait_objects {
+        //
+        // Holding sys_wait_objects across remove_waiting_thread() is safe:
+        // nothing takes sys_wait_objects while holding an object's
+        // waiting_threads lock (the order is always wait list -> waiters).
+        let mut wait_objects = self.sys_wait_objects.lock(line!());
+        for obj in wait_objects.iter() {
             obj.sys_object.remove_waiting_thread(self);
         }
-        core::mem::drop(wait_objects); // Must drop before resuming the thread.
+        // Drops the Arc refs (must happen before the thread resumes), but
+        // keeps the capacity for the next wait's registration (S13). Bound
+        // what a single huge wait can pin per thread.
+        wait_objects.clear();
+        if wait_objects.capacity() > 64 {
+            wait_objects.shrink_to(64);
+        }
     }
 
     // The negation of on_thread_paused()'s park condition: a thread that
@@ -1452,20 +1468,20 @@ impl Thread {
     }
 
     // Called for IO threads on non-blocking waits.
-    pub fn take_wakers(&self) -> Vec<SysHandle> {
+    pub(super) fn take_wakers(&self) -> WakerVec {
         self.clear_wait_objects_on_wake();
 
         self.wakes_taken
             .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
         self.timed_out.store(false, Ordering::Relaxed);
-        let mut wakers = core::mem::take(&mut *self.wakers.lock(line!()));
+        let mut wakers = core::mem::replace(
+            &mut *self.wakers.lock(line!()),
+            WakerVec::new(SysHandle::NONE),
+        );
 
-        if wakers.len() > 1 {
-            wakers.sort_unstable();
-            wakers.dedup();
-        }
+        wakers.sort_dedup();
 
-        for waker in &wakers {
+        for waker in wakers.as_slice() {
             self.owner().process_wake(waker);
         }
 
@@ -1473,7 +1489,7 @@ impl Thread {
     }
 
     // Returns true if the wait timed out, and/or a list of waker handles.
-    pub fn wait(&self) -> (bool, Vec<SysHandle>) {
+    pub(super) fn wait(&self) -> (bool, WakerVec) {
         self.trace("thread::wait", 0, 0);
 
         // tcb.pause() below will triger on_thread_paused() that will
@@ -1491,7 +1507,7 @@ impl Thread {
     // *_for_switch wake) instead of posting its resume job and bouncing
     // through the scheduler loop. Own park bookkeeping runs from next's
     // context (finish_direct_switch), after the context is saved.
-    pub fn wait_and_switch(&self, next: Arc<Thread>) -> (bool, Vec<SysHandle>) {
+    pub(super) fn wait_and_switch(&self, next: Arc<Thread>) -> (bool, WakerVec) {
         self.trace("thread::wait_and_switch", next.tid.as_u64(), 0);
 
         // Mirror resume_in_kernel() for the wakee.
@@ -1507,7 +1523,7 @@ impl Thread {
         self.after_wait()
     }
 
-    fn after_wait(&self) -> (bool, Vec<SysHandle>) {
+    fn after_wait(&self) -> (bool, WakerVec) {
         let (timed_out, mut wakers) = {
             {
                 self.trace("thread::wait: woke", 0, 0);
@@ -1531,16 +1547,16 @@ impl Thread {
                 .store(self.wakes_queued.load(Ordering::Relaxed), Ordering::Relaxed);
             (
                 self.timed_out.swap(false, Ordering::AcqRel),
-                core::mem::take(&mut *self.wakers.lock(line!())),
+                core::mem::replace(
+                    &mut *self.wakers.lock(line!()),
+                    WakerVec::new(SysHandle::NONE),
+                ),
             )
         };
 
-        if wakers.len() > 1 {
-            wakers.sort_unstable();
-            wakers.dedup();
-        }
+        wakers.sort_dedup();
 
-        for waker in &wakers {
+        for waker in wakers.as_slice() {
             self.owner().process_wake(waker);
         }
 

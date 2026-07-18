@@ -9,6 +9,12 @@ use crate::config::uCpus;
 
 use super::syscall::*;
 
+// S13: the dominant waits pass 1-3 handles (sync RPC, io_channel clients);
+// sys-io's reactor passes one per registered channel. Up to this many
+// handles, the whole registration below runs off stack buffers and the
+// thread's retained wait list - no heap allocations.
+const INLINE_WAIT_HANDLES: usize = 16;
+
 fn process_wait_handles(
     curr: &super::process::Thread,
     args: &SyscallArgs,
@@ -17,7 +23,10 @@ fn process_wait_handles(
     // NOTE: if this changes, you may need to change sys_ctl::sys_query_handle().
     let flags = args.flags;
 
-    let handles: Vec<SysHandle> = if flags & SysCpu::F_HANDLE_ARRAY != 0 {
+    let mut inline_handles = [0_u64; INLINE_WAIT_HANDLES];
+    let mut heap_handles: Vec<u64>;
+
+    let handles: &[u64] = if flags & SysCpu::F_HANDLE_ARRAY != 0 {
         let h_ptr = args.args[next_arg];
         let h_sz = args.args[next_arg + 1];
 
@@ -36,84 +45,91 @@ fn process_wait_handles(
             return ResultBuilder::invalid_argument();
         }
 
-        let buf = match curr.owner().address_space().read_from_user(h_ptr, h_sz * 8) {
-            Ok(buf) => buf,
-            Err(err) => return ResultBuilder::result(err),
+        let dst: &mut [u64] = if (h_sz as usize) <= INLINE_WAIT_HANDLES {
+            &mut inline_handles[..(h_sz as usize)]
+        } else {
+            heap_handles = alloc::vec![0_u64; h_sz as usize];
+            &mut heap_handles
         };
-        debug_assert_eq!(buf.len() >> 3, h_sz as usize);
-
-        let mut handles = Vec::with_capacity(h_sz as usize);
-        let mut src = buf.as_ptr();
-        for _idx in 0..h_sz {
-            let mut handle: u64 = 0;
-            unsafe {
-                let dst: *mut u8 = &mut handle as *mut u64 as *mut u8;
-                core::intrinsics::copy_nonoverlapping(src, dst, 8);
-                src = src.add(8);
-            }
-
-            if handle == 0 {
-                continue;
-            }
-
-            handles.push(SysHandle::from_u64(handle));
+        let dst_bytes = unsafe {
+            core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 8)
+        };
+        if let Err(err) = curr
+            .owner()
+            .address_space()
+            .read_from_user_into(h_ptr, dst_bytes)
+        {
+            return ResultBuilder::result(err);
         }
-
-        handles
+        dst
     } else {
-        let mut handles = Vec::with_capacity(6);
-        for idx in next_arg..6 {
-            if args.args[idx] != 0 {
-                handles.push(SysHandle::from_u64(args.args[idx]));
-            }
-        }
-
-        handles
+        &args.args[next_arg..6]
     };
-
-    if handles.is_empty() {
-        return ResultBuilder::ok();
-    }
 
     let process = curr.owner();
 
-    let mut objects = Vec::with_capacity(handles.len());
+    // Zero handles are skipped; bad handles fail the whole call before any
+    // object is registered (as before). Validated objects are staged on the
+    // stack; only a wait on more than INLINE_WAIT_HANDLES objects spills.
+    let mut staged: [Option<(SysHandle, super::process::WaitObject)>; INLINE_WAIT_HANDLES] =
+        core::array::from_fn(|_| None);
+    let mut spill: Vec<(SysHandle, super::process::WaitObject)> = Vec::new();
+    let mut count = 0_usize;
 
-    for handle in &handles {
-        let obj = process.get_object(handle);
-        if let Some(obj) = obj {
-            if obj.sys_object.sibling_dropped() {
-                log::debug!(
-                    "sys_wait: object {} has it's sibling dropped in pid {}.",
-                    handle.as_u64(),
-                    process.pid().as_u64()
-                );
-                return ResultBuilder::bad_handle(*handle);
-            }
-            objects.push((*handle, obj.clone()));
-        } else {
+    for &raw_handle in handles {
+        if raw_handle == 0 {
+            continue;
+        }
+        let handle = SysHandle::from_u64(raw_handle);
+
+        let Some(obj) = process.get_object(&handle) else {
             log::debug!(
                 "sys_wait: object not found in pid {} for handle {}.",
                 process.pid().as_u64(),
                 handle.as_u64()
             );
-            return ResultBuilder::bad_handle(*handle);
+            return ResultBuilder::bad_handle(handle);
+        };
+        if obj.sys_object.sibling_dropped() {
+            log::debug!(
+                "sys_wait: object {} has it's sibling dropped in pid {}.",
+                handle.as_u64(),
+                process.pid().as_u64()
+            );
+            return ResultBuilder::bad_handle(handle);
         }
+
+        if count < INLINE_WAIT_HANDLES {
+            staged[count] = Some((handle, obj));
+        } else {
+            spill.push((handle, obj));
+        }
+        count += 1;
     }
 
-    for (handle, obj) in &objects {
-        obj.sys_object.add_waiting_thread(curr, *handle);
+    if count == 0 {
+        return ResultBuilder::ok();
+    }
+
+    for (handle, obj) in staged
+        .iter()
+        .flatten()
+        .chain(spill.iter())
+        .map(|(handle, obj)| (*handle, obj))
+    {
+        obj.sys_object.add_waiting_thread(curr, handle);
         if obj.wake_count < obj.sys_object.wake_count() || obj.sys_object.done() {
             // obj has unconsumed wakes, so queue it as a waker to the current thread.
-            curr.wake_by_object(*handle, true);
+            curr.wake_by_object(handle, true);
         }
     }
 
-    let mut wait_objects = Vec::with_capacity(objects.len());
-    for (_, obj) in objects {
-        wait_objects.push(obj.clone());
-    }
-    curr.add_wait_objects(wait_objects);
+    curr.add_wait_objects(
+        staged
+            .iter_mut()
+            .filter_map(|slot| slot.take().map(|(_, obj)| obj))
+            .chain(spill.into_iter().map(|(_, obj)| obj)),
+    );
 
     ResultBuilder::ok()
 }
@@ -122,7 +138,7 @@ fn process_wake_handles(
     curr: &super::process::Thread,
     args: &SyscallArgs,
     next_arg: usize,
-    wakers: Vec<SysHandle>,
+    wakers: &[SysHandle],
     timed_out: bool,
 ) -> SyscallResult {
     if wakers.len() < 6 {
@@ -156,7 +172,7 @@ fn process_wake_handles(
     assert!(wakers.len() <= h_sz as usize);
 
     let mut idx = 0;
-    for handle in &wakers {
+    for handle in wakers {
         let val = u64::from(handle);
         let buf: &[u8] =
             unsafe { core::slice::from_raw_parts(&val as *const _ as usize as *const u8, 8) };
@@ -290,7 +306,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
                 curr.new_timeout(crate::arch::time::Instant::from_u64(timeout));
             }
             let (timed_out, wakers) = curr.wait_and_switch(next);
-            return process_wake_handles(curr, args, next_arg, wakers, timed_out);
+            return process_wake_handles(curr, args, next_arg, wakers.as_slice(), timed_out);
         }
     } else if wake_this_cpu {
         crate::xray::stats::kernel_stats()
@@ -309,7 +325,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         crate::xray::stats::kernel_stats()
             .adjust_metric(crate::xray::stats::MetricType::WaitFastPath, 1);
         let wakers = curr.take_wakers();
-        return process_wake_handles(curr, args, next_arg, wakers, false);
+        return process_wake_handles(curr, args, next_arg, wakers.as_slice(), false);
     }
 
     if timeout != u64::MAX {
@@ -328,7 +344,7 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         curr.wait()
     };
 
-    process_wake_handles(curr, args, next_arg, wakers, timed_out)
+    process_wake_handles(curr, args, next_arg, wakers.as_slice(), timed_out)
 }
 
 // W7: do_wake(waker, wake_target, SysHandle::NONE, true), but claiming the
@@ -503,7 +519,7 @@ fn sys_kill_impl(killer: &super::process::Thread, args: &SyscallArgs) -> Syscall
         killer.add_waker(target)
     }
 
-    killer.add_wait_objects(alloc::vec![target_obj]);
+    killer.add_wait_objects(core::iter::once(target_obj));
     let _ = killer.wait();
     ResultBuilder::ok()
 }

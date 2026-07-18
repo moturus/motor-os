@@ -1,3 +1,4 @@
+pub mod inline_vec;
 pub mod loader;
 pub mod percpu;
 pub mod pin_weak;
@@ -7,6 +8,7 @@ pub mod unsafe_ref;
 
 use alloc::vec::Vec;
 
+pub use inline_vec::InlineVec;
 pub use percpu::StaticPerCpu;
 pub use pin_weak::sync::PinWeak;
 pub use spin_lock::LockGuard;
