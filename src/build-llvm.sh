@@ -455,13 +455,19 @@ EOF
 EOF
 
 	# mlibc reads its config from /sys/cfg/libc (MLIBC_SYSCONFDIR). Ship the
-	# resolver and services databases needed by its generic DNS client.
+	# resolver, hosts, and services databases needed by its generic DNS client.
 	cat > "$img/$CFG_LIBC/resolv.conf" << 'EOF'
 nameserver 8.8.8.8
 EOF
 	cat > "$img/$CFG_LIBC/services" << 'EOF'
 domain 53/tcp
 domain 53/udp
+EOF
+	cat > "$img/$CFG_LIBC/hosts" << 'EOF'
+127.0.0.1 localhost
+::1 localhost
+127.0.0.53 motor-dns-test
+::1 motor-dns-test
 EOF
 
 	# Sample sources to compile natively in the VM.

@@ -17,6 +17,16 @@ else
 endif
 
 ROOT_DIR := $(CURDIR)
+MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
+MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
+MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
+MOTOR_DNS_RUSTFLAGS := -C linker=$(MOTOR_DNS_CLANG) \
+	-C link-arg=--no-default-config \
+	-C link-arg=--target=x86_64-unknown-motor \
+	-C link-arg=--sysroot=$(MOTOR_DNS_SYSROOT) \
+	-C link-arg=-Wl,--allow-multiple-definition \
+	-C link-self-contained=no \
+	-C default-linker-libraries=yes
 
 DO_BUILD = cargo +dev-x86_64-unknown-motor build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
@@ -25,14 +35,14 @@ DO_CLIPPY = cargo +dev-x86_64-unknown-motor clippy --target x86_64-unknown-motor
 all: boot core sys user img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
-sys: strobe sys-io sys-init sys-tty
+sys: strobe sys-io sys-init sys-tty dns-resolver
 user: sysbox systest mio-test tokio-tests \
 	rush kibim mdbg red rmux rnetbench crossbench \
 	russhd httpd httpd-axum
 
 .PHONY: all boot core sys user img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
-.PHONY: strobe sys-io sys-init sys-tty
+.PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests
 .PHONY: rush kibim red rmux russhd httpd httpd-axum
 .PHONY: mdbg rnetbench crossbench
@@ -87,6 +97,18 @@ sys-tty:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/sys-tty && CARGO_TARGET_DIR="$(OBJ_DIR)/sys-tty" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/sys-tty" "$(OBJ_DIR)/sys-tty/$(SUB_DIR)/sys-tty"
+
+dns-resolver:
+	mkdir -p $(BIN_DIR)
+	cd src/sys/dns-resolver && \
+		MOTOR_DNS_CLANG="$(MOTOR_DNS_CLANG)" \
+		MOTOR_DNS_SYSROOT="$(MOTOR_DNS_SYSROOT)" \
+		MOTOR_DNS_SDK="$(MOTOR_DNS_SDK)" \
+		CARGO_PROFILE_RELEASE_LTO=false \
+		RUSTFLAGS="$(MOTOR_DNS_RUSTFLAGS)" \
+		CARGO_TARGET_DIR="$(OBJ_DIR)/dns-resolver" $(DO_BUILD)
+	strip -o "$(BIN_DIR)/dns-resolver" \
+		"$(OBJ_DIR)/dns-resolver/$(SUB_DIR)/dns-resolver"
 
 sysbox:
 	mkdir -p $(BIN_DIR)
@@ -173,6 +195,12 @@ clippy: vdso
 	cd src/sys/sys-init && $(DO_CLIPPY)
 	cd src/sys/strobe && $(DO_CLIPPY)
 	cd src/sys/sys-tty && $(DO_CLIPPY)
+	cd src/sys/dns-resolver && \
+		MOTOR_DNS_CLANG="$(MOTOR_DNS_CLANG)" \
+		MOTOR_DNS_SYSROOT="$(MOTOR_DNS_SYSROOT)" \
+		MOTOR_DNS_SDK="$(MOTOR_DNS_SDK)" \
+		CARGO_PROFILE_RELEASE_LTO=false \
+		RUSTFLAGS="$(MOTOR_DNS_RUSTFLAGS)" $(DO_CLIPPY)
 	cd src/sys/tools/sysbox && $(DO_CLIPPY)
 	cd src/sys/tools/mdbg && $(DO_CLIPPY)
 	cd src/sys/tests/systest && $(DO_CLIPPY)

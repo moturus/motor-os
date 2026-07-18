@@ -3,6 +3,7 @@ members = [
   # system libraries (legacy, to be refactored)
   "lib/async-fs",
   "lib/moto-async",
+  "lib/moto-dns",
   "lib/moto-io-internal",
   "lib/moto-ipc",
   "lib/moto-log",
@@ -27,6 +28,7 @@ members = [
   "lib/moto-tooling",
 
   # system binaries
+  "dns-resolver",
   "kernel",
   "strobe",
   "sys-init",

@@ -552,13 +552,20 @@ cat > $IMG/sys/cfg/llvm/x86_64-unknown-motor.cfg << EOF
 EOF
 
 # 6. mlibc reads its config from /sys/cfg/libc (MLIBC_SYSCONFDIR). Its generic
-#    DNS client needs both a nameserver and the domain service entry.
+#    resolver needs a nameserver, the domain service entry, and a minimal hosts
+#    database. `motor-dns-test` is a deterministic resolver-service smoke name.
 cat > $IMG/sys/cfg/libc/resolv.conf << 'EOF'
 nameserver 8.8.8.8
 EOF
 cat > $IMG/sys/cfg/libc/services << 'EOF'
 domain 53/tcp
 domain 53/udp
+EOF
+cat > $IMG/sys/cfg/libc/hosts << 'EOF'
+127.0.0.1 localhost
+::1 localhost
+127.0.0.53 motor-dns-test
+::1 motor-dns-test
 EOF
 
 # 7. A couple of sample sources to compile natively in the VM.

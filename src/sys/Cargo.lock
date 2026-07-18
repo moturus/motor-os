@@ -458,6 +458,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dns-resolver"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "moto-dns",
+ "moto-ipc",
+ "moto-log",
+ "moto-rt",
+ "moto-sys",
+]
+
+[[package]]
 name = "elfloader"
 version = "0.1.0"
 dependencies = [
@@ -886,6 +898,14 @@ dependencies = [
  "moto-mpmc",
  "moto-rt",
  "moto-sys",
+]
+
+[[package]]
+name = "moto-dns"
+version = "0.1.0"
+dependencies = [
+ "moto-ipc",
+ "moto-rt",
 ]
 
 [[package]]

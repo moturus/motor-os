@@ -8,6 +8,7 @@ input_files:
   - "/bin/rnetbench"
   - "/bin/rush"
   - "/sys/mdbg"
+  - "/sys/dns-resolver"
   - "/sys/strobe"
   - "/sys/sys-init"
   - "/sys/sys-tty"
@@ -21,4 +22,3 @@ static_dirs:
   - "img_files/motor-os"
 filesystem: "motor-fs"
 data_partition_size_mb: 512
-

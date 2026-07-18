@@ -1,0 +1,13 @@
+[package]
+name = "moto-dns"
+version = "0.1.0"
+authors = ["The Motor OS Project Developers"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/moturus/motor-os"
+description = "Motor OS DNS resolver IPC protocol and client."
+edition = "2021"
+
+[dependencies]
+moto-ipc = { path = "../moto-ipc" }
+moto-rt  = { path = "../moto-rt"  }
+
