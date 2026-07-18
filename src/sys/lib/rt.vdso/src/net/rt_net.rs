@@ -35,31 +35,113 @@ pub unsafe extern "C" fn dns_lookup(
     result_addr: *mut usize,
     result_len: *mut usize,
 ) -> ErrorCode {
-    use core::net::Ipv4Addr;
-    use core::net::SocketAddrV4;
+    use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
     use core::str::FromStr;
+    use moto_dns::{AddressFamily, ClientError, Status};
     use moto_rt::netc;
 
+    fn error_code(error: ClientError) -> ErrorCode {
+        match error {
+            ClientError::InvalidName => moto_rt::E_INVALID_ARGUMENT,
+            ClientError::ServiceUnavailable => moto_rt::E_NOT_CONNECTED,
+            ClientError::TimedOut => moto_rt::E_TIMED_OUT,
+            ClientError::Transport(error) => error,
+            ClientError::Protocol(_) => moto_rt::E_INVALID_DATA,
+            ClientError::Resolver(status) => match status {
+                Status::NotFound => moto_rt::E_NOT_FOUND,
+                Status::TemporaryFailure | Status::Busy => moto_rt::E_NOT_READY,
+                Status::OutOfMemory => moto_rt::E_OUT_OF_MEMORY,
+                Status::TimedOut => moto_rt::E_TIMED_OUT,
+                Status::System | Status::ResolverFailure => moto_rt::E_INTERNAL_ERROR,
+                Status::Ok | Status::UnsupportedFamily | Status::InvalidRequest => {
+                    moto_rt::E_INVALID_DATA
+                }
+            },
+        }
+    }
+
+    if result_addr.is_null() || result_len.is_null() {
+        return moto_rt::E_INVALID_ARGUMENT;
+    }
     unsafe {
-        let host: &str = core::str::from_raw_parts(host_bytes, host_bytes_sz);
+        *result_addr = 0;
+        *result_len = 0;
+    }
+    if host_bytes.is_null()
+        || host_bytes_sz == 0
+        || host_bytes_sz > moto_dns::MAX_NAME_LEN
+    {
+        return moto_rt::E_INVALID_ARGUMENT;
+    }
 
-        let addr = if host == "localhost" {
-            SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port)
-        } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
-            SocketAddrV4::new(addr_v4, port)
-        } else {
-            log::warn!("dns_lookup: {}:{}: not implemented", host, port);
-            return moto_rt::E_NOT_IMPLEMENTED;
+    let host_bytes = unsafe { core::slice::from_raw_parts(host_bytes, host_bytes_sz) };
+    if host_bytes.contains(&0) {
+        return moto_rt::E_INVALID_ARGUMENT;
+    }
+    let Ok(host) = core::str::from_utf8(host_bytes) else {
+        return moto_rt::E_INVALID_ARGUMENT;
+    };
+
+    let mut addresses = Vec::<netc::sockaddr>::new();
+    if host == "localhost" {
+        addresses.push(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)).into());
+    } else if let Ok(addr_v4) = Ipv4Addr::from_str(host) {
+        addresses.push(SocketAddr::V4(SocketAddrV4::new(addr_v4, port)).into());
+    } else if let Ok(addr_v6) = Ipv6Addr::from_str(host) {
+        addresses.push(SocketAddr::V6(SocketAddrV6::new(addr_v6, port, 0, 0)).into());
+    } else {
+        let mut client = match moto_dns::Client::connect() {
+            Ok(client) => client,
+            Err(error) => return error_code(error),
         };
+        let lookup = match client.lookup(host, AddressFamily::Any) {
+            Ok(lookup) => lookup,
+            Err(error) => return error_code(error),
+        };
+        if lookup.truncated {
+            log::warn!(
+                "dns_lookup: resolver truncated the result for {}:{} to {} addresses",
+                host,
+                port,
+                lookup.addresses.len()
+            );
+        }
 
-        let res_addr = crate::rt_alloc::alloc(core::mem::size_of::<netc::sockaddr>() as u64, 16);
-        let result: &mut [netc::sockaddr] =
-            core::slice::from_raw_parts_mut(res_addr as usize as *mut netc::sockaddr, 1);
+        addresses.reserve(lookup.addresses.len());
+        for address in lookup.addresses {
+            let socket_addr = match address.address_family() {
+                Ok(AddressFamily::V4) => SocketAddr::new(
+                    Ipv4Addr::new(
+                        address.bytes[0],
+                        address.bytes[1],
+                        address.bytes[2],
+                        address.bytes[3],
+                    )
+                    .into(),
+                    port,
+                ),
+                Ok(AddressFamily::V6) => {
+                    SocketAddr::new(Ipv6Addr::from(address.bytes).into(), port)
+                }
+                Ok(AddressFamily::Any) | Err(_) => return moto_rt::E_INVALID_DATA,
+            };
+            addresses.push(socket_addr.into());
+        }
+    }
 
-        let addr = netc::sockaddr { v4: addr.into() };
-        result[0] = addr;
+    let allocation_size = core::mem::size_of_val(addresses.as_slice());
+    let res_addr = unsafe { crate::rt_alloc::alloc(allocation_size as u64, 16) };
+    if res_addr == 0 {
+        return moto_rt::E_OUT_OF_MEMORY;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            addresses.as_ptr(),
+            res_addr as usize as *mut netc::sockaddr,
+            addresses.len(),
+        );
         *result_addr = res_addr as usize;
-        *result_len = 1;
+        *result_len = addresses.len();
     }
     moto_rt::E_OK
 }

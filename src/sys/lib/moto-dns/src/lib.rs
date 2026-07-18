@@ -303,7 +303,8 @@ impl Client {
         let mut addresses = Vec::with_capacity(count);
         for address in response.addresses[..count].iter().copied() {
             let address_family = address.address_family().map_err(ClientError::Protocol)?;
-            if address.reserved != [0; 3]
+            if address_family == AddressFamily::Any
+                || address.reserved != [0; 3]
                 || (address_family == AddressFamily::V4 && address.bytes[4..] != [0; 12])
                 || (family != AddressFamily::Any && family != address_family)
             {

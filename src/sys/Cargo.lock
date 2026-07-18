@@ -1291,6 +1291,7 @@ dependencies = [
  "frusa 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "moto-async",
+ "moto-dns",
  "moto-io",
  "moto-io-internal",
  "moto-ipc",
