@@ -25,6 +25,28 @@ use moto_sys::ErrorCode;
 use moto_sys::SysHandle;
 use moto_sys::UserThreadControlBlock;
 
+// W7 direct switch: when a thread hands its CPU directly to a claimed
+// wakee (wait_and_switch), its own park bookkeeping (on_thread_paused)
+// cannot run in its own context — it runs from the *wakee's* context right
+// after the switch, exactly like on_thread_paused runs after tcb.pause()
+// has saved the context in the queue path. The parked thread's Arc is
+// stashed across the switch in this CPU's gs:[72] slot (see the GS struct
+// in arch/x64) — per-CPU by construction, no static array.
+
+fn set_direct_switch_prev(prev: Arc<Thread>) {
+    crate::arch::set_direct_switch_prev(Arc::into_raw(prev) as usize as u64);
+}
+
+// Parks the thread that direct-switched to us, if any. Must run first
+// thing after every potential switch-in point (wait()/wait_and_switch()).
+fn finish_direct_switch() {
+    let prev = crate::arch::take_direct_switch_prev();
+    if prev != 0 {
+        let prev = unsafe { Arc::from_raw(prev as usize as *const Thread) };
+        prev.on_thread_paused();
+    }
+}
+
 // Process ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProcessId(u64);
@@ -1402,7 +1424,8 @@ impl Thread {
             }
             core::mem::drop(cpu_usage_scope);
             self.trace("will spawn usermode", 0, 0);
-            self.on_thread_descheduled(tcb.spawn_usermode_thread(arg));
+            let tocr = tcb.spawn_usermode_thread(arg);
+            Self::off_cpu_current().on_thread_descheduled(tocr);
             self.trace("back from spawn usermode", 0, 0);
         }
     }
@@ -1451,17 +1474,42 @@ impl Thread {
 
     // Returns true if the wait timed out, and/or a list of waker handles.
     pub fn wait(&self) -> (bool, Vec<SysHandle>) {
+        self.trace("thread::wait", 0, 0);
+
+        // tcb.pause() below will triger on_thread_paused() that will
+        // change this thread's status to InWait. It will NOT return
+        // until the thread wakes.
+        self.tcb.pause();
+        // tcb.pause() above is done, which means the thread is
+        // no longer InWait.
+
+        finish_direct_switch();
+        self.after_wait()
+    }
+
+    // W7: like wait(), but hands the CPU directly to `next` (claimed via a
+    // *_for_switch wake) instead of posting its resume job and bouncing
+    // through the scheduler loop. Own park bookkeeping runs from next's
+    // context (finish_direct_switch), after the context is saved.
+    pub fn wait_and_switch(&self, next: Arc<Thread>) -> (bool, Vec<SysHandle>) {
+        self.trace("thread::wait_and_switch", next.tid.as_u64(), 0);
+
+        // Mirror resume_in_kernel() for the wakee.
+        next.cancel_timeout();
+        next.clear_wait_objects_on_wake();
+
+        set_direct_switch_prev(self.get_weak().upgrade().unwrap());
+        self.tcb.switch_to(&next.tcb);
+        // We are back on a CPU: someone woke us (queue path or a direct
+        // switch of their own).
+
+        finish_direct_switch();
+        self.after_wait()
+    }
+
+    fn after_wait(&self) -> (bool, Vec<SysHandle>) {
         let (timed_out, mut wakers) = {
             {
-                self.trace("thread::wait", 0, 0);
-
-                // tcb.pause() below will triger on_thread_paused() that will
-                // change this thread's status to InWait. It will NOT return
-                // until the thread wakes.
-                self.tcb.pause();
-                // tcb.pause() above is done, which means the thread is
-                // no longer InWait.
-
                 self.trace("thread::wait: woke", 0, 0);
                 // The pause() above deschedules this thread from this CPU.
                 // The thread will resume below via Self::resume().
@@ -1543,6 +1591,16 @@ impl Thread {
         }
     }
 
+    // W7: after a resume-type TCB call returns to this CPU's kernel stack,
+    // the thread that actually went off-CPU is gs:[32]'s owner, NOT
+    // necessarily the thread the frame resumed: direct switches
+    // (wait_and_switch) move threads on-CPU without returning here.
+    fn off_cpu_current() -> Arc<Thread> {
+        ThreadControlBlock::off_cpu_thread()
+            .upgrade()
+            .expect("off-CPU thread already dropped")
+    }
+
     // Resumes a thread sleeping in Thread::wait() or in Thread::pause_debuggee_in_syscall().
     fn resume_in_kernel(&self) {
         self.trace("thread::resume_in_kernel", 0, 0);
@@ -1552,13 +1610,12 @@ impl Thread {
         self.cancel_timeout();
         self.clear_wait_objects_on_wake();
 
-        self.on_thread_descheduled(
-            /*
-             * Resumes the thread on this CPU:
-             * jumps to the line marked 'resumes here' in Self::wait().
-             */
-            self.tcb.resume(),
-        );
+        /*
+         * Resumes the thread on this CPU:
+         * jumps to the line marked 'resumes here' in Self::wait().
+         */
+        let tocr = self.tcb.resume();
+        Self::off_cpu_current().on_thread_descheduled(tocr);
         self.trace("resume_in_kernel back", 0, 0);
     }
 
@@ -1582,7 +1639,8 @@ impl Thread {
         };
 
         if resume {
-            self.on_thread_descheduled(self.tcb.resume_preempted_thread());
+            let tocr = self.tcb.resume_preempted_thread();
+            Self::off_cpu_current().on_thread_descheduled(tocr);
         }
     }
 
@@ -1600,6 +1658,51 @@ impl Thread {
             }
             _ => {}
         }
+    }
+
+    // W7: post_wake(), but when the thread is InWait it is claimed for a
+    // direct switch instead of having its resume job posted: on Some(_)
+    // the caller MUST either switch to it (wait_and_switch) or release it
+    // (release_switch_claim).
+    pub fn post_wake_for_switch(self: &Arc<Self>) -> Option<Arc<Thread>> {
+        self.trace("thread::post_wake_for_switch", 0, 0);
+        self.wakes_queued.fetch_add(1, Ordering::Relaxed);
+        let mut status = self.status.lock(line!());
+        match *status {
+            ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
+                *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
+                Some(self.clone())
+            }
+            ThreadStatus::Created => {
+                self.post_start(0);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    // W7: wake_by_object(), but claiming instead of posting; see
+    // post_wake_for_switch.
+    pub fn wake_by_object_for_switch(self: Arc<Self>, handle: SysHandle) -> Option<Arc<Thread>> {
+        let mut status = self.status.lock(line!());
+        self.add_waker(handle);
+        match *status {
+            ThreadStatus::Live(LiveThreadStatus::InWait(nr, op)) => {
+                *status = ThreadStatus::Live(LiveThreadStatus::Runnable(nr, op));
+                self.trace("thread::wake_by_object_for_switch", handle.as_u64(), 0);
+                core::mem::drop(status);
+                Some(self)
+            }
+            _ => None,
+        }
+    }
+
+    // W7: releases a thread claimed for a direct switch that will not
+    // happen (error paths): post its resume job as the normal wake would
+    // have.
+    pub fn release_switch_claim(&self) {
+        let _status = self.status.lock(line!());
+        self.post_wake_locked(true);
     }
 
     fn process_live_thread_status_locked(

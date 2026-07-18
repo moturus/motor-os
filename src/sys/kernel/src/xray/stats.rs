@@ -113,7 +113,13 @@ pub enum MetricType {
     WaitFastPath = 44,
     WaitPaused = 45,
 
-    TotalMetricTypes = 46,
+    // Swap waits (W7): F_SWAP_TARGET handoffs that context-switched
+    // directly to the wakee vs falling back to the queue path (wakee not
+    // InWait, object already woken, etc.).
+    DirectSwitch = 46,
+    DirectSwitchMiss = 47,
+
+    TotalMetricTypes = 48,
 }
 
 impl MetricType {
@@ -182,6 +188,8 @@ impl MetricType {
             MetricType::PlacementQueueGlobal => "placement_queue_global",
             MetricType::WaitFastPath => "wait_fast_path",
             MetricType::WaitPaused => "wait_paused",
+            MetricType::DirectSwitch => "direct_switch",
+            MetricType::DirectSwitchMiss => "direct_switch_miss",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }

@@ -219,6 +219,43 @@ impl SysObject {
         }
     }
 
+    // W7: wake(this_cpu = true), but the first InWait waiting thread is
+    // claimed for a direct switch instead of having its resume job posted
+    // (see Thread::wake_by_object_for_switch); any remaining waiting
+    // threads are woken normally. Returns the claimed thread, which the
+    // caller MUST switch to or release.
+    pub fn wake_for_switch(&self) -> Option<Arc<super::process::Thread>> {
+        self.wake_counter.fetch_add(1, Ordering::AcqRel);
+        let prev = self.wake_queue_ptr_guard.swap(true, Ordering::AcqRel);
+        if prev {
+            self.wake_pending.store(true, Ordering::Release);
+            return None;
+        }
+
+        if self.is_woken() {
+            // Already on the wake queue.
+            self.wake_queue_ptr_guard.store(false, Ordering::Release);
+            return None;
+        }
+
+        self.wake_queue_ptr_guard.store(false, Ordering::Release);
+
+        let threads_and_handles = self.take_waiting_threads();
+        let mut claimed: Option<Arc<super::process::Thread>> = None;
+        for (_, (thread, handle)) in threads_and_handles {
+            if let Some(thread) = thread.upgrade() {
+                if claimed.is_none() {
+                    // A failed claim leaves the same state as wake_by_object
+                    // on a non-InWait thread (waker recorded, nothing posted).
+                    claimed = thread.wake_by_object_for_switch(handle);
+                } else {
+                    thread.wake_by_object(handle, false);
+                }
+            }
+        }
+        claimed
+    }
+
     pub fn wake_count(&self) -> u64 {
         self.wake_counter.load(Ordering::Acquire)
     }

@@ -18,7 +18,7 @@ changes applied, uncommitted).
 | S4 | Preempted threads are re-queued to "first idle CPU by index", not their last CPU; `last_cpu` field exists but is never written ⇒ constant migrations, cold caches/TLBs — **done, Round 3** (52 % of placements now land on the warm CPU; timer IRQs −26 %; bench-neutral otherwise) | perf | unquantified, likely large | small–medium |
 | S5 | xsave/xrstor (full RFBM=~0) on every uspace IRQ and every uspace #PF, even when the same thread resumes on the same CPU (the common case) | perf | ~500–1000 cyc + 2×~1 KB memory traffic per IRQ | small once S1 lands |
 | S6 | Every demand page fault costs the full preempt/deschedule machinery | perf | ~2–5 µs per minor fault | medium |
-| S7 | `swap` (IPC handoff) round-trips through the job queue instead of switching threads directly | perf | queue + locks + latency per message | large |
+| S7 | `swap` (IPC handoff) round-trips through the job queue instead of switching threads directly — **done, Round 7** (claim + direct switch_to; sys-io stays wake+placement by measurement) | perf | queue + locks + latency per message | large |
 | S8 | `slow_swapgs()`: 2–3 rdmsr on every IRQ and #PF entry — **done, Round 1** (see the GS-model correction there) | perf | ~200–500 cyc per IRQ | small |
 | S9 | Vector 72 is registered with irqnum 71 (`naked_irq_handler!(irq_handler_72, 71)`) ⇒ devices on vector 72 wake the wrong waiter — **fixed, Round 1** | **bug** | correctness | trivial |
 | S10 | MXCSR / x87 CW are not preserved across blocking syscalls (pause/resume skips FPU entirely) ⇒ another thread's FP env can leak in — **fixed, Round 4** (saved/restored in pause/resume; systest coverage added) | **bug** (latent) | correctness | small |
@@ -575,7 +575,7 @@ fixed shootdown path) all PASS; idle watchdog-quiet; zero
 
 ## Round 6 (done 2026-07-17): roadmap step 7 (part 1) — W6b: no CR3 switch on syscalls/preempts (S2 part 2)
 
-Uncommitted, on top of Round 5 (aad92a5).
+Committed as 4f4887e, on top of Round 5 (aad92a5).
 
 ### What was done
 
@@ -660,6 +660,140 @@ any before), possibly W6b-related; **watch in future rounds**.
 - S15 note: syscalls now run with user memory mapped — SMEP/SMAP (S15)
   gains relevance as defense-in-depth for the kernel-touches-user-memory
   bug class (it was already the case for IRQs).
+
+---
+
+## Round 7 (done 2026-07-18): roadmap step 8 — W7: direct-switch swap (S7)
+
+Uncommitted, on top of Round 6 (4f4887e).
+
+### What was done
+
+A swap wait (`F_SWAP_TARGET`) now *claims* an InWait wakee and
+context-switches straight to it — no queue round trip, no sched-loop
+iteration, no pause/resume pair through the per-CPU kernel stack:
+
+1. **Claim protocol** (`*_for_switch` wake variants): under the wakee's
+   status lock, `InWait → Runnable` *without posting its resume job* —
+   the claimer owns the resume. `SysObject::wake_for_switch` →
+   `Thread::wake_by_object_for_switch` (object/channel wakes),
+   `Thread::post_wake_for_switch` (direct thread-handle wakes),
+   `shared::try_wake_for_switch`, `sys_cpu::do_wake_for_switch`. Every
+   non-claimable state (thread running, object already woken, Created,
+   dead) falls back to byte-identical today's behavior; error paths
+   release the claim (`release_switch_claim` posts the job as the queue
+   path would have). A non-blocking IO-manager poll (`timeout == 0` +
+   CAP_IO_MANAGER) keeps its never-deschedules semantics: claim released,
+   no switch.
+2. **The switch** (`TCB::switch_to` + `syscall_switch_asm`):
+   syscall_pause_asm's save half + syscall_resume_asm's install half with
+   no sched-stack bounce; `gs:[40]` (kernel RSP) untouched. FP env
+   (S10), CR3 (`install_page_table`, no-op same-process), stats and the
+   preemption-timer check mirror pause()/resume() exactly. Kernel-mode
+   IRQs can fire anywhere in the window: they never preempt and never
+   read `gs:[32]`, so the non-atomic TCB/RSP update is safe (same
+   precedent as syscall_resume_asm).
+3. **Park-from-the-other-side** (`finish_direct_switch`): the switcher's
+   own `on_thread_paused()` cannot run in its own context — it runs from
+   the *wakee's* context right after the switch (Linux
+   `finish_task_switch` pattern), via a per-CPU slot at `gs:[72]` in the
+   GS struct (Arc::into_raw pointer, same idiom as the `gs:[64]` CR3
+   shadow — no MAX_CPUS static array, single-mov access, no false
+   sharing). Hooked at both emergence sites (`wait()` after pause,
+   `wait_and_switch()` after switch). Ordering
+   guarantee identical to the queue path: status flips to InWait only
+   after the context is fully saved, by the next code the CPU runs;
+   wake-vs-park races resolve exactly as today (pending wakes → the hook
+   re-posts immediately).
+4. **The load-bearing refactor**: the kernel-stack resume frames
+   (`do_start`/`resume_in_kernel`/`resume_in_userspace` and the TCB
+   epilogues incl. `thread_off_cpu_reason`'s stats stop) no longer
+   assume the thread they resumed is the thread that comes off-CPU — the
+   TOCR is applied to `gs:[32]`'s owner (`off_cpu_current()`), because a
+   direct-switch chain can leave *any* thread's TOCR in any frame. This
+   is what makes handoff chains (A→B→C, C preempted/exits into A's
+   resume frame) correct, including kills: a claimed thread that gets
+   killed simply emerges in `wait()`'s Killed branch and dies normally.
+5. Metrics: `direct_switch` (46) / `direct_switch_miss` (47).
+
+### Results
+
+**Direct microbenchmark (added on request): systest `bench_thread_swap`**
+— two threads ping-pong via `SysCpu::wait(swap_target = peer)`, 100K
+roundtrips, exact lockstep (waits == roundtrips, ~100 % direct-switch
+engagement). Same systest binary, kernel A/B on the same rig:
+
+| kernel | ns/roundtrip (3 runs) | ns/handoff |
+|---|---|---|
+| stock 4f4887e | 1193 / 1208 / 1237 | 596 / 604 / 618 |
+| W7 | **920 / 926 / 940** | **460 / 463 / 470** |
+
+**−23 % per roundtrip; ~140 ns saved per handoff.** Net of raw syscall
+entry/exit (test_syscall ≈ 171 ns), the kernel handoff machinery went
+~430 → ~290 ns (−33 %): the queue round trip, the sched-loop iteration
+and the kernel-stack pause/resume pair are gone. The S7 "sub-µs kernel
+cost per handoff" target is met with margin. (The bench's first,
+count-based protocol deadlocked by design — a wait consumes ALL pending
+wakes, so coalesced wakes starve a later wait; the committed version is
+condition-checked token passing. Same semantics on both kernels; worth
+knowing when writing swap-based protocols.)
+
+Macro context: same-session baseline (w7before, at 4f4887e). All test
+suites pass (release systest ×3, now 72 PASS lines — the new ping test +
+bench_thread_swap — tokio, mio).
+
+- **Macro benches: flat.** RR 130.3/144.4/178.4 vs 131.4/144.7/169.7
+  baseline (best-of-boot −1%, within today's steal noise; a standalone
+  quiet-window run on the W7 kernel hit **RR 104.1 µs**, the best single
+  observation ever on this rig, but quiet windows are not attributable);
+  #PF bench 6361 vs 6403 ns; FS/hot-cache/liveness unchanged.
+- **Engagement is workload-shaped**: systest = ~98.6K direct switches
+  per run (moto-ipc `sync.rs` RPC — stdio pipes, channel tests — already
+  passes a swap target); rnetbench = **~22 per run**: the io_channel net
+  runtime never used F_SWAP_TARGET at all.
+- io_channel `test_ping_pong` 50.3–52.8 µs and `set_nodelay` IO latency
+  67.5–69.0 µs: identical before/after — the swap-heavy in-VM paths got
+  the mechanism without regression.
+
+### The negative result: swap ≠ right call for sys-io
+
+Teaching the net runtime's io-thread park path to swap to sys-io
+(replacing its `wake_driver()`+wait pair) was **measured negative**:
+`set_nodelay` 68.0/68.2/68.1 → 78.3/80.1/79.9 µs (+16%, tight bands).
+The direct handoff pulls sys-io onto the *client's* CPU and off its warm
+one — for a heavyweight multiplexer, W2 warm-CPU placement beats the
+handoff (the R3 lesson from the other side: placement matters more than
+queue latency for big-working-set threads). Kept instead: the park path
+folds the wake into the wait syscall as a **WAKE** target (one syscall
+instead of two, normal placement) — `set_nodelay` back to 67.5/67.9,
+RR/throughput flat, and the fold saves ~200K wake syscalls per
+rnetbench run. The rule of thumb recorded: **direct switch fits
+lightweight dedicated peers (sync RPC); wake+warm-placement fits
+heavyweight shared servers (sys-io).**
+
+(A sporadic ms-class `set_nodelay` outlier (50 ms once in 9 runs) is a
+pre-existing class — R1/R2-era logs show 0.76/0.93/5.7 ms instances —
+not attributable to this round; watching.)
+
+Verified: release systest ×9 (3 vmbench + 6 stability, 71 PASS each) +
+tokio + mio; debug systest ×6 → **6 clean (71 PASS each)** + tokio, with
+every switch-path assert live (validate_gs/validate_rsp/in_syscall/status
+panics) across ~600K direct switches; zero panic/"invalid rsp"/watchdog
+lines in debug serial; **Round 6's test_peek hang did not recur in any of
+the 6 debug runs**.
+
+### Consequences for the roadmap
+
+- The swap syscall is now an honest sub-µs CPU handoff; per-message
+  moto-ipc sync RPC gets it automatically. Candidates for adopting it:
+  the app-thread ↔ io-thread in-process wakes in io_channel
+  (`send_receive`/`wait_for_resp` — both peers lightweight), rush/stdio
+  relay paths.
+- W6c (PCID) would remove the remaining cross-process CR3 wipe on the
+  claimed-switch path; re-measure moto-ipc RPC first.
+- The `off_cpu_current()` identity model is a prerequisite worth keeping
+  in mind for any future scheduling surgery: kernel-stack frames are
+  per-CPU continuations, not per-thread ones.
 
 ---
 
@@ -1008,6 +1142,8 @@ which the FS/llvm work showed matter.
 
 ### S7 — swap should be a direct switch
 
+**Done in Round 7 — see above.**
+
 Where: F_SWAP_TARGET in sys_cpu.rs:221 → `do_wake(this_cpu=true)` + full
 `wait()`.
 
@@ -1178,6 +1314,9 @@ Phase B — TLB/syscall cost (S2), sequenced:
    The user-copy software walks remain: direct copies need #PF fixup
    machinery (user pages are lazily mapped) — future round.
 8. **W7: direct-switch swap** (after A+B shrink the path; biggest surgery).
+   **Done — see "Round 7" above** (claim + switch_to + finish hook;
+   engaged by moto-ipc sync RPC; sys-io park path folds wake into wait
+   as a WAKE target — swap-to-sys-io measured negative, placement wins).
 9. **W6c: PCID** — only if post-W6b profiles still show user-TLB pain.
 10. **W8/S13: wait-path allocation elimination** (can run parallel to B).
 
@@ -1202,7 +1341,9 @@ Baselines to capture before Phase A (all on the qemu/KVM 4-CPU rig):
   systest or crossbench).
 - **IPC swap RTT**: two threads/processes ping-pong via swap — targets
   S3/S7; today's proxy: FS smoke (~15 µs/msg machinery), rnetbench RR
-  (152.6 µs incl. network stack).
+  (152.6 µs incl. network stack). **Added in Round 7:
+  systest `bench_thread_swap` (threads.rs) — measured the W7 A/B
+  directly (1208 → 926 ns/roundtrip).**
 - **Preempt cost**: busy spin thread; measure achieved work/s with tick at
   100 Hz vs the same with device IRQ storm directed at its CPU (S1).
 - **Fault cost**: `test_lazy_memory_map`-style first-touch over N pages,

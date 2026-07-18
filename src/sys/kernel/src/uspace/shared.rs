@@ -54,6 +54,27 @@ impl Shared {
         Err(())
     }
 
+    // W7: wake_other(wakee_thread = NONE, this_cpu = true), but claiming
+    // the peer's waiting thread for a direct switch (see
+    // SysObject::wake_for_switch). Ok(None) means the peer was woken (or
+    // had nothing to wake) without a claimable thread.
+    fn wake_other_for_switch(
+        &self,
+        wakee_id: u64,
+    ) -> Result<Option<Arc<super::process::Thread>>, ()> {
+        if let Some(sharer) = self.sharer.upgrade() {
+            if sharer.id() == wakee_id {
+                let lock = self.sharee.lock(line!());
+                if let Some(sharee) = lock.upgrade() {
+                    return Ok(sharee.wake_for_switch());
+                }
+            } else {
+                return Ok(sharer.wake_for_switch());
+            }
+        }
+        Err(())
+    }
+
     fn on_sharer_dropped(&self) {
         let lock = self.sharee.lock(line!());
         if let Some(sharee) = lock.upgrade() {
@@ -232,6 +253,18 @@ pub(super) fn try_wake(
 ) -> Result<(), ()> {
     if let Some(shared) = super::sysobject::object_from_sysobject::<Shared>(maybe_shared) {
         shared.wake_other(maybe_shared.id(), wakee_thread, this_cpu)
+    } else {
+        Err(())
+    }
+}
+
+/// W7: try_wake(wakee_thread = NONE, this_cpu = true), claiming the woken
+/// thread for a direct switch when possible.
+pub(super) fn try_wake_for_switch(
+    maybe_shared: &Arc<SysObject>,
+) -> Result<Option<Arc<super::process::Thread>>, ()> {
+    if let Some(shared) = super::sysobject::object_from_sysobject::<Shared>(maybe_shared) {
+        shared.wake_other_for_switch(maybe_shared.id())
     } else {
         Err(())
     }

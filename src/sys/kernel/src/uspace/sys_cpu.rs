@@ -239,8 +239,22 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
         return ResultBuilder::invalid_argument();
     }
 
+    // W7: a swap wake (F_SWAP_TARGET) tries to *claim* the wakee for a
+    // direct context switch instead of posting its resume job on this CPU.
+    let mut switch_to: Option<alloc::sync::Arc<super::process::Thread>> = None;
     if wake_target != SysHandle::NONE {
-        if let Err(err) = do_wake(curr, wake_target, SysHandle::NONE, wake_this_cpu) {
+        let wake_result = if wake_this_cpu {
+            match do_wake_for_switch(curr, wake_target) {
+                Ok(claimed) => {
+                    switch_to = claimed;
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            do_wake(curr, wake_target, SysHandle::NONE, false)
+        };
+        if let Err(err) = wake_result {
             match err {
                 moto_rt::E_BAD_HANDLE => return ResultBuilder::bad_handle(wake_target),
                 _ => return ResultBuilder::result(err),
@@ -250,7 +264,37 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
 
     let result = process_wait_handles(curr, args, next_arg);
     if !result.is_ok() {
+        if let Some(next) = switch_to {
+            next.release_switch_claim();
+        }
         return result;
+    }
+
+    if let Some(next) = switch_to {
+        if (timeout == 0) && (curr.capabilities() & CAP_IO_MANAGER != 0) {
+            // A non-blocking IO-manager poll never deschedules (see the
+            // take_wakers branch below) — keep that: release the claim,
+            // which posts the wakee's job on this CPU as the queue path
+            // would have.
+            next.release_switch_claim();
+        } else {
+            // Direct switch: hand the CPU to the wakee right now — no
+            // queue round trip, no sched-loop iteration, no pause/resume
+            // pair. The swap semantic ("hand the CPU over") makes this the
+            // real yield; if we have pending wakes, our park bookkeeping
+            // re-posts us immediately (see on_thread_paused via
+            // finish_direct_switch).
+            crate::xray::stats::kernel_stats()
+                .adjust_metric(crate::xray::stats::MetricType::DirectSwitch, 1);
+            if timeout != u64::MAX {
+                curr.new_timeout(crate::arch::time::Instant::from_u64(timeout));
+            }
+            let (timed_out, wakers) = curr.wait_and_switch(next);
+            return process_wake_handles(curr, args, next_arg, wakers, timed_out);
+        }
+    } else if wake_this_cpu {
+        crate::xray::stats::kernel_stats()
+            .adjust_metric(crate::xray::stats::MetricType::DirectSwitchMiss, 1);
     }
 
     // W5 fast path: wait is "at least a yield()" — but when wakes are
@@ -285,6 +329,34 @@ pub(super) fn sys_wait_impl(curr: &super::process::Thread, args: &SyscallArgs) -
     };
 
     process_wake_handles(curr, args, next_arg, wakers, timed_out)
+}
+
+// W7: do_wake(waker, wake_target, SysHandle::NONE, true), but claiming the
+// wakee for a direct switch when it is InWait. Ok(Some(_)) = claimed (the
+// caller MUST switch to it or release it); Ok(None) = woken (or nothing to
+// wake) via the normal paths.
+fn do_wake_for_switch(
+    waker: &super::process::Thread,
+    wake_target: SysHandle,
+) -> Result<Option<alloc::sync::Arc<super::process::Thread>>, ErrorCode> {
+    if let Some(obj) = waker.owner().get_object(&wake_target) {
+        if let Ok(claimed) = super::shared::try_wake_for_switch(&obj.sys_object) {
+            return Ok(claimed);
+        }
+    }
+
+    if let Some(thread) =
+        super::sysobject::object_from_handle::<super::process::Thread>(&waker.owner(), wake_target)
+    {
+        Ok(thread.post_wake_for_switch())
+    } else {
+        log::debug!(
+            "{}: waker 0x{:x} not found",
+            waker.debug_name(),
+            wake_target.as_u64()
+        );
+        Err(moto_rt::E_BAD_HANDLE)
+    }
 }
 
 pub(super) fn do_wake(

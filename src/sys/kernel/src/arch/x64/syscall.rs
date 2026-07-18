@@ -307,10 +307,14 @@ impl ThreadControlBlock {
             )
         };
 
-        self.owner()
-            .trace("spawn_usermode_thread back", self.syscall_rsp, 0);
         crate::util::full_fence(); // The kernel does a #PF without this.
-        self.thread_off_cpu_reason(ret, maybe_addr)
+        // W7: the thread that went off-CPU may not be `self` — a direct
+        // switch chain can leave a different thread's TOCR in this frame.
+        let off_tcb = unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
+        off_tcb
+            .owner()
+            .trace("spawn_usermode_thread back", off_tcb.syscall_rsp, 0);
+        off_tcb.thread_off_cpu_reason(ret, maybe_addr)
     }
 
     #[inline(never)]
@@ -432,8 +436,11 @@ impl ThreadControlBlock {
         };
 
         crate::util::full_fence();
-        self.owner().trace("tcb::resume ret", ret, maybe_addr);
-        self.thread_off_cpu_reason(ret, maybe_addr)
+        // W7: see spawn_usermode_thread — the off-CPU thread is gs:[32]'s
+        // owner, not necessarily `self`.
+        let off_tcb = unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
+        off_tcb.owner().trace("tcb::resume ret", ret, maybe_addr);
+        off_tcb.thread_off_cpu_reason(ret, maybe_addr)
     }
 
     // Called from IRQ.
@@ -525,13 +532,69 @@ impl ThreadControlBlock {
         };
 
         crate::util::full_fence();
-        self.owner()
+        // W7: see spawn_usermode_thread — the off-CPU thread is gs:[32]'s
+        // owner, not necessarily `self`.
+        let off_tcb = unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
+        off_tcb
+            .owner()
             .trace("tcb::resume_preempted_thread ret", ret, maybe_addr);
-        self.thread_off_cpu_reason(ret, maybe_addr)
+        off_tcb.thread_off_cpu_reason(ret, maybe_addr)
     }
 
     unsafe fn current_tcb() -> &'static mut Self {
         Self::from_addr(super::GS::current_tcb())
+    }
+
+    // W7: the thread whose kernel context this CPU last saved. After a
+    // resume-type call (spawn/resume/resume_preempted) returns to the
+    // kernel stack, gs:[32] identifies the thread that actually went
+    // off-CPU — with direct switches (switch_to) it may not be the thread
+    // the frame resumed.
+    pub fn off_cpu_thread() -> alloc::sync::Weak<Thread> {
+        unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }
+            .unwrap()
+            .owner()
+            .get_weak()
+    }
+
+    // W7: direct switch — save this thread's kernel context exactly like
+    // pause() and install `next`'s exactly like resume(), without bouncing
+    // through the sched-loop stack. `next` must have been claimed via a
+    // *_for_switch wake: Runnable, off-CPU, parked in wait()'s pause,
+    // with no resume job posted anywhere. The caller
+    // (wait_and_switch) parks `self` from the other side of the switch
+    // (finish_direct_switch), mirroring how on_thread_paused() runs after
+    // pause() has saved the context.
+    #[inline(never)]
+    pub fn switch_to(&self, next: &ThreadControlBlock) {
+        // Mirror pause() for self...
+        self.owner().process_stats.stop_cpu_usage_kernel();
+        debug_assert!(self.in_syscall.load(Ordering::Relaxed));
+        self.owner().trace("tcb::switch_to", next.to_addr(), 0);
+        self.save_fp_env();
+        // ...and resume() for next.
+        next.owner().process_stats.start_cpu_usage_kernel();
+        crate::sched::ensure_preemption_timer();
+        next.validate_rsp();
+        next.check_sti();
+        debug_assert!(next.in_syscall.load(Ordering::Relaxed));
+        super::install_page_table(next.user_page_table);
+        next.restore_fp_env();
+
+        crate::util::full_fence();
+        self.validate_gs();
+        unsafe {
+            asm!(
+                "call rax",
+                in("rax") syscall_switch_asm,
+                in("rdi") next.to_addr(),
+                clobber_abi("C"),
+            )
+        };
+        // Someone resumed us (possibly on another CPU, possibly via a
+        // direct switch of their own).
+        crate::util::full_fence();
+        self.validate_gs();
     }
 
     fn set_fs(&self) {
@@ -797,6 +860,34 @@ unsafe extern "C" fn syscall_resume_asm() {
         // gs:[32] holds TCB; TCB[32] holds user RSP; gs:[40] holds kernel RSP.
         "
         mov gs:[40], rsp
+        mov gs:[32], rdi
+        mov rsp, [rdi + 32]
+        ",
+        pop_preserved_registers!(),
+        "ret",
+    );
+}
+
+// W7: syscall_pause_asm's save half + syscall_resume_asm's install half,
+// with no sched-loop stack bounce in between. gs:[40] (the kernel RSP) is
+// deliberately untouched: the kernel stack keeps whatever resume() frame it
+// had, and when the CPU eventually returns to it the TOCR is applied to the
+// *current* gs:[32] owner (see off_cpu_thread), not the thread that frame
+// resumed.
+#[unsafe(naked)]
+unsafe extern "C" fn syscall_switch_asm() {
+    // rdi = target TCB.
+    naked_asm!(
+        push_preserved_registers!(),
+        // Save this thread's syscall RSP in its TCB (gs:[32])...
+        "
+        mov rax, gs:[32]
+        mov [rax + 32], rsp
+        ",
+        // ...install the target TCB and its syscall RSP. Kernel-mode IRQs
+        // in this window are harmless: they never preempt and never read
+        // gs:[32] (see irq_handler_inner).
+        "
         mov gs:[32], rdi
         mov rsp, [rdi + 32]
         ",

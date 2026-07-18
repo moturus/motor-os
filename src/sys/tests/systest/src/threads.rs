@@ -269,6 +269,73 @@ fn test_wait_wake_futex() {
     println!("-- test_wait_wake_futex PASS");
 }
 
+/// Measures the swap-wait handoff: two threads ping-pong via
+/// SysCpu::wait(swap_target = peer), i.e. the kernel's F_SWAP_TARGET
+/// path (wake the peer + deschedule self in one syscall). Each
+/// iteration is one roundtrip = two handoffs.
+fn bench_thread_swap() {
+    #[cfg(debug_assertions)]
+    const NUM_ITERS: u32 = 10_000;
+    #[cfg(not(debug_assertions))]
+    const NUM_ITERS: u32 = 100_000;
+
+    let peer_handle: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let main_handle: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    // Progress is condition-checked via the token (main sets odd = ping i,
+    // peer sets even = pong i); wakes only carry it. Wake counts cannot be
+    // relied on: a wait consumes ALL pending wakes at once, so a
+    // count-based ping-pong loses coalesced wakes and deadlocks.
+    let token: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    main_handle.store(moto_sys::current_thread().as_u64(), Ordering::Release);
+
+    let peer = {
+        let peer_handle = peer_handle.clone();
+        let main_handle = main_handle.clone();
+        let token = token.clone();
+        std::thread::spawn(move || {
+            let main_h = SysHandle::from(main_handle.load(Ordering::Acquire));
+            peer_handle.store(moto_sys::current_thread().as_u64(), Ordering::Release);
+            for i in 0..NUM_ITERS {
+                while token.load(Ordering::Acquire) != 2 * i + 1 {
+                    moto_sys::SysCpu::wait(&mut [], main_h, SysHandle::NONE, None).unwrap();
+                }
+                token.store(2 * i + 2, Ordering::Release);
+            }
+            // The final pong is not followed by another swap-wait; wake
+            // main explicitly so it cannot park on its last check.
+            moto_sys::SysCpu::wake(main_h).unwrap();
+        })
+    };
+
+    // Wait for the peer to publish its handle.
+    while peer_handle.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let peer_h = SysHandle::from(peer_handle.load(Ordering::Acquire));
+
+    let mut waits = 0_u64;
+    let start = std::time::Instant::now();
+    for i in 0..NUM_ITERS {
+        token.store(2 * i + 1, Ordering::Release);
+        while token.load(Ordering::Acquire) != 2 * i + 2 {
+            moto_sys::SysCpu::wait(&mut [], peer_h, SysHandle::NONE, None).unwrap();
+            waits += 1;
+        }
+    }
+    let elapsed = start.elapsed();
+
+    peer.join().unwrap();
+
+    println!(
+        "bench_thread_swap PASS: {} roundtrips ({} waits) in {:?}; {} ns/roundtrip, {} ns/handoff",
+        NUM_ITERS,
+        waits,
+        elapsed,
+        elapsed.as_nanos() as u64 / (NUM_ITERS as u64),
+        elapsed.as_nanos() as u64 / (2 * NUM_ITERS as u64),
+    );
+}
+
 pub fn run_all_tests() {
     test_thread();
     test_thread_preemption();
@@ -277,5 +344,6 @@ pub fn run_all_tests() {
     test_futex_timeout();
     test_wait_wake();
     test_wait_wake_futex();
+    bench_thread_swap();
     println!("threads: ALL PASS");
 }
