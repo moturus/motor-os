@@ -695,12 +695,16 @@ impl NetChannel {
                     continue;
                 }
 
-                self.wake_driver(); // TODO: be smarter.
-
+                // One syscall instead of wake_driver() + wait: fold the
+                // sys-io wake into the wait. Deliberately a WAKE target,
+                // not a SWAP target: a direct switch would pull sys-io
+                // onto this CPU, off its warm one — measured +11 usec on
+                // the set_nodelay IO latency (sys-io is a heavyweight
+                // multiplexer; warm-CPU placement beats the handoff).
                 let _ = moto_sys::SysCpu::wait(
                     &mut [self.conn.server_handle()],
                     SysHandle::NONE,
-                    SysHandle::NONE,
+                    self.conn.server_handle(),
                     None,
                 );
             }
