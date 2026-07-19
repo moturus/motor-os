@@ -77,6 +77,10 @@ fn input_listener(prog: String) {
     loop {
         let mut input = [0_u8; 16];
         let sz = std::io::stdin().read(&mut input).unwrap();
+        if sz == 0 {
+            // EOF: stdin is gone; no ^C can ever arrive.
+            return;
+        }
         for b in &input[0..sz] {
             if *b == 3 {
                 println!("\n{prog}: caught ^C: exiting.");

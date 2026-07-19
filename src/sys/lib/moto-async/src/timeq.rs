@@ -33,60 +33,60 @@ impl Timer {
 
 struct QueueEntry<T> {
     at: Instant,
+    // Insertion order, the ordering tie-break: the payload (a waker) has
+    // no useful order of its own.
+    seq: u64,
     what: T,
     // Cleared when the timer is cancelled; such entries are discarded rather than
     // fired. Not part of the ordering below.
     alive: Rc<Cell<bool>>,
 }
 
-impl<T: PartialEq> PartialEq for QueueEntry<T> {
+impl<T> PartialEq for QueueEntry<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.at == other.at && self.what == other.what
+        self.at == other.at && self.seq == other.seq
     }
 }
 
-impl<T: Eq> Eq for QueueEntry<T> {}
+impl<T> Eq for QueueEntry<T> {}
 
-impl<T: Ord> PartialOrd for QueueEntry<T> {
+impl<T> PartialOrd for QueueEntry<T> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T: Ord> Ord for QueueEntry<T> {
+impl<T> Ord for QueueEntry<T> {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        if self.at < other.at {
-            return core::cmp::Ordering::Less;
-        }
-
-        if self.at > other.at {
-            return core::cmp::Ordering::Greater;
-        }
-
-        self.what.cmp(&other.what)
+        (self.at, self.seq).cmp(&(other.at, other.seq))
     }
 }
 
-pub struct TimeQ<T: Eq + Ord> {
+pub struct TimeQ<T> {
     // BinaryHeap is a max heap, we need a min heap.
     inner: BinaryHeap<core::cmp::Reverse<QueueEntry<T>>>,
+    next_seq: u64,
 }
 
-impl<T: Eq + Ord> Default for TimeQ<T> {
+impl<T> Default for TimeQ<T> {
     fn default() -> Self {
         Self {
             inner: BinaryHeap::new(),
+            next_seq: 0,
         }
     }
 }
 
-impl<T: Eq + Ord> TimeQ<T> {
+impl<T> TimeQ<T> {
     /// Queue a timer firing at `at`, returning a handle to cancel it (e.g. from
     /// the registering future's `Drop`).
     pub fn add_at(&mut self, at: Instant, what: T) -> Timer {
         let alive = Rc::new(Cell::new(true));
+        let seq = self.next_seq;
+        self.next_seq += 1;
         self.inner.push(core::cmp::Reverse(QueueEntry {
             at,
+            seq,
             what,
             alive: alive.clone(),
         }));
@@ -131,11 +131,15 @@ impl<T: Eq + Ord> TimeQ<T> {
 fn simple_ord() {
     let e1 = QueueEntry {
         at: Instant::now(),
+        seq: 0,
         what: 1,
+        alive: Rc::new(Cell::new(true)),
     };
     let e2 = QueueEntry {
         at: Instant::now() + core::time::Duration::from_secs(1),
+        seq: 1,
         what: 2,
+        alive: Rc::new(Cell::new(true)),
     };
     assert!(e1 < e2);
 }

@@ -1,21 +1,32 @@
-use core::cell::Cell;
+extern crate alloc;
+
+use alloc::collections::VecDeque;
+use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::LocalWaker;
 use core::task::{Context, Poll};
 
-#[derive(Default)]
-enum Waiter {
-    #[default]
-    None,
-    Waiting,
-    Waker(LocalWaker),
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct WaiterId(u64);
+
+struct Waiter {
+    id: WaiterId,
+    fired: bool,
+    waker: Option<LocalWaker>,
 }
 
 /// A single-threaded, local version of tokio::sync::Notify.
+///
+/// Any number of concurrent waiters is allowed. `notify_one` wakes the
+/// oldest un-notified waiter, or stores a single permit if there is
+/// none; `notify_all` wakes every current waiter and stores nothing.
+/// A notified-but-cancelled waiter passes its notification on (drop
+/// re-dispatch), so cancellation cannot lose a notify_one.
 pub struct LocalNotify {
     notified: Cell<bool>,
-    waiter: Cell<Waiter>,
+    waiters: RefCell<VecDeque<Waiter>>,
+    next_id: Cell<u64>,
 }
 
 impl Default for LocalNotify {
@@ -28,65 +39,89 @@ impl LocalNotify {
     pub const fn new() -> Self {
         Self {
             notified: Cell::new(false),
-            waiter: Cell::new(Waiter::None),
+            waiters: RefCell::new(VecDeque::new()),
+            next_id: Cell::new(0),
         }
     }
 
-    /// Triggers the notification and wakes the waiting task (if any).
+    fn fire(waiter: &mut Waiter) {
+        waiter.fired = true;
+        if let Some(waker) = waiter.waker.take() {
+            waker.wake();
+        }
+    }
+
+    /// Wakes the oldest waiter, or stores a permit for the next one.
     pub fn notify_one(&self) {
-        self.notified.set(true);
-        match self.waiter.take() {
-            Waiter::Waker(waker) => {
-                waker.wake();
-                self.waiter.set(Waiter::Waiting);
-            }
-            Waiter::Waiting => {
-                self.waiter.set(Waiter::Waiting);
-            }
-            Waiter::None => {}
+        if let Some(waiter) = self.waiters.borrow_mut().iter_mut().find(|w| !w.fired) {
+            Self::fire(waiter);
+        } else {
+            self.notified.set(true);
         }
     }
 
-    /// Returns a future that resolves when notify_one() is called.
-    ///
-    /// # Panics
-    /// Panics if multiple `NotifiedFuture`s for this `LocalNotify` are alive concurrently.
-    pub fn notified(&self) -> NotifiedFuture<'_> {
-        let prev = self.waiter.replace(Waiter::Waiting);
-        if !matches!(prev, Waiter::None) {
-            self.waiter.set(prev); // restore state before panic
-            panic!("Multiple NotifiedFutures for the same LocalNotify are not supported.");
+    /// Wakes all current waiters. No permit is stored: a waiter that
+    /// arrives later needs its own notification.
+    pub fn notify_all(&self) {
+        for waiter in self.waiters.borrow_mut().iter_mut() {
+            Self::fire(waiter);
         }
-        NotifiedFuture { notify: self }
+    }
+
+    /// Returns a future that resolves when notified. The waiter queues
+    /// at creation time (not first poll), so notification order follows
+    /// notified() call order.
+    pub fn notified(&self) -> NotifiedFuture<'_> {
+        let id = WaiterId(self.next_id.get());
+        self.next_id.set(id.0 + 1);
+        self.waiters.borrow_mut().push_back(Waiter {
+            id,
+            fired: false,
+            waker: None,
+        });
+        NotifiedFuture { notify: self, id }
     }
 }
 
 /// The Future returned by `notified()`.
 pub struct NotifiedFuture<'a> {
     notify: &'a LocalNotify,
+    id: WaiterId,
 }
 
-impl<'a> Drop for NotifiedFuture<'a> {
+impl Drop for NotifiedFuture<'_> {
     fn drop(&mut self) {
-        self.notify.waiter.set(Waiter::None);
+        let mut waiters = self.notify.waiters.borrow_mut();
+        let Some(pos) = waiters.iter().position(|w| w.id == self.id) else {
+            return; // Completed; nothing queued.
+        };
+        let waiter = waiters.remove(pos).unwrap();
+        if waiter.fired {
+            // Cancelled after being picked: re-dispatch.
+            if let Some(next) = waiters.iter_mut().find(|w| !w.fired) {
+                LocalNotify::fire(next);
+            } else {
+                self.notify.notified.set(true);
+            }
+        }
     }
 }
 
-impl<'a> Future for NotifiedFuture<'a> {
+impl Future for NotifiedFuture<'_> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.notify.notified.get() {
-            // We were notified: consume the notification and wake up.
-            self.notify.notified.set(false);
-            Poll::Ready(())
-        } else {
-            // We haven't been notified yet. Store the current task's waker
-            // so `notify_one()` knows who to wake up later.
-            self.notify
-                .waiter
-                .set(Waiter::Waker(cx.local_waker().clone()));
-            Poll::Pending
+        let mut waiters = self.notify.waiters.borrow_mut();
+        let Some(pos) = waiters.iter().position(|w| w.id == self.id) else {
+            return Poll::Ready(()); // Polled again after Ready.
+        };
+
+        if waiters[pos].fired || self.notify.notified.replace(false) {
+            waiters.remove(pos);
+            return Poll::Ready(());
         }
+
+        waiters[pos].waker = Some(cx.local_waker().clone());
+        Poll::Pending
     }
 }

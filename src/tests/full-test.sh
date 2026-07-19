@@ -22,6 +22,9 @@ else
   make -C "$ROOT_DIR" all -j"$(nproc)"
 fi
 
+# A fresh checkout leaves the key group-readable; ssh then silently ignores it.
+chmod 600 "$WD/test.key"
+
 SSH_OPTIONS=(
   -F /dev/null
   -p 2222
@@ -32,6 +35,36 @@ SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
 
 vm_ssh() {
   "${SSH[@]}" "$@"
+}
+
+# Some environments (e.g. a dev host behind qemu user-mode networking) cannot
+# send external ICMP echo at all; probe once so external pings can tolerate it.
+EXTERNAL_ICMP=1
+ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || EXTERNAL_ICMP=0
+
+# Ping an external host: name resolution must always succeed; a missing echo
+# reply is tolerated iff the test host itself has no external ICMP.
+ping_external() {
+  local host="$1"
+  local output
+
+  if output="$(vm_ssh /bin/ping -c 1 "$host" 2>&1)"; then
+    printf '%s\n' "$output"
+    return
+  fi
+  printf '%s\n' "$output"
+  if [ "$EXTERNAL_ICMP" = "0" ]; then
+    case "$output" in
+      # NotConnected covers an AAAA-first DNS answer on a rig with no
+      # IPv6 route (qemu user-mode networking): resolution -- the part
+      # under test -- succeeded, only the echo cannot be delivered.
+      *"Request timeout"* | *"NotConnected"*)
+        echo "NOTE: '$host' resolved; echo reply skipped (host has no external ICMP)"
+        return
+        ;;
+    esac
+  fi
+  fail "ping '$host' failed"
 }
 
 fail() {
@@ -99,7 +132,9 @@ echo ""
 echo ""
 
 
-"$IMG_DIR/run-qemu.sh" &> /tmp/full-test.log &
+# FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
+# for hang forensics); run-qemu.sh passes "$@" through to qemu.
+"$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
 
 # It takes some time to start sshd, especially with a debug build, so we
 # have a large timeout and several retries. And the first "test" is just an empty echo.
@@ -112,7 +147,7 @@ vm_ssh /bin/ping -c 1 localhost
 
 echo "-- DNS resolver integration --"
 vm_ssh /sys/dns-resolver --self-test
-vm_ssh /bin/ping -c 1 google.com
+ping_external google.com
 expect_ping_error does-not-exist.motor.invalid NotFound
 
 udp_sockets="$(vm_ssh /bin/stats get 2 |
@@ -142,7 +177,7 @@ for _ in $(seq 1 20); do
 done
 [ "$resolver_restarted" = "1" ] ||
   fail "dns-resolver did not become ready after restart"
-vm_ssh /bin/ping -c 1 google.com
+ping_external google.com
 
 udp_sockets="$(vm_ssh /bin/stats get 2 |
   awk '$2 == "net.udp_sockets" { print $3 }')"
@@ -150,6 +185,15 @@ udp_sockets="$(vm_ssh /bin/stats get 2 |
   fail "restarted DNS service left $udp_sockets active UDP socket(s)"
 
 vm_ssh sys/tests/systest
+
+# Inherited-stdio relay smoke: a nested rush spawns its child with
+# inherited stdio, so the outer rush's stdin and stdout relay tasks
+# carry both directions; the no-delay tail must not be lost to the
+# child-exit race.
+out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
+[ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
+out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
+[ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"

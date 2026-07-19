@@ -28,8 +28,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::AtomicUsize;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::task::Context;
 use core::task::Poll;
 use core::task::RawWaker;
@@ -61,6 +60,10 @@ fn get_runtime_tls_key() -> moto_rt::tls::Key {
     } else {
         key
     }
+}
+
+pub(crate) fn on_runtime_thread() -> bool {
+    !get_local_runtime_context().is_null()
 }
 
 fn get_local_runtime_context() -> *const LocalRuntimeInner {
@@ -96,11 +99,30 @@ impl TaskId {
     }
 }
 
+// Executor run-state, for wake elision (design 3.4): cross-thread wakes
+// always enqueue, but pay the wake syscall only when the runtime is
+// parked or committing to park.
+const RUN_STATE_POLLING: u32 = 0;
+const RUN_STATE_COMMITTING: u32 = 1;
+const RUN_STATE_PARKED: u32 = 2;
+
+// Wakes issued (syscall) vs elided (runtime awake), process-wide.
+static WAKES_ISSUED: AtomicU64 = AtomicU64::new(0);
+static WAKES_ELIDED: AtomicU64 = AtomicU64::new(0);
+
+pub fn wake_counters() -> (u64, u64) {
+    (
+        WAKES_ISSUED.load(Ordering::Relaxed),
+        WAKES_ELIDED.load(Ordering::Relaxed),
+    )
+}
+
 // This is the waker to use cross-threads.
 // The local waker is just a pointer to TaskId.
 struct MotoWaker {
     // The queue to add task_id upon wake.
     runqueue: Arc<crossbeam::queue::SegQueue<TaskId>>,
+    run_state: Arc<AtomicU32>,
     task_id: TaskId,
     wake_handle: SysHandle, // The handle to call wake() on.
 }
@@ -127,7 +149,16 @@ unsafe fn waker_wake_by_ref(data: *const ()) {
     };
 
     waker.runqueue.push(waker.task_id);
-    let _ = moto_sys::SysCpu::wake(waker.wake_handle);
+    // SC fence pairs with the one in LocalRuntime::wait(): either our
+    // push is visible to the executor's recheck-after-commit, or its
+    // COMMITTING store is visible to the load below and we wake.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    if waker.run_state.load(Ordering::Relaxed) == RUN_STATE_POLLING {
+        WAKES_ELIDED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        WAKES_ISSUED.fetch_add(1, Ordering::Relaxed);
+        let _ = moto_sys::SysCpu::wake(waker.wake_handle);
+    }
 }
 
 unsafe fn waker_drop(data: *const ()) {
@@ -195,8 +226,10 @@ struct LocalRuntimeInner {
     // SysHandle futures.
     sys_handle_futures: RefCell<BTreeMap<SysHandle, VecDeque<Rc<RefCell<SysHandleFutureInner>>>>>,
 
-    // Timers. Can be added to at runtime.
-    timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
+    // Timers. Can be added to at runtime. Hold wakers, not task IDs:
+    // a timer registered under a nested combinator (FuturesUnordered)
+    // must fire the combinator's waker, or the child is never re-polled.
+    timeq: RefCell<crate::timeq::TimeQ<core::task::LocalWaker>>,
 
     // New tasks (from spawn()). As they are added "at runtime",
     // when Self::tasks is borrowed, we need to temporarily
@@ -209,6 +242,12 @@ struct LocalRuntimeInner {
 
     // Task IDs of wakes coming from wakers (!= LocalWaker).
     nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
+
+    run_state: Arc<AtomicU32>,
+
+    // Deferred peer wake (design 3.3): delivered exactly once, folded
+    // into the next sleep syscall or issued if we resume polling.
+    wake_on_sleep: core::cell::Cell<Option<SysHandle>>,
 
     currently_running_task: core::cell::Cell<Option<TaskId>>,
 }
@@ -223,6 +262,8 @@ impl LocalRuntimeInner {
             tasks: Default::default(),
             next_task_id: RefCell::new(1),
             nonlocal_wakes: Default::default(),
+            run_state: Arc::new(AtomicU32::new(RUN_STATE_POLLING)),
+            wake_on_sleep: core::cell::Cell::new(None),
             currently_running_task: Default::default(),
         }
     }
@@ -230,6 +271,7 @@ impl LocalRuntimeInner {
     fn new_waker(&self, task_id: TaskId) -> Waker {
         let moto_waker = Arc::new(MotoWaker {
             runqueue: self.nonlocal_wakes.clone(),
+            run_state: self.run_state.clone(),
             task_id,
             wake_handle: moto_sys::current_thread(),
         });
@@ -284,11 +326,11 @@ impl LocalRuntimeInner {
         self.runqueue.borrow_mut().pop_front()
     }
 
-    fn wait(&self, timeo: Option<Instant>) {
+    fn wait(&self, timeo: Option<Instant>, wake_target: SysHandle) {
         let sys_waiters = self.sys_handle_futures.borrow();
         if sys_waiters.is_empty() {
             core::mem::drop(sys_waiters);
-            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
+            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, wake_target, timeo);
             return;
         }
 
@@ -302,7 +344,7 @@ impl LocalRuntimeInner {
         let result = moto_sys::SysCpu::wait(
             wait_handles.as_mut_slice(),
             SysHandle::NONE,
-            SysHandle::NONE,
+            wake_target,
             timeo,
         );
 
@@ -312,12 +354,15 @@ impl LocalRuntimeInner {
                     if handle.is_none() {
                         break;
                     }
-                    let done_futures = self
-                        .sys_handle_futures
-                        .borrow_mut()
-                        .remove(&handle)
-                        .unwrap();
-                    let mut runqueue = self.runqueue.borrow_mut();
+                    // The kernel queues wakers for signals arriving while
+                    // this thread is awake, so a wait may report a handle
+                    // no future waits on anymore. The signal stays latched
+                    // on the object; there is nothing to deliver.
+                    let Some(done_futures) = self.sys_handle_futures.borrow_mut().remove(&handle)
+                    else {
+                        continue;
+                    };
+                    let mut to_wake = Vec::new();
                     for future in done_futures {
                         let mut inner_future = future.borrow_mut();
                         if inner_future.dropped {
@@ -329,8 +374,11 @@ impl LocalRuntimeInner {
                                 log::debug!("{}: woke ok", inner_future.name());
                             }
                         }
-                        runqueue.push_back(inner_future.task_id);
                         inner_future.result = Some(Ok(()));
+                        to_wake.push(inner_future.waker.clone());
+                    }
+                    for waker in to_wake {
+                        waker.wake();
                     }
                 }
             }
@@ -340,12 +388,13 @@ impl LocalRuntimeInner {
                         break;
                     }
 
-                    let done_futures = self
-                        .sys_handle_futures
-                        .borrow_mut()
-                        .remove(&handle)
-                        .unwrap();
-                    let mut runqueue = self.runqueue.borrow_mut();
+                    // See above: a stale queued waker may name a handle
+                    // with no remaining waiters.
+                    let Some(done_futures) = self.sys_handle_futures.borrow_mut().remove(&handle)
+                    else {
+                        continue;
+                    };
+                    let mut to_wake = Vec::new();
                     for future in done_futures {
                         let mut inner_future = future.borrow_mut();
                         if inner_future.dropped {
@@ -357,8 +406,11 @@ impl LocalRuntimeInner {
                                 log::debug!("{}: woke BAD_HANDLE", inner_future.name());
                             }
                         }
-                        runqueue.push_back(inner_future.task_id);
                         inner_future.result = Some(Err(moto_rt::Error::BadHandle));
+                        to_wake.push(inner_future.waker.clone());
+                    }
+                    for waker in to_wake {
+                        waker.wake();
                     }
                 }
             }
@@ -368,11 +420,13 @@ impl LocalRuntimeInner {
 
     fn enqueue_expired_timers(&self) {
         let now = Instant::now();
-        let mut timeq = self.timeq.borrow_mut();
-        let mut runqueue = self.runqueue.borrow_mut();
-
-        while let Some(task_id) = timeq.pop_at(now) {
-            runqueue.push_back(task_id)
+        // Wake with no borrows held: a foreign (combinator) waker runs
+        // arbitrary code, which may add timers or wake tasks.
+        loop {
+            let Some(waker) = self.timeq.borrow_mut().pop_at(now) else {
+                return;
+            };
+            waker.wake();
         }
     }
 }
@@ -426,12 +480,24 @@ impl LocalRuntime {
     }
 
     pub(crate) fn add_timer(when: Instant, cx: &mut Context<'_>) -> crate::timeq::Timer {
-        let task_id = TaskId(cx.local_waker().data() as usize as u64);
-
         LocalRuntimeInner::current()
             .timeq
             .borrow_mut()
-            .add_at(when, task_id)
+            .add_at(when, cx.local_waker().clone())
+    }
+
+    /// Defer a peer wake to the executor (design 3.3): delivered exactly
+    /// once, folded as the wake target of the next sleep syscall, or issued
+    /// explicitly if the executor resumes polling instead of sleeping.
+    /// The handle is only ever a wake target, never a swap target.
+    /// Must be called within a LocalRuntime context.
+    pub fn set_wake_on_sleep(handle: SysHandle) {
+        let prev = LocalRuntimeInner::current()
+            .wake_on_sleep
+            .replace(Some(handle));
+        // Same-handle sets coalesce; a second distinct handle would lose
+        // the first wake.
+        debug_assert!(prev.is_none() || prev == Some(handle));
     }
 
     /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
@@ -477,11 +543,33 @@ impl LocalRuntime {
             inner.enqueue_expired_timers();
             inner.merge_incoming();
             if !inner.runqueue.borrow().is_empty() {
-                return;
+                // Resuming polling instead of sleeping: the deferred
+                // wake cannot be folded, so issue it (exactly once).
+                if let Some(handle) = inner.wake_on_sleep.take() {
+                    let _ = moto_sys::SysCpu::wake(handle);
+                }
+                return; // Always entered and left in POLLING.
+            }
+
+            // Commit to park, then recheck: a waker that pushed before
+            // seeing COMMITTING skipped its wake syscall (see the SC
+            // fence pairing in waker_wake_by_ref). A wake that lands
+            // after this check is sticky in the kernel and makes the
+            // wait below return immediately.
+            inner
+                .run_state
+                .store(RUN_STATE_COMMITTING, Ordering::Relaxed);
+            core::sync::atomic::fence(Ordering::SeqCst);
+            if !inner.nonlocal_wakes.is_empty() {
+                inner.run_state.store(RUN_STATE_POLLING, Ordering::Relaxed);
+                continue;
             }
 
             let timeo = inner.timeq.borrow_mut().next();
-            inner.wait(timeo);
+            let wake_target = inner.wake_on_sleep.take().unwrap_or(SysHandle::NONE);
+            inner.run_state.store(RUN_STATE_PARKED, Ordering::Relaxed);
+            inner.wait(timeo, wake_target);
+            inner.run_state.store(RUN_STATE_POLLING, Ordering::Relaxed);
         }
     }
 
@@ -505,6 +593,11 @@ impl LocalRuntime {
                 runtime.currently_running_task.set(None);
 
                 if let Poll::Ready(output) = result {
+                    // The runtime exits instead of sleeping: still owes
+                    // the deferred wake, if one is pending.
+                    if let Some(handle) = runtime.wake_on_sleep.take() {
+                        let _ = moto_sys::SysCpu::wake(handle);
+                    }
                     return output;
                 }
             }
@@ -628,7 +721,9 @@ pub trait AsFuture {
 
 struct SysHandleFutureInner {
     handle: SysHandle,
-    task_id: TaskId,
+    // Woken on completion. Set at creation to the owning task's waker,
+    // refreshed on every poll so nested combinators wake correctly.
+    waker: core::task::LocalWaker,
     result: Option<Result<()>>,
     dropped: bool,
 
@@ -643,9 +738,8 @@ struct SysHandleFutureInner {
 impl SysHandleFutureInner {
     fn name(&self) -> alloc::string::String {
         alloc::format!(
-            "\n\tSysHandleFuture: [handle: 0x{:x} task: {}]",
-            self.handle.as_u64(),
-            self.task_id.0
+            "\n\tSysHandleFuture: [handle: 0x{:x}]",
+            self.handle.as_u64()
         )
     }
 }
@@ -682,10 +776,12 @@ impl AsFuture for SysHandle {
     fn as_future(&self) -> Self::AsFuture {
         let inner = Rc::new(RefCell::new(SysHandleFutureInner {
             handle: *self,
-            task_id: LocalRuntimeInner::current()
-                .currently_running_task
-                .get()
-                .unwrap(),
+            waker: new_local_waker(
+                LocalRuntimeInner::current()
+                    .currently_running_task
+                    .get()
+                    .unwrap(),
+            ),
             result: None,
             dropped: false,
 
@@ -708,7 +804,7 @@ impl SysHandleFuture {
         log::debug!("debugging future {}", self.inner.borrow().name());
     }
 
-    pub fn do_poll(&self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+    pub fn do_poll(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         #[cfg(debug_assertions)]
         if self.inner.borrow_mut().debug_ready_done {
             panic!("SysHandleFuture polled after Poll::Ready() was returned.");
@@ -728,13 +824,10 @@ impl SysHandleFuture {
             return Poll::Ready(result);
         }
 
+        inner.waker = cx.local_waker().clone();
         #[cfg(debug_assertions)]
-        {
-            let task_id = TaskId(_cx.local_waker().data() as usize as u64);
-            assert_eq!(inner.task_id, task_id);
-            if inner.debug_log {
-                log::debug!("{}: pending", inner.name());
-            }
+        if inner.debug_log {
+            log::debug!("{}: pending", inner.name());
         }
         Poll::Pending
     }

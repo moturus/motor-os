@@ -161,41 +161,41 @@ impl NetRuntime {
 
         let this = self.clone();
         moto_async::LocalRuntime::spawn(async move {
-            let (connected_tx, connected_rx) = moto_async::oneshot();
-            let _ = this.net_listener(started_tx, connected_tx).await;
-            // Spawn an extra one once the previous one is connected.
-            let _ = connected_rx.await;
-            this.spawn_new_listener().await;
+            // net_listener() replenishes the accept pool itself once a client
+            // connects (before serving it), so a consumed listener is replaced
+            // at connect time rather than at disconnect time. It returns Err
+            // only when the accept fails before that point; respawn here so the
+            // pool does not shrink.
+            if let Err(err) = this.net_listener(started_tx).await {
+                log::debug!("net_listener() failed: {err:?}");
+                this.spawn_new_listener().await;
+            }
         });
 
         // Note: we must not return until there is a started listener,
-        //       otherwise the FS is not yet functional.
+        //       otherwise networking is not yet functional.
         let _ = started_rx.await;
     }
 
-    async fn net_listener(
-        &self,
-        started_tx: moto_async::oneshot::Sender<()>,
-        connected_tx: moto_async::oneshot::Sender<()>,
-    ) -> Result<()> {
+    async fn net_listener(&self, started_tx: moto_async::oneshot::Sender<()>) -> Result<()> {
         let mut listener = core::pin::pin!(moto_ipc::io_channel::listen("sys-io"));
 
         // Do a poll to ensure the listener has started listening.
-        let (sender, mut receiver) =
-            match core::future::poll_fn(|cx| match listener.as_mut().poll(cx) {
+        let (sender, mut receiver) = {
+            let first_poll = core::future::poll_fn(|cx| match listener.as_mut().poll(cx) {
                 std::task::Poll::Ready(res) => std::task::Poll::Ready(Some(res)),
                 std::task::Poll::Pending => std::task::Poll::Ready(None),
             })
-            .await
-            {
+            .await;
+
+            let _ = started_tx.send(());
+
+            match first_poll {
                 Some(res) => res,
-                None => {
-                    let _ = started_tx.send(());
-                    listener.await
-                }
+                None => listener.await,
             }
-            .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?;
-        let _ = connected_tx.send(());
+            .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
+        };
 
         self.inner.borrow_mut().clients.insert(
             sender.remote_handle(),
@@ -212,15 +212,21 @@ impl NetRuntime {
 
         log::debug!("new NET connection 0x{:x}", sender.remote_handle().as_u64());
 
-        // We want to process more than one message at at time (due to I/O waits), but
-        // we don't want to have unlimited concurrency, we want backpressure.
+        // Replenish the accept pool now that this listener has a connection, so
+        // NUM_LISTENERS bounds in-flight accepts rather than the number of
+        // concurrent clients. Per the note in spawn_new_listener, this function
+        // must not return Err below this point, or each disconnect would leak an
+        // extra listener into the pool.
+        self.spawn_new_listener().await;
+
+        // We want to process more than one message at a time (due to I/O
+        // waits), but with bounded concurrency for backpressure, so we use
+        // mpsc "tickets".
         //
-        // I tried to convert the receiver to a futures::Stream (via futures::stream::unfold()),
-        // and then use futures::stream::for_each_concurrent, but this didn't work
-        // with our runtime (maybe there is a bug in our runtime, maybe in for_each_concurrent).
-        // (N.B.: futures::stream::for_each works).
-        //
-        // So we are using mpsc to implement "tickets".
+        // Historical note: for_each_concurrent used to hang here because
+        // timer and SysHandle wakes bypassed nested combinator wakers. The
+        // runtime stores wakers now, but the ticket loop stays: it keeps
+        // the inline fast path below dispatchable per message.
 
         const MAX_IN_FLIGHT: usize = 64;
         let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
@@ -259,14 +265,16 @@ impl NetRuntime {
                         let _ = ticket_tx.send(()).await;
                     });
                 }
-                Err(err) => {
+                Err(_) => {
                     self.on_connection_done(sender.remote_handle()).await;
                     log::debug!(
                         "NET connection 0x{:x} done.",
                         sender.remote_handle().as_u64()
                     );
 
-                    return Err(std::io::Error::from_raw_os_error(err as u16 as i32));
+                    // The replacement listener was already spawned at accept, so
+                    // return Ok — returning Err would spawn a second one.
+                    return Ok(());
                 }
             }
         }

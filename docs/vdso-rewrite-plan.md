@@ -5,6 +5,293 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
+## Status (2026-07-21, stage F + F4c complete; pending review)
+
+Stage F extraction is done, including the native async API (F4c).
+`moto-io::net`
+now holds the channel runtime and the TCP/UDP state machines
+(`moto_io::net::{channel, tcp, udp}`); the vdso keeps a thin veneer (ABI shims,
+`PosixFile` impls, poll-registry event synthesis) -- `rt_tcp.rs` 1740->193,
+`rt_udp.rs` 656->92. The channel layer and the three sockets are one
+mutually-recursive SCC (the channel holds `Weak` socket refs for rx dispatch;
+the sockets hold `ChannelReservation`), so they moved atomically. It landed as
+prep-then-move commits because the veneer had to be split from each state
+machine first:
+
+- **C0** (`1ae9306`): channel layer out of `rt_net.rs` into in-crate
+  `net/channel.rs`.
+- **C1** (`42004b4`): listener injection -- constructors take
+  `Arc<dyn NetEventListener>`; the ABI shims build the concrete
+  `EventSourceManaged`. Severs the vdso type from the socket constructors.
+- **C2** (`c126f14`): `event_source`/`maybe_raise_events` become vdso free
+  functions over a public state-machine surface (they name `EventSourceManaged`
+  so cannot be inherent methods on a moved type); `raise_readiness` stays
+  inherent and moves.
+- **C3** (`d194286`): the atomic cross-crate move. The veneer stays legal by
+  the orphan rule (`PosixFile` is a vdso-local trait), so the FD table and the
+  ~20 ABI downcast sites are unchanged. `moto-io` gains
+  `moto-sys`/`moto-io-internal`/`crossbeam`/`crossbeam-queue` + a `netdev`
+  feature wired from the vdso.
+- **F4a** (`d61c653`): tidy the relocated code to library lint standards
+  (safety docs; drop/allow the dead code the vdso's crate-wide
+  `#![allow(unused)]` had masked).
+- **F4b** (`9f5a42b`): cancel-safety audit -- all four data-path futures are
+  rule-7 compliant; UDP wakers now dedup like TCP.
+- **F4d** (`90d0531`): `test_timeout_storm_during_transfer` -- storms
+  `TcpWriteFuture`'s partial-progress drop under an active transfer.
+
+**F4c (native async API) done.** `moto-io::net` now mirrors `moto-io::fs`:
+async-first, with no `block_on` on the data path. Two commits:
+
+- **F4c-1** (`b5051cb`): publish the async-first surface on `moto-io::net`
+  (additive, zero behavior change) -- `try_read`/`read_future`/`readable`,
+  `try_write`/`write_future`/`writable`, `read_timeout`/`write_timeout`/
+  `is_nonblocking` on `TcpStream`; the UDP mirror. The data-path future types
+  become `pub`; `readable()`/`writable()` are new readiness futures (design
+  5.4) that arm the same wakes their action futures do.
+- **F4c-2** (`b747054`): move the blocking POSIX layer (write spin,
+  `block_on_recheck`, `SO_*TIMEO`, `O_NONBLOCK`) out of `moto-io` into a new
+  veneer module `rt.vdso/src/net/blocking.rs`, mirroring how `rt_fs` blocks on
+  `moto-io::fs`. `connect`/`accept` split into async + nonblocking forms the
+  veneer picks by `is_nonblocking()` and drives with `block_on_sync`; the
+  moto-io blocking `read_or_peek`/`peek`/`write` and UDP `recv_or_peek_from`/
+  `peek`/`send_to` are deleted. Setup stays sync (bind/listen/sockopts via
+  `send_receive`) per design 5.4.
+
+Validation: full-test debug 7/7 + release 3/3 green; paired A/B bench
+(`e04f335` pre-F4c vs `b747054`, same host) perf-neutral -- every throughput
+metric flat-to-better (bulk RX +2.2%, TX +3.0%; def RX +2.2%, TX +9.7%), both
+RR deltas within the host-noise band. Behavior traced path-by-path as
+identical; the relocation preserves the async cores and blocking logic
+byte-for-byte across the crate boundary.
+
+**Stage-F gate (`90d0531`):** `full x3` 3/3 green (95/95/94s). vdso binary size
++2.06% `.text` (~11 KB; lost cross-crate inlining now that net is a separate
+crate -- above the plan's "~neutral" expectation, modest). Bench (release,
+3-run sanity, noisy): RR at/better (def 118 vs 122, bulk 130 vs 148 usec), bulk
+TX +17%, but RX soft (def 435 vs 525, bulk 485 vs 551) on a bimodal sample (def
+RX 431-628). The RX drift needs Stage G2's paired A/B to separate move-cost from
+host noise; deferred per the accepted "sub-10%, look later".
+
+---
+
+Stage E (lifecycle) is complete; the gate passed: `full x3` is 3/3 green (the
+flake checkpoint) and the bench sanity check holds. E1-E3 retire the last
+control-plane panics/`todo!()`s -- guaranteed sends and accept re-posts await
+send room, and a `NetChannel` is torn down when its last reservation releases
+(design 5.5). E3 deviates from the plan's "join handed to the core IO runtime"
+sketch: instead the runtime thread holds its own `Arc<Self>` for its whole life,
+so `NetChannel::drop` runs only after the thread exits and the kernel auto-reaps
+it -- no join, no self-join hazard, no io_runtime hand-off (which could not work
+anyway: `io_runtime::spawn` uses `block_on_sync`, illegal from a runtime thread).
+`NetRuntime::assert_empty` is now meaningful (channel pool empty + UDP count),
+exercised by a new `test_channel_teardown` systest (12 conns x3 rounds past
+`IO_SUBCHANNELS`, then the assert_empty debug hook).
+
+- **E1/E2** (`1233233`/`6902b29`): `send_msg_guaranteed`'s panic/spin paths
+  become awaits -- a drop on the channel's own runtime thread hands the close to
+  a detached task counted by `guaranteed_inflight`, and `UdpSocket::drop`'s
+  unwrap is deleted. `post_accept` is infallible: the listener control task
+  awaits send room and re-posts, retiring the `post_accept(false).unwrap()` TODO.
+
+- **E3 side-finding / sys-io teardown idempotency** (`0bc8854`): eager teardown
+  closes a client's io_channel connection at last-socket-release instead of
+  pooling it for process life, so sys-io's `on_connection_done` safety net now
+  runs mid-life, racing the client's own graceful closes over the same
+  sockets/listeners. `TcpListener::drop_from_client`'s socket loop and
+  `close_tcp_socket_inner`'s linger unlink both unwrapped on the now-shared
+  teardown; made both tolerate an already-removed entry (same class as
+  `666bcf0`). Without it the systest tcp suite crashes sys-io (`Option::unwrap`
+  on None, `0xbadc0de`), taking all networking down.
+
+- **E3 latent-bug fix**: the tightened `assert_empty` caught `UdpSocket::drop`
+  never calling `stats_udp_socket_dropped()` -- `num_udp_sockets` only ever grew
+  (mio-test tripped the new assert). The channel already tore down correctly;
+  only the counter was wrong.
+
+- **E-gate bench** (sanity, unpaired vs the stage-0 release baselines): RR -- the
+  only metric E3's steady-state change (the `rx_park` poll_fn) can touch -- is
+  at-or-better both modes (def ~118-125 vs 122 usec, b64k 128 vs 148). Throughput
+  sits in the host-noise band: def TX best-run 327.6 ~= 332.1 (median ~306, the
+  flagged host-steal metric, 13% spread among clean-RR runs), bulk TX +8.8%, bulk
+  RX -8.6%, def RX ~= parity. E3 has no steady-state data-path change (teardown +
+  idle rx_park only), so the sub-10% RX drifts have no mechanism and track the
+  cross-day unpaired window; a paired A/B (stage-D methodology) is available if
+  gate-grade rigor is wanted.
+
+Stages 0, A, B, C, D, and E are complete on `vdso-rewrite`. The stage-D gate
+passed: full x5 (flake checkpoint 3) is 5/5 green after the checkpoint-3 fix
+(`812e7da`), and the bench (kill checkpoint 2) is within bounds after a
+write-path tuning (`eb7de6e`). Checkpoint 3 reproduced the tokio loopback
+freeze on run 1 and root-caused it to a D4b auto-merge that reverted the
+42e1359 self-deadlock fix; the bench then tripped on default-buffer TX
+(-30.5%), which the tuning recovered to parity. One stage-C gate metric still
+sits at the kill boundary (below), the review's open question.
+
+- **Bench / kill checkpoint 2** (`eb7de6e`): the D4b write flip replaced the
+  old spin/yield/exp-sleep page-grab ladder with a straight `block_on_recheck`
+  park, costing default-buffer TX -30.5% (228.7 vs C-tip 329.1 MiB/s; b64k TX,
+  RX and RR were all in bounds). The tuning restores a bounded spin-then-yield
+  fast path (100+100) before the park; re-bench (paired same-window 4-round
+  medians vs C-tip e687196): def TX 328.0 -> 331.7 (+1.1%), all six metrics
+  within bounds. Correctness held (systest incl. the backpressure-integrity and
+  write-timeout tests, mio-test ALL PASS, tokio 3/3).
+
+- **Checkpoint 3 / flake fix** (`812e7da`): `mdbg print-stacks` on a frozen
+  VM (all threads InWait) showed `channel_runtime` deadlocked in
+  `tcp_listener_dropped`'s `lock_contended` mid-`dispatch_incoming`, `main`
+  parked in `TcpListener::bind` awaiting a bind reply the wedged rx task
+  cannot deliver — the exact 42e1359 signature. `git show a9f899f` confirmed
+  the D4b auto-merge deleted 42e1359's `upgraded_listeners` deferred drop and
+  restored the `return`-under-lock form, so a last-ref `TcpListener::drop`
+  re-locks `tcp_listeners` on the rx thread and self-deadlocks. The fix
+  re-applies the deferred drop; the a9f899f revert was audited to this one
+  pattern (the other removals are intended D4b retirements). The earlier
+  "~1/37 stdio hang" reading was wrong — it was this freeze surfacing at the
+  tokio-tests output, where block-buffered stdout hid the final
+  `tokio-tests PASS` and made the freeze look like a lost stdout tail.
+
+- **D5** (`c1f4ff8`): blocking `UdpSocket::recv_or_peek_from`/`send_to`
+  flip onto `UdpRecvFuture`/`UdpSendFuture` via the shared
+  `block_on_recheck` (now `pub(super)`), woken by per-socket
+  `rx_wakers`/`tx_wakers` at the RX / TX-ack points. With UDP off the
+  futex, the `EventSourceManaged` readable/writable futex wait/wake
+  protocol is retired (UDP was its last user); `on_event` is now purely
+  the poll-registry notification, and the registration side of managed
+  sources stays (TCP and UDP both use it for mio readiness). Suites pass:
+  systest UDP suite + full x3 to `PASS`, mio-test ALL PASS (incl. the
+  `udp_socket` edge-triggered tests), tokio 2/2.
+
+- **Stage D (through D4b)**: D1 (`9d993d5`, RPC oneshot map), D2a/D2b
+  (`f5c3beb`/`b5a29e0`, RpcWaiter + blocking accept/connect await
+  oneshots), D3 (`da94974`, send/page waiters as `SyncWaiter` lists),
+  D4a (`bdfbc97`, read/write future machinery beside the old path),
+  D4b (`a9f899f` flip + `23ab3ac` systests). The flip drives blocking
+  read/write through `block_on_recheck` (`block_on_sync_deadline` capped
+  at TX 500ms / RX 5s, the old debug-timeout resilience) and retires
+  `rx_waiter`, `page_waiters`, and the `dispatch_incoming` wake-handle;
+  the `rt_net.rs` fences stay one more step. Suites pass (all net
+  systests, mio-test, tokio-tests 5/5); a 2 MB slow-reader backpressure
+  systest proves the write future's retract-and-recopy is byte-exact.
+  The tokio "flake" was the rx-task self-deadlock, fixed `42e1359` — but
+  this flip's auto-merge silently reverted that fix, resurfacing the freeze
+  until `812e7da` (checkpoint 3 above). Two D4b side-findings: (1) `666bcf0`
+  — sys-io RX robustness: a client vanishing under backpressure made
+  `alloc_page().await.unwrap()` crash sys-io (all networking down); now
+  a graceful break. (2) The "rare NET-INDEPENDENT stdio/process-spawn hang"
+  logged here was a mis-read of the same tokio freeze at the tokio-tests
+  output tail (block-buffered stdout); checkpoint 3 resolved it as the
+  `812e7da` self-deadlock, not a stdio-relay bug. D4b bench gate still owed.
+
+- **Stage C** (`963e7ca..` + two tuning commits): C1-C3 landed as
+  planned; the channel thread is a `LocalRuntime` hosting the C1 rx/tx
+  task bodies, the `io_thread_running`/`io_thread_wake_requested` park
+  protocol and `deferred_msgs`/`restage_deferred_msgs` are deleted, and
+  guaranteed sends from the runtime thread await a send-room
+  `LocalNotify`. Two C2 review/tuning findings, both fixed on the
+  branch: the old sleep-edge send-waiter release had to move into the
+  tx task's park poll (a sender enlisting between drain and park was
+  otherwise stranded), and the drained-edge `wake_driver()` had to stay
+  explicit per design 5.2 — folding it into the A6 slot alone cost ~9%
+  of default-buffer bulk TX (sys-io idled until the park committed).
+  A 16-pass linger before the tx park (standing in for the old
+  `wake_requested` hysteresis) recovered most of the rest.
+
+  Stage gate (paired same-window release A/B vs the stage-B tip,
+  4 rounds each, medians): default RR 123.5 -> 126.3 usec, b64k RR
+  145.3 -> 134.6 usec; bulk b64k TX +13.1%, b64k RX +5.0%, default RX
+  +4.7%, **default TX 310.9 -> 293.2 MiB/s (-5.7%)** — at the kill
+  bound on the metric with the widest run-to-run spread (distributions
+  overlap; parity with the stage-B gate-day reference of 295.4). Three
+  of four bulk metrics improved; the review decides whether the kill
+  criterion is satisfied in spirit. FS smoke release 239/241 mbps vs
+  236/231 stage-B reference. Syscall shape: client wake counts back at
+  stage-B levels, client waits +20% (parks replacing the old hot spin
+  — the executor owns sleeping now), the A6 fold present at every park.
+  full x5 (debug): 4/5 green; the hang was mio-test `tcp::test_write`
+  (missed WRITABLE, client-side, ssh alive) — a new site in the same
+  suspected wake-protocol family (`write_waiters` is D3 delete
+  territory), and 30/30 green on a warm mio-test loop after.
+
+**Flake status after stage C**: the tokio loopback freeze reproduced in
+warm loops at today's elevated ambient rate on BOTH the C2 image and
+the stage-B image (iter 11/1 vs iter 1, same window) with the same
+flat-counter total-freeze signature — stage C exonerated by A/B; the
+c2-1 full-test hang matched the pre-existing sys-io-side wedge
+fingerprint (socket dispatch silent amid teardown churn, device task
+alive). New live-forensics facts: during the client-side freeze ssh
+stays up and a second tokio-tests run on the same VM passes, so the
+wedge is per-process client state, not sys-io; the io_channel ring's
+WaitingToRecv/WaitingToSend flags plus kernel signal latching cover
+both C2 await edges. The stage-D deletions (rx_waiter, write_waiters,
+futex protocol) remain the prime suspects, with checkpoint 3 the
+mandatory root-cause point.
+
+- **Stage 0** (`344191b` plus the uncommitted watchdog harness): baselines
+  recorded in `vdso-rewrite-baselines.md`; 10 wrapped runs (one hang in
+  the boot/ssh window, one early ssh failure).
+- **Stage A** (`2159e69..edfcc5c`): A1-A8 landed as planned; A7's outcome
+  was an executor fix (timer/SysHandle wakes under combinators). Stage
+  gate passed.
+- **Stage B** (`73bd747..f5fa0c3` plus four fix commits): B1-B6 landed as
+  planned. The flake checkpoints caught three real bugs beyond the B6
+  step itself, all fixed on the branch:
+  - `4ed03da` — pre-existing: `ChildStdio::read` reported EOF while the
+    ring still held a fast-exiting child's final output; exposed once B4
+    delivered the closed flag promptly. No-delay tail smoke now 20/20.
+  - `e27f3e1` — B6 regression: the stdio spinlock was held across
+    blocking pipe ops; the single-threaded relay runtime hard-spun on it
+    and froze `rt_process::spawn` before waking the child (tokio-tests
+    hung 3/3 at checkpoint 2 until fixed).
+  - `3900a7e` — pre-existing moto-async bug: the kernel queues wakers
+    even while a thread is awake, so `SysCpu::wait` can report a handle
+    from an earlier wait epoch; the `unwrap` on the future-map lookup
+    panicked sys-io live (0xbadc0de, VM down) under ssh churn.
+  - `e123bc1` — pre-existing, unmasked by B6's prompt EOF delivery:
+    `input_listener` threads in ten binaries spun at 100% CPU on stdin
+    EOF (a dead stdin pipe read returns `E_BAD_HANDLE` with no syscall,
+    and std's blanket `is_ebadf` maps any stdin error to `Ok(0)`).
+    `rnetbench --server` always burned one vCPU this way, polluting all
+    pre-fix bench sessions. Follow-ups flagged: `SelfStdio::read` should
+    return `Ok(0)` at EOF itself; the std shim's `is_ebadf` blanket
+    deserves a real mapping.
+
+  Stage gate passed on a paired, same-window, spin-free A/B (stage-A tip
+  plus `e123bc1` cherry-pick vs branch tip; release, 3 rounds each).
+  Medians: RR default 125.4 -> 126.8 usec, RR b64K 153.1 -> 152.9 usec;
+  bulk deltas -2.5%..+4.7% — all within the kill bounds. FS smoke
+  (release): 236 write / 231 read mbps, recorded as the stage-B
+  reference. Unpaired cross-session bulk comparisons falsely tripped the
+  kill criterion twice; the measurement discipline of section 1 (paired
+  runs, same window) is mandatory for every later gate.
+
+**Flake status: ROOT-CAUSED AND FIXED (in D, commit "fix rx-task
+self-deadlock dropping a listener under its lock").** The premise below
+that it was "a lost wake" was wrong; it is a **self-deadlock**, which is
+why every wake-protocol suspect (and, later, every thread-park timeout
+bound) came back clean. `dispatch_incoming()`, routing a packet with no
+live stream, iterated `tcp_listeners.values()` under the `tcp_listeners`
+lock and upgraded each `Weak<TcpListener>`; when an upgraded Arc was a
+listener's last strong ref (owner dropped it concurrently), dropping the
+temporary inside the loop ran `TcpListener::drop -> tcp_listener_dropped
+-> tcp_listeners.lock()`, re-locking the mutex the rx task already held.
+The rx task wedged, the channel died, and any socket op on it hung.
+Diagnosed by attaching **`mdbg print-stacks`** to a frozen VM and
+symbolizing against the unstripped `build/obj/*/rt` and
+`build/obj/tokio-tests/*/tokio-tests` (`addr2line`): `channel_runtime`
+was parked in `tcp_listener_dropped`'s `lock_contended`, `main` in
+`TcpListener::bind`. Fix: defer dropping the upgraded listener Arcs until
+after both map locks release. 60/60 warm tokio-tests loop green.
+
+Historical fingerprint (kept for context): 3/5 green on the final
+series; both hangs one pre-existing signature. The freeze is entering
+tokio's loopback-socket tests (`test_socket_from_blocking`,
+`test_local_set_client_server_block_on`, `test_io_driver_called_when_under_load`)
+-- the tests *after* the last printed PASS, which earlier notes
+misattributed to `test_sleep_from_blocking` -- with every thread blocked
+and zero syscalls while the VM and sys-io stay healthy; present since at
+least the stage-A series.
+
 ## 1. Process rules
 
 - **Branch.** All work happens on the `vdso-rewrite` branch; `main` is not
@@ -71,6 +358,8 @@ primitives end-to-end before the riskiest stage begins.
 
 ## 3. Stage 0 — baselines and flake characterization
 
+*Status: complete (`344191b` + scratchpad harness).*
+
 | Step | Content | Gate |
 |---|---|---|
 | 0.1 | Watchdog wrapper for `full-test.sh` (scratch script, uncommitted): global timeout; on hang, capture `/tmp/full-test.log` and, if ssh still answers, `ps`, `stats get`, and which suite/test was running. | — |
@@ -82,6 +371,8 @@ the test harness), the sequencing bet in section 2 is re-assessed before
 stage B.
 
 ## 4. Stage A — moto-async groundwork
+
+*Status: complete (`2159e69..edfcc5c`); gate passed.*
 
 Design sections 3.1–3.6. Every primitive lands with a systest exercising its
 race edges. A5 changes `LocalRuntime` under sys-io's feet — it is the one
@@ -102,6 +393,8 @@ Stage gate: `full x3` + bench. Flake status noted; no change expected yet.
 
 ## 5. Stage B — poll delivery rewrite, core IO runtime, stdio relays
 
+*Status: complete (`73bd747..f5fa0c3` + `4ed03da`, `e27f3e1`, `3900a7e`, `e123bc1`); gate passed. See Status section.*
+
 Design sections 4, 6, 7.2. Registration model and mio event-generation
 semantics (layer 1–2) are untouched throughout; only delivery changes, so
 `mio-test` is the semantic gate at every step.
@@ -119,6 +412,9 @@ Stage gate: bench — RR especially; `poll_wait` is on tokio's critical
 latency path and must keep its one-push-one-wake shape.
 
 ## 6. Stage C — net executor swap
+
+*Status: complete (see Status section); gate run, one metric at the kill
+bound pending review.*
 
 Design 5.2, first half: the channel thread becomes a `LocalRuntime` hosting
 rx/tx tasks; every hand-rolled *waiter* protocol survives this stage
@@ -181,6 +477,15 @@ purely mechanical.
 
 Stage gate: `full x3` + bench parity + vdso binary size check (expected
 ~neutral; moto-async and futures are already linked in).
+
+*Status: complete (`1ae9306..b747054`). Actual execution decomposed F2/F3 as
+C0-C3 (the channel + socket SCC moves atomically); F4 as F4a lint / F4b
+cancel-safety + UDP waker dedup / F4d timeout-storm systest; F4c (native async
+API) as F4c-1 async-first surface + F4c-2 blocking-into-veneer, done in Stage G.
+Gate: `full x3` 3/3 green; binary size +2.06% .text (crate-boundary inlining,
+modest); the RX softness on the move gate resolved as host noise (G2 paired
+A/B, perf-neutral); F4c re-confirmed perf-neutral by its own paired A/B. See the
+Status section.*
 
 ## 10. Stage G — acceptance
 

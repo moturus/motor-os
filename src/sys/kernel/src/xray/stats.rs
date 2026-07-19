@@ -127,7 +127,18 @@ pub enum MetricType {
     UserCopyWrite = 50,
     UserCopyWriteBytes = 51,
 
-    TotalMetricTypes = 52,
+    // Count of user allocations refused by the soft-OOM reserve
+    // (mm::oom_for_user returning true): the small-page pool came within the
+    // system reserve of empty and a user stack/heap/process allocation was
+    // denied with E_OUT_OF_MEMORY. System-wide, reported at PID_SYSTEM.
+    SoftOomUser = 52,
+
+    // Count of TLB-shootdown waits that spun past the 1e9 "slow" mark before
+    // the peer acked (arch::tlb) -- almost always a peer vCPU the host
+    // descheduled long enough to notice. System-wide, reported at PID_SYSTEM.
+    TlbShootdownSlow = 53,
+
+    TotalMetricTypes = 54,
 }
 
 impl MetricType {
@@ -202,6 +213,8 @@ impl MetricType {
             MetricType::UserCopyReadBytes => "user_copy_read_bytes",
             MetricType::UserCopyWrite => "user_copy_write",
             MetricType::UserCopyWriteBytes => "user_copy_write_bytes",
+            MetricType::SoftOomUser => "mem.soft_oom_user",
+            MetricType::TlbShootdownSlow => "cpu.tlb_shootdown_slow",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -273,7 +286,7 @@ impl MemStats {
     }
 }
 
-const PCPU_STATS_CNT: usize = 52; // 8 * N + 4: see below.
+const PCPU_STATS_CNT: usize = 60; // struct is 8 * (N + 4) bytes; see the size assert below.
 
 #[repr(C, align(64))]
 pub struct PerCpuStatsEntry {
@@ -286,7 +299,7 @@ pub struct PerCpuStatsEntry {
 
 const _: () = assert!(PCPU_STATS_CNT >= MetricType::TotalMetricTypes as usize);
 
-const _: () = assert!(448 == core::mem::size_of::<PerCpuStatsEntry>()); // 56 * 8
+const _: () = assert!(512 == core::mem::size_of::<PerCpuStatsEntry>()); // 64 * 8
 
 impl PerCpuStatsEntry {
     const fn new() -> Self {
@@ -600,6 +613,10 @@ impl KProcessStats {
             vals[MetricType::MemHeapTotal as usize] =
                 crate::mm::kheap::heap_stats().total_in_heap as u64;
             vals[MetricType::MemUsedPages as usize] = phys.small_pages_used;
+            vals[MetricType::SoftOomUser as usize] =
+                crate::mm::SOFT_OOM_USER_COUNT.load(Ordering::Relaxed);
+            vals[MetricType::TlbShootdownSlow as usize] =
+                crate::arch::x64::tlb::TLB_SHOOTDOWN_SLOW_COUNT.load(Ordering::Relaxed);
         }
 
         out.reserve(n);

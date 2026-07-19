@@ -4,6 +4,7 @@
 #![feature(str_from_raw_parts)]
 #![feature(box_into_inner)]
 
+mod io_runtime;
 mod load;
 mod posix;
 mod proc_fd;
@@ -17,9 +18,10 @@ mod rt_time;
 mod rt_tls;
 mod runtime;
 mod stdio;
+mod stdio_relay;
 
 mod net {
-    pub mod inner_rx_stream;
+    pub mod blocking;
     pub mod rt_net;
     pub mod rt_tcp;
     pub mod rt_udp;
@@ -426,6 +428,12 @@ pub extern "C" fn motor_start(version: u64) {
     let _ = moto_sys::set_current_thread_name("main");
     stdio::init();
     crate::util::logging::init();
+
+    // A net channel's runtime thread is a raw kernel thread (not the vdso
+    // thread wrapper), so it cannot auto-run thread-local destructors on exit;
+    // hand it the vdso's teardown explicitly (design 5.1: the host installs
+    // this so the channel layer needs no vdso reach-back).
+    moto_io::net::channel::set_thread_exit_hook(|| unsafe { crate::rt_tls::on_thread_exiting() });
 }
 
 /// # Safety

@@ -24,6 +24,11 @@ const _: () = assert!(crate::config::MAX_CPUS <= 64);
 static MESSAGE: StaticRef<TlbShootdownMessage> = StaticRef::default_const();
 static PERCPU_PROCESSED_GENERATION: StaticRef<Vec<AtomicU64>> = StaticRef::default_const();
 
+// Count of shootdown waits that crossed the 1e9-spin "slow" mark below -- a
+// peer vCPU the host descheduled long enough to notice. Exposed as the
+// cpu.tlb_shootdown_slow system metric (see xray::stats).
+pub static TLB_SHOOTDOWN_SLOW_COUNT: AtomicU64 = AtomicU64::new(0);
+
 pub fn setup() {
     use alloc::boxed::Box;
 
@@ -85,9 +90,27 @@ pub fn invalidate(page_table: u64, first_page_vaddr: u64, num_pages: u64) {
 
     let done_mask = MESSAGE.done_mask.load(Ordering::Acquire);
     let mut counter: u64 = 0;
+    let mut noted_slow = false;
     while MESSAGE.cpumask.load(Ordering::Relaxed) != done_mask {
         counter += 1;
-        if counter > 1_000_000 {
+        // A shootdown almost never spins this long for a real reason. Under a
+        // hypervisor a peer vCPU can be descheduled by the host for many ms
+        // (the guest IF flag has no bearing on host scheduling), so it cannot
+        // ack the IPI until the host reschedules it -- at which point it
+        // recovers on its own. Wait very patiently (1e11 spins, tens of
+        // seconds to minutes) before treating a stall as a true all-CPU wedge;
+        // a real hang is caught far sooner by higher-level liveness checks.
+        // Note the first 1e9-spin crossing once, for the operator and the
+        // cpu.tlb_shootdown_slow metric.
+        if counter == 1_000_000_000 && !noted_slow {
+            noted_slow = true;
+            TLB_SHOOTDOWN_SLOW_COUNT.fetch_add(1, Ordering::Relaxed);
+            crate::write_serial!(
+                "\nTLB shootdown slow on cpu {this_cpu}: 1e9 spins, still waiting for cpu mask 0b{:b} (likely host vCPU preemption)\n",
+                done_mask & !MESSAGE.cpumask.load(Ordering::Acquire)
+            );
+        }
+        if counter > 100_000_000_000 {
             panic!(
                 "\nTLB shootdown hung: this cpu: {this_cpu}, mask: 0b{:b}",
                 MESSAGE.cpumask.load(Ordering::Acquire)

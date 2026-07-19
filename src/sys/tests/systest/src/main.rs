@@ -9,6 +9,7 @@ mod io_channel;
 mod logging;
 mod moto_async;
 mod mpmc;
+mod poll;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -484,6 +485,10 @@ fn input_listener() {
     loop {
         let mut input = [0_u8; 16];
         let sz = std::io::stdin().read(&mut input).unwrap();
+        if sz == 0 {
+            // EOF: stdin is gone; no ^C can ever arrive.
+            return;
+        }
         for b in &input[0..sz] {
             if *b == 3 {
                 println!("Caught ^C: exiting.");
@@ -537,6 +542,7 @@ fn main() {
     test_syscall();
     threads::run_all_tests();
     moto_async::run_all_tests();
+    poll::run_all_tests();
     io_channel::run_all_tests();
     test_thread_names();
     test_cpus();

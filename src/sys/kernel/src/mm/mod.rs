@@ -426,11 +426,25 @@ fn allocate_kernel_stack() -> u64 {
     stack.end() - PAGE_SIZE_SMALL
 }
 
+/// Count of user allocations refused by the soft-OOM reserve below (the
+/// `oom_for_user` gate returning true). This is the "soft OOM": the physical
+/// small-page pool came within SMALL_PAGES_RESERVED_FOR_SYSTEM of empty and a
+/// user thread-stack / heap / process allocation was denied with
+/// E_OUT_OF_MEMORY (surfacing as a userspace alloc failure) rather than the
+/// pool truly emptying and panicking the kernel. Exposed as the system-wide
+/// `mem.soft_oom_user` metric so a soak can confirm transient pool exhaustion.
+pub static SOFT_OOM_USER_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 pub fn oom_for_user(would_allocate: u64) -> bool {
     let available = phys::available_small_pages() << 12;
-    if available <= would_allocate {
+    let oom = if available <= would_allocate {
         true
     } else {
         (available - would_allocate) <= (SMALL_PAGES_RESERVED_FOR_SYSTEM << 12)
+    };
+    if oom {
+        SOFT_OOM_USER_COUNT.fetch_add(1, Ordering::Relaxed);
     }
+    oom
 }
