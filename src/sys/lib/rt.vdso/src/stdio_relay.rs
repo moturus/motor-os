@@ -5,8 +5,12 @@
 //! last relay task and is recreated on demand.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering;
+use moto_async::SyncWaiter;
 use moto_rt::spinlock::SpinLock;
 use moto_sys::SysHandle;
 
@@ -34,7 +38,11 @@ static STATE: SpinLock<RelayState> = SpinLock::new(RelayState {
 });
 
 /// Spawn the future `make_task` builds onto the relay runtime,
-/// creating the runtime thread if none is running.
+/// creating the runtime thread if none is running. Returns only after
+/// the task's first poll: a relay must have its pipe-handle future
+/// registered before the child process spawns, or output written just
+/// before an early child exit can die unread (the old relay threads
+/// won this race by going straight into a blocking read).
 pub fn spawn<C, F>(make_task: C)
 where
     C: FnOnce() -> F + Send + 'static,
@@ -61,10 +69,37 @@ where
         }
     };
 
-    let ctor: TaskConstructor = Box::new(move || Box::pin(make_task()));
+    let started = Arc::new((AtomicBool::new(false), SyncWaiter::new()));
+    let started_task = started.clone();
+    let ctor: TaskConstructor = Box::new(move || {
+        let fut = make_task();
+        Box::pin(async move {
+            // The first poll continues into the task body right after
+            // this; a pipe signal racing the last microseconds of
+            // handle registration is latched by the kernel.
+            started_task.0.store(true, Ordering::Release);
+            started_task.1.signal();
+            fut.await
+        })
+    });
     moto_async::block_on_sync(async move {
         let _ = tasks_tx.send(RelayMsg::Spawn(ctor)).await;
     });
+    while !started.0.load(Ordering::Acquire) {
+        started.1.wait(None);
+    }
+}
+
+/// Give live relays a bounded window to finish before process exit;
+/// they exit only after draining a dead child's pipe, so this restores
+/// the ordering the per-child relay threads got from their write
+/// yields (child output drained before the parent's exit is visible).
+/// A relay of a still-running child just eats the timeout, as before.
+pub fn drain_for_exit() {
+    let deadline = moto_rt::time::Instant::now() + core::time::Duration::from_millis(10);
+    while STATE.lock().live > 0 && moto_rt::time::Instant::now() < deadline {
+        moto_sys::SysCpu::sched_yield();
+    }
 }
 
 extern "C" fn runtime_thread(param: u64) {

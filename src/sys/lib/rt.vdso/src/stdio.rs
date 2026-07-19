@@ -24,26 +24,19 @@ impl StdioKind {
         matches!(self, StdioKind::Stdin)
     }
 
-    fn get(&self) -> &'static SelfStdio {
-        let fd = match self {
-            Self::Stdin => moto_rt::FD_STDIN,
-            Self::Stdout => moto_rt::FD_STDOUT,
-            Self::Stderr => moto_rt::FD_STDERR,
+    fn get(&self) -> Arc<SelfStdio> {
+        let idx = match self {
+            Self::Stdin => 0,
+            Self::Stdout => 1,
+            Self::Stderr => 2,
         };
-
-        let Some(posix_file) = posix::get_file(fd) else {
-            panic!();
-        };
-        let Some(stdio) = (posix_file.as_ref() as &dyn Any).downcast_ref::<SelfStdio>() else {
-            panic!();
-        };
-        unsafe {
-            (stdio as *const _ as usize as *const SelfStdio)
-                .as_ref()
-                .unwrap()
-        }
+        SELF_STDIO.lock()[idx].as_ref().unwrap().clone()
     }
 }
+
+// The process's own stdin/out/err, set in init(). Also in the FD
+// table; this direct reference is for the relay tasks.
+static SELF_STDIO: SpinLock<[Option<Arc<SelfStdio>>; 3]> = SpinLock::new([None, None, None]);
 struct StdioImpl {
     kind: StdioKind,
     pipe: StdioPipe,
@@ -133,7 +126,25 @@ impl StdioImpl {
 }
 
 struct SelfStdio {
-    inner: SpinLock<StdioImpl>,
+    // None while a stdin relay task owns the reader (design 7.2).
+    inner: SpinLock<Option<StdioImpl>>,
+}
+
+impl SelfStdio {
+    fn with_impl<R>(&self, f: impl FnOnce(&mut StdioImpl) -> R) -> R {
+        loop {
+            {
+                let mut guard = self.inner.lock();
+                if let Some(inner) = guard.as_mut() {
+                    return f(inner);
+                }
+            }
+            // Claimed by a stdin relay for a child's lifetime; parent
+            // reads block meanwhile, as they did when the relay thread
+            // held this lock.
+            moto_sys::SysCpu::sched_yield();
+        }
+    }
 }
 
 impl PosixFile for SelfStdio {
@@ -141,13 +152,13 @@ impl PosixFile for SelfStdio {
         PosixKind::SelfStdio
     }
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.inner.lock().read(buf)
+        self.with_impl(|inner| inner.read(buf))
     }
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.inner.lock().write(buf)
+        self.with_impl(|inner| inner.write(buf))
     }
     fn flush(&self) -> Result<(), ErrorCode> {
-        self.inner.lock().flush()
+        self.with_impl(|inner| inner.flush())
     }
     fn close(&self, _rt_fd: RtFd) -> Result<(), ErrorCode> {
         todo!()
@@ -156,7 +167,7 @@ impl PosixFile for SelfStdio {
 
 // Sets up relaying between this process's stdio and an inherited-stdio
 // child's pipe.
-pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<(), ErrorCode> {
+pub fn set_relay(from: moto_rt::RtFd, to: *const u8) {
     use moto_ipc::stdio_pipe::RawPipeData;
 
     let from = match from {
@@ -169,22 +180,93 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<(), ErrorCode> {
     let to: RawPipeData =
         unsafe { (to as usize as *const RawPipeData).as_ref().unwrap() }.unsafe_copy();
 
+    let stdio = from.get();
     if from == StdioKind::Stdin {
-        set_stdin_relay(to)
+        crate::stdio_relay::spawn(move || relay_in(stdio, to));
     } else {
         crate::stdio_relay::spawn(move || async move {
             // Safety: the pair was made for this process; see make_pair().
             let dest = unsafe { StdioPipe::new_reader(to) };
-            relay_out(from, dest).await;
+            relay_out(stdio, dest).await;
         });
-        Ok(())
     }
+}
+
+/// Relays this process's stdin into an inherited-stdio child, as a
+/// task on the relay runtime. Owns the stdin reader for the child's
+/// lifetime; bytes the child did not consume return to the parent's
+/// stream via the overflow stash.
+async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) {
+    use futures::future::Either;
+    use moto_async::AsFuture;
+
+    // Safety: the pair was made for this process; see make_pair().
+    let dest = unsafe { StdioPipe::new_writer(to) };
+
+    // Only one child may consume stdin at a time; relays used to
+    // serialize on the stdio spinlock, now on the claim itself.
+    let mut owned = loop {
+        if let Some(owned) = stdio.inner.lock().take() {
+            break owned;
+        }
+        moto_async::sleep(core::time::Duration::from_millis(1)).await;
+    };
+
+    let mut buf = [0_u8; 80];
+    'relay: loop {
+        match owned.pipe.nonblocking_read(&mut buf) {
+            Ok(sz) if sz > 0 => {
+                let mut chunk = &buf[..sz];
+                while !chunk.is_empty() {
+                    match dest.nonblocking_write(chunk) {
+                        Ok(written) => {
+                            chunk = &chunk[written..];
+                            moto_sys::SysCpu::sched_yield();
+                        }
+                        Err(moto_rt::E_NOT_READY) => {
+                            if dest.handle().as_future().await.is_err() {
+                                owned.overflow.extend_from_slice(chunk);
+                                break 'relay;
+                            }
+                        }
+                        Err(_) => {
+                            owned.overflow.extend_from_slice(chunk);
+                            break 'relay;
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(moto_rt::E_NOT_READY) => {
+                // Wait for parent stdin data or for the child to go
+                // away; a spurious child-side signal just re-loops.
+                let stdin_ready = owned.pipe.handle().as_future();
+                let dest_alive = dest.handle().as_future();
+                match futures::future::select(stdin_ready, dest_alive).await {
+                    Either::Left((result, _)) => {
+                        if result.is_err() {
+                            break 'relay;
+                        }
+                    }
+                    Either::Right((result, _)) => {
+                        if result.is_err() {
+                            break 'relay;
+                        }
+                    }
+                }
+            }
+            Err(_) => break 'relay,
+        }
+    }
+
+    // Return the reader (and any stash) to the parent.
+    *stdio.inner.lock() = Some(owned);
 }
 
 /// Relays an inherited-stdio child's stdout/stderr into this process's
 /// own, as a task on the relay runtime. Exits when either pipe dies,
 /// draining what the child wrote first.
-async fn relay_out(kind: StdioKind, dest: StdioPipe) {
+async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
     use moto_async::AsFuture;
 
     let mut buf = [0_u8; 80];
@@ -192,7 +274,7 @@ async fn relay_out(kind: StdioKind, dest: StdioPipe) {
     loop {
         match dest.nonblocking_read(&mut buf) {
             Ok(sz) => {
-                if sz > 0 && !relay_write(&kind, &buf[..sz]).await {
+                if sz > 0 && !relay_write(&stdio, &buf[..sz]).await {
                     return;
                 }
             }
@@ -209,12 +291,12 @@ async fn relay_out(kind: StdioKind, dest: StdioPipe) {
 
 /// Writes all of `buf` into this process's own stdio pipe, awaiting
 /// pipe room. Returns false if the pipe is gone.
-async fn relay_write(kind: &StdioKind, mut buf: &[u8]) -> bool {
+async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
     use moto_async::AsFuture;
 
-    let stdio = kind.get();
+    // Only stdin is ever claimed; with_impl never spins here.
     while !buf.is_empty() {
-        let result = stdio.inner.lock().pipe.nonblocking_write(buf);
+        let result = stdio.with_impl(|inner| inner.pipe.nonblocking_write(buf));
         match result {
             Ok(written) => {
                 buf = &buf[written..];
@@ -223,7 +305,7 @@ async fn relay_write(kind: &StdioKind, mut buf: &[u8]) -> bool {
                 moto_sys::SysCpu::sched_yield();
             }
             Err(moto_rt::E_NOT_READY) => {
-                let handle = stdio.inner.lock().pipe.handle();
+                let handle = stdio.with_impl(|inner| inner.pipe.handle());
                 if handle.as_future().await.is_err() {
                     return false;
                 }
@@ -234,117 +316,28 @@ async fn relay_write(kind: &StdioKind, mut buf: &[u8]) -> bool {
     true
 }
 
-fn set_stdin_relay(to: moto_ipc::stdio_pipe::RawPipeData) -> Result<(), ErrorCode> {
-    use moto_ipc::stdio_pipe::RawPipeData;
-
-    extern "C" fn relay_thread_fn(thread_arg: u64) {
-        let to = *unsafe { Box::from_raw(thread_arg as usize as *mut RawPipeData) };
-
-        // STDIN should not be shared, so we lock it for the whole time the child lives.
-        //
-        // See also https://devblogs.microsoft.com/oldnewthing/20111202-00/?p=8983.
-        let stdin = StdioKind::Stdin.get();
-        let mut stdin_lock = stdin.inner.lock();
-        let mut dest = unsafe { StdioPipe::new_writer(to) };
-        let mut buf = [0_u8; 80];
-
-        // We need to break if the child exits, so we wait for the child or for the data,
-        // and read with a short timeout.
-        let wait_handles = [stdin_lock.pipe.handle(), dest.handle()];
-        let mut had_error = false;
-        loop {
-            let mut handles = wait_handles;
-            if moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).is_err()
-            {
-                if had_error {
-                    break;
-                } else {
-                    // Don't exit on the first error, as there may be something
-                    // in the buffer to process.
-                    had_error = true;
-                }
-            }
-
-            let timeout = moto_rt::time::Instant::now() + core::time::Duration::new(0, 1_000);
-            match stdin_lock.pipe.read_timeout(&mut buf, Some(timeout)) {
-                Ok(sz_read) => {
-                    if sz_read > 0 {
-                        match dest.write(&buf[0..sz_read]) {
-                            Ok(sz_written) => {
-                                moto_sys::SysCpu::sched_yield();
-                                if sz_written == sz_read {
-                                    continue;
-                                } else {
-                                    stdin_lock
-                                        .overflow
-                                        .extend_from_slice(&buf[sz_written..sz_read]);
-                                    break;
-                                }
-                            }
-                            Err(_) => {
-                                stdin_lock.overflow.extend_from_slice(&buf[0..sz_read]);
-                                break;
-                            }
-                        }
-                    } else {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    if err == moto_rt::E_TIMED_OUT {
-                        continue;
-                    }
-                    break;
-                }
-            }
-        } // loop
-
-        let _ = moto_sys::SysObj::put(SysHandle::SELF);
-        unreachable!()
-    } // relay_thread_fn
-
-    let local_copy = to.unsafe_copy();
-    let thread_arg = Box::into_raw(Box::new(to)) as usize as u64;
-
-    #[cfg(debug_assertions)]
-    const RELAY_THREAD_STACK_SIZE: usize = 1024 * 16;
-    #[cfg(not(debug_assertions))]
-    const RELAY_THREAD_STACK_SIZE: usize = 1024 * 4;
-
-    let thread = moto_sys::SysCpu::spawn(
-        SysHandle::SELF,
-        RELAY_THREAD_STACK_SIZE as u64,
-        relay_thread_fn as *const () as usize as u64,
-        thread_arg,
-    )
-    .inspect_err(|_| unsafe {
-        drop(Box::from_raw(thread_arg as *mut RawPipeData));
-        local_copy.release(SysHandle::SELF);
-    })?;
-
-    // The relay thread is detached.
-    moto_sys::SysObj::put(thread).unwrap();
-    Ok(())
-}
-
 pub fn init() {
     use alloc::sync::Arc;
     use posix::PosixFile;
 
-    let stdin_fd = posix::push_file(Arc::new(SelfStdio {
-        inner: SpinLock::new(StdioImpl::new(StdioKind::Stdin)),
-    }));
-    assert_eq!(moto_rt::FD_STDIN, stdin_fd);
+    let stdin = Arc::new(SelfStdio {
+        inner: SpinLock::new(Some(StdioImpl::new(StdioKind::Stdin))),
+    });
+    let stdout = Arc::new(SelfStdio {
+        inner: SpinLock::new(Some(StdioImpl::new(StdioKind::Stdout))),
+    });
+    let stderr = Arc::new(SelfStdio {
+        inner: SpinLock::new(Some(StdioImpl::new(StdioKind::Stderr))),
+    });
+    *SELF_STDIO.lock() = [
+        Some(stdin.clone()),
+        Some(stdout.clone()),
+        Some(stderr.clone()),
+    ];
 
-    let stdout_fd = posix::push_file(Arc::new(SelfStdio {
-        inner: SpinLock::new(StdioImpl::new(StdioKind::Stdout)),
-    }));
-    assert_eq!(moto_rt::FD_STDOUT, stdout_fd);
-
-    let stderr_fd = posix::push_file(Arc::new(SelfStdio {
-        inner: SpinLock::new(StdioImpl::new(StdioKind::Stderr)),
-    }));
-    assert_eq!(moto_rt::FD_STDERR, stderr_fd);
+    assert_eq!(moto_rt::FD_STDIN, posix::push_file(stdin));
+    assert_eq!(moto_rt::FD_STDOUT, posix::push_file(stdout));
+    assert_eq!(moto_rt::FD_STDERR, posix::push_file(stderr));
 }
 
 pub fn create_child_stdio(
@@ -396,9 +389,7 @@ fn create_stdio_pipes(
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            set_relay(kind, pdata).inspect_err(|_| unsafe {
-                remote_data.unsafe_copy().release(remote_process);
-            })?;
+            set_relay(kind, pdata);
 
             Ok((
                 moto_rt::process::STDIO_NULL,

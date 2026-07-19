@@ -1289,6 +1289,7 @@ dependencies = [
  "crossbeam-queue",
  "elfloader",
  "frusa 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures",
  "log",
  "moto-async",
  "moto-dns",

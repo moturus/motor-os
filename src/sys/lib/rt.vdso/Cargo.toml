@@ -22,6 +22,7 @@ elfloader        = { path = "../../../third_party/elfloader" }
 # frusa          = { path = "../frusa"            }
 frusa            = "0.1.3"
 moto-async       = { path = "../moto-async"       }
+futures          = { version = "0.3", default-features = false, features = ["alloc"] }
 moto-dns         = { path = "../moto-dns"         }
 moto-io          = { path = "../moto-io"          }
 moto-io-internal = { path = "../moto-io-internal" }

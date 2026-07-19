@@ -116,6 +116,7 @@ pub unsafe extern "C" fn status(handle: u64, status: *mut u64) -> moto_rt::Error
 }
 
 pub extern "C" fn exit(code: i32) -> ! {
+    crate::stdio_relay::drain_for_exit();
     let code = i32::cast_unsigned(code) as u64;
     moto_sys::SysCpu::exit_process(code)
 }
