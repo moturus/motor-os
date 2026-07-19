@@ -22,6 +22,9 @@ else
   make -C "$ROOT_DIR" all -j"$(nproc)"
 fi
 
+# A fresh checkout leaves the key group-readable; ssh then silently ignores it.
+chmod 600 "$WD/test.key"
+
 SSH_OPTIONS=(
   -F /dev/null
   -p 2222
