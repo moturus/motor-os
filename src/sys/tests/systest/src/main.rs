@@ -9,6 +9,7 @@ mod io_channel;
 mod logging;
 mod moto_async;
 mod mpmc;
+mod poll;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -537,6 +538,7 @@ fn main() {
     test_syscall();
     threads::run_all_tests();
     moto_async::run_all_tests();
+    poll::run_all_tests();
     io_channel::run_all_tests();
     test_thread_names();
     test_cpus();

@@ -8,7 +8,10 @@ use core::any::Any;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
+use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
+
+use moto_async::SyncWaiter;
 
 use crate::posix;
 use crate::posix::PosixFile;
@@ -432,59 +435,95 @@ impl EventSourceUnmanaged {
 
 static REGISTRIES: SpinLock<BTreeMap<u64, Weak<Registry>>> = SpinLock::new(BTreeMap::new());
 
-/// The delivery half of the registry's wait protocol, isolated as one
-/// seam (design section 6): event producers call `wake()`, the polling
-/// thread arms the slot, re-checks for events, and parks.
+/// The delivery half of the registry's wait protocol (design section 6):
+/// event producers call `wake()`, pollers park on the bridge parker.
 ///
-/// Today this is a single clobberable slot: a second concurrent poller
-/// overwrites the first. The rewrite replaces these internals with the
-/// bridge parker plus an overflow waiter list.
+/// wake() is sticky, so arm -> re-check -> park cannot lose a wakeup;
+/// the price is occasional spurious returns, absorbed by the caller's
+/// collect loop. The single-poller case (mio's `&mut Poll`) claims the
+/// registry's own waiter with one CAS; concurrent extra pollers overflow
+/// into a locked list of ad-hoc waiters, which makes multi-poller waits
+/// correct -- the old single-slot protocol let one poller clobber
+/// another's wake slot and sleep through its events.
 struct PollerSlot {
-    wait_handle: AtomicU64,
+    fast_waiter: SyncWaiter,
+    fast_taken: AtomicBool,
+    overflow: SpinLock<Vec<Arc<SyncWaiter>>>,
+    overflow_waiters: AtomicUsize,
+}
+
+enum PollerTicket {
+    Fast,
+    Overflow(Arc<SyncWaiter>),
 }
 
 impl PollerSlot {
     fn new() -> Self {
         Self {
-            wait_handle: AtomicU64::new(SysHandle::NONE.as_u64()),
+            fast_waiter: SyncWaiter::new(),
+            fast_taken: AtomicBool::new(false),
+            overflow: SpinLock::new(Vec::new()),
+            overflow_waiters: AtomicUsize::new(0),
         }
     }
 
-    /// Publish the calling thread as the parked poller. Must happen
-    /// before the caller re-checks for pending events, otherwise a
-    /// concurrent wake() may be lost.
-    fn arm(&self) {
-        self.wait_handle.store(
-            moto_sys::UserThreadControlBlock::get().self_handle,
-            Ordering::Release,
-        );
-    }
-
-    fn disarm(&self) {
-        self.wait_handle
-            .store(SysHandle::NONE.as_u64(), Ordering::Release);
-    }
-
-    /// Wake the armed poller, if any. Callable from any thread.
-    fn wake(&self) {
-        let handle = SysHandle::from_u64(self.wait_handle.load(Ordering::Acquire));
-        if handle != SysHandle::NONE {
-            let _ = moto_sys::SysCpu::wake(handle);
+    /// Claim a waiter. Wakes after this reach us; the caller must
+    /// re-check for events pushed before it, between arm() and park().
+    fn arm(&self) -> PollerTicket {
+        if self
+            .fast_taken
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return PollerTicket::Fast;
         }
+
+        let waiter = Arc::new(SyncWaiter::new());
+        self.overflow.lock().push(waiter.clone());
+        // The SeqCst RMW pairs with the fence in wake(): either wake()
+        // sees the count, or we see its events in the re-check.
+        self.overflow_waiters.fetch_add(1, Ordering::SeqCst);
+        PollerTicket::Overflow(waiter)
     }
 
-    /// Park the armed poller until wake(), a `wait_handles` event, or
-    /// the deadline. Disarms on return so that wake() calls made by
-    /// this thread's own event processing do not self-wake.
     fn park(
         &self,
+        ticket: &PollerTicket,
         wait_handles: &mut [SysHandle],
         deadline: Option<moto_rt::time::Instant>,
     ) -> Result<(), ErrorCode> {
-        let result =
-            moto_sys::SysCpu::wait(wait_handles, SysHandle::NONE, SysHandle::NONE, deadline);
-        self.disarm();
-        result
+        match ticket {
+            PollerTicket::Fast => self.fast_waiter.wait_on(wait_handles, deadline),
+            PollerTicket::Overflow(waiter) => waiter.wait_on(wait_handles, deadline),
+        }
+    }
+
+    fn disarm(&self, ticket: PollerTicket) {
+        match ticket {
+            PollerTicket::Fast => self.fast_taken.store(false, Ordering::Release),
+            PollerTicket::Overflow(waiter) => {
+                self.overflow
+                    .lock()
+                    .retain(|other| !Arc::ptr_eq(other, &waiter));
+                self.overflow_waiters.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Wake parked pollers. Callable from any thread.
+    fn wake(&self) {
+        // Unconditional: a signal with no waiter is remembered and
+        // consumed by the next park, which then re-checks for events.
+        self.fast_waiter.signal();
+
+        // Pairs with the SeqCst RMW in arm(); the caller published its
+        // events before calling us.
+        core::sync::atomic::fence(Ordering::SeqCst);
+        if self.overflow_waiters.load(Ordering::Relaxed) > 0 {
+            for waiter in self.overflow.lock().iter() {
+                waiter.signal();
+            }
+        }
     }
 }
 
@@ -673,15 +712,21 @@ impl Registry {
             self.prep_unmanaged_sources(&mut wait_handles);
 
             // Wait phase: arm before the event check (see arm()).
-            self.poller.arm();
+            let ticket = self.poller.arm();
 
             let collected = self.collect_events(events_buf);
             if collected > 0 {
-                self.poller.disarm();
+                self.poller.disarm(ticket);
                 return collected as i32;
             }
 
-            match self.poller.park(wait_handles.as_mut_slice(), deadline) {
+            let result = self
+                .poller
+                .park(&ticket, wait_handles.as_mut_slice(), deadline);
+            // The claim is only needed while parked.
+            self.poller.disarm(ticket);
+
+            match result {
                 Err(E_BAD_HANDLE) => {
                     // The kernel puts the bad handle first in the list.
                     assert!(!wait_handles.is_empty());
