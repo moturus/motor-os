@@ -19,17 +19,17 @@ use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 use moto_ipc::io_channel;
+use moto_rt::E_BAD_HANDLE;
+use moto_rt::E_INVALID_ARGUMENT;
+use moto_rt::E_OK;
+use moto_rt::E_TIMED_OUT;
+use moto_rt::ErrorCode;
+use moto_rt::RtFd;
 use moto_rt::poll::Event;
 use moto_rt::poll::EventBits;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
-use moto_rt::ErrorCode;
-use moto_rt::RtFd;
-use moto_rt::E_BAD_HANDLE;
-use moto_rt::E_INVALID_ARGUMENT;
-use moto_rt::E_OK;
-use moto_rt::E_TIMED_OUT;
 use moto_sys::SysHandle;
 
 /// A leaf object that can be waited on.
@@ -432,10 +432,66 @@ impl EventSourceUnmanaged {
 
 static REGISTRIES: SpinLock<BTreeMap<u64, Weak<Registry>>> = SpinLock::new(BTreeMap::new());
 
+/// The delivery half of the registry's wait protocol, isolated as one
+/// seam (design section 6): event producers call `wake()`, the polling
+/// thread arms the slot, re-checks for events, and parks.
+///
+/// Today this is a single clobberable slot: a second concurrent poller
+/// overwrites the first. The rewrite replaces these internals with the
+/// bridge parker plus an overflow waiter list.
+struct PollerSlot {
+    wait_handle: AtomicU64,
+}
+
+impl PollerSlot {
+    fn new() -> Self {
+        Self {
+            wait_handle: AtomicU64::new(SysHandle::NONE.as_u64()),
+        }
+    }
+
+    /// Publish the calling thread as the parked poller. Must happen
+    /// before the caller re-checks for pending events, otherwise a
+    /// concurrent wake() may be lost.
+    fn arm(&self) {
+        self.wait_handle.store(
+            moto_sys::UserThreadControlBlock::get().self_handle,
+            Ordering::Release,
+        );
+    }
+
+    fn disarm(&self) {
+        self.wait_handle
+            .store(SysHandle::NONE.as_u64(), Ordering::Release);
+    }
+
+    /// Wake the armed poller, if any. Callable from any thread.
+    fn wake(&self) {
+        let handle = SysHandle::from_u64(self.wait_handle.load(Ordering::Acquire));
+        if handle != SysHandle::NONE {
+            let _ = moto_sys::SysCpu::wake(handle);
+        }
+    }
+
+    /// Park the armed poller until wake(), a `wait_handles` event, or
+    /// the deadline. Disarms on return so that wake() calls made by
+    /// this thread's own event processing do not self-wake.
+    fn park(
+        &self,
+        wait_handles: &mut [SysHandle],
+        deadline: Option<moto_rt::time::Instant>,
+    ) -> Result<(), ErrorCode> {
+        let result =
+            moto_sys::SysCpu::wait(wait_handles, SysHandle::NONE, SysHandle::NONE, deadline);
+        self.disarm();
+        result
+    }
+}
+
 pub struct Registry {
     id: u64,
     events: SpinLock<BTreeMap<Token, EventBits>>,
-    wait_handle: AtomicU64,
+    poller: PollerSlot,
     event_source: EventSourceManaged,
 
     // Pollees like sockets have their own runtime/wakups, and they notify their registries
@@ -515,7 +571,7 @@ impl Registry {
         let result = Arc::new(Self {
             id,
             events: SpinLock::new(BTreeMap::new()),
-            wait_handle: AtomicU64::new(SysHandle::NONE.as_u64()),
+            poller: PollerSlot::new(),
             event_source: EventSourceManaged::new(moto_rt::poll::POLL_READABLE),
             unmanaged_sources: SpinLock::new(BTreeMap::new()),
             pollees: SpinLock::new(BTreeMap::new()),
@@ -534,11 +590,12 @@ impl Registry {
         if let Err(err) = posix_file.poll_add(self.id, source_fd, token, interests) {
             err
         } else {
-            assert!(self
-                .pollees
-                .lock()
-                .insert(source_fd, Arc::downgrade(&posix_file))
-                .is_none());
+            assert!(
+                self.pollees
+                    .lock()
+                    .insert(source_fd, Arc::downgrade(&posix_file))
+                    .is_none()
+            );
             E_OK
         }
     }
@@ -606,119 +663,122 @@ impl Registry {
 
         let mut wait_handles = Vec::new();
         loop {
-            {
-                // If there are tombstones, just return them.
-                let mut idx = 0;
-                // for entry in self.tombstones.lock().values() {
-                while let Some((_, entry)) = self.tombstones.lock().pop_first() {
-                    events_buf[idx] = entry;
-                    idx += 1;
-                    if idx >= events_buf.len() {
-                        break;
-                    }
-                }
-
-                if idx > 0 {
-                    return idx as i32;
-                }
+            // Collect phase: tombstones are returned alone, ahead of
+            // regular events.
+            let collected = self.collect_tombstones(events_buf);
+            if collected > 0 {
+                return collected as i32;
             }
 
-            // Prepare wait handles.
-            {
-                wait_handles.clear();
-                let mut waiting_handle_objects = self.unmanaged_sources.lock();
-                let mut dropped_handles = alloc::vec::Vec::new();
+            self.prep_unmanaged_sources(&mut wait_handles);
 
-                for (handle, obj) in &*waiting_handle_objects {
-                    if let Some(obj) = obj.upgrade() {
-                        obj.check_interests_for_registry(self.id);
-                        wait_handles.push(*handle);
-                    } else {
-                        dropped_handles.push(*handle);
-                    }
-                }
+            // Wait phase: arm before the event check (see arm()).
+            self.poller.arm();
 
-                for handle in dropped_handles {
-                    waiting_handle_objects.remove(&handle);
-                }
+            let collected = self.collect_events(events_buf);
+            if collected > 0 {
+                self.poller.disarm();
+                return collected as i32;
             }
 
-            // We must store the handle before we check self.events,
-            // otherwise we may lose a concurrently happening wakeup.
-            self.wait_handle.store(
-                moto_sys::UserThreadControlBlock::get().self_handle,
-                Ordering::Release,
-            );
-
-            if !self.events.lock().is_empty() {
-                self.wait_handle
-                    .store(SysHandle::NONE.as_u64(), Ordering::Release);
-                break;
-            }
-
-            let result = moto_sys::SysCpu::wait(
-                wait_handles.as_mut_slice(),
-                SysHandle::NONE,
-                SysHandle::NONE,
-                deadline,
-            );
-            // Need to clear self.wait_handle so that on_event(), when called from
-            // check_interests_for_registry(), does not try to wake the current thread.
-            self.wait_handle
-                .store(SysHandle::NONE.as_u64(), Ordering::Release);
-
-            if let Err(moto_rt::E_BAD_HANDLE) = result {
-                // The first object is the bad handle.
-                assert!(!wait_handles.is_empty());
-                let bad_handle = wait_handles[0];
-                let obj = self.unmanaged_sources.lock().remove(&bad_handle).unwrap();
-
-                if let Some(obj) = obj.upgrade() {
-                    obj.on_handle_error();
-                    obj.check_interests_for_registry(self.id);
-                }
-            } else if let Err(moto_rt::E_TIMED_OUT) = result {
-                if !self.events.lock().is_empty() {
-                    break;
-                }
-
-                // MIO docs for poll() say that upon timeout poll() returns OK(()),
-                // and MIO tests (specifically tcp::listen_then_close() rely on this).
-                return 0; // -(E_TIMED_OUT as i32);
-            } else {
-                for handle in &wait_handles {
-                    if *handle == SysHandle::NONE {
-                        break;
-                    }
-
-                    let obj = self.unmanaged_sources.lock().get(handle).unwrap().clone();
+            match self.poller.park(wait_handles.as_mut_slice(), deadline) {
+                Err(E_BAD_HANDLE) => {
+                    // The kernel puts the bad handle first in the list.
+                    assert!(!wait_handles.is_empty());
+                    let bad_handle = wait_handles[0];
+                    let obj = self.unmanaged_sources.lock().remove(&bad_handle).unwrap();
 
                     if let Some(obj) = obj.upgrade() {
+                        obj.on_handle_error();
                         obj.check_interests_for_registry(self.id);
-                    } else {
-                        self.unmanaged_sources.lock().remove(handle);
+                    }
+                }
+                Err(E_TIMED_OUT) => {
+                    let collected = self.collect_events(events_buf);
+                    if collected > 0 {
+                        return collected as i32;
+                    }
+
+                    // MIO docs for poll() say that upon timeout poll() returns OK(()),
+                    // and MIO tests (specifically tcp::listen_then_close()) rely on this.
+                    return 0;
+                }
+                _ => {
+                    // Woken handles are moved to the front of the list.
+                    for handle in &wait_handles {
+                        if *handle == SysHandle::NONE {
+                            break;
+                        }
+
+                        let obj = self.unmanaged_sources.lock().get(handle).unwrap().clone();
+
+                        if let Some(obj) = obj.upgrade() {
+                            obj.check_interests_for_registry(self.id);
+                        } else {
+                            self.unmanaged_sources.lock().remove(handle);
+                        }
                     }
                 }
             }
 
-            if !self.events.lock().is_empty() {
-                break;
+            let collected = self.collect_events(events_buf);
+            if collected > 0 {
+                return collected as i32;
             }
         }
+    }
 
+    /// Collect closed-pollee tombstones into `events_buf`. Tombstones
+    /// are delivered ahead of, and never mixed with, regular events.
+    fn collect_tombstones(&self, events_buf: &mut [Event]) -> usize {
+        let mut idx = 0;
+        while idx < events_buf.len() {
+            let Some((_, event)) = self.tombstones.lock().pop_first() else {
+                break;
+            };
+            events_buf[idx] = event;
+            idx += 1;
+        }
+        idx
+    }
+
+    /// Drain accumulated (token, bits) events into `events_buf`.
+    fn collect_events(&self, events_buf: &mut [Event]) -> usize {
         let mut events = self.events.lock();
         let mut idx = 0;
         while idx < events_buf.len() {
             let Some((token, bits)) = events.pop_first() else {
                 break;
             };
-            let entry = &mut events_buf[idx];
-            entry.token = token;
-            entry.events = bits;
+            events_buf[idx] = Event {
+                token,
+                events: bits,
+            };
             idx += 1;
         }
+        idx
+    }
 
-        idx as i32
+    /// Refresh unmanaged sources (their level state is polled here and
+    /// converted to edges -- they have no wake path of their own) and
+    /// rebuild the handle list to park on; dead sources are dropped.
+    fn prep_unmanaged_sources(&self, wait_handles: &mut Vec<SysHandle>) {
+        wait_handles.clear();
+        let mut unmanaged_sources = self.unmanaged_sources.lock();
+        let mut dropped_handles = alloc::vec::Vec::new();
+
+        for (handle, obj) in &*unmanaged_sources {
+            if let Some(obj) = obj.upgrade() {
+                obj.check_interests_for_registry(self.id);
+                wait_handles.push(*handle);
+            } else {
+                dropped_handles.push(*handle);
+            }
+        }
+
+        for handle in dropped_handles {
+            unmanaged_sources.remove(&handle);
+        }
     }
 
     fn on_event(&self, token: Token, event_bits: EventBits) {
@@ -728,17 +788,11 @@ impl Registry {
             .and_modify(|curr| *curr |= event_bits)
             .or_insert(event_bits);
 
-        let handle = SysHandle::from_u64(self.wait_handle.load(Ordering::Acquire));
-        if handle != SysHandle::NONE {
-            let _ = moto_sys::SysCpu::wake(handle);
-        }
+        self.poller.wake();
     }
 
     fn add_tombstone(&self, source_fd: RtFd, tombstone: Event) {
         self.tombstones.lock().insert(source_fd, tombstone);
-        let handle = SysHandle::from_u64(self.wait_handle.load(Ordering::Acquire));
-        if handle != SysHandle::NONE {
-            let _ = moto_sys::SysCpu::wake(handle);
-        }
+        self.poller.wake();
     }
 }
