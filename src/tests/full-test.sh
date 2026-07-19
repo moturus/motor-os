@@ -129,7 +129,9 @@ echo ""
 echo ""
 
 
-"$IMG_DIR/run-qemu.sh" &> /tmp/full-test.log &
+# FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
+# for hang forensics); run-qemu.sh passes "$@" through to qemu.
+"$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
 
 # It takes some time to start sshd, especially with a debug build, so we
 # have a large timeout and several retries. And the first "test" is just an empty echo.
