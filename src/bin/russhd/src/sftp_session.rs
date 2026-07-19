@@ -2,9 +2,11 @@
 //!
 //! Protocol: https://www.ietf.org/proceedings/50/I-D/secsh-filexfer-00.txt
 
-use russh_sftp::protocol::{File, FileAttributes, Handle, Name, Status, StatusCode, Version};
+use russh_sftp::protocol::{
+    File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+};
 use std::collections::HashMap;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 #[derive(Default)]
 pub struct SftpSession {
@@ -21,6 +23,27 @@ impl SftpSession {
     fn new_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
+    }
+}
+
+fn ok_status(id: u32) -> Status {
+    Status {
+        id,
+        status_code: StatusCode::Ok,
+        error_message: "Ok".to_string(),
+        language_tag: "en-US".to_string(),
+    }
+}
+
+fn io_status(err: &std::io::Error) -> StatusCode {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => StatusCode::NoSuchFile,
+        std::io::ErrorKind::PermissionDenied => StatusCode::PermissionDenied,
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            StatusCode::BadMessage
+        }
+        std::io::ErrorKind::Unsupported => StatusCode::OpUnsupported,
+        _ => StatusCode::Failure,
     }
 }
 
@@ -49,12 +72,7 @@ impl russh_sftp::server::Handler for SftpSession {
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         if self.open_files.remove(&handle).is_some() || self.open_dirs.remove(&handle).is_some() {
             log::info!("close {handle}: Ok");
-            Ok(Status {
-                id,
-                status_code: StatusCode::Ok,
-                error_message: "Ok".to_string(),
-                language_tag: "en-US".to_string(),
-            })
+            Ok(ok_status(id))
         } else {
             log::warn!("close: handle: '{handle}' not found");
             Err(StatusCode::BadMessage)
@@ -138,19 +156,23 @@ impl russh_sftp::server::Handler for SftpSession {
         &mut self,
         id: u32,
         filename: String,
-        pflags: russh_sftp::protocol::OpenFlags,
+        pflags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
-        if pflags.bits() != russh_sftp::protocol::OpenFlags::READ.bits() {
-            log::warn!("open: {filename}: unsupported flags 0x{pflags:x}");
-            return Err(self.unimplemented());
+        if !pflags.intersects(OpenFlags::READ | OpenFlags::WRITE) {
+            log::warn!("open: {filename}: missing read/write flag in 0x{pflags:x}");
+            return Err(StatusCode::BadMessage);
         }
 
-        let file = tokio::fs::File::open(filename.as_str())
+        // russh-sftp's conversion implements the SFTP v3 flag semantics,
+        // including CREATE|EXCLUDE (create_new), TRUNCATE, and APPEND.
+        let options: std::fs::OpenOptions = pflags.into();
+        let file = tokio::fs::OpenOptions::from(options)
+            .open(filename.as_str())
             .await
             .map_err(|err| {
                 log::warn!("open: {filename}: Err: {err:?}");
-                StatusCode::NoSuchFile
+                io_status(&err)
             })?;
 
         let handle = format!("{:x}", self.new_id());
@@ -209,6 +231,35 @@ impl russh_sftp::server::Handler for SftpSession {
 
         log::debug!("read {handle} Ok: {total_read} bytes read");
         Ok(russh_sftp::protocol::Data { id, data })
+    }
+
+    /// Called on SSH_FXP_WRITE
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Status, Self::Error> {
+        let Some(file) = self.open_files.get_mut(&handle) else {
+            log::warn!("write {handle}: Err: not found");
+            return Err(StatusCode::BadMessage);
+        };
+
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|err| {
+                log::warn!("write: seek {handle} {offset} failed: {err:?}");
+                io_status(&err)
+            })?;
+
+        file.write_all(&data).await.map_err(|err| {
+            log::warn!("write {handle} at {offset} failed: {err:?}");
+            io_status(&err)
+        })?;
+
+        log::debug!("write {handle} Ok: {} bytes at {offset}", data.len());
+        Ok(ok_status(id))
     }
 
     /// Called on SSH_FXP_LSTAT
@@ -281,7 +332,20 @@ fn canonicalize_lexical(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_lexical;
+    use super::{SftpSession, canonicalize_lexical};
+    use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+    use russh_sftp::server::Handler as _;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_path(label: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "russhd-sftp-{}-{}-{label}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[test]
     fn absolute_paths_are_normalized() {
@@ -307,5 +371,82 @@ mod tests {
         // `..` pops the last cwd segment.
         let parent = canonicalize_lexical("..");
         assert!(cwd.starts_with(&parent));
+    }
+
+    #[test]
+    fn upload_creates_truncates_and_writes_at_offsets() {
+        let path = temp_path("upload");
+        std::fs::write(&path, b"old data that must be truncated").unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut session = SftpSession::default();
+            let opened = session
+                .open(
+                    1,
+                    path.to_string_lossy().into_owned(),
+                    OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+                    FileAttributes::empty(),
+                )
+                .await
+                .unwrap();
+
+            let status = session
+                .write(2, opened.handle.clone(), 6, b"world".to_vec())
+                .await
+                .unwrap();
+            assert_eq!(status.id, 2);
+            assert_eq!(status.status_code, StatusCode::Ok);
+
+            session
+                .write(3, opened.handle.clone(), 0, b"hello ".to_vec())
+                .await
+                .unwrap();
+            session.close(4, opened.handle).await.unwrap();
+        });
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn upload_honors_append_and_rejects_unknown_handles() {
+        let path = temp_path("append");
+        std::fs::write(&path, b"first").unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut session = SftpSession::default();
+            let opened = session
+                .open(
+                    1,
+                    path.to_string_lossy().into_owned(),
+                    OpenFlags::WRITE | OpenFlags::APPEND,
+                    FileAttributes::empty(),
+                )
+                .await
+                .unwrap();
+
+            // APPEND makes the requested offset irrelevant.
+            session
+                .write(2, opened.handle.clone(), 0, b" second".to_vec())
+                .await
+                .unwrap();
+            session.close(3, opened.handle).await.unwrap();
+
+            assert!(matches!(
+                session
+                    .write(4, "not-an-open-handle".to_string(), 0, vec![1])
+                    .await,
+                Err(StatusCode::BadMessage)
+            ));
+        });
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"first second");
+        std::fs::remove_file(path).unwrap();
     }
 }
