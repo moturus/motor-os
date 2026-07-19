@@ -17,14 +17,17 @@ else
 endif
 
 ROOT_DIR := $(CURDIR)
-MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../../llvm-project/build/bin/clang)
-MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../../motor-sysroot)
-MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../../motor-sysroot/sys/tools/llvm)
+MOTOR_DNS_CLANG ?= $(abspath $(ROOT_DIR)/../llvm-project/build/bin/clang)
+MOTOR_DNS_SYSROOT ?= $(abspath $(ROOT_DIR)/../motor-sysroot)
+MOTOR_DNS_SDK ?= $(abspath $(ROOT_DIR)/../motor-sysroot/sys/tools/llvm)
+ifneq ($(MOTOR_DNS_STRICT_LINK),1)
+	MOTOR_DNS_COMPAT_LINK_ARG := -C link-arg=-Wl,--allow-multiple-definition
+endif
 MOTOR_DNS_RUSTFLAGS := -C linker=$(MOTOR_DNS_CLANG) \
 	-C link-arg=--no-default-config \
 	-C link-arg=--target=x86_64-unknown-motor \
 	-C link-arg=--sysroot=$(MOTOR_DNS_SYSROOT) \
-	-C link-arg=-Wl,--allow-multiple-definition \
+	$(MOTOR_DNS_COMPAT_LINK_ARG) \
 	-C link-self-contained=no \
 	-C default-linker-libraries=yes
 

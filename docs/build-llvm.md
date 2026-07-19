@@ -68,7 +68,8 @@ Build order matters — each stage consumes the sysroot the previous ones filled
 5. **C++ runtimes** (`libunwind`, `libc++abi`, `libc++`, exceptions on).
 6. **Native LLVM** (the on-image `llvm` multicall binary).
 7. **Lua** (a real end-to-end program).
-8. **Stage** everything into `img_files/motor-os/` and rebuild the image.
+8. **Stage** generated artifacts into `img_files/generated/llvm/` and rebuild
+   the image. The tracked `img_files/motor-os/` tree remains source-only.
 
 Rough budget: a first build is ~1–2 h of compiling (two full LLVM builds
 dominate) and adds ~135 MB to the image.
@@ -480,18 +481,17 @@ $B/clang $CFLAGS lua.c liblua.a $SYSROOT/sys/tools/llvm/lib/crt1.o \
 
 ## Stage 8 — stage everything into the image
 
-`img_files/motor-os/` is a passthrough that maps to the **image root** (the
-imager yaml already lists it — never edit that yaml). Headers and libraries land
-at `/sys/tools/llvm`, the `llvm` multicall at `/sys/tools/llvm/bin` (mirroring
-`/sys/tools/rust/bin`), `lua` and the `cc` script at `/bin`, the clang driver
-config at `/sys/cfg/llvm`, and mlibc's config at `/sys/cfg/libc`. (If an earlier
-build left a `/usr` or `/etc` tree, or a `/bin/llvm` from the old layout, delete
-them: `rm -rf $IMG/usr $IMG/etc $IMG/bin/llvm`.)
+`img_files/generated/llvm/` is a generated passthrough that maps to the
+**image root**. The imager combines it with the tracked
+`img_files/motor-os/` source tree and the generated native Rust tree. Headers
+and libraries land at `/sys/tools/llvm`, the `llvm` multicall at
+`/sys/tools/llvm/bin` (mirroring `/sys/tools/rust/bin`), `lua` and the `cc`
+script at `/bin`, the clang driver config at `/sys/cfg/llvm`, and mlibc's
+config at `/sys/cfg/libc`.
 
 ```sh
-IMG=$MOTOR/img_files/motor-os
-rm -rf $IMG/usr $IMG/etc     # obsolete layout, if present
-rm -f  $IMG/bin/llvm         # old location — the multicall now lives under /sys
+IMG=$MOTOR/img_files/generated/llvm
+rm -rf $IMG                  # stale-free generated staging tree
 mkdir -p $IMG/bin $IMG/sys/tools/llvm/bin $IMG/sys/cfg/llvm $IMG/sys/cfg/libc \
          $IMG/sys/tools/llvm/lib/clang/$CLANG_MAJOR $IMG/sys/tools/llvm/src
 

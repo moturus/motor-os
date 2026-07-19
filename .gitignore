@@ -1,6 +1,6 @@
 /build
 /target
 /vm_images
+/img_files/generated
 /.vscode
 *.swp
-

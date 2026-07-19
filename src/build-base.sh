@@ -8,17 +8,16 @@
 #
 #       ./build-base.sh
 #
-#   The directory the script lives in becomes $MOTORH (the Motor OS dev root).
-#   Everything is cloned/built underneath it. This file is kept in the repo at
-#   src/build-base.sh only as the canonical copy to hand out; do not run it from
-#   inside a checkout (that would make $MOTORH be .../motor-os/src).
+#   When copied out, the directory the script lives in becomes $MOTORH (the
+#   Motor OS dev root). The unified build sets MOTORH and MOTOR_OS_DIR so this
+#   same stage can also run directly from the Motor OS checkout.
 #
 # WHAT IT DOES (all under $MOTORH), mirroring docs/build.md:
 #   1. install host build packages via apt          [skipped if already present]
 #   2. install rustup + the pinned nightly toolchain [skipped if already present]
 #   3. clone + build the Rust Motor OS toolchain      [clone skipped if present]
 #   4. clone the motor-os repo                         [skipped if already present]
-#   5. build Motor OS: make all BUILD=release          [always; incremental]
+#   5. build Motor OS when its C sysroot already exists [incremental]
 #   6. create the moto-tap interface + /dev/kvm access [skipped if already done]
 #
 #   It does NOT launch the VM (run-qemu.sh) — that is left to you.
@@ -37,8 +36,10 @@ warn() { printf '\033[1;33m[build-base]\033[0m WARNING: %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[build-base]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO"' ERR
 
-# --- $MOTORH is the directory this script lives in --------------------------
-MOTORH="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# --- development root and Motor OS checkout ---------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+MOTORH="$(readlink -f "${MOTORH:-$SCRIPT_DIR}")"
+MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
 export MOTORH
 
 # --- pins (keep in sync with docs/build.md) ---------------------------------
@@ -150,18 +151,18 @@ EOF
 
 # --- 4. motor-os repo -------------------------------------------------------
 clone_motor_os() {
-	if [ -d "$MOTORH/motor-os/.git" ]; then
+	if [ -e "$MOTOR/.git" ]; then
 		skip "motor-os already cloned"
 	else
 		log "cloning moturus/motor-os"
-		git clone https://github.com/moturus/motor-os.git "$MOTORH/motor-os"
+		git clone https://github.com/moturus/motor-os.git "$MOTOR"
 	fi
 }
 
 # --- 5. build Motor OS ------------------------------------------------------
 build_motor_os() {
 	log "building Motor OS (make all BUILD=release)"
-	( cd "$MOTORH/motor-os" && make all BUILD=release -j"$(nproc)" )
+	( cd "$MOTOR" && make all BUILD=release -j"$(nproc)" )
 }
 
 # --- 6. host VM prerequisites (tap + kvm), but NOT running the VM -----------
@@ -171,7 +172,7 @@ setup_host_vm_prereqs() {
 		skip "moto-tap interface already exists"
 	else
 		log "creating the moto-tap interface"
-		local tap="$MOTORH/motor-os/vm_images/release/create-tap.sh"
+		local tap="$MOTOR/vm_images/release/create-tap.sh"
 		if [ -f "$tap" ]; then
 			sh "$tap"
 		else
@@ -200,10 +201,20 @@ main() {
 	install_rust
 	build_rust_toolchain
 	clone_motor_os
-	build_motor_os
+	if [ "${MOTOR_SKIP_OS_BUILD:-0}" = "1" ]; then
+		skip "base Motor OS image build (deferred to the unified toolchain build)"
+	elif [ ! -f "$MOTORH/motor-sysroot/sys/tools/llvm/lib/libc.a" ]; then
+		skip "base Motor OS image build (the DNS resolver requires the later mlibc stage)"
+	else
+		build_motor_os
+	fi
 	setup_host_vm_prereqs
 	log "done — the environment is ready."
-	log "to run the VM:  cd \"$MOTORH/motor-os/vm_images/release\" && ./run-qemu.sh"
+	if [ -f "$MOTOR/vm_images/release/motor-os.img" ]; then
+		log "to run the VM:  cd \"$MOTOR/vm_images/release\" && ./run-qemu.sh"
+	else
+		log "next: run $MOTOR/src/build-motor-os.sh to build the complete image"
+	fi
 }
 
 main "$@"

@@ -33,6 +33,7 @@ REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/sys/logs/sys-init.log}"
 EXPECTED_FILES=(russhd rush)
 
 SSH_OPTS=(
+    -F /dev/null
     -P "$PORT"
     -i "$KEY"
     -o IdentitiesOnly=yes
