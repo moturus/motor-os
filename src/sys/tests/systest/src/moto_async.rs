@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     task::Poll,
     time::Duration,
@@ -10,7 +10,7 @@ use std::{
 use futures::FutureExt;
 use moto_async::AsFuture;
 use moto_rt::time::Instant;
-use moto_sys::SysHandle;
+use moto_sys::{SysCpu, SysHandle};
 
 fn test_basic() {
     assert_eq!(42, moto_async::LocalRuntime::new().block_on(async { 42 }));
@@ -784,6 +784,74 @@ fn test_wake_elision_counters() {
     );
 }
 
+// Helper for the wake_on_sleep tests: a thread expecting exactly one wake
+// on its handle - it fails on a second wake within its 50ms window.
+fn spawn_wake_probe() -> (std::thread::JoinHandle<()>, SysHandle) {
+    let handle_slot = Arc::new(AtomicU64::new(0));
+    let handle_clone = handle_slot.clone();
+    let probe = std::thread::spawn(move || {
+        handle_clone.store(moto_sys::current_thread().as_u64(), Ordering::Release);
+        SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        let res = SysCpu::wait(
+            &mut [],
+            SysHandle::NONE,
+            SysHandle::NONE,
+            Some(Instant::now() + Duration::from_millis(50)),
+        );
+        assert_eq!(res, Err(moto_rt::E_TIMED_OUT), "wake delivered twice");
+    });
+    while handle_slot.load(Ordering::Acquire) == 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    (probe, SysHandle::from_u64(handle_slot.load(Ordering::Acquire)))
+}
+
+fn test_wake_on_sleep_fold() {
+    let (probe, handle) = spawn_wake_probe();
+
+    // A single task parking on a timer: the executor folds the deferred
+    // wake into its sleep syscall.
+    moto_async::LocalRuntime::new().block_on(async move {
+        moto_async::LocalRuntime::set_wake_on_sleep(handle);
+        moto_async::sleep(Duration::from_millis(5)).await;
+    });
+
+    probe.join().unwrap();
+    println!("----- moto_async::test_wake_on_sleep_fold PASS");
+}
+
+fn test_wake_on_sleep_poll_resume() {
+    let (probe, handle) = spawn_wake_probe();
+
+    // The task spins past its own 200us timer deadline, so the executor
+    // finds an expired timer at its sleep decision and resumes polling
+    // instead of parking: the deferred wake must be issued explicitly.
+    moto_async::LocalRuntime::new().block_on(async move {
+        let mut sleep = Box::pin(moto_async::sleep(Duration::from_micros(200)));
+        let mut armed = false;
+        futures::future::poll_fn(|cx| {
+            if !armed {
+                armed = true;
+                moto_async::LocalRuntime::set_wake_on_sleep(handle);
+            }
+            match sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => {
+                    let spin_until = Instant::now() + Duration::from_micros(400);
+                    while Instant::now() < spin_until {
+                        core::hint::spin_loop();
+                    }
+                    Poll::Pending
+                }
+            }
+        })
+        .await;
+    });
+
+    probe.join().unwrap();
+    println!("----- moto_async::test_wake_on_sleep_poll_resume PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -811,6 +879,8 @@ pub fn run_all_tests() {
     test_local_notify_multi_waiter();
     test_local_notify_cancel_redispatch();
     test_wake_elision_counters();
+    test_wake_on_sleep_fold();
+    test_wake_on_sleep_poll_resume();
 
     println!("moto_async all PASS");
 }

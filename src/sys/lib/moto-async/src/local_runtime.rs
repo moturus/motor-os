@@ -243,6 +243,10 @@ struct LocalRuntimeInner {
 
     run_state: Arc<AtomicU32>,
 
+    // Deferred peer wake (design 3.3): delivered exactly once, folded
+    // into the next sleep syscall or issued if we resume polling.
+    wake_on_sleep: core::cell::Cell<Option<SysHandle>>,
+
     currently_running_task: core::cell::Cell<Option<TaskId>>,
 }
 
@@ -257,6 +261,7 @@ impl LocalRuntimeInner {
             next_task_id: RefCell::new(1),
             nonlocal_wakes: Default::default(),
             run_state: Arc::new(AtomicU32::new(RUN_STATE_POLLING)),
+            wake_on_sleep: core::cell::Cell::new(None),
             currently_running_task: Default::default(),
         }
     }
@@ -319,11 +324,11 @@ impl LocalRuntimeInner {
         self.runqueue.borrow_mut().pop_front()
     }
 
-    fn wait(&self, timeo: Option<Instant>) {
+    fn wait(&self, timeo: Option<Instant>, wake_target: SysHandle) {
         let sys_waiters = self.sys_handle_futures.borrow();
         if sys_waiters.is_empty() {
             core::mem::drop(sys_waiters);
-            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, timeo);
+            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, wake_target, timeo);
             return;
         }
 
@@ -337,7 +342,7 @@ impl LocalRuntimeInner {
         let result = moto_sys::SysCpu::wait(
             wait_handles.as_mut_slice(),
             SysHandle::NONE,
-            SysHandle::NONE,
+            wake_target,
             timeo,
         );
 
@@ -469,6 +474,18 @@ impl LocalRuntime {
             .add_at(when, task_id)
     }
 
+    /// Defer a peer wake to the executor (design 3.3): delivered exactly
+    /// once, folded as the wake target of the next sleep syscall, or issued
+    /// explicitly if the executor resumes polling instead of sleeping.
+    /// The handle is only ever a wake target, never a swap target.
+    /// Must be called within a LocalRuntime context.
+    pub fn set_wake_on_sleep(handle: SysHandle) {
+        let prev = LocalRuntimeInner::current().wake_on_sleep.replace(Some(handle));
+        // Same-handle sets coalesce; a second distinct handle would lose
+        // the first wake.
+        debug_assert!(prev.is_none() || prev == Some(handle));
+    }
+
     /// Spawn a new asynchronous task. Must be called within a LocalRuntime context.
     pub fn spawn<F: Future + 'static>(f: F) -> JoinHandle<F::Output> {
         use futures::channel::oneshot;
@@ -512,6 +529,11 @@ impl LocalRuntime {
             inner.enqueue_expired_timers();
             inner.merge_incoming();
             if !inner.runqueue.borrow().is_empty() {
+                // Resuming polling instead of sleeping: the deferred
+                // wake cannot be folded, so issue it (exactly once).
+                if let Some(handle) = inner.wake_on_sleep.take() {
+                    let _ = moto_sys::SysCpu::wake(handle);
+                }
                 return; // Always entered and left in POLLING.
             }
 
@@ -530,8 +552,9 @@ impl LocalRuntime {
             }
 
             let timeo = inner.timeq.borrow_mut().next();
+            let wake_target = inner.wake_on_sleep.take().unwrap_or(SysHandle::NONE);
             inner.run_state.store(RUN_STATE_PARKED, Ordering::Relaxed);
-            inner.wait(timeo);
+            inner.wait(timeo, wake_target);
             inner.run_state.store(RUN_STATE_POLLING, Ordering::Relaxed);
         }
     }
@@ -556,6 +579,11 @@ impl LocalRuntime {
                 runtime.currently_running_task.set(None);
 
                 if let Poll::Ready(output) = result {
+                    // The runtime exits instead of sleeping: still owes
+                    // the deferred wake, if one is pending.
+                    if let Some(handle) = runtime.wake_on_sleep.take() {
+                        let _ = moto_sys::SysCpu::wake(handle);
+                    }
                     return output;
                 }
             }
