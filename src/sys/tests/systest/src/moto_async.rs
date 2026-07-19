@@ -469,6 +469,86 @@ fn test_futures_channel_multithreaded() {
     println!("----- moto_async::test_futures_channel_multithreaded PASS");
 }
 
+fn test_sync_waiter_signal_coalescing() {
+    let waiter = moto_async::SyncWaiter::new();
+
+    // Multiple signals with no waiter coalesce into one.
+    waiter.signal();
+    waiter.signal();
+    waiter.signal();
+
+    let start = Instant::now();
+    waiter.wait(None);
+    assert!(start.elapsed() < Duration::from_millis(100));
+
+    // The coalesced signal is consumed: this wait must run to deadline.
+    let timo = Duration::from_millis(30);
+    let start = Instant::now();
+    waiter.wait(Some(Instant::now() + timo));
+    assert!(start.elapsed() >= timo);
+
+    println!("----- moto_async::test_sync_waiter_signal_coalescing PASS");
+}
+
+fn test_sync_waiter_cross_thread() {
+    let waiter = Arc::new(moto_async::SyncWaiter::new());
+    let done = Arc::new(AtomicU32::new(0));
+
+    let waiter_clone = waiter.clone();
+    let done_clone = done.clone();
+    let thread = std::thread::spawn(move || {
+        while done_clone.load(Ordering::Acquire) == 0 {
+            waiter_clone.wait(None);
+        }
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+
+    // Signal from inside a runtime task: allowed by contract.
+    moto_async::LocalRuntime::new().block_on(async {
+        done.store(1, Ordering::Release);
+        waiter.signal();
+    });
+
+    thread.join().unwrap();
+    println!("----- moto_async::test_sync_waiter_cross_thread PASS");
+}
+
+fn test_sync_waiter_ping_pong() {
+    // Race stress: signal-while-parked, signal-before-wait, and
+    // timeout-vs-signal races (one side waits with a short deadline).
+    const ITERS: u32 = 5_000;
+
+    let ping = Arc::new(moto_async::SyncWaiter::new());
+    let pong = Arc::new(moto_async::SyncWaiter::new());
+    let counter = Arc::new(AtomicU32::new(0));
+
+    let ping_clone = ping.clone();
+    let pong_clone = pong.clone();
+    let counter_clone = counter.clone();
+    let thread = std::thread::spawn(move || {
+        for step in 0..ITERS {
+            while counter_clone.load(Ordering::Acquire) != step * 2 {
+                ping_clone.wait(Some(Instant::now() + Duration::from_millis(1)));
+            }
+            counter_clone.store(step * 2 + 1, Ordering::Release);
+            pong_clone.signal();
+        }
+    });
+
+    for step in 0..ITERS {
+        while counter.load(Ordering::Acquire) != step * 2 + 1 {
+            pong.wait(None);
+        }
+        counter.store(step * 2 + 2, Ordering::Release);
+        ping.signal();
+    }
+
+    thread.join().unwrap();
+    assert_eq!(counter.load(Ordering::Acquire), ITERS * 2);
+    println!("----- moto_async::test_sync_waiter_ping_pong PASS");
+}
+
 fn test_local_notify_eager() {
     moto_async::LocalRuntime::new().block_on(async move {
         let notify = moto_async::LocalNotify::new();
@@ -532,6 +612,9 @@ pub fn run_all_tests() {
     test_channel_basic();
     test_moto_channel_multithreaded();
     test_futures_channel_multithreaded();
+    test_sync_waiter_signal_coalescing();
+    test_sync_waiter_cross_thread();
+    test_sync_waiter_ping_pong();
     test_local_notify_eager();
     test_local_notify_deferred();
 
