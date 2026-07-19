@@ -28,8 +28,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::AtomicUsize;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::task::Context;
 use core::task::Poll;
 use core::task::RawWaker;
@@ -100,11 +99,30 @@ impl TaskId {
     }
 }
 
+// Executor run-state, for wake elision (design 3.4): cross-thread wakes
+// always enqueue, but pay the wake syscall only when the runtime is
+// parked or committing to park.
+const RUN_STATE_POLLING: u32 = 0;
+const RUN_STATE_COMMITTING: u32 = 1;
+const RUN_STATE_PARKED: u32 = 2;
+
+// Wakes issued (syscall) vs elided (runtime awake), process-wide.
+static WAKES_ISSUED: AtomicU64 = AtomicU64::new(0);
+static WAKES_ELIDED: AtomicU64 = AtomicU64::new(0);
+
+pub fn wake_counters() -> (u64, u64) {
+    (
+        WAKES_ISSUED.load(Ordering::Relaxed),
+        WAKES_ELIDED.load(Ordering::Relaxed),
+    )
+}
+
 // This is the waker to use cross-threads.
 // The local waker is just a pointer to TaskId.
 struct MotoWaker {
     // The queue to add task_id upon wake.
     runqueue: Arc<crossbeam::queue::SegQueue<TaskId>>,
+    run_state: Arc<AtomicU32>,
     task_id: TaskId,
     wake_handle: SysHandle, // The handle to call wake() on.
 }
@@ -131,7 +149,16 @@ unsafe fn waker_wake_by_ref(data: *const ()) {
     };
 
     waker.runqueue.push(waker.task_id);
-    let _ = moto_sys::SysCpu::wake(waker.wake_handle);
+    // SC fence pairs with the one in LocalRuntime::wait(): either our
+    // push is visible to the executor's recheck-after-commit, or its
+    // COMMITTING store is visible to the load below and we wake.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    if waker.run_state.load(Ordering::Relaxed) == RUN_STATE_POLLING {
+        WAKES_ELIDED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        WAKES_ISSUED.fetch_add(1, Ordering::Relaxed);
+        let _ = moto_sys::SysCpu::wake(waker.wake_handle);
+    }
 }
 
 unsafe fn waker_drop(data: *const ()) {
@@ -214,6 +241,8 @@ struct LocalRuntimeInner {
     // Task IDs of wakes coming from wakers (!= LocalWaker).
     nonlocal_wakes: Arc<crossbeam::queue::SegQueue<TaskId>>,
 
+    run_state: Arc<AtomicU32>,
+
     currently_running_task: core::cell::Cell<Option<TaskId>>,
 }
 
@@ -227,6 +256,7 @@ impl LocalRuntimeInner {
             tasks: Default::default(),
             next_task_id: RefCell::new(1),
             nonlocal_wakes: Default::default(),
+            run_state: Arc::new(AtomicU32::new(RUN_STATE_POLLING)),
             currently_running_task: Default::default(),
         }
     }
@@ -234,6 +264,7 @@ impl LocalRuntimeInner {
     fn new_waker(&self, task_id: TaskId) -> Waker {
         let moto_waker = Arc::new(MotoWaker {
             runqueue: self.nonlocal_wakes.clone(),
+            run_state: self.run_state.clone(),
             task_id,
             wake_handle: moto_sys::current_thread(),
         });
@@ -481,11 +512,27 @@ impl LocalRuntime {
             inner.enqueue_expired_timers();
             inner.merge_incoming();
             if !inner.runqueue.borrow().is_empty() {
-                return;
+                return; // Always entered and left in POLLING.
+            }
+
+            // Commit to park, then recheck: a waker that pushed before
+            // seeing COMMITTING skipped its wake syscall (see the SC
+            // fence pairing in waker_wake_by_ref). A wake that lands
+            // after this check is sticky in the kernel and makes the
+            // wait below return immediately.
+            inner
+                .run_state
+                .store(RUN_STATE_COMMITTING, Ordering::Relaxed);
+            core::sync::atomic::fence(Ordering::SeqCst);
+            if !inner.nonlocal_wakes.is_empty() {
+                inner.run_state.store(RUN_STATE_POLLING, Ordering::Relaxed);
+                continue;
             }
 
             let timeo = inner.timeq.borrow_mut().next();
+            inner.run_state.store(RUN_STATE_PARKED, Ordering::Relaxed);
             inner.wait(timeo);
+            inner.run_state.store(RUN_STATE_POLLING, Ordering::Relaxed);
         }
     }
 

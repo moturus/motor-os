@@ -752,6 +752,38 @@ fn test_local_notify_cancel_redispatch() {
     println!("----- moto_async::test_local_notify_cancel_redispatch PASS");
 }
 
+fn test_wake_elision_counters() {
+    let (issued_0, elided_0) = moto_async::wake_counters();
+
+    // Busy receiver + foreign-thread sender: most sender wakes should
+    // land while the receiver runtime is polling and be elided.
+    moto_async::LocalRuntime::new().block_on(async {
+        let (tx, mut rx) = moto_async::channel::<u32>(64);
+        std::thread::spawn(move || {
+            moto_async::LocalRuntime::new().block_on(async move {
+                for i in 0..10_000 {
+                    tx.send(i).await.unwrap();
+                }
+            });
+        });
+
+        let mut count = 0;
+        while rx.recv().await.is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 10_000);
+    });
+
+    let (issued, elided) = moto_async::wake_counters();
+    // Wakes happened; elision ratio is scheduling-dependent, so only log it.
+    assert!(issued + elided > issued_0 + elided_0);
+    println!(
+        "----- moto_async::test_wake_elision_counters PASS (issued {} elided {})",
+        issued - issued_0,
+        elided - elided_0
+    );
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -778,6 +810,7 @@ pub fn run_all_tests() {
     test_local_notify_deferred();
     test_local_notify_multi_waiter();
     test_local_notify_cancel_redispatch();
+    test_wake_elision_counters();
 
     println!("moto_async all PASS");
 }
