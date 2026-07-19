@@ -132,18 +132,21 @@ struct SelfStdio {
 
 impl SelfStdio {
     fn with_impl<R>(&self, f: impl FnOnce(&mut StdioImpl) -> R) -> R {
-        loop {
-            {
-                let mut guard = self.inner.lock();
-                if let Some(inner) = guard.as_mut() {
-                    return f(inner);
-                }
+        // Claim the impl instead of running `f` under the lock: `f`
+        // may block in the kernel for as long as it likes (a stdin
+        // read waiting for input), and anyone touching the lock
+        // meanwhile would spin through that entire wait.
+        let mut owned = loop {
+            if let Some(owned) = self.inner.lock().take() {
+                break owned;
             }
-            // Claimed by a stdin relay for a child's lifetime; parent
-            // reads block meanwhile, as they did when the relay thread
-            // held this lock.
+            // Claimed by a stdin relay for a child's lifetime, or by
+            // a concurrent op on this fd; block as before.
             moto_sys::SysCpu::sched_yield();
-        }
+        };
+        let result = f(&mut owned);
+        *self.inner.lock() = Some(owned);
+        result
     }
 }
 
@@ -204,12 +207,21 @@ async fn relay_in(stdio: Arc<SelfStdio>, to: moto_ipc::stdio_pipe::RawPipeData) 
     let dest = unsafe { StdioPipe::new_writer(to) };
 
     // Only one child may consume stdin at a time; relays used to
-    // serialize on the stdio spinlock, now on the claim itself.
+    // serialize on the stdio spinlock, now on the claim itself. The
+    // parent may sit in a blocking read holding the claim for the
+    // child's whole lifetime (tokio-tests does), so also watch for
+    // child death: an unserved child must not pin this task forever.
     let mut owned = loop {
         if let Some(owned) = stdio.inner.lock().take() {
             break owned;
         }
-        moto_async::sleep(core::time::Duration::from_millis(1)).await;
+        let nap = core::pin::pin!(moto_async::sleep(core::time::Duration::from_millis(1)));
+        if let Either::Right((result, _)) =
+            futures::future::select(nap, dest.handle().as_future()).await
+            && result.is_err()
+        {
+            return;
+        }
     };
 
     let mut buf = [0_u8; 80];
@@ -294,9 +306,19 @@ async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
 async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
     use moto_async::AsFuture;
 
-    // Only stdin is ever claimed; with_impl never spins here.
+    // Claim per write instead of using with_impl: a user thread may
+    // hold the claim across a blocking write, and this runtime must
+    // sleep through that wait, not spin through it.
     while !buf.is_empty() {
-        let result = stdio.with_impl(|inner| inner.pipe.nonblocking_write(buf));
+        let mut owned = loop {
+            if let Some(owned) = stdio.inner.lock().take() {
+                break owned;
+            }
+            moto_async::sleep(core::time::Duration::from_millis(1)).await;
+        };
+        let result = owned.pipe.nonblocking_write(buf);
+        let handle = owned.pipe.handle();
+        *stdio.inner.lock() = Some(owned);
         match result {
             Ok(written) => {
                 buf = &buf[written..];
@@ -305,7 +327,6 @@ async fn relay_write(stdio: &SelfStdio, mut buf: &[u8]) -> bool {
                 moto_sys::SysCpu::sched_yield();
             }
             Err(moto_rt::E_NOT_READY) => {
-                let handle = stdio.with_impl(|inner| inner.pipe.handle());
                 if handle.as_future().await.is_err() {
                     return false;
                 }
