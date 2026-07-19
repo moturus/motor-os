@@ -212,15 +212,14 @@ impl NetRuntime {
 
         log::debug!("new NET connection 0x{:x}", sender.remote_handle().as_u64());
 
-        // We want to process more than one message at at time (due to I/O waits), but
-        // we don't want to have unlimited concurrency, we want backpressure.
+        // We want to process more than one message at a time (due to I/O
+        // waits), but with bounded concurrency for backpressure, so we use
+        // mpsc "tickets".
         //
-        // I tried to convert the receiver to a futures::Stream (via futures::stream::unfold()),
-        // and then use futures::stream::for_each_concurrent, but this didn't work
-        // with our runtime (maybe there is a bug in our runtime, maybe in for_each_concurrent).
-        // (N.B.: futures::stream::for_each works).
-        //
-        // So we are using mpsc to implement "tickets".
+        // Historical note: for_each_concurrent used to hang here because
+        // timer and SysHandle wakes bypassed nested combinator wakers. The
+        // runtime stores wakers now, but the ticket loop stays: it keeps
+        // the inline fast path below dispatchable per message.
 
         const MAX_IN_FLIGHT: usize = 64;
         let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);

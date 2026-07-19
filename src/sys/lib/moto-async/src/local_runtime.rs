@@ -226,8 +226,10 @@ struct LocalRuntimeInner {
     // SysHandle futures.
     sys_handle_futures: RefCell<BTreeMap<SysHandle, VecDeque<Rc<RefCell<SysHandleFutureInner>>>>>,
 
-    // Timers. Can be added to at runtime.
-    timeq: RefCell<crate::timeq::TimeQ<TaskId>>,
+    // Timers. Can be added to at runtime. Hold wakers, not task IDs:
+    // a timer registered under a nested combinator (FuturesUnordered)
+    // must fire the combinator's waker, or the child is never re-polled.
+    timeq: RefCell<crate::timeq::TimeQ<core::task::LocalWaker>>,
 
     // New tasks (from spawn()). As they are added "at runtime",
     // when Self::tasks is borrowed, we need to temporarily
@@ -357,7 +359,7 @@ impl LocalRuntimeInner {
                         .borrow_mut()
                         .remove(&handle)
                         .unwrap();
-                    let mut runqueue = self.runqueue.borrow_mut();
+                    let mut to_wake = Vec::new();
                     for future in done_futures {
                         let mut inner_future = future.borrow_mut();
                         if inner_future.dropped {
@@ -369,8 +371,11 @@ impl LocalRuntimeInner {
                                 log::debug!("{}: woke ok", inner_future.name());
                             }
                         }
-                        runqueue.push_back(inner_future.task_id);
                         inner_future.result = Some(Ok(()));
+                        to_wake.push(inner_future.waker.clone());
+                    }
+                    for waker in to_wake {
+                        waker.wake();
                     }
                 }
             }
@@ -385,7 +390,7 @@ impl LocalRuntimeInner {
                         .borrow_mut()
                         .remove(&handle)
                         .unwrap();
-                    let mut runqueue = self.runqueue.borrow_mut();
+                    let mut to_wake = Vec::new();
                     for future in done_futures {
                         let mut inner_future = future.borrow_mut();
                         if inner_future.dropped {
@@ -397,8 +402,11 @@ impl LocalRuntimeInner {
                                 log::debug!("{}: woke BAD_HANDLE", inner_future.name());
                             }
                         }
-                        runqueue.push_back(inner_future.task_id);
                         inner_future.result = Some(Err(moto_rt::Error::BadHandle));
+                        to_wake.push(inner_future.waker.clone());
+                    }
+                    for waker in to_wake {
+                        waker.wake();
                     }
                 }
             }
@@ -408,11 +416,13 @@ impl LocalRuntimeInner {
 
     fn enqueue_expired_timers(&self) {
         let now = Instant::now();
-        let mut timeq = self.timeq.borrow_mut();
-        let mut runqueue = self.runqueue.borrow_mut();
-
-        while let Some(task_id) = timeq.pop_at(now) {
-            runqueue.push_back(task_id)
+        // Wake with no borrows held: a foreign (combinator) waker runs
+        // arbitrary code, which may add timers or wake tasks.
+        loop {
+            let Some(waker) = self.timeq.borrow_mut().pop_at(now) else {
+                return;
+            };
+            waker.wake();
         }
     }
 }
@@ -466,12 +476,10 @@ impl LocalRuntime {
     }
 
     pub(crate) fn add_timer(when: Instant, cx: &mut Context<'_>) -> crate::timeq::Timer {
-        let task_id = TaskId(cx.local_waker().data() as usize as u64);
-
         LocalRuntimeInner::current()
             .timeq
             .borrow_mut()
-            .add_at(when, task_id)
+            .add_at(when, cx.local_waker().clone())
     }
 
     /// Defer a peer wake to the executor (design 3.3): delivered exactly
@@ -707,7 +715,9 @@ pub trait AsFuture {
 
 struct SysHandleFutureInner {
     handle: SysHandle,
-    task_id: TaskId,
+    // Woken on completion. Set at creation to the owning task's waker,
+    // refreshed on every poll so nested combinators wake correctly.
+    waker: core::task::LocalWaker,
     result: Option<Result<()>>,
     dropped: bool,
 
@@ -721,11 +731,7 @@ struct SysHandleFutureInner {
 #[cfg(debug_assertions)]
 impl SysHandleFutureInner {
     fn name(&self) -> alloc::string::String {
-        alloc::format!(
-            "\n\tSysHandleFuture: [handle: 0x{:x} task: {}]",
-            self.handle.as_u64(),
-            self.task_id.0
-        )
+        alloc::format!("\n\tSysHandleFuture: [handle: 0x{:x}]", self.handle.as_u64())
     }
 }
 
@@ -761,10 +767,12 @@ impl AsFuture for SysHandle {
     fn as_future(&self) -> Self::AsFuture {
         let inner = Rc::new(RefCell::new(SysHandleFutureInner {
             handle: *self,
-            task_id: LocalRuntimeInner::current()
-                .currently_running_task
-                .get()
-                .unwrap(),
+            waker: new_local_waker(
+                LocalRuntimeInner::current()
+                    .currently_running_task
+                    .get()
+                    .unwrap(),
+            ),
             result: None,
             dropped: false,
 
@@ -787,7 +795,7 @@ impl SysHandleFuture {
         log::debug!("debugging future {}", self.inner.borrow().name());
     }
 
-    pub fn do_poll(&self, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+    pub fn do_poll(&self, cx: &mut Context<'_>) -> Poll<Result<()>> {
         #[cfg(debug_assertions)]
         if self.inner.borrow_mut().debug_ready_done {
             panic!("SysHandleFuture polled after Poll::Ready() was returned.");
@@ -807,13 +815,10 @@ impl SysHandleFuture {
             return Poll::Ready(result);
         }
 
+        inner.waker = cx.local_waker().clone();
         #[cfg(debug_assertions)]
-        {
-            let task_id = TaskId(_cx.local_waker().data() as usize as u64);
-            assert_eq!(inner.task_id, task_id);
-            if inner.debug_log {
-                log::debug!("{}: pending", inner.name());
-            }
+        if inner.debug_log {
+            log::debug!("{}: pending", inner.name());
         }
         Poll::Pending
     }

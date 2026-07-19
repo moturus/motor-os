@@ -784,6 +784,23 @@ fn test_wake_elision_counters() {
     );
 }
 
+fn test_for_each_concurrent() {
+    use futures::StreamExt;
+
+    // Regression test for the waker-contract fix: a timer registered under
+    // FuturesUnordered used to decode the combinator's waker as a task id
+    // and hang, so for_each_concurrent never completed.
+    let count = std::cell::Cell::new(0u32);
+    moto_async::LocalRuntime::new().block_on(
+        futures::stream::iter(0..100u32).for_each_concurrent(8, |_| async {
+            moto_async::sleep(Duration::from_micros(100)).await;
+            count.set(count.get() + 1);
+        }),
+    );
+    assert_eq!(count.get(), 100);
+    println!("----- moto_async::test_for_each_concurrent PASS");
+}
+
 // Helper for the wake_on_sleep tests: a thread expecting exactly one wake
 // on its handle - it fails on a second wake within its 50ms window.
 fn spawn_wake_probe() -> (std::thread::JoinHandle<()>, SysHandle) {
@@ -879,6 +896,7 @@ pub fn run_all_tests() {
     test_local_notify_multi_waiter();
     test_local_notify_cancel_redispatch();
     test_wake_elision_counters();
+    test_for_each_concurrent();
     test_wake_on_sleep_fold();
     test_wake_on_sleep_poll_resume();
 
