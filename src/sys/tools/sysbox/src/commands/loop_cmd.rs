@@ -21,6 +21,10 @@ fn input_listener(input_queue: Arc<Mutex<VecDeque<u8>>>, input_futex: Arc<Atomic
     loop {
         let mut buffer = [0_u8; 16];
         let sz = std::io::stdin().read(&mut buffer).unwrap();
+        if sz == 0 {
+            // EOF: stdin is gone; no input can ever arrive.
+            return;
+        }
         if sz > 0 {
             let mut queue = input_queue.lock().unwrap();
             for b in &buffer[0..sz] {
