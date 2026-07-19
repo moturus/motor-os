@@ -44,19 +44,6 @@ impl Parker {
     /// Park the calling thread until unpark, the deadline, or a spurious
     /// wake. Returns immediately (no syscall) if an unpark is pending.
     pub(crate) fn park(&self, deadline: Option<Instant>) {
-        let _ = self.park_on(&mut [], deadline);
-    }
-
-    /// park() that additionally waits on kernel handles, surfacing the
-    /// kernel result: on Ok, woken handles are at the front of the list,
-    /// NONE-terminated, and the no-syscall fast path reports zero of
-    /// them. For the poll registry, whose pollers also wait on unmanaged
-    /// source handles; unneeded once those move to the core IO runtime.
-    pub(crate) fn park_on(
-        &self,
-        wait_handles: &mut [SysHandle],
-        deadline: Option<Instant>,
-    ) -> Result<(), moto_rt::ErrorCode> {
         self.waiter
             .store(moto_sys::current_thread().as_u64(), Ordering::Relaxed);
 
@@ -70,21 +57,16 @@ impl Parker {
             Err(prev) => {
                 debug_assert_eq!(prev, NOTIFIED, "concurrent park() calls");
                 self.state.store(EMPTY, Ordering::Release);
-                if let Some(first) = wait_handles.first_mut() {
-                    *first = SysHandle::NONE;
-                }
-                return Ok(());
+                return;
             }
         }
 
-        let result =
-            moto_sys::SysCpu::wait(wait_handles, SysHandle::NONE, SysHandle::NONE, deadline);
+        let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, deadline);
 
         // Either woken (NOTIFIED) or timed out (still WAITING); an unpark
         // racing with the timeout is consumed here or left for the next
         // park -- both fold into the spurious-return contract.
         self.state.swap(EMPTY, Ordering::AcqRel);
-        result
     }
 
     /// Wake the parked thread, or make the next park return immediately.
@@ -129,16 +111,6 @@ impl SyncWaiter {
     /// remembered and consumed by the next wait().
     pub fn signal(&self) {
         self.parker.unpark();
-    }
-
-    /// wait() that also waits on kernel handles; see Parker::park_on
-    /// for the result contract.
-    pub fn wait_on(
-        &self,
-        wait_handles: &mut [SysHandle],
-        deadline: Option<Instant>,
-    ) -> Result<(), moto_rt::ErrorCode> {
-        self.parker.park_on(wait_handles, deadline)
     }
 }
 

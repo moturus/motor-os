@@ -250,12 +250,38 @@ pub trait UnmanagedEventSourceHolder: Send + Sync {
     fn on_handle_error(&self);
 }
 
-// An event source that exposes a wait handle to be managed by runtime here.
+// An event source that exposes a wait handle, watched by a readiness
+// task on the core IO runtime.
 pub struct EventSourceUnmanaged {
     wait_handle: SysHandle,
     base: EventSourceBase<EventBits>,
     owner: Weak<dyn UnmanagedEventSourceHolder>,
     closed: AtomicBool,
+    task_spawned: AtomicBool,
+}
+
+/// Watches one source's wait handle and converts its level state into
+/// edges pushed at every registered registry (design section 4). Holds
+/// no strong ref: exits when the source dies or its handle goes bad.
+async fn unmanaged_readiness_task(source: Weak<EventSourceUnmanaged>, wait_handle: SysHandle) {
+    use moto_async::AsFuture;
+
+    loop {
+        let result = wait_handle.as_future().await;
+        let Some(source) = source.upgrade() else {
+            return;
+        };
+
+        if result.is_ok() {
+            source.check_interests_all();
+        } else {
+            // The handle died: the remote end is gone, or the owner
+            // closed it locally.
+            source.on_handle_error();
+            source.check_interests_all();
+            return;
+        }
+    }
 }
 
 impl EventSourceUnmanaged {
@@ -269,6 +295,7 @@ impl EventSourceUnmanaged {
             base: EventSourceBase::new(supported_interests),
             owner,
             closed: AtomicBool::new(false),
+            task_spawned: AtomicBool::new(false),
         })
     }
 
@@ -279,15 +306,24 @@ impl EventSourceUnmanaged {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        let Some(registry) = Option::flatten(REGISTRIES.lock().get(&r_id).map(|r| r.upgrade()))
-        else {
+        if REGISTRIES.lock().get(&r_id).is_none() {
             return Err(E_BAD_HANDLE);
-        };
+        }
 
         self.base
             .add_interests(r_id, source_fd, token, interests, 0 as EventBits)?;
 
-        registry.add_waiting_handle(self);
+        // Spawned on first registration, not in new(): sources are
+        // built inside Arc::new_cyclic, and the task upgrades weak refs.
+        if !self.task_spawned.swap(true, Ordering::AcqRel) {
+            let source = Arc::downgrade(self);
+            let wait_handle = self.wait_handle;
+            crate::io_runtime::spawn(move || unmanaged_readiness_task(source, wait_handle));
+        }
+
+        // The task only sees handle edges; the level state at
+        // registration time is reported here.
+        self.check_interests_for_registry(r_id);
         Ok(())
     }
 
@@ -299,7 +335,9 @@ impl EventSourceUnmanaged {
         interests: Interests,
     ) -> Result<(), ErrorCode> {
         self.base
-            .set_interests(r_id, source_fd, token, interests, 0 as EventBits)
+            .set_interests(r_id, source_fd, token, interests, 0 as EventBits)?;
+        self.check_interests_for_registry(r_id);
+        Ok(())
     }
 
     pub fn del_interests(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
@@ -325,14 +363,28 @@ impl EventSourceUnmanaged {
         }
     }
 
-    // Called by a woken registry to check if this object's owner has a new event to report.
-    // Note that we must convert "level-triggered events" into "edge-triggered events" here.
     fn check_interests_for_registry(&self, reg_id: u64) {
+        self.check_interests_filtered(Some(reg_id));
+    }
+
+    fn check_interests_all(&self) {
+        self.check_interests_filtered(None);
+    }
+
+    // Checks if this object's owner has a new event to report to the
+    // registries selected by `reg_filter` (None = all). Note that we must
+    // convert "level-triggered events" into "edge-triggered events" here.
+    fn check_interests_filtered(&self, reg_filter: Option<u64>) {
+        // The owner may be mid-drop while its readiness task still runs.
+        let Some(owner) = self.owner.upgrade() else {
+            return;
+        };
+
         let mut registries = self.base.registries.lock();
         let mut dropped_registries = alloc::vec::Vec::new();
         for entry in &mut *registries {
             let ((r_id, s_fd), (token, interests, events)) = entry;
-            if reg_id != *r_id {
+            if reg_filter.is_some_and(|reg_id| reg_id != *r_id) {
                 continue;
             }
 
@@ -343,11 +395,7 @@ impl EventSourceUnmanaged {
                     continue;
                 }
 
-                let mut new_events = self
-                    .owner
-                    .upgrade()
-                    .unwrap()
-                    .check_interests(unreported_interests);
+                let mut new_events = owner.check_interests(unreported_interests);
                 if new_events == 0 {
                     if self.closed.load(Ordering::Acquire) {
                         if *interests & moto_rt::poll::POLL_READABLE != 0 {
@@ -421,7 +469,9 @@ impl EventSourceUnmanaged {
     }
 
     fn on_handle_error(&self) {
-        self.owner.upgrade().unwrap().on_handle_error();
+        if let Some(owner) = self.owner.upgrade() {
+            owner.on_handle_error();
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -486,15 +536,10 @@ impl PollerSlot {
         PollerTicket::Overflow(waiter)
     }
 
-    fn park(
-        &self,
-        ticket: &PollerTicket,
-        wait_handles: &mut [SysHandle],
-        deadline: Option<moto_rt::time::Instant>,
-    ) -> Result<(), ErrorCode> {
+    fn park(&self, ticket: &PollerTicket, deadline: Option<moto_rt::time::Instant>) {
         match ticket {
-            PollerTicket::Fast => self.fast_waiter.wait_on(wait_handles, deadline),
-            PollerTicket::Overflow(waiter) => waiter.wait_on(wait_handles, deadline),
+            PollerTicket::Fast => self.fast_waiter.wait(deadline),
+            PollerTicket::Overflow(waiter) => waiter.wait(deadline),
         }
     }
 
@@ -532,14 +577,6 @@ pub struct Registry {
     events: SpinLock<BTreeMap<Token, EventBits>>,
     poller: PollerSlot,
     event_source: EventSourceManaged,
-
-    // Pollees like sockets have their own runtime/wakups, and they notify their registries
-    // via on_event(). Pollees that don't have their own runtime (e.g. async stdio)
-    // have wait handles, and registries have to wait on those to get notifications.
-    //
-    // Note: a single EventSourceWithHandle may be registered multiple times via
-    //       different FDs, so we should be careful re: when to remove the handle.
-    unmanaged_sources: SpinLock<BTreeMap<SysHandle, Weak<EventSourceUnmanaged>>>,
 
     // We need to keep week refs to added sources, otherwise fds are reused and bugs ensue.
     // We also need a way to remove waiting_handle_objects on poll_del (so that no
@@ -612,7 +649,6 @@ impl Registry {
             events: SpinLock::new(BTreeMap::new()),
             poller: PollerSlot::new(),
             event_source: EventSourceManaged::new(moto_rt::poll::POLL_READABLE),
-            unmanaged_sources: SpinLock::new(BTreeMap::new()),
             pollees: SpinLock::new(BTreeMap::new()),
             tombstones: SpinLock::new(BTreeMap::new()),
         });
@@ -683,13 +719,6 @@ impl Registry {
         }
     }
 
-    fn add_waiting_handle(&self, waiting_handle: &Arc<EventSourceUnmanaged>) {
-        // Note: the registry may already have this ref (multiple FDs can ref the same obj).
-        self.unmanaged_sources
-            .lock()
-            .insert(waiting_handle.wait_handle, Arc::downgrade(waiting_handle));
-    }
-
     pub fn wake(&self) -> ErrorCode {
         self.event_source.on_event(moto_rt::poll::POLL_READABLE);
         E_OK
@@ -700,7 +729,6 @@ impl Registry {
             return 0;
         }
 
-        let mut wait_handles = Vec::new();
         loop {
             // Collect phase: tombstones are returned alone, ahead of
             // regular events.
@@ -708,8 +736,6 @@ impl Registry {
             if collected > 0 {
                 return collected as i32;
             }
-
-            self.prep_unmanaged_sources(&mut wait_handles);
 
             // Wait phase: arm before the event check (see arm()).
             let ticket = self.poller.arm();
@@ -720,55 +746,21 @@ impl Registry {
                 return collected as i32;
             }
 
-            let result = self
-                .poller
-                .park(&ticket, wait_handles.as_mut_slice(), deadline);
+            self.poller.park(&ticket, deadline);
             // The claim is only needed while parked.
             self.poller.disarm(ticket);
-
-            match result {
-                Err(E_BAD_HANDLE) => {
-                    // The kernel puts the bad handle first in the list.
-                    assert!(!wait_handles.is_empty());
-                    let bad_handle = wait_handles[0];
-                    let obj = self.unmanaged_sources.lock().remove(&bad_handle).unwrap();
-
-                    if let Some(obj) = obj.upgrade() {
-                        obj.on_handle_error();
-                        obj.check_interests_for_registry(self.id);
-                    }
-                }
-                Err(E_TIMED_OUT) => {
-                    let collected = self.collect_events(events_buf);
-                    if collected > 0 {
-                        return collected as i32;
-                    }
-
-                    // MIO docs for poll() say that upon timeout poll() returns OK(()),
-                    // and MIO tests (specifically tcp::listen_then_close()) rely on this.
-                    return 0;
-                }
-                _ => {
-                    // Woken handles are moved to the front of the list.
-                    for handle in &wait_handles {
-                        if *handle == SysHandle::NONE {
-                            break;
-                        }
-
-                        let obj = self.unmanaged_sources.lock().get(handle).unwrap().clone();
-
-                        if let Some(obj) = obj.upgrade() {
-                            obj.check_interests_for_registry(self.id);
-                        } else {
-                            self.unmanaged_sources.lock().remove(handle);
-                        }
-                    }
-                }
-            }
 
             let collected = self.collect_events(events_buf);
             if collected > 0 {
                 return collected as i32;
+            }
+
+            // MIO docs for poll() say that upon timeout poll() returns OK(()),
+            // and MIO tests (specifically tcp::listen_then_close()) rely on this.
+            if let Some(deadline) = deadline
+                && moto_rt::time::Instant::now() >= deadline
+            {
+                return 0;
             }
         }
     }
@@ -802,28 +794,6 @@ impl Registry {
             idx += 1;
         }
         idx
-    }
-
-    /// Refresh unmanaged sources (their level state is polled here and
-    /// converted to edges -- they have no wake path of their own) and
-    /// rebuild the handle list to park on; dead sources are dropped.
-    fn prep_unmanaged_sources(&self, wait_handles: &mut Vec<SysHandle>) {
-        wait_handles.clear();
-        let mut unmanaged_sources = self.unmanaged_sources.lock();
-        let mut dropped_handles = alloc::vec::Vec::new();
-
-        for (handle, obj) in &*unmanaged_sources {
-            if let Some(obj) = obj.upgrade() {
-                obj.check_interests_for_registry(self.id);
-                wait_handles.push(*handle);
-            } else {
-                dropped_handles.push(*handle);
-            }
-        }
-
-        for handle in dropped_handles {
-            unmanaged_sources.remove(&handle);
-        }
     }
 
     fn on_event(&self, token: Token, event_bits: EventBits) {
