@@ -595,6 +595,52 @@ fn test_block_on_sync_self_wake() {
     println!("----- moto_async::test_block_on_sync_self_wake PASS");
 }
 
+fn test_block_on_sync_deadline() {
+    // Completion before the deadline.
+    let (tx, rx) = moto_async::oneshot();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(10));
+        tx.send(5_u32).unwrap();
+    });
+    match moto_async::block_on_sync_deadline(rx, Instant::now() + Duration::from_secs(5)) {
+        Ok(val) => assert_eq!(val.unwrap(), 5),
+        Err(_) => panic!("unexpected deadline"),
+    }
+    thread.join().unwrap();
+
+    // Timeout hands the future back with its partial progress intact:
+    // two self-wakes, then quiet until the final poll at the deadline.
+    struct Progress {
+        polls: u32,
+    }
+
+    impl core::future::Future for Progress {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<Self::Output> {
+            self.polls += 1;
+            if self.polls < 3 {
+                cx.waker().wake_by_ref();
+            }
+            Poll::Pending
+        }
+    }
+
+    let timo = Duration::from_millis(30);
+    let start = Instant::now();
+    let Err(progress) = moto_async::block_on_sync_deadline(Progress { polls: 0 }, start + timo)
+    else {
+        panic!("Progress future completed?");
+    };
+    assert!(start.elapsed() >= timo);
+    assert!(progress.polls >= 4, "polls: {}", progress.polls);
+
+    println!("----- moto_async::test_block_on_sync_deadline PASS");
+}
+
 fn test_local_notify_eager() {
     moto_async::LocalRuntime::new().block_on(async move {
         let notify = moto_async::LocalNotify::new();
@@ -664,6 +710,7 @@ pub fn run_all_tests() {
     test_block_on_sync_ready();
     test_block_on_sync_cross_thread();
     test_block_on_sync_self_wake();
+    test_block_on_sync_deadline();
     test_local_notify_eager();
     test_local_notify_deferred();
 

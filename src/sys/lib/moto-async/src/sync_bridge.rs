@@ -219,3 +219,40 @@ pub fn block_on_sync<F: Future>(fut: F) -> F::Output {
         parker.park(None);
     }
 }
+
+/// `block_on_sync` with a deadline. On timeout the future is handed
+/// back so the caller can extract partial progress (design rule 7:
+/// a blocking write that timed out mid-way returns Ok(written)) and
+/// cancel by dropping it.
+///
+/// `F: Unpin` because the future is returned by value; the intended
+/// consumers are hand-rolled progress-tracking structs, which are.
+pub fn block_on_sync_deadline<F: Future + Unpin>(
+    mut fut: F,
+    deadline: Instant,
+) -> Result<F::Output, F> {
+    debug_assert!(
+        !crate::local_runtime::on_runtime_thread(),
+        "block_on_sync_deadline on a LocalRuntime thread"
+    );
+
+    let parker = thread_parker();
+    let data = Arc::as_ptr(&parker) as *const ();
+    // Safety: both wakers own a strong count via bridge_waker_clone.
+    let waker = unsafe { Waker::from_raw(bridge_waker_clone(data)) };
+    let local_waker = unsafe { LocalWaker::from_raw(bridge_waker_clone(data)) };
+    let mut cx = ContextBuilder::from_waker(&waker)
+        .local_waker(&local_waker)
+        .build();
+
+    loop {
+        // Progress racing the deadline: always one final poll first.
+        if let Poll::Ready(val) = core::pin::Pin::new(&mut fut).poll(&mut cx) {
+            return Ok(val);
+        }
+        if Instant::now() >= deadline {
+            return Err(fut);
+        }
+        parker.park(Some(deadline));
+    }
+}

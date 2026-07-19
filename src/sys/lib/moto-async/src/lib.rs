@@ -40,5 +40,5 @@ pub use local_runtime::*;
 pub use mutex::{LocalMutex, LocalMutexGuard};
 pub use oneshot::oneshot;
 pub use rwlock::{LocalRwLock, LocalRwLockReadGuard, LocalRwLockWriteGuard};
-pub use sync_bridge::{SyncWaiter, block_on_sync};
+pub use sync_bridge::{SyncWaiter, block_on_sync, block_on_sync_deadline};
 pub use time::{Instant, Sleep, sleep, sleep_until};
