@@ -354,11 +354,14 @@ impl LocalRuntimeInner {
                     if handle.is_none() {
                         break;
                     }
-                    let done_futures = self
-                        .sys_handle_futures
-                        .borrow_mut()
-                        .remove(&handle)
-                        .unwrap();
+                    // The kernel queues wakers for signals arriving while
+                    // this thread is awake, so a wait may report a handle
+                    // no future waits on anymore. The signal stays latched
+                    // on the object; there is nothing to deliver.
+                    let Some(done_futures) = self.sys_handle_futures.borrow_mut().remove(&handle)
+                    else {
+                        continue;
+                    };
                     let mut to_wake = Vec::new();
                     for future in done_futures {
                         let mut inner_future = future.borrow_mut();
@@ -385,11 +388,12 @@ impl LocalRuntimeInner {
                         break;
                     }
 
-                    let done_futures = self
-                        .sys_handle_futures
-                        .borrow_mut()
-                        .remove(&handle)
-                        .unwrap();
+                    // See above: a stale queued waker may name a handle
+                    // with no remaining waiters.
+                    let Some(done_futures) = self.sys_handle_futures.borrow_mut().remove(&handle)
+                    else {
+                        continue;
+                    };
                     let mut to_wake = Vec::new();
                     for future in done_futures {
                         let mut inner_future = future.borrow_mut();
@@ -488,7 +492,9 @@ impl LocalRuntime {
     /// The handle is only ever a wake target, never a swap target.
     /// Must be called within a LocalRuntime context.
     pub fn set_wake_on_sleep(handle: SysHandle) {
-        let prev = LocalRuntimeInner::current().wake_on_sleep.replace(Some(handle));
+        let prev = LocalRuntimeInner::current()
+            .wake_on_sleep
+            .replace(Some(handle));
         // Same-handle sets coalesce; a second distinct handle would lose
         // the first wake.
         debug_assert!(prev.is_none() || prev == Some(handle));
@@ -731,7 +737,10 @@ struct SysHandleFutureInner {
 #[cfg(debug_assertions)]
 impl SysHandleFutureInner {
     fn name(&self) -> alloc::string::String {
-        alloc::format!("\n\tSysHandleFuture: [handle: 0x{:x}]", self.handle.as_u64())
+        alloc::format!(
+            "\n\tSysHandleFuture: [handle: 0x{:x}]",
+            self.handle.as_u64()
+        )
     }
 }
 
