@@ -5,6 +5,63 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
+## Status (2026-07-19, end of stage B)
+
+Stages 0, A, and B are complete on `vdso-rewrite` (`344191b..e123bc1`).
+Stage C is next, pending stage-B review.
+
+- **Stage 0** (`344191b` plus the uncommitted watchdog harness): baselines
+  recorded in `vdso-rewrite-baselines.md`; 10 wrapped runs (one hang in
+  the boot/ssh window, one early ssh failure).
+- **Stage A** (`2159e69..edfcc5c`): A1-A8 landed as planned; A7's outcome
+  was an executor fix (timer/SysHandle wakes under combinators). Stage
+  gate passed.
+- **Stage B** (`73bd747..f5fa0c3` plus four fix commits): B1-B6 landed as
+  planned. The flake checkpoints caught three real bugs beyond the B6
+  step itself, all fixed on the branch:
+  - `4ed03da` — pre-existing: `ChildStdio::read` reported EOF while the
+    ring still held a fast-exiting child's final output; exposed once B4
+    delivered the closed flag promptly. No-delay tail smoke now 20/20.
+  - `e27f3e1` — B6 regression: the stdio spinlock was held across
+    blocking pipe ops; the single-threaded relay runtime hard-spun on it
+    and froze `rt_process::spawn` before waking the child (tokio-tests
+    hung 3/3 at checkpoint 2 until fixed).
+  - `3900a7e` — pre-existing moto-async bug: the kernel queues wakers
+    even while a thread is awake, so `SysCpu::wait` can report a handle
+    from an earlier wait epoch; the `unwrap` on the future-map lookup
+    panicked sys-io live (0xbadc0de, VM down) under ssh churn.
+  - `e123bc1` — pre-existing, unmasked by B6's prompt EOF delivery:
+    `input_listener` threads in ten binaries spun at 100% CPU on stdin
+    EOF (a dead stdin pipe read returns `E_BAD_HANDLE` with no syscall,
+    and std's blanket `is_ebadf` maps any stdin error to `Ok(0)`).
+    `rnetbench --server` always burned one vCPU this way, polluting all
+    pre-fix bench sessions. Follow-ups flagged: `SelfStdio::read` should
+    return `Ok(0)` at EOF itself; the std shim's `is_ebadf` blanket
+    deserves a real mapping.
+
+  Stage gate passed on a paired, same-window, spin-free A/B (stage-A tip
+  plus `e123bc1` cherry-pick vs branch tip; release, 3 rounds each).
+  Medians: RR default 125.4 -> 126.8 usec, RR b64K 153.1 -> 152.9 usec;
+  bulk deltas -2.5%..+4.7% — all within the kill bounds. FS smoke
+  (release): 236 write / 231 read mbps, recorded as the stage-B
+  reference. Unpaired cross-session bulk comparisons falsely tripped the
+  kill criterion twice; the measurement discipline of section 1 (paired
+  runs, same window) is mandatory for every later gate.
+
+**Flake status after checkpoint 2**: 3/5 green on the final series; both
+hangs are one pre-existing fingerprint. The freeze is in tokio's
+loopback-socket tests `test_socket_from_blocking` and
+`test_local_set_client_server_block_on` — the tests *after* the last
+printed PASS lines, which earlier notes misattributed to
+`test_sleep_from_blocking` — with every thread blocked and zero syscalls
+while the VM and sys-io stay healthy: a lost wake, present since at
+least the stage-A series. The registry `wait_handle` protocol is
+exonerated (deleted in B2; the hang reproduced after). The remaining
+suspects are the client net wake protocols that stages C and D delete —
+the sequencing bet of section 2 so far holds. The watchdog now captures
+in-flight stall state (ssh ps/stats, qemu-monitor RIP and stack
+sampling) before the exit trap can shut the VM down.
+
 ## 1. Process rules
 
 - **Branch.** All work happens on the `vdso-rewrite` branch; `main` is not
@@ -71,6 +128,8 @@ primitives end-to-end before the riskiest stage begins.
 
 ## 3. Stage 0 — baselines and flake characterization
 
+*Status: complete (`344191b` + scratchpad harness).*
+
 | Step | Content | Gate |
 |---|---|---|
 | 0.1 | Watchdog wrapper for `full-test.sh` (scratch script, uncommitted): global timeout; on hang, capture `/tmp/full-test.log` and, if ssh still answers, `ps`, `stats get`, and which suite/test was running. | — |
@@ -82,6 +141,8 @@ the test harness), the sequencing bet in section 2 is re-assessed before
 stage B.
 
 ## 4. Stage A — moto-async groundwork
+
+*Status: complete (`2159e69..edfcc5c`); gate passed.*
 
 Design sections 3.1–3.6. Every primitive lands with a systest exercising its
 race edges. A5 changes `LocalRuntime` under sys-io's feet — it is the one
@@ -101,6 +162,8 @@ step here with real regression surface, and gets its own bench gate.
 Stage gate: `full x3` + bench. Flake status noted; no change expected yet.
 
 ## 5. Stage B — poll delivery rewrite, core IO runtime, stdio relays
+
+*Status: complete (`73bd747..f5fa0c3` + `4ed03da`, `e27f3e1`, `3900a7e`, `e123bc1`); gate passed. See Status section.*
 
 Design sections 4, 6, 7.2. Registration model and mio event-generation
 semantics (layer 1–2) are untouched throughout; only delivery changes, so
