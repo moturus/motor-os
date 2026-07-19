@@ -689,6 +689,69 @@ fn test_local_notify_deferred() {
     println!("----- moto_async::test_local_notify_deferred PASS");
 }
 
+fn test_local_notify_multi_waiter() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let notify = std::rc::Rc::new(moto_async::LocalNotify::new());
+        let done = std::rc::Rc::new(std::cell::Cell::new((false, false, false)));
+
+        for i in 0..3 {
+            let notify = notify.clone();
+            let done = done.clone();
+            moto_async::LocalRuntime::spawn(async move {
+                notify.notified().await;
+                let mut val = done.get();
+                match i {
+                    0 => val.0 = true,
+                    1 => val.1 = true,
+                    _ => val.2 = true,
+                }
+                done.set(val);
+            });
+        }
+        moto_async::yield_now().await;
+
+        // notify_one is FIFO: waiters complete in spawn order.
+        notify.notify_one();
+        moto_async::yield_now().await;
+        assert_eq!(done.get(), (true, false, false));
+
+        // notify_all completes the rest.
+        notify.notify_all();
+        moto_async::yield_now().await;
+        assert_eq!(done.get(), (true, true, true));
+
+        // notify_all stored no permit: a fresh waiter stays pending.
+        let pending = notify.notified();
+        futures::select! {
+            _ = futures::FutureExt::fuse(pending) => panic!("permit after notify_all?"),
+            _ = moto_async::sleep(Duration::from_millis(10)).fuse() => (),
+        }
+    });
+    println!("----- moto_async::test_local_notify_multi_waiter PASS");
+}
+
+fn test_local_notify_cancel_redispatch() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let notify = moto_async::LocalNotify::new();
+
+        let first = notify.notified();
+        let second = notify.notified();
+
+        // Fires `first` (the oldest); dropping it un-consumed must pass
+        // the notification to `second`.
+        notify.notify_one();
+        drop(first);
+
+        futures::select! {
+            _ = futures::FutureExt::fuse(second) => (),
+            _ = moto_async::sleep(Duration::from_millis(100)).fuse() => {
+                panic!("cancelled notification was lost")
+            }
+        }
+    });
+    println!("----- moto_async::test_local_notify_cancel_redispatch PASS");
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -713,6 +776,8 @@ pub fn run_all_tests() {
     test_block_on_sync_deadline();
     test_local_notify_eager();
     test_local_notify_deferred();
+    test_local_notify_multi_waiter();
+    test_local_notify_cancel_redispatch();
 
     println!("moto_async all PASS");
 }
