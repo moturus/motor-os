@@ -183,6 +183,15 @@ udp_sockets="$(vm_ssh /bin/stats get 2 |
 
 vm_ssh sys/tests/systest
 
+# Inherited-stdio relay smoke: a nested rush spawns its child with
+# inherited stdio, so the outer rush's stdin and stdout relay tasks
+# carry both directions; the no-delay tail must not be lost to the
+# child-exit race.
+out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
+[ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
+out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
+[ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
+
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
 

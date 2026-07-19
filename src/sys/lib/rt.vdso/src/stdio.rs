@@ -487,7 +487,13 @@ impl PosixFile for ChildStdio {
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
         if self.event_source.is_closed() {
-            return Ok(0);
+            // The peer is gone; deliver what remains in the ring
+            // before reporting EOF, or a fast-exiting child's final
+            // output is lost.
+            return match self.inner.nonblocking_read(buf) {
+                Ok(sz) => Ok(sz),
+                Err(_) => Ok(0),
+            };
         }
         let res = if self.nonblocking.load(Ordering::Acquire) {
             self.inner.nonblocking_read(buf).inspect_err(|_| {
