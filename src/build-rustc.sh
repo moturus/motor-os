@@ -14,7 +14,7 @@
 # forks, all one LLVM version (23). build-llvm.sh already checked out mlibc and
 # llvm-project (LLVM 23) on that branch, so the only checkout this script
 # switches is the rust tree: it adds the moturus remote to $MOTORH/rust,
-# switches to motor-os-rustc, and points the src/llvm-project submodule at
+# switches to motor-os-rustc, and seeds the src/llvm-project submodule from
 # build-llvm's llvm-project (same LLVM 23 commit, objects shared). The four
 # dependency forks are [patch.crates-io] git URLs cargo fetches — not cloned —
 # and moto-rt comes from crates.io. No patches of its own.
@@ -165,32 +165,54 @@ update_rust() {
 			git -C "$RUST" switch -q "$BRANCH"
 	fi
 
-	# The fork's .gitmodules points src/llvm-project at moturus/llvm-project @
-	# motor-os-rustc (LLVM 23), so a plain submodule update checks out the LLVM 23
-	# tree. --reference reuses the objects of build-llvm's $MOTORH/llvm-project,
-	# so almost nothing is re-downloaded. bootstrap.toml sets submodules = false
-	# so bootstrap leaves this checkout alone afterwards.
+	# Seed rustc's LLVM tree from the checkout build-llvm just compiled, and put
+	# it on that checkout's exact commit. Do not use `git submodule update` here:
+	# the rust fork currently pins an orphaned pre-amend commit. Besides relying
+	# on GitHub to retain that unreachable object, submodule's direct-fetch
+	# fallback can reject the local reference with "transport 'file' not
+	# allowed" on Ubuntu's Git.
 	#
-	# FRAGILE, and this line is where it would break: the fork's gitlink
-	# (4c0679b5a854 as of this writing) is NOT the tip of moturus/llvm-project @
-	# motor-os-rustc (88ea5aa2a7b4) — the tip was amended in place, which orphaned
-	# the gitlink commit, and `git branch -r --contains 4c0679b5a854` now lists
-	# nothing. This still works only because GitHub serves unreachable SHAs on
-	# request; if it is ever GC'd, this step fails with "Server does not allow
-	# request for unadvertised object" / "Direct fetch of that commit failed".
-	# The two commits differ only in clang/lib/Driver/ToolChains/Motor.cpp — a
-	# file rustc's LLVM build never compiles (it builds LLVM, not clang) — so the
-	# permanent fix is to fast-forward the fork's gitlink onto the branch tip:
-	#     cd $RUST && git -C src/llvm-project checkout motor-os-rustc \
-	#       && git add src/llvm-project && git commit -m 'llvm: sync submodule'
-	# Until then the LLVM rustc links is 4c0679b and the cross clang is 88ea5aa,
-	# which is harmless but makes docs/build-rustc.md's "one commit" literally
-	# false.
-	git -C "$RUST" submodule update --init --progress --reference "$LLVM" src/llvm-project
+	# A direct local clone is safe here because both paths are controlled build
+	# inputs under MOTORH. Keep protocol.file.allow scoped to those commands;
+	# never weaken the user's global Git policy. --shared preserves the original
+	# --reference optimization, and absorbgitdirs restores the normal submodule
+	# gitdir layout. Existing and half-initialized submodules are repaired too.
+	local rust_llvm="$RUST/src/llvm-project"
+	local llvm_commit llvm_url
+	llvm_commit="$(git -C "$LLVM" rev-parse HEAD)"
+	llvm_url="$(git -C "$RUST" config -f .gitmodules \
+		--get submodule.src/llvm-project.url)"
+	[ -n "$llvm_url" ] || die "rust fork has no src/llvm-project URL in .gitmodules"
+
+	git -C "$RUST" submodule init src/llvm-project >/dev/null
+	if git -C "$rust_llvm" rev-parse --git-dir >/dev/null 2>&1; then
+		skip "rust LLVM submodule already initialized"
+	else
+		if [ -e "$rust_llvm" ] && [ -n "$(ls -A "$rust_llvm" 2>/dev/null)" ]; then
+			die "$rust_llvm exists but is not a Git checkout — move it aside and re-run"
+		fi
+		log "seeding rust LLVM submodule from $LLVM"
+		git -c protocol.file.allow=always clone --no-checkout --shared \
+			"$LLVM" "$rust_llvm"
+		git -C "$RUST" submodule absorbgitdirs src/llvm-project
+	fi
+
+	if ! git -C "$rust_llvm" cat-file -e "$llvm_commit^{commit}" 2>/dev/null; then
+		log "importing build-llvm's commit into the existing rust LLVM submodule"
+		git -c protocol.file.allow=always -C "$rust_llvm" \
+			fetch -q "$LLVM" "$llvm_commit"
+	fi
+	git -C "$rust_llvm" checkout -q --detach "$llvm_commit"
+	git -C "$rust_llvm" remote set-url origin "$llvm_url" 2>/dev/null || \
+		git -C "$rust_llvm" remote add origin "$llvm_url"
+	git -C "$RUST" config submodule.src/llvm-project.url "$llvm_url"
+
+	[ "$(git -C "$rust_llvm" rev-parse HEAD)" = "$llvm_commit" ] || \
+		die "rust LLVM submodule did not reach build-llvm commit $llvm_commit"
 	grep -q 'Motor, // Motor OS' "$RUST/src/llvm-project/llvm/include/llvm/TargetParser/Triple.h" || \
-		die "src/llvm-project is not on the Motor triple — does moturus/rust $BRANCH pin moturus/llvm-project @ $BRANCH?"
+		die "src/llvm-project is not on the Motor triple — is $LLVM on moturus/llvm-project @ $BRANCH?"
 	grep -q 'set(LLVM_VERSION_MAJOR 23)' "$RUST/src/llvm-project/cmake/Modules/LLVMVersion.cmake" || \
-		die "src/llvm-project is not LLVM 23 — check the moturus/rust $BRANCH submodule pin"
+		die "src/llvm-project is not LLVM 23 — check $LLVM"
 
 	# The [patch.crates-io] deps are moturus git URLs and moto-rt is on
 	# crates.io, so there are no local paths to rewrite. Refresh the lock so the

@@ -67,25 +67,22 @@ performs every step below in one go (copy it into `$MOTORH` next to
 `build-base.sh`/`build-llvm.sh` and run it after those two); it carries no
 patches of its own.
 
-**One LLVM, version 23.** rustc builds its own copy of LLVM from its
-`src/llvm-project` submodule; this build points that submodule at
-`moturus/llvm-project` @ `motor-os-rustc` (LLVM 23) — the same repo and branch
-build-llvm.md's cross toolchain is built from, sharing its git objects. So there
-is one LLVM repo and one LLVM version, no version split. (rustc's default pin is
-LLVM 22.1.7; 1.98-dev already carries the LLVM-23 support code, plus one
-four-line adaptation on the `moturus/rust` branch for a struct LLVM 23 made
-non-copyable — see the appendix.)
+**One LLVM, version 23.** rustc builds its own copy of LLVM from
+`src/llvm-project`; this build seeds that checkout from build-llvm.md's
+`moturus/llvm-project` @ `motor-os-rustc` checkout, shares its git objects, and
+checks out its exact commit. So there is one LLVM repo, commit, and version, no
+version split. (rustc's default pin is LLVM 22.1.7; 1.98-dev already carries the
+LLVM-23 support code, plus one four-line adaptation on the `moturus/rust` branch
+for a struct LLVM 23 made non-copyable — see the appendix.)
 
-One wrinkle, worth knowing before it bites: it is one branch but currently *not*
-one commit. The fork's gitlink (`4c0679b5a854`) is not the branch tip
-(`88ea5aa2a7b4`) — the tip was amended in place, orphaning the gitlink, so
-`git branch -r --contains 4c0679b5a854` lists nothing. `git submodule update`
-still succeeds only because GitHub serves unreachable SHAs on request; should
-that object ever be GC'd, Stage R1's submodule step is where the build stops.
-The two differ solely in `clang/lib/Driver/ToolChains/Motor.cpp`, which rustc's
-LLVM build never compiles (it builds LLVM, not clang) — so the difference is
-inert, and the permanent fix is simply to fast-forward the fork's gitlink onto
-the branch tip and commit it.
+The explicit seeding avoids a known fork-history trap. The rust fork's gitlink
+(`4c0679b5a854`) was orphaned when the LLVM branch tip was amended
+(`88ea5aa2a7b4`). A plain `git submodule update` therefore depends on GitHub
+retaining and serving an unreachable object; its direct-fetch fallback can
+also fail with `transport 'file' not allowed` when a local reference checkout
+is supplied. Stage R1 deliberately bypasses that stale gitlink and uses the
+already validated build-llvm checkout. The upstream cleanup is still to update
+the rust fork's gitlink to the LLVM branch tip.
 
 ## How the pieces fit together
 
@@ -181,11 +178,10 @@ the rust tree:
    `moturus/rust` branch `motor-os-rustc` (the Motor host-target patches; see
    the appendix). Its `[patch.crates-io]` already carries the four dependency
    forks as **git URLs** — cargo fetches them, so nothing is cloned by hand.
-2. **The `src/llvm-project` submodule** is repointed at build-llvm.md's
+2. **The `src/llvm-project` submodule** is seeded from build-llvm.md's
    `$MOTORH/llvm-project` (moturus @ `motor-os-rustc`, **LLVM 23**) — the same
-   commit, its objects shared via `--reference`. `submodules = false` in
-   `bootstrap.toml` keeps bootstrap from resetting it to the upstream LLVM 22
-   pin.
+   commit, with its objects shared via a local clone. `submodules = false` in
+   `bootstrap.toml` keeps bootstrap from resetting it to the stale gitlink.
 3. **mlibc source is not needed** — rustc links the sysroot `libc.a`
    build-llvm.md already produced from mlibc `motor-os-rustc`. This build only
    checks that `libc.a` carries the `operator delete` guard; it touches the
@@ -243,12 +239,25 @@ git remote add moturus https://github.com/moturus/rust.git
 git fetch moturus motor-os-rustc
 git switch -c motor-os-rustc moturus/motor-os-rustc
 
-# Point the LLVM submodule at build-llvm.md's llvm-project (moturus @
-# motor-os-rustc, LLVM 23), sharing its objects. `submodules = false` in
-# bootstrap.toml (below) stops bootstrap from resetting it to the LLVM 22 pin.
-git -C src/llvm-project remote add moturus $LLVM 2>/dev/null || true
-git -C src/llvm-project fetch -q moturus motor-os-rustc
-git -C src/llvm-project checkout -q "$(git -C $LLVM rev-parse HEAD)"
+# Seed the LLVM submodule from build-llvm.md's checkout (moturus @
+# motor-os-rustc, LLVM 23), sharing its objects and using its exact commit.
+# protocol.file.allow is scoped to this trusted local clone; do not change the
+# global Git policy. `submodules = false` in bootstrap.toml (below) stops
+# bootstrap from resetting it to the stale LLVM gitlink.
+git submodule init src/llvm-project
+LLVM_COMMIT="$(git -C "$LLVM" rev-parse HEAD)"
+if ! git -C src/llvm-project rev-parse --git-dir >/dev/null 2>&1; then
+    git -c protocol.file.allow=always clone --no-checkout --shared \
+        "$LLVM" src/llvm-project
+    git submodule absorbgitdirs src/llvm-project
+fi
+if ! git -C src/llvm-project cat-file -e "$LLVM_COMMIT^{commit}"; then
+    git -c protocol.file.allow=always -C src/llvm-project \
+        fetch "$LLVM" "$LLVM_COMMIT"
+fi
+git -C src/llvm-project checkout -q --detach "$LLVM_COMMIT"
+git -C src/llvm-project remote set-url origin \
+    https://github.com/moturus/llvm-project.git
 ```
 
 mlibc and the deps need nothing here — build-llvm.md already checked out mlibc
@@ -341,8 +350,8 @@ profile = "library"
 [build]
 host = ["x86_64-unknown-linux-gnu"]
 target = ["x86_64-unknown-linux-gnu", "x86_64-unknown-motor"]
-# src/llvm-project is repointed to moturus/llvm-project @ motor-os-rustc
-# (LLVM 23); keep bootstrap from resetting it to the upstream LLVM 22 pin.
+# src/llvm-project is seeded from moturus/llvm-project @ motor-os-rustc
+# (LLVM 23); keep bootstrap from resetting it to the stale gitlink.
 submodules = false
 
 [rust]
