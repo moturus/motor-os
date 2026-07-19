@@ -63,6 +63,10 @@ fn get_runtime_tls_key() -> moto_rt::tls::Key {
     }
 }
 
+pub(crate) fn on_runtime_thread() -> bool {
+    !get_local_runtime_context().is_null()
+}
+
 fn get_local_runtime_context() -> *const LocalRuntimeInner {
     // Safety: safe by construction.
     unsafe { moto_rt::tls::get(get_runtime_tls_key()) as usize as *const _ }

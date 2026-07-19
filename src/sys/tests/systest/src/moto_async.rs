@@ -549,6 +549,52 @@ fn test_sync_waiter_ping_pong() {
     println!("----- moto_async::test_sync_waiter_ping_pong PASS");
 }
 
+fn test_block_on_sync_ready() {
+    assert_eq!(42, moto_async::block_on_sync(async { 42 }));
+    println!("----- moto_async::test_block_on_sync_ready PASS");
+}
+
+fn test_block_on_sync_cross_thread() {
+    let (tx, rx) = moto_async::oneshot();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        tx.send(7_u32).unwrap();
+    });
+
+    assert_eq!(7, moto_async::block_on_sync(async { rx.await.unwrap() }));
+    thread.join().unwrap();
+    println!("----- moto_async::test_block_on_sync_cross_thread PASS");
+}
+
+fn test_block_on_sync_self_wake() {
+    // Wake-before-park on every poll: exercises the parker's NOTIFIED
+    // fast path and cached-waker reuse across calls.
+    struct SelfWake {
+        remaining: u32,
+    }
+
+    impl core::future::Future for SelfWake {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> Poll<Self::Output> {
+            if self.remaining == 0 {
+                return Poll::Ready(());
+            }
+            self.remaining -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    for _ in 0..1000 {
+        moto_async::block_on_sync(SelfWake { remaining: 10 });
+    }
+    println!("----- moto_async::test_block_on_sync_self_wake PASS");
+}
+
 fn test_local_notify_eager() {
     moto_async::LocalRuntime::new().block_on(async move {
         let notify = moto_async::LocalNotify::new();
@@ -615,6 +661,9 @@ pub fn run_all_tests() {
     test_sync_waiter_signal_coalescing();
     test_sync_waiter_cross_thread();
     test_sync_waiter_ping_pong();
+    test_block_on_sync_ready();
+    test_block_on_sync_cross_thread();
+    test_block_on_sync_self_wake();
     test_local_notify_eager();
     test_local_notify_deferred();
 

@@ -5,7 +5,13 @@
 //! waiting on a task-maintained condition; `block_on_sync` builds its
 //! future-polling parker on the same state machine.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+extern crate alloc;
+
+use alloc::sync::Arc;
+use core::future::Future;
+use core::pin::pin;
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::task::{ContextBuilder, LocalWaker, Poll, RawWaker, RawWakerVTable, Waker};
 use moto_rt::time::Instant;
 use moto_sys::SysHandle;
 
@@ -104,5 +110,112 @@ impl SyncWaiter {
     /// remembered and consumed by the next wait().
     pub fn signal(&self) {
         self.parker.unpark();
+    }
+}
+
+// The calling thread's parker, created once and cached in TLS; waker
+// clones handed to futures keep it alive past thread exit if needed.
+static PARKER_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn drop_thread_parker(ptr: *mut u8) {
+    unsafe { Arc::decrement_strong_count(ptr as *const Parker) };
+}
+
+fn parker_tls_key() -> moto_rt::tls::Key {
+    let key = PARKER_TLS_KEY.load(Ordering::Relaxed);
+    if key != 0 {
+        return key;
+    }
+
+    let key = moto_rt::tls::create(Some(drop_thread_parker));
+    assert_ne!(key, 0);
+    if let Err(prev) = PARKER_TLS_KEY.compare_exchange(0, key, Ordering::AcqRel, Ordering::Relaxed)
+    {
+        // Safety: we just created the key; nobody else saw it.
+        unsafe { moto_rt::tls::destroy(key) };
+        prev
+    } else {
+        key
+    }
+}
+
+fn thread_parker() -> Arc<Parker> {
+    let key = parker_tls_key();
+    // Safety: the key is valid; the slot holds null or an Arc'd Parker.
+    let ptr = unsafe { moto_rt::tls::get(key) } as *const Parker;
+    if ptr.is_null() {
+        let parker = Arc::new(Parker::new());
+        // Safety: the raw count is owned by the TLS slot until thread exit.
+        unsafe { moto_rt::tls::set(key, Arc::into_raw(parker.clone()) as *mut u8) };
+        parker
+    } else {
+        // Safety: the slot's strong count keeps ptr alive.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
+        }
+    }
+}
+
+unsafe fn bridge_waker_clone(data: *const ()) -> RawWaker {
+    unsafe { Arc::increment_strong_count(data as *const Parker) };
+    RawWaker::new(data, &BRIDGE_WAKER_VTABLE)
+}
+
+unsafe fn bridge_waker_wake(data: *const ()) {
+    unsafe {
+        bridge_waker_wake_by_ref(data);
+        bridge_waker_drop(data);
+    }
+}
+
+unsafe fn bridge_waker_wake_by_ref(data: *const ()) {
+    unsafe { (data as *const Parker).as_ref().unwrap_unchecked() }.unpark();
+}
+
+unsafe fn bridge_waker_drop(data: *const ()) {
+    unsafe { Arc::decrement_strong_count(data as *const Parker) };
+}
+
+static BRIDGE_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    bridge_waker_clone,
+    bridge_waker_wake,
+    bridge_waker_wake_by_ref,
+    bridge_waker_drop,
+);
+
+/// Poll `fut` to completion on the calling thread, parking between polls.
+///
+/// The sync half of the sync/async boundary (design 3.1): sync callers
+/// drive bridge futures (channel sends, oneshot receives) with this; the
+/// async half runs on some LocalRuntime elsewhere. A ready future
+/// completes in one poll with no syscall and no allocation (the waker
+/// state is cached per thread).
+///
+/// Must not be called on a LocalRuntime thread: parking there would
+/// deadlock the executor. Futures that need a runtime (SysHandleFuture,
+/// timers) cannot be driven by this either -- they panic on "No runtime".
+pub fn block_on_sync<F: Future>(fut: F) -> F::Output {
+    debug_assert!(
+        !crate::local_runtime::on_runtime_thread(),
+        "block_on_sync on a LocalRuntime thread"
+    );
+
+    let mut fut = pin!(fut);
+    let parker = thread_parker();
+    let data = Arc::as_ptr(&parker) as *const ();
+    // Safety: both wakers own a strong count via bridge_waker_clone.
+    let waker = unsafe { Waker::from_raw(bridge_waker_clone(data)) };
+    let local_waker = unsafe { LocalWaker::from_raw(bridge_waker_clone(data)) };
+    let mut cx = ContextBuilder::from_waker(&waker)
+        .local_waker(&local_waker)
+        .build();
+
+    loop {
+        if let Poll::Ready(val) = fut.as_mut().poll(&mut cx) {
+            return val;
+        }
+        // A leftover signal from a prior call costs one spurious re-poll.
+        parker.park(None);
     }
 }
