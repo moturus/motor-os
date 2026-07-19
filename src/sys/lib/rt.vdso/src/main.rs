@@ -18,6 +18,7 @@ mod rt_time;
 mod rt_tls;
 mod runtime;
 mod stdio;
+mod stdio_relay;
 
 mod net {
     pub mod inner_rx_stream;

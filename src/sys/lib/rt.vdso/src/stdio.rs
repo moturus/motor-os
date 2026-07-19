@@ -154,8 +154,9 @@ impl PosixFile for SelfStdio {
     }
 }
 
-// Returns the handle of the relay thread.
-pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorCode> {
+// Sets up relaying between this process's stdio and an inherited-stdio
+// child's pipe.
+pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<(), ErrorCode> {
     use moto_ipc::stdio_pipe::RawPipeData;
 
     let from = match from {
@@ -168,108 +169,162 @@ pub fn set_relay(from: moto_rt::RtFd, to: *const u8) -> Result<SysHandle, ErrorC
     let to: RawPipeData =
         unsafe { (to as usize as *const RawPipeData).as_ref().unwrap() }.unsafe_copy();
 
-    struct RelayArg {
-        from: StdioKind,
-        to: RawPipeData,
+    if from == StdioKind::Stdin {
+        set_stdin_relay(to)
+    } else {
+        crate::stdio_relay::spawn(move || async move {
+            // Safety: the pair was made for this process; see make_pair().
+            let dest = unsafe { StdioPipe::new_reader(to) };
+            relay_out(from, dest).await;
+        });
+        Ok(())
     }
-    extern "C" fn relay_thread_fn(thread_arg: u64) {
-        let arg = unsafe { Box::from_raw(thread_arg as usize as *mut RelayArg) };
-        let RelayArg { from, to } = *arg;
+}
 
-        if from == StdioKind::Stdin {
-            // STDIN should not be shared, so we lock it for the whole time the child lives.
-            //
-            // See also https://devblogs.microsoft.com/oldnewthing/20111202-00/?p=8983.
-            let stdin = from.get();
-            let mut stdin_lock = stdin.inner.lock();
-            let mut dest = unsafe { StdioPipe::new_writer(to) };
-            let mut buf = [0_u8; 80];
+/// Relays an inherited-stdio child's stdout/stderr into this process's
+/// own, as a task on the relay runtime. Exits when either pipe dies,
+/// draining what the child wrote first.
+async fn relay_out(kind: StdioKind, dest: StdioPipe) {
+    use moto_async::AsFuture;
 
-            // We need to break if the child exits, so we wait for the child or for the data,
-            // and read with a short timeout.
-            let wait_handles = [stdin_lock.pipe.handle(), dest.handle()];
-            let mut had_error = false;
-            loop {
-                let mut handles = wait_handles;
-                if moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None)
-                    .is_err()
-                {
-                    if had_error {
-                        break;
-                    } else {
-                        // Don't exit on the first error, as there may be something
-                        // in the buffer to process.
-                        had_error = true;
-                    }
+    let mut buf = [0_u8; 80];
+    let mut dest_dead = false;
+    loop {
+        match dest.nonblocking_read(&mut buf) {
+            Ok(sz) => {
+                if sz > 0 && !relay_write(&kind, &buf[..sz]).await {
+                    return;
                 }
+            }
+            Err(moto_rt::E_NOT_READY) => {
+                if dest_dead {
+                    return;
+                }
+                dest_dead = dest.handle().as_future().await.is_err();
+            }
+            Err(_) => return,
+        }
+    }
+}
 
-                let timeout = moto_rt::time::Instant::now() + core::time::Duration::new(0, 1_000);
-                match stdin_lock.pipe.read_timeout(&mut buf, Some(timeout)) {
-                    Ok(sz_read) => {
-                        if sz_read > 0 {
-                            match dest.write(&buf[0..sz_read]) {
-                                Ok(sz_written) => {
-                                    moto_sys::SysCpu::sched_yield();
-                                    if sz_written == sz_read {
-                                        continue;
-                                    } else {
-                                        stdin_lock
-                                            .overflow
-                                            .extend_from_slice(&buf[sz_written..sz_read]);
-                                        break;
-                                    }
-                                }
-                                Err(_) => {
-                                    stdin_lock.overflow.extend_from_slice(&buf[0..sz_read]);
+/// Writes all of `buf` into this process's own stdio pipe, awaiting
+/// pipe room. Returns false if the pipe is gone.
+async fn relay_write(kind: &StdioKind, mut buf: &[u8]) -> bool {
+    use moto_async::AsFuture;
+
+    let stdio = kind.get();
+    while !buf.is_empty() {
+        let result = stdio.inner.lock().pipe.nonblocking_write(buf);
+        match result {
+            Ok(written) => {
+                buf = &buf[written..];
+                // Give the consumer a chance to run now, as the thread
+                // relays did.
+                moto_sys::SysCpu::sched_yield();
+            }
+            Err(moto_rt::E_NOT_READY) => {
+                let handle = stdio.inner.lock().pipe.handle();
+                if handle.as_future().await.is_err() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+fn set_stdin_relay(to: moto_ipc::stdio_pipe::RawPipeData) -> Result<(), ErrorCode> {
+    use moto_ipc::stdio_pipe::RawPipeData;
+
+    extern "C" fn relay_thread_fn(thread_arg: u64) {
+        let to = *unsafe { Box::from_raw(thread_arg as usize as *mut RawPipeData) };
+
+        // STDIN should not be shared, so we lock it for the whole time the child lives.
+        //
+        // See also https://devblogs.microsoft.com/oldnewthing/20111202-00/?p=8983.
+        let stdin = StdioKind::Stdin.get();
+        let mut stdin_lock = stdin.inner.lock();
+        let mut dest = unsafe { StdioPipe::new_writer(to) };
+        let mut buf = [0_u8; 80];
+
+        // We need to break if the child exits, so we wait for the child or for the data,
+        // and read with a short timeout.
+        let wait_handles = [stdin_lock.pipe.handle(), dest.handle()];
+        let mut had_error = false;
+        loop {
+            let mut handles = wait_handles;
+            if moto_sys::SysCpu::wait(&mut handles, SysHandle::NONE, SysHandle::NONE, None).is_err()
+            {
+                if had_error {
+                    break;
+                } else {
+                    // Don't exit on the first error, as there may be something
+                    // in the buffer to process.
+                    had_error = true;
+                }
+            }
+
+            let timeout = moto_rt::time::Instant::now() + core::time::Duration::new(0, 1_000);
+            match stdin_lock.pipe.read_timeout(&mut buf, Some(timeout)) {
+                Ok(sz_read) => {
+                    if sz_read > 0 {
+                        match dest.write(&buf[0..sz_read]) {
+                            Ok(sz_written) => {
+                                moto_sys::SysCpu::sched_yield();
+                                if sz_written == sz_read {
+                                    continue;
+                                } else {
+                                    stdin_lock
+                                        .overflow
+                                        .extend_from_slice(&buf[sz_written..sz_read]);
                                     break;
                                 }
                             }
-                        } else {
-                            break;
+                            Err(_) => {
+                                stdin_lock.overflow.extend_from_slice(&buf[0..sz_read]);
+                                break;
+                            }
                         }
-                    }
-                    Err(err) => {
-                        if err == moto_rt::E_TIMED_OUT {
-                            continue;
-                        }
+                    } else {
                         break;
                     }
                 }
-            } // loop
-        } else {
-            let mut dest = unsafe { StdioPipe::new_reader(to) };
-            let mut buf = [0_u8; 80];
-            while let Ok(sz) = dest.read(&mut buf) {
-                if sz > 0 {
-                    if from.get().inner.lock().pipe.write(&buf[0..sz]).is_err() {
-                        break;
+                Err(err) => {
+                    if err == moto_rt::E_TIMED_OUT {
+                        continue;
                     }
-                    moto_sys::SysCpu::sched_yield();
+                    break;
                 }
             }
-        }
+        } // loop
+
         let _ = moto_sys::SysObj::put(SysHandle::SELF);
         unreachable!()
     } // relay_thread_fn
 
     let local_copy = to.unsafe_copy();
-    let thread_arg = Box::into_raw(Box::new(RelayArg { from, to })) as usize as u64;
+    let thread_arg = Box::into_raw(Box::new(to)) as usize as u64;
 
     #[cfg(debug_assertions)]
     const RELAY_THREAD_STACK_SIZE: usize = 1024 * 16;
     #[cfg(not(debug_assertions))]
     const RELAY_THREAD_STACK_SIZE: usize = 1024 * 4;
 
-    moto_sys::SysCpu::spawn(
+    let thread = moto_sys::SysCpu::spawn(
         SysHandle::SELF,
         RELAY_THREAD_STACK_SIZE as u64,
         relay_thread_fn as *const () as usize as u64,
         thread_arg,
     )
     .inspect_err(|_| unsafe {
-        drop(Box::from_raw(thread_arg as *mut RelayArg));
+        drop(Box::from_raw(thread_arg as *mut RawPipeData));
         local_copy.release(SysHandle::SELF);
-    })
+    })?;
+
+    // The relay thread is detached.
+    moto_sys::SysObj::put(thread).unwrap();
+    Ok(())
 }
 
 pub fn init() {
@@ -337,16 +392,13 @@ fn create_stdio_pipes(
                 moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
 
             let pdata = &local_data as *const _ as usize as *const u8;
-            let thread = set_relay(kind, pdata).inspect_err(|_| unsafe {
-                remote_data.unsafe_copy().release(remote_process);
-            })?;
-
-            // These relay threads are "detached" below (we release the handles).
             // TODO: remote shutdowns are now detected via bad remote handle IPCs.
             //       Should we set up a protocol to do it explicitly?
             //       But why? On remote errors/panics we need to handle bad IPCs
             //       anyway.
-            moto_sys::SysObj::put(thread).unwrap();
+            set_relay(kind, pdata).inspect_err(|_| unsafe {
+                remote_data.unsafe_copy().release(remote_process);
+            })?;
 
             Ok((
                 moto_rt::process::STDIO_NULL,
