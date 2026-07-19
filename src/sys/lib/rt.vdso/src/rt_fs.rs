@@ -232,42 +232,40 @@ impl AsyncFsClient {
     }
 
     fn create() -> Result<&'static Self> {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let fs_client = moto_io::fs::FsClient::connect()?;
-            let (tasks_tx, tasks_rx) = moto_async::channel(8);
+        let fs_client = moto_io::fs::FsClient::connect()?;
+        let (tasks_tx, tasks_rx) = moto_async::channel(8);
 
-            let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
-                tasks_tx,
-                cwd: moto_rt::mutex::Mutex::new(
-                    if let Some(cwd) = super::rt_process::EnvRt::get("PWD") {
-                        cwd
-                    } else {
-                        "/".to_owned()
-                    },
-                ),
-            }));
+        let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
+            tasks_tx,
+            cwd: moto_rt::mutex::Mutex::new(
+                if let Some(cwd) = super::rt_process::EnvRt::get("PWD") {
+                    cwd
+                } else {
+                    "/".to_owned()
+                },
+            ),
+        }));
 
-            let addr = this as *mut _ as usize;
-            let runtime_thread_param = Box::into_raw(Box::new((tasks_rx, fs_client)));
+        let addr = this as *mut _ as usize;
+        let runtime_thread_param = Box::into_raw(Box::new((tasks_rx, fs_client)));
 
-            let thread_handle = moto_sys::SysCpu::spawn(
-                SysHandle::SELF,
-                4096 * 16,
-                Self::runtime_thread as *const () as usize as u64,
-                runtime_thread_param as u64,
-            )
-            .expect("Error spawning the runtime thread (FS).");
+        let thread_handle = moto_sys::SysCpu::spawn(
+            SysHandle::SELF,
+            4096 * 16,
+            Self::runtime_thread as *const () as usize as u64,
+            runtime_thread_param as u64,
+        )
+        .expect("Error spawning the runtime thread (FS).");
 
-            assert!(
-                ASYNC_CLIENT
-                    .compare_exchange(CLIENT_PENDING, addr, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-            );
+        assert!(
+            ASYNC_CLIENT
+                .compare_exchange(CLIENT_PENDING, addr, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        );
 
-            log::debug!("AsyncFsClient created.");
+        log::debug!("AsyncFsClient created.");
 
-            unsafe { Ok((addr as *const Self).as_ref_unchecked()) }
-        })
+        unsafe { Ok((addr as *const Self).as_ref_unchecked()) }
     }
 
     fn getcwd(&self) -> Result<String> {
@@ -379,7 +377,7 @@ impl AsyncFsClient {
             })
         });
 
-        moto_async::LocalRuntime::new().block_on(async {
+        moto_async::block_on_sync(async {
             let _ = self.tasks_tx.send(task).await;
             rx_result.await.unwrap()
         })
@@ -481,13 +479,7 @@ impl AsyncFsClient {
         self.blocking_run(move |fs_client| async move { fs_client.resize(file_id, new_size).await })
     }
 
-    fn copy_file_range(
-        &self,
-        from: EntryId,
-        to: EntryId,
-        offset: u64,
-        size: u64,
-    ) -> Result<u64> {
+    fn copy_file_range(&self, from: EntryId, to: EntryId, offset: u64, size: u64) -> Result<u64> {
         self.blocking_run(move |fs_client| async move {
             fs_client.copy_file_range(from, to, offset, size).await
         })
