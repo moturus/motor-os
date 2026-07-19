@@ -4,6 +4,7 @@
 #![feature(str_from_raw_parts)]
 #![feature(box_into_inner)]
 
+mod io_runtime;
 mod load;
 mod posix;
 mod proc_fd;

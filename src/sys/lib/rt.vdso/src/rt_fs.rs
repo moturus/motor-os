@@ -204,23 +204,6 @@ impl AsyncFsClient {
         }
     }
 
-    extern "C" fn runtime_thread(param: u64) {
-        // Safety: safe by construction. See Self::create().
-        let boxed = unsafe {
-            Box::from_raw(
-                param as usize
-                    as *mut (
-                        moto_async::channel::Receiver<IoTask>,
-                        Rc<moto_io::fs::FsClient>,
-                    ),
-            )
-        };
-        let (tasks_rx, fs_client) = Box::into_inner(boxed);
-        moto_sys::set_current_thread_name("rt_fs::runtime").unwrap();
-
-        moto_async::LocalRuntime::new().block_on(Self::main_runtime_task(tasks_rx, fs_client));
-    }
-
     async fn main_runtime_task(
         mut tasks_rx: moto_async::channel::Receiver<IoTask>,
         fs_client: Rc<moto_io::fs::FsClient>,
@@ -247,15 +230,17 @@ impl AsyncFsClient {
         }));
 
         let addr = this as *mut _ as usize;
-        let runtime_thread_param = Box::into_raw(Box::new((tasks_rx, fs_client)));
 
-        let thread_handle = moto_sys::SysCpu::spawn(
-            SysHandle::SELF,
-            4096 * 16,
-            Self::runtime_thread as *const () as usize as u64,
-            runtime_thread_param as u64,
-        )
-        .expect("Error spawning the runtime thread (FS).");
+        // The Rc is uniquely owned until it reaches the runtime thread.
+        struct SendFsClient(Rc<moto_io::fs::FsClient>);
+        unsafe impl Send for SendFsClient {}
+        let carrier = SendFsClient(fs_client);
+
+        crate::io_runtime::spawn(move || {
+            // Capture the whole wrapper, not its (non-Send) field.
+            let carrier = carrier;
+            Self::main_runtime_task(tasks_rx, carrier.0)
+        });
 
         assert!(
             ASYNC_CLIENT
