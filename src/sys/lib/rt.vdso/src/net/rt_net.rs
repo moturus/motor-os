@@ -958,9 +958,16 @@ impl NetChannel {
             match batch {
                 TxBatch::Drained { sent_any } => {
                     if sent_any {
-                        // The drained-edge driver wake, folded into the
-                        // executor's sleep syscall (design 3.3): a
-                        // send-then-park cycle stays one syscall.
+                        // The batch-boundary driver wake stays explicit, as
+                        // in the old loop (design 5.2): sys-io must start on
+                        // this batch while we head to park. Folding it into
+                        // the park alone (A6) cost ~9% of default-buffer
+                        // bulk TX at the stage-C gate: the driver idled
+                        // until the park committed — a bubble per
+                        // pending-page marker on the single-writer path.
+                        self.wake_driver();
+                        // The old sleep-edge fold, kept in addition (the
+                        // second wake coalesces on the latched handle).
                         moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
                     }
                     self.wake_waiters();
