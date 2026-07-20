@@ -568,6 +568,7 @@ pub struct ResolvedEdge {
     pub dependency_index: usize,
     pub alias: String,
     pub kind: DependencyKind,
+    pub compile_kind: CompileKind,
     pub context: FeatureContext,
     pub package: PackageKey,
 }
@@ -578,6 +579,7 @@ pub struct ResolvedPackage {
     pub source: ResolvedSource,
     pub local_manifest: Option<Manifest>,
     pub feature_sets: BTreeMap<FeatureContext, BTreeSet<String>>,
+    pub compile_kinds: BTreeSet<CompileKind>,
     pub target_features: BTreeSet<String>,
     pub host_features: BTreeSet<String>,
     pub edges: Vec<ResolvedEdge>,
@@ -683,8 +685,8 @@ impl Scope<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CompileKind {
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum CompileKind {
     Target,
     Host,
 }
@@ -901,7 +903,7 @@ struct Activation {
     enabled_optional: BTreeSet<String>,
     dependency_features: BTreeMap<String, BTreeSet<String>>,
     weak_dependencies: BTreeSet<usize>,
-    sent: BTreeMap<usize, Sent>,
+    sent: BTreeMap<(CompileKind, usize), Sent>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -914,14 +916,15 @@ struct Sent {
 struct Node {
     record: Candidate,
     activations: BTreeMap<FeatureContext, Activation>,
-    edges: BTreeMap<(FeatureContext, usize), PackageKey>,
+    compile_kinds: BTreeSet<CompileKind>,
+    edges: BTreeMap<(CompileKind, FeatureContext, usize), PackageKey>,
 }
 
 #[derive(Clone, Default)]
 struct State {
     nodes: BTreeMap<PackageKey, Node>,
     links: BTreeMap<String, PackageKey>,
-    root_edges: BTreeMap<(FeatureContext, usize), PackageKey>,
+    root_edges: BTreeMap<(CompileKind, FeatureContext, usize), PackageKey>,
 }
 
 impl State {
@@ -954,12 +957,13 @@ impl State {
             let edges = node
                 .edges
                 .iter()
-                .map(|((context, dependency_index), package)| {
+                .map(|((compile_kind, context, dependency_index), package)| {
                     let dependency = &node.record.dependencies[*dependency_index];
                     ResolvedEdge {
                         dependency_index: *dependency_index,
                         alias: dependency.alias.clone(),
                         kind: dependency.kind,
+                        compile_kind: *compile_kind,
                         context: context.clone(),
                         package: package.clone(),
                     }
@@ -979,19 +983,20 @@ impl State {
                         .max_by(|left, right| left.0.version.cmp(&right.0.version))
                     {
                         lock_edges
-                            .entry((context.clone(), *dependency_index))
+                            .entry((CompileKind::Target, context.clone(), *dependency_index))
                             .or_insert_with(|| package.0.clone());
                     }
                 }
             }
             let lock_edges = lock_edges
                 .into_iter()
-                .map(|((context, dependency_index), package)| {
+                .map(|((compile_kind, context, dependency_index), package)| {
                     let dependency = &node.record.dependencies[dependency_index];
                     ResolvedEdge {
                         dependency_index,
                         alias: dependency.alias.clone(),
                         kind: dependency.kind,
+                        compile_kind,
                         context,
                         package,
                     }
@@ -1002,6 +1007,7 @@ impl State {
                 source: node.record.source,
                 local_manifest: node.record.local_manifest,
                 feature_sets,
+                compile_kinds: node.compile_kinds,
                 target_features,
                 host_features,
                 edges,
@@ -1011,12 +1017,13 @@ impl State {
         let root_edges = self
             .root_edges
             .into_iter()
-            .map(|((context, dependency_index), package)| {
+            .map(|((compile_kind, context, dependency_index), package)| {
                 let dependency = &manifest.dependencies[dependency_index];
                 ResolvedEdge {
                     dependency_index,
                     alias: dependency.alias.clone(),
                     kind: dependency.kind,
+                    compile_kind,
                     context,
                     package,
                 }
@@ -1143,6 +1150,7 @@ fn solve(
             Node {
                 record,
                 activations: BTreeMap::new(),
+                compile_kinds: BTreeSet::new(),
                 edges: BTreeMap::new(),
             },
         );
@@ -1199,7 +1207,11 @@ fn fulfill(
             .nodes
             .get_mut(parent)
             .ok_or_else(|| Failure::new("dependency parent disappeared during resolution"))?;
-        let edge = (event.context.clone(), event.dependency_index);
+        let edge = (
+            event.compile_kind,
+            event.context.clone(),
+            event.dependency_index,
+        );
         if node
             .edges
             .insert(edge, key.clone())
@@ -1211,7 +1223,11 @@ fn fulfill(
             )));
         }
     } else {
-        let edge = (event.context.clone(), event.dependency_index);
+        let edge = (
+            event.compile_kind,
+            event.context.clone(),
+            event.dependency_index,
+        );
         if state
             .root_edges
             .insert(edge, key.clone())
@@ -1239,13 +1255,9 @@ fn activate(
         .ok_or_else(|| Failure::new("selected package disappeared during activation"))?
         .record
         .clone();
-    let activation = state
-        .nodes
-        .get_mut(key)
-        .unwrap()
-        .activations
-        .entry(event.context.clone())
-        .or_default();
+    let node = state.nodes.get_mut(key).unwrap();
+    node.compile_kinds.insert(event.compile_kind);
+    let activation = node.activations.entry(event.context.clone()).or_default();
 
     if event.dependency.default_features && record.features.contains_key("default") {
         activation.active.insert("default".to_owned());
@@ -1390,10 +1402,11 @@ fn activate(
             features,
             default_features: dependency.default_features,
         };
-        if activation.sent.get(&index) == Some(&sent) {
+        let sent_key = (event.compile_kind, index);
+        if activation.sent.get(&sent_key) == Some(&sent) {
             continue;
         }
-        activation.sent.insert(index, sent.clone());
+        activation.sent.insert(sent_key, sent.clone());
         let mut dependency = dependency.clone();
         dependency.dependency.features = sent.features.into_iter().collect();
         let mut ancestors = event.ancestors.clone();
@@ -2020,6 +2033,34 @@ mod tests {
             .unwrap();
         assert_eq!(shared.target_features, ["target".to_owned()].into());
         assert_eq!(shared.host_features, ["host".to_owned()].into());
+
+        let root = manifest("a = { version = \"1\", features = [\"full\"] }", "", "1");
+        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V1), &[]).unwrap();
+        let shared = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "shared")
+            .unwrap();
+        assert_eq!(
+            shared.compile_kinds,
+            [CompileKind::Target, CompileKind::Host].into()
+        );
+        assert_eq!(
+            shared.feature_sets[&FeatureContext::Unified],
+            ["host".to_owned(), "target".to_owned()].into()
+        );
+        let a = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert_eq!(
+            a.edges
+                .iter()
+                .map(|edge| edge.compile_kind)
+                .collect::<BTreeSet<_>>(),
+            [CompileKind::Target, CompileKind::Host].into()
+        );
     }
 
     #[test]
