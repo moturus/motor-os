@@ -1307,6 +1307,7 @@ impl TcpStream {
         let mut sleep_timo_usec = 1;
         let mut spin_loop_counter: u64 = 0;
         let mut yield_counter: u64 = 0;
+        let mut page_waiter = None;
         let io_page = loop {
             if let Some(timo) = abs_timeout
                 && Instant::now() >= timo
@@ -1359,27 +1360,23 @@ impl TcpStream {
                         // self.channel().conn.dump_state();
                     }
 
-                    // Register for a wake before sleeping: the failed alloc
-                    // set this subchannel's page-wait bits, so sys-io wakes
-                    // the channel (= the io thread) when it frees one of our
-                    // pages, and the io thread wakes us on its next pass.
+                    // Register for a signal before sleeping: the failed
+                    // alloc set this subchannel's page-wait bits, so sys-io
+                    // wakes the channel when it frees one of our pages, and
+                    // the channel runtime signals us on its next pass.
                     // The timed sleep below is a fallback, not the
                     // mechanism — when it WAS the mechanism, the exponential
                     // ladder governed stuck bulk TX at one write per rung
                     // (18.8 MiB/s measured, 2026-07-11).
-                    self.channel()
-                        .add_page_waiter(moto_sys::UserThreadControlBlock::get().self_handle);
+                    let waiter = page_waiter
+                        .get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
+                    self.channel().add_page_waiter(waiter);
                     // Close the race with pages freed before we registered.
                     if let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
                         break page;
                     }
 
-                    let _ = moto_sys::SysCpu::wait(
-                        &mut [],
-                        SysHandle::NONE,
-                        SysHandle::NONE,
-                        Some(sleep_timo),
-                    );
+                    waiter.wait(Some(sleep_timo));
                 }
             }
         };
@@ -1447,6 +1444,7 @@ impl TcpStream {
         let filled = Self::tx_copy_at(bufs, offset, page.bytes_mut());
         debug_assert!(filled > 0);
         let mut entry = PendingTxPage { page, filled };
+        let mut waiter = None;
         loop {
             {
                 let mut pending = self.pending_tx.lock();
@@ -1461,7 +1459,9 @@ impl TcpStream {
                 // We held the lock throughout, so the entry is still the back.
                 entry = pending.pop_back().unwrap();
             }
-            self.channel().wait_can_send();
+            let waiter =
+                waiter.get_or_insert_with(|| alloc::sync::Arc::new(moto_async::SyncWaiter::new()));
+            self.channel().wait_can_send(waiter);
         }
     }
 

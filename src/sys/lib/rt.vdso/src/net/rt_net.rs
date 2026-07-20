@@ -688,8 +688,10 @@ pub struct NetChannel {
     // This is a multi-producer, single-consumer queue.
     send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
 
-    // Threads waiting to add their msg to send_queue.
-    send_waiters: Mutex<VecDeque<u64>>,
+    // Threads waiting to add their msg to send_queue. Signaled one per
+    // quiescent tx poll; a stale or duplicate entry costs a spurious
+    // signal the waiter's re-check absorbs.
+    send_waiters: Mutex<VecDeque<Arc<moto_async::SyncWaiter>>>,
 
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
@@ -697,9 +699,8 @@ pub struct NetChannel {
     // Threads blocked in TcpStream::write() waiting for a free io_page.
     // sys-io wakes this channel when it frees a page whose page-wait bit is
     // set (the blocked writer's failed alloc sets it), which wakes the rx
-    // task, which drains + wakes these at its next edge (`wake_waiters`).
-    // Stale entries are harmless: waking a running thread is a no-op.
-    page_waiters: Mutex<VecDeque<u64>>,
+    // task, which drains + signals these at its next edge (`wake_waiters`).
+    page_waiters: Mutex<VecDeque<Arc<moto_async::SyncWaiter>>>,
 
     // The channel runtime's send-room notify (a leaked LocalNotify),
     // signaled by the tx task whenever the send queue has room; awaited by
@@ -931,7 +932,7 @@ impl NetChannel {
             let mut waiters = VecDeque::new();
             core::mem::swap(&mut waiters, &mut *self.page_waiters.lock());
             for waiter in waiters {
-                let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
+                waiter.signal();
             }
         }
     }
@@ -1081,7 +1082,7 @@ impl NetChannel {
             // proceed; its retried push wakes us again for the next one.
             let waiter = { self.send_waiters.lock().pop_front() };
             if let Some(waiter) = waiter {
-                let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
+                waiter.signal();
             }
             Poll::Pending
         })
@@ -1089,23 +1090,21 @@ impl NetChannel {
 
     /// Block the calling thread until the send queue likely has room
     /// (mirrors the wait in [`Self::send_msg`]).
-    pub(super) fn wait_can_send(&self) {
-        self.send_waiters
-            .lock()
-            .push_back(moto_sys::UserThreadControlBlock::this_thread_handle().into());
+    pub(super) fn wait_can_send(&self, waiter: &Arc<moto_async::SyncWaiter>) {
+        self.send_waiters.lock().push_back(waiter.clone());
         self.maybe_wake_io_thread();
-        let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
+        waiter.wait(None);
     }
 
     pub fn add_write_waiter(&self, stream: &TcpStream) {
         self.write_waiters.lock().push_back(stream.weak());
     }
 
-    /// Register a thread blocked in TcpStream::write() on io_page
-    /// exhaustion; the io thread wakes it on its next pass (see
+    /// Register a writer blocked in TcpStream::write() on io_page
+    /// exhaustion; the channel runtime signals it on its next pass (see
     /// `page_waiters`).
-    pub fn add_page_waiter(&self, thread_handle: u64) {
-        self.page_waiters.lock().push_back(thread_handle);
+    pub fn add_page_waiter(&self, waiter: &Arc<moto_async::SyncWaiter>) {
+        self.page_waiters.lock().push_back(waiter.clone());
     }
 
     /// Wake the tx task: callers do this after queuing send work. The
@@ -1261,17 +1260,19 @@ impl NetChannel {
     }
 
     pub fn send_msg(&self, msg: io_channel::Msg) {
+        // The waiter is created only on backpressure (the fast path
+        // stays allocation-free) and lives for this call: entries left
+        // in send_waiters after we return absorb signals harmlessly.
+        let mut waiter = None;
         loop {
             if self.send_queue.push(msg).is_ok() {
                 self.maybe_wake_io_thread();
                 return;
             }
 
-            self.send_waiters
-                .lock()
-                .push_back(moto_sys::UserThreadControlBlock::this_thread_handle().into());
-            self.maybe_wake_io_thread();
-            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
+            let waiter =
+                waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
+            self.wait_can_send(waiter);
         }
     }
 
