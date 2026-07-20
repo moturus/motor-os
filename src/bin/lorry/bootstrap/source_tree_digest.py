@@ -140,7 +140,9 @@ def digest_entries(entries: Iterable[SourceEntry]) -> str:
 
 
 def source_tree(
-    root: Path, limits: SourceTreeLimits = SourceTreeLimits()
+    root: Path,
+    limits: SourceTreeLimits = SourceTreeLimits(),
+    excluded_directory_names: frozenset[str] = EXCLUDED_DIRECTORY_NAMES,
 ) -> SourceTree:
     root_metadata = root.stat(follow_symlinks=False)
     if not stat.S_ISDIR(root_metadata.st_mode):
@@ -152,10 +154,12 @@ def source_tree(
     total_bytes = 0
 
     for directory, names, files in os.walk(root, followlinks=False):
-        names[:] = [
-            name for name in names if name not in EXCLUDED_DIRECTORY_NAMES
+        names[:] = [name for name in names if name not in excluded_directory_names]
+        files = [
+            name
+            for name in files
+            if not (name == ".git" and ".git" in excluded_directory_names)
         ]
-        files = [name for name in files if name != ".git"]
         current = Path(directory)
 
         for name in names:
