@@ -969,6 +969,24 @@ impl NetChannel {
                         // The old sleep-edge fold, kept in addition (the
                         // second wake coalesces on the latched handle).
                         moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
+                        self.wake_waiters();
+
+                        // Linger before parking, standing in for the old
+                        // loop's wake_requested hysteresis: the single-
+                        // writer TX path posts its next pending-page marker
+                        // within a few microseconds, and catching it while
+                        // still polling keeps the caller's wake syscall-
+                        // free (A5 elision) and skips a park/unpark round-
+                        // trip per marker. The driver wake already went
+                        // out, so a lone send (RR) loses no latency; each
+                        // empty pass is a sub-microsecond re-poll.
+                        for _ in 0..16 {
+                            moto_async::yield_now().await;
+                            if !self.send_queue.is_empty() {
+                                break;
+                            }
+                        }
+                        continue;
                     }
                     self.wake_waiters();
                     self.park_until_send_work().await;
