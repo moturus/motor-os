@@ -2989,11 +2989,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static N: AtomicUsize = AtomicUsize::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        #[cfg(target_os = "motor")]
-        let temp_dir = std::path::PathBuf::from("/user/tmp");
-        #[cfg(not(target_os = "motor"))]
-        let temp_dir = std::env::temp_dir();
-        temp_dir.join(format!("red_save_{}_{tag}_{n}", std::process::id()))
+        std::env::temp_dir().join(format!("red_save_{}_{tag}_{n}", std::process::id()))
     }
 
     /// Load `original` from a real file, save it back, return the bytes on disk.
