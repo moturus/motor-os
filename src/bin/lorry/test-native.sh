@@ -408,7 +408,9 @@ EOF
 }
 
 build_image() {
-    [ "$REUSE_VM" -eq 0 ] || return
+    if [ "$REUSE_VM" -eq 1 ]; then
+        return 0
+    fi
     echo "== Building the existing Motor $BUILD VM image =="
     if [ "$BUILD" = "release" ]; then
         if ! make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)" \
