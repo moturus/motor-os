@@ -1,5 +1,6 @@
 mod archive;
 mod atomic;
+mod build_script;
 mod cli;
 mod compile;
 mod config;
