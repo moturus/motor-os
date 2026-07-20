@@ -638,7 +638,9 @@ enum TxBatch {
 
 /// A communication channel between the current process and sys-io.
 ///
-/// Each channel has a dedicated io_thread.
+/// Each channel has a dedicated runtime thread hosting its rx and tx
+/// tasks (design 5.2); thread-per-channel is kept per the scaling
+/// rationale at the top of this section.
 ///
 /// Each ~socket~ has a dedicated "subchannel", so that sockets don't interfere
 /// with each other.
@@ -670,16 +672,16 @@ pub struct NetChannel {
 
     // Threads blocked in TcpStream::write() waiting for a free io_page.
     // sys-io wakes this channel when it frees a page whose page-wait bit is
-    // set (the blocked writer's failed alloc sets it), which wakes the io
-    // thread, which drains + wakes these on its next pass. Stale entries
-    // are harmless: waking a running thread is a no-op.
+    // set (the blocked writer's failed alloc sets it), which wakes the rx
+    // task, which drains + wakes these at its next edge (`wake_waiters`).
+    // Stale entries are harmless: waking a running thread is a no-op.
     page_waiters: Mutex<VecDeque<u64>>,
 
     // Fire-and-forget messages (e.g. TcpStreamClose) that could not be staged
     // into `send_queue` because it was full, and that were produced while
-    // running on the IO thread itself (so blocking to wait for room would
-    // deadlock). The IO thread's main loop drains these back into `send_queue`.
-    // Only ever touched by the IO thread.
+    // running on the channel's own runtime thread (so blocking to wait for
+    // room would deadlock). The tx task drains these back into `send_queue`.
+    // Only ever touched on the runtime thread.
     deferred_msgs: Mutex<VecDeque<io_channel::Msg>>,
 
     // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
@@ -688,14 +690,11 @@ pub struct NetChannel {
 
     // The tx task's cross-thread waker, published by `park_until_send_work`;
     // waking it is cheap while the runtime is polling (A5 wake elision).
-    // Unused until the C2 flip.
     tx_task_waker: Mutex<Option<core::task::Waker>>,
 
     io_thread_join_handle: AtomicU64,
     io_thread_wake_handle: AtomicU64,
 
-    io_thread_running: CachePadded<AtomicBool>,
-    io_thread_wake_requested: CachePadded<AtomicBool>,
     exiting: CachePadded<AtomicBool>,
 }
 
@@ -719,91 +718,6 @@ impl NetChannel {
         for sub in &self.subchannels_in_use {
             assert!(!sub.load(Ordering::Relaxed));
         }
-    }
-
-    fn io_thread(&self) -> ! {
-        // Messages already popped from `send_queue` but not yet sent (a
-        // full-ring leftover or a coalescing run terminator); older than
-        // anything in `send_queue`, so always sent first.
-        let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
-
-        #[cfg(feature = "netdev")]
-        let mut loop_counter = 0_u64;
-
-        loop {
-            #[cfg(feature = "netdev")]
-            {
-                loop_counter += 1;
-                if loop_counter.is_multiple_of(1_000_000) {
-                    NET.lock().print_stats();
-                }
-            }
-
-            self.io_thread_running.store(true, Ordering::Release);
-            let mut should_sleep = self.io_thread_poll_messages();
-
-            // Re-stage messages deferred from a TcpStream drop that ran on this
-            // (the IO) thread while the send queue was full. Done here, in the
-            // main loop, so recv and send keep interleaving and we cannot
-            // deadlock against sys-io.
-            let deferred_pending = self.restage_deferred_msgs();
-
-            let sleep = self.io_thread_send_messages(&mut carry);
-            should_sleep &= sleep && !deferred_pending;
-
-            self.wake_waiters();
-
-            if should_sleep {
-                assert!(carry.is_empty());
-
-                // We do the complicated dance with two atomics and send waiters below
-                // because we don't want to syscall wake in every maybe_wake_io_thread().
-                if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
-                    continue;
-                }
-                self.io_thread_running.store(false, Ordering::Release);
-                if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
-                    continue;
-                }
-                let waiter = { self.send_waiters.lock().pop_front() };
-                if let Some(waiter) = waiter {
-                    self.io_thread_running.store(true, Ordering::Release);
-                    let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
-                    continue;
-                }
-                if self.io_thread_wake_requested.swap(false, Ordering::SeqCst) {
-                    continue;
-                }
-
-                // One syscall instead of wake_driver() + wait: fold the
-                // sys-io wake into the wait. Deliberately a WAKE target,
-                // not a SWAP target: a direct switch would pull sys-io
-                // onto this CPU, off its warm one — measured +11 usec on
-                // the set_nodelay IO latency (sys-io is a heavyweight
-                // multiplexer; warm-CPU placement beats the handoff).
-                let _ = moto_sys::SysCpu::wait(
-                    &mut [self.conn.server_handle()],
-                    SysHandle::NONE,
-                    self.conn.server_handle(),
-                    None,
-                );
-            }
-        }
-    }
-
-    // Poll messages, if any. Returns true if the IO thread may sleep.
-    fn io_thread_poll_messages(&self) -> bool {
-        let mut received_messages = 0;
-
-        while let Ok(msg) = self.conn.recv() {
-            received_messages += 1;
-            self.dispatch_incoming(msg);
-            if received_messages > 32 {
-                return false;
-            }
-        }
-
-        true
     }
 
     /// Dispatch one incoming message to its stream/socket/listener
@@ -901,24 +815,6 @@ impl NetChannel {
         }
     }
 
-    // Attempts to send some messages. Returns true if the io thread may sleep.
-    // `carry` holds messages already popped from `send_queue` but not yet sent;
-    // they are older than anything in the queue and so are sent first.
-    fn io_thread_send_messages(&self, carry: &mut VecDeque<io_channel::Msg>) -> bool {
-        match self.tx_send_batch(carry) {
-            TxBatch::Drained { sent_any } => {
-                if sent_any {
-                    self.wake_driver();
-                }
-                true
-            }
-            TxBatch::RingFull | TxBatch::BatchLimit => {
-                self.wake_driver();
-                false
-            }
-        }
-    }
-
     /// Send one batch from `carry` + `send_queue`, expanding TX markers.
     /// `carry` holds messages already popped from `send_queue` but not yet
     /// sent; they are older than anything in the queue and are sent first.
@@ -995,15 +891,23 @@ impl NetChannel {
         }
     }
 
-    /// The rx task: today's `io_thread_poll_messages` loop as a resident
-    /// of the channel runtime. Receives and dispatches inline; yields to
-    /// the tx task at batch boundaries; parks awaiting the connection
-    /// handle when the ring is empty.
-    ///
-    /// Unused until the C2 flip.
-    #[allow(dead_code)]
+    /// The rx task: the receive half of the old IO thread loop as a
+    /// resident of the channel runtime. Receives and dispatches inline;
+    /// yields to the tx task at batch boundaries; parks awaiting the
+    /// connection handle when the ring is empty.
     async fn rx_task(&self) {
+        #[cfg(feature = "netdev")]
+        let mut loop_counter = 0_u64;
+
         loop {
+            #[cfg(feature = "netdev")]
+            {
+                loop_counter += 1;
+                if loop_counter.is_multiple_of(1_000_000) {
+                    NET.lock().print_stats();
+                }
+            }
+
             let mut received_messages = 0_u32;
             while let Ok(msg) = self.conn.recv() {
                 received_messages += 1;
@@ -1029,14 +933,11 @@ impl NetChannel {
         }
     }
 
-    /// The tx task: today's send half of the IO thread loop as a resident
+    /// The tx task: the send half of the old IO thread loop as a resident
     /// of the channel runtime. Drains `deferred_msgs` and the send queue;
     /// on ring-full awaits the connection handle (sys-io signals as it
     /// consumes); at batch boundaries yields to the rx task; when drained,
     /// parks until a caller queues work (see `park_until_send_work`).
-    ///
-    /// Unused until the C2 flip.
-    #[allow(dead_code)]
     async fn tx_task(&self) {
         // Messages already popped from `send_queue` but not yet sent (a
         // full-ring leftover or a coalescing run terminator); older than
@@ -1059,13 +960,6 @@ impl NetChannel {
                         moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
                     }
                     self.wake_waiters();
-
-                    // The old loop's sleep-edge send-waiter pop: the queue
-                    // is empty, so one blocked sender can proceed.
-                    let waiter = { self.send_waiters.lock().pop_front() };
-                    if let Some(waiter) = waiter {
-                        let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
-                    }
 
                     if deferred_pending {
                         continue;
@@ -1093,16 +987,23 @@ impl NetChannel {
     /// friends), then re-checks for work: a push that raced the publish
     /// either lands before the check or wakes the published waker.
     ///
-    /// Unused until the C2 flip.
-    #[allow(dead_code)]
+    /// The old loop's sleep-edge send-waiter release lives here — at every
+    /// quiescent poll, not just the batch-drained edge — so a sender that
+    /// enlists after the tx task drained the queue but before it parked is
+    /// still released (its `maybe_wake_io_thread` re-runs this poll).
     fn park_until_send_work(&self) -> impl Future<Output = ()> + '_ {
         core::future::poll_fn(move |cx| {
             *self.tx_task_waker.lock() = Some(cx.waker().clone());
             if !self.send_queue.is_empty() || !self.deferred_msgs.lock().is_empty() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
+                return Poll::Ready(());
             }
+            // Quiescent and the queue is empty: one blocked sender can
+            // proceed; its retried push wakes us again for the next one.
+            let waiter = { self.send_waiters.lock().pop_front() };
+            if let Some(waiter) = waiter {
+                let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
+            }
+            Poll::Pending
         })
     }
 
@@ -1127,16 +1028,20 @@ impl NetChannel {
         self.page_waiters.lock().push_back(thread_handle);
     }
 
+    /// Wake the tx task: callers do this after queuing send work. The
+    /// wake is a runqueue push plus, only when the runtime is parked or
+    /// committing to park, a wake syscall (A5 wake elision). A None waker
+    /// means the tx task has not been polled yet; its first poll sees the
+    /// queued work.
     pub fn maybe_wake_io_thread(&self) {
-        self.io_thread_wake_requested.store(true, Ordering::Release);
-        if self.io_thread_running.load(Ordering::SeqCst) {
-            return;
+        // Waking under the lock is fine: a wake never blocks (a runqueue
+        // push and at most one wake syscall).
+        if let Some(waker) = &*self.tx_task_waker.lock() {
+            waker.wake_by_ref();
         }
-
-        let _ = moto_sys::SysCpu::wake(self.io_thread_wake_handle.load(Ordering::Relaxed).into());
     }
 
-    extern "C" fn io_thread_init(self_addr: usize) {
+    extern "C" fn runtime_thread_init(self_addr: usize) {
         // We extract a raw reference from Arc<Self> so that refcounting works and Self::drop()
         // gets triggered.
         let self_: &'static Self = unsafe {
@@ -1150,9 +1055,20 @@ impl NetChannel {
             Ordering::Release,
         );
 
-        moto_sys::set_current_thread_name("rt_net::io_thread").unwrap();
+        moto_sys::set_current_thread_name("rt_net::channel_runtime").unwrap();
 
-        self_.io_thread();
+        // Still a sys-io wake target, never a swap target: a direct
+        // switch would pull sys-io onto this CPU, off its warm one —
+        // measured +11 usec on the set_nodelay IO latency (sys-io is a
+        // heavyweight multiplexer; warm-CPU placement beats the handoff).
+        moto_async::LocalRuntime::new().block_on(async {
+            // The residents run forever (channel teardown is stage E);
+            // dropping a JoinHandle detaches, it does not cancel.
+            core::mem::drop(moto_async::LocalRuntime::spawn(self_.rx_task()));
+            core::mem::drop(moto_async::LocalRuntime::spawn(self_.tx_task()));
+            core::future::pending::<()>().await
+        });
+        unreachable!("the channel runtime exited");
     }
 
     fn new() -> Arc<Self> {
@@ -1179,8 +1095,6 @@ impl NetChannel {
             tx_task_waker: Mutex::new(None),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
-            io_thread_running: CachePadded::new(AtomicBool::new(false)),
-            io_thread_wake_requested: CachePadded::new(AtomicBool::new(false)),
             exiting: CachePadded::new(AtomicBool::new(false)),
         });
 
@@ -1188,7 +1102,7 @@ impl NetChannel {
         let thread_handle = moto_sys::SysCpu::spawn(
             SysHandle::SELF,
             4096 * 16,
-            Self::io_thread_init as *const () as usize as u64,
+            Self::runtime_thread_init as *const () as usize as u64,
             self_ptr as usize as u64,
         )
         .unwrap();
@@ -1366,17 +1280,14 @@ impl NetChannel {
             return;
         }
 
-        // We are the IO thread and the queue is full: hand the message to the
-        // main loop, which keeps interleaving recv and send (so it makes
-        // progress against sys-io) and will stage it as soon as there is room.
-        // `restage_deferred_msgs()` drains this back into `send_queue`.
+        // We are on the runtime thread and the queue is full: hand the
+        // message to the tx task, which keeps interleaving with recv (so it
+        // makes progress against sys-io) and will stage it as soon as there
+        // is room. `restage_deferred_msgs()` drains this back into
+        // `send_queue`; the wake keeps the tx task from parking with the
+        // message still pending (its park re-checks `deferred_msgs`).
         self.deferred_msgs.lock().push_back(msg);
         self.maybe_wake_io_thread();
-
-        // Ensure the main loop does not go to sleep with this still pending.
-        // Note: we are running on the IO thread (see the 'if' above), so
-        // just setting the flag is fine, no need to wake it.
-        self.io_thread_wake_requested.store(true, Ordering::Release);
     }
 
     pub fn post_msg_with_response_waiter(
