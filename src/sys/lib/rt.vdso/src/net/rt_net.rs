@@ -684,8 +684,10 @@ pub struct NetChannel {
     // dereferenced on the runtime thread.
     send_room: AtomicUsize,
 
-    // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
-    legacy_resp_waiters: Mutex<BTreeMap<u64, (SysHandle, Option<io_channel::Msg>)>>,
+    // In-flight RPCs: req_id => the sender the rx task resolves with the
+    // response. Insert-before-queue is the ordering rule: the response
+    // must never beat its waiter into the map.
+    rpc_map: Mutex<BTreeMap<u64, moto_async::oneshot::Sender<io_channel::Msg>>>,
     response_handlers: Mutex<BTreeMap<u64, Weak<dyn ResponseHandler + Send + Sync>>>,
 
     // The tx task's cross-thread waker, published by `park_until_send_work`;
@@ -775,13 +777,17 @@ impl NetChannel {
                 SysHandle::NONE
             }
         } else {
-            // These are synchronous req/resp messages.
-            let mut resp_waiters = self.legacy_resp_waiters.lock();
-            if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
-                *resp = Some(msg);
-                *handle
+            // An RPC response: resolve through the RPC map. The send wakes
+            // the receiver — a caller thread parked in block_on_sync.
+            let waiter = self.rpc_map.lock().remove(&msg.id);
+            if let Some(tx) = waiter {
+                if tx.send(msg).is_err() {
+                    // Receivers are never dropped before completion
+                    // (block_on_sync polls to Ready; teardown is stage E).
+                    panic!("RPC receiver gone for msg {}", msg.id);
+                }
+                SysHandle::NONE
             } else {
-                core::mem::drop(resp_waiters);
                 let Some(resp_handler) = self.response_handlers.lock().remove(&msg.id) else {
                     panic!("unexpected msg");
                 };
@@ -1132,7 +1138,7 @@ impl NetChannel {
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
             page_waiters: Mutex::new(VecDeque::new()),
-            legacy_resp_waiters: Mutex::new(BTreeMap::new()),
+            rpc_map: Mutex::new(BTreeMap::new()),
             response_handlers: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),
@@ -1231,38 +1237,20 @@ impl NetChannel {
         }
     }
 
-    fn wait_for_resp(&self, resp_id: u64) -> io_channel::Msg {
-        loop {
-            {
-                let mut recv_waiters = self.legacy_resp_waiters.lock();
-                if let Some(resp) = recv_waiters.get_mut(&resp_id).unwrap().1.take() {
-                    recv_waiters.remove(&resp_id);
-                    return resp;
-                }
-            }
-
-            // No need to wake the IO thread, as it will be woken by sys-io.
-            let _ = moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None);
-        }
-    }
-
     // Send message and wait for response.
     pub fn send_receive(&self, mut req: io_channel::Msg) -> io_channel::Msg {
         let req_id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
 
-        // Add to waiters before sending the message, otherwise the response may
-        // arive too quickly and the receiving code will panic due to a missing waiter.
-        self.legacy_resp_waiters.lock().insert(
-            req_id,
-            (
-                moto_sys::UserThreadControlBlock::get().self_handle.into(),
-                None,
-            ),
-        );
+        // Insert the waiter before queuing the request, otherwise the
+        // response may arrive before the rx task can find it in the map.
+        let (tx, rx) = moto_async::oneshot();
+        assert!(self.rpc_map.lock().insert(req_id, tx).is_none());
 
         req.id = req_id;
         self.send_msg(req);
-        self.wait_for_resp(req_id)
+
+        // Completes without a syscall if the response already arrived.
+        moto_async::block_on_sync(rx).expect("RPC sender dropped")
     }
 
     pub fn new_req_id(&self) -> u64 {
