@@ -5,6 +5,7 @@ mod diagnostic;
 mod engine;
 mod hash;
 mod identity;
+mod json;
 mod manifest;
 mod process;
 mod toml;
