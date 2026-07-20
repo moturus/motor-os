@@ -1,6 +1,24 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub type StdinTx = tokio::sync::mpsc::Sender<Vec<u8>>;
+
+/// Shared ownership of the one SSH `CHANNEL_CLOSE` allowed for a channel.
+///
+/// The SSH handler and another completion path (the child-reaping task, or the
+/// special Motor shutdown path) can both finish a channel. Every explicit
+/// close path must claim this guard first so russhd never sends a second close
+/// after another owner has finished the channel.
+#[derive(Clone, Debug, Default)]
+pub struct ChannelCloseGuard(Arc<AtomicBool>);
+
+impl ChannelCloseGuard {
+    pub fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
 
 /// The shell that runs client sessions and commands.
 #[cfg(target_os = "motor")]
@@ -47,6 +65,7 @@ pub async fn spawn(
     command: Command,
     channel: russh::ChannelId,
     session: russh::server::Handle,
+    close_guard: ChannelCloseGuard,
     cfg: &Arc<crate::config::Config>,
 ) -> Result<StdinTx, russh::Error> {
     use std::process::Stdio;
@@ -193,8 +212,10 @@ pub async fn spawn(
             }
         }
 
-        let _ = session_handle.eof(channel).await;
-        let _ = session_handle.close(channel).await;
+        if close_guard.claim() {
+            let _ = session_handle.eof(channel).await;
+            let _ = session_handle.close(channel).await;
+        }
     });
 
     Ok(stdin_tx)
@@ -266,5 +287,36 @@ mod tests {
         // `ssh host cat some-file > copy` must not corrupt the file.
         let bytes = b"\x7fELF\r\n\n\x00\xff";
         assert_eq!(output_bytes(bytes, false), bytes);
+    }
+
+    #[test]
+    fn competing_channel_completion_paths_claim_exactly_one_close() {
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        let close_guard = ChannelCloseGuard::default();
+        let start = Arc::new(Barrier::new(2));
+        let winners = Arc::new(AtomicUsize::new(0));
+
+        // Reproduce the two owners in the shutdown failure: exec("shutdown")
+        // completes the channel while the client's already-sent EOF is
+        // dispatched to channel_eof. Whichever is handled first must suppress
+        // the other's CHANNEL_CLOSE.
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let close_guard = close_guard.clone();
+                let start = start.clone();
+                let winners = winners.clone();
+                scope.spawn(move || {
+                    start.wait();
+                    if close_guard.claim() {
+                        winners.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(winners.load(Ordering::Relaxed), 1);
+        assert!(!close_guard.claim(), "a completed channel must stay closed");
     }
 }

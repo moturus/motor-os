@@ -11,7 +11,7 @@ use russh::server::{Msg, Server as _, Session};
 use russh::*;
 
 use russhd::config;
-use russhd::local_session::{self, StdinTx};
+use russhd::local_session::{self, ChannelCloseGuard, StdinTx};
 
 // Intercept Ctrl+C ourselves if the OS does not do it for us.
 #[cfg(target_os = "motor")]
@@ -119,6 +119,7 @@ struct ConnectionHandler {
 
     stdin_tx: Option<StdinTx>,
     sftp_channel_id: Option<ChannelId>,
+    close_guard: Option<ChannelCloseGuard>,
 }
 
 impl ConnectionHandler {
@@ -133,16 +134,23 @@ impl ConnectionHandler {
             authenticated_user: None,
             stdin_tx: None,
             sftp_channel_id: None,
+            close_guard: None,
         }
     }
 
     async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
         let command = local_session::Command::shell();
+        let close_guard = self
+            .close_guard
+            .as_ref()
+            .ok_or(russh::Error::Inconsistent)?
+            .clone();
 
         let (channel, session) = self.channel.take().unwrap();
         let session_clone = session.clone();
-        self.stdin_tx =
-            Some(local_session::spawn(command, channel.id(), session, &self.config).await?);
+        self.stdin_tx = Some(
+            local_session::spawn(command, channel.id(), session, close_guard, &self.config).await?,
+        );
 
         // Show a greeting.
         #[cfg(target_os = "motor")]
@@ -179,7 +187,13 @@ impl ConnectionHandler {
             let (channel, session) = self.channel.take().unwrap();
             let _ = session.exit_status_request(channel.id(), 0).await;
             let _ = session.eof(channel.id()).await;
-            let _ = session.close(channel.id()).await;
+            if self
+                .close_guard
+                .as_ref()
+                .is_some_and(ChannelCloseGuard::claim)
+            {
+                let _ = session.close(channel.id()).await;
+            }
 
             tokio::spawn(async {
                 log::info!("shutdown initiated");
@@ -198,10 +212,16 @@ impl ConnectionHandler {
         // Only `ssh -t host cmd` asks for a terminal; a plain `ssh host cmd`
         // gets the command's bytes as they are.
         let command = local_session::Command::exec(cmdline, self.pty_request.is_some());
+        let close_guard = self
+            .close_guard
+            .as_ref()
+            .ok_or(russh::Error::Inconsistent)?
+            .clone();
 
         let (channel, session) = self.channel.take().unwrap();
-        self.stdin_tx =
-            Some(local_session::spawn(command, channel.id(), session, &self.config).await?);
+        self.stdin_tx = Some(
+            local_session::spawn(command, channel.id(), session, close_guard, &self.config).await?,
+        );
 
         Ok(())
     }
@@ -348,6 +368,7 @@ impl server::Handler for ConnectionHandler {
         }
 
         self.channel = Some((channel, session.handle()));
+        self.close_guard = Some(ChannelCloseGuard::default());
         Ok(true)
     }
 
@@ -372,8 +393,17 @@ impl server::Handler for ConnectionHandler {
             return Ok(());
         }
 
-        // Nothing is running on the channel, so nobody else will close it.
-        session.close(channel_id)
+        // Nothing is running on the channel. It may still race with another
+        // completion path, so claim the channel's one close before sending it.
+        if self
+            .close_guard
+            .as_ref()
+            .is_some_and(ChannelCloseGuard::claim)
+        {
+            session.close(channel_id)
+        } else {
+            Ok(())
+        }
     }
 
     #[allow(unused_variables, clippy::too_many_arguments)]
