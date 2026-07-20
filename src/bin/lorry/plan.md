@@ -2806,6 +2806,18 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      discovered integration tests, `--test`, and `--no-run`. Require clean
      Cargo/Lorry release identity and then native-Motor/cross-Lorry identity.
 
+   Progress evidence:
+   - The selected dependency graph now expands into a deterministic
+     topological unit DAG with distinct target/host libraries and
+     build-script compile/run units. Resolver-1 unified features still retain
+     separate host and target compilation activations, and seeded external
+     graphs validate the same invariants.
+   - The generalized compilation-identity adapter preserves every frozen
+     Stage-1 identity and matches clean Cargo 1.97/1.98 release identities for
+     registry and local-path libraries, host build dependencies,
+     build-script compile/run units, enabled features, LTO, and sorted
+     transitive dependency identities.
+
 6. **Finish Stage-2 cache, bundle, and core self-hosting.**
    - Add the Round-22 content-addressed library/build-output cache with cold,
      warm, invalidation, concurrent-writer, interruption, and corruption

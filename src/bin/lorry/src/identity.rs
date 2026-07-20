@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::hash::StableHasher;
 use crate::manifest::{Lto as ManifestLto, ReleaseProfile, Strip as ManifestStrip, Version};
 use crate::toolchain::Toolchain;
@@ -7,6 +9,8 @@ use std::hash::{Hash, Hasher};
 pub struct Identity {
     pub metadata: String,
     pub extra_filename: String,
+    metadata_value: u64,
+    unit_id_value: u64,
 }
 
 pub struct IdentityInput<'a> {
@@ -24,6 +28,150 @@ pub struct IdentityInput<'a> {
 }
 
 pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
+    let profile = stage_one_profile(input);
+    cargo_unit_identity(&CargoUnitIdentityInput {
+        package_name: input.package_name,
+        version: input.version,
+        source: CargoSource::Path(""),
+        features: &[],
+        profile: &profile,
+        mode: if input.test {
+            CargoCompileMode::Test
+        } else {
+            CargoCompileMode::Build
+        },
+        lto: stage_one_lto(input.release, input.release_profile.lto),
+        logical_target: input.logical_target,
+        target_name: input.target_name,
+        target_kind: CargoTargetKind::Bin,
+        rustc: input.rustc,
+        rustflags: input.rustflags,
+        extra_arguments: &[],
+        dependencies: &[],
+        host_configuration_differs: None,
+    })
+}
+
+pub struct CargoUnitIdentityInput<'a> {
+    pub package_name: &'a str,
+    pub version: &'a Version,
+    pub source: CargoSource<'a>,
+    /// Cargo stores enabled features as a sorted vector.
+    pub features: &'a [String],
+    pub profile: &'a CargoProfile<'a>,
+    pub mode: CargoCompileMode,
+    pub lto: CargoUnitLto<'a>,
+    /// `None` is Cargo's host compile kind; `Some` is an explicit target.
+    pub logical_target: Option<&'a str>,
+    pub target_name: &'a str,
+    pub target_kind: CargoTargetKind<'a>,
+    pub rustc: &'a Toolchain,
+    pub rustflags: &'a [String],
+    pub extra_arguments: &'a [String],
+    pub dependencies: &'a [Identity],
+    /// Cargo hashes this boolean only for a host unit when target
+    /// configuration has explicitly stopped applying to the host.
+    pub host_configuration_differs: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CargoSource<'a> {
+    /// The string is Cargo's workspace-relative path, or its file URL when the
+    /// package is outside the workspace.
+    Path(&'a str),
+    CratesIo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CargoCompileMode {
+    Test,
+    Build,
+    Check { test: bool },
+    Doc,
+    Doctest,
+    Docscrape,
+    RunCustomBuild,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum CargoTargetKind<'a> {
+    Lib(Vec<CargoCrateType<'a>>),
+    Bin,
+    Test,
+    Bench,
+    ExampleLib(Vec<CargoCrateType<'a>>),
+    ExampleBin,
+    CustomBuild,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum CargoCrateType<'a> {
+    Bin,
+    Lib,
+    Rlib,
+    Dylib,
+    Cdylib,
+    Staticlib,
+    ProcMacro,
+    Other(&'a str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CargoProfileLto<'a> {
+    Off,
+    Bool(bool),
+    Named(&'a str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CargoDebugInfo {
+    None,
+    LineDirectivesOnly,
+    LineTablesOnly,
+    Limited,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CargoPanicStrategy {
+    Unwind,
+    Abort,
+    ImmediateAbort,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CargoStrip<'a> {
+    None,
+    Named(&'a str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CargoUnitLto<'a> {
+    Run(Option<&'a str>),
+    Off,
+    OnlyBitcode,
+    ObjectAndBitcode,
+    OnlyObject,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CargoProfile<'a> {
+    pub opt_level: &'a str,
+    pub lto: CargoProfileLto<'a>,
+    pub codegen_backend: Option<&'a str>,
+    pub codegen_units: Option<u32>,
+    pub debuginfo: CargoDebugInfo,
+    pub split_debuginfo: Option<&'a str>,
+    pub debug_assertions: bool,
+    pub overflow_checks: bool,
+    pub rpath: bool,
+    pub incremental: bool,
+    pub panic: CargoPanicStrategy,
+    pub strip: CargoStrip<'a>,
+    pub rustflags: &'a [String],
+}
+
+pub fn cargo_unit_identity(input: &CargoUnitIdentityInput<'_>) -> Identity {
     let mut shared = StableHasher::new();
     2u8.hash(&mut shared);
 
@@ -33,17 +181,21 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
     input.version.patch.hash(&mut shared);
     input.version.pre.hash(&mut shared);
     input.version.build.hash(&mut shared);
-    std::mem::discriminant(&SourceKind::Path).hash(&mut shared);
-    "".hash(&mut shared);
-
-    Vec::<&str>::new().hash(&mut shared);
-    hash_profile(input, &mut shared);
-    if input.test {
-        CompileMode::Test.hash(&mut shared);
-    } else {
-        CompileMode::Build.hash(&mut shared);
+    match input.source {
+        CargoSource::Path(path) => {
+            std::mem::discriminant(&SourceKind::Path).hash(&mut shared);
+            path.hash(&mut shared);
+        }
+        CargoSource::CratesIo => {
+            std::mem::discriminant(&SourceKind::Registry).hash(&mut shared);
+            "https://github.com/rust-lang/crates.io-index".hash(&mut shared);
+        }
     }
-    hash_unit_lto(input.release, input.release_profile.lto, &mut shared);
+
+    input.features.hash(&mut shared);
+    hash_profile(input.profile, &mut shared);
+    input.mode.hash(&mut shared);
+    input.lto.hash(&mut shared);
 
     let kind_fingerprint = match input.logical_target {
         None => 0,
@@ -55,87 +207,138 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
     };
     kind_fingerprint.hash(&mut shared);
     input.target_name.hash(&mut shared);
-    TargetKind::Bin.hash(&mut shared);
+    input.target_kind.hash(&mut shared);
     hash_rustc_version(input, &mut shared);
     false.hash(&mut shared);
+    if let Some(differs) = input.host_configuration_differs {
+        differs.hash(&mut shared);
+    }
 
     let mut metadata = shared.clone();
-    Vec::<u64>::new().hash(&mut metadata);
+    let mut dependency_metadata = input
+        .dependencies
+        .iter()
+        .map(|identity| identity.metadata_value)
+        .collect::<Vec<_>>();
+    dependency_metadata.sort();
+    dependency_metadata.hash(&mut metadata);
 
     let mut unit = shared;
-    Vec::<u64>::new().hash(&mut unit);
-    Vec::<String>::new().hash(&mut unit);
-    input.rustflags.hash(&mut unit);
+    let mut dependency_units = input
+        .dependencies
+        .iter()
+        .map(|identity| identity.unit_id_value)
+        .collect::<Vec<_>>();
+    dependency_units.sort();
+    dependency_units.hash(&mut unit);
+    if !has_remap_path_prefix(input.extra_arguments) {
+        input.extra_arguments.hash(&mut unit);
+    }
+    if !has_remap_path_prefix(input.rustflags) {
+        input.rustflags.hash(&mut unit);
+    }
+
+    let metadata_value = metadata.finish();
+    let unit_id_value = unit.finish();
 
     Identity {
-        metadata: format!("{:016x}", metadata.finish()),
-        extra_filename: format!("-{:016x}", unit.finish()),
+        metadata: format!("{metadata_value:016x}"),
+        extra_filename: format!("-{unit_id_value:016x}"),
+        metadata_value,
+        unit_id_value,
     }
 }
 
-fn hash_profile(input: &IdentityInput<'_>, hasher: &mut StableHasher) {
+fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
     let release = input.release;
     if release {
-        "3".hash(hasher);
-        match input.release_profile.lto {
-            ManifestLto::Default => ProfileLto::Bool(false).hash(hasher),
-            ManifestLto::True => ProfileLto::Bool(true).hash(hasher),
-            ManifestLto::Fat => ProfileLto::Named("fat").hash(hasher),
-            ManifestLto::Thin => ProfileLto::Named("thin").hash(hasher),
-            ManifestLto::Off => ProfileLto::Off.hash(hasher),
-        }
-        Option::<&str>::None.hash(hasher);
-        input.release_profile.codegen_units.hash(hasher);
-        DebugInfo::None.hash(hasher);
-        Option::<&str>::None.hash(hasher);
-        false.hash(hasher);
-        false.hash(hasher);
-        false.hash(hasher);
-        (
-            false,
-            if input.test || !input.release_profile.panic_abort {
-                PanicStrategy::Unwind
+        CargoProfile {
+            opt_level: "3",
+            lto: manifest_profile_lto(input.release_profile.lto),
+            codegen_backend: None,
+            codegen_units: input.release_profile.codegen_units,
+            debuginfo: CargoDebugInfo::None,
+            split_debuginfo: None,
+            debug_assertions: false,
+            overflow_checks: false,
+            rpath: false,
+            incremental: false,
+            panic: if input.test || !input.release_profile.panic_abort {
+                CargoPanicStrategy::Unwind
             } else {
-                PanicStrategy::Abort
+                CargoPanicStrategy::Abort
             },
-            match input.release_profile.strip {
-                ManifestStrip::None => StripInner::None,
-                ManifestStrip::Debuginfo => StripInner::Named("debuginfo"),
-                ManifestStrip::Symbols => StripInner::Named("symbols"),
-            },
-        )
-            .hash(hasher);
+            strip: manifest_strip(input.release_profile.strip),
+            rustflags: &[],
+        }
     } else {
-        "0".hash(hasher);
-        ProfileLto::Bool(false).hash(hasher);
-        Option::<&str>::None.hash(hasher);
-        Option::<u32>::None.hash(hasher);
-        DebugInfo::Full.hash(hasher);
-        Option::<&str>::None.hash(hasher);
-        true.hash(hasher);
-        true.hash(hasher);
-        false.hash(hasher);
-        (true, PanicStrategy::Unwind, StripInner::None).hash(hasher);
+        CargoProfile {
+            opt_level: "0",
+            lto: CargoProfileLto::Bool(false),
+            codegen_backend: None,
+            codegen_units: None,
+            debuginfo: CargoDebugInfo::Full,
+            split_debuginfo: None,
+            debug_assertions: true,
+            overflow_checks: true,
+            rpath: false,
+            incremental: true,
+            panic: CargoPanicStrategy::Unwind,
+            strip: CargoStrip::None,
+            rustflags: &[],
+        }
     }
-    Vec::<&str>::new().hash(hasher);
+}
+
+fn hash_profile(profile: &CargoProfile<'_>, hasher: &mut StableHasher) {
+    profile.opt_level.hash(hasher);
+    profile.lto.hash(hasher);
+    profile.codegen_backend.hash(hasher);
+    profile.codegen_units.hash(hasher);
+    profile.debuginfo.hash(hasher);
+    profile.split_debuginfo.hash(hasher);
+    profile.debug_assertions.hash(hasher);
+    profile.overflow_checks.hash(hasher);
+    profile.rpath.hash(hasher);
+    (profile.incremental, profile.panic, profile.strip).hash(hasher);
+    profile.rustflags.hash(hasher);
+    // Stage 2 does not admit Cargo's unstable trim-paths profile setting.
     Option::<&str>::None.hash(hasher);
 }
 
-fn hash_unit_lto(release: bool, profile_lto: ManifestLto, hasher: &mut StableHasher) {
-    if release {
-        match profile_lto {
-            ManifestLto::True => UnitLto::Run(None).hash(hasher),
-            ManifestLto::Fat => UnitLto::Run(Some("fat")).hash(hasher),
-            ManifestLto::Thin => UnitLto::Run(Some("thin")).hash(hasher),
-            ManifestLto::Off => UnitLto::Off.hash(hasher),
-            ManifestLto::Default => UnitLto::OnlyObject.hash(hasher),
-        }
-    } else {
-        UnitLto::OnlyObject.hash(hasher);
+fn manifest_profile_lto(lto: ManifestLto) -> CargoProfileLto<'static> {
+    match lto {
+        ManifestLto::Default => CargoProfileLto::Bool(false),
+        ManifestLto::True => CargoProfileLto::Bool(true),
+        ManifestLto::Fat => CargoProfileLto::Named("fat"),
+        ManifestLto::Thin => CargoProfileLto::Named("thin"),
+        ManifestLto::Off => CargoProfileLto::Off,
     }
 }
 
-fn hash_rustc_version(input: &IdentityInput<'_>, hasher: &mut StableHasher) {
+fn manifest_strip(strip: ManifestStrip) -> CargoStrip<'static> {
+    match strip {
+        ManifestStrip::None => CargoStrip::None,
+        ManifestStrip::Debuginfo => CargoStrip::Named("debuginfo"),
+        ManifestStrip::Symbols => CargoStrip::Named("symbols"),
+    }
+}
+
+fn stage_one_lto(release: bool, profile_lto: ManifestLto) -> CargoUnitLto<'static> {
+    if release {
+        match profile_lto {
+            ManifestLto::True => CargoUnitLto::Run(None),
+            ManifestLto::Fat => CargoUnitLto::Run(Some("fat")),
+            ManifestLto::Thin => CargoUnitLto::Run(Some("thin")),
+            ManifestLto::Off => CargoUnitLto::Off,
+            ManifestLto::Default => CargoUnitLto::OnlyObject,
+        }
+    } else {
+        CargoUnitLto::OnlyObject
+    }
+}
+
+fn hash_rustc_version(input: &CargoUnitIdentityInput<'_>, hasher: &mut StableHasher) {
     let prerelease = input
         .rustc
         .release
@@ -155,6 +358,12 @@ fn hash_rustc_version(input: &IdentityInput<'_>, hasher: &mut StableHasher) {
     }
 }
 
+fn has_remap_path_prefix(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        argument == "--remap-path-prefix" || argument.starts_with("--remap-path-prefix=")
+    })
+}
+
 #[allow(dead_code)]
 #[derive(Hash)]
 enum SourceKind {
@@ -166,98 +375,24 @@ enum SourceKind {
     Directory,
 }
 
-#[allow(dead_code)]
-#[derive(Hash)]
-enum CompileMode {
-    Test,
-    Build,
-    Check { test: bool },
-    Doc,
-    Doctest,
-    Docscrape,
-    RunCustomBuild,
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum TargetKind {
-    Lib(Vec<CrateType>),
-    Bin,
-    Test,
-    Bench,
-    ExampleLib(Vec<CrateType>),
-    ExampleBin,
-    CustomBuild,
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum CrateType {
-    Bin,
-    Lib,
-    Rlib,
-    Dylib,
-    Cdylib,
-    Staticlib,
-    ProcMacro,
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum ProfileLto<'a> {
-    Off,
-    Bool(bool),
-    Named(&'a str),
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum DebugInfo {
-    None,
-    LineDirectivesOnly,
-    LineTablesOnly,
-    Limited,
-    Full,
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum PanicStrategy {
-    Unwind,
-    Abort,
-    ImmediateAbort,
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum StripInner<'a> {
-    None,
-    Named(&'a str),
-}
-
-#[allow(dead_code)]
-#[derive(Hash)]
-enum UnitLto<'a> {
-    Run(Option<&'a str>),
-    Off,
-    OnlyBitcode,
-    ObjectAndBitcode,
-    OnlyObject,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::CargoCompat;
 
     fn version() -> Version {
+        parsed_version("0.1.0")
+    }
+
+    fn parsed_version(value: &str) -> Version {
+        let parsed = semver::Version::parse(value).unwrap();
         Version {
-            original: "0.1.0".to_owned(),
-            major: 0,
-            minor: 1,
-            patch: 0,
-            pre: String::new(),
-            build: String::new(),
+            original: value.to_owned(),
+            major: parsed.major,
+            minor: parsed.minor,
+            patch: parsed.patch,
+            pre: parsed.pre.to_string(),
+            build: parsed.build.to_string(),
         }
     }
 
@@ -302,6 +437,88 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_98,
         }
+    }
+
+    fn release_profile<'a>() -> CargoProfile<'a> {
+        CargoProfile {
+            opt_level: "3",
+            lto: CargoProfileLto::Named("fat"),
+            codegen_backend: None,
+            codegen_units: Some(1),
+            debuginfo: CargoDebugInfo::None,
+            split_debuginfo: None,
+            debug_assertions: false,
+            overflow_checks: false,
+            rpath: false,
+            incremental: false,
+            panic: CargoPanicStrategy::Abort,
+            strip: CargoStrip::Named("symbols"),
+            rustflags: &[],
+        }
+    }
+
+    fn build_profile<'a>() -> CargoProfile<'a> {
+        CargoProfile {
+            opt_level: "0",
+            lto: CargoProfileLto::Named("fat"),
+            codegen_backend: None,
+            codegen_units: None,
+            debuginfo: CargoDebugInfo::None,
+            split_debuginfo: None,
+            debug_assertions: false,
+            overflow_checks: false,
+            rpath: false,
+            incremental: false,
+            panic: CargoPanicStrategy::Unwind,
+            strip: CargoStrip::Named("symbols"),
+            rustflags: &[],
+        }
+    }
+
+    fn run_build_profile<'a>() -> CargoProfile<'a> {
+        CargoProfile {
+            opt_level: "3",
+            lto: CargoProfileLto::Bool(false),
+            codegen_backend: None,
+            codegen_units: None,
+            debuginfo: CargoDebugInfo::None,
+            split_debuginfo: None,
+            debug_assertions: false,
+            overflow_checks: false,
+            rpath: false,
+            incremental: false,
+            panic: CargoPanicStrategy::Unwind,
+            strip: CargoStrip::Named("debuginfo"),
+            rustflags: &[],
+        }
+    }
+
+    fn registry_library(
+        name: &str,
+        version: &Version,
+        crate_name: &str,
+        features: &[String],
+        profile: &CargoProfile<'_>,
+        lto: CargoUnitLto<'_>,
+        dependencies: &[Identity],
+    ) -> Identity {
+        cargo_unit_identity(&CargoUnitIdentityInput {
+            package_name: name,
+            version,
+            source: CargoSource::CratesIo,
+            features,
+            profile,
+            mode: CargoCompileMode::Build,
+            lto,
+            logical_target: None,
+            target_name: crate_name,
+            target_kind: CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
+            rustc: &native_toolchain(),
+            rustflags: &[],
+            extra_arguments: &[],
+            dependencies,
+            host_configuration_differs: None,
+        })
     }
 
     #[test]
@@ -396,5 +613,131 @@ mod tests {
                 "release={release} test={test} target={target:?}"
             );
         }
+    }
+
+    #[test]
+    fn matches_cargo_1_97_and_1_98_release_dependency_unit_oracle() {
+        // Captured from clean Cargo 1.97 and Cargo 1.98 builds using the same
+        // rustc 1.98 nightly. Both Cargo families produced these identities.
+        let release = release_profile();
+        let build = build_profile();
+        let cfg_if = registry_library(
+            "cfg-if",
+            &parsed_version("1.0.4"),
+            "cfg_if",
+            &[],
+            &release,
+            CargoUnitLto::OnlyBitcode,
+            &[],
+        );
+        assert_eq!(cfg_if.metadata, "eed0be358b9a99e1");
+        assert_eq!(cfg_if.extra_filename, "-94168a7c2b2fed6b");
+
+        let version_check = registry_library(
+            "version_check",
+            &parsed_version("0.9.5"),
+            "version_check",
+            &[],
+            &build,
+            CargoUnitLto::OnlyObject,
+            &[],
+        );
+        assert_eq!(version_check.metadata, "9d0f88734f8d0ba0");
+        assert_eq!(version_check.extra_filename, "-a52364eda26712a9");
+
+        let build_script = cargo_unit_identity(&CargoUnitIdentityInput {
+            package_name: "generic-array",
+            version: &parsed_version("0.14.7"),
+            source: CargoSource::CratesIo,
+            features: &[],
+            profile: &build,
+            mode: CargoCompileMode::Build,
+            lto: CargoUnitLto::OnlyObject,
+            logical_target: None,
+            target_name: "build-script-build",
+            target_kind: CargoTargetKind::CustomBuild,
+            rustc: &native_toolchain(),
+            rustflags: &[],
+            extra_arguments: &[],
+            dependencies: std::slice::from_ref(&version_check),
+            host_configuration_differs: None,
+        });
+        assert_eq!(build_script.metadata, "c0310cdf423fd5fb");
+        assert_eq!(build_script.extra_filename, "-54bde9ff4b0e1354");
+
+        let run_script = cargo_unit_identity(&CargoUnitIdentityInput {
+            package_name: "generic-array",
+            version: &parsed_version("0.14.7"),
+            source: CargoSource::CratesIo,
+            features: &[],
+            profile: &run_build_profile(),
+            mode: CargoCompileMode::RunCustomBuild,
+            lto: CargoUnitLto::OnlyObject,
+            logical_target: None,
+            target_name: "build-script-build",
+            target_kind: CargoTargetKind::CustomBuild,
+            rustc: &native_toolchain(),
+            rustflags: &[],
+            extra_arguments: &[],
+            dependencies: std::slice::from_ref(&build_script),
+            host_configuration_differs: None,
+        });
+        assert_eq!(run_script.extra_filename, "-6dae74b52cdc9822");
+
+        let typenum = registry_library(
+            "typenum",
+            &parsed_version("1.20.0"),
+            "typenum",
+            &[],
+            &release,
+            CargoUnitLto::OnlyBitcode,
+            &[],
+        );
+        assert_eq!(typenum.metadata, "bf17786a989f3163");
+        assert_eq!(typenum.extra_filename, "-3bece92618a1f233");
+
+        let generic_array = registry_library(
+            "generic-array",
+            &parsed_version("0.14.7"),
+            "generic_array",
+            &[],
+            &release,
+            CargoUnitLto::OnlyBitcode,
+            &[typenum, run_script],
+        );
+        assert_eq!(generic_array.metadata, "b4888d1c786ef3d6");
+        assert_eq!(generic_array.extra_filename, "-ff844e945f4f0d9d");
+
+        let crc32fast = registry_library(
+            "crc32fast",
+            &parsed_version("1.4.2"),
+            "crc32fast",
+            &["default".to_owned(), "std".to_owned()],
+            &release,
+            CargoUnitLto::OnlyBitcode,
+            &[cfg_if],
+        );
+        assert_eq!(crc32fast.metadata, "e8395ad9ac6f5d81");
+        assert_eq!(crc32fast.extra_filename, "-318c473e97bb0e1f");
+
+        let local = cargo_unit_identity(&CargoUnitIdentityInput {
+            package_name: "local-oracle",
+            version: &parsed_version("0.2.0"),
+            source: CargoSource::Path("file:///tmp/lorry-unit-oracle/local"),
+            features: &[],
+            profile: &release,
+            mode: CargoCompileMode::Build,
+            lto: CargoUnitLto::OnlyBitcode,
+            logical_target: None,
+            target_name: "local_oracle",
+            target_kind: CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
+            rustc: &native_toolchain(),
+            rustflags: &[],
+            extra_arguments: &[],
+            dependencies: &[],
+            host_configuration_differs: None,
+        });
+        assert_eq!(local.metadata, "19b865ccb8a55508");
+        assert_eq!(local.extra_filename, "-56d3e29f04ed1cbd");
     }
 }
