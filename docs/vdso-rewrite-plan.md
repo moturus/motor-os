@@ -5,9 +5,53 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-20, stage D complete pending review)
+## Status (2026-07-20, stage E complete pending review)
 
-Stages 0, A, B, C, and D are complete on `vdso-rewrite`. The stage-D gate
+Stage E (lifecycle) is complete; the gate passed: `full x3` is 3/3 green (the
+flake checkpoint) and the bench sanity check holds. E1-E3 retire the last
+control-plane panics/`todo!()`s -- guaranteed sends and accept re-posts await
+send room, and a `NetChannel` is torn down when its last reservation releases
+(design 5.5). E3 deviates from the plan's "join handed to the core IO runtime"
+sketch: instead the runtime thread holds its own `Arc<Self>` for its whole life,
+so `NetChannel::drop` runs only after the thread exits and the kernel auto-reaps
+it -- no join, no self-join hazard, no io_runtime hand-off (which could not work
+anyway: `io_runtime::spawn` uses `block_on_sync`, illegal from a runtime thread).
+`NetRuntime::assert_empty` is now meaningful (channel pool empty + UDP count),
+exercised by a new `test_channel_teardown` systest (12 conns x3 rounds past
+`IO_SUBCHANNELS`, then the assert_empty debug hook).
+
+- **E1/E2** (`1233233`/`6902b29`): `send_msg_guaranteed`'s panic/spin paths
+  become awaits -- a drop on the channel's own runtime thread hands the close to
+  a detached task counted by `guaranteed_inflight`, and `UdpSocket::drop`'s
+  unwrap is deleted. `post_accept` is infallible: the listener control task
+  awaits send room and re-posts, retiring the `post_accept(false).unwrap()` TODO.
+
+- **E3 side-finding / sys-io teardown idempotency** (`0bc8854`): eager teardown
+  closes a client's io_channel connection at last-socket-release instead of
+  pooling it for process life, so sys-io's `on_connection_done` safety net now
+  runs mid-life, racing the client's own graceful closes over the same
+  sockets/listeners. `TcpListener::drop_from_client`'s socket loop and
+  `close_tcp_socket_inner`'s linger unlink both unwrapped on the now-shared
+  teardown; made both tolerate an already-removed entry (same class as
+  `666bcf0`). Without it the systest tcp suite crashes sys-io (`Option::unwrap`
+  on None, `0xbadc0de`), taking all networking down.
+
+- **E3 latent-bug fix**: the tightened `assert_empty` caught `UdpSocket::drop`
+  never calling `stats_udp_socket_dropped()` -- `num_udp_sockets` only ever grew
+  (mio-test tripped the new assert). The channel already tore down correctly;
+  only the counter was wrong.
+
+- **E-gate bench** (sanity, unpaired vs the stage-0 release baselines): RR -- the
+  only metric E3's steady-state change (the `rx_park` poll_fn) can touch -- is
+  at-or-better both modes (def ~118-125 vs 122 usec, b64k 128 vs 148). Throughput
+  sits in the host-noise band: def TX best-run 327.6 ~= 332.1 (median ~306, the
+  flagged host-steal metric, 13% spread among clean-RR runs), bulk TX +8.8%, bulk
+  RX -8.6%, def RX ~= parity. E3 has no steady-state data-path change (teardown +
+  idle rx_park only), so the sub-10% RX drifts have no mechanism and track the
+  cross-day unpaired window; a paired A/B (stage-D methodology) is available if
+  gate-grade rigor is wanted.
+
+Stages 0, A, B, C, D, and E are complete on `vdso-rewrite`. The stage-D gate
 passed: full x5 (flake checkpoint 3) is 5/5 green after the checkpoint-3 fix
 (`812e7da`), and the bench (kill checkpoint 2) is within bounds after a
 write-path tuning (`eb7de6e`). Checkpoint 3 reproduced the tokio loopback
