@@ -20,6 +20,7 @@ mod source_tree;
 mod sparse;
 mod toml;
 mod toolchain;
+mod unit;
 
 use cli::{Cli, Command};
 use diagnostic::{Error, Result};
