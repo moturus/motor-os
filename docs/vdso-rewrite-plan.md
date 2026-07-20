@@ -93,19 +93,32 @@ mandatory root-cause point.
   kill criterion twice; the measurement discipline of section 1 (paired
   runs, same window) is mandatory for every later gate.
 
-**Flake status after checkpoint 2**: 3/5 green on the final series; both
-hangs are one pre-existing fingerprint. The freeze is in tokio's
-loopback-socket tests `test_socket_from_blocking` and
-`test_local_set_client_server_block_on` — the tests *after* the last
-printed PASS lines, which earlier notes misattributed to
-`test_sleep_from_blocking` — with every thread blocked and zero syscalls
-while the VM and sys-io stay healthy: a lost wake, present since at
-least the stage-A series. The registry `wait_handle` protocol is
-exonerated (deleted in B2; the hang reproduced after). The remaining
-suspects are the client net wake protocols that stages C and D delete —
-the sequencing bet of section 2 so far holds. The watchdog now captures
-in-flight stall state (ssh ps/stats, qemu-monitor RIP and stack
-sampling) before the exit trap can shut the VM down.
+**Flake status: ROOT-CAUSED AND FIXED (in D, commit "fix rx-task
+self-deadlock dropping a listener under its lock").** The premise below
+that it was "a lost wake" was wrong; it is a **self-deadlock**, which is
+why every wake-protocol suspect (and, later, every thread-park timeout
+bound) came back clean. `dispatch_incoming()`, routing a packet with no
+live stream, iterated `tcp_listeners.values()` under the `tcp_listeners`
+lock and upgraded each `Weak<TcpListener>`; when an upgraded Arc was a
+listener's last strong ref (owner dropped it concurrently), dropping the
+temporary inside the loop ran `TcpListener::drop -> tcp_listener_dropped
+-> tcp_listeners.lock()`, re-locking the mutex the rx task already held.
+The rx task wedged, the channel died, and any socket op on it hung.
+Diagnosed by attaching **`mdbg print-stacks`** to a frozen VM and
+symbolizing against the unstripped `build/obj/*/rt` and
+`build/obj/tokio-tests/*/tokio-tests` (`addr2line`): `channel_runtime`
+was parked in `tcp_listener_dropped`'s `lock_contended`, `main` in
+`TcpListener::bind`. Fix: defer dropping the upgraded listener Arcs until
+after both map locks release. 60/60 warm tokio-tests loop green.
+
+Historical fingerprint (kept for context): 3/5 green on the final
+series; both hangs one pre-existing signature. The freeze is entering
+tokio's loopback-socket tests (`test_socket_from_blocking`,
+`test_local_set_client_server_block_on`, `test_io_driver_called_when_under_load`)
+-- the tests *after* the last printed PASS, which earlier notes
+misattributed to `test_sleep_from_blocking` -- with every thread blocked
+and zero syscalls while the VM and sys-io stay healthy; present since at
+least the stage-A series.
 
 ## 1. Process rules
 
