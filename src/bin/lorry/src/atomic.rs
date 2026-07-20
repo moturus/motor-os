@@ -134,14 +134,14 @@ fn unique_name(label: &str, role: &str) -> String {
     )
 }
 
-fn set_private(path: &Path) -> Result<()> {
+fn set_private(_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o700)).map_err(|error| {
             Error::failure(format!(
                 "failed to make staging `{}` private: {error}",
-                path.display()
+                _path.display()
             ))
         })?;
     }
