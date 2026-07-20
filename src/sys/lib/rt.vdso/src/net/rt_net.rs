@@ -7,10 +7,13 @@ use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::future::Future;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
+use core::task::Poll;
 use core::time::Duration;
 use crossbeam::utils::CachePadded;
+use moto_async::AsFuture;
 use moto_ipc::io_channel;
 use moto_rt::RtFd;
 use moto_rt::mutex::Mutex;
@@ -621,6 +624,18 @@ pub(super) fn tcp_tx_marker_msg(handle: u64) -> io_channel::Msg {
     msg
 }
 
+/// How a TX send batch ended; each outcome needs a different reaction
+/// (park / await ring space / yield), so the batch reports it instead
+/// of acting on it.
+enum TxBatch {
+    /// `carry` and `send_queue` are both empty.
+    Drained { sent_any: bool },
+    /// `conn.send` returned NotReady; the unsent head is back in `carry`.
+    RingFull,
+    /// 32 messages sent with more still queued.
+    BatchLimit,
+}
+
 /// A communication channel between the current process and sys-io.
 ///
 /// Each channel has a dedicated io_thread.
@@ -670,6 +685,11 @@ pub struct NetChannel {
     // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
     legacy_resp_waiters: Mutex<BTreeMap<u64, (SysHandle, Option<io_channel::Msg>)>>,
     response_handlers: Mutex<BTreeMap<u64, Weak<dyn ResponseHandler + Send + Sync>>>,
+
+    // The tx task's cross-thread waker, published by `park_until_send_work`;
+    // waking it is cheap while the runtime is polling (A5 wake elision).
+    // Unused until the C2 flip.
+    tx_task_waker: Mutex<Option<core::task::Waker>>,
 
     io_thread_join_handle: AtomicU64,
     io_thread_wake_handle: AtomicU64,
@@ -731,29 +751,7 @@ impl NetChannel {
             let sleep = self.io_thread_send_messages(&mut carry);
             should_sleep &= sleep && !deferred_pending;
 
-            if !self.send_queue.is_full() {
-                // Take waiters because maybe_can_write() may push into write_waiters.
-                let mut waiters = VecDeque::new();
-                core::mem::swap(&mut waiters, &mut *self.write_waiters.lock());
-                for waiter in waiters {
-                    if let Some(waiter) = waiter.upgrade() {
-                        waiter.maybe_can_write();
-                    }
-                }
-            } else {
-                self.wake_driver();
-            }
-
-            // Wake writers blocked on io_page exhaustion; they re-check and
-            // re-register if still stuck. This pass runs after every wake of
-            // this thread, including sys-io's page-freed wake.
-            {
-                let mut waiters = VecDeque::new();
-                core::mem::swap(&mut waiters, &mut *self.page_waiters.lock());
-                for waiter in waiters {
-                    let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
-                }
-            }
+            self.wake_waiters();
 
             if should_sleep {
                 assert!(carry.is_empty());
@@ -797,88 +795,94 @@ impl NetChannel {
     fn io_thread_poll_messages(&self) -> bool {
         let mut received_messages = 0;
 
-        'outer: while let Ok(msg) = self.conn.recv() {
-            fence(Ordering::SeqCst);
+        while let Ok(msg) = self.conn.recv() {
             received_messages += 1;
-
-            #[cfg(debug_assertions)]
-            {
-                if let Ok(cmd) = api_net::NetCmd::try_from(msg.command) {
-                    log::debug!("got msg {}:0x{:x}:{cmd:?}", msg.id, msg.handle,);
-                } else {
-                    log::debug!("got msg {}:0x{:x}:{}", msg.id, msg.handle, msg.command);
-                }
-            }
-
-            let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
-
-            let wait_handle: SysHandle = if msg.id == 0 {
-                if cmd.is_udp() {
-                    self.on_udp_msg(msg);
-                    continue;
-                }
-
-                // This is an incoming packet, or similar, without a dedicated waiter.
-                let stream_handle = msg.handle;
-                let stream = {
-                    let mut tcp_streams = self.tcp_streams.lock();
-                    if let Some(stream) = tcp_streams.get_mut(&stream_handle) {
-                        stream.upgrade()
-                    } else {
-                        // No stream for the packet. But it is possible that there is a pending
-                        // accept for the stream, so we must not just drop the packet in
-                        // on_orphan_message() below. And we should check the pending accept queues
-                        // while holding the tcp streams lock, otherwise we could race with
-                        // the accept converting into a stream...
-                        let mut tcp_listeners = self.tcp_listeners.lock();
-                        for listener in tcp_listeners.values() {
-                            if let Some(listener) = listener.upgrade()
-                                && listener.add_to_pending_queue(msg)
-                            {
-                                continue 'outer;
-                            }
-                        }
-                        None
-                    }
-                };
-                if let Some(stream) = stream {
-                    // Note: we must hold the lock while processing the message, otherwise the wait handle might get updated
-                    //       and we will lose the wakeup. Sad story, don't ask...
-                    stream.process_incoming_msg(msg)
-                } else {
-                    self.on_orphan_message(msg);
-                    SysHandle::NONE
-                }
-            } else {
-                // These are synchronous req/resp messages.
-                let mut resp_waiters = self.legacy_resp_waiters.lock();
-                if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
-                    *resp = Some(msg);
-                    *handle
-                } else {
-                    core::mem::drop(resp_waiters);
-                    let Some(resp_handler) = self.response_handlers.lock().remove(&msg.id) else {
-                        panic!("unexpected msg");
-                    };
-                    if let Some(handler) = resp_handler.upgrade() {
-                        handler.on_response(msg);
-                    }
-                    SysHandle::NONE
-                }
-            };
-
-            if wait_handle != SysHandle::NONE
-                && wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle
-            {
-                let _ = moto_sys::SysCpu::wake(wait_handle);
-            }
-
+            self.dispatch_incoming(msg);
             if received_messages > 32 {
                 return false;
             }
         }
 
         true
+    }
+
+    /// Dispatch one incoming message to its stream/socket/listener
+    /// (`msg.id == 0`) or its response waiter/handler (`msg.id != 0`),
+    /// waking the blocked thread if there is one.
+    fn dispatch_incoming(&self, msg: io_channel::Msg) {
+        fence(Ordering::SeqCst);
+
+        #[cfg(debug_assertions)]
+        {
+            if let Ok(cmd) = api_net::NetCmd::try_from(msg.command) {
+                log::debug!("got msg {}:0x{:x}:{cmd:?}", msg.id, msg.handle,);
+            } else {
+                log::debug!("got msg {}:0x{:x}:{}", msg.id, msg.handle, msg.command);
+            }
+        }
+
+        let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
+
+        let wait_handle: SysHandle = if msg.id == 0 {
+            if cmd.is_udp() {
+                self.on_udp_msg(msg);
+                return;
+            }
+
+            // This is an incoming packet, or similar, without a dedicated waiter.
+            let stream_handle = msg.handle;
+            let stream = {
+                let mut tcp_streams = self.tcp_streams.lock();
+                if let Some(stream) = tcp_streams.get_mut(&stream_handle) {
+                    stream.upgrade()
+                } else {
+                    // No stream for the packet. But it is possible that there is a pending
+                    // accept for the stream, so we must not just drop the packet in
+                    // on_orphan_message() below. And we should check the pending accept queues
+                    // while holding the tcp streams lock, otherwise we could race with
+                    // the accept converting into a stream...
+                    let mut tcp_listeners = self.tcp_listeners.lock();
+                    for listener in tcp_listeners.values() {
+                        if let Some(listener) = listener.upgrade()
+                            && listener.add_to_pending_queue(msg)
+                        {
+                            return;
+                        }
+                    }
+                    None
+                }
+            };
+            if let Some(stream) = stream {
+                // Note: we must hold the lock while processing the message, otherwise the wait handle might get updated
+                //       and we will lose the wakeup. Sad story, don't ask...
+                stream.process_incoming_msg(msg)
+            } else {
+                self.on_orphan_message(msg);
+                SysHandle::NONE
+            }
+        } else {
+            // These are synchronous req/resp messages.
+            let mut resp_waiters = self.legacy_resp_waiters.lock();
+            if let Some((handle, resp)) = resp_waiters.get_mut(&msg.id) {
+                *resp = Some(msg);
+                *handle
+            } else {
+                core::mem::drop(resp_waiters);
+                let Some(resp_handler) = self.response_handlers.lock().remove(&msg.id) else {
+                    panic!("unexpected msg");
+                };
+                if let Some(handler) = resp_handler.upgrade() {
+                    handler.on_response(msg);
+                }
+                SysHandle::NONE
+            }
+        };
+
+        if wait_handle != SysHandle::NONE
+            && wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle
+        {
+            let _ = moto_sys::SysCpu::wake(wait_handle);
+        }
     }
 
     fn on_udp_msg(&self, msg: io_channel::Msg) {
@@ -901,6 +905,24 @@ impl NetChannel {
     // `carry` holds messages already popped from `send_queue` but not yet sent;
     // they are older than anything in the queue and so are sent first.
     fn io_thread_send_messages(&self, carry: &mut VecDeque<io_channel::Msg>) -> bool {
+        match self.tx_send_batch(carry) {
+            TxBatch::Drained { sent_any } => {
+                if sent_any {
+                    self.wake_driver();
+                }
+                true
+            }
+            TxBatch::RingFull | TxBatch::BatchLimit => {
+                self.wake_driver();
+                false
+            }
+        }
+    }
+
+    /// Send one batch from `carry` + `send_queue`, expanding TX markers.
+    /// `carry` holds messages already popped from `send_queue` but not yet
+    /// sent; they are older than anything in the queue and are sent first.
+    fn tx_send_batch(&self, carry: &mut VecDeque<io_channel::Msg>) -> TxBatch {
         let mut sent_messages = 0;
         while let Some(msg) = carry.pop_front().or_else(|| self.send_queue.pop()) {
             let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
@@ -922,21 +944,18 @@ impl NetChannel {
             if let Err(err) = self.conn.send(msg) {
                 assert_eq!(err, moto_rt::Error::NotReady);
                 carry.push_front(msg);
-                self.wake_driver();
-                return false;
+                return TxBatch::RingFull;
             }
 
             sent_messages += 1;
             if sent_messages > 32 {
-                self.wake_driver();
-                return false;
+                return TxBatch::BatchLimit;
             }
         }
 
-        if sent_messages > 0 {
-            self.wake_driver();
+        TxBatch::Drained {
+            sent_any: sent_messages > 0,
         }
-        true
     }
 
     /// Claim stream `handle`'s pending TX pages in response to a marker.
@@ -945,6 +964,146 @@ impl NetChannel {
     fn claim_tcp_tx(&self, handle: u64) -> Option<io_channel::Msg> {
         let stream = self.tcp_streams.lock().get(&handle)?.upgrade()?;
         stream.claim_pending_tx()
+    }
+
+    /// Wake the channel's registered waiters. Runs after every pass of
+    /// the IO thread (and, after the C2 flip, at every rx/tx task edge),
+    /// so waiters registered against any progress event get re-checked.
+    fn wake_waiters(&self) {
+        if !self.send_queue.is_full() {
+            // Take waiters because maybe_can_write() may push into write_waiters.
+            let mut waiters = VecDeque::new();
+            core::mem::swap(&mut waiters, &mut *self.write_waiters.lock());
+            for waiter in waiters {
+                if let Some(waiter) = waiter.upgrade() {
+                    waiter.maybe_can_write();
+                }
+            }
+        } else {
+            self.wake_driver();
+        }
+
+        // Wake writers blocked on io_page exhaustion; they re-check and
+        // re-register if still stuck. This pass runs after every wake of
+        // this thread, including sys-io's page-freed wake.
+        {
+            let mut waiters = VecDeque::new();
+            core::mem::swap(&mut waiters, &mut *self.page_waiters.lock());
+            for waiter in waiters {
+                let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
+            }
+        }
+    }
+
+    /// The rx task: today's `io_thread_poll_messages` loop as a resident
+    /// of the channel runtime. Receives and dispatches inline; yields to
+    /// the tx task at batch boundaries; parks awaiting the connection
+    /// handle when the ring is empty.
+    ///
+    /// Unused until the C2 flip.
+    #[allow(dead_code)]
+    async fn rx_task(&self) {
+        loop {
+            let mut received_messages = 0_u32;
+            while let Ok(msg) = self.conn.recv() {
+                received_messages += 1;
+                self.dispatch_incoming(msg);
+                if received_messages > 32 {
+                    self.wake_waiters();
+                    moto_async::yield_now().await;
+                    received_messages = 0;
+                }
+            }
+            self.wake_waiters();
+            if received_messages > 0 {
+                // Ring entries were consumed: sys-io gets the wake the old
+                // loop folded into its sleep syscall (design 3.3) — either
+                // folded into the executor's park or issued at the next
+                // poll edge.
+                moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
+            }
+            // A signal arriving between the failed recv above and the
+            // executor's wait stays latched on the handle; the wait
+            // returns immediately.
+            let _ = self.conn.server_handle().as_future().await;
+        }
+    }
+
+    /// The tx task: today's send half of the IO thread loop as a resident
+    /// of the channel runtime. Drains `deferred_msgs` and the send queue;
+    /// on ring-full awaits the connection handle (sys-io signals as it
+    /// consumes); at batch boundaries yields to the rx task; when drained,
+    /// parks until a caller queues work (see `park_until_send_work`).
+    ///
+    /// Unused until the C2 flip.
+    #[allow(dead_code)]
+    async fn tx_task(&self) {
+        // Messages already popped from `send_queue` but not yet sent (a
+        // full-ring leftover or a coalescing run terminator); older than
+        // anything in `send_queue`, so always sent first.
+        let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
+
+        loop {
+            // Re-stage messages deferred from a TcpStream drop that ran on
+            // the runtime thread while the send queue was full. Done at the
+            // top of every pass so recv and send keep interleaving and we
+            // cannot deadlock against sys-io.
+            let deferred_pending = self.restage_deferred_msgs();
+
+            match self.tx_send_batch(&mut carry) {
+                TxBatch::Drained { sent_any } => {
+                    if sent_any {
+                        // The drained-edge driver wake, folded into the
+                        // executor's sleep syscall (design 3.3): a
+                        // send-then-park cycle stays one syscall.
+                        moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
+                    }
+                    self.wake_waiters();
+
+                    // The old loop's sleep-edge send-waiter pop: the queue
+                    // is empty, so one blocked sender can proceed.
+                    let waiter = { self.send_waiters.lock().pop_front() };
+                    if let Some(waiter) = waiter {
+                        let _ = moto_sys::SysCpu::wake(SysHandle::from(waiter));
+                    }
+
+                    if deferred_pending {
+                        continue;
+                    }
+                    self.park_until_send_work().await;
+                }
+                TxBatch::RingFull => {
+                    // Wait for sys-io to consume ring entries; it signals
+                    // the connection handle as it processes messages.
+                    self.wake_driver();
+                    self.wake_waiters();
+                    let _ = self.conn.server_handle().as_future().await;
+                }
+                TxBatch::BatchLimit => {
+                    self.wake_driver();
+                    self.wake_waiters();
+                    moto_async::yield_now().await;
+                }
+            }
+        }
+    }
+
+    /// Park the tx task until a caller queues send work. Publishes the
+    /// task's waker in `tx_task_waker` (the wake target of `send_msg` and
+    /// friends), then re-checks for work: a push that raced the publish
+    /// either lands before the check or wakes the published waker.
+    ///
+    /// Unused until the C2 flip.
+    #[allow(dead_code)]
+    fn park_until_send_work(&self) -> impl Future<Output = ()> + '_ {
+        core::future::poll_fn(move |cx| {
+            *self.tx_task_waker.lock() = Some(cx.waker().clone());
+            if !self.send_queue.is_empty() || !self.deferred_msgs.lock().is_empty() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
     }
 
     /// Block the calling thread until the send queue likely has room
@@ -1017,6 +1176,7 @@ impl NetChannel {
             deferred_msgs: Mutex::new(VecDeque::new()),
             legacy_resp_waiters: Mutex::new(BTreeMap::new()),
             response_handlers: Mutex::new(BTreeMap::new()),
+            tx_task_waker: Mutex::new(None),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_running: CachePadded::new(AtomicBool::new(false)),
