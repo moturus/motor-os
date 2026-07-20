@@ -2155,11 +2155,16 @@ members = ["ignored-member"]
         assert!(root.join("Cargo.toml").is_file());
         let manifest = Manifest::load(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 8);
+        assert_eq!(manifest.dependencies.len(), 9);
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
                 && matches!(dependency.source, DependencySource::Path(_))
+        }));
+        assert!(manifest.dependencies.iter().any(|dependency| {
+            dependency.package == "libc"
+                && dependency.target.as_deref() == Some("cfg(target_os = \"linux\")")
+                && matches!(dependency.source, DependencySource::CratesIo)
         }));
         assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 40);
     }

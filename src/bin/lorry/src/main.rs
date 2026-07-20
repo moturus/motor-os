@@ -18,6 +18,7 @@ mod policy;
 mod process;
 mod repository;
 mod resolver;
+mod sandbox;
 mod source_tree;
 mod sparse;
 mod toml;

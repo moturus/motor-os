@@ -31,6 +31,9 @@ toml_edit = { version = "=0.22.26", default-features = false, features = [
 [target.'cfg(target_os = "motor")'.dependencies]
 moto-rt = { path = "../../sys/lib/moto-rt", version = "=0.16.1" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "=0.2.186", default-features = false }
+
 [profile.release]
 panic = "abort"
 lto = "fat"

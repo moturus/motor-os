@@ -2883,6 +2883,22 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
   identity checks, so omitting a redundant version from the Cargo path entry
   does not weaken patch integrity or policy enforcement.
 
+### Round 40: temporary Motor sandbox adapter
+
+#### Resolved during Stage-2 implementation
+
+- Lorry defines the complete platform sandbox boundary before build-script
+  execution is wired into the engine. Linux must enforce that boundary and
+  its denial fixtures remain Stage-2 gates.
+- The Motor implementation is temporarily an explicit warning stub which
+  returns success without enforcing the requested policy. This development
+  exception permits the platform-independent Stage-2 engine and Linux path to
+  progress while the Motor isolation facility is implemented asynchronously.
+- The stub does not satisfy Gate 11, may not be described as sandboxed, and
+  cannot pass native-Motor build-script or final Stage-2 acceptance. Those
+  gates remain pending until the stub is replaced and the same observable
+  denial fixtures pass on Motor.
+
 ## Stage-1/2 design closure and external start gates
 
 Design items 1–8 are resolved by the rounds above and are reflected in the
