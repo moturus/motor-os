@@ -5,17 +5,25 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-20, checkpoint 3 root-caused; bench remains)
+## Status (2026-07-20, stage D complete pending review)
 
-Stages 0, A, B, and C are complete on `vdso-rewrite`; stage D's
-implementation is landed (D1-D5). Full x5 (flake checkpoint 3) reproduced the
-tokio loopback freeze on run 1 and root-caused it: the D4b flip's auto-merge
-silently reverted the 42e1359 rx-task self-deadlock fix, and `812e7da`
-restores it (60/60 warm tokio-tests, was a run-1 freeze). That freeze — not a
-stdio hang — was the checkpoint-3 target all along. The stage-D gate still
-needs full x5 re-run on `812e7da` plus bench (kill checkpoint 2). One stage-C
-gate metric still sits at the kill boundary (below), the review's open
-question.
+Stages 0, A, B, C, and D are complete on `vdso-rewrite`. The stage-D gate
+passed: full x5 (flake checkpoint 3) is 5/5 green after the checkpoint-3 fix
+(`812e7da`), and the bench (kill checkpoint 2) is within bounds after a
+write-path tuning (`eb7de6e`). Checkpoint 3 reproduced the tokio loopback
+freeze on run 1 and root-caused it to a D4b auto-merge that reverted the
+42e1359 self-deadlock fix; the bench then tripped on default-buffer TX
+(-30.5%), which the tuning recovered to parity. One stage-C gate metric still
+sits at the kill boundary (below), the review's open question.
+
+- **Bench / kill checkpoint 2** (`eb7de6e`): the D4b write flip replaced the
+  old spin/yield/exp-sleep page-grab ladder with a straight `block_on_recheck`
+  park, costing default-buffer TX -30.5% (228.7 vs C-tip 329.1 MiB/s; b64k TX,
+  RX and RR were all in bounds). The tuning restores a bounded spin-then-yield
+  fast path (100+100) before the park; re-bench (paired same-window 4-round
+  medians vs C-tip e687196): def TX 328.0 -> 331.7 (+1.1%), all six metrics
+  within bounds. Correctness held (systest incl. the backpressure-integrity and
+  write-timeout tests, mio-test ALL PASS, tokio 3/3).
 
 - **Checkpoint 3 / flake fix** (`812e7da`): `mdbg print-stacks` on a frozen
   VM (all threads InWait) showed `channel_runtime` deadlocked in
