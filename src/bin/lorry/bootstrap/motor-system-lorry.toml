@@ -1,0 +1,32 @@
+config-version = 1
+cargo-compat-version = "1.98"
+
+[repositories]
+system = "/sys/tools/rust/lorry/vendor"
+keep-artifacts = true
+keep-sources = true
+
+[required-patches.crates-io.ring-0_17_14]
+name = "ring"
+version = "=0.17.14"
+upstream-checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+git-url = "https://github.com/moturus/ring.git"
+git-commit = "b1dad2579de791d0c31ad33300187e584ba6c268"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
+
+[policy.rules.allow-ring-0_17_14]
+action = "allow"
+name = "ring"
+version = "=0.17.14"
+source = "system-vendored-path"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
+license = "Apache-2.0 AND ISC"
+allow-build-script = true
+native-tools = ["c-compiler", "archiver"]
+
+[system-constraints]
+locked = [
+    "repositories.system",
+    "required-patches.crates-io.ring-0_17_14",
+    "policy.rules.allow-ring-0_17_14",
+]

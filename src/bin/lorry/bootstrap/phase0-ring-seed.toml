@@ -1,0 +1,16 @@
+manifest-version = 1
+
+[[seeded-git]]
+name = "ring"
+version = "0.17.14"
+license = "Apache-2.0 AND ISC"
+upstream-crates-io-checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+git-url = "https://github.com/moturus/ring.git"
+requested-revision = "motor-os-0.17.14"
+resolved-commit = "b1dad2579de791d0c31ad33300187e584ba6c268"
+git-tree = "824d5b8e9755603070a8167e0c5529acb627d956"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
+extracted-bytes = 11764800
+file-count = 414
+directory-count = 71
+retained-source = true

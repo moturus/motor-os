@@ -1,7 +1,7 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage-1/2 design complete — implementation blocked on the external
-prerequisites listed in the closure gates**
+Status: **Stage-1/2 design complete — Phase-0 external gates satisfied;
+Stage-1 oracle capture in progress**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -431,12 +431,12 @@ below.
   through a trap. The Lorry native harness can reuse this established image,
   SSH identity, and running-VM session instead of defining another VM format.
 - The image builder assembles a writable Motor filesystem from the tracked
-  `img_files/motor-os` tree and generated LLVM/Rust roots. The current SFTP
-  server supports host downloads but not uploads, and the current guest
-  `cp -r` implementation is unfinished while recursive `rm` is absent. SFTP
-  upload and recursive copy/removal are explicit pre-implementation Motor OS
-  prerequisites; after they land, the native harness stages and cleans its
-  inputs dynamically instead of adding a generated image root.
+  `img_files/motor-os` tree and generated LLVM/Rust roots. SFTP upload landed
+  in `cef41af`, and recursive guest copy/removal landed in `ca24c77`. The
+  nested-tree, safe-error, and cleanup-isolation fixture in
+  `src/tests/test-sftp.sh` passed against the debug Motor VM before Stage-1
+  product implementation began. The native harness can therefore stage and
+  clean its inputs dynamically instead of adding a generated image root.
 - Existing Motor OS manifests already patch crates including `mio`, `tokio`,
   `smoltcp`, `ring`, `getrandom`, `home`, and `russh-cryptovec`, using a mix of
   git forks and repository-local paths. These existing declarations are useful
@@ -2249,15 +2249,15 @@ name = "ring"
 version = "=0.17.14"
 upstream-checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
 git-url = "https://github.com/moturus/ring.git"
-git-commit = "<full-40-lowercase-hex-commit>"
-source-tree-sha256 = "<64-lowercase-hex-digest>"
+git-commit = "b1dad2579de791d0c31ad33300187e584ba6c268"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
 
 [policy.rules.allow-ring-0_17_14]
 action = "allow"
 name = "ring"
 version = "=0.17.14"
 source = "system-vendored-path"
-source-tree-sha256 = "<same-tree-digest>"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
 license = "Apache-2.0 AND ISC"
 allow-build-script = true
 native-tools = ["c-compiler", "archiver"]
@@ -2333,19 +2333,25 @@ ring = { path = ".lorry/vendor/ring-0_17_14/source" }
 
 #### Resolved prerequisite
 
-- Before Lorry implementation starts, an externally maintained
-  `moturus/ring` commit based on upstream `ring 0.17.14` must exist and be
-  fetchable by the host bootstrap tools.
+- The externally maintained `moturus/ring` branch `motor-os-0.17.14` resolves
+  to fetchable commit `b1dad2579de791d0c31ad33300187e584ba6c268`,
+  directly on upstream `ring 0.17.14` commit
+  `2723abbca9e83347d82b056d5b239c6604f786df`.
 - Its Motor delta contains only the two already validated source changes:
   classify Motor in the x86_64 Linux-ABI pregenerated-assembly set in
   `build.rs`, and admit Motor in `src/rand.rs`'s supported OS list. It does not
   enable `getrandom/rdrand` or retain the old target-sysroot bypass.
+- The fork commit also removes three upstream GitHub-only CI/issue-template
+  files. Review confirmed that these removals do not change packaged or built
+  source; the only product-source changes are the two lines above.
 - A descriptive branch such as `motor-os-0.17.14` is an acquisition aid only.
   All trusted configuration and seed metadata pin the final 40-hex commit;
   branch movement never changes an admitted object.
-- Once that commit exists, the host seed process records its Git tree ID and
-  computes the exact `lorry-source-tree-v1` digest. The placeholders in Round
-  33 must be replaced with those concrete values before implementation starts.
+- The exact Git tree is `824d5b8e9755603070a8167e0c5529acb627d956`.
+  Exporting that tree without `.git` yields 414 regular files, 71 directories,
+  11,764,800 file bytes, and the `lorry-source-tree-v1` digest
+  `776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351`.
+  Round 33 and the checked-in seed/config inputs contain these concrete values.
 - Human review establishes that the fork has the intended upstream baseline
   and patch. Lorry does not claim to derive or prove a Git diff from the
   crates.io archive checksum; it verifies the configured commit metadata and
@@ -2643,10 +2649,11 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
 
 0. **Freeze external prerequisites and oracle inputs.**
    - Verify the Motor SFTP upload, safe `cp -r`, and safe `rm -r` fixtures from
-     Round 26.
+     Round 26. This is satisfied by the nested-tree fixture recorded above.
    - Create and review the final `ring 0.17.14` Motor commit, record its full
      commit and Git tree IDs, generate its `lorry-source-tree-v1` digest, and
-     replace every placeholder in this plan and the seed/config fixtures.
+     replace every placeholder in this plan and the seed/config fixtures. This
+     is satisfied by the Round-34 identities and checked-in Phase-0 inputs.
    - Capture checked-in Cargo 1.97/1.98 command/metadata fixtures for every
      Stage-1 unit shape and establish deterministic, isolated Linux Cargo
      oracle directories. No product code is written before these inputs pass.
@@ -2796,16 +2803,22 @@ reopens only the affected review and downstream gates.
 8. An ordered implementation plan with unit, fixture, integration,
    Cargo-comparison, cross-build, and native-Motor acceptance gates.
 
-Implementation remains prohibited until both Phase-0 external start gates
-below are present, tested, and their concrete evidence is recorded:
+Implementation was prohibited until both Phase-0 external start gates below
+were present, tested, and their concrete evidence was recorded:
 
-9. Motor SFTP can upload nested source trees and round-trip file contents;
-   guest `cp -r` copies a representative tree correctly; and guest `rm -r`
-   removes only the selected representative tree with safe error behavior.
-10. The reviewed `moturus/ring` commit based on upstream `ring 0.17.14`
-    exists and is fetchable. Its exact 40-hex commit, Git tree ID, and
-    `lorry-source-tree-v1` digest have replaced every placeholder in this plan,
-    the bootstrap manifest, and system configuration.
+9. **Satisfied.** Motor SFTP uploads and round-trips a nested representative
+   tree; guest `cp -r` copies it and rejects a destination inside the source;
+   guest `rm` rejects the directory without `-r`; and `rm -r` removes only the
+   selected copy while an outside sentinel survives. The checked-in fixture
+   passed against the debug Motor VM.
+10. **Satisfied.** The reviewed `moturus/ring` commit based on upstream
+    `ring 0.17.14` is fetchable at
+    `b1dad2579de791d0c31ad33300187e584ba6c268`. Its Git tree ID is
+    `824d5b8e9755603070a8167e0c5529acb627d956`, and its
+    `lorry-source-tree-v1` digest is
+    `776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351`.
+    These values appear in this plan and the checked-in bootstrap/config
+    inputs.
 
 The following later external gate does not prevent Stage-1 implementation,
 but it must be green before Phase 5 starts:
@@ -2815,9 +2828,9 @@ but it must be green before Phase 5 starts:
     suffice, the acceptance fixture records that fact; otherwise the Motor OS
     feature is delivered outside this Lorry effort.
 
-Until gates 9 and 10 are green, the next action in this repository is limited
-to maintaining this design or recording external evidence. No Lorry product,
-bootstrap-seeder, or test-harness implementation begins.
+Gates 9 and 10 are green. Phase 0 may proceed through Cargo-oracle capture;
+Lorry product implementation begins only after those checked-in oracle inputs
+pass.
 
 ### Design stop point
 
