@@ -153,6 +153,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "moto-rt",
  "semver",
  "serde",
  "serde_json",
@@ -175,6 +176,10 @@ dependencies = [
  "adler2",
  "simd-adler32",
 ]
+
+[[package]]
+name = "moto-rt"
+version = "0.16.1"
 
 [[package]]
 name = "proc-macro2"

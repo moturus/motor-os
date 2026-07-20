@@ -8,6 +8,7 @@ mod identity;
 mod json;
 mod manifest;
 mod process;
+mod source_tree;
 mod toml;
 mod toolchain;
 

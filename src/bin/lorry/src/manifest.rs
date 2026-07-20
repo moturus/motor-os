@@ -1734,8 +1734,13 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(root.join("Cargo.toml").is_file());
         let manifest = Manifest::load(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 7);
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 39);
+        assert_eq!(manifest.dependencies.len(), 8);
+        assert!(manifest.dependencies.iter().any(|dependency| {
+            dependency.package == "moto-rt"
+                && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
+                && matches!(dependency.source, DependencySource::Path(_))
+        }));
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 40);
     }
 
     #[test]
