@@ -5,10 +5,55 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-19, end of stage B)
+## Status (2026-07-20, end of stage C)
 
-Stages 0, A, and B are complete on `vdso-rewrite` (`344191b..e123bc1`).
-Stage C is next, pending stage-B review.
+Stages 0, A, B, and C are complete on `vdso-rewrite` (`344191b..` C tip).
+Stage D is next, pending stage-C review; one gate metric sits at the
+kill boundary (below) and is the review's main question.
+
+- **Stage C** (`963e7ca..` + two tuning commits): C1-C3 landed as
+  planned; the channel thread is a `LocalRuntime` hosting the C1 rx/tx
+  task bodies, the `io_thread_running`/`io_thread_wake_requested` park
+  protocol and `deferred_msgs`/`restage_deferred_msgs` are deleted, and
+  guaranteed sends from the runtime thread await a send-room
+  `LocalNotify`. Two C2 review/tuning findings, both fixed on the
+  branch: the old sleep-edge send-waiter release had to move into the
+  tx task's park poll (a sender enlisting between drain and park was
+  otherwise stranded), and the drained-edge `wake_driver()` had to stay
+  explicit per design 5.2 — folding it into the A6 slot alone cost ~9%
+  of default-buffer bulk TX (sys-io idled until the park committed).
+  A 16-pass linger before the tx park (standing in for the old
+  `wake_requested` hysteresis) recovered most of the rest.
+
+  Stage gate (paired same-window release A/B vs the stage-B tip,
+  4 rounds each, medians): default RR 123.5 -> 126.3 usec, b64k RR
+  145.3 -> 134.6 usec; bulk b64k TX +13.1%, b64k RX +5.0%, default RX
+  +4.7%, **default TX 310.9 -> 293.2 MiB/s (-5.7%)** — at the kill
+  bound on the metric with the widest run-to-run spread (distributions
+  overlap; parity with the stage-B gate-day reference of 295.4). Three
+  of four bulk metrics improved; the review decides whether the kill
+  criterion is satisfied in spirit. FS smoke release 239/241 mbps vs
+  236/231 stage-B reference. Syscall shape: client wake counts back at
+  stage-B levels, client waits +20% (parks replacing the old hot spin
+  — the executor owns sleeping now), the A6 fold present at every park.
+  full x5 (debug): 4/5 green; the hang was mio-test `tcp::test_write`
+  (missed WRITABLE, client-side, ssh alive) — a new site in the same
+  suspected wake-protocol family (`write_waiters` is D3 delete
+  territory), and 30/30 green on a warm mio-test loop after.
+
+**Flake status after stage C**: the tokio loopback freeze reproduced in
+warm loops at today's elevated ambient rate on BOTH the C2 image and
+the stage-B image (iter 11/1 vs iter 1, same window) with the same
+flat-counter total-freeze signature — stage C exonerated by A/B; the
+c2-1 full-test hang matched the pre-existing sys-io-side wedge
+fingerprint (socket dispatch silent amid teardown churn, device task
+alive). New live-forensics facts: during the client-side freeze ssh
+stays up and a second tokio-tests run on the same VM passes, so the
+wedge is per-process client state, not sys-io; the io_channel ring's
+WaitingToRecv/WaitingToSend flags plus kernel signal latching cover
+both C2 await edges. The stage-D deletions (rx_waiter, write_waiters,
+futex protocol) remain the prime suspects, with checkpoint 3 the
+mandatory root-cause point.
 
 - **Stage 0** (`344191b` plus the uncommitted watchdog harness): baselines
   recorded in `vdso-rewrite-baselines.md`; 10 wrapped runs (one hang in
@@ -182,6 +227,9 @@ Stage gate: bench — RR especially; `poll_wait` is on tokio's critical
 latency path and must keep its one-push-one-wake shape.
 
 ## 6. Stage C — net executor swap
+
+*Status: complete (see Status section); gate run, one metric at the kill
+bound pending review.*
 
 Design 5.2, first half: the channel thread becomes a `LocalRuntime` hosting
 rx/tx tasks; every hand-rolled *waiter* protocol survives this stage
