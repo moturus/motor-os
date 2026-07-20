@@ -34,16 +34,15 @@ pub fn query(program: &Path, arguments: &[&str], description: &str) -> Result<Ou
     Ok(output)
 }
 
-#[allow(dead_code)] // Consumed by the build engine in the next implementation slice.
 pub struct RustcCommand<'a> {
     pub program: &'a Path,
     pub arguments: &'a [OsString],
     pub environment: &'a BTreeMap<String, OsString>,
     pub current_dir: &'a Path,
     pub verbose: bool,
+    pub color: bool,
 }
 
-#[allow(dead_code)] // Consumed by the build engine in the next implementation slice.
 impl RustcCommand<'_> {
     pub fn run(&self) -> Result<()> {
         if self.verbose {
@@ -64,8 +63,8 @@ impl RustcCommand<'_> {
                     self.program.display()
                 ))
             })?;
-        render_rustc_output(&output.stdout);
-        render_rustc_output(&output.stderr);
+        render_rustc_output(&output.stdout, self.color);
+        render_rustc_output(&output.stderr, self.color);
         if output.status.success() {
             Ok(())
         } else {
@@ -77,7 +76,6 @@ impl RustcCommand<'_> {
     }
 }
 
-#[allow(dead_code)] // Consumed by run/test in the next implementation slice.
 pub fn run_child(
     program: &OsStr,
     arguments: &[OsString],
@@ -100,19 +98,55 @@ pub fn run_child(
                 Path::new(program).display()
             ))
         })?;
-    Ok(status.code().unwrap_or(130))
+    if let Some(code) = status.code() {
+        return Ok(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return Ok(128 + signal);
+        }
+    }
+    Ok(130)
 }
 
-#[allow(dead_code)] // Reached through RustcCommand once the build engine is installed.
-fn render_rustc_output(bytes: &[u8]) {
+fn render_rustc_output(bytes: &[u8], color: bool) {
     let text = String::from_utf8_lossy(bytes);
     for line in text.lines() {
         match json_string_field(line, "rendered") {
-            Some(rendered) => eprint!("{rendered}"),
+            Some(rendered) if color => eprint!("{rendered}"),
+            Some(rendered) => eprint!("{}", strip_ansi(&rendered)),
+            None if line.trim_start().starts_with('{') => {}
             None if !line.trim().is_empty() => eprintln!("{line}"),
             None => {}
         }
     }
+}
+
+fn strip_ansi(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut plain = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            output.push_str(&text[plain..index]);
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            plain = index;
+        } else {
+            index += 1;
+        }
+    }
+    output.push_str(&text[plain..]);
+    output
 }
 
 fn json_string_field(document: &str, wanted: &str) -> Option<String> {
@@ -289,5 +323,10 @@ mod tests {
         assert!(!display.contains("secret"));
         assert!(display.contains("[REDACTED]"));
         assert!(display.contains("'two words'"));
+    }
+
+    #[test]
+    fn removes_ansi_control_sequences() {
+        assert_eq!(strip_ansi("\x1b[1;31merror\x1b[0m: bad"), "error: bad");
     }
 }

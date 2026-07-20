@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Consumed by the identity/build engine in the next implementation slice.
-
 use crate::diagnostic::{Error, Result};
 use std::fs::File;
 use std::hash::Hasher;

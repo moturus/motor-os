@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Consumed by the build engine in the next implementation slice.
-
 use crate::hash::StableHasher;
 use crate::manifest::{Lto as ManifestLto, ReleaseProfile, Strip as ManifestStrip, Version};
 use crate::toolchain::Toolchain;

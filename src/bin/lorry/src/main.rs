@@ -2,17 +2,15 @@ mod atomic;
 mod cli;
 mod config;
 mod diagnostic;
+mod engine;
 mod hash;
 mod identity;
 mod manifest;
 mod process;
 mod toolchain;
 
-use cli::{Cli, Command, Verbosity};
-use config::{Config, environment_rustflags};
+use cli::{Cli, Command};
 use diagnostic::{Error, Result};
-use manifest::Manifest;
-use toolchain::Toolchain;
 
 const VERSION: &str = "0.1.0";
 
@@ -34,7 +32,7 @@ where
     I: IntoIterator<Item = String>,
 {
     let cli = Cli::parse(arguments)?;
-    match cli.command {
+    match &cli.command {
         Command::Help(topic) => {
             print_help(topic.as_deref());
             Ok(0)
@@ -54,41 +52,7 @@ where
             };
             Err(Error::unsupported(option, 1))
         }
-        command @ (Command::Build(_) | Command::Run(_) | Command::Test(_)) => {
-            let current = std::env::current_dir().map_err(|error| {
-                Error::failure(format!("failed to read current directory: {error}"))
-            })?;
-            let _manifest = Manifest::load(&current)?;
-            let config = Config::load(&current)?;
-            let command_target = match &command {
-                Command::Build(options) => options.target.as_deref(),
-                Command::Run(options) => options.build.target.as_deref(),
-                Command::Test(options) => options.build.target.as_deref(),
-                _ => unreachable!(),
-            };
-            let target = config.selected_target(command_target)?;
-            let _rustflags = environment_rustflags()?;
-            let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config)?;
-            let target_info = toolchain.target_info(target.as_deref())?;
-            let selectors = config.targets.keys().filter_map(|selector| match selector {
-                config::TargetSelector::Cfg(expression) => Some(expression.as_str()),
-                config::TargetSelector::Triple(_) => None,
-            });
-            let matching = target_info.cfg.matching_selectors(selectors)?;
-            let _target_options = config.target_options(&target_info.triple, &matching)?;
-            if cli.verbosity == Verbosity::Verbose {
-                eprintln!(
-                    "Using {} (rustc {}, Cargo {:?} compatibility)",
-                    toolchain.rustc.display(),
-                    toolchain.release,
-                    toolchain.compatibility
-                );
-                eprintln!("rustc identity:\n{}", toolchain.verbose_version.trim_end());
-            }
-            Err(Error::failure(
-                "the Stage-1 build engine is not available in this implementation slice",
-            ))
-        }
+        Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }
 
