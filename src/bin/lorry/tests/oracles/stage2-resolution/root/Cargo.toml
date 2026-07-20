@@ -1,0 +1,18 @@
+[package]
+name = "stage2-resolution-oracle"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[dependencies]
+a = { version = "1", features = ["extra"] }
+defaultdep = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+platform = "1"
+
+[target.'cfg(windows)'.dependencies]
+other = "1"
+
+[features]
+default = ["dep:defaultdep"]

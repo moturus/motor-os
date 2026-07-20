@@ -2518,6 +2518,57 @@ mod tests {
     }
 
     #[test]
+    fn matches_the_frozen_stage_two_cargo_resolution_oracle() {
+        let root = Path::new("tests/oracles/stage2-resolution/root");
+        let manifest = Manifest::load(root).unwrap();
+        let mut catalog = Catalog::default();
+        for entry in fs::read_dir("tests/oracles/stage2-resolution/index-records").unwrap() {
+            let path = entry.unwrap().path();
+            catalog
+                .insert(Record::parse(&path, &fs::read(&path).unwrap()).unwrap())
+                .unwrap();
+        }
+        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
+        let options = Options {
+            resolver: manifest.resolver,
+            incompatible_rust_versions: Some(IncompatibleRustVersions::Allow),
+            rust_version: Version::parse("1.98.0").unwrap(),
+            max_packages: 64,
+            max_depth: 16,
+        };
+        let complete = resolve(&manifest, &catalog, &options, &locked).unwrap();
+        crate::offline::validate_resolution(&manifest, &complete).unwrap();
+        assert_eq!(
+            crate::lockfile::render(&manifest, &complete).unwrap(),
+            fs::read(root.join("Cargo.lock")).unwrap()
+        );
+
+        let linux = CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap();
+        let selected = resolve_selected(
+            &manifest,
+            &catalog,
+            &options,
+            &locked,
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &linux,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &linux,
+            },
+        )
+        .unwrap();
+        crate::offline::validate_selected_resolution(&manifest, &selected).unwrap();
+        assert_eq!(
+            selected
+                .packages
+                .iter()
+                .map(|package| package.key.name.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["a", "defaultdep", "optional", "platform", "shared"])
+        );
+    }
+
+    #[test]
     fn resolves_the_seeded_lorry_lock_graph_when_requested() {
         let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
             return;
