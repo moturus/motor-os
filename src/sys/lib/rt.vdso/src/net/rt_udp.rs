@@ -1,4 +1,5 @@
 use super::rt_net::{ChannelReservation, NetChannel};
+use super::rt_tcp::{RX_PARK_RECHECK, TX_PARK_RECHECK, block_on_recheck};
 use crate::posix::PosixKind;
 use crate::{posix::PosixFile, runtime::EventSourceManaged};
 use alloc::collections::vec_deque::VecDeque;
@@ -30,6 +31,12 @@ pub struct UdpSocket {
 
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
+
+    // Wakers of parked blocking recv/send futures, drained (wake-all-and-
+    // recheck) at the RX / TX-ack points -- the D5 replacement for the old
+    // EventSourceManaged readable/writable futex pair.
+    rx_wakers: Mutex<Vec<core::task::Waker>>,
+    tx_wakers: Mutex<Vec<core::task::Waker>>,
 
     me: Weak<UdpSocket>,
 }
@@ -136,6 +143,8 @@ impl UdpSocket {
             rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
             rx_timeout_ns: AtomicU64::new(u64::MAX),
             tx_timeout_ns: AtomicU64::new(u64::MAX),
+            rx_wakers: Mutex::new(Vec::new()),
+            tx_wakers: Mutex::new(Vec::new()),
             me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
@@ -172,24 +181,14 @@ impl UdpSocket {
             }
         };
 
-        loop {
-            match self.recv_or_peek_from_nonblocking(buf, peek) {
-                Ok(res) => return Ok(res),
-                Err(err) => {
-                    if err != E_NOT_READY {
-                        return Err(err);
-                    }
-                }
-            }
-
-            if let Some(deadline) = deadline
-                && deadline <= moto_rt::time::Instant::now()
-            {
-                return Err(E_TIMED_OUT);
-            }
-
-            self.event_source
-                .wait(moto_rt::poll::POLL_READABLE, deadline);
+        let fut = UdpRecvFuture {
+            socket: self,
+            buf,
+            peek,
+        };
+        match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
+            Ok(res) => res,
+            Err(_fut) => Err(E_TIMED_OUT),
         }
     }
 
@@ -270,24 +269,14 @@ impl UdpSocket {
             }
         };
 
-        loop {
-            match self.send_to_nonblocking(buf, addr) {
-                Ok(sz) => return Ok(sz),
-                Err(err) => {
-                    if err != E_NOT_READY {
-                        return Err(err);
-                    }
-                }
-            }
-
-            if let Some(deadline) = deadline
-                && deadline <= moto_rt::time::Instant::now()
-            {
-                return Err(E_TIMED_OUT);
-            }
-
-            self.event_source
-                .wait(moto_rt::poll::POLL_WRITABLE, deadline);
+        let fut = UdpSendFuture {
+            socket: self,
+            buf,
+            addr: *addr,
+        };
+        match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
+            Ok(res) => res,
+            Err(_fut) => Err(E_TIMED_OUT),
         }
     }
 
@@ -345,11 +334,13 @@ impl UdpSocket {
                 };
                 if notify {
                     self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+                    self.wake_rx_waiters();
                 }
             }
             api_net::NetCmd::UdpSocketTxRxAck => {
                 self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
                 self.try_tx();
+                self.wake_tx_waiters();
             }
             _ => panic!("Unexpected UDP cmd: {:?}", cmd),
         }
@@ -469,6 +460,26 @@ impl UdpSocket {
             self.event_source.on_event(events);
         }
     }
+
+    fn add_rx_waker(&self, waker: &core::task::Waker) {
+        self.rx_wakers.lock().push(waker.clone());
+    }
+
+    fn add_tx_waker(&self, waker: &core::task::Waker) {
+        self.tx_wakers.lock().push(waker.clone());
+    }
+
+    fn wake_rx_waiters(&self) {
+        for waker in self.rx_wakers.lock().drain(..) {
+            waker.wake();
+        }
+    }
+
+    fn wake_tx_waiters(&self) {
+        for waker in self.tx_wakers.lock().drain(..) {
+            waker.wake();
+        }
+    }
 }
 
 impl PosixFile for UdpSocket {
@@ -521,5 +532,67 @@ impl PosixFile for UdpSocket {
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
         self.event_source.del_interests(r_id, source_fd)
+    }
+}
+
+// ------------- blocking-path futures (design 5.3): the UDP mirror of ------------
+// the rt_tcp read/write futures, driven by the shared block_on_recheck. All
+// state lives in the socket, so a dropped (timed-out) instance leaves at
+// most a stale waker entry. Register-then-recheck closes the race with the
+// rx task queueing between the poll's check and the waker registration.
+
+struct UdpRecvFuture<'a, 'b> {
+    socket: &'a UdpSocket,
+    buf: &'b mut [u8],
+    peek: bool,
+}
+
+impl core::future::Future for UdpRecvFuture<'_, '_> {
+    type Output = Result<(usize, SocketAddr), ErrorCode>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        use core::task::Poll;
+
+        let this = self.get_mut();
+        match this.socket.recv_or_peek_from_nonblocking(this.buf, this.peek) {
+            Err(E_NOT_READY) => {}
+            res => return Poll::Ready(res),
+        }
+        this.socket.add_rx_waker(cx.waker());
+        match this.socket.recv_or_peek_from_nonblocking(this.buf, this.peek) {
+            Err(E_NOT_READY) => Poll::Pending,
+            res => Poll::Ready(res),
+        }
+    }
+}
+
+struct UdpSendFuture<'a, 'b> {
+    socket: &'a UdpSocket,
+    buf: &'b [u8],
+    addr: SocketAddr,
+}
+
+impl core::future::Future for UdpSendFuture<'_, '_> {
+    type Output = Result<usize, ErrorCode>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        use core::task::Poll;
+
+        let this = self.get_mut();
+        match this.socket.send_to_nonblocking(this.buf, &this.addr) {
+            Err(E_NOT_READY) => {}
+            res => return Poll::Ready(res),
+        }
+        this.socket.add_tx_waker(cx.waker());
+        match this.socket.send_to_nonblocking(this.buf, &this.addr) {
+            Err(E_NOT_READY) => Poll::Pending,
+            res => Poll::Ready(res),
+        }
     }
 }

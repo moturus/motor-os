@@ -6,7 +6,6 @@
 
 use core::any::Any;
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
@@ -123,20 +122,12 @@ impl<MaybeBits> EventSourceBase<MaybeBits> {
 // An event source that is managed by an internal I/O thread.
 pub struct EventSourceManaged {
     base: EventSourceBase<()>,
-    readable_futex: AtomicU32,
-    writable_futex: AtomicU32,
 }
 
 impl EventSourceManaged {
-    const FUTEX_EMPTY: u32 = 0;
-    const FUTEX_WAITING: u32 = 1;
-    const FUTEX_WAKING: u32 = 2;
-
     pub fn new(supported_interests: Interests) -> Self {
         Self {
             base: EventSourceBase::new(supported_interests),
-            readable_futex: AtomicU32::new(0),
-            writable_futex: AtomicU32::new(0),
         }
     }
 
@@ -195,49 +186,9 @@ impl EventSourceManaged {
                 registries.remove(&id);
             }
         }
-
-        if events & moto_rt::poll::POLL_READABLE != 0 {
-            Self::wake_futex(&self.readable_futex);
-        }
-        if events & moto_rt::poll::POLL_WRITABLE != 0 {
-            Self::wake_futex(&self.writable_futex);
-        }
-    }
-
-    fn wake_futex(futex: &AtomicU32) {
-        let prev = futex.swap(Self::FUTEX_WAKING, Ordering::AcqRel);
-        if prev == Self::FUTEX_EMPTY {
-            return;
-        }
-        moto_rt::futex_wake_all(futex);
-    }
-
-    // This is only used internally.
-    pub fn wait(&self, interest: Interests, deadline: Option<moto_rt::time::Instant>) {
-        let futex: &AtomicU32 = match interest {
-            moto_rt::poll::POLL_READABLE => &self.readable_futex,
-            moto_rt::poll::POLL_WRITABLE => &self.writable_futex,
-            _ => panic!("Bad interest: {interest}"),
-        };
-
-        let prev = futex.swap(Self::FUTEX_WAITING, Ordering::AcqRel);
-        if prev != Self::FUTEX_EMPTY {
-            return;
-        }
-
-        let _ = moto_rt::futex_wait(
-            futex,
-            Self::FUTEX_WAITING,
-            deadline.map(|val| val.duration_since(moto_rt::time::Instant::now())),
-        );
-
-        // Consume the wakeup.
-        let _ = futex.compare_exchange(
-            Self::FUTEX_WAKING,
-            Self::FUTEX_EMPTY,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
+        // Blocking UDP recv/send no longer parks here (D5): a socket's own
+        // waker list is woken directly at the RX / TX-ack points. This is
+        // now purely the poll-registry notification.
     }
 
     pub fn on_closed_locally(&self, source_fd: RtFd) {

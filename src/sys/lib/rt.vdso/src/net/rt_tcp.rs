@@ -1630,20 +1630,22 @@ impl TcpStream {
 /// carried an exponential sleep ladder (max 3s) for exactly this reason.
 /// A miss now costs at most one tick of extra latency instead of a hang;
 /// a healthy send never waits this long, so steady-state TX pays nothing.
-const TX_PARK_RECHECK: Duration = Duration::from_millis(500);
+/// Also the UDP send recheck (rt_udp shares block_on_recheck).
+pub(super) const TX_PARK_RECHECK: Duration = Duration::from_millis(500);
 
 /// Read-side recheck interval: the old blocking read loop woke every 5s
 /// (its `DEBUG_TIMEOUT`) even without data, which masked any lost RX
 /// wake; kept here as the same insurance. A blocked reader waiting for
-/// data pays one wasted wakeup per interval, as it did before.
-const RX_PARK_RECHECK: Duration = Duration::from_secs(5);
+/// data pays one wasted wakeup per interval, as it did before. Also the
+/// UDP recv recheck (rt_udp shares block_on_recheck).
+pub(super) const RX_PARK_RECHECK: Duration = Duration::from_secs(5);
 
 /// Drive `fut` on the calling thread, capping each park at `recheck` so a
 /// lost wake self-heals on the next tick. `deadline` is the real
 /// `SO_*TIMEO` bound if any; `Err(fut)` is only returned once that real
 /// deadline passes (never on a recheck tick), so the caller can extract
 /// partial progress.
-fn block_on_recheck<F: core::future::Future + Unpin>(
+pub(super) fn block_on_recheck<F: core::future::Future + Unpin>(
     mut fut: F,
     deadline: Option<Instant>,
     recheck: Duration,
