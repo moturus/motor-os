@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::Path;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -32,6 +33,19 @@ impl Error {
         }
     }
 
+    pub fn at(
+        path: &Path,
+        line: usize,
+        message: impl fmt::Display,
+        help: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ErrorKind::Failure,
+            message: format!("{message}\n  --> {}:{line}", path.display()),
+            help: Some(help.into()),
+        }
+    }
+
     pub fn unsupported(subject: impl fmt::Display, stage: u8) -> Self {
         Self {
             kind: ErrorKind::Failure,
@@ -40,6 +54,11 @@ impl Error {
                 "remove `{subject}` or use a Lorry stage that supports it"
             )),
         }
+    }
+
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
     }
 
     #[cfg(test)]

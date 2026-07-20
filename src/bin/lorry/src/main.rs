@@ -1,8 +1,10 @@
 mod cli;
 mod diagnostic;
+mod manifest;
 
 use cli::{Cli, Command};
 use diagnostic::{Error, Result};
+use manifest::Manifest;
 
 const VERSION: &str = "0.1.0";
 
@@ -44,9 +46,15 @@ where
             };
             Err(Error::unsupported(option, 1))
         }
-        Command::Build(_) | Command::Run(_) | Command::Test(_) => Err(Error::failure(
-            "the Stage-1 build engine is not available in this implementation slice",
-        )),
+        Command::Build(_) | Command::Run(_) | Command::Test(_) => {
+            let current = std::env::current_dir().map_err(|error| {
+                Error::failure(format!("failed to read current directory: {error}"))
+            })?;
+            let _manifest = Manifest::load(&current)?;
+            Err(Error::failure(
+                "the Stage-1 build engine is not available in this implementation slice",
+            ))
+        }
     }
 }
 
