@@ -730,7 +730,14 @@ impl MotoSocket {
                     .tcp_rx_alloc_waits
                     .set(stats.tcp_rx_alloc_waits.get() + 1);
             }
-            let page = sender.alloc_page(subchannel_mask).await.unwrap();
+            let Ok(page) = sender.alloc_page(subchannel_mask).await else {
+                // The client's whole connection went away (the process exited
+                // or panicked) while we awaited a free RX page under
+                // backpressure. Stop delivering to a dead client rather than
+                // unwrapping BadHandle and crashing sys-io.
+                log::debug!("RX: socket 0x{socket_id:x} sender gone; stopping RX.");
+                break;
+            };
 
             // Step 4: read bytes from the socket. Note that we read at most one page,
             // because to read more, we need to check if the socket has more bytes to read,
