@@ -21,6 +21,7 @@ pub struct Config {
     pub rustc: Option<PathBuf>,
     pub default_target: Option<String>,
     pub build_rustflags: Vec<String>,
+    pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
     #[allow(dead_code)]
     pub repositories: Repositories,
@@ -46,6 +47,7 @@ impl Default for Config {
             rustc: None,
             default_target: None,
             build_rustflags: Vec::new(),
+            incompatible_rust_versions: None,
             targets: BTreeMap::new(),
             repositories: Repositories::default(),
             vendor: VendorConfig::default(),
@@ -70,6 +72,12 @@ pub struct TargetOptions {
     pub linker: Option<PathBuf>,
     pub runner: Option<Vec<String>>,
     pub rustflags: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IncompatibleRustVersions {
+    Allow,
+    Fallback,
 }
 
 #[allow(dead_code)]
@@ -1181,12 +1189,12 @@ fn cargo_config_in(directory: &Path) -> Option<PathBuf> {
 fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
     let document = Document::load(path, "Cargo configuration")?;
     for (key, item) in document.root().iter() {
-        if !matches!(key, "build" | "target") {
+        if !matches!(key, "build" | "target" | "resolver") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported Cargo configuration table or key `{key}`"),
-                "Lorry reads only build and target compiler configuration",
+                "Lorry reads only build, target, and resolver configuration",
             ));
         }
     }
@@ -1289,6 +1297,24 @@ fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
             }
         }
     }
+    if let Some(item) = document.root().get("resolver") {
+        let resolver = require_table(path, &document, item, "resolver")?;
+        reject_unknown_keys(
+            path,
+            &document,
+            resolver,
+            "resolver",
+            &["incompatible-rust-versions"],
+        )?;
+        if let Some(item) = resolver.get("incompatible-rust-versions") {
+            config.incompatible_rust_versions = Some(parse_incompatible_rust_versions(
+                path,
+                &document,
+                item,
+                "resolver.incompatible-rust-versions",
+            )?);
+        }
+    }
     Ok(())
 }
 
@@ -1304,6 +1330,17 @@ fn apply_cargo_environment(
         config.build_rustflags = split_words(flags).map_err(|message| {
             Error::failure(format!("invalid `CARGO_BUILD_RUSTFLAGS`: {message}"))
         })?;
+    }
+    if let Some(value) = environment.get("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS") {
+        config.incompatible_rust_versions = Some(match value.as_str() {
+            "allow" => IncompatibleRustVersions::Allow,
+            "fallback" => IncompatibleRustVersions::Fallback,
+            _ => {
+                return Err(Error::failure(format!(
+                    "invalid `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS` value `{value}`; expected `allow` or `fallback`"
+                )));
+            }
+        });
     }
 
     const PREFIX: &str = "CARGO_TARGET_";
@@ -1351,6 +1388,25 @@ fn apply_cargo_environment(
         }
     }
     Ok(())
+}
+
+fn parse_incompatible_rust_versions(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+    name: &str,
+) -> Result<IncompatibleRustVersions> {
+    match item.as_str() {
+        Some("allow") => Ok(IncompatibleRustVersions::Allow),
+        Some("fallback") => Ok(IncompatibleRustVersions::Fallback),
+        Some(value) => Err(Error::at(
+            path,
+            document.line_of_item(item),
+            format!("unsupported `{name}` value `{value}`"),
+            "choose `allow` or `fallback`",
+        )),
+        None => Err(type_error(path, document, item, name, "a string")),
+    }
 }
 
 pub fn environment_rustflags() -> Result<Option<Vec<String>>> {
@@ -1943,7 +1999,8 @@ mod tests {
         fs::write(
             home.join(".cargo/config.toml"),
             "[build]\ntarget = \"x86_64-unknown-linux-musl\"\nrustflags = [\n\
-             \"--cfg\",\n\"base\",\n]\n",
+             \"--cfg\",\n\"base\",\n]\n\
+             [resolver]\nincompatible-rust-versions = \"fallback\"\n",
         )
         .unwrap();
         fs::write(
@@ -1964,6 +2021,10 @@ mod tests {
             Some("x86_64-unknown-linux-musl")
         );
         assert_eq!(config.build_rustflags, ["--cfg", "base", "--cfg", "local"]);
+        assert_eq!(
+            config.incompatible_rust_versions,
+            Some(IncompatibleRustVersions::Fallback)
+        );
         assert!(config.repositories.system.is_some());
         assert!(config.repositories.user.is_some());
         assert!(config.repositories.local.is_some());
@@ -2123,6 +2184,10 @@ locked = [
                 "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUNNER".to_owned(),
                 "motor-run --quiet".to_owned(),
             ),
+            (
+                "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS".to_owned(),
+                "allow".to_owned(),
+            ),
         ]);
         let config = Config::load_with_environment(&package, &environment).unwrap();
         assert_eq!(
@@ -2136,6 +2201,10 @@ locked = [
                 .runner
                 .unwrap(),
             ["motor-run", "--quiet"]
+        );
+        assert_eq!(
+            config.incompatible_rust_versions,
+            Some(IncompatibleRustVersions::Allow)
         );
     }
 

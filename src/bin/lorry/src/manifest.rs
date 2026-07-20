@@ -217,7 +217,7 @@ impl Manifest {
     }
 
     #[cfg(test)]
-    fn parse(root: &Path, path: &Path, source: &str) -> Result<Self> {
+    pub(crate) fn parse(root: &Path, path: &Path, source: &str) -> Result<Self> {
         let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
         Self::parse_document(root, path, &document)
     }

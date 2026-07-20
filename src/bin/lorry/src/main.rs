@@ -10,6 +10,7 @@ mod json;
 mod manifest;
 mod process;
 mod repository;
+mod resolver;
 mod source_tree;
 mod sparse;
 mod toml;
