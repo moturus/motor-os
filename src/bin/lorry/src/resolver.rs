@@ -8,8 +8,9 @@ use semver::Version;
 
 use crate::config::IncompatibleRustVersions;
 use crate::diagnostic::{Error, Result};
-use crate::hash::decode_hex;
+use crate::hash::{decode_hex, hex};
 use crate::manifest::{DependencySource, Lockfile, Manifest, Resolver as ResolverVersion};
+use crate::repository::RepositorySet;
 use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree};
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 use crate::toolchain::CfgSet;
@@ -19,9 +20,52 @@ pub struct Catalog {
     records: BTreeMap<String, Vec<Candidate>>,
     paths: BTreeMap<PathBuf, PackageKey>,
     required_patches: Vec<RequiredPatchGuard>,
+    locked_repository: Option<LockedRepository>,
 }
 
 impl Catalog {
+    pub fn from_locked_repository(
+        manifest: &Manifest,
+        repositories: &RepositorySet,
+    ) -> Result<Self> {
+        let lock = manifest.lock.as_ref().ok_or_else(|| {
+            Error::failure("Cargo.lock is missing")
+                .with_help("run `lorry vendor` to create a version-4 Cargo.lock")
+        })?;
+        let mut packages: BTreeMap<String, Vec<LockedRegistryPackage>> = BTreeMap::new();
+        for package in &lock.packages {
+            let (Some(source), Some(checksum)) = (&package.source, &package.checksum) else {
+                continue;
+            };
+            if source != "registry+https://github.com/rust-lang/crates.io-index" {
+                continue;
+            }
+            let version = Version::parse(&package.version.original).map_err(|error| {
+                Error::failure(format!(
+                    "invalid locked version `{} {}`: {error}",
+                    package.name, package.version.original
+                ))
+            })?;
+            packages
+                .entry(package.name.clone())
+                .or_default()
+                .push(LockedRegistryPackage {
+                    version,
+                    checksum: checksum.clone(),
+                });
+        }
+        for versions in packages.values_mut() {
+            versions.sort_unstable_by(|left, right| right.version.cmp(&left.version));
+        }
+        Ok(Self {
+            locked_repository: Some(LockedRepository {
+                repositories: repositories.clone(),
+                packages,
+            }),
+            ..Self::default()
+        })
+    }
+
     pub fn insert(&mut self, record: Record) -> Result<()> {
         let records = self.records.entry(record.name.clone()).or_default();
         if records.iter().any(|existing| {
@@ -144,9 +188,12 @@ impl Catalog {
         })
     }
 
-    fn prepare(&mut self, source: &mut RequirementSource) -> Result<()> {
-        let RequirementSource::Path(declared) = source else {
-            return Ok(());
+    fn prepare(&mut self, dependency: &mut CandidateDependency) -> Result<()> {
+        if dependency.source == RequirementSource::CratesIo {
+            return self.prepare_registry(dependency);
+        }
+        let RequirementSource::Path(declared) = &mut dependency.source else {
+            unreachable!();
         };
         let canonical = fs::canonicalize(&*declared).map_err(|error| {
             Error::failure(format!(
@@ -189,6 +236,102 @@ impl Catalog {
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
+
+    fn prepare_registry(&mut self, dependency: &CandidateDependency) -> Result<()> {
+        let Some(repository) = &self.locked_repository else {
+            return Ok(());
+        };
+        let locked = repository
+            .packages
+            .get(&dependency.package)
+            .into_iter()
+            .flatten()
+            .filter(|package| dependency.requirement.matches(&package.version))
+            .cloned()
+            .collect::<Vec<_>>();
+        let repositories = repository.repositories.clone();
+
+        let has_path_candidate = self.records(&dependency.package).iter().any(|candidate| {
+            dependency.requirement.matches(&candidate.version)
+                && matches!(
+                    candidate.source,
+                    ResolvedSource::Path {
+                        patched_crates_io: true,
+                        ..
+                    }
+                )
+        });
+        let mut available = self.records(&dependency.package).iter().any(|candidate| {
+            locked.iter().any(|package| {
+                package.version == candidate.version
+                    && matches!(
+                        candidate.source,
+                        ResolvedSource::CratesIo { checksum }
+                            if hex(&checksum) == package.checksum
+                    )
+            })
+        });
+        let mut missing = Vec::new();
+        for package in locked {
+            if self.records(&dependency.package).iter().any(|candidate| {
+                candidate.version == package.version
+                    && matches!(
+                        candidate.source,
+                        ResolvedSource::CratesIo { checksum }
+                            if hex(&checksum) == package.checksum
+                    )
+            }) {
+                continue;
+            }
+            let Some(object) = repositories.lookup_registry(&package.checksum)? else {
+                missing.push(package);
+                continue;
+            };
+            if object.name != dependency.package || object.version != package.version {
+                return Err(Error::failure(format!(
+                    "repository object `{}` identifies `{} {}`, but Cargo.lock selects `{} {}`",
+                    package.checksum,
+                    object.name,
+                    object.version,
+                    dependency.package,
+                    package.version
+                )));
+            }
+            self.insert(object.index)?;
+            available = true;
+        }
+        if available || has_path_candidate {
+            return Ok(());
+        }
+        if missing.is_empty() {
+            return Err(Error::failure(format!(
+                "Cargo.lock has no crates.io package `{}` matching `{}`; run `lorry vendor` to update Cargo.lock",
+                dependency.package, dependency.requirement
+            )));
+        }
+        let identities = missing
+            .iter()
+            .map(|package| format!("{} {}", dependency.package, package.version))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(Error::failure(format!(
+            "locked crates.io package{} {identities} {} unavailable in the configured repositories; run `lorry vendor` to acquire the missing package",
+            if missing.len() == 1 { "" } else { "s" },
+            if missing.len() == 1 { "is" } else { "are" },
+        )))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LockedRepository {
+    repositories: RepositorySet,
+    packages: BTreeMap<String, Vec<LockedRegistryPackage>>,
+}
+
+#[derive(Clone, Debug)]
+struct LockedRegistryPackage {
+    version: Version,
+    checksum: String,
 }
 
 fn local_candidate(
@@ -894,7 +1037,7 @@ fn solve(
         return Ok(state);
     };
     catalog
-        .prepare(&mut event.dependency.source)
+        .prepare(&mut event.dependency)
         .map_err(|error| Failure::new(error.to_string()))?;
     if event.depth > options.max_depth {
         return Err(Failure::new(format!(
@@ -2181,6 +2324,68 @@ mod tests {
     }
 
     #[test]
+    fn locked_repository_loading_skips_inactive_objects_and_reports_selected_missing_objects() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "local",
+            "[package]\nname = \"local\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        fs::create_dir(fixture.0.join("src")).unwrap();
+        fs::write(fixture.0.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nlocal = { path = \"local\" }\n\
+             [target.'cfg(windows)'.dependencies]\nmissing = \"=2.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            format!(
+                "version = 4\n\
+                 [[package]]\nname = \"local\"\nversion = \"1.0.0\"\n\
+                 [[package]]\nname = \"missing\"\nversion = \"2.0.0\"\nsource = \"{SOURCE}\"\n\
+                 checksum = \"{}\"\n\
+                 [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                 dependencies = [\"local\", \"missing\"]\n",
+                checksum("2.0.0"),
+            ),
+        )
+        .unwrap();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let repositories = RepositorySet::open(
+            &crate::config::Repositories::default(),
+            DEFAULT_TREE_LIMITS,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        let catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
+        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
+        let unix = CfgSet::parse("unix\n").unwrap();
+        let selected = resolve_selected(
+            &manifest,
+            &catalog,
+            &options(ResolverVersion::V2),
+            &locked,
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-musl",
+                target_cfg: &unix,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &unix,
+            },
+        )
+        .unwrap();
+        crate::offline::validate_selected_resolution(&manifest, &selected).unwrap();
+        assert_eq!(selected.packages.len(), 1);
+        assert_eq!(selected.packages[0].key.name, "local");
+
+        let error =
+            resolve(&manifest, &catalog, &options(ResolverVersion::V2), &locked).unwrap_err();
+        assert!(error.to_string().contains("missing 2.0.0"));
+        assert!(error.render().contains("lorry vendor"));
+    }
+
+    #[test]
     fn resolves_and_lock_checks_the_real_rush_source_graph() {
         let manifest = Manifest::load(Path::new("../rush")).unwrap();
         let libc = Record::parse(
@@ -2424,5 +2629,56 @@ mod tests {
             .map(|package| (package.key.name.clone(), package.key.version.clone()))
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn selected_lorry_graph_loads_objects_directly_from_the_seeded_repository() {
+        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
+            return;
+        };
+        let manifest = Manifest::load(Path::new(".")).unwrap();
+        let repositories = RepositorySet::open(
+            &crate::config::Repositories {
+                system: Some(PathBuf::from(repository)),
+                ..crate::config::Repositories::default()
+            },
+            DEFAULT_TREE_LIMITS,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        let catalog = Catalog::from_locked_repository(&manifest, &repositories).unwrap();
+        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
+        let linux = CfgSet::parse(
+            "debug_assertions\npanic=\"unwind\"\ntarget_arch=\"x86_64\"\n\
+             target_endian=\"little\"\ntarget_env=\"gnu\"\ntarget_family=\"unix\"\n\
+             target_os=\"linux\"\ntarget_pointer_width=\"64\"\ntarget_vendor=\"unknown\"\nunix\n",
+        )
+        .unwrap();
+        let resolution = resolve_selected(
+            &manifest,
+            &catalog,
+            &Options {
+                resolver: manifest.resolver,
+                incompatible_rust_versions: None,
+                rust_version: Version::parse("1.98.0").unwrap(),
+                max_packages: 64,
+                max_depth: 16,
+            },
+            &locked,
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-gnu",
+                target_cfg: &linux,
+                host_triple: "x86_64-unknown-linux-gnu",
+                host_cfg: &linux,
+            },
+        )
+        .unwrap();
+        crate::offline::validate_selected_resolution(&manifest, &resolution).unwrap();
+        assert!(
+            resolution
+                .packages
+                .iter()
+                .all(|package| package.key.name != "moto-rt")
+        );
     }
 }
