@@ -43,8 +43,28 @@ SSH_OPTS=(
     -o UserKnownHostsFile=/dev/null
 )
 
+REMOTE_PHASE0_ROOT="${RUSSHD_PHASE0_ROOT:-/user/tmp/lorry/sftp-prerequisite-$$}"
+
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+
+run_ssh() {
+    ssh \
+        -F /dev/null \
+        -p "$PORT" \
+        -i "$KEY" \
+        -o IdentitiesOnly=yes \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        "$USER@$HOST" \
+        "$@"
+}
+
+cleanup() {
+    run_ssh /bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
+    rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -56,7 +76,7 @@ command -v dd >/dev/null 2>&1 || fail "no 'dd' command found in PATH"
 # Run a batch of sftp commands (passed on stdin) against the VM. Stderr is
 # captured so we can surface it only on failure.
 run_sftp() {
-    sftp "${SSH_OPTS[@]}" "$USER@$HOST" >"$WORK/out" 2>"$WORK/err"
+    sftp "${SSH_OPTS[@]}" -b - "$USER@$HOST" >"$WORK/out" 2>"$WORK/err"
 }
 
 echo "== russhd SFTP test against $USER@$HOST:$PORT =="
@@ -132,6 +152,88 @@ EOF
 cmp -s "$overwrite_source" "$overwrite_roundtrip" ||
     fail "short overwrite differs after downloading it again"
 echo "  ok: upload truncated and replaced the existing remote file"
+
+# ---------------------------------------------------------------------------
+# 5. Lorry's native harness prerequisite: stage a representative nested source
+#    tree through SFTP, copy it recursively in the guest, and remove only the
+#    selected copy. Directory creation is deliberately performed through SSH:
+#    the prerequisite is SFTP file upload, while sysbox supplies mkdir/cp/rm.
+# ---------------------------------------------------------------------------
+source_tree="$WORK/source"
+mkdir -p "$source_tree/src/nested" "$source_tree/empty"
+printf '[package]\nname = "phase0-fixture"\nversion = "0.1.0"\n' \
+    >"$source_tree/Cargo.toml"
+printf 'fn main() { println!("nested fixture"); }\n' \
+    >"$source_tree/src/main.rs"
+dd if=/dev/urandom of="$source_tree/src/nested/payload.bin" \
+    bs=1024 count=96 status=none
+printf 'must survive copy cleanup\n' >"$WORK/outside-sentinel"
+
+remote_source="$REMOTE_PHASE0_ROOT/source"
+remote_copy="$REMOTE_PHASE0_ROOT/copy"
+remote_outside="$REMOTE_PHASE0_ROOT/outside-sentinel"
+
+echo "-- staging a nested Lorry source fixture under $REMOTE_PHASE0_ROOT --"
+run_ssh /bin/mkdir /user/tmp >/dev/null 2>&1 || true
+run_ssh /bin/mkdir /user/tmp/lorry >/dev/null 2>&1 || true
+run_ssh /bin/mkdir "$REMOTE_PHASE0_ROOT" ||
+    fail "could not create the fixture run root"
+run_ssh /bin/mkdir "$remote_source" ||
+    fail "could not create the fixture source root"
+run_ssh /bin/mkdir "$remote_source/src" ||
+    fail "could not create the fixture src directory"
+run_ssh /bin/mkdir "$remote_source/src/nested" ||
+    fail "could not create the fixture nested directory"
+run_ssh /bin/mkdir "$remote_source/empty" ||
+    fail "could not create the fixture empty directory"
+
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "nested SFTP upload failed"; }
+put $source_tree/Cargo.toml $remote_source/Cargo.toml
+put $source_tree/src/main.rs $remote_source/src/main.rs
+put $source_tree/src/nested/payload.bin $remote_source/src/nested/payload.bin
+put $WORK/outside-sentinel $remote_outside
+EOF
+
+run_ssh /bin/cp -r "$remote_source" "$remote_copy" ||
+    fail "guest 'cp -r' rejected the representative source tree"
+
+if run_ssh /bin/cp -r "$remote_source" "$remote_source/inside-source"; then
+    fail "guest 'cp -r' accepted a destination inside its source"
+fi
+
+if run_ssh /bin/rm "$remote_copy"; then
+    fail "guest 'rm' removed a directory without -r"
+fi
+
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "copied-tree SFTP round-trip failed"; }
+get $remote_copy/Cargo.toml $WORK/copied-Cargo.toml
+get $remote_copy/src/main.rs $WORK/copied-main.rs
+get $remote_copy/src/nested/payload.bin $WORK/copied-payload.bin
+EOF
+
+cmp -s "$source_tree/Cargo.toml" "$WORK/copied-Cargo.toml" ||
+    fail "Cargo.toml changed during nested upload/copy"
+cmp -s "$source_tree/src/main.rs" "$WORK/copied-main.rs" ||
+    fail "main.rs changed during nested upload/copy"
+cmp -s "$source_tree/src/nested/payload.bin" "$WORK/copied-payload.bin" ||
+    fail "binary payload changed during nested upload/copy"
+
+run_ssh /bin/rm -r "$remote_copy" ||
+    fail "guest 'rm -r' could not remove the selected copied tree"
+
+if run_sftp <<EOF
+get $remote_copy/Cargo.toml $WORK/removed-Cargo.toml
+EOF
+then
+    fail "guest 'rm -r' left the selected copied tree reachable"
+fi
+
+run_sftp <<EOF || { cat "$WORK/err" >&2; fail "cleanup damaged an outside sentinel"; }
+get $remote_outside $WORK/outside-roundtrip
+EOF
+cmp -s "$WORK/outside-sentinel" "$WORK/outside-roundtrip" ||
+    fail "recursive cleanup changed the outside sentinel"
+echo "  ok: nested SFTP upload, cp -r, safe errors, and selected rm -r passed"
 
 echo
 echo "PASS: all checks succeeded"
