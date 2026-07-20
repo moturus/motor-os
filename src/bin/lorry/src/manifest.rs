@@ -189,6 +189,12 @@ pub struct LockedPackage {
 
 impl Manifest {
     pub fn load(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize package directory `{}`: {error}",
+                root.display()
+            ))
+        })?;
         let path = root.join(MANIFEST_NAME);
         if !path.is_file() {
             return Err(Error::failure(format!(
@@ -197,13 +203,8 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo manifest")?;
-        let mut manifest = Self::parse_document(root, &path, &document, ManifestMode::Root)?;
-        manifest.root = fs::canonicalize(root).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize package directory `{}`: {error}",
-                root.display()
-            ))
-        })?;
+        let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Root)?;
+        manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
 
@@ -221,6 +222,12 @@ impl Manifest {
     }
 
     pub fn load_path_dependency(root: &Path) -> Result<Self> {
+        let root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize path dependency directory `{}`: {error}",
+                root.display()
+            ))
+        })?;
         let path = root.join(MANIFEST_NAME);
         if !path.is_file() {
             return Err(Error::failure(format!(
@@ -229,13 +236,9 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let mut manifest = Self::parse_document(root, &path, &document, ManifestMode::Dependency)?;
-        manifest.root = fs::canonicalize(root).map_err(|error| {
-            Error::failure(format!(
-                "failed to canonicalize path dependency directory `{}`: {error}",
-                root.display()
-            ))
-        })?;
+        let mut manifest =
+            Self::parse_document(&root, &path, &document, ManifestMode::Dependency)?;
+        manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
         Ok(manifest)
