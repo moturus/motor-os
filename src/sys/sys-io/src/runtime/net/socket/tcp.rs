@@ -1108,14 +1108,16 @@ impl MotoSocket {
                 socket_ref.unwrap_tcp_mut().lingerer = Some(sender);
 
                 let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
-                // Note: if initiated from the client done handling in net.rs,
-                // the socket won't be with the client hashmap anymore.
-                runtime_ref
+                // Note: if initiated from the client-done handling in net.rs,
+                // the socket won't be in the client hashmap anymore -- and the
+                // client itself may already be gone when a graceful close
+                // races the connection teardown, so tolerate a missing client.
+                if let Some(client) = runtime_ref
                     .clients
                     .get_mut(&socket_ref.base.sender().remote_handle())
-                    .unwrap()
-                    .sockets
-                    .remove(&socket_ref.base.socket_id);
+                {
+                    client.sockets.remove(&socket_ref.base.socket_id);
+                }
 
                 receiver
             };

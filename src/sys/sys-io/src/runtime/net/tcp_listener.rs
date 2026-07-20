@@ -528,13 +528,15 @@ impl TcpListener {
         drop(tcp_listener);
 
         for socket_id in socket_ids {
-            let moto_socket = runtime
-                .inner
-                .borrow()
-                .sockets
-                .get(&socket_id)
-                .unwrap()
-                .clone();
+            // Dropping one socket is async and may cascade-remove others (a
+            // listening socket's replenish task, a lingering peer), and the
+            // connection-close path (on_connection_done) can be draining the
+            // same sockets concurrently -- so a listed socket may already be
+            // gone. Skip it rather than unwrapping None (mirrors net.rs).
+            let maybe_socket = runtime.inner.borrow().sockets.get(&socket_id).cloned();
+            let Some(moto_socket) = maybe_socket else {
+                continue;
+            };
             super::socket::MotoSocket::drop_tcp_socket(moto_socket).await;
         }
 
