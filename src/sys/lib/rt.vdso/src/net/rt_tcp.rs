@@ -28,7 +28,7 @@ use moto_sys_io::api_net::TcpState;
 
 use super::rt_net::ChannelReservation;
 use super::rt_net::NetChannel;
-use super::rt_net::ResponseHandler;
+use super::rt_net::RpcWaiter;
 
 struct AcceptRequest {
     channel_reservation: Option<ChannelReservation>,
@@ -139,9 +139,10 @@ impl PosixFile for TcpListener {
     }
 }
 
-impl ResponseHandler for TcpListener {
-    // Called from the I/O thread.
-    fn on_response(&self, resp: io_channel::Msg) {
+impl TcpListener {
+    // Called inline from rx dispatch: the pending_accept_queue must
+    // exist before the next message for the new stream is dispatched.
+    pub(super) fn on_accept_response(&self, resp: io_channel::Msg) {
         let req = self.accept_requests.lock().remove(&resp.id).unwrap();
         let wake_handle = SysHandle::from_u64(req.req.wake_handle);
 
@@ -393,7 +394,7 @@ impl TcpListener {
         );
 
         channel
-            .post_msg_with_response_waiter(req, self.me.clone())
+            .post_rpc(req, RpcWaiter::Accept(self.me.clone()))
             .inspect_err(|_| {
                 assert!(self.accept_requests.lock().remove(&req.id).is_some());
             })
@@ -645,13 +646,6 @@ impl PosixFile for TcpStream {
     }
 }
 
-impl ResponseHandler for TcpStream {
-    fn on_response(&self, resp: io_channel::Msg) {
-        assert_eq!(resp.command, api_net::NetCmd::TcpStreamConnect as u16);
-        self.on_connect_response(resp);
-    }
-}
-
 impl TcpStream {
     pub fn handle(&self) -> u64 {
         let handle = self.handle.load(Ordering::Acquire);
@@ -887,11 +881,10 @@ impl TcpStream {
         super::rt_net::stats_tcp_stream_created();
 
         if nonblocking {
-            let req_id = new_stream.channel().new_req_id();
-            req.id = req_id;
+            req.id = new_stream.channel().new_req_id();
             new_stream
                 .channel()
-                .post_msg_with_response_waiter(req, new_stream.me.clone())?;
+                .post_rpc(req, RpcWaiter::Connect(new_stream.me.clone()))?;
             return Ok(new_stream);
         }
 
@@ -901,7 +894,11 @@ impl TcpStream {
         Ok(new_stream)
     }
 
-    fn on_connect_response(&self, resp: io_channel::Msg) -> Result<(), ErrorCode> {
+    // Called inline from rx dispatch for nonblocking connects: the
+    // tcp_streams registration must exist before the next message for
+    // the stream is dispatched. Blocking connects call it on the caller
+    // thread (until D2b).
+    pub(super) fn on_connect_response(&self, resp: io_channel::Msg) -> Result<(), ErrorCode> {
         if resp.status().is_err() {
             log::debug!("TcpStream::connect {:?} failed", self.remote_addr,);
 

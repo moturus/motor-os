@@ -487,8 +487,22 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
 //
 // Note: some or all of the above may be outdated.
 
-pub trait ResponseHandler {
-    fn on_response(&self, resp: io_channel::Msg);
+/// How the rx task completes an in-flight RPC (`msg.id != 0`).
+///
+/// Plain responses resolve a oneshot whose receiver a blocked caller
+/// thread polls. Connect and accept completions run inline in rx
+/// dispatch — not in a control task as design 5.3 sketches — because
+/// they create message-routing state (the stream's `tcp_streams` entry,
+/// the listener's pending-accept queue) that must exist before the next
+/// message for the same stream handle is dispatched; a task hop would
+/// race that and lose early state changes.
+pub enum RpcWaiter {
+    /// Resolved by send(); the receiver side is a caller thread.
+    Response(moto_async::oneshot::Sender<io_channel::Msg>),
+    /// Nonblocking TcpStream::connect completion.
+    Connect(Weak<TcpStream>),
+    /// TcpListener accept completion.
+    Accept(Weak<TcpListener>),
 }
 
 static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
@@ -684,11 +698,10 @@ pub struct NetChannel {
     // dereferenced on the runtime thread.
     send_room: AtomicUsize,
 
-    // In-flight RPCs: req_id => the sender the rx task resolves with the
+    // In-flight RPCs: req_id => the waiter the rx task resolves with the
     // response. Insert-before-queue is the ordering rule: the response
     // must never beat its waiter into the map.
-    rpc_map: Mutex<BTreeMap<u64, moto_async::oneshot::Sender<io_channel::Msg>>>,
-    response_handlers: Mutex<BTreeMap<u64, Weak<dyn ResponseHandler + Send + Sync>>>,
+    rpc_map: Mutex<BTreeMap<u64, RpcWaiter>>,
 
     // The tx task's cross-thread waker, published by `park_until_send_work`;
     // waking it is cheap while the runtime is polling (A5 wake elision).
@@ -777,25 +790,36 @@ impl NetChannel {
                 SysHandle::NONE
             }
         } else {
-            // An RPC response: resolve through the RPC map. The send wakes
-            // the receiver — a caller thread parked in block_on_sync.
+            // An RPC response: resolve through the RPC map. The binding
+            // drops the map lock before the match: accept completions
+            // re-post accepts, which re-enters the map.
             let waiter = self.rpc_map.lock().remove(&msg.id);
-            if let Some(tx) = waiter {
-                if tx.send(msg).is_err() {
-                    // Receivers are never dropped before completion
-                    // (block_on_sync polls to Ready; teardown is stage E).
-                    panic!("RPC receiver gone for msg {}", msg.id);
+            match waiter {
+                Some(RpcWaiter::Response(tx)) => {
+                    // The send wakes the receiver — a caller thread
+                    // parked in block_on_sync.
+                    if tx.send(msg).is_err() {
+                        // Receivers are never dropped before completion
+                        // (block_on_sync polls to Ready; teardown is
+                        // stage E).
+                        panic!("RPC receiver gone for msg {}", msg.id);
+                    }
                 }
-                SysHandle::NONE
-            } else {
-                let Some(resp_handler) = self.response_handlers.lock().remove(&msg.id) else {
-                    panic!("unexpected msg");
-                };
-                if let Some(handler) = resp_handler.upgrade() {
-                    handler.on_response(msg);
+                Some(RpcWaiter::Connect(stream)) => {
+                    // A stream dropped mid-connect leaves sys-io's
+                    // stream behind, as today.
+                    if let Some(stream) = stream.upgrade() {
+                        let _ = stream.on_connect_response(msg);
+                    }
                 }
-                SysHandle::NONE
+                Some(RpcWaiter::Accept(listener)) => {
+                    if let Some(listener) = listener.upgrade() {
+                        listener.on_accept_response(msg);
+                    }
+                }
+                None => panic!("unexpected msg"),
             }
+            SysHandle::NONE
         };
 
         if wait_handle != SysHandle::NONE
@@ -1139,7 +1163,6 @@ impl NetChannel {
             write_waiters: Mutex::new(VecDeque::new()),
             page_waiters: Mutex::new(VecDeque::new()),
             rpc_map: Mutex::new(BTreeMap::new()),
-            response_handlers: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
@@ -1237,17 +1260,33 @@ impl NetChannel {
         }
     }
 
+    /// Insert `waiter` and queue `req`, blocking if the send queue is
+    /// full. The waiter goes in first: the response must never beat it
+    /// into the map.
+    pub fn send_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
+        assert_ne!(0, req.id);
+        assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
+        self.send_msg(req);
+    }
+
+    /// Nonblocking [`Self::send_rpc`]: on a full send queue the waiter
+    /// is removed again and the caller gets `E_NOT_READY`.
+    pub fn post_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) -> Result<(), ErrorCode> {
+        assert_ne!(0, req.id);
+        assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
+        if self.post_msg(req).is_ok() {
+            Ok(())
+        } else {
+            self.rpc_map.lock().remove(&req.id);
+            Err(moto_rt::E_NOT_READY)
+        }
+    }
+
     // Send message and wait for response.
     pub fn send_receive(&self, mut req: io_channel::Msg) -> io_channel::Msg {
-        let req_id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
-
-        // Insert the waiter before queuing the request, otherwise the
-        // response may arrive before the rx task can find it in the map.
         let (tx, rx) = moto_async::oneshot();
-        assert!(self.rpc_map.lock().insert(req_id, tx).is_none());
-
-        req.id = req_id;
-        self.send_msg(req);
+        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        self.send_rpc(req, RpcWaiter::Response(tx));
 
         // Completes without a syscall if the response already arrived.
         moto_async::block_on_sync(rx).expect("RPC sender dropped")
@@ -1315,31 +1354,6 @@ impl NetChannel {
                 self_.send_room().notified().await;
             }
         }));
-    }
-
-    pub fn post_msg_with_response_waiter(
-        &self,
-        req: io_channel::Msg,
-        handler: Weak<dyn ResponseHandler + Send + Sync>,
-    ) -> Result<(), ErrorCode> {
-        assert_ne!(0, req.id);
-
-        // Add to response handlers before sending the message, otherwise the response may
-        // arive too quickly and the receiving code will panic due to a missing waiter.
-        assert!(
-            self.response_handlers
-                .lock()
-                .insert(req.id, handler)
-                .is_none()
-        );
-
-        if self.send_queue.push(req).is_ok() {
-            self.maybe_wake_io_thread();
-            Ok(())
-        } else {
-            self.response_handlers.lock().remove(&req.id);
-            Err(moto_rt::E_NOT_READY)
-        }
     }
 
     // Note: this is called from the IO thread, so must not sleep/block.
