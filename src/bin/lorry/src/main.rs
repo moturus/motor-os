@@ -1,6 +1,8 @@
+mod atomic;
 mod cli;
 mod config;
 mod diagnostic;
+mod hash;
 mod manifest;
 mod process;
 mod toolchain;
