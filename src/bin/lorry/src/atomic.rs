@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug)]
 pub struct AtomicDirectory {
     path: PathBuf,
     committed: bool,
@@ -21,7 +22,7 @@ impl AtomicDirectory {
         })?;
         for _ in 0..100 {
             let path = parent.join(unique_name(label, "staging"));
-            match fs::create_dir(&path) {
+            match create_private_directory(&path) {
                 Ok(()) => {
                     set_private(&path)?;
                     return Ok(Self {
@@ -123,6 +124,20 @@ impl Drop for AtomicDirectory {
     }
 }
 
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir(path)
+    }
+}
+
 fn unique_name(label: &str, role: &str) -> String {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -139,6 +154,25 @@ fn set_private(_path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(_path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            Error::failure(format!(
+                "failed to make staging `{}` private: {error}",
+                _path.display()
+            ))
+        })?;
+    }
+    #[cfg(target_os = "motor")]
+    {
+        let path = _path.to_str().ok_or_else(|| {
+            Error::failure(format!(
+                "private staging path is not UTF-8: `{}`",
+                _path.display()
+            ))
+        })?;
+        moto_rt::fs::set_perm(
+            path,
+            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
+        )
+        .map_err(|error| {
             Error::failure(format!(
                 "failed to make staging `{}` private: {error}",
                 _path.display()

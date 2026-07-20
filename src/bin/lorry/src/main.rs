@@ -1,3 +1,4 @@
+mod archive;
 mod atomic;
 mod cli;
 mod config;
