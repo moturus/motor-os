@@ -1,7 +1,6 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage-1/2 design complete — Phase 0 complete; Stage-1 implementation
-ready**
+Status: **Stage 1 complete — Stage 2 system-seeder implementation is next**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -2662,7 +2661,8 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      difference across all eight Stage-1 unit shapes. No product code was
      written before these inputs passed.
 
-1. **Implement the dependency-free Stage-1 foundation.**
+1. **Complete (2026-07-20): implement the dependency-free Stage-1
+   foundation.**
    - Add the small Stage-1 CLI, manifest, root-only Cargo.lock, layered
      configuration, toolchain/target discovery, process, diagnostic, hashing,
      and atomic-output modules using only `std`.
@@ -2674,7 +2674,8 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      the resulting seed is only a bootstrap executable, not an identity
      oracle.
 
-2. **Close Stage 1 on Linux, cross-Motor, and native Motor.**
+2. **Complete (2026-07-20): close Stage 1 on Linux, cross-Motor, and native
+   Motor.**
    - Implement the single-package/single-binary unit graph, Cargo 1.97/1.98
      identity adapter, dev/release rustc commands, `build`, `run`, and binary
      unit-test harness behavior, with no artifact reuse.
@@ -2690,6 +2691,24 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      smoke on native Motor. Require native-Motor Lorry outputs to equal the
      Linux-to-Motor outputs under the scoped identity promise. Stage 1 closes
      only after the Round-26 boot/smoke timing and cleanup rules pass.
+
+   Closure evidence:
+   - `src/bin/lorry/tests/stage1-linux.sh` passes the 26-test Lorry unit gate,
+     native-Linux and Linux-to-Motor Cargo release-identity comparisons,
+     native and release 66-test `red` gates, run/test argument and status
+     checks, and native/cross second-generation Lorry self-builds.
+   - `src/tests/full-test.sh` builds a fresh debug image, reaches SSH within
+     the 10-second boot deadline, passes the SFTP prerequisite fixture, and
+     runs `src/bin/lorry/test-native.sh --reuse-running-vm` before the
+     remaining Motor regression tests. The closure run completed the isolated
+     native phase in 155438 ms, passed all 66 `red` tests, matched the
+     Linux-to-Motor release artifacts, exercised run argument forwarding, and
+     removed its isolated remote tree.
+   - The closure artifact SHA-256 values were
+     `251d46b5cd79d0625fe8a7157c0595912c8d7061c5cacc3be1fe991fb1c7aa06`
+     for `red` and
+     `c696316be8d4ff7f0fef445f08e12c9bcf294575f8ea3f15e14f7a7128c6beb3`
+     for the native run fixture.
 
 3. **Implement and validate the external Stage-2 system seeder.**
    - Implement the Round-37 Python tool, reviewed 45-registry-object/full and
