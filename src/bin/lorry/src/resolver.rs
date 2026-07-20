@@ -1342,7 +1342,7 @@ fn activate(
                 .iter()
                 .any(|dependency| dependency.optional && dependency.alias == *reference)
             {
-                activation.enabled_optional.insert(reference.to_owned());
+                activation.active.insert(reference.to_owned());
             } else {
                 return Err(Failure::new(format!(
                     "`{}` {} feature `{feature}` references unknown `{reference}`",
@@ -2064,6 +2064,44 @@ mod tests {
     }
 
     #[test]
+    fn optional_dependency_features_are_implicit_unless_namespaced() {
+        let dependencies = [
+            dependency_with("implicit", "implicit", "1", &[], true, "normal"),
+            dependency_with("namespaced", "namespaced", "1", &[], true, "normal"),
+        ]
+        .join(",");
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "a",
+                "1.0.0",
+                &format!("[{dependencies}]"),
+                "{\"default\":[\"implicit\",\"dep:namespaced\"]}",
+                "",
+            ))
+            .unwrap();
+        for name in ["implicit", "namespaced"] {
+            catalog
+                .insert(record(name, "1.0.0", "[]", "{}", ""))
+                .unwrap();
+        }
+
+        let root = manifest("a = \"1\"", "", "2");
+        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        assert_eq!(selected(&resolution, "implicit").len(), 1);
+        assert_eq!(selected(&resolution, "namespaced").len(), 1);
+        let a = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert_eq!(
+            a.target_features,
+            BTreeSet::from(["default".to_owned(), "implicit".to_owned()])
+        );
+    }
+
+    #[test]
     fn resolver_two_separates_target_feature_sets_while_one_unifies_them() {
         let mut catalog = Catalog::default();
         catalog
@@ -2491,7 +2529,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             moto_sys.target_features,
-            ["default", "userspace"].map(str::to_owned).into()
+            ["default", "moto-rt", "userspace"]
+                .map(str::to_owned)
+                .into()
         );
         assert_eq!(moto_sys.lock_edges.len(), 1);
         assert_eq!(moto_sys.lock_edges[0].package.name, "moto-rt");
