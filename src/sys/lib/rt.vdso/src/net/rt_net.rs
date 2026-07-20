@@ -1,6 +1,5 @@
 use crate::posix;
 use crate::posix::PosixFile;
-use crate::runtime::EventSourceManaged;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -457,11 +456,37 @@ pub unsafe extern "C" fn udp_connect(rt_fd: RtFd, addr: *const netc::sockaddr) -
 pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
     match a1 {
         #[cfg(feature = "netdev")]
-        0 => NET.lock().assert_empty(),
+        0 => {
+            // Give stage-E teardown a moment to settle before the leak check;
+            // the wait is a veneer (caller-thread) concern, kept out of the
+            // moving channel layer.
+            crate::rt_thread::sleep(
+                (moto_rt::time::Instant::now() + core::time::Duration::from_millis(500)).as_u64(),
+            );
+            NET.lock().assert_empty();
+        }
         _ => panic!("Unrecognized option {a1}"),
     }
 
     0
+}
+
+/// Host-installed hook run by the channel runtime thread just before it
+/// exits, so the host (the vdso) can run its thread-local destructors -- a
+/// concern the channel layer itself must not reach into. A native host that
+/// needs no such cleanup leaves it unset.
+static THREAD_EXIT_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_thread_exit_hook(hook: fn()) {
+    THREAD_EXIT_HOOK.store(hook as usize, Ordering::Release);
+}
+
+fn run_thread_exit_hook() {
+    let hook = THREAD_EXIT_HOOK.load(Ordering::Acquire);
+    if hook != 0 {
+        let hook: fn() = unsafe { core::mem::transmute(hook) };
+        hook();
+    }
 }
 
 // -------------------------------- implementation details ------------------------------ //
@@ -573,9 +598,6 @@ struct NetRuntime {
 impl NetRuntime {
     #[cfg(feature = "netdev")]
     fn assert_empty(&self) {
-        crate::rt_thread::sleep(
-            (moto_rt::time::Instant::now() + core::time::Duration::from_millis(500)).as_u64(),
-        );
         assert_eq!(0, self.num_tcp_listeners.load(Ordering::Acquire));
         assert_eq!(0, self.num_tcp_streams.load(Ordering::Acquire));
         assert_eq!(0, self.num_udp_sockets.load(Ordering::Acquire));
@@ -1281,7 +1303,7 @@ impl NetChannel {
         // releasing thread still holds one, drop runs there, also after this
         // thread is gone. Then reclaim TLS and exit; the kernel reaps us.
         core::mem::drop(self_arc);
-        unsafe { crate::rt_tls::on_thread_exiting() };
+        run_thread_exit_hook();
         let _ = moto_sys::SysObj::put(SysHandle::SELF);
         unreachable!("the channel runtime thread exited");
     }
