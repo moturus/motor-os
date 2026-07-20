@@ -1,8 +1,13 @@
-use crate::diagnostic::{Error, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+use semver::{Op, VersionReq};
+use toml_edit::{Item, Table};
+
+use crate::diagnostic::{Error, Result};
+use crate::toml::Document;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CargoCompat {
@@ -10,13 +15,48 @@ pub enum CargoCompat {
     V1_98,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub cargo_compat: Option<CargoCompat>,
     pub rustc: Option<PathBuf>,
     pub default_target: Option<String>,
     pub build_rustflags: Vec<String>,
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
+    #[allow(dead_code)]
+    pub repositories: Repositories,
+    #[allow(dead_code)]
+    pub vendor: VendorConfig,
+    #[allow(dead_code)]
+    pub network: NetworkConfig,
+    #[allow(dead_code)]
+    pub test: TestConfig,
+    #[allow(dead_code)]
+    pub native_tools: BTreeMap<(String, NativeToolRole), NativeTool>,
+    #[allow(dead_code)]
+    pub policy: Policy,
+    #[allow(dead_code)]
+    pub required_patches: BTreeMap<String, RequiredPatch>,
+    constraints: Vec<Constraint>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            cargo_compat: None,
+            rustc: None,
+            default_target: None,
+            build_rustflags: Vec::new(),
+            targets: BTreeMap::new(),
+            repositories: Repositories::default(),
+            vendor: VendorConfig::default(),
+            network: NetworkConfig::default(),
+            test: TestConfig::default(),
+            native_tools: BTreeMap::new(),
+            policy: Policy::default(),
+            required_patches: BTreeMap::new(),
+            constraints: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -30,6 +70,192 @@ pub struct TargetOptions {
     pub linker: Option<PathBuf>,
     pub runner: Option<Vec<String>>,
     pub rustflags: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Repositories {
+    pub system: Option<PathBuf>,
+    pub user: Option<PathBuf>,
+    pub local: Option<PathBuf>,
+    pub keep_artifacts: bool,
+    pub keep_sources: bool,
+}
+
+impl Default for Repositories {
+    fn default() -> Self {
+        Self {
+            system: None,
+            user: None,
+            local: None,
+            keep_artifacts: true,
+            keep_sources: true,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VendorConfig {
+    pub targets: Vec<String>,
+    pub include_host: bool,
+}
+
+impl Default for VendorConfig {
+    fn default() -> Self {
+        Self {
+            targets: vec![
+                "x86_64-unknown-linux-musl".to_owned(),
+                "x86_64-unknown-motor".to_owned(),
+            ],
+            include_host: true,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NetworkConfig {
+    pub helper: Option<PathBuf>,
+    pub ca_bundle: Option<PathBuf>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestConfig {
+    pub extraction_root: PathBuf,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self {
+        Self {
+            extraction_root: if cfg!(target_os = "motor") {
+                PathBuf::from("/user/tmp/lorry/test-extraction")
+            } else {
+                PathBuf::from("/tmp/lorry-tests")
+            },
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NativeToolRole {
+    CCompiler,
+    Archiver,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NativeTool {
+    pub program: Option<PathBuf>,
+    pub prefix_args: Vec<String>,
+    pub flags: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyDefault {
+    Deny,
+    Allow,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Policy {
+    pub default: PolicyDefault,
+    pub path_roots: Vec<PathBuf>,
+    pub limits: PolicyLimits,
+    pub rules: BTreeMap<String, PolicyRule>,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            default: PolicyDefault::Deny,
+            path_roots: Vec::new(),
+            limits: PolicyLimits::default(),
+            rules: BTreeMap::new(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyLimits {
+    pub max_packages: u64,
+    pub max_depth: u64,
+    pub max_package_bytes: u64,
+    pub max_extracted_package_bytes: u64,
+    pub max_package_files: u64,
+    pub max_transaction_bytes: u64,
+    pub max_extracted_transaction_bytes: u64,
+    pub build_script_seconds: u64,
+    pub build_script_output_bytes: u64,
+}
+
+impl Default for PolicyLimits {
+    fn default() -> Self {
+        Self {
+            max_packages: 64,
+            max_depth: 16,
+            max_package_bytes: 16 * 1024 * 1024,
+            max_extracted_package_bytes: 128 * 1024 * 1024,
+            max_package_files: 20_000,
+            max_transaction_bytes: 256 * 1024 * 1024,
+            max_extracted_transaction_bytes: 1024 * 1024 * 1024,
+            build_script_seconds: 300,
+            build_script_output_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyAction {
+    Allow,
+    Deny,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyRule {
+    pub action: PolicyAction,
+    pub name: Option<String>,
+    pub version: Option<VersionReq>,
+    pub source: Option<String>,
+    pub checksum: Option<String>,
+    pub source_tree_sha256: Option<String>,
+    pub license: Option<String>,
+    pub allow_build_script: bool,
+    pub native_tools: BTreeSet<NativeToolRole>,
+    pub provenance: PathBuf,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequiredPatch {
+    pub name: String,
+    pub version: VersionReq,
+    pub upstream_checksum: String,
+    pub git_url: String,
+    pub git_commit: String,
+    pub source_tree_sha256: String,
+    pub provenance: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Constraint {
+    key: String,
+    provenance: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LayerKind {
+    LinuxBase,
+    MotorSystem,
+    MotorUser,
+    Local,
 }
 
 impl Config {
@@ -47,6 +273,7 @@ impl Config {
         reject_environment(environment)?;
         let mut config = Config::default();
         load_lorry_layers(package_root, environment, &mut config)?;
+        validate_repository_layout(&config.repositories)?;
         load_cargo_layers(package_root, environment, &mut config)?;
         apply_cargo_environment(environment, &mut config)?;
         Ok(config)
@@ -84,7 +311,6 @@ impl Config {
             }
         }
 
-        // Cargo gives an exact target table priority over matching cfg tables.
         if let Some(exact) = self.targets.get(&TargetSelector::Triple(target.to_owned())) {
             if exact.linker.is_some() {
                 matching_linkers
@@ -123,7 +349,7 @@ fn reject_environment(environment: &BTreeMap<String, String>) -> Result<()> {
             let explanation = if variable == "CARGO_TARGET_DIR" {
                 "Lorry uses the isolated `target/lorry` artifact root"
             } else {
-                "compiler wrappers are outside the Stage-1 identity contract"
+                "compiler wrappers are outside the Stage-2 identity contract"
             };
             return Err(Error::failure(format!(
                 "environment variable `{variable}` is not supported: {explanation}"
@@ -141,82 +367,764 @@ fn load_lorry_layers(
 ) -> Result<()> {
     let mut layers = Vec::new();
     if cfg!(target_os = "motor") {
-        layers.push(PathBuf::from("/sys/tools/rust/cfg/lorry.toml"));
-        layers.push(PathBuf::from("/user/cfg/lorry.toml"));
+        layers.push((
+            PathBuf::from("/sys/tools/rust/cfg/lorry.toml"),
+            LayerKind::MotorSystem,
+        ));
+        layers.push((PathBuf::from("/user/cfg/lorry.toml"), LayerKind::MotorUser));
     } else if let Some(home) = environment.get("HOME") {
-        layers.push(Path::new(home).join(".config/lorry/lorry.toml"));
+        layers.push((
+            Path::new(home).join(".config/lorry/lorry.toml"),
+            LayerKind::LinuxBase,
+        ));
     }
-    if let Some(local) = nearest_file(package_root, "lorry.toml") {
-        if !layers.contains(&local) {
-            layers.push(local);
-        }
+    if let Some(local) = nearest_file(package_root, "lorry.toml")
+        && !layers.iter().any(|(path, _)| path == &local)
+    {
+        layers.push((local, LayerKind::Local));
     }
-    for path in layers {
+    for (path, kind) in layers {
         if path.is_file() {
-            merge_lorry_file(&path, config)?;
+            merge_lorry_file(&path, kind, config)?;
         }
     }
     Ok(())
 }
 
-fn merge_lorry_file(path: &Path, config: &mut Config) -> Result<()> {
-    let source = read_config(path)?;
-    let entries = parse_entries(path, &source)?;
-    let mut version = None;
-    for entry in entries {
-        match (entry.table.as_str(), entry.key.as_str()) {
-            ("", "config-version") => {
-                let value = entry.integer(path)?;
-                if value != 1 {
-                    return Err(entry.error(
-                        path,
-                        "unsupported Lorry configuration version",
-                        "set `config-version = 1`",
-                    ));
-                }
-                version = Some(());
-            }
-            ("", "cargo-compat-version") => {
-                config.cargo_compat = Some(match entry.string(path)?.as_str() {
-                    "1.97" => CargoCompat::V1_97,
-                    "1.98" => CargoCompat::V1_98,
-                    value => {
-                        return Err(entry.error(
-                            path,
-                            format!("unsupported Cargo compatibility family `{value}`"),
-                            "choose `1.97` or `1.98`",
-                        ));
-                    }
-                });
-            }
-            ("toolchain", "rustc") => {
-                let value = PathBuf::from(entry.string(path)?);
-                if !value.is_absolute() {
-                    return Err(entry.error(
-                        path,
-                        "configured `toolchain.rustc` must be an absolute path",
-                        "use an absolute compiler path",
-                    ));
-                }
-                config.rustc = Some(value);
-            }
-            _ => {
-                return Err(entry.error(
+fn merge_lorry_file(path: &Path, kind: LayerKind, config: &mut Config) -> Result<()> {
+    let document = Document::load(path, "Lorry configuration")?;
+    reject_locked_overrides(path, kind, &document, &config.constraints)?;
+    validate_lorry_root(path, &document)?;
+
+    let version = document.root().get("config-version").ok_or_else(|| {
+        Error::failure(format!(
+            "Lorry configuration `{}` is missing `config-version = 1`",
+            path.display()
+        ))
+    })?;
+    if version.as_integer() != Some(1) {
+        return Err(Error::at(
+            path,
+            document.line_of_item(version),
+            "unsupported Lorry configuration version",
+            "set `config-version = 1`",
+        ));
+    }
+    if let Some(item) = document.root().get("cargo-compat-version") {
+        config.cargo_compat = Some(match item.as_str() {
+            Some("1.97") => CargoCompat::V1_97,
+            Some("1.98") => CargoCompat::V1_98,
+            Some(value) => {
+                return Err(Error::at(
                     path,
-                    format!(
-                        "unsupported Stage-1 Lorry configuration key `{}`",
-                        entry.full_key()
-                    ),
-                    "remove the key or use a later Lorry stage that supports it",
+                    document.line_of_item(item),
+                    format!("unsupported Cargo compatibility family `{value}`"),
+                    "choose `1.97` or `1.98`",
+                ));
+            }
+            None => {
+                return Err(type_error(
+                    path,
+                    &document,
+                    item,
+                    "cargo-compat-version",
+                    "a string",
+                ));
+            }
+        });
+    }
+    merge_toolchain(path, &document, config)?;
+    merge_repositories(path, kind, &document, config)?;
+    merge_vendor(path, &document, config)?;
+    merge_network(path, &document, config)?;
+    merge_test(path, &document, config)?;
+    merge_native_tools(path, &document, config)?;
+    merge_policy(path, &document, config)?;
+    merge_required_patches(path, &document, config)?;
+    merge_constraints(path, kind, &document, config)?;
+    Ok(())
+}
+
+fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
+    const ALLOWED: &[&str] = &[
+        "config-version",
+        "cargo-compat-version",
+        "toolchain",
+        "repositories",
+        "vendor",
+        "network",
+        "test",
+        "native-tools",
+        "policy",
+        "required-patches",
+        "system-constraints",
+    ];
+    for (key, item) in document.root().iter() {
+        if !ALLOWED.contains(&key) {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("unsupported Stage-2 Lorry configuration key `{key}`"),
+                "remove the unknown key",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn merge_toolchain(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("toolchain") else {
+        return Ok(());
+    };
+    let table = require_table(path, document, item, "toolchain")?;
+    reject_unknown_keys(path, document, table, "toolchain", &["rustc"])?;
+    if let Some(item) = table.get("rustc") {
+        config.rustc = Some(absolute_path(path, document, item, "toolchain.rustc")?);
+    }
+    Ok(())
+}
+
+fn merge_repositories(
+    path: &Path,
+    kind: LayerKind,
+    document: &Document,
+    config: &mut Config,
+) -> Result<()> {
+    let Some(item) = document.root().get("repositories") else {
+        return Ok(());
+    };
+    let table = require_table(path, document, item, "repositories")?;
+    reject_unknown_keys(
+        path,
+        document,
+        table,
+        "repositories",
+        &["system", "user", "local", "keep-artifacts", "keep-sources"],
+    )?;
+    for (key, destination, allowed) in [
+        (
+            "system",
+            &mut config.repositories.system,
+            matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem),
+        ),
+        (
+            "user",
+            &mut config.repositories.user,
+            matches!(kind, LayerKind::LinuxBase | LayerKind::MotorUser),
+        ),
+        (
+            "local",
+            &mut config.repositories.local,
+            kind == LayerKind::Local,
+        ),
+    ] {
+        if let Some(item) = table.get(key) {
+            if !allowed {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(item),
+                    format!("`repositories.{key}` is not owned by this configuration layer"),
+                    "define system/user/local only in its designated layer",
+                ));
+            }
+            *destination = Some(absolute_path(
+                path,
+                document,
+                item,
+                &format!("repositories.{key}"),
+            )?);
+        }
+    }
+    if let Some(item) = table.get("keep-artifacts") {
+        config.repositories.keep_artifacts =
+            require_bool(path, document, item, "repositories.keep-artifacts")?;
+    }
+    if let Some(item) = table.get("keep-sources") {
+        config.repositories.keep_sources =
+            require_bool(path, document, item, "repositories.keep-sources")?;
+    }
+    if !config.repositories.keep_artifacts && !config.repositories.keep_sources {
+        return Err(Error::at(
+            path,
+            document.line_of_table(table),
+            "`repositories.keep-artifacts` and `keep-sources` cannot both be false",
+            "retain at least one verified dependency representation",
+        ));
+    }
+    Ok(())
+}
+
+fn merge_vendor(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("vendor") else {
+        return Ok(());
+    };
+    let table = require_table(path, document, item, "vendor")?;
+    reject_unknown_keys(
+        path,
+        document,
+        table,
+        "vendor",
+        &["targets", "include-host"],
+    )?;
+    if let Some(item) = table.get("targets") {
+        let targets = require_string_array(path, document, item, "vendor.targets")?;
+        let mut unique = BTreeSet::new();
+        for target in &targets {
+            validate_target_at(path, document.line_of_item(item), target)?;
+            if !unique.insert(target) {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(item),
+                    format!("duplicate vendoring target `{target}`"),
+                    "list each target once",
                 ));
             }
         }
+        config.vendor.targets = targets;
     }
-    if version.is_none() {
-        return Err(Error::failure(format!(
-            "Lorry configuration `{}` is missing `config-version = 1`",
-            path.display()
-        )));
+    if let Some(item) = table.get("include-host") {
+        config.vendor.include_host = require_bool(path, document, item, "vendor.include-host")?;
+    }
+    Ok(())
+}
+
+fn merge_network(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("network") else {
+        return Ok(());
+    };
+    let table = require_table(path, document, item, "network")?;
+    reject_unknown_keys(path, document, table, "network", &["helper", "ca-bundle"])?;
+    if let Some(item) = table.get("helper") {
+        config.network.helper = Some(absolute_path(path, document, item, "network.helper")?);
+    }
+    if let Some(item) = table.get("ca-bundle") {
+        config.network.ca_bundle = Some(absolute_path(path, document, item, "network.ca-bundle")?);
+    }
+    Ok(())
+}
+
+fn merge_test(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("test") else {
+        return Ok(());
+    };
+    let table = require_table(path, document, item, "test")?;
+    reject_unknown_keys(path, document, table, "test", &["extraction-root"])?;
+    if let Some(item) = table.get("extraction-root") {
+        config.test.extraction_root = absolute_path(path, document, item, "test.extraction-root")?;
+    }
+    Ok(())
+}
+
+fn merge_native_tools(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("native-tools") else {
+        return Ok(());
+    };
+    let targets = require_table(path, document, item, "native-tools")?;
+    for (target, item) in targets.iter() {
+        validate_target_at(path, document.line_of_item(item), target)?;
+        let roles = require_table(path, document, item, &format!("native-tools.{target}"))?;
+        for (role_name, item) in roles.iter() {
+            let role = parse_native_role(path, document.line_of_item(item), role_name)?;
+            let table = require_table(
+                path,
+                document,
+                item,
+                &format!("native-tools.{target}.{role_name}"),
+            )?;
+            reject_unknown_keys(
+                path,
+                document,
+                table,
+                &format!("native-tools.{target}.{role_name}"),
+                &["program", "prefix-args", "flags"],
+            )?;
+            let tool = config
+                .native_tools
+                .entry((target.to_owned(), role))
+                .or_default();
+            if let Some(item) = table.get("program") {
+                tool.program = Some(absolute_path(
+                    path,
+                    document,
+                    item,
+                    &format!("native-tools.{target}.{role_name}.program"),
+                )?);
+            }
+            if let Some(item) = table.get("prefix-args") {
+                tool.prefix_args = native_arguments(
+                    path,
+                    document,
+                    item,
+                    &format!("native-tools.{target}.{role_name}.prefix-args"),
+                )?;
+            }
+            if let Some(item) = table.get("flags") {
+                tool.flags = native_arguments(
+                    path,
+                    document,
+                    item,
+                    &format!("native-tools.{target}.{role_name}.flags"),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_policy(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("policy") else {
+        return Ok(());
+    };
+    let policy = require_table(path, document, item, "policy")?;
+    reject_unknown_keys(
+        path,
+        document,
+        policy,
+        "policy",
+        &["default", "path-roots", "limits", "rules"],
+    )?;
+    if let Some(item) = policy.get("default") {
+        config.policy.default = match item.as_str() {
+            Some("deny") => PolicyDefault::Deny,
+            Some("allow") => PolicyDefault::Allow,
+            Some(value) => {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(item),
+                    format!("unsupported policy default `{value}`"),
+                    "choose `deny` or `allow`",
+                ));
+            }
+            None => {
+                return Err(type_error(
+                    path,
+                    document,
+                    item,
+                    "policy.default",
+                    "a string",
+                ));
+            }
+        };
+    }
+    if let Some(item) = policy.get("path-roots") {
+        config.policy.path_roots = require_string_array(path, document, item, "policy.path-roots")?
+            .into_iter()
+            .map(|value| {
+                canonical_config_path(
+                    path,
+                    document.line_of_item(item),
+                    "policy.path-roots",
+                    &value,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+    }
+    if let Some(item) = policy.get("limits") {
+        merge_policy_limits(
+            path,
+            document,
+            require_table(path, document, item, "policy.limits")?,
+            &mut config.policy.limits,
+        )?;
+    }
+    if let Some(item) = policy.get("rules") {
+        merge_policy_rules(
+            path,
+            document,
+            require_table(path, document, item, "policy.rules")?,
+            &mut config.policy.rules,
+        )?;
+    }
+    Ok(())
+}
+
+fn merge_policy_limits(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    limits: &mut PolicyLimits,
+) -> Result<()> {
+    const KEYS: &[&str] = &[
+        "max-packages",
+        "max-depth",
+        "max-package-bytes",
+        "max-extracted-package-bytes",
+        "max-package-files",
+        "max-transaction-bytes",
+        "max-extracted-transaction-bytes",
+        "build-script-seconds",
+        "build-script-output-bytes",
+    ];
+    reject_unknown_keys(path, document, table, "policy.limits", KEYS)?;
+    for (key, item) in table.iter() {
+        let value = positive_integer(path, document, item, &format!("policy.limits.{key}"))?;
+        match key {
+            "max-packages" => limits.max_packages = value,
+            "max-depth" => limits.max_depth = value,
+            "max-package-bytes" => limits.max_package_bytes = value,
+            "max-extracted-package-bytes" => limits.max_extracted_package_bytes = value,
+            "max-package-files" => limits.max_package_files = value,
+            "max-transaction-bytes" => limits.max_transaction_bytes = value,
+            "max-extracted-transaction-bytes" => {
+                limits.max_extracted_transaction_bytes = value;
+            }
+            "build-script-seconds" => limits.build_script_seconds = value,
+            "build-script-output-bytes" => limits.build_script_output_bytes = value,
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+fn merge_policy_rules(
+    path: &Path,
+    document: &Document,
+    rules: &Table,
+    output: &mut BTreeMap<String, PolicyRule>,
+) -> Result<()> {
+    for (id, item) in rules.iter() {
+        validate_rule_id(path, document.line_of_item(item), id)?;
+        if output.contains_key(id) {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("policy rule ID `{id}` is already defined by another layer"),
+                "use a unique rule ID; rules accumulate and cannot be replaced",
+            ));
+        }
+        let table = require_table(path, document, item, &format!("policy.rules.{id}"))?;
+        reject_unknown_keys(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            &[
+                "action",
+                "name",
+                "version",
+                "source",
+                "checksum",
+                "source-tree-sha256",
+                "license",
+                "allow-build-script",
+                "native-tools",
+            ],
+        )?;
+        let action_item = table.get("action").ok_or_else(|| {
+            Error::at(
+                path,
+                document.line_of_table(table),
+                format!("policy rule `{id}` is missing `action`"),
+                "set action to `allow` or `deny`",
+            )
+        })?;
+        let action = match action_item.as_str() {
+            Some("allow") => PolicyAction::Allow,
+            Some("deny") => PolicyAction::Deny,
+            Some(value) => {
+                return Err(Error::at(
+                    path,
+                    document.line_of_item(action_item),
+                    format!("unsupported policy action `{value}`"),
+                    "choose `allow` or `deny`",
+                ));
+            }
+            None => {
+                return Err(type_error(
+                    path,
+                    document,
+                    action_item,
+                    &format!("policy.rules.{id}.action"),
+                    "a string",
+                ));
+            }
+        };
+        let name = optional_string(path, document, table, &format!("policy.rules.{id}"), "name")?;
+        if let Some(name) = &name {
+            validate_package_name(path, document.line_of_table(table), name)?;
+        }
+        let version = optional_string(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            "version",
+        )?
+        .map(|value| parse_requirement(path, document.line_of_table(table), &value))
+        .transpose()?;
+        let source = optional_string(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            "source",
+        )?;
+        if source
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "crates.io" | "path" | "system-vendored-path"))
+        {
+            return Err(Error::at(
+                path,
+                document.line_of_table(table),
+                format!("unsupported policy source `{}`", source.as_deref().unwrap()),
+                "choose crates.io, path, or system-vendored-path",
+            ));
+        }
+        let checksum = optional_digest(path, document, table, id, "checksum")?;
+        let source_tree_sha256 = optional_digest(path, document, table, id, "source-tree-sha256")?;
+        let license = optional_string(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            "license",
+        )?;
+        let allow_build_script = optional_bool(
+            path,
+            document,
+            table,
+            &format!("policy.rules.{id}"),
+            "allow-build-script",
+        )?
+        .unwrap_or(false);
+        let native_tools = match table.get("native-tools") {
+            Some(item) => parse_native_roles(path, document, item)?,
+            None => BTreeSet::new(),
+        };
+        if !native_tools.is_empty() && !allow_build_script {
+            return Err(Error::at(
+                path,
+                document.line_of_table(table),
+                format!(
+                    "policy rule `{id}` grants native tools without `allow-build-script = true`"
+                ),
+                "explicitly allow the build script before granting native tools",
+            ));
+        }
+        if !native_tools.is_empty()
+            && matches!(
+                source.as_deref(),
+                Some("path") | Some("system-vendored-path")
+            )
+            && source_tree_sha256.is_none()
+        {
+            return Err(Error::at(
+                path,
+                document.line_of_table(table),
+                format!("path policy rule `{id}` grants native tools without a source-tree digest"),
+                "pin `source-tree-sha256` before granting native tools",
+            ));
+        }
+        output.insert(
+            id.to_owned(),
+            PolicyRule {
+                action,
+                name,
+                version,
+                source,
+                checksum,
+                source_tree_sha256,
+                license,
+                allow_build_script,
+                native_tools,
+                provenance: path.to_path_buf(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn merge_required_patches(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
+    let Some(item) = document.root().get("required-patches") else {
+        return Ok(());
+    };
+    let root = require_table(path, document, item, "required-patches")?;
+    reject_unknown_keys(path, document, root, "required-patches", &["crates-io"])?;
+    let Some(item) = root.get("crates-io") else {
+        return Ok(());
+    };
+    let rules = require_table(path, document, item, "required-patches.crates-io")?;
+    for (id, item) in rules.iter() {
+        validate_rule_id(path, document.line_of_item(item), id)?;
+        if config.required_patches.contains_key(id) {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("required patch ID `{id}` conflicts with another layer"),
+                "use one exact requirement for each patch ID",
+            ));
+        }
+        let table = require_table(
+            path,
+            document,
+            item,
+            &format!("required-patches.crates-io.{id}"),
+        )?;
+        reject_unknown_keys(
+            path,
+            document,
+            table,
+            &format!("required-patches.crates-io.{id}"),
+            &[
+                "name",
+                "version",
+                "upstream-checksum",
+                "git-url",
+                "git-commit",
+                "source-tree-sha256",
+            ],
+        )?;
+        let name = required_string(path, document, table, id, "name")?;
+        validate_package_name(path, document.line_of_table(table), &name)?;
+        let version_text = required_string(path, document, table, id, "version")?;
+        let version = parse_exact_requirement(path, document.line_of_table(table), &version_text)?;
+        let upstream_checksum = required_digest(path, document, table, id, "upstream-checksum")?;
+        let git_url = required_string(path, document, table, id, "git-url")?;
+        validate_https_git_url(path, document.line_of_table(table), &git_url)?;
+        let git_commit = required_string(path, document, table, id, "git-commit")?;
+        if !is_hex(&git_commit, 40) {
+            return Err(Error::at(
+                path,
+                document.line_of_table(table),
+                format!("required patch `{id}` has an invalid Git commit"),
+                "pin a full 40-character lowercase Git commit ID",
+            ));
+        }
+        let source_tree_sha256 = required_digest(path, document, table, id, "source-tree-sha256")?;
+        config.required_patches.insert(
+            id.to_owned(),
+            RequiredPatch {
+                name,
+                version,
+                upstream_checksum,
+                git_url,
+                git_commit,
+                source_tree_sha256,
+                provenance: path.to_path_buf(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn merge_constraints(
+    path: &Path,
+    kind: LayerKind,
+    document: &Document,
+    config: &mut Config,
+) -> Result<()> {
+    let Some(item) = document.root().get("system-constraints") else {
+        return Ok(());
+    };
+    if !matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem) {
+        return Err(Error::at(
+            path,
+            document.line_of_item(item),
+            "`system-constraints` is allowed only in the trusted system/base layer",
+            "remove it from user or repository-local configuration",
+        ));
+    }
+    let table = require_table(path, document, item, "system-constraints")?;
+    reject_unknown_keys(path, document, table, "system-constraints", &["locked"])?;
+    let locked = table.get("locked").ok_or_else(|| {
+        Error::at(
+            path,
+            document.line_of_table(table),
+            "`system-constraints` is missing `locked`",
+            "list the key/table prefixes protected from later layers",
+        )
+    })?;
+    for key in require_string_array(path, document, locked, "system-constraints.locked")? {
+        validate_constraint_key(path, document.line_of_item(locked), &key)?;
+        if config
+            .constraints
+            .iter()
+            .any(|constraint| constraint.key == key)
+        {
+            return Err(Error::at(
+                path,
+                document.line_of_item(locked),
+                format!("system constraint `{key}` is listed more than once"),
+                "list each locked prefix once",
+            ));
+        }
+        config.constraints.push(Constraint {
+            key,
+            provenance: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_locked_overrides(
+    path: &Path,
+    kind: LayerKind,
+    document: &Document,
+    constraints: &[Constraint],
+) -> Result<()> {
+    if matches!(kind, LayerKind::LinuxBase | LayerKind::MotorSystem) {
+        return Ok(());
+    }
+    let mut leaves = Vec::new();
+    collect_leaf_paths(document.root(), "", &mut leaves);
+    for leaf in leaves {
+        if let Some(constraint) = constraints.iter().find(|constraint| {
+            leaf == constraint.key
+                || leaf.starts_with(&format!("{}.", constraint.key))
+                || constraint.key.starts_with(&format!("{leaf}."))
+        }) {
+            return Err(Error::failure(format!(
+                "configuration `{}` attempts to override locked `{}` from `{}`",
+                path.display(),
+                constraint.key,
+                constraint.provenance.display()
+            ))
+            .with_help("remove the later-layer override"));
+        }
+    }
+    Ok(())
+}
+
+fn collect_leaf_paths(table: &Table, prefix: &str, output: &mut Vec<String>) {
+    for (key, item) in table.iter() {
+        let path = if prefix.is_empty() {
+            key.to_owned()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match item {
+            Item::Table(table) => collect_leaf_paths(table, &path, output),
+            Item::ArrayOfTables(_) | Item::Value(_) | Item::None => output.push(path),
+        }
+    }
+}
+
+fn validate_repository_layout(repositories: &Repositories) -> Result<()> {
+    let paths = [
+        ("system", repositories.system.as_deref()),
+        ("user", repositories.user.as_deref()),
+        ("local", repositories.local.as_deref()),
+    ];
+    for (left_name, left) in paths {
+        let Some(left) = left else {
+            continue;
+        };
+        for (right_name, right) in paths {
+            let Some(right) = right else {
+                continue;
+            };
+            if left_name >= right_name {
+                continue;
+            }
+            if left == right || left.starts_with(right) || right.starts_with(left) {
+                return Err(Error::failure(format!(
+                    "repositories.{left_name} `{}` and repositories.{right_name} `{}` overlap",
+                    left.display(),
+                    right.display()
+                ))
+                .with_help("configure distinct repositories that do not contain one another"));
+            }
+        }
     }
     Ok(())
 }
@@ -234,12 +1142,11 @@ fn load_cargo_layers(
                 .get("HOME")
                 .map(|home| Path::new(home).join(".cargo"))
         });
-
     let mut layers = Vec::new();
-    if let Some(home) = cargo_home.as_deref() {
-        if let Some(path) = cargo_config_in(home) {
-            layers.push(path);
-        }
+    if let Some(home) = cargo_home.as_deref()
+        && let Some(path) = cargo_config_in(home)
+    {
+        layers.push(path);
     }
     let mut ancestors: Vec<_> = package_root.ancestors().collect();
     ancestors.reverse();
@@ -272,79 +1179,117 @@ fn cargo_config_in(directory: &Path) -> Option<PathBuf> {
 }
 
 fn merge_cargo_file(path: &Path, config: &mut Config) -> Result<()> {
-    let source = read_config(path)?;
-    let entries = parse_entries(path, &source)?;
+    let document = Document::load(path, "Cargo configuration")?;
+    for (key, item) in document.root().iter() {
+        if !matches!(key, "build" | "target") {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("unsupported Cargo configuration table or key `{key}`"),
+                "Lorry reads only build and target compiler configuration",
+            ));
+        }
+    }
     let definition_root = path
         .parent()
         .and_then(Path::parent)
         .unwrap_or_else(|| Path::new("/"));
-
-    for entry in entries {
-        if entry.table == "build" {
-            match entry.key.as_str() {
+    if let Some(item) = document.root().get("build") {
+        let build = require_table(path, &document, item, "build")?;
+        reject_unknown_keys(
+            path,
+            &document,
+            build,
+            "build",
+            &[
+                "target",
+                "rustflags",
+                "target-dir",
+                "rustc-wrapper",
+                "rustc-workspace-wrapper",
+            ],
+        )?;
+        for (key, item) in build.iter() {
+            match key {
                 "target" => {
-                    let value = entry.string(path)?;
-                    validate_target_at(path, entry.line, &value)?;
+                    let value = require_string(path, &document, item, "build.target")?;
+                    validate_target_at(path, document.line_of_item(item), &value)?;
                     config.default_target = Some(value);
                 }
                 "rustflags" => {
-                    config.build_rustflags.extend(entry.words(path)?);
+                    config.build_rustflags.extend(argument_words(
+                        path,
+                        &document,
+                        item,
+                        "build.rustflags",
+                    )?);
                 }
                 "target-dir" => {
-                    return Err(entry.error(
+                    return Err(Error::at(
                         path,
+                        document.line_of_item(item),
                         "Cargo `build.target-dir` is not supported",
                         "remove it; Lorry always writes below `target/lorry`",
                     ));
                 }
                 "rustc-wrapper" | "rustc-workspace-wrapper" => {
-                    return Err(entry.error(
+                    return Err(Error::at(
                         path,
-                        format!("Cargo `build.{}` is not supported", entry.key),
-                        "remove the wrapper; compiler wrappers are outside Stage 1",
+                        document.line_of_item(item),
+                        format!("Cargo `build.{key}` is not supported"),
+                        "remove the wrapper; compiler wrappers are outside Stage 2",
                     ));
                 }
-                _ => return Err(unsupported_cargo(path, &entry)),
+                _ => unreachable!(),
             }
-            continue;
         }
-        if let Some(selector) = parse_target_table(path, entry.line, &entry.table)? {
+    }
+    if let Some(item) = document.root().get("target") {
+        let targets = require_table(path, &document, item, "target")?;
+        for (selector, item) in targets.iter() {
+            let selector = parse_target_selector(path, document.line_of_item(item), selector)?;
             let options = config.targets.entry(selector).or_default();
-            match entry.key.as_str() {
-                "linker" => {
-                    let value = entry.string(path)?;
-                    options.linker = Some(resolve_program_path(definition_root, &value));
-                }
-                "runner" => {
-                    let mut value = entry.words(path)?;
-                    if value.is_empty() {
-                        return Err(entry.error(
-                            path,
-                            "target runner cannot be empty",
-                            "configure an executable and optional arguments",
-                        ));
+            let table = require_table(path, &document, item, "target selector")?;
+            reject_unknown_keys(
+                path,
+                &document,
+                table,
+                "target",
+                &["linker", "runner", "rustflags"],
+            )?;
+            for (key, item) in table.iter() {
+                match key {
+                    "linker" => {
+                        let value = require_string(path, &document, item, "target.linker")?;
+                        options.linker = Some(resolve_program_path(definition_root, &value));
                     }
-                    value[0] = resolve_program_path(definition_root, &value[0])
-                        .to_string_lossy()
-                        .into_owned();
-                    options.runner = Some(value);
+                    "runner" => {
+                        let mut value = argument_words(path, &document, item, "target.runner")?;
+                        if value.is_empty() {
+                            return Err(Error::at(
+                                path,
+                                document.line_of_item(item),
+                                "target runner cannot be empty",
+                                "configure an executable and optional arguments",
+                            ));
+                        }
+                        value[0] = resolve_program_path(definition_root, &value[0])
+                            .to_string_lossy()
+                            .into_owned();
+                        options.runner = Some(value);
+                    }
+                    "rustflags" => options.rustflags.extend(argument_words(
+                        path,
+                        &document,
+                        item,
+                        "target.rustflags",
+                    )?),
+                    _ => unreachable!(),
                 }
-                "rustflags" => options.rustflags.extend(entry.words(path)?),
-                _ => return Err(unsupported_cargo(path, &entry)),
             }
-            continue;
         }
-        return Err(unsupported_cargo(path, &entry));
     }
     Ok(())
-}
-
-fn unsupported_cargo(path: &Path, entry: &Entry) -> Error {
-    entry.error(
-        path,
-        format!("unsupported Cargo configuration key `{}`", entry.full_key()),
-        "Lorry reads only build.target, build.rustflags, and target linker/runner/rustflags",
-    )
 }
 
 fn apply_cargo_environment(
@@ -393,34 +1338,19 @@ fn apply_cargo_environment(
         match field {
             "linker" => options.linker = Some(PathBuf::from(value)),
             "runner" => {
-                options.runner = Some(
-                    split_words(value)
-                        .map_err(|message| Error::failure(format!("invalid `{key}`: {message}")))?,
-                )
+                options.runner =
+                    Some(split_words(value).map_err(|message| {
+                        Error::failure(format!("invalid `{key}`: {message}"))
+                    })?);
             }
             "rustflags" => {
                 options.rustflags = split_words(value)
-                    .map_err(|message| Error::failure(format!("invalid `{key}`: {message}")))?
+                    .map_err(|message| Error::failure(format!("invalid `{key}`: {message}")))?;
             }
             _ => unreachable!(),
         }
     }
     Ok(())
-}
-
-fn encode_target_environment(target: &str) -> String {
-    target.to_ascii_uppercase().replace('-', "_")
-}
-
-fn decode_target_environment(encoded: &str) -> String {
-    // Cargo's environment spelling loses the distinction between `_` and `-`.
-    // Preserve the only underscored architecture admitted by the initial
-    // Linux/Motor target set, and use hyphens for the remaining separators.
-    if let Some(rest) = encoded.strip_prefix("X86_64_") {
-        format!("x86_64-{}", rest.to_ascii_lowercase().replace('_', "-"))
-    } else {
-        encoded.to_ascii_lowercase().replace('_', "-")
-    }
 }
 
 pub fn environment_rustflags() -> Result<Option<Vec<String>>> {
@@ -441,11 +1371,7 @@ pub fn environment_rustflags() -> Result<Option<Vec<String>>> {
     Ok(None)
 }
 
-fn parse_target_table(path: &Path, line: usize, table: &str) -> Result<Option<TargetSelector>> {
-    let Some(raw) = table.strip_prefix("target.") else {
-        return Ok(None);
-    };
-    let value = unquote(raw).unwrap_or(raw).trim();
+fn parse_target_selector(path: &Path, line: usize, value: &str) -> Result<TargetSelector> {
     if value.starts_with("cfg(") && value.ends_with(')') {
         if value.len() <= 5 {
             return Err(Error::at(
@@ -455,10 +1381,10 @@ fn parse_target_table(path: &Path, line: usize, table: &str) -> Result<Option<Ta
                 "use a non-empty cfg expression",
             ));
         }
-        Ok(Some(TargetSelector::Cfg(value.to_owned())))
+        Ok(TargetSelector::Cfg(value.to_owned()))
     } else {
         validate_target_at(path, line, value)?;
-        Ok(Some(TargetSelector::Triple(value.to_owned())))
+        Ok(TargetSelector::Triple(value.to_owned()))
     }
 }
 
@@ -492,9 +1418,414 @@ fn resolve_program_path(definition_root: &Path, value: &str) -> PathBuf {
     }
 }
 
-fn read_config(path: &Path) -> Result<String> {
-    fs::read_to_string(path)
-        .map_err(|error| Error::failure(format!("failed to read `{}`: {error}", path.display())))
+fn require_table<'a>(
+    path: &Path,
+    document: &Document,
+    item: &'a Item,
+    name: &str,
+) -> Result<&'a Table> {
+    item.as_table()
+        .ok_or_else(|| type_error(path, document, item, name, "a TOML table"))
+}
+
+fn reject_unknown_keys(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    table_name: &str,
+    allowed: &[&str],
+) -> Result<()> {
+    for (key, item) in table.iter() {
+        if !allowed.contains(&key) {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("unsupported configuration key `{table_name}.{key}`"),
+                "remove the unknown key",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn required_string(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    table_name: &str,
+    key: &str,
+) -> Result<String> {
+    let item = table.get(key).ok_or_else(|| {
+        Error::at(
+            path,
+            document.line_of_table(table),
+            format!("configuration table `{table_name}` is missing `{key}`"),
+            "add the required string value",
+        )
+    })?;
+    require_string(path, document, item, &format!("{table_name}.{key}"))
+}
+
+fn optional_string(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    table_name: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    table
+        .get(key)
+        .map(|item| require_string(path, document, item, &format!("{table_name}.{key}")))
+        .transpose()
+}
+
+fn require_string(path: &Path, document: &Document, item: &Item, name: &str) -> Result<String> {
+    item.as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| type_error(path, document, item, name, "a string"))
+}
+
+fn require_bool(path: &Path, document: &Document, item: &Item, name: &str) -> Result<bool> {
+    item.as_bool()
+        .ok_or_else(|| type_error(path, document, item, name, "a boolean"))
+}
+
+fn optional_bool(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    table_name: &str,
+    key: &str,
+) -> Result<Option<bool>> {
+    table
+        .get(key)
+        .map(|item| require_bool(path, document, item, &format!("{table_name}.{key}")))
+        .transpose()
+}
+
+fn require_string_array(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+    name: &str,
+) -> Result<Vec<String>> {
+    let array = item
+        .as_array()
+        .ok_or_else(|| type_error(path, document, item, name, "an array of strings"))?;
+    array
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                Error::at(
+                    path,
+                    document.line_of_value(value),
+                    format!("`{name}` must contain only strings"),
+                    "remove the non-string array item",
+                )
+            })
+        })
+        .collect()
+}
+
+fn argument_words(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+    name: &str,
+) -> Result<Vec<String>> {
+    if item.as_array().is_some() {
+        require_string_array(path, document, item, name)
+    } else if let Some(value) = item.as_str() {
+        split_words(value).map_err(|message| {
+            Error::at(
+                path,
+                document.line_of_item(item),
+                format!("invalid argument string for `{name}`: {message}"),
+                "use an argument array when values contain complex quoting",
+            )
+        })
+    } else {
+        Err(type_error(
+            path,
+            document,
+            item,
+            name,
+            "a string or string array",
+        ))
+    }
+}
+
+fn absolute_path(path: &Path, document: &Document, item: &Item, name: &str) -> Result<PathBuf> {
+    let value = require_string(path, document, item, name)?;
+    canonical_config_path(path, document.line_of_item(item), name, &value)
+}
+
+fn canonical_config_path(path: &Path, line: usize, name: &str, value: &str) -> Result<PathBuf> {
+    let candidate = Path::new(value);
+    if !candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("configured `{name}` must be an absolute normalized path"),
+            "use an absolute path without `.` or `..` components",
+        ));
+    }
+    let mut existing = candidate;
+    let mut tail = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            break;
+        };
+        tail.push(name.to_os_string());
+        existing = existing.parent().unwrap_or_else(|| Path::new("/"));
+    }
+    let mut result = fs::canonicalize(existing).map_err(|error| {
+        Error::at(
+            path,
+            line,
+            format!("failed to canonicalize configured `{name}`: {error}"),
+            "use a path beneath an accessible existing directory",
+        )
+    })?;
+    for component in tail.into_iter().rev() {
+        result.push(component);
+    }
+    Ok(result)
+}
+
+fn positive_integer(path: &Path, document: &Document, item: &Item, name: &str) -> Result<u64> {
+    match item.as_integer() {
+        Some(value) if value > 0 => Ok(value as u64),
+        _ => Err(Error::at(
+            path,
+            document.line_of_item(item),
+            format!("`{name}` must be a positive integer"),
+            "use a finite value greater than zero",
+        )),
+    }
+}
+
+fn native_arguments(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+    name: &str,
+) -> Result<Vec<String>> {
+    let arguments = require_string_array(path, document, item, name)?;
+    for argument in &arguments {
+        if argument.is_empty()
+            || argument
+                .bytes()
+                .any(|byte| byte == 0 || byte.is_ascii_whitespace())
+        {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("`{name}` contains an empty, whitespace-bearing, or NUL argument"),
+                "use one non-empty argument per array element",
+            ));
+        }
+    }
+    Ok(arguments)
+}
+
+fn parse_native_role(path: &Path, line: usize, value: &str) -> Result<NativeToolRole> {
+    match value {
+        "c-compiler" => Ok(NativeToolRole::CCompiler),
+        "archiver" => Ok(NativeToolRole::Archiver),
+        _ => Err(Error::at(
+            path,
+            line,
+            format!("unsupported native-tool role `{value}`"),
+            "Stage 2 supports only c-compiler and archiver",
+        )),
+    }
+}
+
+fn parse_native_roles(
+    path: &Path,
+    document: &Document,
+    item: &Item,
+) -> Result<BTreeSet<NativeToolRole>> {
+    let mut output = BTreeSet::new();
+    for value in require_string_array(path, document, item, "policy rule native-tools")? {
+        let role = parse_native_role(path, document.line_of_item(item), &value)?;
+        if !output.insert(role) {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                format!("duplicate native-tool role `{value}`"),
+                "list each granted role once",
+            ));
+        }
+    }
+    Ok(output)
+}
+
+fn optional_digest(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    id: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    optional_string(path, document, table, id, key)?
+        .map(|value| {
+            if is_hex(&value, 64) {
+                Ok(value)
+            } else {
+                Err(Error::at(
+                    path,
+                    document.line_of_table(table),
+                    format!("`{id}.{key}` must be a lowercase SHA-256 digest"),
+                    "use exactly 64 lowercase hexadecimal digits",
+                ))
+            }
+        })
+        .transpose()
+}
+
+fn required_digest(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    id: &str,
+    key: &str,
+) -> Result<String> {
+    optional_digest(path, document, table, id, key)?.ok_or_else(|| {
+        Error::at(
+            path,
+            document.line_of_table(table),
+            format!("required patch `{id}` is missing `{key}`"),
+            "pin the reviewed SHA-256 digest",
+        )
+    })
+}
+
+fn parse_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq> {
+    VersionReq::parse(value).map_err(|error| {
+        Error::at(
+            path,
+            line,
+            format!("invalid semantic version requirement `{value}`: {error}"),
+            "use a Cargo-compatible semantic version requirement",
+        )
+    })
+}
+
+fn parse_exact_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq> {
+    let requirement = parse_requirement(path, line, value)?;
+    if requirement.comparators.len() != 1 || requirement.comparators[0].op != Op::Exact {
+        return Err(Error::at(
+            path,
+            line,
+            format!("required patch version `{value}` is not exact"),
+            "use `=major.minor.patch`",
+        ));
+    }
+    Ok(requirement)
+}
+
+fn validate_rule_id(path: &Path, line: usize, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("invalid policy/patch rule ID `{value}`"),
+            "use ASCII letters, digits, `-`, and `_`",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_constraint_key(path: &Path, line: usize, value: &str) -> Result<()> {
+    if value.is_empty()
+        || !value.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("invalid locked configuration prefix `{value}`"),
+            "use a dotted sequence of configuration key names",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_package_name(path: &Path, line: usize, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("invalid package name `{value}`"),
+            "use ASCII letters, digits, `-`, and `_`",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_https_git_url(path: &Path, line: usize, value: &str) -> Result<()> {
+    if !value.starts_with("https://")
+        || value.contains('@')
+        || value.contains('?')
+        || value.contains('#')
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(Error::at(
+            path,
+            line,
+            format!("required patch Git URL `{value}` is not a plain public HTTPS URL"),
+            "use an https:// URL without credentials, query, or fragment",
+        ));
+    }
+    Ok(())
+}
+
+fn is_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn type_error(path: &Path, document: &Document, item: &Item, name: &str, expected: &str) -> Error {
+    Error::at(
+        path,
+        document.line_of_item(item),
+        format!("configuration key `{name}` must be {expected}"),
+        "use the supported TOML value type",
+    )
+}
+
+fn encode_target_environment(target: &str) -> String {
+    target.to_ascii_uppercase().replace('-', "_")
+}
+
+fn decode_target_environment(encoded: &str) -> String {
+    if let Some(rest) = encoded.strip_prefix("X86_64_") {
+        format!("x86_64-{}", rest.to_ascii_lowercase().replace('_', "-"))
+    } else {
+        encoded.to_ascii_lowercase().replace('_', "-")
+    }
 }
 
 fn nearest_file(start: &Path, name: &str) -> Option<PathBuf> {
@@ -507,310 +1838,6 @@ fn nearest_file(start: &Path, name: &str) -> Option<PathBuf> {
 fn same_path(left: &Path, right: &Path) -> bool {
     fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf())
         == fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
-}
-
-#[derive(Clone, Debug)]
-struct Entry {
-    table: String,
-    key: String,
-    value: ConfigValue,
-    line: usize,
-}
-
-impl Entry {
-    fn full_key(&self) -> String {
-        if self.table.is_empty() {
-            self.key.clone()
-        } else {
-            format!("{}.{}", self.table, self.key)
-        }
-    }
-
-    fn string(&self, path: &Path) -> Result<String> {
-        match &self.value {
-            ConfigValue::String(value) => Ok(value.clone()),
-            _ => Err(self.error(
-                path,
-                format!("configuration key `{}` must be a string", self.full_key()),
-                "use a quoted TOML string",
-            )),
-        }
-    }
-
-    fn integer(&self, path: &Path) -> Result<u64> {
-        match self.value {
-            ConfigValue::Integer(value) => Ok(value),
-            _ => Err(self.error(
-                path,
-                format!("configuration key `{}` must be an integer", self.full_key()),
-                "use an unsigned integer",
-            )),
-        }
-    }
-
-    fn words(&self, path: &Path) -> Result<Vec<String>> {
-        match &self.value {
-            ConfigValue::Strings(values) => Ok(values.clone()),
-            ConfigValue::String(value) => split_words(value).map_err(|message| {
-                self.error(
-                    path,
-                    format!(
-                        "invalid argument string for `{}`: {message}",
-                        self.full_key()
-                    ),
-                    "use an argument array when values contain complex quoting",
-                )
-            }),
-            _ => Err(self.error(
-                path,
-                format!(
-                    "configuration key `{}` must be a string or string array",
-                    self.full_key()
-                ),
-                "use a quoted string or an array of quoted arguments",
-            )),
-        }
-    }
-
-    fn error(
-        &self,
-        path: &Path,
-        message: impl std::fmt::Display,
-        help: impl Into<String>,
-    ) -> Error {
-        Error::at(path, self.line, message, help)
-    }
-}
-
-#[derive(Clone, Debug)]
-enum ConfigValue {
-    String(String),
-    Strings(Vec<String>),
-    Integer(u64),
-    Bool,
-}
-
-fn parse_entries(path: &Path, source: &str) -> Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    let mut current_table = String::new();
-    let mut seen = BTreeMap::<(String, String), usize>::new();
-    for (index, raw) in source.lines().enumerate() {
-        let line = index + 1;
-        let text = strip_comment(raw).trim();
-        if text.is_empty() {
-            continue;
-        }
-        if text.starts_with('[') {
-            let Some(table) = text
-                .strip_prefix('[')
-                .and_then(|value| value.strip_suffix(']'))
-                .map(str::trim)
-            else {
-                return Err(Error::at(
-                    path,
-                    line,
-                    "malformed configuration table",
-                    "close the table header on the same line",
-                ));
-            };
-            if table.is_empty() || table.starts_with('[') {
-                return Err(Error::at(
-                    path,
-                    line,
-                    "array tables are not supported in Stage-1 configuration",
-                    "use one ordinary table for each supported target",
-                ));
-            }
-            current_table = table.to_owned();
-            continue;
-        }
-        let Some((raw_key, raw_value)) = text.split_once('=') else {
-            return Err(Error::at(
-                path,
-                line,
-                "expected a configuration `key = value` assignment",
-                "put each Stage-1 value on one line",
-            ));
-        };
-        let key = raw_key.trim();
-        if key.is_empty()
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(Error::at(
-                path,
-                line,
-                format!("unsupported configuration key `{key}`"),
-                "use a simple bare key",
-            ));
-        }
-        let identity = (current_table.clone(), key.to_owned());
-        if seen.insert(identity, line).is_some() {
-            return Err(Error::at(
-                path,
-                line,
-                format!(
-                    "duplicate configuration key `{}{}{}.`",
-                    current_table,
-                    if current_table.is_empty() { "" } else { "." },
-                    key
-                )
-                .trim_end_matches('.'),
-                "remove the duplicate key",
-            ));
-        }
-        entries.push(Entry {
-            table: current_table.clone(),
-            key: key.to_owned(),
-            value: parse_config_value(path, line, raw_value.trim())?,
-            line,
-        });
-    }
-    Ok(entries)
-}
-
-fn parse_config_value(path: &Path, line: usize, value: &str) -> Result<ConfigValue> {
-    if value.starts_with('"') || value.starts_with('\'') {
-        return parse_quoted(path, line, value).map(ConfigValue::String);
-    }
-    if value.starts_with('[') {
-        return parse_array(path, line, value).map(ConfigValue::Strings);
-    }
-    if matches!(value, "true" | "false") {
-        return Ok(ConfigValue::Bool);
-    }
-    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return value.parse().map(ConfigValue::Integer).map_err(|_| {
-            Error::at(
-                path,
-                line,
-                "configuration integer is out of range",
-                "use an unsigned 64-bit integer",
-            )
-        });
-    }
-    Err(Error::at(
-        path,
-        line,
-        format!("unsupported Stage-1 configuration value `{value}`"),
-        "use a one-line string, string array, boolean, or unsigned integer",
-    ))
-}
-
-fn parse_quoted(path: &Path, line: usize, value: &str) -> Result<String> {
-    let quote = value.as_bytes()[0];
-    if value.len() < 2 || value.as_bytes()[value.len() - 1] != quote {
-        return Err(Error::at(
-            path,
-            line,
-            "unterminated configuration string",
-            "close the string on the same line",
-        ));
-    }
-    let body = &value[1..value.len() - 1];
-    if quote == b'\'' {
-        if body.contains('\'') || body.chars().any(char::is_control) {
-            return Err(Error::at(
-                path,
-                line,
-                "invalid literal configuration string",
-                "remove embedded quotes and control characters",
-            ));
-        }
-        return Ok(body.to_owned());
-    }
-    let mut result = String::new();
-    let mut escaped = false;
-    for character in body.chars() {
-        if escaped {
-            match character {
-                '"' | '\\' => result.push(character),
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                _ => {
-                    return Err(Error::at(
-                        path,
-                        line,
-                        format!("unsupported configuration escape `\\{character}`"),
-                        "use \\\", \\\\, \\n, \\r, or \\t",
-                    ));
-                }
-            }
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '"' || character.is_control() {
-            return Err(Error::at(
-                path,
-                line,
-                "invalid character in configuration string",
-                "escape quotes and control characters",
-            ));
-        } else {
-            result.push(character);
-        }
-    }
-    if escaped {
-        return Err(Error::at(
-            path,
-            line,
-            "unterminated configuration escape",
-            "complete the escape before the closing quote",
-        ));
-    }
-    Ok(result)
-}
-
-fn parse_array(path: &Path, line: usize, value: &str) -> Result<Vec<String>> {
-    let Some(body) = value
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-    else {
-        return Err(Error::at(
-            path,
-            line,
-            "unterminated configuration array",
-            "close the array on the same line",
-        ));
-    };
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in body.bytes().enumerate() {
-        if escaped {
-            escaped = false;
-        } else if quote == Some(b'"') && byte == b'\\' {
-            escaped = true;
-        } else if matches!(byte, b'"' | b'\'') {
-            if quote == Some(byte) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(byte);
-            }
-        } else if byte == b',' && quote.is_none() {
-            let item = body[start..index].trim();
-            if !item.is_empty() {
-                result.push(parse_quoted(path, line, item)?);
-            }
-            start = index + 1;
-        }
-    }
-    if quote.is_some() {
-        return Err(Error::at(
-            path,
-            line,
-            "unterminated string in configuration array",
-            "close every string on the same line",
-        ));
-    }
-    let item = body[start..].trim();
-    if !item.is_empty() {
-        result.push(parse_quoted(path, line, item)?);
-    }
-    Ok(result)
 }
 
 fn split_words(value: &str) -> std::result::Result<Vec<String>, String> {
@@ -858,37 +1885,6 @@ fn split_words(value: &str) -> std::result::Result<Vec<String>, String> {
     Ok(words)
 }
 
-fn unquote(value: &str) -> Option<&str> {
-    if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if matches!(bytes[0], b'\'' | b'"') && bytes[0] == bytes[value.len() - 1] {
-            return Some(&value[1..value.len() - 1]);
-        }
-    }
-    None
-}
-
-fn strip_comment(text: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, byte) in text.bytes().enumerate() {
-        if escaped {
-            escaped = false;
-        } else if quote == Some(b'"') && byte == b'\\' {
-            escaped = true;
-        } else if matches!(byte, b'"' | b'\'') {
-            if quote == Some(byte) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(byte);
-            }
-        } else if byte == b'#' && quote.is_none() {
-            return &text[..index];
-        }
-    }
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,18 +1922,28 @@ mod tests {
         fs::create_dir_all(package.join(".cargo")).unwrap();
         fs::write(
             home.join(".config/lorry/lorry.toml"),
-            "config-version = 1\ncargo-compat-version = \"1.97\"\n\
-             [toolchain]\nrustc = \"/base/rustc\"\n",
+            format!(
+                "config-version = 1\ncargo-compat-version = \"1.97\"\n\
+                 [toolchain]\nrustc = \"/base/rustc\"\n\
+                 [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n",
+                temp.0.join("system").display(),
+                temp.0.join("user").display(),
+            ),
         )
         .unwrap();
         fs::write(
             package.join("lorry.toml"),
-            "config-version = 1\ncargo-compat-version = \"1.98\"\n",
+            format!(
+                "config-version = 1\ncargo-compat-version = \"1.98\"\n\
+                 [repositories]\nlocal = \"{}\"\n",
+                temp.0.join("local").display()
+            ),
         )
         .unwrap();
         fs::write(
             home.join(".cargo/config.toml"),
-            "[build]\ntarget = \"x86_64-unknown-linux-musl\"\nrustflags = [\"--cfg\", \"base\"]\n",
+            "[build]\ntarget = \"x86_64-unknown-linux-musl\"\nrustflags = [\n\
+             \"--cfg\",\n\"base\",\n]\n",
         )
         .unwrap();
         fs::write(
@@ -958,11 +1964,148 @@ mod tests {
             Some("x86_64-unknown-linux-musl")
         );
         assert_eq!(config.build_rustflags, ["--cfg", "base", "--cfg", "local"]);
+        assert!(config.repositories.system.is_some());
+        assert!(config.repositories.user.is_some());
+        assert!(config.repositories.local.is_some());
         let target = config
             .target_options("x86_64-unknown-linux-musl", &[])
             .unwrap();
         assert_eq!(target.linker, Some(package.join("tools/ld")));
         assert_eq!(target.runner.unwrap(), ["runner", "--flag"]);
+    }
+
+    #[test]
+    fn parses_complete_system_policy_and_required_patch() {
+        let temp = TempDir::new();
+        let config_path = temp.0.join("lorry.toml");
+        let system = temp.0.join("system");
+        let user = temp.0.join("user");
+        let compiler = temp.0.join("llvm");
+        let source = format!(
+            r#"
+config-version = 1
+cargo-compat-version = "1.98"
+
+[repositories]
+system = "{}"
+user = "{}"
+keep-artifacts = true
+keep-sources = true
+
+[vendor]
+targets = [
+  "x86_64-unknown-linux-musl",
+  "x86_64-unknown-motor",
+]
+include-host = true
+
+[native-tools."x86_64-unknown-motor".c-compiler]
+program = "{}"
+prefix-args = ["clang"]
+flags = ["--target=x86_64-unknown-motor"]
+
+[policy]
+default = "deny"
+path-roots = []
+
+[policy.limits]
+max-packages = 64
+max-depth = 16
+max-package-bytes = 16777216
+max-extracted-package-bytes = 134217728
+max-package-files = 20000
+max-transaction-bytes = 268435456
+max-extracted-transaction-bytes = 1073741824
+build-script-seconds = 300
+build-script-output-bytes = 8388608
+
+[required-patches.crates-io.ring-0_17_14]
+name = "ring"
+version = "=0.17.14"
+upstream-checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+git-url = "https://github.com/moturus/ring.git"
+git-commit = "b1dad2579de791d0c31ad33300187e584ba6c268"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
+
+[policy.rules.allow-ring-0_17_14]
+action = "allow"
+name = "ring"
+version = "=0.17.14"
+source = "system-vendored-path"
+source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
+license = "Apache-2.0 AND ISC"
+allow-build-script = true
+native-tools = ["c-compiler", "archiver"]
+
+[system-constraints]
+locked = [
+  "repositories.system",
+  "required-patches.crates-io.ring-0_17_14",
+  "policy.rules.allow-ring-0_17_14",
+]
+"#,
+            system.display(),
+            user.display(),
+            compiler.display(),
+        );
+        fs::write(&config_path, source).unwrap();
+        let mut config = Config::default();
+        merge_lorry_file(&config_path, LayerKind::LinuxBase, &mut config).unwrap();
+        assert_eq!(config.vendor.targets.len(), 2);
+        assert_eq!(config.policy.rules.len(), 1);
+        assert_eq!(config.required_patches.len(), 1);
+        assert_eq!(config.constraints.len(), 3);
+        assert_eq!(
+            config
+                .native_tools
+                .get(&("x86_64-unknown-motor".to_owned(), NativeToolRole::CCompiler))
+                .unwrap()
+                .prefix_args,
+            ["clang"]
+        );
+    }
+
+    #[test]
+    fn enforces_layer_ownership_constraints_and_repository_separation() {
+        let temp = TempDir::new();
+        let base = temp.0.join("base.toml");
+        let local = temp.0.join("local.toml");
+        fs::write(
+            &base,
+            format!(
+                "config-version = 1\n[repositories]\nsystem = \"{}\"\n\
+                 [policy]\ndefault = \"deny\"\n\
+                 [system-constraints]\nlocked = [\"policy.default\"]\n",
+                temp.0.join("repo").display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &local,
+            format!(
+                "config-version = 1\n[repositories]\nlocal = \"{}\"\n\
+                 [policy]\ndefault = \"allow\"\n",
+                temp.0.join("repo/child").display()
+            ),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        merge_lorry_file(&base, LayerKind::LinuxBase, &mut config).unwrap();
+        let error = merge_lorry_file(&local, LayerKind::Local, &mut config).unwrap_err();
+        assert!(error.to_string().contains("locked"));
+
+        fs::write(
+            &local,
+            format!(
+                "config-version = 1\n[repositories]\nsystem = \"{}\"\n",
+                temp.0.join("other").display()
+            ),
+        )
+        .unwrap();
+        assert!(merge_lorry_file(&local, LayerKind::Local, &mut config).is_err());
+
+        config.repositories.local = Some(temp.0.join("repo/child"));
+        assert!(validate_repository_layout(&config.repositories).is_err());
     }
 
     #[test]
