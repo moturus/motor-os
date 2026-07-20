@@ -699,22 +699,6 @@ fn parse_dependency(
             ));
         }
     }
-    let requirement_item = lookup.get("version").ok_or_else(|| {
-        Error::at(
-            path,
-            line,
-            format!("dependency `{alias}` is missing a version requirement"),
-            "add `version = \"...\"`, including for verified path dependencies",
-        )
-    })?;
-    let requirement_text = requirement_item.as_str().ok_or_else(|| {
-        type_error(
-            path,
-            requirement_item.line(document),
-            &format!("dependencies.{alias}.version"),
-            "a string",
-        )
-    })?;
     let package = match lookup.get("package") {
         Some(value) => value
             .as_str()
@@ -732,7 +716,7 @@ fn parse_dependency(
     validate_package_name(path, line, &package)?;
     let source = match lookup.get("path") {
         Some(value) => {
-            let relative = value.as_str().ok_or_else(|| {
+            let declared = value.as_str().ok_or_else(|| {
                 type_error(
                     path,
                     value.line(document),
@@ -740,25 +724,42 @@ fn parse_dependency(
                     "a string",
                 )
             })?;
-            validate_relative_path(
+            validate_dependency_path(
                 path,
                 value.line(document),
                 &format!("dependencies.{alias}.path"),
-                relative,
+                declared,
             )?;
-            DependencySource::Path(root.join(relative))
+            DependencySource::Path(resolve_declared_path(root, declared))
         }
         None => DependencySource::CratesIo,
+    };
+    let requirement = match lookup.get("version") {
+        Some(item) => {
+            let text = item.as_str().ok_or_else(|| {
+                type_error(
+                    path,
+                    item.line(document),
+                    &format!("dependencies.{alias}.version"),
+                    "a string",
+                )
+            })?;
+            parse_requirement(path, item.line(document), alias, text)?
+        }
+        None if matches!(source, DependencySource::Path(_)) => VersionReq::STAR,
+        None => {
+            return Err(Error::at(
+                path,
+                line,
+                format!("crates.io dependency `{alias}` is missing a version requirement"),
+                "add `version = \"...\"` or declare an explicit local `path`",
+            ));
+        }
     };
     Ok(Dependency {
         alias: alias.to_owned(),
         package,
-        requirement: parse_requirement(
-            path,
-            requirement_item.line(document),
-            alias,
-            requirement_text,
-        )?,
+        requirement,
         source,
         optional: lookup_bool(path, document, &lookup, alias, "optional")?.unwrap_or(false),
         default_features: lookup_bool(path, document, &lookup, alias, "default-features")?
@@ -866,19 +867,19 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
                 ));
             }
         }
-        let relative = table.get("path").and_then(Value::as_str).ok_or_else(|| {
+        let declared = table.get("path").and_then(Value::as_str).ok_or_else(|| {
             Error::at(
                 path,
                 document.line_of_item(item),
                 format!("patch `{alias}` is missing string key `path`"),
-                "use `{ path = \"relative/source\" }`",
+                "use `{ path = \"relative/source\" }` or an absolute local path",
             )
         })?;
-        validate_relative_path(
+        validate_dependency_path(
             path,
             document.line_of_item(item),
             &format!("patch.crates-io.{alias}.path"),
-            relative,
+            declared,
         )?;
         let package = table
             .get("package")
@@ -888,7 +889,7 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
         result.push(PathPatch {
             alias: alias.to_owned(),
             package: package.to_owned(),
-            path: root.join(relative),
+            path: resolve_declared_path(root, declared),
         });
     }
     Ok(result)
@@ -1589,6 +1590,27 @@ fn validate_relative_path(path: &Path, line: usize, name: &str, value: &str) -> 
     Ok(())
 }
 
+fn validate_dependency_path(path: &Path, line: usize, name: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.as_bytes().contains(&0) {
+        return Err(Error::at(
+            path,
+            line,
+            format!("`{name}` must be a non-empty filesystem path"),
+            "use an absolute path or a path relative to the package manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_declared_path(root: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        root.join(path)
+    }
+}
+
 fn validate_lint_level(path: &Path, line: usize, value: &str) -> Result<String> {
     if matches!(value, "allow" | "warn" | "force-warn" | "deny" | "forbid") {
         Ok(value.to_owned())
@@ -1697,7 +1719,7 @@ doc = false
 serde = { version = "=1.0.228", default-features = false, features = [
     "std",
 ] }
-local-name = { package = "real-name", version = "^2.0", path = "../real" }
+local-name = { package = "real-name", path = "../real" }
 
 [target.'cfg(target_os = "motor")'.dependencies]
 motor = "0.16"
@@ -1720,6 +1742,7 @@ unsafe_code = { level = "forbid", priority = 1 }
             manifest.dependencies[1].source,
             DependencySource::Path(_)
         ));
+        assert_eq!(manifest.dependencies[1].requirement, VersionReq::STAR);
         assert_eq!(
             manifest.dependencies[2].target.as_deref(),
             Some("cfg(target_os = \"motor\")")
@@ -1746,6 +1769,43 @@ unsafe_code = { level = "forbid", priority = 1 }
     }
 
     #[test]
+    fn accepts_unversioned_relative_and_absolute_path_dependencies() {
+        let relative = parsed(&RED.replace(
+            "[dependencies]",
+            "[dependencies]\nlocal = { path = \"../local\" }",
+        ))
+        .unwrap();
+        assert_eq!(relative.dependencies[0].requirement, VersionReq::STAR);
+        assert!(matches!(
+            relative.dependencies[0].source,
+            DependencySource::Path(_)
+        ));
+
+        let absolute = parsed(&RED.replace(
+            "[dependencies]",
+            "[dependencies]\nlocal = { path = \"/opt/local\" }",
+        ))
+        .unwrap();
+        assert_eq!(
+            absolute.dependencies[0].source,
+            DependencySource::Path(PathBuf::from("/opt/local"))
+        );
+
+        let rush = Manifest::load(Path::new("../rush")).unwrap();
+        let local = rush
+            .dependencies
+            .iter()
+            .filter(|dependency| matches!(dependency.source, DependencySource::Path(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(local.len(), 2);
+        assert!(
+            local
+                .iter()
+                .all(|dependency| dependency.requirement == VersionReq::STAR)
+        );
+    }
+
+    #[test]
     fn rejects_unknown_and_unsupported_build_semantics() {
         for source in [
             format!("{RED}\n[dev-dependencies]\nhelper = \"1\"\n"),
@@ -1753,12 +1813,18 @@ unsafe_code = { level = "forbid", priority = 1 }
                 "[dependencies]",
                 "[dependencies]\nthing = { version = \"1\", git = \"https://example.test/x\" }",
             ),
+            RED.replace(
+                "[dependencies]",
+                "[dependencies]\nthing = { package = \"other\" }",
+            ),
             format!("{RED}\n[workspace]\nmembers = []\n"),
             format!("{RED}\n[lib]\nproc-macro = true\n"),
         ] {
             let error = parsed(&source).unwrap_err();
             assert!(
-                error.to_string().contains("supported") || error.to_string().contains("unknown"),
+                error.to_string().contains("supported")
+                    || error.to_string().contains("unknown")
+                    || error.to_string().contains("missing"),
                 "{error}"
             );
         }
