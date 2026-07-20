@@ -702,6 +702,11 @@ pub struct NetChannel {
     // task, which drains + signals these at its next edge (`wake_waiters`).
     page_waiters: Mutex<VecDeque<Arc<moto_async::SyncWaiter>>>,
 
+    // Wakers of parked TCP write futures, drained on every channel pass:
+    // the same broad wake-and-recheck semantics as page_waiters (progress
+    // may be a freed io_page or send-queue room).
+    tx_wakers: Mutex<Vec<core::task::Waker>>,
+
     // The channel runtime's send-room notify (a leaked LocalNotify),
     // signaled by the tx task whenever the send queue has room; awaited by
     // guaranteed-send tasks (see `send_msg_guaranteed`). LocalNotify is not
@@ -935,6 +940,19 @@ impl NetChannel {
                 waiter.signal();
             }
         }
+
+        // Likewise the write futures'.
+        self.wake_tx_wakers();
+    }
+
+    /// Wake parked write futures. drain() keeps the Vec's capacity: no
+    /// allocation per park/wake cycle. Waking under the lock is fine
+    /// (a bridge-waker wake never blocks).
+    pub(super) fn wake_tx_wakers(&self) {
+        let mut wakers = self.tx_wakers.lock();
+        for waker in wakers.drain(..) {
+            waker.wake();
+        }
     }
 
     /// The rx task: the receive half of the old IO thread loop as a
@@ -1100,6 +1118,20 @@ impl NetChannel {
         self.write_waiters.lock().push_back(stream.weak());
     }
 
+    /// Register a write future's waker for the next channel pass. The
+    /// caller must re-check its condition after registering (the pass
+    /// that made room may already have drained the list).
+    pub(super) fn add_tx_waker(&self, waker: &core::task::Waker) {
+        let mut wakers = self.tx_wakers.lock();
+        if !wakers.iter().any(|w| w.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
+    }
+
+    pub(super) fn send_queue_is_full(&self) -> bool {
+        self.send_queue.is_full()
+    }
+
     /// Register a writer blocked in TcpStream::write() on io_page
     /// exhaustion; the channel runtime signals it on its next pass (see
     /// `page_waiters`).
@@ -1176,6 +1208,7 @@ impl NetChannel {
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
             page_waiters: Mutex::new(VecDeque::new()),
+            tx_wakers: Mutex::new(Vec::new()),
             rpc_map: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),

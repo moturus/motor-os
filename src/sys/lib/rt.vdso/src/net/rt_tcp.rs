@@ -315,6 +315,7 @@ impl TcpListener {
             channel_reservation,
             recv_queue,
             rx_waiter: Mutex::new(None),
+            rx_wakers: Mutex::new(Vec::new()),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
@@ -494,6 +495,12 @@ pub struct TcpStream {
     recv_queue: Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
 
     rx_waiter: Mutex<Option<SysHandle>>,
+
+    // Wakers of parked read futures, drained (wake-all-and-recheck) on
+    // every incoming message and read-closing state change. Multiple
+    // entries = concurrent readers on dup'd FDs, all correct candidates
+    // for the next byte.
+    rx_wakers: Mutex<Vec<core::task::Waker>>,
 
     // This reflects the state as reported by the driver (sys-io).
     tcp_state_driver: AtomicU32, // rt_api::TcpState
@@ -708,6 +715,26 @@ impl TcpStream {
         api_net::TcpState::try_from(self.tcp_state_driver.load(Ordering::Acquire)).unwrap()
     }
 
+    /// Register a read future's waker. The caller must re-check for RX
+    /// progress after registering (register-then-recheck closes the race
+    /// with the rx task queueing in between).
+    fn add_rx_waker(&self, waker: &core::task::Waker) {
+        let mut wakers = self.rx_wakers.lock();
+        if !wakers.iter().any(|w| w.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
+    }
+
+    /// Wake parked read futures. drain() keeps the Vec's capacity: no
+    /// allocation per park/wake cycle. Waking under the lock is fine
+    /// (a bridge-waker wake never blocks).
+    fn wake_rx_waiters(&self) {
+        let mut wakers = self.rx_wakers.lock();
+        for waker in wakers.drain(..) {
+            waker.wake();
+        }
+    }
+
     // Note: this is called from the IO thread, so must not sleep.
     pub fn process_incoming_msg(&self, msg: io_channel::Msg) -> SysHandle {
         let mut rx_lock = self.rx_waiter.lock();
@@ -734,6 +761,7 @@ impl TcpStream {
         {
             // Claiming the page(s) and dropping them frees them.
             super::rt_net::claim_rx_page(self.channel(), &msg, &mut |_page, _len| {});
+            self.wake_rx_waiters();
             return rx_lock.take().unwrap_or(SysHandle::NONE);
         }
 
@@ -752,6 +780,7 @@ impl TcpStream {
                 }
                 // RX done event happens when the recv_q is drained.
             }
+            self.wake_rx_waiters();
             return rx_lock.take().unwrap_or(SysHandle::NONE);
         }
 
@@ -779,6 +808,7 @@ impl TcpStream {
             )
         }
 
+        self.wake_rx_waiters();
         rx_lock.take().unwrap_or(SysHandle::NONE)
     }
 
@@ -855,6 +885,7 @@ impl TcpStream {
             nonblocking: AtomicBool::new(nonblocking),
             recv_queue: super::inner_rx_stream::InnerRxStream::new(),
             rx_waiter: Mutex::new(None),
+            rx_wakers: Mutex::new(Vec::new()),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
@@ -910,6 +941,9 @@ impl TcpStream {
                     | moto_rt::poll::POLL_WRITE_CLOSED
                     | moto_rt::poll::POLL_ERROR,
             );
+            // A reader can park while the stream is still Connecting
+            // (another thread/FD); the failed connect is its EOF.
+            self.wake_rx_waiters();
             return Err(resp.status);
         }
 
@@ -1094,9 +1128,15 @@ impl TcpStream {
         let mut events = 0;
         if notify_rx_done {
             events |= moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_READ_CLOSED;
+            // A parked reader must observe the closed read half (this
+            // path is also reached from a caller-thread shutdown, where
+            // no incoming message will wake it).
+            self.wake_rx_waiters();
         }
         if notify_tx_done {
             events |= moto_rt::poll::POLL_WRITABLE | moto_rt::poll::POLL_WRITE_CLOSED;
+            // Likewise parked writers: their close check ends the write.
+            self.channel().wake_tx_wakers();
         }
 
         if events != 0 {
@@ -1741,5 +1781,140 @@ impl TcpStream {
     fn set_nonblocking(&self, nonblocking: bool) -> ErrorCode {
         self.nonblocking.store(nonblocking, Ordering::Release);
         moto_rt::E_OK
+    }
+}
+
+// ------------------- blocking-path futures (design 5.3) ------------------- //
+//
+// Landed unused (D4a): the sync read/write paths flip onto these via
+// block_on_sync / block_on_sync_deadline in D4b. Copies happen in poll,
+// i.e. on the polling caller thread, never the channel runtime.
+
+impl TcpStream {
+    /// `push_pending_tx` without the blocking retry: on a full send
+    /// queue the entry is retracted (freeing the page) and Err returned;
+    /// the caller re-copies on its next attempt. Backpressure-path cost.
+    #[allow(dead_code)]
+    fn try_push_pending_tx(&self, page: io_channel::IoPage, bufs: &[&[u8]], offset: usize) -> Result<usize, ()> {
+        let filled = Self::tx_copy_at(bufs, offset, page.bytes_mut());
+        debug_assert!(filled > 0);
+        let mut pending = self.pending_tx.lock();
+        pending.push_back(PendingTxPage { page, filled });
+        if self
+            .channel()
+            .post_msg(super::rt_net::tcp_tx_marker_msg(self.handle()))
+            .is_ok()
+        {
+            return Ok(filled);
+        }
+        // We held the lock throughout, so the entry is still the back;
+        // dropping it frees the page.
+        let _ = pending.pop_back();
+        Err(())
+    }
+}
+
+/// A blocking read expressed as a future. Cancel-safe (design rule 7):
+/// all RX state lives in the stream; dropping a timed-out instance
+/// leaves at most a stale waker entry.
+#[allow(dead_code)]
+pub(super) struct TcpReadFuture<'a, 'b, 'c> {
+    pub stream: &'a TcpStream,
+    pub bufs: &'b mut [&'c mut [u8]],
+    pub peek: bool,
+}
+
+impl core::future::Future for TcpReadFuture<'_, '_, '_> {
+    type Output = Result<usize, ErrorCode>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        use core::task::Poll;
+
+        let this = self.get_mut();
+        match this.stream.poll_rx(this.bufs, this.peek) {
+            Err(moto_rt::E_NOT_READY) => {}
+            res => return Poll::Ready(res),
+        }
+        // Register-then-recheck closes the race with the rx task
+        // queueing between the check above and the registration.
+        this.stream.add_rx_waker(cx.waker());
+        match this.stream.poll_rx(this.bufs, this.peek) {
+            Err(moto_rt::E_NOT_READY) => Poll::Pending,
+            res => Poll::Ready(res),
+        }
+    }
+}
+
+/// A blocking write expressed as a future. Committed bytes ride in
+/// `written`, so a timed-out instance surrenders partial progress
+/// (design rule 7, the rt_tcp SO_SNDTIMEO contract: Ok(written)).
+///
+/// Wait/return policy mirrors the old blocking loop exactly: a closed
+/// write half ends the write with Ok(written); a missing io_page parks
+/// only while written == 0 (a partial write returns instead); a full
+/// send queue parks unconditionally (the marker must land).
+#[allow(dead_code)]
+pub(super) struct TcpWriteFuture<'a, 'b, 'c> {
+    pub stream: &'a TcpStream,
+    pub bufs: &'b [&'c [u8]],
+    pub total: usize,
+    pub written: usize,
+}
+
+impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
+    type Output = Result<usize, ErrorCode>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        use core::task::Poll;
+
+        let this = self.get_mut();
+        let stream = this.stream;
+        loop {
+            if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
+                return Poll::Ready(Ok(this.written));
+            }
+
+            // Top up the unclaimed pending back page: no alloc, no
+            // queue traffic.
+            this.written += stream.append_pending_tx(this.bufs, this.written);
+            if this.written == this.total {
+                return Poll::Ready(Ok(this.written));
+            }
+
+            let Ok(page) = stream.channel().alloc_page(stream.subchannel_mask) else {
+                if this.written > 0 {
+                    // Partial write: return it rather than wait for
+                    // pages (the old loop's opportunistic tail).
+                    return Poll::Ready(Ok(this.written));
+                }
+                // The failed alloc set the subchannel's page-wait bits;
+                // sys-io will wake the channel, whose next pass drains
+                // tx_wakers. Register, then re-check via the loop.
+                stream.channel().add_tx_waker(cx.waker());
+                if stream.channel().may_alloc_page(stream.subchannel_mask) {
+                    continue;
+                }
+                return Poll::Pending;
+            };
+
+            match stream.try_push_pending_tx(page, this.bufs, this.written) {
+                Ok(filled) => this.written += filled,
+                Err(()) => {
+                    // Full send queue. Register, re-check, park; the
+                    // page was freed and is re-allocated on retry.
+                    stream.channel().add_tx_waker(cx.waker());
+                    if !stream.channel().send_queue_is_full() {
+                        continue;
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
     }
 }
