@@ -677,12 +677,12 @@ pub struct NetChannel {
     // Stale entries are harmless: waking a running thread is a no-op.
     page_waiters: Mutex<VecDeque<u64>>,
 
-    // Fire-and-forget messages (e.g. TcpStreamClose) that could not be staged
-    // into `send_queue` because it was full, and that were produced while
-    // running on the channel's own runtime thread (so blocking to wait for
-    // room would deadlock). The tx task drains these back into `send_queue`.
-    // Only ever touched on the runtime thread.
-    deferred_msgs: Mutex<VecDeque<io_channel::Msg>>,
+    // The channel runtime's send-room notify (a leaked LocalNotify),
+    // signaled by the tx task whenever the send queue has room; awaited by
+    // guaranteed-send tasks (see `send_msg_guaranteed`). LocalNotify is not
+    // Sync: the pointer is published once at runtime startup and only ever
+    // dereferenced on the runtime thread.
+    send_room: AtomicUsize,
 
     // Threads waiting for specific resp_id: map resp_id => (thread handle, resp).
     legacy_resp_waiters: Mutex<BTreeMap<u64, (SysHandle, Option<io_channel::Msg>)>>,
@@ -934,10 +934,11 @@ impl NetChannel {
     }
 
     /// The tx task: the send half of the old IO thread loop as a resident
-    /// of the channel runtime. Drains `deferred_msgs` and the send queue;
-    /// on ring-full awaits the connection handle (sys-io signals as it
-    /// consumes); at batch boundaries yields to the rx task; when drained,
-    /// parks until a caller queues work (see `park_until_send_work`).
+    /// of the channel runtime. Drains the send queue, signaling `send_room`
+    /// as room appears; on ring-full awaits the connection handle (sys-io
+    /// signals as it consumes); at batch boundaries yields to the rx task;
+    /// when drained, parks until a caller queues work (see
+    /// `park_until_send_work`).
     async fn tx_task(&self) {
         // Messages already popped from `send_queue` but not yet sent (a
         // full-ring leftover or a coalescing run terminator); older than
@@ -945,13 +946,16 @@ impl NetChannel {
         let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
 
         loop {
-            // Re-stage messages deferred from a TcpStream drop that ran on
-            // the runtime thread while the send queue was full. Done at the
-            // top of every pass so recv and send keep interleaving and we
-            // cannot deadlock against sys-io.
-            let deferred_pending = self.restage_deferred_msgs();
+            let batch = self.tx_send_batch(&mut carry);
 
-            match self.tx_send_batch(&mut carry) {
+            // Any batch that popped messages may have made send-queue room;
+            // release guaranteed-send tasks awaiting it (they re-check and
+            // re-await on a still-full queue).
+            if !self.send_queue.is_full() {
+                self.send_room().notify_all();
+            }
+
+            match batch {
                 TxBatch::Drained { sent_any } => {
                     if sent_any {
                         // The drained-edge driver wake, folded into the
@@ -960,10 +964,6 @@ impl NetChannel {
                         moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
                     }
                     self.wake_waiters();
-
-                    if deferred_pending {
-                        continue;
-                    }
                     self.park_until_send_work().await;
                 }
                 TxBatch::RingFull => {
@@ -982,6 +982,16 @@ impl NetChannel {
         }
     }
 
+    /// The channel runtime's send-room notify. Runtime thread only (the
+    /// pointee is a LocalNotify, which is not Sync).
+    fn send_room(&self) -> &'static moto_async::LocalNotify {
+        debug_assert!(self.on_io_thread());
+        let addr = self.send_room.load(Ordering::Acquire);
+        debug_assert_ne!(addr, 0);
+        // Safety: published once at runtime startup, leaked, never freed.
+        unsafe { &*(addr as *const moto_async::LocalNotify) }
+    }
+
     /// Park the tx task until a caller queues send work. Publishes the
     /// task's waker in `tx_task_waker` (the wake target of `send_msg` and
     /// friends), then re-checks for work: a push that raced the publish
@@ -994,7 +1004,7 @@ impl NetChannel {
     fn park_until_send_work(&self) -> impl Future<Output = ()> + '_ {
         core::future::poll_fn(move |cx| {
             *self.tx_task_waker.lock() = Some(cx.waker().clone());
-            if !self.send_queue.is_empty() || !self.deferred_msgs.lock().is_empty() {
+            if !self.send_queue.is_empty() {
                 return Poll::Ready(());
             }
             // Quiescent and the queue is empty: one blocked sender can
@@ -1057,6 +1067,14 @@ impl NetChannel {
 
         moto_sys::set_current_thread_name("rt_net::channel_runtime").unwrap();
 
+        // The send-room notify lives (leaked) for the channel's lifetime;
+        // teardown is stage E. Published before the tasks that use it spawn.
+        let send_room: &'static moto_async::LocalNotify =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(moto_async::LocalNotify::new()));
+        self_
+            .send_room
+            .store(send_room as *const _ as usize, Ordering::Release);
+
         // Still a sys-io wake target, never a swap target: a direct
         // switch would pull sys-io onto this CPU, off its warm one —
         // measured +11 usec on the set_nodelay IO latency (sys-io is a
@@ -1089,9 +1107,9 @@ impl NetChannel {
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
             page_waiters: Mutex::new(VecDeque::new()),
-            deferred_msgs: Mutex::new(VecDeque::new()),
             legacy_resp_waiters: Mutex::new(BTreeMap::new()),
             response_handlers: Mutex::new(BTreeMap::new()),
+            send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
@@ -1240,22 +1258,6 @@ impl NetChannel {
             == moto_sys::UserThreadControlBlock::get().self_handle
     }
 
-    // Move deferred messages back into the send queue. Returns true if some
-    // remain (the send queue is still full). Only called from the IO thread.
-    fn restage_deferred_msgs(&self) -> bool {
-        debug_assert!(self.on_io_thread());
-
-        let mut deferred = self.deferred_msgs.lock();
-        while let Some(&msg) = deferred.front() {
-            if self.send_queue.push(msg).is_ok() {
-                deferred.pop_front();
-            } else {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Enqueue a fire-and-forget message (e.g. TcpStreamClose) for delivery to
     /// sys-io. Unlike `post_msg`, the message is never dropped (sys-io would
     /// otherwise leak the stream), it never panics on a full send queue, and it
@@ -1281,13 +1283,25 @@ impl NetChannel {
         }
 
         // We are on the runtime thread and the queue is full: hand the
-        // message to the tx task, which keeps interleaving with recv (so it
-        // makes progress against sys-io) and will stage it as soon as there
-        // is room. `restage_deferred_msgs()` drains this back into
-        // `send_queue`; the wake keeps the tx task from parking with the
-        // message still pending (its park re-checks `deferred_msgs`).
-        self.deferred_msgs.lock().push_back(msg);
-        self.maybe_wake_io_thread();
+        // message to a task that retries the push whenever the tx task
+        // signals send-queue room. Registration cannot lose a notify: the
+        // failed push and the waiter registration happen within one poll,
+        // and the tx task (same thread) cannot run in between.
+        //
+        // The lifetime extension is exactly as sound as the runtime
+        // thread's own &'static self (see runtime_thread_init): channel
+        // teardown is stage E.
+        let self_: &'static Self = unsafe { &*(self as *const Self) };
+        core::mem::drop(moto_async::LocalRuntime::spawn(async move {
+            let mut msg = msg;
+            loop {
+                match self_.post_msg(msg) {
+                    Ok(()) => return,
+                    Err(rejected) => msg = rejected,
+                }
+                self_.send_room().notified().await;
+            }
+        }));
     }
 
     pub fn post_msg_with_response_waiter(
