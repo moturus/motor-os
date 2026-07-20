@@ -5,14 +5,31 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-20, through stage D5)
+## Status (2026-07-20, checkpoint 3 root-caused; bench remains)
 
 Stages 0, A, B, and C are complete on `vdso-rewrite`; stage D's
-implementation is fully landed (D1-D5, `344191b..` C tip then D1-D5). The
-stage-D gate — bench (kill checkpoint 2) + full x5 (flake checkpoint 3) —
-remains, with the rare stdio hang (below) the checkpoint-3 root-cause
-target. One stage-C gate metric still sits at the kill boundary (below),
-the review's open question.
+implementation is landed (D1-D5). Full x5 (flake checkpoint 3) reproduced the
+tokio loopback freeze on run 1 and root-caused it: the D4b flip's auto-merge
+silently reverted the 42e1359 rx-task self-deadlock fix, and `812e7da`
+restores it (60/60 warm tokio-tests, was a run-1 freeze). That freeze — not a
+stdio hang — was the checkpoint-3 target all along. The stage-D gate still
+needs full x5 re-run on `812e7da` plus bench (kill checkpoint 2). One stage-C
+gate metric still sits at the kill boundary (below), the review's open
+question.
+
+- **Checkpoint 3 / flake fix** (`812e7da`): `mdbg print-stacks` on a frozen
+  VM (all threads InWait) showed `channel_runtime` deadlocked in
+  `tcp_listener_dropped`'s `lock_contended` mid-`dispatch_incoming`, `main`
+  parked in `TcpListener::bind` awaiting a bind reply the wedged rx task
+  cannot deliver — the exact 42e1359 signature. `git show a9f899f` confirmed
+  the D4b auto-merge deleted 42e1359's `upgraded_listeners` deferred drop and
+  restored the `return`-under-lock form, so a last-ref `TcpListener::drop`
+  re-locks `tcp_listeners` on the rx thread and self-deadlocks. The fix
+  re-applies the deferred drop; the a9f899f revert was audited to this one
+  pattern (the other removals are intended D4b retirements). The earlier
+  "~1/37 stdio hang" reading was wrong — it was this freeze surfacing at the
+  tokio-tests output, where block-buffered stdout hid the final
+  `tokio-tests PASS` and made the freeze look like a lost stdout tail.
 
 - **D5** (`c1f4ff8`): blocking `UdpSocket::recv_or_peek_from`/`send_to`
   flip onto `UdpRecvFuture`/`UdpSendFuture` via the shared
@@ -36,16 +53,15 @@ the review's open question.
   the `rt_net.rs` fences stay one more step. Suites pass (all net
   systests, mio-test, tokio-tests 5/5); a 2 MB slow-reader backpressure
   systest proves the write future's retract-and-recopy is byte-exact.
-  The tokio "flake" was the rx-task self-deadlock, fixed `42e1359` (not
-  a D4b lost wake). Two D4b side-findings: (1) `666bcf0` — sys-io RX
-  robustness: a client vanishing under backpressure made
+  The tokio "flake" was the rx-task self-deadlock, fixed `42e1359` — but
+  this flip's auto-merge silently reverted that fix, resurfacing the freeze
+  until `812e7da` (checkpoint 3 above). Two D4b side-findings: (1) `666bcf0`
+  — sys-io RX robustness: a client vanishing under backpressure made
   `alloc_page().await.unwrap()` crash sys-io (all networking down); now
-  a graceful break. (2) A rare (~1/37 warm runs), NET-INDEPENDENT
-  intermittent hang in systest's `stdio`/process-spawn tests (Stage B
-  stdio-relay territory) — proven net-independent (net silent 60-300s
-  during the one hang; clean HEAD also reaches stdio and passes). It is
-  the D5 checkpoint-3 concern, where root-causing the full-test hang is
-  already scheduled. D4b bench gate still owed.
+  a graceful break. (2) The "rare NET-INDEPENDENT stdio/process-spawn hang"
+  logged here was a mis-read of the same tokio freeze at the tokio-tests
+  output tail (block-buffered stdout); checkpoint 3 resolved it as the
+  `812e7da` self-deadlock, not a stdio-relay bug. D4b bench gate still owed.
 
 - **Stage C** (`963e7ca..` + two tuning commits): C1-C3 landed as
   planned; the channel thread is a `LocalRuntime` hosting the C1 rx/tx
