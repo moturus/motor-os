@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use crate::build_script::{Directive, Output as BuildScriptOutput};
 use crate::diagnostic::{Error, Result};
 use crate::identity::{CargoDebugInfo, CargoPanicStrategy, CargoStrip, CargoUnitLto, Identity};
 use crate::manifest::{Edition, Manifest};
@@ -42,11 +43,26 @@ pub enum RustcOutput {
     },
 }
 
+pub struct BuildOutput<'a> {
+    pub output: &'a BuildScriptOutput,
+    pub out_dir: &'a Path,
+}
+
 pub fn dependency_rustc_invocation(
     plan: &CompilationPlan,
     manifests: &BTreeMap<PackageKey, Manifest>,
     key: &UnitKey,
     options: &CommandOptions<'_>,
+) -> Result<Option<RustcInvocation>> {
+    dependency_rustc_invocation_with_build_output(plan, manifests, key, options, None)
+}
+
+pub fn dependency_rustc_invocation_with_build_output(
+    plan: &CompilationPlan,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    key: &UnitKey,
+    options: &CommandOptions<'_>,
+    build_output: Option<BuildOutput<'_>>,
 ) -> Result<Option<RustcInvocation>> {
     let planned = plan.units.get(key).ok_or_else(|| {
         Error::failure(format!(
@@ -57,16 +73,22 @@ pub fn dependency_rustc_invocation(
     if key.kind == UnitKind::BuildScriptRun {
         return Ok(None);
     }
-    if key.kind == UnitKind::Library
+    let requires_build_output = key.kind == UnitKind::Library
         && planned
             .unit
             .dependencies
             .iter()
-            .any(|dependency| dependency.kind == UnitEdgeKind::BuildScriptOutput)
-    {
+            .any(|dependency| dependency.kind == UnitEdgeKind::BuildScriptOutput);
+    if requires_build_output && build_output.is_none() {
         return Err(Error::failure(format!(
             "library unit for `{} {}` requires build-script output before its rustc command can be finalized",
             key.package.name, key.package.version
+        )));
+    }
+    if !requires_build_output && build_output.is_some() {
+        return Err(Error::failure(format!(
+            "unexpected build-script output for {:?} unit `{} {}`",
+            key.kind, key.package.name, key.package.version
         )));
     }
     let manifest = manifests.get(&key.package).ok_or_else(|| {
@@ -166,6 +188,11 @@ pub fn dependency_rustc_invocation(
         );
     }
     arguments.extend(planned.settings.rustflags.iter().map(OsString::from));
+    let mut environment =
+        rustc_environment(options.cargo, options.host_profile, manifest, crate_name)?;
+    if let Some(build_output) = build_output {
+        apply_build_output(&mut arguments, &mut environment, build_output);
+    }
     if options.verbose {
         push(&mut arguments, "--verbose");
     }
@@ -173,10 +200,54 @@ pub fn dependency_rustc_invocation(
     let output = expected_output(key, crate_name, &planned.identity, &output_dir);
     Ok(Some(RustcInvocation {
         arguments,
-        environment: rustc_environment(options.cargo, options.host_profile, manifest, crate_name)?,
+        environment,
         current_dir: manifest.root.clone(),
         output,
     }))
+}
+
+fn apply_build_output(
+    arguments: &mut Vec<OsString>,
+    environment: &mut BTreeMap<String, OsString>,
+    build: BuildOutput<'_>,
+) {
+    value(environment, "OUT_DIR", build.out_dir);
+    for directive in &build.output.directives {
+        if let Directive::RustcLinkSearch { kind, path } = directive {
+            push(arguments, "-L");
+            arguments.push(match kind {
+                Some(kind) => format!("{kind}={}", path.display()).into(),
+                None => path.as_os_str().to_owned(),
+            });
+        }
+    }
+    for directive in &build.output.directives {
+        if let Directive::RustcLinkLib(library) = directive {
+            push(arguments, "-l");
+            push(arguments, library);
+        }
+    }
+    for directive in &build.output.directives {
+        if let Directive::RustcCfg(cfg) = directive {
+            push(arguments, "--cfg");
+            push(arguments, cfg);
+        }
+    }
+    for directive in &build.output.directives {
+        if let Directive::RustcCheckCfg(cfg) = directive {
+            push(arguments, "--check-cfg");
+            push(arguments, cfg);
+        }
+    }
+    for directive in &build.output.directives {
+        if let Directive::RustcEnv {
+            name,
+            value: setting,
+        } = directive
+        {
+            value(environment, name, setting);
+        }
+    }
 }
 
 fn profile_arguments(arguments: &mut Vec<OsString>, planned: &PlannedUnit, manifest: &Manifest) {
@@ -827,6 +898,58 @@ mod tests {
                 .to_string()
                 .contains("requires build-script output")
         );
+        let script_out = fixture.0.join("script-out");
+        fs::create_dir(&script_out).unwrap();
+        let output = crate::build_script::Output {
+            directives: vec![
+                Directive::RustcEnv {
+                    name: "GENERATED".to_owned(),
+                    value: "yes".to_owned(),
+                },
+                Directive::RustcLinkLib("static=fixture".to_owned()),
+                Directive::RustcCfg("generated_cfg".to_owned()),
+                Directive::RustcLinkSearch {
+                    kind: Some("native".to_owned()),
+                    path: script_out.clone(),
+                },
+                Directive::RustcCheckCfg("cfg(generated_cfg)".to_owned()),
+            ],
+            diagnostics: Vec::new(),
+            stderr: String::new(),
+            out_dir: crate::source_tree::Tree {
+                entries: Vec::new(),
+                file_count: 0,
+                directory_count: 0,
+                total_bytes: 0,
+                sha256: [0; 32],
+            },
+        };
+        let invocation = dependency_rustc_invocation_with_build_output(
+            &plan,
+            &manifests,
+            library_key,
+            &command_options,
+            Some(BuildOutput {
+                output: &output,
+                out_dir: &script_out,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let arguments = string_arguments(&invocation);
+        assert!(arguments.ends_with(&[
+            "-L".to_owned(),
+            format!("native={}", script_out.display()),
+            "-l".to_owned(),
+            "static=fixture".to_owned(),
+            "--cfg".to_owned(),
+            "generated_cfg".to_owned(),
+            "--check-cfg".to_owned(),
+            "cfg(generated_cfg)".to_owned(),
+            "--verbose".to_owned(),
+        ]));
+        assert_eq!(invocation.environment["OUT_DIR"], script_out);
+        assert_eq!(invocation.environment["GENERATED"], "yes");
 
         let cross_flags = vec!["--cfg=cross_oracle".to_owned()];
         let cross_plan = plan_dependency_units(
