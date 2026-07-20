@@ -160,7 +160,10 @@ impl TcpListener {
 
         self.async_accepts.lock().push_back(pending);
         if self.async_accepts.lock().len() < (self.max_backlog.load(Ordering::Relaxed) as usize) {
-            self.post_accept(None).unwrap(); // TODO: how to post an accept later?
+            // Re-arm the next accept slot. Runs on the rx task; the
+            // guaranteed post keeps the slot even if the reserved channel's
+            // send queue is momentarily full.
+            self.post_accept(None);
         }
 
         self.event_source.on_event(moto_rt::poll::POLL_READABLE);
@@ -254,8 +257,8 @@ impl TcpListener {
             return Ok(()); // The backlog is too large.
         }
 
-        self.post_accept(None)
-            .inspect_err(|_| panic!("TODO: what can we do here?"))
+        self.post_accept(None);
+        Ok(())
     }
 
     pub fn socket_addr(&self) -> &SocketAddr {
@@ -272,7 +275,7 @@ impl TcpListener {
         };
 
         let (tx, rx) = moto_async::oneshot();
-        self.post_accept(Some(tx)).unwrap(); // Blocking accepts cannot hit a full queue.
+        self.post_accept(Some(tx));
 
         // The sender lives in the channel's RPC map; it cannot be
         // dropped unresolved while we hold &self (see rx dispatch).
@@ -350,10 +353,14 @@ impl TcpListener {
         Ok((new_stream, remote_addr))
     }
 
-    fn post_accept(
-        &self,
-        sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>,
-    ) -> Result<(), ErrorCode> {
+    /// Reserve a fresh channel for one incoming connection and post the
+    /// accept RPC on it. Guaranteed delivery (design 5.2): a full send
+    /// queue no longer fails and drops the slot. A caller-thread post (a
+    /// blocking accept, or `listen`) parks until there is room; a re-post
+    /// from the rx task (see `on_accept_response`) hands the retry to a
+    /// task when the reserved channel is the one we run on, and otherwise
+    /// briefly waits out that channel's queue — never a self-deadlock.
+    fn post_accept(&self, sync_tx: Option<moto_async::oneshot::Sender<PendingAccept>>) {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
         // channel for incoming connections.
@@ -373,18 +380,8 @@ impl TcpListener {
                 .is_none()
         );
 
-        let blocking = sync_tx.is_some();
         let waiter = RpcWaiter::Accept(self.me.clone(), sync_tx);
-        if blocking {
-            // A blocking accept's caller thread may wait out a full
-            // send queue.
-            channel.send_rpc(req, waiter);
-            Ok(())
-        } else {
-            channel.post_rpc(req, waiter).inspect_err(|_| {
-                assert!(self.accept_requests.lock().remove(&req.id).is_some());
-            })
-        }
+        channel.send_rpc_guaranteed(req, waiter);
     }
 
     pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {

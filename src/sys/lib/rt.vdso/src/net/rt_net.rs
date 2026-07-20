@@ -1305,6 +1305,19 @@ impl NetChannel {
         self.send_msg(req);
     }
 
+    /// [`Self::send_rpc`] with guaranteed delivery. The waiter is inserted
+    /// first (the ordering rule: a response must never beat its waiter into
+    /// the map), then the request goes out via `send_msg_guaranteed`: a full
+    /// send queue parks a caller thread or, when we already run on the
+    /// channel's own runtime, hands the retry to a task — the request is
+    /// never dropped and the runtime never self-deadlocks. Used by the
+    /// accept re-post path (design 5.2), which must keep its slot alive.
+    pub(super) fn send_rpc_guaranteed(&self, req: io_channel::Msg, waiter: RpcWaiter) {
+        assert_ne!(0, req.id);
+        assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
+        self.send_msg_guaranteed(req);
+    }
+
     /// Nonblocking [`Self::send_rpc`]: on a full send queue the waiter
     /// is removed again and the caller gets `E_NOT_READY`.
     pub(super) fn post_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) -> Result<(), ErrorCode> {
