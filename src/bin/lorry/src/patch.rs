@@ -106,6 +106,11 @@ fn load_required_patch(
             manifest.name, rule.name
         )));
     }
+    if manifest.metadata.license != object.license {
+        return Err(Error::failure(
+            "seeded source manifest license does not match repository metadata",
+        ));
+    }
     if logical_root.as_os_str().is_empty() {
         return Err(Error::failure(format!(
             "required patch `{id}` produced an empty logical source path"
@@ -437,6 +442,12 @@ mod tests {
         )
         .unwrap();
         let staging = fixture.package("seed", "ring", "0.17.14");
+        fs::write(
+            staging.join("Cargo.toml"),
+            "[package]\nname = \"ring\"\nversion = \"0.17.14\"\n\
+             edition = \"2021\"\nlicense = \"Apache-2.0 AND ISC\"\n",
+        )
+        .unwrap();
         let tree = Tree::scan(&staging, DEFAULT_LIMITS, Exclusions::None).unwrap();
         let digest = hex(&tree.sha256);
         let object = repository

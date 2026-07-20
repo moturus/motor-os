@@ -10,6 +10,7 @@ mod json;
 mod manifest;
 mod offline;
 mod patch;
+mod policy;
 mod process;
 mod repository;
 mod resolver;

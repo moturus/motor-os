@@ -287,6 +287,14 @@ impl Config {
         Ok(config)
     }
 
+    #[cfg(test)]
+    pub(crate) fn load_for_test(
+        package_root: &Path,
+        environment: &BTreeMap<String, String>,
+    ) -> Result<Self> {
+        Self::load_with_environment(package_root, environment)
+    }
+
     pub fn selected_target(&self, command_target: Option<&str>) -> Result<Option<String>> {
         let target = command_target
             .map(str::to_owned)
@@ -910,10 +918,7 @@ fn merge_policy_rules(
             ));
         }
         if !native_tools.is_empty()
-            && matches!(
-                source.as_deref(),
-                Some("path") | Some("system-vendored-path")
-            )
+            && source.as_deref() != Some("crates.io")
             && source_tree_sha256.is_none()
         {
             return Err(Error::at(
@@ -2257,5 +2262,35 @@ locked = [
                 "{requirement}"
             );
         }
+    }
+
+    #[test]
+    fn source_agnostic_native_tool_grants_require_a_tree_digest() {
+        let temp = TempDir::new();
+        let path = temp.0.join("lorry.toml");
+        fs::write(
+            &path,
+            "config-version = 1\n\
+             [policy.rules.native]\n\
+             action = \"allow\"\n\
+             allow-build-script = true\n\
+             native-tools = [\"c-compiler\"]\n",
+        )
+        .unwrap();
+        let error =
+            merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap_err();
+        assert!(error.to_string().contains("source-tree digest"));
+
+        fs::write(
+            &path,
+            "config-version = 1\n\
+             [policy.rules.native]\n\
+             action = \"allow\"\n\
+             source = \"crates.io\"\n\
+             allow-build-script = true\n\
+             native-tools = [\"c-compiler\"]\n",
+        )
+        .unwrap();
+        merge_lorry_file(&path, LayerKind::LinuxBase, &mut Config::default()).unwrap();
     }
 }
