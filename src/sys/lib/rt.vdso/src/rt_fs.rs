@@ -15,7 +15,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
-use moto_io::fs::{EntryId, EntryKind, FsClient, ROOT_ID};
+use moto_io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, ROOT_ID, Role};
 use moto_ipc::io_channel;
 use moto_rt::Result;
 use moto_rt::fs::HANDLE_URL_PREFIX;
@@ -454,7 +454,7 @@ impl AsyncFsClient {
 
         let mut file_attr = moto_rt::fs::FileAttr::new();
         file_attr.size = metadata.size;
-        file_attr.perm = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
+        file_attr.perm = access_to_perm(metadata.access(Role::System)?);
         file_attr.file_type = match metadata.kind() {
             moto_io::fs::EntryKind::Directory => moto_rt::fs::FILETYPE_DIRECTORY,
             moto_io::fs::EntryKind::File => moto_rt::fs::FILETYPE_FILE,
@@ -465,6 +465,12 @@ impl AsyncFsClient {
         file_attr.entry_id = entry_id; // v2: unique file identity
 
         Ok(file_attr)
+    }
+
+    fn set_permissions(&self, entry_id: EntryId, access: AccessPermissions) -> Result<()> {
+        self.blocking_run(move |fs_client| async move {
+            fs_client.set_permissions(entry_id, access).await
+        })
     }
 
     fn resize(&self, file_id: EntryId, new_size: u64) -> Result<()> {
@@ -1305,11 +1311,83 @@ pub extern "C" fn rmdir(path_ptr: *const u8, path_size: usize) -> moto_rt::Error
 }
 
 pub extern "C" fn set_perm(path_ptr: *const u8, path_size: usize, perm: u64) -> moto_rt::ErrorCode {
-    todo!()
+    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_size) };
+    let Ok(path) = core::str::from_utf8(path_bytes) else {
+        return moto_rt::E_INVALID_FILENAME;
+    };
+    let access = match perm_to_access(perm) {
+        Ok(access) => access,
+        Err(err) => return err.into(),
+    };
+    let client = match AsyncFsClient::get() {
+        Ok(client) => client,
+        Err(err) => return err.into(),
+    };
+    let path = match CanonicalPath::parse(path) {
+        Ok(path) => path,
+        Err(err) => return err.into(),
+    };
+    let (entry_id, _) = match client.stat_internal(path) {
+        Ok(entry) => entry,
+        Err(err) => return err.into(),
+    };
+
+    match client.set_permissions(entry_id, access) {
+        Ok(()) => moto_rt::E_OK,
+        Err(err) => err.into(),
+    }
 }
 
-pub extern "C" fn set_file_perm(_rt_fd: moto_rt::RtFd, _perm: u64) -> moto_rt::ErrorCode {
-    todo!()
+pub extern "C" fn set_file_perm(rt_fd: moto_rt::RtFd, perm: u64) -> moto_rt::ErrorCode {
+    let access = match perm_to_access(perm) {
+        Ok(access) => access,
+        Err(err) => return err.into(),
+    };
+    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+    let Some(file) = (posix_file.as_ref() as &dyn Any).downcast_ref::<File>() else {
+        return moto_rt::E_BAD_HANDLE;
+    };
+
+    match AsyncFsClient::get().and_then(|client| client.set_permissions(file.entry_id, access)) {
+        Ok(()) => moto_rt::E_OK,
+        Err(err) => err.into(),
+    }
+}
+
+fn access_to_perm(access: AccessPermissions) -> u64 {
+    let (read, write, execute) = access.triple();
+    let mut perm = 0;
+    if read {
+        perm |= moto_rt::fs::PERM_READ;
+    }
+    if write {
+        perm |= moto_rt::fs::PERM_WRITE;
+    }
+    if execute {
+        perm |= moto_rt::fs::PERM_EXEC;
+    }
+    perm
+}
+
+fn perm_to_access(perm: u64) -> Result<AccessPermissions> {
+    use moto_rt::fs::{PERM_EXEC, PERM_READ, PERM_WRITE};
+
+    let known = PERM_READ | PERM_WRITE | PERM_EXEC;
+    match (
+        perm & PERM_READ != 0,
+        perm & PERM_WRITE != 0,
+        perm & PERM_EXEC != 0,
+        perm & !known == 0,
+    ) {
+        (false, false, false, true) => Ok(AccessPermissions::None),
+        (true, false, false, true) => Ok(AccessPermissions::R),
+        (true, true, false, true) => Ok(AccessPermissions::Rw),
+        (true, false, true, true) => Ok(AccessPermissions::Rx),
+        (true, true, true, true) => Ok(AccessPermissions::Rwx),
+        _ => Err(moto_rt::Error::InvalidArgument),
+    }
 }
 
 pub extern "C" fn copy(

@@ -41,6 +41,7 @@ pub const FILETYPE_DIRECTORY: u8 = 2;
 // File permissions.
 pub const PERM_READ: u64 = 1;
 pub const PERM_WRITE: u64 = 2;
+pub const PERM_EXEC: u64 = 4;
 
 // Open options.
 pub const O_READ: u32 = 1 << 0;

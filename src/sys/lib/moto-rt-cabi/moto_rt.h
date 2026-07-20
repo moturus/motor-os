@@ -54,6 +54,7 @@ extern "C" {
 #define MOTO_FILETYPE_DIRECTORY 2
 #define MOTO_PERM_READ  1u
 #define MOTO_PERM_WRITE 2u
+#define MOTO_PERM_EXEC  4u
 #define MOTO_MAX_FILENAME_LEN 256
 
 /* Mirrors moto_rt::fs::FileAttr, #[repr(C, align(16))] — keep the alignment
