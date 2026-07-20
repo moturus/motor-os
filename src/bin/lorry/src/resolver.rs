@@ -566,6 +566,8 @@ pub struct PackageKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedEdge {
     pub dependency_index: usize,
+    pub alias: String,
+    pub kind: DependencyKind,
     pub context: FeatureContext,
     pub package: PackageKey,
 }
@@ -652,7 +654,7 @@ fn resolve_with_scope(
     .map_err(|failure| {
         Error::failure(format!("dependency resolution failed: {}", failure.message))
     })?;
-    Ok(state.into_resolution())
+    Ok(state.into_resolution(manifest))
 }
 
 #[derive(Clone, Copy)]
@@ -923,7 +925,7 @@ struct State {
 }
 
 impl State {
-    fn into_resolution(self) -> Resolution {
+    fn into_resolution(self, manifest: &Manifest) -> Resolution {
         let selected = self
             .nodes
             .iter()
@@ -952,10 +954,15 @@ impl State {
             let edges = node
                 .edges
                 .iter()
-                .map(|((context, dependency_index), package)| ResolvedEdge {
-                    dependency_index: *dependency_index,
-                    context: context.clone(),
-                    package: package.clone(),
+                .map(|((context, dependency_index), package)| {
+                    let dependency = &node.record.dependencies[*dependency_index];
+                    ResolvedEdge {
+                        dependency_index: *dependency_index,
+                        alias: dependency.alias.clone(),
+                        kind: dependency.kind,
+                        context: context.clone(),
+                        package: package.clone(),
+                    }
                 })
                 .collect();
             let mut lock_edges = node.edges;
@@ -979,10 +986,15 @@ impl State {
             }
             let lock_edges = lock_edges
                 .into_iter()
-                .map(|((context, dependency_index), package)| ResolvedEdge {
-                    dependency_index,
-                    context,
-                    package,
+                .map(|((context, dependency_index), package)| {
+                    let dependency = &node.record.dependencies[dependency_index];
+                    ResolvedEdge {
+                        dependency_index,
+                        alias: dependency.alias.clone(),
+                        kind: dependency.kind,
+                        context,
+                        package,
+                    }
                 })
                 .collect();
             packages.push(ResolvedPackage {
@@ -999,10 +1011,15 @@ impl State {
         let root_edges = self
             .root_edges
             .into_iter()
-            .map(|((context, dependency_index), package)| ResolvedEdge {
-                dependency_index,
-                context,
-                package,
+            .map(|((context, dependency_index), package)| {
+                let dependency = &manifest.dependencies[dependency_index];
+                ResolvedEdge {
+                    dependency_index,
+                    alias: dependency.alias.clone(),
+                    kind: dependency.kind,
+                    context,
+                    package,
+                }
             })
             .collect();
         Resolution {
@@ -2174,11 +2191,22 @@ mod tests {
         assert_eq!(selected(&resolution, "host-selected").len(), 1);
         assert!(selected(&resolution, "inactive-build").is_empty());
         assert!(selected(&resolution, "host-inactive").is_empty());
+        assert_eq!(resolution.root_edges[0].alias, "target-package");
+        assert_eq!(resolution.root_edges[0].kind, DependencyKind::Normal);
+        let target = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "target-package")
+            .unwrap();
+        assert_eq!(target.edges[0].alias, "host-build");
+        assert_eq!(target.edges[0].kind, DependencyKind::Build);
         let host = resolution
             .packages
             .iter()
             .find(|package| package.key.name == "host-build")
             .unwrap();
+        assert_eq!(host.edges[0].alias, "host-selected");
+        assert_eq!(host.edges[0].kind, DependencyKind::Normal);
         assert!(host.feature_sets.contains_key(&FeatureContext::Host));
     }
 

@@ -820,6 +820,8 @@ mod tests {
             .enumerate()
             .map(|(dependency_index, package)| ResolvedEdge {
                 dependency_index,
+                alias: package.key.name.clone(),
+                kind: crate::sparse::DependencyKind::Normal,
                 context: FeatureContext::Target(String::new()),
                 package: package.key.clone(),
             })
@@ -1003,12 +1005,16 @@ mod tests {
         let second = registry_package("child", "2.0.0", 5);
         first.edges.push(ResolvedEdge {
             dependency_index: 0,
+            alias: "child".to_owned(),
+            kind: crate::sparse::DependencyKind::Normal,
             context: FeatureContext::Target(String::new()),
             package: second.key.clone(),
         });
         let resolution = Resolution {
             root_edges: vec![ResolvedEdge {
                 dependency_index: 0,
+                alias: "demo".to_owned(),
+                kind: crate::sparse::DependencyKind::Normal,
                 context: FeatureContext::Target(String::new()),
                 package: first.key.clone(),
             }],

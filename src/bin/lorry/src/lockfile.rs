@@ -302,11 +302,15 @@ mod tests {
             root_edges: vec![
                 ResolvedEdge {
                     dependency_index: 0,
+                    alias: "registry-demo".to_owned(),
+                    kind: crate::sparse::DependencyKind::Normal,
                     context: FeatureContext::Target(String::new()),
                     package: registry_key,
                 },
                 ResolvedEdge {
                     dependency_index: 1,
+                    alias: "path-demo".to_owned(),
+                    kind: crate::sparse::DependencyKind::Normal,
                     context: FeatureContext::Target(String::new()),
                     package: path_key,
                 },
