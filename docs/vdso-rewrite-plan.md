@@ -5,11 +5,35 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-20, end of stage C)
+## Status (2026-07-20, through stage D4b)
 
-Stages 0, A, B, and C are complete on `vdso-rewrite` (`344191b..` C tip).
-Stage D is next, pending stage-C review; one gate metric sits at the
-kill boundary (below) and is the review's main question.
+Stages 0, A, B, and C are complete on `vdso-rewrite`; stage D is landed
+through D4b (`344191b..` C tip, then D1-D4b). D5 (UDP futures + retire
+the `EventSourceManaged` futex protocol) and the stage-D gate (bench +
+full x5, kill checkpoint 2 / flake checkpoint 3) remain. One stage-C gate
+metric still sits at the kill boundary (below), the review's open question.
+
+- **Stage D (through D4b)**: D1 (`9d993d5`, RPC oneshot map), D2a/D2b
+  (`f5c3beb`/`b5a29e0`, RpcWaiter + blocking accept/connect await
+  oneshots), D3 (`da94974`, send/page waiters as `SyncWaiter` lists),
+  D4a (`bdfbc97`, read/write future machinery beside the old path),
+  D4b (`a9f899f` flip + `23ab3ac` systests). The flip drives blocking
+  read/write through `block_on_recheck` (`block_on_sync_deadline` capped
+  at TX 500ms / RX 5s, the old debug-timeout resilience) and retires
+  `rx_waiter`, `page_waiters`, and the `dispatch_incoming` wake-handle;
+  the `rt_net.rs` fences stay one more step. Suites pass (all net
+  systests, mio-test, tokio-tests 5/5); a 2 MB slow-reader backpressure
+  systest proves the write future's retract-and-recopy is byte-exact.
+  The tokio "flake" was the rx-task self-deadlock, fixed `42e1359` (not
+  a D4b lost wake). Two D4b side-findings: (1) `666bcf0` — sys-io RX
+  robustness: a client vanishing under backpressure made
+  `alloc_page().await.unwrap()` crash sys-io (all networking down); now
+  a graceful break. (2) A rare (~1/37 warm runs), NET-INDEPENDENT
+  intermittent hang in systest's `stdio`/process-spawn tests (Stage B
+  stdio-relay territory) — proven net-independent (net silent 60-300s
+  during the one hang; clean HEAD also reaches stdio and passes). It is
+  the D5 checkpoint-3 concern, where root-causing the full-test hang is
+  already scheduled. D4b bench gate still owed.
 
 - **Stage C** (`963e7ca..` + two tuning commits): C1-C3 landed as
   planned; the channel thread is a `LocalRuntime` hosting the C1 rx/tx
