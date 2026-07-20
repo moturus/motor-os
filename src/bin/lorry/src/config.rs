@@ -1775,7 +1775,11 @@ fn parse_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq
 
 fn parse_exact_requirement(path: &Path, line: usize, value: &str) -> Result<VersionReq> {
     let requirement = parse_requirement(path, line, value)?;
-    if requirement.comparators.len() != 1 || requirement.comparators[0].op != Op::Exact {
+    if requirement.comparators.len() != 1
+        || requirement.comparators[0].op != Op::Exact
+        || requirement.comparators[0].minor.is_none()
+        || requirement.comparators[0].patch.is_none()
+    {
         return Err(Error::at(
             path,
             line,
@@ -2242,5 +2246,16 @@ locked = [
             ["one", "two words", "three words", "four five"]
         );
         assert!(split_words("'unterminated").is_err());
+    }
+
+    #[test]
+    fn required_patch_versions_are_complete_exact_versions() {
+        assert!(parse_exact_requirement(Path::new("lorry.toml"), 1, "=1.2.3").is_ok());
+        for requirement in ["=1", "=1.2", "^1.2.3", ">=1.2.3"] {
+            assert!(
+                parse_exact_requirement(Path::new("lorry.toml"), 1, requirement).is_err(),
+                "{requirement}"
+            );
+        }
     }
 }

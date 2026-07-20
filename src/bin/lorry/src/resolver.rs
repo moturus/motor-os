@@ -17,6 +17,7 @@ use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 pub struct Catalog {
     records: BTreeMap<String, Vec<Candidate>>,
     paths: BTreeMap<PathBuf, PackageKey>,
+    required_patches: Vec<RequiredPatchGuard>,
 }
 
 impl Catalog {
@@ -62,6 +63,86 @@ impl Catalog {
         })
     }
 
+    pub(crate) fn register_required_patch(
+        &mut self,
+        id: &str,
+        name: &str,
+        version: Version,
+        provenance: &std::path::Path,
+        failure: Option<String>,
+    ) -> Result<()> {
+        if let Some(existing) = self
+            .required_patches
+            .iter()
+            .find(|guard| guard.name == name && guard.version == version)
+        {
+            return Err(Error::failure(format!(
+                "required patch `{id}` from `{}` conflicts with `{}` from `{}`: both guard `{name} {version}`",
+                provenance.display(),
+                existing.id,
+                existing.provenance.display()
+            )));
+        }
+        self.required_patches.push(RequiredPatchGuard {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            version,
+            provenance: provenance.to_owned(),
+            failure,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn insert_path_patch(
+        &mut self,
+        manifest: Manifest,
+        logical_root: PathBuf,
+        physical_root: PathBuf,
+        source_tree_sha256: [u8; 32],
+        required_patch: Option<String>,
+    ) -> Result<()> {
+        let candidate = local_candidate(
+            manifest,
+            logical_root,
+            physical_root,
+            source_tree_sha256,
+            true,
+            required_patch,
+        )?;
+        let records = self.records.entry(candidate.name.clone()).or_default();
+        if records.iter().any(|existing| {
+            matches!(
+                existing.source,
+                ResolvedSource::Path {
+                    patched_crates_io: true,
+                    ..
+                }
+            ) && same_semver_identity(&existing.version, &candidate.version)
+        }) {
+            return Err(Error::failure(format!(
+                "multiple path patches provide `{} {}`",
+                candidate.name, candidate.version
+            )));
+        }
+        records.push(candidate);
+        records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_required_patch(&self, id: &str) -> bool {
+        self.records.values().flatten().any(|candidate| {
+            matches!(
+                &candidate.source,
+                ResolvedSource::Path {
+                    patched_crates_io: true,
+                    required_patch: Some(required),
+                    ..
+                } if required == id
+            )
+        })
+    }
+
     fn prepare(&mut self, source: &mut RequirementSource) -> Result<()> {
         let RequirementSource::Path(declared) = source else {
             return Ok(());
@@ -93,68 +174,95 @@ impl Catalog {
         if self.paths.insert(canonical.clone(), key.clone()).is_some() {
             return Ok(());
         }
-        let dependencies = manifest
-            .dependencies
-            .iter()
-            .map(|dependency| {
-                Ok(CandidateDependency {
-                    dependency: Dependency {
-                        alias: dependency.alias.clone(),
-                        package: dependency.package.clone(),
-                        requirement: dependency.requirement.clone(),
-                        features: dependency.features.clone(),
-                        optional: dependency.optional,
-                        default_features: dependency.default_features,
-                        target: dependency.target.clone(),
-                        kind: dependency.kind,
-                    },
-                    source: match &dependency.source {
-                        DependencySource::CratesIo => RequirementSource::CratesIo,
-                        DependencySource::Path(path) => RequirementSource::Path(path.clone()),
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let rust_version = if manifest.metadata.rust_version.is_empty() {
-            None
-        } else {
-            Some(parse_local_rust_version(
-                &manifest.name,
-                &manifest.metadata.rust_version,
-            )?)
-        };
-        let record = Record {
-            name: manifest.name.clone(),
-            version,
-            dependencies: dependencies
-                .iter()
-                .map(|dependency| dependency.dependency.clone())
-                .collect(),
-            checksum: tree.sha256,
-            features: manifest.features.clone(),
-            features2: BTreeMap::new(),
-            yanked: false,
-            links: manifest.links.clone(),
-            schema: 1,
-            rust_version,
-            published: None,
-            exact_bytes: Vec::new(),
-        };
-        let records = self.records.entry(record.name.clone()).or_default();
-        records.push(Candidate {
-            record,
-            dependencies,
-            source: ResolvedSource::Path {
-                logical_root: canonical.clone(),
-                physical_root: canonical,
-                source_tree_sha256: tree.sha256,
-                patched_crates_io: false,
-            },
-            local_manifest: Some(manifest),
-        });
+        let candidate = local_candidate(
+            manifest,
+            canonical.clone(),
+            canonical,
+            tree.sha256,
+            false,
+            None,
+        )?;
+        debug_assert_eq!(candidate.version, version);
+        let records = self.records.entry(candidate.name.clone()).or_default();
+        records.push(candidate);
         records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
+}
+
+fn local_candidate(
+    manifest: Manifest,
+    logical_root: PathBuf,
+    physical_root: PathBuf,
+    source_tree_sha256: [u8; 32],
+    patched_crates_io: bool,
+    required_patch: Option<String>,
+) -> Result<Candidate> {
+    let version = Version::parse(&manifest.version.original).map_err(|error| {
+        Error::failure(format!(
+            "invalid local package version `{} {}`: {error}",
+            manifest.name, manifest.version.original
+        ))
+    })?;
+    let dependencies = manifest
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            Ok(CandidateDependency {
+                dependency: Dependency {
+                    alias: dependency.alias.clone(),
+                    package: dependency.package.clone(),
+                    requirement: dependency.requirement.clone(),
+                    features: dependency.features.clone(),
+                    optional: dependency.optional,
+                    default_features: dependency.default_features,
+                    target: dependency.target.clone(),
+                    kind: dependency.kind,
+                },
+                source: match &dependency.source {
+                    DependencySource::CratesIo => RequirementSource::CratesIo,
+                    DependencySource::Path(path) => RequirementSource::Path(path.clone()),
+                },
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rust_version = if manifest.metadata.rust_version.is_empty() {
+        None
+    } else {
+        Some(parse_local_rust_version(
+            &manifest.name,
+            &manifest.metadata.rust_version,
+        )?)
+    };
+    let record = Record {
+        name: manifest.name.clone(),
+        version,
+        dependencies: dependencies
+            .iter()
+            .map(|dependency| dependency.dependency.clone())
+            .collect(),
+        checksum: source_tree_sha256,
+        features: manifest.features.clone(),
+        features2: BTreeMap::new(),
+        yanked: false,
+        links: manifest.links.clone(),
+        schema: 1,
+        rust_version,
+        published: None,
+        exact_bytes: Vec::new(),
+    };
+    Ok(Candidate {
+        record,
+        dependencies,
+        source: ResolvedSource::Path {
+            logical_root,
+            physical_root,
+            source_tree_sha256,
+            patched_crates_io,
+            required_patch,
+        },
+        local_manifest: Some(manifest),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +271,15 @@ struct Candidate {
     dependencies: Vec<CandidateDependency>,
     source: ResolvedSource,
     local_manifest: Option<Manifest>,
+}
+
+#[derive(Clone, Debug)]
+struct RequiredPatchGuard {
+    id: String,
+    name: String,
+    version: Version,
+    provenance: PathBuf,
+    failure: Option<String>,
 }
 
 impl std::ops::Deref for Candidate {
@@ -268,6 +385,7 @@ pub enum ResolvedSource {
         physical_root: PathBuf,
         source_tree_sha256: [u8; 32],
         patched_crates_io: bool,
+        required_patch: Option<String>,
     },
 }
 
@@ -789,12 +907,14 @@ fn solve(
         }
     }
 
-    Err(last_failure.unwrap_or_else(|| {
-        Failure::new(format!(
-            "no version of `{}` matches `{}`",
-            event.dependency.package, event.dependency.requirement
-        ))
-    }))
+    Err(required_patch_failure(catalog, &event)
+        .or(last_failure)
+        .unwrap_or_else(|| {
+            Failure::new(format!(
+                "no version of `{}` matches `{}`",
+                event.dependency.package, event.dependency.requirement
+            ))
+        }))
 }
 
 fn fulfill(
@@ -1025,6 +1145,8 @@ fn candidates(
         .iter()
         .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
         .filter(|record| event.dependency.requirement.matches(&record.version))
+        .filter(|candidate| required_patch_allows(catalog, event, candidate))
+        .filter(|candidate| !registry_candidate_is_patched(catalog, event, candidate))
         .filter(|record| {
             !record.yanked
                 || locked.iter().any(|locked| {
@@ -1059,6 +1181,59 @@ fn candidates(
         })
     });
     candidates
+}
+
+fn required_patch_allows(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
+    if event.dependency.source != RequirementSource::CratesIo {
+        return true;
+    }
+    let Some(guard) = catalog.required_patches.iter().find(|guard| {
+        guard.name == candidate.name && same_semver_identity(&guard.version, &candidate.version)
+    }) else {
+        return true;
+    };
+    matches!(
+        &candidate.source,
+        ResolvedSource::Path {
+            required_patch: Some(required),
+            ..
+        } if required == &guard.id
+    )
+}
+
+fn registry_candidate_is_patched(catalog: &Catalog, event: &Event, candidate: &Candidate) -> bool {
+    if event.dependency.source != RequirementSource::CratesIo
+        || !matches!(candidate.source, ResolvedSource::CratesIo { .. })
+    {
+        return false;
+    }
+    catalog.records(&candidate.name).iter().any(|replacement| {
+        same_semver_identity(&replacement.version, &candidate.version)
+            && matches!(
+                replacement.source,
+                ResolvedSource::Path {
+                    patched_crates_io: true,
+                    ..
+                }
+            )
+            && required_patch_allows(catalog, event, replacement)
+    })
+}
+
+fn required_patch_failure(catalog: &Catalog, event: &Event) -> Option<Failure> {
+    if event.dependency.source != RequirementSource::CratesIo {
+        return None;
+    }
+    catalog
+        .required_patches
+        .iter()
+        .find(|guard| {
+            guard.name == event.dependency.package
+                && event.dependency.requirement.matches(&guard.version)
+                && guard.failure.is_some()
+        })
+        .and_then(|guard| guard.failure.as_deref())
+        .map(Failure::new)
 }
 
 fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
@@ -1664,6 +1839,7 @@ mod tests {
                 physical_root,
                 source_tree_sha256,
                 patched_crates_io,
+                required_patch,
             } = &package.source
             else {
                 panic!("local fixture resolved as a registry package");
@@ -1672,6 +1848,7 @@ mod tests {
             assert_eq!(logical_root, physical_root);
             assert_ne!(*source_tree_sha256, [0_u8; 32]);
             assert!(!patched_crates_io);
+            assert!(required_patch.is_none());
             assert_eq!(
                 package.local_manifest.as_ref().unwrap().name,
                 package.key.name

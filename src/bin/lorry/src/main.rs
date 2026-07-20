@@ -9,6 +9,7 @@ mod identity;
 mod json;
 mod manifest;
 mod offline;
+mod patch;
 mod process;
 mod repository;
 mod resolver;
