@@ -6,6 +6,56 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, atomic::*};
 use std::time::Duration;
 
+// Stage-E channel teardown (design 5.5): churn more concurrent connections
+// than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
+// close everything, then assert the net runtime tore every channel down.
+// Before stage E, NetChannel::drop was a todo!() and channels were pooled
+// forever, so this leak check could never pass.
+fn test_channel_teardown() {
+    const N: usize = 12;
+    const ROUNDS: usize = 3;
+    let addr = "127.0.0.1:3340";
+    let listener = Arc::new(std::net::TcpListener::bind(addr).unwrap());
+
+    for _round in 0..ROUNDS {
+        let acceptor_listener = listener.clone();
+        let acceptor = std::thread::spawn(move || {
+            let mut servers = Vec::with_capacity(N);
+            for _ in 0..N {
+                let (mut server, _) = acceptor_listener.accept().unwrap();
+                let mut byte = [0_u8; 1];
+                server.read_exact(&mut byte).unwrap();
+                server.write_all(&byte).unwrap();
+                servers.push(server);
+            }
+            // Every accepted stream drops here, on this (non-runtime) thread.
+        });
+
+        let mut clients = Vec::with_capacity(N);
+        for i in 0..N {
+            let mut client = std::net::TcpStream::connect(addr).unwrap();
+            client.write_all(&[i as u8]).unwrap();
+            let mut byte = [0_u8; 1];
+            client.read_exact(&mut byte).unwrap();
+            assert_eq!(byte[0], i as u8);
+            clients.push(client);
+        }
+        acceptor.join().unwrap();
+        drop(clients); // Close every client socket.
+    }
+
+    drop(listener); // Close the listener and release its pending accepts.
+
+    // internal_helper(0, 0, ..) routes to NET.assert_empty(), which sleeps
+    // briefly and then panics on any surviving channel, listener or socket --
+    // so a clean return proves teardown completed.
+    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
+
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_channel_teardown() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
 fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
     stream.set_read_timeout(Some(Duration::from_millis(1000)));
     let mut data = [0_u8; 17];
@@ -623,6 +673,7 @@ fn test_concurrent_readers() {
 }
 
 pub fn run_all_tests() {
+    test_channel_teardown();
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();

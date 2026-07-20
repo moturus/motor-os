@@ -578,10 +578,12 @@ impl NetRuntime {
         );
         assert_eq!(0, self.num_tcp_listeners.load(Ordering::Acquire));
         assert_eq!(0, self.num_tcp_streams.load(Ordering::Acquire));
+        assert_eq!(0, self.num_udp_sockets.load(Ordering::Acquire));
+        // With stage-E teardown a channel is removed from the pool the moment
+        // its last reservation is released, so a quiescent runtime holds no
+        // channels at all -- the meaningful leak check (design 5.5).
         assert!(self.full_channels.is_empty());
-        for channel in self.channels.values() {
-            channel.assert_empty();
-        }
+        assert!(self.channels.is_empty());
     }
 
     fn reserve_channel(&mut self) -> ChannelReservation {
@@ -611,13 +613,26 @@ impl NetRuntime {
 
     fn release_channel_reservation(&mut self, channel: &NetChannel) {
         // Note: it is fine to use Relaxed ordering because the fn is called under NET.lock().
-        channel.reservations.fetch_sub(1, Ordering::Relaxed);
-        if let Some(channel) = self.full_channels.remove(&channel.id()) {
-            // TODO: maybe clear empty channels?
-            self.channels.insert(channel.id(), channel);
+        let prev = channel.reservations.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "released a channel with no reservations");
+
+        if prev == 1 {
+            // Last reservation released: tear the channel down (design 5.5).
+            // Drop it from the pool so it is never reused, then signal its
+            // runtime to drain and exit. The runtime thread holds its own
+            // Arc<Self>, so the channel stays alive until it exits -- there
+            // is nothing to join and no self-join hazard even when this runs
+            // on the channel's own runtime thread (a socket dropped by rx).
+            self.full_channels.remove(&channel.id());
+            self.channels.remove(&channel.id());
+            channel.begin_exit();
+            return;
         }
 
-        // moto_log!("{}:{} drop empty channels", file!(), line!());
+        // Still in use; a channel that was full now has room again.
+        if let Some(channel) = self.full_channels.remove(&channel.id()) {
+            self.channels.insert(channel.id(), channel);
+        }
     }
 
     #[cfg(feature = "netdev")]
@@ -717,6 +732,16 @@ pub struct NetChannel {
     // waking it is cheap while the runtime is polling (A5 wake elision).
     tx_task_waker: Mutex<Option<core::task::Waker>>,
 
+    // The rx task's cross-thread waker, published by `rx_park`. The rx task
+    // otherwise parks on the connection handle, which teardown cannot signal
+    // (it is sys-io's); this lets `begin_exit` wake it to observe `exiting`.
+    rx_task_waker: Mutex<Option<core::task::Waker>>,
+
+    // Guaranteed sends still awaiting send-queue room on the runtime thread
+    // (the `send_msg_guaranteed` detached-task path). Teardown's tx task
+    // will not exit until this reaches zero, so no close is ever dropped.
+    guaranteed_inflight: AtomicUsize,
+
     io_thread_join_handle: AtomicU64,
     io_thread_wake_handle: AtomicU64,
 
@@ -725,9 +750,23 @@ pub struct NetChannel {
 
 impl Drop for NetChannel {
     fn drop(&mut self) {
-        self.exiting.store(true, Ordering::Release);
-        self.assert_empty();
-        todo!("wait for the IO thread to finish")
+        // Reached only after the runtime thread has exited: it holds an
+        // Arc<Self> for its whole life (see runtime_thread_init), so this
+        // last drop cannot run while a task still borrows `self`. Teardown
+        // (begin_exit + the tasks draining) already happened; the conn,
+        // maps and queues drop with the struct. The kernel reaps the
+        // exited thread on its own (no join needed).
+        debug_assert!(self.exiting.load(Ordering::Acquire));
+        debug_assert_eq!(0, self.reservations.load(Ordering::Relaxed));
+
+        // Free the send-room notify leaked at runtime startup. Safe: the
+        // runtime thread has exited, so no task dereferences it.
+        let addr = self.send_room.load(Ordering::Acquire);
+        if addr != 0 {
+            core::mem::drop(unsafe {
+                alloc::boxed::Box::from_raw(addr as *mut moto_async::LocalNotify)
+            });
+        }
     }
 }
 
@@ -985,11 +1024,33 @@ impl NetChannel {
                 // poll edge.
                 moto_async::LocalRuntime::set_wake_on_sleep(self.conn.server_handle());
             }
-            // A signal arriving between the failed recv above and the
-            // executor's wait stays latched on the handle; the wait
-            // returns immediately.
-            let _ = self.conn.server_handle().as_future().await;
+            if self.exiting.load(Ordering::Acquire) {
+                // Teardown (design 5.5): incoming is drained above, so every
+                // in-flight response has been dispatched. Exit; the tx task
+                // still delivers the pending closes.
+                return;
+            }
+            self.rx_park().await;
         }
+    }
+
+    /// Park the rx task until sys-io signals the connection handle or
+    /// teardown requests exit. sys-io's handle is not something teardown can
+    /// signal, so the wrapper also publishes the task's cross-thread waker
+    /// (`begin_exit`'s target) and completes as soon as `exiting` is set.
+    ///
+    /// A signal arriving between the failed recv above and the executor's
+    /// wait stays latched on the handle; the wait returns immediately.
+    async fn rx_park(&self) {
+        let mut conn_fut = core::pin::pin!(self.conn.server_handle().as_future());
+        core::future::poll_fn(|cx| {
+            *self.rx_task_waker.lock() = Some(cx.waker().clone());
+            if self.exiting.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+            conn_fut.as_mut().poll(cx).map(|_| ())
+        })
+        .await;
     }
 
     /// The tx task: the send half of the old IO thread loop as a resident
@@ -1048,6 +1109,25 @@ impl NetChannel {
                         continue;
                     }
                     self.wake_waiters();
+                    if self.exiting.load(Ordering::Acquire) {
+                        // Teardown (design 5.5): all closes are delivered once
+                        // the send queue, the carry, and any in-flight
+                        // guaranteed sends are drained. Only then may the tx
+                        // task exit.
+                        if carry.is_empty()
+                            && self.send_queue.is_empty()
+                            && self.guaranteed_inflight.load(Ordering::Acquire) == 0
+                        {
+                            return;
+                        }
+                        // Still draining a guaranteed-send task: the batch's
+                        // `send_room().notify_all()` above already nudged it
+                        // (the queue is empty, so not full); yield so it runs
+                        // -- it pushes its close and decrements the count --
+                        // before we re-check.
+                        moto_async::yield_now().await;
+                        continue;
+                    }
                     self.park_until_send_work().await;
                 }
                 TxBatch::RingFull => {
@@ -1088,7 +1168,9 @@ impl NetChannel {
     fn park_until_send_work(&self) -> impl Future<Output = ()> + '_ {
         core::future::poll_fn(move |cx| {
             *self.tx_task_waker.lock() = Some(cx.waker().clone());
-            if !self.send_queue.is_empty() {
+            // Teardown wakes this waker after setting `exiting`; return so the
+            // tx loop re-checks its exit condition instead of re-parking.
+            if !self.send_queue.is_empty() || self.exiting.load(Ordering::Acquire) {
                 return Poll::Ready(());
             }
             // Quiescent and the queue is empty: one blocked sender can
@@ -1140,14 +1222,29 @@ impl NetChannel {
         }
     }
 
+    /// Begin channel teardown (design 5.5): mark `exiting` then wake both
+    /// tasks so they observe it. Called under NET.lock() when the last
+    /// reservation is released. The Release store pairs with the tasks'
+    /// Acquire loads; the wakes must follow it so a task that re-checks
+    /// after waking always sees `exiting`.
+    fn begin_exit(&self) {
+        self.exiting.store(true, Ordering::Release);
+        if let Some(waker) = &*self.tx_task_waker.lock() {
+            waker.wake_by_ref();
+        }
+        if let Some(waker) = &*self.rx_task_waker.lock() {
+            waker.wake_by_ref();
+        }
+    }
+
     extern "C" fn runtime_thread_init(self_addr: usize) {
-        // We extract a raw reference from Arc<Self> so that refcounting works and Self::drop()
-        // gets triggered.
-        let self_: &'static Self = unsafe {
-            let self_arc = Arc::from_raw(self_addr as *const Self);
-            let self_ptr = Arc::as_ptr(&self_arc);
-            &*self_ptr
-        };
+        // Reclaim the strong ref new() leaked via into_raw and HOLD it for
+        // the whole thread: every task borrows `self_`, so the channel must
+        // outlive block_on. `self_` is `&'static` only in the unsafe sense
+        // the codebase uses -- it points into `self_arc`, which lives until
+        // this function's end, past every use.
+        let self_arc: Arc<Self> = unsafe { Arc::from_raw(self_addr as *const Self) };
+        let self_: &'static Self = unsafe { &*Arc::as_ptr(&self_arc) };
 
         self_.io_thread_wake_handle.store(
             moto_sys::UserThreadControlBlock::get().self_handle,
@@ -1156,8 +1253,10 @@ impl NetChannel {
 
         moto_sys::set_current_thread_name("rt_net::channel_runtime").unwrap();
 
-        // The send-room notify lives (leaked) for the channel's lifetime;
-        // teardown is stage E. Published before the tasks that use it spawn.
+        // The send-room notify is leaked here (LocalNotify is not Sync, so it
+        // cannot be a field) and freed in NetChannel::drop, safe because that
+        // runs only after the thread has exited. Published before the tasks
+        // that use it spawn.
         let send_room: &'static moto_async::LocalNotify =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(moto_async::LocalNotify::new()));
         self_
@@ -1169,13 +1268,22 @@ impl NetChannel {
         // measured +11 usec on the set_nodelay IO latency (sys-io is a
         // heavyweight multiplexer; warm-CPU placement beats the handoff).
         moto_async::LocalRuntime::new().block_on(async {
-            // The residents run forever (channel teardown is stage E);
-            // dropping a JoinHandle detaches, it does not cancel.
-            core::mem::drop(moto_async::LocalRuntime::spawn(self_.rx_task()));
-            core::mem::drop(moto_async::LocalRuntime::spawn(self_.tx_task()));
-            core::future::pending::<()>().await
+            let rx = moto_async::LocalRuntime::spawn(self_.rx_task());
+            let tx = moto_async::LocalRuntime::spawn(self_.tx_task());
+            // Both tasks return once `exiting` is set and their queues drain
+            // (design 5.5); then block_on returns and the thread exits.
+            let _ = rx.await;
+            let _ = tx.await;
         });
-        unreachable!("the channel runtime exited");
+
+        // Drop the thread's Arc before exiting: if it is the last strong ref
+        // NetChannel::drop runs here (no task borrows `self_` anymore); if a
+        // releasing thread still holds one, drop runs there, also after this
+        // thread is gone. Then reclaim TLS and exit; the kernel reaps us.
+        core::mem::drop(self_arc);
+        unsafe { crate::rt_tls::on_thread_exiting() };
+        let _ = moto_sys::SysObj::put(SysHandle::SELF);
+        unreachable!("the channel runtime thread exited");
     }
 
     fn new() -> Arc<Self> {
@@ -1199,6 +1307,8 @@ impl NetChannel {
             rpc_map: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),
+            rx_task_waker: Mutex::new(None),
+            guaranteed_inflight: AtomicUsize::new(0),
             io_thread_join_handle: AtomicU64::new(SysHandle::NONE.into()),
             io_thread_wake_handle: AtomicU64::new(SysHandle::NONE.into()),
             exiting: CachePadded::new(AtomicBool::new(false)),
@@ -1389,19 +1499,25 @@ impl NetChannel {
         // failed push and the waiter registration happen within one poll,
         // and the tx task (same thread) cannot run in between.
         //
-        // The lifetime extension is exactly as sound as the runtime
-        // thread's own &'static self (see runtime_thread_init): channel
-        // teardown is stage E.
+        // The &'static borrow is sound because the runtime thread holds an
+        // Arc<Self> for its whole life (runtime_thread_init) and teardown's
+        // tx task waits out `guaranteed_inflight` before letting block_on
+        // return, so this task always completes while `self` is still alive.
+        self.guaranteed_inflight.fetch_add(1, Ordering::Relaxed);
         let self_: &'static Self = unsafe { &*(self as *const Self) };
         core::mem::drop(moto_async::LocalRuntime::spawn(async move {
             let mut msg = msg;
             loop {
                 match self_.post_msg(msg) {
-                    Ok(()) => return,
+                    Ok(()) => break,
                     Err(rejected) => msg = rejected,
                 }
                 self_.send_room().notified().await;
             }
+            // The push may be the last unsent close a teardown is waiting on;
+            // drop the count and wake the tx task so it re-checks and exits.
+            self_.guaranteed_inflight.fetch_sub(1, Ordering::Release);
+            self_.maybe_wake_io_thread();
         }));
     }
 

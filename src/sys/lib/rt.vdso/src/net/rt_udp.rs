@@ -63,6 +63,10 @@ impl Drop for UdpSocket {
         // rx task briefly upgrades the Weak it keeps in udp_sockets, so a
         // socket whose fd is already closed drops here, on the IO thread.
         self.channel().send_msg_guaranteed(req);
+
+        // Balance stats_udp_socket_created(): the decrement was missing, which
+        // stage-E's assert_empty (now checking num_udp_sockets) would trip on.
+        crate::net::rt_net::stats_udp_socket_dropped();
     }
 }
 
