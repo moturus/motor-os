@@ -1,16 +1,24 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::diagnostic::{Error, Result};
+use crate::sandbox::{Executable, NetworkAccess, Policy, Sandbox};
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Output {
     pub directives: Vec<Directive>,
     pub diagnostics: Vec<String>,
+    pub stderr: String,
     pub out_dir: Tree,
 }
 
@@ -34,6 +42,203 @@ pub struct ParseOptions<'a> {
     pub out_dir_limits: TreeLimits,
 }
 
+pub struct RunOptions<'a> {
+    pub executable: &'a Path,
+    pub arguments: &'a [OsString],
+    pub environment: &'a BTreeMap<String, OsString>,
+    pub package_root: &'a Path,
+    pub out_dir: &'a Path,
+    pub temp_dir: &'a Path,
+    pub read_only: &'a [PathBuf],
+    pub executables: &'a [Executable],
+    pub timeout: Duration,
+    pub max_output_bytes: u64,
+    pub out_dir_limits: TreeLimits,
+    pub verbose: bool,
+}
+
+pub fn run(options: &RunOptions<'_>) -> Result<Output> {
+    if options.timeout.is_zero() {
+        return Err(Error::failure("build-script timeout must be nonzero"));
+    }
+    if options.max_output_bytes == 0 {
+        return Err(Error::failure("build-script output limit must be nonzero"));
+    }
+    let package_root = canonical_directory(options.package_root, "package root")?;
+    let out_dir = canonical_directory(options.out_dir, "OUT_DIR")?;
+    let temp_dir = canonical_directory(options.temp_dir, "temporary directory")?;
+    if package_root.starts_with(&out_dir) || package_root.starts_with(&temp_dir) {
+        return Err(Error::failure(
+            "build-script package root may not be nested inside a writable sandbox directory",
+        ));
+    }
+    if out_dir.starts_with(&temp_dir) || temp_dir.starts_with(&out_dir) {
+        return Err(Error::failure(format!(
+            "build-script OUT_DIR `{}` and temporary directory `{}` overlap",
+            out_dir.display(),
+            temp_dir.display()
+        )));
+    }
+
+    let mut read_only = options.read_only.to_vec();
+    read_only.push(package_root.clone());
+    let policy = Policy {
+        read_only,
+        writable: vec![out_dir.clone(), temp_dir],
+        executables: options.executables.to_vec(),
+        network: NetworkAccess::Deny,
+    };
+    let mut command = Command::new(options.executable);
+    command
+        .args(options.arguments)
+        .env_clear()
+        .envs(options.environment)
+        .current_dir(&package_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::sandbox::platform().apply(&mut command, &policy)?;
+    if options.verbose {
+        eprintln!(
+            "Running sandboxed {}",
+            crate::process::display_command(options.executable.as_os_str(), options.arguments)
+        );
+    }
+    let captured = capture(&mut command, options.timeout, options.max_output_bytes)?;
+    if !captured.status.success() {
+        let stderr = String::from_utf8_lossy(&captured.stderr);
+        return Err(Error::failure(format!(
+            "build script `{}` failed{}{}",
+            options.executable.display(),
+            captured.status.code().map_or_else(
+                || " after being terminated by a signal".to_owned(),
+                |code| { format!(" with status {code}") }
+            ),
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", stderr.trim())
+            }
+        )));
+    }
+
+    let approved_environment = options.environment.keys().cloned().collect();
+    let mut output = parse(
+        &captured.stdout,
+        &ParseOptions {
+            package_root: &package_root,
+            out_dir: &out_dir,
+            approved_environment: &approved_environment,
+            max_bytes: options.max_output_bytes,
+            out_dir_limits: options.out_dir_limits,
+        },
+    )?;
+    output.stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
+    Ok(output)
+}
+
+struct Captured {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn capture(command: &mut Command, timeout: Duration, max_bytes: u64) -> Result<Captured> {
+    let mut child = command.spawn().map_err(|error| {
+        Error::failure(format!(
+            "failed to start sandboxed build script `{}`: {error}",
+            Path::new(command.get_program()).display()
+        ))
+    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::failure("build-script stdout pipe was not created"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::failure("build-script stderr pipe was not created"))?;
+    let total = Arc::new(AtomicU64::new(0));
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let stdout_thread = capture_pipe(stdout, total.clone(), exceeded.clone(), max_bytes);
+    let stderr_thread = capture_pipe(stderr, total, exceeded.clone(), max_bytes);
+    let started = Instant::now();
+    let status = loop {
+        if exceeded.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(Error::failure(format!(
+                "build-script output exceeded the {max_bytes}-byte combined limit"
+            )));
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(Error::failure(format!(
+                "build script timed out after {} ms",
+                timeout.as_millis()
+            )));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(Error::failure(format!(
+                    "failed while waiting for build script: {error}"
+                )));
+            }
+        }
+    };
+    let stdout = stdout_thread
+        .join()
+        .map_err(|_| Error::failure("build-script stdout capture thread panicked"))??;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| Error::failure("build-script stderr capture thread panicked"))??;
+    if exceeded.load(Ordering::Acquire) {
+        return Err(Error::failure(format!(
+            "build-script output exceeded the {max_bytes}-byte combined limit"
+        )));
+    }
+    Ok(Captured {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn capture_pipe(
+    mut pipe: impl Read + Send + 'static,
+    total: Arc<AtomicU64>,
+    exceeded: Arc<AtomicBool>,
+    max_bytes: u64,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = pipe.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(captured);
+            }
+            let previous = total.fetch_add(read as u64, Ordering::AcqRel);
+            let available = max_bytes.saturating_sub(previous) as usize;
+            captured.extend_from_slice(&buffer[..read.min(available)]);
+            if read > available {
+                exceeded.store(true, Ordering::Release);
+            }
+        }
+    })
+}
+
 pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
     if stdout.len() as u64 > options.max_bytes {
         return Err(Error::failure(format!(
@@ -55,6 +260,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
     let mut output = Output {
         directives: Vec::new(),
         diagnostics: Vec::new(),
+        stderr: String::new(),
         out_dir: Tree::scan(&out_dir, options.out_dir_limits, Exclusions::None)?,
     };
     for (index, raw_line) in stdout.split('\n').enumerate() {
@@ -365,5 +571,185 @@ mod tests {
             assert!(parse(source.as_bytes(), &fixture.options()).is_err());
         }
         fs::remove_file(outside).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    struct RunFixture {
+        root: PathBuf,
+        package: PathBuf,
+        out: PathBuf,
+        temp: PathBuf,
+        outside: PathBuf,
+        executable: PathBuf,
+        arguments: Vec<OsString>,
+        environment: BTreeMap<String, OsString>,
+        read_only: Vec<PathBuf>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl RunFixture {
+        fn new(action: &str) -> Self {
+            let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let root =
+                std::env::temp_dir().join(format!("lorry-build-run-{}-{id}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            let package = root.join("package");
+            let out = root.join("output");
+            let temp = root.join("temp");
+            let outside = root.join("outside");
+            for path in [&package, &out, &temp, &outside] {
+                fs::create_dir_all(path).unwrap();
+            }
+            fs::write(package.join("build.rs"), b"input").unwrap();
+            fs::write(outside.join("secret"), b"secret").unwrap();
+            let executable = std::env::current_exe().unwrap();
+            let arguments = [
+                "--exact",
+                "build_script::tests::sandboxed_build_script_child",
+                "--nocapture",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            let environment = BTreeMap::from([
+                ("LORRY_BUILD_SCRIPT_CHILD".to_owned(), action.into()),
+                ("OUT_DIR".to_owned(), out.clone().into_os_string()),
+                ("TARGET".to_owned(), "x86_64-unknown-linux-gnu".into()),
+                ("TMPDIR".to_owned(), temp.clone().into_os_string()),
+            ]);
+            let mut read_only = Vec::new();
+            for path in ["/lib", "/lib64", "/usr/lib", "/etc/ld.so.cache"] {
+                if Path::new(path).exists() {
+                    read_only.push(PathBuf::from(path));
+                }
+            }
+            Self {
+                root,
+                package,
+                out,
+                temp,
+                outside,
+                executable,
+                arguments,
+                environment,
+                read_only,
+            }
+        }
+
+        fn options(&self, timeout: Duration, max_output_bytes: u64) -> RunOptions<'_> {
+            RunOptions {
+                executable: &self.executable,
+                arguments: &self.arguments,
+                environment: &self.environment,
+                package_root: &self.package,
+                out_dir: &self.out,
+                temp_dir: &self.temp,
+                read_only: &self.read_only,
+                executables: &[],
+                timeout,
+                max_output_bytes,
+                out_dir_limits: crate::source_tree::DEFAULT_LIMITS,
+                verbose: false,
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for RunFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runs_with_a_clean_environment_and_enforced_sandbox() {
+        let fixture = RunFixture::new("success");
+        let output = run(&fixture.options(Duration::from_secs(5), 64 * 1024)).unwrap();
+        assert_eq!(fs::read(fixture.out.join("generated")).unwrap(), b"output");
+        assert_eq!(fs::read(fixture.temp.join("temporary")).unwrap(), b"temp");
+        assert_eq!(
+            fs::read(fixture.package.join("build.rs")).unwrap(),
+            b"input"
+        );
+        assert_eq!(output.out_dir.file_count, 1);
+        assert!(output.stderr.contains("sandbox stderr"));
+        assert!(
+            output.directives.iter().any(|directive| {
+                *directive == Directive::RerunIfEnvChanged("TARGET".to_owned())
+            })
+        );
+        assert!(output.directives.iter().any(|directive| {
+            *directive
+                == Directive::RustcEnv {
+                    name: "GENERATED".to_owned(),
+                    value: "yes".to_owned(),
+                }
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kills_timeouts_and_rejects_combined_output_and_failures() {
+        let timeout = RunFixture::new("timeout");
+        assert!(
+            run(&timeout.options(Duration::from_millis(20), 64 * 1024))
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+
+        let excess = RunFixture::new("excess-output");
+        assert!(
+            run(&excess.options(Duration::from_secs(5), 128))
+                .unwrap_err()
+                .to_string()
+                .contains("combined limit")
+        );
+
+        let failure = RunFixture::new("failure");
+        assert!(
+            run(&failure.options(Duration::from_secs(5), 64 * 1024))
+                .unwrap_err()
+                .to_string()
+                .contains("failed with status")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandboxed_build_script_child() {
+        let Ok(action) = std::env::var("LORRY_BUILD_SCRIPT_CHILD") else {
+            return;
+        };
+        match action.as_str() {
+            "success" => {
+                let package = std::env::current_dir().unwrap();
+                let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+                let temp = PathBuf::from(std::env::var_os("TMPDIR").unwrap());
+                let outside = package.parent().unwrap().join("outside/secret");
+                assert!(std::env::var_os("HOME").is_none());
+                assert_eq!(fs::read(package.join("build.rs")).unwrap(), b"input");
+                fs::write(out.join("generated"), b"output").unwrap();
+                fs::write(temp.join("temporary"), b"temp").unwrap();
+                assert!(fs::write(package.join("build.rs"), b"bad").is_err());
+                assert!(fs::read(outside).is_err());
+                assert!(
+                    std::net::TcpStream::connect("127.0.0.1:9").is_err_and(|error| {
+                        error.kind() == std::io::ErrorKind::PermissionDenied
+                    })
+                );
+                assert!(Command::new("/bin/true").status().is_err());
+                println!("cargo:rerun-if-changed=build.rs");
+                println!("cargo:rerun-if-env-changed=TARGET");
+                println!("cargo:rustc-env=GENERATED=yes");
+                println!("cargo:rustc-link-search=native={}", out.display());
+                eprintln!("sandbox stderr");
+            }
+            "timeout" => std::thread::sleep(Duration::from_secs(5)),
+            "excess-output" => println!("{}", "x".repeat(4096)),
+            "failure" => panic!("requested build-script failure"),
+            _ => panic!("unknown build-script child action {action}"),
+        }
     }
 }
