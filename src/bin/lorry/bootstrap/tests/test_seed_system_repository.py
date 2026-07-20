@@ -22,6 +22,7 @@ from seed_system_repository import (  # noqa: E402
     SeededGitPackage,
     extract_registry_archive,
     load_seed_manifest,
+    rename_no_replace,
     registry_object_path,
     seed_registry_repository,
     seed_system_repository,
@@ -222,6 +223,24 @@ def prepare_git_fixture(
 
 
 class SeedSystemRepositoryTests(unittest.TestCase):
+    def test_directory_install_never_replaces_an_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir()
+            destination.mkdir()
+            (source / "source-marker").write_text("source", encoding="utf-8")
+            (destination / "destination-marker").write_text(
+                "destination", encoding="utf-8"
+            )
+
+            with self.assertRaises(FileExistsError):
+                rename_no_replace(source, destination)
+
+            self.assertTrue((source / "source-marker").is_file())
+            self.assertTrue((destination / "destination-marker").is_file())
+
     def test_offline_seed_is_complete_reproducible_and_reverified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -89,6 +89,10 @@ verify_prereqs() {
 	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 	rustup toolchain list | grep -q '^dev-x86_64-unknown-motor' || \
 		die "dev-x86_64-unknown-motor toolchain not registered — run build-base.sh first"
+	python3 -c 'import sys, tomllib; assert sys.version_info >= (3, 11)' ||
+		die "Stage-2 Lorry seeding requires Python 3.11 or newer"
+	[ -x "$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py" ] ||
+		die "Stage-2 Lorry seed installer is missing or not executable"
 
 	# rustc's default linker is the bare name `cc`, resolved on the image's PATH
 	# (=/bin), and that script fronts the llvm multicall. Both are build-llvm.sh's
@@ -514,6 +518,11 @@ fn main() {
     println!("10! = {}", t.join().unwrap());
 }
 EOF
+
+	# Seed the reviewed Stage-2 Lorry dependency repository into both the
+	# Linux host configuration and the generated image root. Run this after
+	# recreating RUSTC_IMG so the image copy survives into the imager.
+	"$MOTOR/src/bin/lorry/bootstrap/install_stage2_seed.py"
 }
 
 # --- rebuild the OS and the image ---------------------------------------------

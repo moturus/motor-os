@@ -61,6 +61,18 @@ FETCH_PACKAGES = {
     "zeroize",
 }
 
+BUILD_SCRIPT_PACKAGES = {
+    "crc32fast",
+    "generic-array",
+    "libc",
+    "rustls",
+    "semver",
+    "serde",
+    "serde_core",
+    "serde_json",
+    "zmij",
+}
+
 
 def load_toml(name: str) -> dict[str, object]:
     with (BOOTSTRAP / name).open("rb") as source:
@@ -94,6 +106,14 @@ class SeedManifestTests(unittest.TestCase):
         self.assertEqual(core, CORE_PACKAGES)
         self.assertEqual(fetch, FETCH_PACKAGES)
         self.assertEqual(core & fetch, {"cfg-if"})
+        self.assertEqual(
+            {
+                package["name"]
+                for package in packages
+                if package.get("allow-build-script", False)
+            },
+            BUILD_SCRIPT_PACKAGES,
+        )
 
     def test_every_registry_object_has_closed_integrity_metadata(self) -> None:
         manifest = load_toml("stage2-seed.toml")

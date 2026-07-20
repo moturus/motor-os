@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -35,6 +37,8 @@ RING_GIT_URL = "https://github.com/moturus/ring.git"
 REPOSITORY_TOML = b'format-version = 1\nobject-hash = "sha256"\n'
 ALLOWED_PAX_KEYS = frozenset({"path", "size"})
 ZERO_BLOCK_BYTES = 1024
+AT_FDCWD = -100
+RENAME_NOREPLACE = 1
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,7 @@ class RegistryPackage:
     lock_graphs: tuple[str, ...]
     retained_archive: bool
     retained_source: bool
+    allow_build_script: bool = False
 
     @property
     def archive_name(self) -> str:
@@ -253,6 +258,7 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                     "retained-source",
                 }
             ),
+            optional=frozenset({"allow-build-script"}),
             context=context,
         )
         name = require_string(package["name"], f"{context}.name")
@@ -284,6 +290,10 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                 ),
                 require_boolean(
                     package["retained-source"], f"{context}.retained-source"
+                ),
+                require_boolean(
+                    package.get("allow-build-script", False),
+                    f"{context}.allow-build-script",
                 ),
             )
         )
@@ -493,6 +503,37 @@ def write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
             os.fsync(destination.fileno())
     finally:
         os.close(descriptor)
+
+
+def rename_no_replace(source: Path, destination: Path) -> None:
+    """Atomically rename a directory without replacing any destination."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(
+            errno.ENOSYS,
+            "the Stage 2 host seeder requires renameat2(RENAME_NOREPLACE)",
+        )
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        AT_FDCWD,
+        os.fsencode(source),
+        AT_FDCWD,
+        os.fsencode(destination),
+        RENAME_NOREPLACE,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        if error in (errno.EEXIST, errno.ENOTEMPTY):
+            raise FileExistsError(error, os.strerror(error), destination)
+        raise OSError(error, os.strerror(error), destination)
 
 
 def atomic_cache_write(path: Path, data: bytes) -> None:
@@ -1151,7 +1192,7 @@ def acquire_git_repository(
             verify_git_cache(cached_repository, package)
         else:
             try:
-                os.rename(temporary_cache, cached_repository)
+                rename_no_replace(temporary_cache, cached_repository)
             except FileExistsError:
                 verify_git_cache(cached_repository, package)
             fsync_directory(cached_repository.parent)
@@ -1509,7 +1550,7 @@ def install_registry_objects(
             verify_registry_object(final, package, limits)
             continue
         try:
-            os.rename(staged, final)
+            rename_no_replace(staged, final)
         except FileExistsError:
             verify_registry_object(final, package, limits)
         fsync_directory(final.parent)
@@ -1540,7 +1581,7 @@ def install_seeded_git_objects(
             verify_seeded_git_object(final, package, limits)
             continue
         try:
-            os.rename(staged, final)
+            rename_no_replace(staged, final)
         except FileExistsError:
             verify_seeded_git_object(final, package, limits)
         fsync_directory(final.parent)

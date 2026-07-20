@@ -104,6 +104,7 @@ version = "1.5.0"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -158,6 +159,7 @@ version = "0.14.7"
 checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 license = "MIT"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -203,6 +205,7 @@ version = "0.2.186"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["lorry-fetch"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -239,6 +242,7 @@ version = "0.23.42"
 checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 license = "Apache-2.0 OR ISC OR MIT"
 lock-graphs = ["lorry-fetch"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -275,6 +279,7 @@ version = "1.0.26"
 checksum = "56e6fa9c48d24d85fb3de5ad847117517440f6beceb7798af16b4a87d616b8d0"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -284,6 +289,7 @@ version = "1.0.228"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -293,6 +299,7 @@ version = "1.0.228"
 checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -302,6 +309,7 @@ version = "1.0.150"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 license = "MIT OR Apache-2.0"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
@@ -419,6 +427,7 @@ version = "1.0.23"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 license = "MIT"
 lock-graphs = ["stage2-core"]
+allow-build-script = true
 retained-archive = true
 retained-source = true
 
