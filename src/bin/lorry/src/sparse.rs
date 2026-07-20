@@ -371,6 +371,7 @@ fn parse_rust_version(path: &Path, value: &str) -> Result<RustVersion> {
     }
     let components = value.split('.').count();
     let normalized = match components {
+        1 => format!("{value}.0.0"),
         2 => format!("{value}.0"),
         3 => value.to_owned(),
         _ => {
@@ -715,6 +716,12 @@ mod tests {
         assert_eq!(
             record.rust_version.as_ref().unwrap().version,
             Version::parse("1.85.0").unwrap()
+        );
+        assert_eq!(
+            parse_rust_version(Path::new("/fixture"), "1")
+                .unwrap()
+                .version,
+            Version::parse("1.0.0").unwrap()
         );
         assert_eq!(
             record.features["legacy"],
