@@ -165,6 +165,7 @@ pub struct PathPatch {
 pub struct Lint {
     pub level: String,
     pub priority: i64,
+    pub check_cfg: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -213,6 +214,27 @@ impl Manifest {
         }
         let lock_document = Document::load(&lock_path, "Cargo lockfile")?;
         manifest.lock = Some(parse_lock_document(&manifest, &lock_path, &lock_document)?);
+        Ok(manifest)
+    }
+
+    pub fn load_path_dependency(root: &Path) -> Result<Self> {
+        let path = root.join(MANIFEST_NAME);
+        if !path.is_file() {
+            return Err(Error::failure(format!(
+                "path dependency manifest `{}` does not exist",
+                path.display()
+            )));
+        }
+        let document = Document::load(&path, "Cargo path dependency manifest")?;
+        let mut manifest = Self::parse_document(root, &path, &document)?;
+        manifest.root = fs::canonicalize(root).map_err(|error| {
+            Error::failure(format!(
+                "failed to canonicalize path dependency directory `{}`: {error}",
+                root.display()
+            ))
+        })?;
+        manifest.path = manifest.root.join(MANIFEST_NAME);
+        resolve_target_defaults(&mut manifest)?;
         Ok(manifest)
     }
 
@@ -920,10 +942,11 @@ fn parse_rust_lints(path: &Path, document: &Document) -> Result<BTreeMap<String,
             Lint {
                 level: validate_lint_level(path, document.line_of_item(item), level)?,
                 priority: 0,
+                check_cfg: Vec::new(),
             }
         } else if let Some(table) = item.as_inline_table() {
             for (key, value) in table.iter() {
-                if !matches!(key, "level" | "priority") {
+                if !matches!(key, "level" | "priority" | "check-cfg") {
                     return Err(Error::at(
                         path,
                         document.line_of_value(value),
@@ -956,6 +979,22 @@ fn parse_rust_lints(path: &Path, document: &Document) -> Result<BTreeMap<String,
                     })
                     .transpose()?
                     .unwrap_or(0),
+                check_cfg: match table.get("check-cfg") {
+                    Some(value) => string_values(
+                        path,
+                        document,
+                        value.as_array().ok_or_else(|| {
+                            type_error(
+                                path,
+                                document.line_of_value(value),
+                                &format!("lints.rust.{name}.check-cfg"),
+                                "an array of strings",
+                            )
+                        })?,
+                        &format!("lints.rust.{name}.check-cfg"),
+                    )?,
+                    None => Vec::new(),
+                },
             }
         } else {
             return Err(type_error(
@@ -1802,6 +1841,50 @@ unsafe_code = { level = "forbid", priority = 1 }
             local
                 .iter()
                 .all(|dependency| dependency.requirement == VersionReq::STAR)
+        );
+
+        let moto_rt_path = local
+            .iter()
+            .find_map(|dependency| {
+                (dependency.package == "moto-rt").then(|| match &dependency.source {
+                    DependencySource::Path(path) => path,
+                    DependencySource::CratesIo => unreachable!(),
+                })
+            })
+            .unwrap();
+        let moto_rt = Manifest::load_path_dependency(moto_rt_path).unwrap();
+        assert_eq!(moto_rt.version.original, "0.16.1");
+        assert_eq!(
+            moto_rt.rust_lints["unexpected_cfgs"].check_cfg,
+            ["cfg(test)"]
+        );
+
+        let moto_sys_path = local
+            .iter()
+            .find_map(|dependency| {
+                (dependency.package == "moto-sys").then(|| match &dependency.source {
+                    DependencySource::Path(path) => path,
+                    DependencySource::CratesIo => unreachable!(),
+                })
+            })
+            .unwrap();
+        let moto_sys = Manifest::load_path_dependency(moto_sys_path).unwrap();
+        assert_eq!(moto_sys.version.original, "0.2.4");
+        let nested = moto_sys
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.package == "moto-rt")
+            .unwrap();
+        assert_eq!(nested.requirement, VersionReq::STAR);
+        let DependencySource::Path(nested_path) = &nested.source else {
+            panic!("moto-sys's moto-rt dependency must remain a path source");
+        };
+        assert_eq!(
+            Manifest::load_path_dependency(nested_path)
+                .unwrap()
+                .version
+                .original,
+            "0.16.1"
         );
     }
 
