@@ -331,7 +331,10 @@ It addresses two related problems:
   include
   target-conditioned crates.io/path dependencies, string and table forms,
   renaming, optional dependencies, default-feature control, feature
-  forwarding, and path dependencies with a verified version requirement.
+  forwarding, required version requirements for crates.io dependencies, and
+  path dependencies with or without an explicit version requirement. When a
+  path dependency supplies `version`, the selected local package must satisfy
+  it.
 - Root build-dependencies and dev-dependencies are rejected in stages 1 and 2.
   Dev-dependencies declared by dependency packages are ignored as Cargo
   ignores them. Stage 1 rejects every selected build-dependency. Stage 2
@@ -1915,6 +1918,12 @@ discovery remain post-Stage-2.
   boundary still applies, and all path source inputs are included in unit
   fingerprints. This retains the previously agreed Cargo-like local
   development workflow.
+- A path dependency does not need a `version` key, whether its path is
+  relative, absolute, or the logical path of a verified vendored object. Its
+  package name/version still come from the selected source manifest and must
+  match Cargo.lock's path-package node. If `version` is present, Lorry enforces
+  it. Crates.io dependencies remain externally resolved inputs and always
+  require a version requirement.
 - A local path dependency that contains a build script must match an allow
   rule with `source = "path"` and `allow-build-script = true`, even when
   `policy.default = "allow"`. A path dependency granted native tools must also
@@ -2279,6 +2288,10 @@ ring = { path = ".lorry/vendor/ring-0_17_14/source" }
   is enabled only when the normalized path is exactly the derived logical path
   of an applicable `required-patches` rule. This does not turn arbitrary broken
   path dependencies into package searches.
+- Required-patch rules independently declare and enforce the guarded package
+  version. The corresponding Cargo path patch does not need a redundant
+  dependency version key; Lorry verifies the selected source manifest and
+  Cargo.lock path-package version against the rule.
 - The logical path is not implicitly materialized beneath the crate and Lorry
   does not test that literal path as an ordinary dependency directory. It
   looks up the exact rule identity and digest through the configured absolute
@@ -2817,6 +2830,23 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
    - Only after this gate passes is Stage 2 complete. Workspaces,
      `httpd-axum`, `russhd`, procedural macros, general Git, CLI feature
      selection, and every other Stage-3+ choice may then be reopened.
+
+### Round 39: optional version requirements for local path sources
+
+#### Resolved during Stage-2 implementation
+
+- The earlier requirement that every path dependency include `version` was
+  unnecessarily strict and is superseded.
+- Crates.io dependencies must still carry a semantic version requirement
+  because Lorry resolves and vendors them as external packages.
+- Dependencies whose Cargo source is `path` may omit `version`, including
+  ordinary relative/absolute local paths and logical paths backed by verified
+  vendored objects. Their selected package name/version are verified from the
+  source manifest and Cargo.lock path-package node. An explicitly supplied
+  version remains a constraint and must match.
+- Required-patch rules retain their own exact guarded version and source-tree
+  identity checks, so omitting a redundant version from the Cargo path entry
+  does not weaken patch integrity or policy enforcement.
 
 ## Stage-1/2 design closure and external start gates
 
