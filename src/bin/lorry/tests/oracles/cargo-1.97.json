@@ -1,0 +1,1098 @@
+{
+  "cargo-version": "cargo 1.97.0 (c980f4866 2026-06-30)\nrelease: 1.97.0\ncommit-hash: c980f4866141969fab6254a680546a277789d6f0\ncommit-date: 2026-06-30\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.2 (sys:0.20.4 vendored)\nlibcurl: 8.20.0-DEV (sys:0.4.88+curl-8.20.0 vendored ssl:OpenSSL/3.6.2)\nssl: OpenSSL 3.6.2 7 Apr 2026\nos: Ubuntu 26.4.0 (resolute) [64-bit]\n",
+  "cases": [
+    {
+      "artifacts": [
+        {
+          "bytes": 7092432,
+          "path": "{TARGET_DIR}/debug/red",
+          "sha256": "4c1b802f49cc7e5cd48c1a1b2f3e1f58036ad88ab9a106b525f8c7a4c0372a97"
+        }
+      ],
+      "command": "build",
+      "name": "native-dev-build",
+      "profile": "dev",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--crate-type",
+          "bin",
+          "--emit=dep-info,link",
+          "-C",
+          "embed-bitcode=no",
+          "-C",
+          "debuginfo=2",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=21ddaf467d140da2",
+          "-C",
+          "extra-filename=-682bd9b3639f73b0",
+          "--out-dir",
+          "{TARGET_DIR}/debug/deps",
+          "-C",
+          "incremental={TARGET_DIR}/debug/incremental",
+          "-L",
+          "dependency={TARGET_DIR}/debug/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/debug/deps"
+          ]
+        ],
+        "extra_filename": "-682bd9b3639f73b0",
+        "metadata": "21ddaf467d140da2",
+        "program": "{RUSTC}"
+      },
+      "target": null
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 9324120,
+          "path": "{TARGET_DIR}/debug/deps/red-49fe10894af1cd5e",
+          "sha256": "6644921b71fd8b0e066f44f69fd05cfa2ae5e5525c2ff455031fd72136690c68"
+        }
+      ],
+      "command": "test",
+      "name": "native-dev-test",
+      "profile": "dev",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--emit=dep-info,link",
+          "-C",
+          "embed-bitcode=no",
+          "-C",
+          "debuginfo=2",
+          "--test",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=61bdcd556a960a48",
+          "-C",
+          "extra-filename=-49fe10894af1cd5e",
+          "--out-dir",
+          "{TARGET_DIR}/debug/deps",
+          "-C",
+          "incremental={TARGET_DIR}/debug/incremental",
+          "-L",
+          "dependency={TARGET_DIR}/debug/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/debug/deps"
+          ]
+        ],
+        "extra_filename": "-49fe10894af1cd5e",
+        "metadata": "61bdcd556a960a48",
+        "program": "{RUSTC}"
+      },
+      "target": null
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 517440,
+          "path": "{TARGET_DIR}/release/red",
+          "sha256": "19fff3757a528fab4ea897ea097282512caa10ea33431e858a68697b21eadc63"
+        }
+      ],
+      "command": "build",
+      "name": "native-release-build",
+      "profile": "release",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--crate-type",
+          "bin",
+          "--emit=dep-info,link",
+          "-C",
+          "opt-level=3",
+          "-C",
+          "panic=abort",
+          "-C",
+          "lto=fat",
+          "-C",
+          "codegen-units=1",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=383c09b6fac15a9f",
+          "-C",
+          "extra-filename=-3192ca1bd04bc552",
+          "--out-dir",
+          "{TARGET_DIR}/release/deps",
+          "-C",
+          "strip=symbols",
+          "-L",
+          "dependency={TARGET_DIR}/release/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/release/deps"
+          ]
+        ],
+        "extra_filename": "-3192ca1bd04bc552",
+        "metadata": "383c09b6fac15a9f",
+        "program": "{RUSTC}"
+      },
+      "target": null
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 1015496,
+          "path": "{TARGET_DIR}/release/deps/red-07186d9f96045ca2",
+          "sha256": "a9158a495c753ef588b2eaccb9a227e7c7168ad1ecea0d6db909c40c3d7a9938"
+        }
+      ],
+      "command": "test",
+      "name": "native-release-test",
+      "profile": "release",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--emit=dep-info,link",
+          "-C",
+          "opt-level=3",
+          "-C",
+          "lto=fat",
+          "-C",
+          "codegen-units=1",
+          "--test",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=74aac86d015964e0",
+          "-C",
+          "extra-filename=-07186d9f96045ca2",
+          "--out-dir",
+          "{TARGET_DIR}/release/deps",
+          "-C",
+          "strip=symbols",
+          "-L",
+          "dependency={TARGET_DIR}/release/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/release/deps"
+          ]
+        ],
+        "extra_filename": "-07186d9f96045ca2",
+        "metadata": "74aac86d015964e0",
+        "program": "{RUSTC}"
+      },
+      "target": null
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 2610624,
+          "path": "{TARGET_DIR}/x86_64-unknown-motor/debug/red",
+          "sha256": "d9bb03dde726f4d69d865ce7066d73a358f7f24502f9206d13758a70833f697d"
+        }
+      ],
+      "command": "build",
+      "name": "motor-dev-build",
+      "profile": "dev",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--crate-type",
+          "bin",
+          "--emit=dep-info,link",
+          "-C",
+          "embed-bitcode=no",
+          "-C",
+          "debuginfo=2",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=bfcb236d1978af58",
+          "-C",
+          "extra-filename=-7c6f12825b966511",
+          "--out-dir",
+          "{TARGET_DIR}/x86_64-unknown-motor/debug/deps",
+          "--target",
+          "x86_64-unknown-motor",
+          "-C",
+          "incremental={TARGET_DIR}/x86_64-unknown-motor/debug/incremental",
+          "-L",
+          "dependency={TARGET_DIR}/x86_64-unknown-motor/debug/deps",
+          "-L",
+          "dependency={TARGET_DIR}/debug/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/debug/deps"
+          ]
+        ],
+        "extra_filename": "-7c6f12825b966511",
+        "metadata": "bfcb236d1978af58",
+        "program": "{RUSTC}"
+      },
+      "target": "x86_64-unknown-motor"
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 2604000,
+          "path": "{TARGET_DIR}/x86_64-unknown-motor/debug/deps/red-62f30cf1672597e1",
+          "sha256": "7eacd419d8c88111800bf0af1646b9f881ef24b93f5419fbf115f1be1739bd04"
+        }
+      ],
+      "command": "test",
+      "name": "motor-dev-test",
+      "profile": "dev",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--emit=dep-info,link",
+          "-C",
+          "embed-bitcode=no",
+          "-C",
+          "debuginfo=2",
+          "--test",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=b1568c6aa36055f1",
+          "-C",
+          "extra-filename=-62f30cf1672597e1",
+          "--out-dir",
+          "{TARGET_DIR}/x86_64-unknown-motor/debug/deps",
+          "--target",
+          "x86_64-unknown-motor",
+          "-C",
+          "incremental={TARGET_DIR}/x86_64-unknown-motor/debug/incremental",
+          "-L",
+          "dependency={TARGET_DIR}/x86_64-unknown-motor/debug/deps",
+          "-L",
+          "dependency={TARGET_DIR}/debug/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/debug/deps"
+          ]
+        ],
+        "extra_filename": "-62f30cf1672597e1",
+        "metadata": "b1568c6aa36055f1",
+        "program": "{RUSTC}"
+      },
+      "target": "x86_64-unknown-motor"
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 226664,
+          "path": "{TARGET_DIR}/x86_64-unknown-motor/release/red",
+          "sha256": "707cac65e1f0ed3c6d9a38ab52393965eb573fc758df0ccfb38a2b3f12bfe647"
+        }
+      ],
+      "command": "build",
+      "name": "motor-release-build",
+      "profile": "release",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--crate-type",
+          "bin",
+          "--emit=dep-info,link",
+          "-C",
+          "opt-level=3",
+          "-C",
+          "panic=abort",
+          "-C",
+          "lto=fat",
+          "-C",
+          "codegen-units=1",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=dcd19f902df9ef76",
+          "-C",
+          "extra-filename=-7ece998c9de35604",
+          "--out-dir",
+          "{TARGET_DIR}/x86_64-unknown-motor/release/deps",
+          "--target",
+          "x86_64-unknown-motor",
+          "-C",
+          "strip=symbols",
+          "-L",
+          "dependency={TARGET_DIR}/x86_64-unknown-motor/release/deps",
+          "-L",
+          "dependency={TARGET_DIR}/release/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/release/deps"
+          ]
+        ],
+        "extra_filename": "-7ece998c9de35604",
+        "metadata": "dcd19f902df9ef76",
+        "program": "{RUSTC}"
+      },
+      "target": "x86_64-unknown-motor"
+    },
+    {
+      "artifacts": [
+        {
+          "bytes": 648480,
+          "path": "{TARGET_DIR}/x86_64-unknown-motor/release/deps/red-d6ce5b974d464d9b",
+          "sha256": "31baa390cf86af978633f5b882e4d308b20e3e42b06726a20d539d3cb7be1f7f"
+        }
+      ],
+      "command": "test",
+      "name": "motor-release-test",
+      "profile": "release",
+      "rustc": {
+        "arguments": [
+          "--crate-name",
+          "red",
+          "--edition=2024",
+          "src/main.rs",
+          "--error-format=json",
+          "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
+          "--emit=dep-info,link",
+          "-C",
+          "opt-level=3",
+          "-C",
+          "lto=fat",
+          "-C",
+          "codegen-units=1",
+          "--test",
+          "--check-cfg",
+          "cfg(docsrs,test)",
+          "--check-cfg",
+          "cfg(feature, values())",
+          "-C",
+          "metadata=9d55f51e411f5219",
+          "-C",
+          "extra-filename=-d6ce5b974d464d9b",
+          "--out-dir",
+          "{TARGET_DIR}/x86_64-unknown-motor/release/deps",
+          "--target",
+          "x86_64-unknown-motor",
+          "-C",
+          "strip=symbols",
+          "-L",
+          "dependency={TARGET_DIR}/x86_64-unknown-motor/release/deps",
+          "-L",
+          "dependency={TARGET_DIR}/release/deps"
+        ],
+        "environment": [
+          [
+            "CARGO",
+            "{CARGO}"
+          ],
+          [
+            "CARGO_BIN_NAME",
+            "red"
+          ],
+          [
+            "CARGO_CRATE_NAME",
+            "red"
+          ],
+          [
+            "CARGO_MANIFEST_DIR",
+            "{PACKAGE}"
+          ],
+          [
+            "CARGO_MANIFEST_PATH",
+            "{PACKAGE}/Cargo.toml"
+          ],
+          [
+            "CARGO_PKG_AUTHORS",
+            ""
+          ],
+          [
+            "CARGO_PKG_DESCRIPTION",
+            ""
+          ],
+          [
+            "CARGO_PKG_HOMEPAGE",
+            ""
+          ],
+          [
+            "CARGO_PKG_LICENSE",
+            "MIT OR Apache-2.0"
+          ],
+          [
+            "CARGO_PKG_LICENSE_FILE",
+            ""
+          ],
+          [
+            "CARGO_PKG_NAME",
+            "red"
+          ],
+          [
+            "CARGO_PKG_README",
+            "README.md"
+          ],
+          [
+            "CARGO_PKG_REPOSITORY",
+            ""
+          ],
+          [
+            "CARGO_PKG_RUST_VERSION",
+            ""
+          ],
+          [
+            "CARGO_PKG_VERSION",
+            "0.1.0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MAJOR",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_MINOR",
+            "1"
+          ],
+          [
+            "CARGO_PKG_VERSION_PATCH",
+            "0"
+          ],
+          [
+            "CARGO_PKG_VERSION_PRE",
+            ""
+          ],
+          [
+            "CARGO_PRIMARY_PACKAGE",
+            "1"
+          ],
+          [
+            "LD_LIBRARY_PATH",
+            "{TARGET_DIR}/release/deps"
+          ]
+        ],
+        "extra_filename": "-d6ce5b974d464d9b",
+        "metadata": "9d55f51e411f5219",
+        "program": "{RUSTC}"
+      },
+      "target": "x86_64-unknown-motor"
+    }
+  ],
+  "family": "1.97",
+  "motor-rustc-version": "rustc 1.98.0-dev\nbinary: rustc\ncommit-hash: unknown\ncommit-date: unknown\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0-dev\nLLVM version: 23.0.0\n",
+  "native-rustc-version": "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\nbinary: rustc\ncommit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\ncommit-date: 2026-06-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0-nightly\nLLVM version: 22.1.7\n",
+  "package": "src/bin/red",
+  "schema-version": 1
+}

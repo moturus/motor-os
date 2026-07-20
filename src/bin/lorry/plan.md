@@ -1,7 +1,7 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage-1/2 design complete — Phase-0 external gates satisfied;
-Stage-1 oracle capture in progress**
+Status: **Stage-1/2 design complete — Phase 0 complete; Stage-1 implementation
+ready**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -2656,7 +2656,11 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      is satisfied by the Round-34 identities and checked-in Phase-0 inputs.
    - Capture checked-in Cargo 1.97/1.98 command/metadata fixtures for every
      Stage-1 unit shape and establish deterministic, isolated Linux Cargo
-     oracle directories. No product code is written before these inputs pass.
+     oracle directories. This is satisfied by
+     `src/bin/lorry/tests/oracles/cargo-1.97.json` and `cargo-1.98.json`;
+     capture rejected any metadata, extra-filename, or executable-byte
+     difference across all eight Stage-1 unit shapes. No product code was
+     written before these inputs passed.
 
 1. **Implement the dependency-free Stage-1 foundation.**
    - Add the small Stage-1 CLI, manifest, root-only Cargo.lock, layered
@@ -2828,9 +2832,8 @@ but it must be green before Phase 5 starts:
     suffice, the acceptance fixture records that fact; otherwise the Motor OS
     feature is delivered outside this Lorry effort.
 
-Gates 9 and 10 are green. Phase 0 may proceed through Cargo-oracle capture;
-Lorry product implementation begins only after those checked-in oracle inputs
-pass.
+Gates 9 and 10 are green, and the checked-in Cargo-oracle inputs pass. Phase 0
+is complete and Lorry product implementation may begin.
 
 ### Design stop point
 
