@@ -770,6 +770,15 @@ impl NetChannel {
 
             // This is an incoming packet, or similar, without a dedicated waiter.
             let stream_handle = msg.handle;
+            // Upgraded listener Arcs are held here and dropped only after the
+            // tcp_streams/tcp_listeners locks below are released: if such a
+            // temporary is a listener's last strong ref (the owner dropped it
+            // concurrently), its Drop runs tcp_listener_dropped(), which
+            // re-locks tcp_listeners -- self-deadlocking this rx task if the
+            // drop happened while we still held that lock (the channel wedges
+            // mid-dispatch and every socket on it hangs).
+            let mut queued_to_listener = false;
+            let mut upgraded_listeners: Vec<Arc<TcpListener>> = Vec::new();
             let stream = {
                 let mut tcp_streams = self.tcp_streams.lock();
                 if let Some(stream) = tcp_streams.get_mut(&stream_handle) {
@@ -780,17 +789,27 @@ impl NetChannel {
                     // on_orphan_message() below. And we should check the pending accept queues
                     // while holding the tcp streams lock, otherwise we could race with
                     // the accept converting into a stream...
-                    let mut tcp_listeners = self.tcp_listeners.lock();
+                    let tcp_listeners = self.tcp_listeners.lock();
                     for listener in tcp_listeners.values() {
-                        if let Some(listener) = listener.upgrade()
-                            && listener.add_to_pending_queue(msg)
-                        {
-                            return;
+                        let Some(listener) = listener.upgrade() else {
+                            continue;
+                        };
+                        let did_queue = listener.add_to_pending_queue(msg);
+                        upgraded_listeners.push(listener);
+                        if did_queue {
+                            queued_to_listener = true;
+                            break;
                         }
                     }
                     None
                 }
             };
+            // Both locks are released; dropping the upgraded listener Arcs
+            // (and a possible last-ref tcp_listener_dropped()) is now safe.
+            drop(upgraded_listeners);
+            if queued_to_listener {
+                return;
+            }
             if let Some(stream) = stream {
                 stream.process_incoming_msg(msg);
             } else {
