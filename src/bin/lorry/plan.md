@@ -2710,7 +2710,8 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      `c696316be8d4ff7f0fef445f08e12c9bcf294575f8ea3f15e14f7a7128c6beb3`
      for the native run fixture.
 
-3. **Implement and validate the external Stage-2 system seeder.**
+3. **Complete (2026-07-20): implement and validate the external Stage-2
+   system seeder.**
    - Implement the Round-37 Python tool, reviewed 45-registry-object/full and
      patched-`ring`-only manifests, malicious archive/Git fixtures, canonical
      tree-digest golden vectors, offline-cache mode, and atomic install logic.
@@ -2721,6 +2722,22 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
    - Seed reproduction from an empty destination, idempotent re-run, offline
      reproduction, interrupted install, existing corruption, and host/image
      equality are hard gates before Stage-2 dependency work.
+
+   Closure evidence:
+   - The 16-test bootstrap suite passes the fixed digest vectors, closed
+     45-object registry manifest, malicious archive/Git fixtures, atomic
+     no-replace install, interruption/corruption handling, idempotent copy,
+     generated-config ownership, and offline reproduction gates.
+   - A full online seed and a second empty-destination offline seed produced
+     the same repository fingerprint,
+     `ad4ae463a27f1f7564a9dd8d51d153dbb13805fce0c6aaed2d8f05d55882f433`,
+     with 45 registry objects and the attested `ring` Git object. The
+     `ring`-only minimal seed fingerprint was
+     `5282f1f781f5a729aa2e26b8d6c5fd3fa9b3802fee64c64c3b3d253122858c21`.
+   - Independently copied host and image repositories re-verified to the full
+     fingerprint. The disposable Cargo oracle view materialized all 45
+     registry checksum manifests and the exact logical
+     `.lorry/vendor/ring-0_17_14/source` path.
 
 4. **Implement Stage-2 parsing, graph, repository, and policy foundations.**
    - Switch core Lorry to the exact Round-36 dependency graph. Add the bounded
