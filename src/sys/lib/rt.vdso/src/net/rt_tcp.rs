@@ -1275,6 +1275,35 @@ impl TcpStream {
             return Ok(0);
         }
 
+        // Fast path before committing to a park: write what fits, then spin
+        // and yield (re-checking for page room) instead of parking. A small
+        // write that briefly outruns sys-io's drain grabs a freed page here
+        // rather than paying a park+wake syscall per write (see TX_WRITE_SPINS).
+        // A return here means at least one byte moved; only a fully backpressured
+        // write (nothing written after the whole budget) falls to the future.
+        match self.write_nonblocking(bufs) {
+            Ok(n) => return Ok(n),
+            Err(err) if err != moto_rt::E_NOT_READY => return Err(err),
+            Err(_) => {}
+        }
+        for i in 0..(TX_WRITE_SPINS + TX_WRITE_YIELDS) {
+            if i < TX_WRITE_SPINS {
+                core::hint::spin_loop();
+            } else {
+                moto_sys::SysCpu::sched_yield();
+            }
+            if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
+                return Err(moto_rt::E_NOT_CONNECTED);
+            }
+            if self.have_write_buffer_space() {
+                match self.write_nonblocking(bufs) {
+                    Ok(n) => return Ok(n),
+                    Err(err) if err != moto_rt::E_NOT_READY => return Err(err),
+                    Err(_) => {}
+                }
+            }
+        }
+
         // The future owns the whole blocking dance: pending-page top-up,
         // page alloc (parking on the channel's tx_wakers; the failed
         // alloc's page-wait bits make sys-io wake the channel), marker
@@ -1639,6 +1668,14 @@ pub(super) const TX_PARK_RECHECK: Duration = Duration::from_millis(500);
 /// data pays one wasted wakeup per interval, as it did before. Also the
 /// UDP recv recheck (rt_udp shares block_on_recheck).
 pub(super) const RX_PARK_RECHECK: Duration = Duration::from_secs(5);
+
+/// A blocking write spins then yields this many times, re-checking for TX-page
+/// room, before it commits to a park. Restores the pre-D4b ladder's cheap page
+/// grab: a small write that briefly outruns sys-io's drain catches a freed page
+/// here instead of paying a park+wake syscall per write (~30% of default-buffer
+/// bulk TX, kill checkpoint 2). Uncontended writes and RR never reach the spin.
+const TX_WRITE_SPINS: usize = 100;
+const TX_WRITE_YIELDS: usize = 100;
 
 /// Drive `fut` on the calling thread, capping each park at `recheck` so a
 /// lost wake self-heals on the next tick. `deadline` is the real
