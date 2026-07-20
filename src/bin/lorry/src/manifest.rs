@@ -29,10 +29,11 @@ pub enum Edition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Version {
     pub original: String,
-    pub major: String,
-    pub minor: String,
-    pub patch: String,
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
     pub pre: String,
+    pub build: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -51,6 +52,7 @@ pub struct PackageMetadata {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lto {
     Default,
+    True,
     Fat,
     Thin,
     Off,
@@ -283,7 +285,7 @@ fn parse_release(path: &Path, table: Option<&Table>) -> Result<ReleaseProfile> {
         Some(ValueAt {
             value: Value::Bool(true),
             ..
-        }) => Lto::Fat,
+        }) => Lto::True,
         Some(ValueAt {
             value: Value::String(value),
             ..
@@ -587,7 +589,9 @@ fn validate_package_name(path: &Path, line: usize, name: &str) -> Result<()> {
 }
 
 fn parse_version(path: &Path, line: usize, version: &str) -> Result<Version> {
-    let without_build = version.split_once('+').map_or(version, |(left, _)| left);
+    let (without_build, build) = version
+        .split_once('+')
+        .map_or((version, ""), |(left, right)| (left, right));
     let (core, pre) = without_build
         .split_once('-')
         .map_or((without_build, ""), |(left, right)| (left, right));
@@ -597,22 +601,37 @@ fn parse_version(path: &Path, line: usize, version: &str) -> Result<Version> {
     else {
         return Err(invalid_version(path, line, version));
     };
-    if [major, minor, patch]
-        .iter()
-        .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
-        || (!pre.is_empty()
-            && !pre
+    if [major, minor, patch].iter().any(|part| {
+        part.is_empty()
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+            || (part.len() > 1 && part.starts_with('0'))
+    }) || (!pre.is_empty()
+        && !pre
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
+        || (!build.is_empty()
+            && !build
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')))
     {
         return Err(invalid_version(path, line, version));
     }
+    let major = major
+        .parse()
+        .map_err(|_| invalid_version(path, line, version))?;
+    let minor = minor
+        .parse()
+        .map_err(|_| invalid_version(path, line, version))?;
+    let patch = patch
+        .parse()
+        .map_err(|_| invalid_version(path, line, version))?;
     Ok(Version {
         original: version.to_owned(),
-        major: major.to_owned(),
-        minor: minor.to_owned(),
-        patch: patch.to_owned(),
+        major,
+        minor,
+        patch,
         pre: pre.to_owned(),
+        build: build.to_owned(),
     })
 }
 

@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod diagnostic;
 mod hash;
+mod identity;
 mod manifest;
 mod process;
 mod toolchain;
