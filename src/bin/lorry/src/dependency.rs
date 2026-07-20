@@ -16,7 +16,9 @@ use crate::resolver::{
     Catalog, LockedPreference, Options, PackageKey, Resolution, ResolvedSource, TargetSelection,
     resolve_selected,
 };
-use crate::unit::{UnitGraph, dependency_units};
+use crate::unit::{
+    CompilationPlan, PlanOptions, UnitGraph, dependency_units, plan_dependency_units,
+};
 
 #[derive(Debug)]
 pub struct PreparedGraph {
@@ -40,6 +42,16 @@ impl PreparedGraph {
             .map(|(key, package)| (key.clone(), package.manifest.clone()))
             .collect();
         dependency_units(&self.resolution, &manifests)
+    }
+
+    pub fn dependency_plan(&self, options: &PlanOptions<'_>) -> Result<CompilationPlan> {
+        let manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        let graph = dependency_units(&self.resolution, &manifests)?;
+        plan_dependency_units(&graph, &manifests, options)
     }
 }
 
@@ -137,10 +149,10 @@ pub fn prepare_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IncompatibleRustVersions, Repositories};
+    use crate::config::{CargoCompat, IncompatibleRustVersions, Repositories};
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
-    use crate::toolchain::CfgSet;
+    use crate::toolchain::{CfgSet, Toolchain};
     use semver::Version;
     use std::fs;
     use std::path::PathBuf;
@@ -175,6 +187,23 @@ mod tests {
             rust_version: Version::parse("1.98.0").unwrap(),
             max_packages: 64,
             max_depth: 16,
+        }
+    }
+
+    fn toolchain() -> Toolchain {
+        Toolchain {
+            rustc: "/rustc".into(),
+            verbose_version: "rustc 1.98.0-nightly (bc2112ed5 2026-06-18)\n\
+                              binary: rustc\n\
+                              commit-hash: bc2112ed56c99fa649e09ab3ab286afab3d9059a\n\
+                              commit-date: 2026-06-18\n\
+                              host: x86_64-unknown-linux-gnu\n\
+                              release: 1.98.0-nightly\n\
+                              LLVM version: 22.1.7\n"
+                .to_owned(),
+            release: "1.98.0-nightly".to_owned(),
+            host: "x86_64-unknown-linux-gnu".to_owned(),
+            compatibility: CargoCompat::V1_98,
         }
     }
 
@@ -312,6 +341,18 @@ mod tests {
             unit.package.name == "generic-array"
                 && unit.kind == crate::unit::UnitKind::BuildScriptRun
         }));
+        let plan = graph
+            .dependency_plan(&PlanOptions {
+                workspace_root: &manifest.root,
+                release: true,
+                release_profile: &manifest.release,
+                rustc: &toolchain(),
+                logical_target: None,
+                rustflags: &[],
+            })
+            .unwrap();
+        assert_eq!(plan.units.len(), units.units.len());
+        assert_eq!(plan.order, units.order);
     }
 
     #[test]
