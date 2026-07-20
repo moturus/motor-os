@@ -225,6 +225,21 @@ impl CfgSet {
     pub fn matches_selector(&self, selector: &str) -> Result<bool> {
         evaluate_selector(selector, self)
     }
+
+    pub(crate) fn cargo_environment(&self) -> BTreeMap<String, String> {
+        let mut environment = self
+            .names
+            .iter()
+            .map(|name| (name.clone(), String::new()))
+            .collect::<BTreeMap<_, _>>();
+        for (name, values) in &self.values {
+            environment.insert(
+                name.clone(),
+                values.iter().cloned().collect::<Vec<_>>().join(","),
+            );
+        }
+        environment
+    }
 }
 
 fn evaluate_selector(selector: &str, cfg: &CfgSet) -> Result<bool> {

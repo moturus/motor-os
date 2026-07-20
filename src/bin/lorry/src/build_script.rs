@@ -11,8 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::diagnostic::{Error, Result};
+use crate::identity::CargoDebugInfo;
+use crate::manifest::Manifest;
 use crate::sandbox::{Executable, NetworkAccess, Policy, Sandbox};
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
+use crate::toolchain::TargetInfo;
+use crate::unit::{Unit, UnitKind, UnitSettings};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Output {
@@ -55,6 +59,186 @@ pub struct RunOptions<'a> {
     pub max_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
     pub verbose: bool,
+}
+
+pub struct EnvironmentOptions<'a> {
+    pub cargo: &'a Path,
+    pub rustc: &'a Path,
+    pub host: &'a str,
+    pub target: &'a TargetInfo,
+    pub host_profile: &'a Path,
+    pub out_dir: &'a Path,
+    pub temp_dir: &'a Path,
+    pub release: bool,
+    pub num_jobs: u32,
+    pub primary_package: bool,
+}
+
+pub fn environment(
+    manifest: &Manifest,
+    unit: &Unit,
+    settings: &UnitSettings,
+    options: &EnvironmentOptions<'_>,
+) -> Result<BTreeMap<String, OsString>> {
+    if unit.key.kind != UnitKind::BuildScriptRun {
+        return Err(Error::failure(format!(
+            "build-script environment requires a run unit, not {:?}",
+            unit.key.kind
+        )));
+    }
+    if options.num_jobs == 0 {
+        return Err(Error::failure(
+            "build-script NUM_JOBS must be greater than zero",
+        ));
+    }
+    for (path, description) in [
+        (options.cargo, "CARGO"),
+        (options.rustc, "RUSTC"),
+        (&manifest.root, "CARGO_MANIFEST_DIR"),
+        (&manifest.path, "CARGO_MANIFEST_PATH"),
+        (options.out_dir, "OUT_DIR"),
+        (options.temp_dir, "temporary directory"),
+        (options.host_profile, "host profile"),
+    ] {
+        if !path.is_absolute() {
+            return Err(Error::failure(format!(
+                "build-script {description} path `{}` is not absolute",
+                path.display()
+            )));
+        }
+    }
+
+    let mut values = BTreeMap::new();
+    value(&mut values, "CARGO", options.cargo);
+    value(&mut values, "CARGO_MANIFEST_DIR", &manifest.root);
+    value(&mut values, "CARGO_MANIFEST_PATH", &manifest.path);
+    let metadata = &manifest.metadata;
+    value(&mut values, "CARGO_PKG_AUTHORS", metadata.authors.join(":"));
+    value(&mut values, "CARGO_PKG_DESCRIPTION", &metadata.description);
+    value(&mut values, "CARGO_PKG_HOMEPAGE", &metadata.homepage);
+    value(&mut values, "CARGO_PKG_LICENSE", &metadata.license);
+    value(
+        &mut values,
+        "CARGO_PKG_LICENSE_FILE",
+        &metadata.license_file,
+    );
+    value(&mut values, "CARGO_PKG_NAME", &manifest.name);
+    value(&mut values, "CARGO_PKG_README", &metadata.readme);
+    value(&mut values, "CARGO_PKG_REPOSITORY", &metadata.repository);
+    value(
+        &mut values,
+        "CARGO_PKG_RUST_VERSION",
+        &metadata.rust_version,
+    );
+    let version = &manifest.version;
+    value(&mut values, "CARGO_PKG_VERSION", &version.original);
+    value(
+        &mut values,
+        "CARGO_PKG_VERSION_MAJOR",
+        version.major.to_string(),
+    );
+    value(
+        &mut values,
+        "CARGO_PKG_VERSION_MINOR",
+        version.minor.to_string(),
+    );
+    value(
+        &mut values,
+        "CARGO_PKG_VERSION_PATCH",
+        version.patch.to_string(),
+    );
+    value(&mut values, "CARGO_PKG_VERSION_PRE", &version.pre);
+    if options.primary_package {
+        value(&mut values, "CARGO_PRIMARY_PACKAGE", "1");
+    }
+    if let Some(links) = &manifest.links {
+        value(&mut values, "CARGO_MANIFEST_LINKS", links);
+    }
+    for feature in &unit.key.features {
+        value(
+            &mut values,
+            &format!("CARGO_FEATURE_{}", envify(feature)),
+            "1",
+        );
+    }
+    let mut cfg = options.target.cfg.cargo_environment();
+    cfg.remove("debug_assertions");
+    cfg.insert(
+        "feature".to_owned(),
+        unit.key
+            .features
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    if settings.profile.debug_assertions {
+        cfg.insert("debug_assertions".to_owned(), String::new());
+    }
+    for (name, setting) in cfg {
+        value(
+            &mut values,
+            &format!("CARGO_CFG_{}", envify(&name)),
+            setting,
+        );
+    }
+    value(
+        &mut values,
+        "CARGO_ENCODED_RUSTFLAGS",
+        settings.rustflags.join("\x1f"),
+    );
+    value(
+        &mut values,
+        "DEBUG",
+        if settings.profile.debuginfo == CargoDebugInfo::None {
+            "false"
+        } else {
+            "true"
+        },
+    );
+    value(&mut values, "HOST", options.host);
+    value(&mut values, "NUM_JOBS", options.num_jobs.to_string());
+    value(&mut values, "OPT_LEVEL", settings.profile.opt_level);
+    value(&mut values, "OUT_DIR", options.out_dir);
+    value(
+        &mut values,
+        "PROFILE",
+        if options.release { "release" } else { "debug" },
+    );
+    value(&mut values, "RUSTC", options.rustc);
+    value(&mut values, "TARGET", &options.target.triple);
+    for name in ["TMPDIR", "TMP", "TEMP"] {
+        value(&mut values, name, options.temp_dir);
+    }
+    let dynamic = std::env::join_paths([options.host_profile.join("deps")]).map_err(|error| {
+        Error::failure(format!(
+            "failed to construct build-script dynamic-library search path: {error}"
+        ))
+    })?;
+    value(&mut values, dynamic_library_path_variable(), dynamic);
+    Ok(values)
+}
+
+fn envify(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_uppercase)
+        .map(|character| if character == '-' { '_' } else { character })
+        .collect()
+}
+
+fn dynamic_library_path_variable() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
+}
+
+fn value(values: &mut BTreeMap<String, OsString>, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    values.insert(key.to_owned(), value.as_ref().to_owned());
 }
 
 pub fn run(options: &RunOptions<'_>) -> Result<Output> {
@@ -439,6 +623,14 @@ fn validate_environment_name(name: &str, directive: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{
+        CargoCompileMode, CargoDebugInfo, CargoPanicStrategy, CargoProfileLto, CargoStrip,
+        CargoUnitLto,
+    };
+    use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
+    use crate::toolchain::CfgSet;
+    use crate::unit::{UnitKey, UnitProfile, UnitSettings};
+    use semver::Version;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -571,6 +763,124 @@ mod tests {
             assert!(parse(source.as_bytes(), &fixture.options()).is_err());
         }
         fs::remove_file(outside).unwrap();
+    }
+
+    #[test]
+    fn constructs_only_the_approved_cargo_environment() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root.join("Cargo.toml"),
+            "[package]\n\
+             name = \"environment-fixture\"\n\
+             version = \"1.2.3-alpha.1\"\n\
+             edition = \"2024\"\n\
+             authors = [\"One\", \"Two\"]\n\
+             description = \"fixture\"\n\
+             homepage = \"https://example.invalid\"\n\
+             repository = \"https://example.invalid/repository\"\n\
+             license = \"MIT\"\n\
+             rust-version = \"1.90\"\n\
+             links = \"fixture\"\n\
+             build = \"build.rs\"\n\n\
+             [features]\n\
+             default = []\n\
+             fancy-feature = []\n",
+        )
+        .unwrap();
+        fs::create_dir_all(fixture.root.join("src")).unwrap();
+        fs::write(fixture.root.join("src/lib.rs"), "").unwrap();
+        let manifest = Manifest::load_path_dependency(&fixture.root).unwrap();
+        let key = UnitKey {
+            package: PackageKey {
+                name: manifest.name.clone(),
+                version: Version::parse(&manifest.version.original).unwrap(),
+                source: PackageSourceKey::Path(manifest.root.clone()),
+            },
+            kind: UnitKind::BuildScriptRun,
+            compile_kind: CompileKind::Target,
+            features: BTreeSet::from(["default".to_owned(), "fancy-feature".to_owned()]),
+        };
+        let unit = Unit {
+            key,
+            dependencies: BTreeSet::new(),
+        };
+        let settings = UnitSettings {
+            profile: UnitProfile {
+                opt_level: "3",
+                lto: CargoProfileLto::Bool(false),
+                codegen_units: None,
+                debuginfo: CargoDebugInfo::Full,
+                debug_assertions: false,
+                overflow_checks: false,
+                incremental: false,
+                panic: CargoPanicStrategy::Unwind,
+                strip: CargoStrip::None,
+            },
+            mode: CargoCompileMode::RunCustomBuild,
+            lto: CargoUnitLto::OnlyObject,
+            logical_target: Some("x86_64-unknown-motor".to_owned()),
+            rustflags: vec!["--cfg=fixture".to_owned(), "-Copt-level=2".to_owned()],
+        };
+        let target = TargetInfo {
+            triple: "x86_64-unknown-motor".to_owned(),
+            cfg: CfgSet::parse(
+                "debug_assertions\nunix\ntarget_arch=\"x86_64\"\n\
+                 target_feature=\"sse2\"\ntarget_feature=\"sse3\"\n",
+            )
+            .unwrap(),
+        };
+        let host_profile = fixture.root.join("host/release");
+        let environment = environment(
+            &manifest,
+            &unit,
+            &settings,
+            &EnvironmentOptions {
+                cargo: Path::new("/tools/lorry"),
+                rustc: Path::new("/tools/rustc"),
+                host: "x86_64-unknown-linux-gnu",
+                target: &target,
+                host_profile: &host_profile,
+                out_dir: &fixture.out,
+                temp_dir: &fixture.root.join("temp"),
+                release: true,
+                num_jobs: 1,
+                primary_package: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(environment["CARGO_PKG_AUTHORS"], "One:Two");
+        assert_eq!(environment["CARGO_PKG_VERSION"], "1.2.3-alpha.1");
+        assert_eq!(environment["CARGO_MANIFEST_LINKS"], "fixture");
+        assert_eq!(environment["CARGO_FEATURE_FANCY_FEATURE"], "1");
+        assert_eq!(environment["CARGO_CFG_FEATURE"], "default,fancy-feature");
+        assert_eq!(environment["CARGO_CFG_TARGET_FEATURE"], "sse2,sse3");
+        assert!(!environment.contains_key("CARGO_CFG_DEBUG_ASSERTIONS"));
+        assert_eq!(
+            environment["CARGO_ENCODED_RUSTFLAGS"],
+            "--cfg=fixture\u{1f}-Copt-level=2"
+        );
+        assert_eq!(environment["DEBUG"], "true");
+        assert_eq!(environment["OPT_LEVEL"], "3");
+        assert_eq!(environment["PROFILE"], "release");
+        assert_eq!(environment["NUM_JOBS"], "1");
+        assert_eq!(environment["TMP"], fixture.root.join("temp"));
+        assert_eq!(
+            environment[dynamic_library_path_variable()],
+            std::env::join_paths([host_profile.join("deps")]).unwrap()
+        );
+        for rejected in [
+            "HOME",
+            "PATH",
+            "RUSTFLAGS",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "http_proxy",
+            "CARGO_HOME",
+            "CARGO_PRIMARY_PACKAGE",
+        ] {
+            assert!(!environment.contains_key(rejected), "leaked {rejected}");
+        }
     }
 
     #[cfg(target_os = "linux")]
