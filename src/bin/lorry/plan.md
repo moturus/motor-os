@@ -1369,9 +1369,12 @@ No generic command allowlist or inherited PATH is added.
   assigned `OUT_DIR` as appropriate and is tracked, although Lorry may
   conservatively hash more source inputs. A `rustc-link-search` path must
   resolve inside the script's assigned `OUT_DIR`; linking ambient system
-  libraries is not admitted by this subset. `rerun-if-env-changed` names only
-  an environment variable in the approved build-script environment, and the
-  value or absence is a unit input.
+  libraries is not admitted by this subset. `rerun-if-env-changed` may name a
+  variable in the approved build-script environment or any other
+  syntactically valid variable name. A name outside the supplied safe
+  environment is tracked as explicitly absent after `env_clear`; Lorry never
+  imports its ambient parent value. The name and supplied value or explicit
+  absence are unit inputs.
 - Unknown directives and other link/metadata directives are actionable hard
   errors. Non-directive stdout is bounded diagnostic output. Nonzero exit,
   timeout, sandbox violation, malformed/oversized output, path escape, or an
@@ -2898,6 +2901,24 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
   cannot pass native-Motor build-script or final Stage-2 acceptance. Those
   gates remain pending until the stub is replaced and the same observable
   denial fixtures pass on Motor.
+
+### Round 41: explicitly absent build-script environment inputs
+
+#### Resolved during Stage-2 implementation
+
+- Cargo build scripts such as `libc` legitimately emit
+  `rerun-if-env-changed` for optional variables that are normally absent.
+  Requiring every such name to be present in Lorry's safe environment would
+  either reject the selected graph or expose knobs that Lorry intentionally
+  leaves unset.
+- Lorry therefore accepts every syntactically valid variable name in this
+  directive. If the name exists in the supplied post-`env_clear` environment,
+  its exact value is recorded. Otherwise the directive records an explicit
+  absent value. Ambient parent values remain inaccessible and cannot affect
+  the build.
+- The ordered directive, variable name, and value-or-absence remain unit and
+  cache inputs. Invalid names, malformed directives, and attempts to obtain
+  ambient values remain hard failures.
 
 ## Stage-1/2 design closure and external start gates
 

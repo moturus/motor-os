@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
@@ -30,18 +30,29 @@ pub struct Output {
 pub enum Directive {
     RustcCfg(String),
     RustcCheckCfg(String),
-    RustcEnv { name: String, value: String },
+    RustcEnv {
+        name: String,
+        value: String,
+    },
     RustcLinkLib(String),
-    RustcLinkSearch { kind: Option<String>, path: PathBuf },
+    RustcLinkSearch {
+        kind: Option<String>,
+        path: PathBuf,
+    },
     RerunIfChanged(PathBuf),
-    RerunIfEnvChanged(String),
+    RerunIfEnvChanged {
+        name: String,
+        value: Option<OsString>,
+    },
     Warning(String),
 }
 
 pub struct ParseOptions<'a> {
     pub package_root: &'a Path,
     pub out_dir: &'a Path,
-    pub approved_environment: &'a BTreeSet<String>,
+    /// The complete environment supplied after `env_clear`. A valid name not
+    /// present in this map is an explicitly tracked absent value.
+    pub environment: &'a BTreeMap<String, OsString>,
     pub max_bytes: u64,
     pub out_dir_limits: TreeLimits,
 }
@@ -306,13 +317,12 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
         )));
     }
 
-    let approved_environment = options.environment.keys().cloned().collect();
     let mut output = parse(
         &captured.stdout,
         &ParseOptions {
             package_root: &package_root,
             out_dir: &out_dir,
-            approved_environment: &approved_environment,
+            environment: options.environment,
             max_bytes: options.max_output_bytes,
             out_dir_limits: options.out_dir_limits,
         },
@@ -497,12 +507,10 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
             )?),
             "rerun-if-env-changed" => {
                 validate_environment_name(value, "rerun-if-env-changed")?;
-                if !options.approved_environment.contains(value) {
-                    return Err(Error::failure(format!(
-                        "build-script rerun-if-env-changed names unapproved environment variable `{value}`"
-                    )));
+                Directive::RerunIfEnvChanged {
+                    name: value.to_owned(),
+                    value: options.environment.get(value).cloned(),
                 }
-                Directive::RerunIfEnvChanged(value.to_owned())
             }
             "warning" => Directive::Warning(value.to_owned()),
             "error" => {
@@ -631,6 +639,7 @@ mod tests {
     use crate::toolchain::CfgSet;
     use crate::unit::{UnitKey, UnitProfile, UnitSettings};
     use semver::Version;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -638,7 +647,7 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         out: PathBuf,
-        environment: BTreeSet<String>,
+        environment: BTreeMap<String, OsString>,
     }
 
     impl Fixture {
@@ -654,7 +663,10 @@ mod tests {
             Self {
                 root,
                 out,
-                environment: BTreeSet::from(["TARGET".to_owned(), "RUSTC".to_owned()]),
+                environment: BTreeMap::from([
+                    ("TARGET".to_owned(), "x86_64-unknown-linux-gnu".into()),
+                    ("RUSTC".to_owned(), "/tools/rustc".into()),
+                ]),
             }
         }
 
@@ -662,7 +674,7 @@ mod tests {
             ParseOptions {
                 package_root: &self.root,
                 out_dir: &self.out,
-                approved_environment: &self.environment,
+                environment: &self.environment,
                 max_bytes: 1024,
                 out_dir_limits: crate::source_tree::DEFAULT_LIMITS,
             }
@@ -698,7 +710,10 @@ mod tests {
             output.directives,
             [
                 Directive::RerunIfChanged(fixture.root.join("build.rs")),
-                Directive::RerunIfEnvChanged("TARGET".to_owned()),
+                Directive::RerunIfEnvChanged {
+                    name: "TARGET".to_owned(),
+                    value: Some("x86_64-unknown-linux-gnu".into()),
+                },
                 Directive::RustcCfg("portable_atomic_no_atomic_64".to_owned()),
                 Directive::RustcCheckCfg("cfg(portable_atomic_no_atomic_64)".to_owned()),
                 Directive::RustcEnv {
@@ -716,15 +731,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_errors_limits_and_unapproved_environment() {
+    fn rejects_unknown_errors_limits_and_invalid_environment_names() {
         let fixture = Fixture::new();
         for (source, expected) in [
             ("cargo:metadata=value\n", "unsupported"),
             ("cargo::error=bad input\n", "reported an error"),
-            (
-                "cargo:rerun-if-env-changed=SECRET\n",
-                "unapproved environment",
-            ),
+            ("cargo:rerun-if-env-changed=9BAD\n", "invalid environment"),
             ("cargo:rustc-env=9BAD=value\n", "invalid environment"),
             ("cargo:warning\n", "no `=`"),
         ] {
@@ -745,6 +757,30 @@ mod tests {
                 .contains("limit")
         );
         assert!(parse(&[0xff], &fixture.options()).is_err());
+    }
+
+    #[test]
+    fn tracks_present_and_explicitly_absent_environment_inputs() {
+        let fixture = Fixture::new();
+        let output = parse(
+            b"cargo:rerun-if-env-changed=TARGET\n\
+              cargo:rerun-if-env-changed=RUST_LIBC_UNSTABLE_FREEBSD_VERSION\n",
+            &fixture.options(),
+        )
+        .unwrap();
+        assert_eq!(
+            output.directives,
+            [
+                Directive::RerunIfEnvChanged {
+                    name: "TARGET".to_owned(),
+                    value: Some("x86_64-unknown-linux-gnu".into()),
+                },
+                Directive::RerunIfEnvChanged {
+                    name: "RUST_LIBC_UNSTABLE_FREEBSD_VERSION".to_owned(),
+                    value: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -984,11 +1020,13 @@ mod tests {
         );
         assert_eq!(output.out_dir.file_count, 1);
         assert!(output.stderr.contains("sandbox stderr"));
-        assert!(
-            output.directives.iter().any(|directive| {
-                *directive == Directive::RerunIfEnvChanged("TARGET".to_owned())
-            })
-        );
+        assert!(output.directives.iter().any(|directive| {
+            *directive
+                == Directive::RerunIfEnvChanged {
+                    name: "TARGET".to_owned(),
+                    value: Some("x86_64-unknown-linux-gnu".into()),
+                }
+        }));
         assert!(output.directives.iter().any(|directive| {
             *directive
                 == Directive::RustcEnv {
