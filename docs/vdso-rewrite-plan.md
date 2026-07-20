@@ -5,13 +5,25 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-20, through stage D4b)
+## Status (2026-07-20, through stage D5)
 
-Stages 0, A, B, and C are complete on `vdso-rewrite`; stage D is landed
-through D4b (`344191b..` C tip, then D1-D4b). D5 (UDP futures + retire
-the `EventSourceManaged` futex protocol) and the stage-D gate (bench +
-full x5, kill checkpoint 2 / flake checkpoint 3) remain. One stage-C gate
-metric still sits at the kill boundary (below), the review's open question.
+Stages 0, A, B, and C are complete on `vdso-rewrite`; stage D's
+implementation is fully landed (D1-D5, `344191b..` C tip then D1-D5). The
+stage-D gate — bench (kill checkpoint 2) + full x5 (flake checkpoint 3) —
+remains, with the rare stdio hang (below) the checkpoint-3 root-cause
+target. One stage-C gate metric still sits at the kill boundary (below),
+the review's open question.
+
+- **D5** (`c1f4ff8`): blocking `UdpSocket::recv_or_peek_from`/`send_to`
+  flip onto `UdpRecvFuture`/`UdpSendFuture` via the shared
+  `block_on_recheck` (now `pub(super)`), woken by per-socket
+  `rx_wakers`/`tx_wakers` at the RX / TX-ack points. With UDP off the
+  futex, the `EventSourceManaged` readable/writable futex wait/wake
+  protocol is retired (UDP was its last user); `on_event` is now purely
+  the poll-registry notification, and the registration side of managed
+  sources stays (TCP and UDP both use it for mio readiness). Suites pass:
+  systest UDP suite + full x3 to `PASS`, mio-test ALL PASS (incl. the
+  `udp_socket` edge-triggered tests), tokio 2/2.
 
 - **Stage D (through D4b)**: D1 (`9d993d5`, RPC oneshot map), D2a/D2b
   (`f5c3beb`/`b5a29e0`, RpcWaiter + blocking accept/connect await
