@@ -7,6 +7,7 @@ mod hash;
 mod identity;
 mod manifest;
 mod process;
+mod toml;
 mod toolchain;
 
 use cli::{Cli, Command};
