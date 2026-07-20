@@ -136,11 +136,13 @@ echo ""
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
 
-# It takes some time to start sshd, especially with a debug build, so we
-# have a large timeout and several retries. And the first "test" is just an empty echo.
+# SSH readiness has its own hard deadline. Image construction above is not
+# charged to this boot-time acceptance check.
 
-ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=30 -o ConnectionAttempts=10 \
-  motor@192.168.4.2 /bin/echo " "
+if ! timeout 10 ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=1 -o ConnectionAttempts=10 \
+  motor@192.168.4.2 /bin/echo " "; then
+  fail "Motor OS did not become SSH-ready within 10 seconds"
+fi
 
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost
@@ -197,6 +199,9 @@ out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
 
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
+
+# Lorry owns only its isolated native smoke deadline and reuses this VM.
+"$ROOT_DIR/src/bin/lorry/test-native.sh" --reuse-running-vm
 
 vm_ssh sys/tests/mio-test
 
