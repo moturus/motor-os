@@ -183,7 +183,7 @@ pub struct CfgSet {
 }
 
 impl CfgSet {
-    fn parse(text: &str) -> Result<Self> {
+    pub(crate) fn parse(text: &str) -> Result<Self> {
         let mut set = Self::default();
         for line in text.lines() {
             let line = line.trim();
@@ -220,6 +220,10 @@ impl CfgSet {
                 Err(error) => Some(Err(error)),
             })
             .collect()
+    }
+
+    pub fn matches_selector(&self, selector: &str) -> Result<bool> {
+        evaluate_selector(selector, self)
     }
 }
 

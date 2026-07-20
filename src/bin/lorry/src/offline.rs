@@ -12,6 +12,14 @@ use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedSource};
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 pub fn validate_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
+    validate(manifest, resolution, EdgeMode::Exact)
+}
+
+pub fn validate_selected_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
+    validate(manifest, resolution, EdgeMode::SelectedSubset)
+}
+
+fn validate(manifest: &Manifest, resolution: &Resolution, edge_mode: EdgeMode) -> Result<()> {
     let lock = manifest
         .lock
         .as_ref()
@@ -46,6 +54,7 @@ pub fn validate_resolution(manifest: &Manifest, resolution: &Resolution) -> Resu
         &root.dependencies,
         &lock.packages,
         &source_kinds,
+        edge_mode,
     )?;
 
     let mut selected = BTreeSet::new();
@@ -76,9 +85,16 @@ pub fn validate_resolution(manifest: &Manifest, resolution: &Resolution) -> Resu
             &locked.dependencies,
             &lock.packages,
             &source_kinds,
+            edge_mode,
         )?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum EdgeMode {
+    Exact,
+    SelectedSubset,
 }
 
 fn find_registry_package<'a>(
@@ -139,6 +155,7 @@ fn validate_edges(
     locked: &[String],
     packages: &[LockedPackage],
     source_kinds: &BTreeMap<PackageKey, bool>,
+    mode: EdgeMode,
 ) -> Result<()> {
     let expected = resolved
         .iter()
@@ -175,7 +192,11 @@ fn validate_edges(
             registry: package.source.as_deref() == Some(CRATES_IO_SOURCE),
         });
     }
-    if actual != expected {
+    let agrees = match mode {
+        EdgeMode::Exact => actual == expected,
+        EdgeMode::SelectedSubset => expected.is_subset(&actual),
+    };
+    if !agrees {
         return Err(stale(format!(
             "{owner} dependency edges disagree with Cargo.lock: resolved [{}], locked [{}]",
             display_keys(&expected),
@@ -398,6 +419,28 @@ mod tests {
     fn accepts_the_selected_subgraph_and_unused_lock_nodes() {
         let (_temp, manifest, resolution) = fixture();
         validate_resolution(&manifest, &resolution).unwrap();
+    }
+
+    #[test]
+    fn selected_validation_allows_inactive_locked_edges_but_exact_validation_does_not() {
+        let (_temp, mut manifest, resolution) = fixture();
+        let root = manifest
+            .lock
+            .as_mut()
+            .unwrap()
+            .packages
+            .iter_mut()
+            .find(|package| package.name == "root")
+            .unwrap();
+        root.dependencies.push("unused".to_owned());
+
+        validate_selected_resolution(&manifest, &resolution).unwrap();
+        assert!(
+            validate_resolution(&manifest, &resolution)
+                .unwrap_err()
+                .to_string()
+                .contains("dependency edges")
+        );
     }
 
     #[test]

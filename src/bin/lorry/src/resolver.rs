@@ -12,6 +12,7 @@ use crate::hash::decode_hex;
 use crate::manifest::{DependencySource, Lockfile, Manifest, Resolver as ResolverVersion};
 use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree};
 use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
+use crate::toolchain::CfgSet;
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
@@ -368,6 +369,14 @@ impl Options {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TargetSelection<'a> {
+    pub target_triple: &'a str,
+    pub target_cfg: &'a CfgSet,
+    pub host_triple: &'a str,
+    pub host_cfg: &'a CfgSet,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FeatureContext {
     Unified,
@@ -442,28 +451,97 @@ pub fn resolve(
     options: &Options,
     locked: &[LockedPreference],
 ) -> Result<Resolution> {
+    resolve_with_scope(manifest, catalog, options, locked, Scope::Complete)
+}
+
+pub fn resolve_selected(
+    manifest: &Manifest,
+    catalog: &Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    selection: TargetSelection<'_>,
+) -> Result<Resolution> {
+    resolve_with_scope(
+        manifest,
+        catalog,
+        options,
+        locked,
+        Scope::Selected(selection),
+    )
+}
+
+fn resolve_with_scope(
+    manifest: &Manifest,
+    catalog: &Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    scope: Scope<'_>,
+) -> Result<Resolution> {
     validate_locked_checksums(catalog, locked)?;
     let mut catalog = catalog.clone();
-    let requirements = root_requirements(manifest)?;
+    let requirements = root_requirements(manifest, matches!(scope, Scope::Complete))?;
     let mut queue = VecDeque::new();
     for requirement in requirements {
+        if !scope.matches(
+            CompileKind::Target,
+            requirement.dependency.target.as_deref(),
+        )? {
+            continue;
+        }
         queue.push_back(Event {
             parent: None,
             dependency_index: requirement.index,
-            context: normalize_context(
-                options.resolver,
-                FeatureContext::Target(requirement.dependency.target.clone().unwrap_or_default()),
-            ),
+            context: root_context(options.resolver, scope, &requirement.dependency),
+            compile_kind: CompileKind::Target,
             dependency: requirement.dependency,
             depth: 1,
             ancestors: BTreeSet::new(),
         });
     }
-    let state =
-        solve(State::default(), queue, &mut catalog, options, locked).map_err(|failure| {
-            Error::failure(format!("dependency resolution failed: {}", failure.message))
-        })?;
+    let state = solve(
+        State::default(),
+        queue,
+        &mut catalog,
+        options,
+        locked,
+        scope,
+    )
+    .map_err(|failure| {
+        Error::failure(format!("dependency resolution failed: {}", failure.message))
+    })?;
     Ok(state.into_resolution())
+}
+
+#[derive(Clone, Copy)]
+enum Scope<'a> {
+    Complete,
+    Selected(TargetSelection<'a>),
+}
+
+impl Scope<'_> {
+    fn matches(self, compile_kind: CompileKind, selector: Option<&str>) -> Result<bool> {
+        let Some(selector) = selector else {
+            return Ok(true);
+        };
+        let Self::Selected(selection) = self else {
+            return Ok(true);
+        };
+        let (triple, cfg) = match compile_kind {
+            CompileKind::Target => (selection.target_triple, selection.target_cfg),
+            CompileKind::Host => (selection.host_triple, selection.host_cfg),
+        };
+        if selector.starts_with("cfg(") {
+            cfg.matches_selector(selector)
+        } else {
+            Ok(selector == triple)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompileKind {
+    Target,
+    Host,
 }
 
 #[derive(Clone)]
@@ -472,7 +550,7 @@ struct RootRequirement {
     dependency: CandidateDependency,
 }
 
-fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
+fn root_requirements(manifest: &Manifest, all_features: bool) -> Result<Vec<RootRequirement>> {
     let mut enabled = BTreeSet::new();
     for (index, dependency) in manifest.dependencies.iter().enumerate() {
         if !dependency.optional {
@@ -486,11 +564,16 @@ fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
         .flatten()
         .filter_map(|reference| reference.strip_prefix("dep:"))
         .collect::<BTreeSet<_>>();
-    let mut active = manifest.features.keys().cloned().collect::<BTreeSet<_>>();
-    for dependency in &manifest.dependencies {
-        if dependency.optional && !namespaced.contains(dependency.alias.as_str()) {
-            active.insert(dependency.alias.clone());
+    let mut active = BTreeSet::new();
+    if all_features {
+        active.extend(manifest.features.keys().cloned());
+        for dependency in &manifest.dependencies {
+            if dependency.optional && !namespaced.contains(dependency.alias.as_str()) {
+                active.insert(dependency.alias.clone());
+            }
         }
+    } else if manifest.features.contains_key("default") {
+        active.insert("default".to_owned());
     }
 
     let mut expanded = BTreeSet::new();
@@ -662,6 +745,7 @@ struct Event {
     dependency_index: usize,
     dependency: CandidateDependency,
     context: FeatureContext,
+    compile_kind: CompileKind,
     depth: u64,
     ancestors: BTreeSet<PackageKey>,
 }
@@ -804,6 +888,7 @@ fn solve(
     catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
+    scope: Scope<'_>,
 ) -> std::result::Result<State, Failure> {
     let Some(mut event) = queue.pop_front() else {
         return Ok(state);
@@ -837,9 +922,18 @@ fn solve(
             &event,
             &key,
             options,
+            scope,
         )
-        .and_then(|()| solve(candidate_state, candidate_queue, catalog, options, locked))
-        {
+        .and_then(|()| {
+            solve(
+                candidate_state,
+                candidate_queue,
+                catalog,
+                options,
+                locked,
+                scope,
+            )
+        }) {
             Ok(state) => return Ok(state),
             Err(failure) => last_failure = Some(failure),
         }
@@ -899,9 +993,18 @@ fn solve(
             &event,
             &key,
             options,
+            scope,
         )
-        .and_then(|()| solve(candidate_state, candidate_queue, catalog, options, locked))
-        {
+        .and_then(|()| {
+            solve(
+                candidate_state,
+                candidate_queue,
+                catalog,
+                options,
+                locked,
+                scope,
+            )
+        }) {
             Ok(state) => return Ok(state),
             Err(failure) => last_failure = Some(failure),
         }
@@ -923,6 +1026,7 @@ fn fulfill(
     event: &Event,
     key: &PackageKey,
     options: &Options,
+    scope: Scope<'_>,
 ) -> std::result::Result<(), Failure> {
     if event.ancestors.contains(key) {
         return Err(Failure::new(format!(
@@ -958,7 +1062,7 @@ fn fulfill(
             ));
         }
     }
-    activate(state, queue, key, event, options)
+    activate(state, queue, key, event, options, scope)
 }
 
 fn activate(
@@ -967,6 +1071,7 @@ fn activate(
     key: &PackageKey,
     event: &Event,
     options: &Options,
+    scope: Scope<'_>,
 ) -> std::result::Result<(), Failure> {
     let record = state
         .nodes
@@ -1096,12 +1201,23 @@ fn activate(
         {
             continue;
         }
+        if !scope
+            .matches(event.compile_kind, dependency.target.as_deref())
+            .map_err(|error| Failure::new(error.to_string()))?
+        {
+            continue;
+        }
+        let child_compile_kind = match dependency.kind {
+            DependencyKind::Build => CompileKind::Host,
+            DependencyKind::Normal => event.compile_kind,
+            DependencyKind::Dev => unreachable!(),
+        };
         let child_context = match options.resolver {
             ResolverVersion::V1 => FeatureContext::Unified,
             ResolverVersion::V2 | ResolverVersion::V3 => match dependency.kind {
                 DependencyKind::Build => FeatureContext::Host,
                 DependencyKind::Normal => {
-                    target_dependency_context(event.context.clone(), dependency.target.as_deref())
+                    child_target_context(scope, event.context.clone(), dependency.target.as_deref())
                 }
                 DependencyKind::Dev => unreachable!(),
             },
@@ -1127,6 +1243,7 @@ fn activate(
             dependency_index: index,
             dependency,
             context: normalize_context(options.resolver, child_context),
+            compile_kind: child_compile_kind,
             depth: event.depth.saturating_add(1),
             ancestors,
         });
@@ -1313,6 +1430,29 @@ fn target_dependency_context(parent: FeatureContext, selector: Option<&str>) -> 
     }
 }
 
+fn root_context(
+    resolver: ResolverVersion,
+    scope: Scope<'_>,
+    dependency: &CandidateDependency,
+) -> FeatureContext {
+    let context = match scope {
+        Scope::Complete => FeatureContext::Target(dependency.target.clone().unwrap_or_default()),
+        Scope::Selected(_) => FeatureContext::Target(String::new()),
+    };
+    normalize_context(resolver, context)
+}
+
+fn child_target_context(
+    scope: Scope<'_>,
+    parent: FeatureContext,
+    selector: Option<&str>,
+) -> FeatureContext {
+    match scope {
+        Scope::Complete => target_dependency_context(parent, selector),
+        Scope::Selected(_) => parent,
+    }
+}
+
 fn semver_compatible(left: &Version, right: &Version) -> bool {
     if left.major != right.major {
         return false;
@@ -1448,6 +1588,14 @@ mod tests {
              \"req\":\"{requirement}\",\"features\":[{features}],\
              \"optional\":{optional},\"default_features\":true,\
              \"target\":null,\"kind\":\"{kind}\"}}"
+        )
+    }
+
+    fn dependency_for_target(name: &str, requirement: &str, target: &str, kind: &str) -> String {
+        format!(
+            "{{\"name\":\"{name}\",\"req\":\"{requirement}\",\
+             \"features\":[],\"optional\":false,\"default_features\":true,\
+             \"target\":\"{target}\",\"kind\":\"{kind}\"}}"
         )
     }
 
@@ -1759,6 +1907,136 @@ mod tests {
             Some(&["unix".to_owned(), "windows".to_owned()].into())
         );
         assert_eq!(shared.feature_sets.len(), 1);
+    }
+
+    #[test]
+    fn selected_resolution_uses_only_default_features_and_matching_target_dependencies() {
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "shared",
+                "1.0.0",
+                "[]",
+                "{\"unix\":[],\"windows\":[]}",
+                "",
+            ))
+            .unwrap();
+        for name in ["default-dep", "extra-dep", "exact-target", "other-target"] {
+            catalog
+                .insert(record(name, "1.0.0", "[]", "{}", ""))
+                .unwrap();
+        }
+        let root = Manifest::parse(
+            Path::new("/fixture"),
+            Path::new("/fixture/Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\n\
+             default-dep = { version = \"1\", optional = true }\n\
+             extra-dep = { version = \"1\", optional = true }\n\
+             [target.'cfg(unix)'.dependencies]\n\
+             unix-shared = { package = \"shared\", version = \"1\", features = [\"unix\"] }\n\
+             [target.'cfg(windows)'.dependencies]\n\
+             windows-shared = { package = \"shared\", version = \"1\", features = [\"windows\"] }\n\
+             [target.'x86_64-unknown-linux-musl'.dependencies]\n\
+             exact-target = \"1\"\n\
+             [target.'aarch64-unknown-linux-gnu'.dependencies]\n\
+             other-target = \"1\"\n\
+             [features]\ndefault = [\"dep:default-dep\"]\nextra = [\"dep:extra-dep\"]\n",
+        )
+        .unwrap();
+        let target_cfg = CfgSet::parse("unix\n").unwrap();
+        let host_cfg = CfgSet::parse("windows\n").unwrap();
+        let resolution = resolve_selected(
+            &root,
+            &catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-musl",
+                target_cfg: &target_cfg,
+                host_triple: "x86_64-pc-windows-msvc",
+                host_cfg: &host_cfg,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected(&resolution, "default-dep").len(), 1);
+        assert!(selected(&resolution, "extra-dep").is_empty());
+        assert_eq!(selected(&resolution, "exact-target").len(), 1);
+        assert!(selected(&resolution, "other-target").is_empty());
+        let shared = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "shared")
+            .unwrap();
+        assert_eq!(
+            shared.target_features,
+            ["unix".to_owned()].into_iter().collect()
+        );
+        assert_eq!(resolution.root_edges.len(), 3);
+    }
+
+    #[test]
+    fn selected_resolution_evaluates_dependencies_of_host_units_against_the_host() {
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "target-package",
+                "1.0.0",
+                &format!(
+                    "[{},{}]",
+                    dependency_for_target("host-build", "1", "cfg(unix)", "build"),
+                    dependency_for_target("inactive-build", "1", "cfg(windows)", "build"),
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "host-build",
+                "1.0.0",
+                &format!(
+                    "[{},{}]",
+                    dependency_for_target("host-selected", "1", "cfg(windows)", "normal"),
+                    dependency_for_target("host-inactive", "1", "cfg(unix)", "normal"),
+                ),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        for name in ["inactive-build", "host-selected", "host-inactive"] {
+            catalog
+                .insert(record(name, "1.0.0", "[]", "{}", ""))
+                .unwrap();
+        }
+        let root = manifest("target-package = \"1\"", "", "2");
+        let target_cfg = CfgSet::parse("unix\n").unwrap();
+        let host_cfg = CfgSet::parse("windows\n").unwrap();
+        let resolution = resolve_selected(
+            &root,
+            &catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            TargetSelection {
+                target_triple: "x86_64-unknown-linux-musl",
+                target_cfg: &target_cfg,
+                host_triple: "x86_64-pc-windows-msvc",
+                host_cfg: &host_cfg,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected(&resolution, "host-build").len(), 1);
+        assert_eq!(selected(&resolution, "host-selected").len(), 1);
+        assert!(selected(&resolution, "inactive-build").is_empty());
+        assert!(selected(&resolution, "host-inactive").is_empty());
+        let host = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "host-build")
+            .unwrap();
+        assert!(host.feature_sets.contains_key(&FeatureContext::Host));
     }
 
     #[test]
