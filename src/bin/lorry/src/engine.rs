@@ -1,18 +1,26 @@
 use crate::atomic::AtomicDirectory;
 use crate::cli::{Cli, Color, Command, Verbosity};
-use crate::config::{Config, TargetOptions, TargetSelector, environment_rustflags};
+use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, environment_rustflags};
+use crate::dependency;
 use crate::diagnostic::{Error, Result};
+use crate::executor;
 use crate::hash::{hex, sha256_file};
 use crate::identity::{Identity, IdentityInput, cargo_identity};
 use crate::manifest::{Edition, Lto, Manifest, Strip};
 use crate::process::{self, RustcCommand};
+use crate::repository::RepositorySet;
+use crate::resolver::{Options as ResolverOptions, Resolution, TargetSelection};
+use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
+use crate::unit::{CompilationPlan, PlanOptions, UnitKind};
+use semver::Version;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
@@ -40,8 +48,15 @@ pub fn execute(cli: &Cli) -> Result<i32> {
     };
     let physical_target = config.selected_target(command_target)?;
     let target_info = toolchain.target_info(physical_target.as_deref())?;
-    let matching_cfgs = matching_cfgs(&config, &target_info)?;
-    let target_options = config.target_options(&target_info.triple, &matching_cfgs)?;
+    let host_info = if physical_target.is_some() {
+        toolchain.target_info(None)?
+    } else {
+        target_info.clone()
+    };
+    let target_matching_cfgs = matching_cfgs(&config, &target_info)?;
+    let target_options = config.target_options(&target_info.triple, &target_matching_cfgs)?;
+    let host_matching_cfgs = matching_cfgs(&config, &host_info)?;
+    let host_options = config.target_options(&host_info.triple, &host_matching_cfgs)?;
     let rustflags = environment_rustflags()?.unwrap_or_else(|| {
         let mut flags = config.build_rustflags.clone();
         flags.extend(target_options.rustflags.iter().cloned());
@@ -60,7 +75,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         Command::Build(_) => {
             build(Build {
                 manifest: &manifest,
+                config: &config,
                 toolchain: &toolchain,
+                host: &host_info,
+                target: &target_info,
+                host_options: &host_options,
                 target_options: &target_options,
                 physical_target: physical_target.as_deref(),
                 logical_target,
@@ -75,7 +94,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
         Command::Run(options) => {
             let artifact = build(Build {
                 manifest: &manifest,
+                config: &config,
                 toolchain: &toolchain,
+                host: &host_info,
+                target: &target_info,
+                host_options: &host_options,
                 target_options: &target_options,
                 physical_target: physical_target.as_deref(),
                 logical_target,
@@ -102,7 +125,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             }
             let artifact = build(Build {
                 manifest: &manifest,
+                config: &config,
                 toolchain: &toolchain,
+                host: &host_info,
+                target: &target_info,
+                host_options: &host_options,
                 target_options: &target_options,
                 physical_target: physical_target.as_deref(),
                 logical_target,
@@ -127,7 +154,11 @@ pub fn execute(cli: &Cli) -> Result<i32> {
 
 struct Build<'a> {
     manifest: &'a Manifest,
+    config: &'a Config,
     toolchain: &'a Toolchain,
+    host: &'a TargetInfo,
+    target: &'a TargetInfo,
+    host_options: &'a TargetOptions,
     target_options: &'a TargetOptions,
     physical_target: Option<&'a str>,
     logical_target: Option<&'a str>,
@@ -164,6 +195,84 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
         ))
     })?;
 
+    let repositories = RepositorySet::open(
+        &build.config.repositories,
+        repository_tree_limits(&build.config.policy.limits)?,
+        build.config.policy.limits.max_package_bytes,
+    )?;
+    let rust_version = Version::parse(&build.toolchain.release).map_err(|error| {
+        Error::failure(format!(
+            "selected rustc release `{}` is not a semantic version: {error}",
+            build.toolchain.release
+        ))
+    })?;
+    let prepared = dependency::prepare_locked(
+        build.manifest,
+        build.config,
+        &repositories,
+        &ResolverOptions {
+            resolver: build.manifest.resolver,
+            incompatible_rust_versions: build.config.incompatible_rust_versions,
+            rust_version,
+            max_packages: build.config.policy.limits.max_packages,
+            max_depth: build.config.policy.limits.max_depth,
+        },
+        TargetSelection {
+            target_triple: &build.target.triple,
+            target_cfg: &build.target.cfg,
+            host_triple: &build.host.triple,
+            host_cfg: &build.host.cfg,
+        },
+        staging.path(),
+    )?;
+    let manifests = prepared
+        .packages
+        .iter()
+        .map(|(key, package)| (key.clone(), package.manifest.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let plan = prepared.dependency_plan(&PlanOptions {
+        workspace_root: &build.manifest.root,
+        release: build.release,
+        release_profile: &build.manifest.release,
+        rustc: build.toolchain,
+        logical_target: build.logical_target,
+        rustflags: build.rustflags,
+    })?;
+    let host_profile = if build.physical_target.is_some() {
+        staging.path().join(".host")
+    } else {
+        staging.path().to_owned()
+    };
+    let cargo = env::current_exe()
+        .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
+    let dependency_outputs = executor::execute(
+        &plan,
+        &manifests,
+        &executor::Options {
+            cargo: &cargo,
+            toolchain: build.toolchain,
+            host: build.host,
+            target: build.target,
+            host_profile: &host_profile,
+            target_profile: staging.path(),
+            physical_target: build.physical_target,
+            host_linker: build.host_options.linker.as_deref(),
+            target_linker: build.target_options.linker.as_deref(),
+            release: build.release,
+            verbose: build.verbosity == Verbosity::Verbose,
+            color: build.color,
+            build_script_timeout: Duration::from_secs(
+                build.config.policy.limits.build_script_seconds,
+            ),
+            build_script_output_bytes: build.config.policy.limits.build_script_output_bytes,
+            out_dir_limits: repository_tree_limits(&build.config.policy.limits)?,
+        },
+    )?;
+    let root_dependencies = root_dependencies(&prepared.resolution, &plan, &dependency_outputs)?;
+    let dependency_identities = root_dependencies
+        .iter()
+        .map(|dependency| dependency.identity.clone())
+        .collect::<Vec<_>>();
     let identity = cargo_identity(&IdentityInput {
         package_name: &build.manifest.name,
         version: &build.manifest.version,
@@ -174,9 +283,16 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
         release_profile: &build.manifest.release,
         rustc: build.toolchain,
         rustflags: build.rustflags,
+        dependencies: &dependency_identities,
     });
-    let arguments = rustc_arguments(&build, &identity, staging.path());
-    let environment = rustc_environment(&build, &target_root, profile_name)?;
+    let arguments = rustc_arguments(
+        &build,
+        &identity,
+        staging.path(),
+        &host_profile,
+        &root_dependencies,
+    );
+    let environment = rustc_environment(&build, &host_profile)?;
     RustcCommand {
         program: &build.toolchain.rustc,
         arguments: &arguments,
@@ -186,6 +302,16 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
         color: build.color,
     }
     .run()?;
+
+    drop(prepared);
+    if build.physical_target.is_some() {
+        fs::remove_dir_all(&host_profile).map_err(|error| {
+            Error::failure(format!(
+                "failed to remove temporary host dependency output `{}`: {error}",
+                host_profile.display()
+            ))
+        })?;
+    }
 
     let dependency_artifact = dependencies.join(format!(
         "{}{}",
@@ -237,7 +363,70 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
     Ok(artifact)
 }
 
-fn rustc_arguments(build: &Build<'_>, identity: &Identity, staging: &Path) -> Vec<OsString> {
+struct RootDependency {
+    alias: String,
+    identity: Identity,
+    artifact: PathBuf,
+}
+
+fn root_dependencies(
+    resolution: &Resolution,
+    plan: &CompilationPlan,
+    outputs: &executor::Outputs,
+) -> Result<Vec<RootDependency>> {
+    let mut result = Vec::new();
+    for edge in &resolution.root_edges {
+        let mut matches = plan.units.iter().filter(|(key, _)| {
+            key.package == edge.package
+                && key.kind == UnitKind::Library
+                && key.compile_kind == edge.compile_kind
+        });
+        let (key, planned) = matches.next().ok_or_else(|| {
+            Error::failure(format!(
+                "root dependency `{} {}` has no target library unit",
+                edge.package.name, edge.package.version
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(Error::failure(format!(
+                "root dependency `{} {}` has more than one target library unit",
+                edge.package.name, edge.package.version
+            )));
+        }
+        let artifact = match outputs.artifacts.get(key) {
+            Some(crate::compile::RustcOutput::Library { rlib, .. }) => rlib.clone(),
+            _ => {
+                return Err(Error::failure(format!(
+                    "root dependency `{} {}` did not produce a library artifact",
+                    edge.package.name, edge.package.version
+                )));
+            }
+        };
+        let alias = edge.alias.replace('-', "_");
+        if result
+            .iter()
+            .any(|existing: &RootDependency| existing.alias == alias)
+        {
+            return Err(Error::failure(format!(
+                "selected root dependency alias `{alias}` is ambiguous"
+            )));
+        }
+        result.push(RootDependency {
+            alias,
+            identity: planned.identity.clone(),
+            artifact,
+        });
+    }
+    Ok(result)
+}
+
+fn rustc_arguments(
+    build: &Build<'_>,
+    identity: &Identity,
+    staging: &Path,
+    host_profile: &Path,
+    root_dependencies: &[RootDependency],
+) -> Vec<OsString> {
     let mut args = Vec::new();
     push(&mut args, "--crate-name");
     push(&mut args, &build.manifest.crate_name);
@@ -313,25 +502,20 @@ fn rustc_arguments(build: &Build<'_>, identity: &Identity, staging: &Path) -> Ve
     push(&mut args, "-L");
     args.push(format!("dependency={}", staging.join("deps").display()).into());
     if build.physical_target.is_some() {
-        let host_dependencies = build
-            .manifest
-            .root
-            .join("target/lorry")
-            .join(if build.release { "release" } else { "debug" })
-            .join("deps");
+        let host_dependencies = host_profile.join("deps");
         push(&mut args, "-L");
         args.push(format!("dependency={}", host_dependencies.display()).into());
+    }
+    for dependency in root_dependencies {
+        push(&mut args, "--extern");
+        args.push(format!("{}={}", dependency.alias, dependency.artifact.display()).into());
     }
     args.extend(build.rustflags.iter().map(OsString::from));
     push(&mut args, "--verbose");
     args
 }
 
-fn rustc_environment(
-    build: &Build<'_>,
-    target_root: &Path,
-    profile_name: &str,
-) -> Result<BTreeMap<String, OsString>> {
+fn rustc_environment(build: &Build<'_>, host_profile: &Path) -> Result<BTreeMap<String, OsString>> {
     let manifest = build.manifest;
     let version = &manifest.version;
     let mut values = BTreeMap::new();
@@ -400,9 +584,23 @@ fn rustc_environment(
     value(
         &mut values,
         dynamic_library_path_variable(),
-        target_root.join(profile_name).join("deps").as_os_str(),
+        host_profile.join("deps").as_os_str(),
     );
     Ok(values)
+}
+
+fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
+    let max_entries = policy
+        .max_package_files
+        .checked_mul(2)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| Error::failure("policy package file limit does not fit this platform"))?;
+    Ok(TreeLimits {
+        max_entries,
+        max_path_bytes: DEFAULT_LIMITS.max_path_bytes,
+        max_file_bytes: policy.max_extracted_package_bytes,
+        max_tree_bytes: policy.max_extracted_package_bytes,
+    })
 }
 
 fn run_artifact(
@@ -524,4 +722,164 @@ fn push(args: &mut Vec<OsString>, value: &str) {
 fn codegen(args: &mut Vec<OsString>, value: &str) {
     push(args, "-C");
     push(args, value);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::config::{CargoCompat, PolicyAction, PolicyRule};
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "lorry-engine-dependencies-{}-{id}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("local/src")).unwrap();
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"root-bin\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                 [dependencies]\nlocal-dependency = { package = \"local-dependency\", path = \"local\" }\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("Cargo.lock"),
+                "version = 4\n\
+                 [[package]]\nname = \"local-dependency\"\nversion = \"1.2.3\"\n\
+                 [[package]]\nname = \"root-bin\"\nversion = \"0.1.0\"\ndependencies = [\"local-dependency\"]\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("src/main.rs"),
+                "fn main() { print!(\"{}\", local_dependency::VALUE); }\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("local/Cargo.toml"),
+                "[package]\nname = \"local-dependency\"\nversion = \"1.2.3\"\nedition = \"2024\"\nlicense = \"MIT\"\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("local/src/lib.rs"),
+                "pub const VALUE: &str = \"dependency-ok\";\n",
+            )
+            .unwrap();
+            Self(root)
+        }
+
+        fn add_build_script(&self) {
+            fs::write(
+                self.0.join("local/Cargo.toml"),
+                "[package]\nname = \"local-dependency\"\nversion = \"1.2.3\"\nedition = \"2024\"\nlicense = \"MIT\"\nbuild = \"build.rs\"\n",
+            )
+            .unwrap();
+            fs::write(
+                self.0.join("local/build.rs"),
+                "fn main() {\n\
+                     let out = std::env::var_os(\"OUT_DIR\").unwrap();\n\
+                     std::fs::write(std::path::Path::new(&out).join(\"generated.rs\"), \"pub const VALUE: &str = \\\"build-script-ok\\\";\\n\").unwrap();\n\
+                     println!(\"cargo:rerun-if-changed=build.rs\");\n\
+                 }\n",
+            )
+            .unwrap();
+            fs::write(
+                self.0.join("local/src/lib.rs"),
+                "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn builds_a_root_binary_with_an_unversioned_path_dependency() {
+        let fixture = Fixture::new();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifact = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: false,
+            color: false,
+            verbosity: Verbosity::Quiet,
+        })
+        .unwrap();
+        let output = std::process::Command::new(artifact).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"dependency-ok");
+    }
+
+    #[test]
+    fn executes_an_admitted_dependency_build_script_from_the_engine() {
+        let fixture = Fixture::new();
+        fixture.add_build_script();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.policy.rules.insert(
+            "local-build-script".to_owned(),
+            PolicyRule {
+                action: PolicyAction::Allow,
+                name: Some("local-dependency".to_owned()),
+                version: None,
+                source: Some("path".to_owned()),
+                checksum: None,
+                source_tree_sha256: None,
+                license: Some("MIT".to_owned()),
+                allow_build_script: true,
+                native_tools: BTreeSet::new(),
+                provenance: fixture.0.join("lorry.toml"),
+            },
+        );
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifact = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: false,
+            color: false,
+            verbosity: Verbosity::Quiet,
+        })
+        .unwrap();
+        let output = std::process::Command::new(artifact).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"build-script-ok");
+    }
 }

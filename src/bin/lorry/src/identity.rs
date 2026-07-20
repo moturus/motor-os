@@ -25,6 +25,7 @@ pub struct IdentityInput<'a> {
     pub release_profile: &'a ReleaseProfile,
     pub rustc: &'a Toolchain,
     pub rustflags: &'a [String],
+    pub dependencies: &'a [Identity],
 }
 
 pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
@@ -47,7 +48,7 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
         rustc: input.rustc,
         rustflags: input.rustflags,
         extra_arguments: &[],
-        dependencies: &[],
+        dependencies: input.dependencies,
         host_configuration_differs: None,
     })
 }
@@ -603,6 +604,7 @@ mod tests {
                 release_profile: &profile,
                 rustc: toolchain,
                 rustflags: &[],
+                dependencies: &[],
             });
             assert_eq!(
                 identity.metadata, metadata,
