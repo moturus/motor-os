@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
+use std::path::PathBuf;
 
 use semver::Version;
 
@@ -8,33 +10,187 @@ use crate::config::IncompatibleRustVersions;
 use crate::diagnostic::{Error, Result};
 use crate::hash::decode_hex;
 use crate::manifest::{DependencySource, Lockfile, Manifest, Resolver as ResolverVersion};
-use crate::sparse::{Dependency, DependencyKind, Record};
+use crate::source_tree::{DEFAULT_LIMITS as DEFAULT_TREE_LIMITS, Exclusions, Tree};
+use crate::sparse::{Dependency, DependencyKind, Record, RustVersion};
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
-    records: BTreeMap<String, Vec<Record>>,
+    records: BTreeMap<String, Vec<Candidate>>,
+    paths: BTreeMap<PathBuf, PackageKey>,
 }
 
 impl Catalog {
     pub fn insert(&mut self, record: Record) -> Result<()> {
         let records = self.records.entry(record.name.clone()).or_default();
-        if records
-            .iter()
-            .any(|existing| same_semver_identity(&existing.version, &record.version))
-        {
+        if records.iter().any(|existing| {
+            matches!(existing.source, ResolvedSource::CratesIo { .. })
+                && same_semver_identity(&existing.record.version, &record.version)
+        }) {
             return Err(Error::failure(format!(
                 "sparse catalog contains duplicate package version `{} {}`",
                 record.name, record.version
             )));
         }
-        records.push(record);
-        records.sort_unstable_by(|left, right| right.version.cmp(&left.version));
+        records.push(Candidate {
+            dependencies: record
+                .dependencies
+                .iter()
+                .cloned()
+                .map(|dependency| CandidateDependency {
+                    dependency,
+                    source: RequirementSource::CratesIo,
+                })
+                .collect(),
+            source: ResolvedSource::CratesIo {
+                checksum: record.checksum,
+            },
+            local_manifest: None,
+            record,
+        });
+        records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
         Ok(())
     }
 
-    pub fn records(&self, name: &str) -> &[Record] {
+    fn records(&self, name: &str) -> &[Candidate] {
         self.records.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    pub fn contains_registry(&self, name: &str, version: &Version) -> bool {
+        self.records(name).iter().any(|candidate| {
+            matches!(candidate.source, ResolvedSource::CratesIo { .. })
+                && candidate.record.version == *version
+        })
+    }
+
+    fn prepare(&mut self, source: &mut RequirementSource) -> Result<()> {
+        let RequirementSource::Path(declared) = source else {
+            return Ok(());
+        };
+        let canonical = fs::canonicalize(&*declared).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve local path dependency `{}`: {error}",
+                declared.display()
+            ))
+        })?;
+        *declared = canonical.clone();
+        if self.paths.contains_key(&canonical) {
+            return Ok(());
+        }
+
+        let manifest = Manifest::load_path_dependency(&canonical)?;
+        let version = Version::parse(&manifest.version.original).map_err(|error| {
+            Error::failure(format!(
+                "invalid local package version `{} {}`: {error}",
+                manifest.name, manifest.version.original
+            ))
+        })?;
+        let tree = Tree::scan(&canonical, DEFAULT_TREE_LIMITS, Exclusions::GitAndTarget)?;
+        let key = PackageKey {
+            name: manifest.name.clone(),
+            version: version.clone(),
+            source: PackageSourceKey::Path(canonical.clone()),
+        };
+        if self.paths.insert(canonical.clone(), key.clone()).is_some() {
+            return Ok(());
+        }
+        let dependencies = manifest
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                Ok(CandidateDependency {
+                    dependency: Dependency {
+                        alias: dependency.alias.clone(),
+                        package: dependency.package.clone(),
+                        requirement: dependency.requirement.clone(),
+                        features: dependency.features.clone(),
+                        optional: dependency.optional,
+                        default_features: dependency.default_features,
+                        target: dependency.target.clone(),
+                        kind: DependencyKind::Normal,
+                    },
+                    source: match &dependency.source {
+                        DependencySource::CratesIo => RequirementSource::CratesIo,
+                        DependencySource::Path(path) => RequirementSource::Path(path.clone()),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let rust_version = if manifest.metadata.rust_version.is_empty() {
+            None
+        } else {
+            Some(parse_local_rust_version(
+                &manifest.name,
+                &manifest.metadata.rust_version,
+            )?)
+        };
+        let record = Record {
+            name: manifest.name.clone(),
+            version,
+            dependencies: dependencies
+                .iter()
+                .map(|dependency| dependency.dependency.clone())
+                .collect(),
+            checksum: tree.sha256,
+            features: manifest.features.clone(),
+            features2: BTreeMap::new(),
+            yanked: false,
+            links: None,
+            schema: 1,
+            rust_version,
+            published: None,
+            exact_bytes: Vec::new(),
+        };
+        let records = self.records.entry(record.name.clone()).or_default();
+        records.push(Candidate {
+            record,
+            dependencies,
+            source: ResolvedSource::Path {
+                logical_root: canonical.clone(),
+                physical_root: canonical,
+                source_tree_sha256: tree.sha256,
+                patched_crates_io: false,
+            },
+            local_manifest: Some(manifest),
+        });
+        records.sort_unstable_by(|left, right| right.record.version.cmp(&left.record.version));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Candidate {
+    record: Record,
+    dependencies: Vec<CandidateDependency>,
+    source: ResolvedSource,
+    local_manifest: Option<Manifest>,
+}
+
+impl std::ops::Deref for Candidate {
+    type Target = Record;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CandidateDependency {
+    dependency: Dependency,
+    source: RequirementSource,
+}
+
+impl std::ops::Deref for CandidateDependency {
+    type Target = Dependency;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dependency
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RequirementSource {
+    CratesIo,
+    Path(PathBuf),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,10 +258,39 @@ pub enum FeatureContext {
     Host,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolvedSource {
+    CratesIo {
+        checksum: [u8; 32],
+    },
+    Path {
+        logical_root: PathBuf,
+        physical_root: PathBuf,
+        source_tree_sha256: [u8; 32],
+        patched_crates_io: bool,
+    },
+}
+
+impl ResolvedSource {
+    fn key(&self) -> PackageSourceKey {
+        match self {
+            Self::CratesIo { .. } => PackageSourceKey::CratesIo,
+            Self::Path { logical_root, .. } => PackageSourceKey::Path(logical_root.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PackageSourceKey {
+    CratesIo,
+    Path(PathBuf),
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PackageKey {
     pub name: String,
     pub version: Version,
+    pub source: PackageSourceKey,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,7 +303,8 @@ pub struct ResolvedEdge {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPackage {
     pub key: PackageKey,
-    pub checksum: [u8; 32],
+    pub source: ResolvedSource,
+    pub local_manifest: Option<Manifest>,
     pub feature_sets: BTreeMap<FeatureContext, BTreeSet<String>>,
     pub target_features: BTreeSet<String>,
     pub host_features: BTreeSet<String>,
@@ -139,6 +325,7 @@ pub fn resolve(
     locked: &[LockedPreference],
 ) -> Result<Resolution> {
     validate_locked_checksums(catalog, locked)?;
+    let mut catalog = catalog.clone();
     let requirements = root_requirements(manifest)?;
     let mut queue = VecDeque::new();
     for requirement in requirements {
@@ -154,16 +341,17 @@ pub fn resolve(
             ancestors: BTreeSet::new(),
         });
     }
-    let state = solve(State::default(), queue, catalog, options, locked).map_err(|failure| {
-        Error::failure(format!("dependency resolution failed: {}", failure.message))
-    })?;
+    let state =
+        solve(State::default(), queue, &mut catalog, options, locked).map_err(|failure| {
+            Error::failure(format!("dependency resolution failed: {}", failure.message))
+        })?;
     Ok(state.into_resolution())
 }
 
 #[derive(Clone)]
 struct RootRequirement {
     index: usize,
-    dependency: Dependency,
+    dependency: CandidateDependency,
 }
 
 fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
@@ -238,7 +426,7 @@ fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
 
     let mut output = Vec::new();
     for (index, dependency) in manifest.dependencies.iter().enumerate() {
-        if !enabled.contains(&index) || !matches!(dependency.source, DependencySource::CratesIo) {
+        if !enabled.contains(&index) {
             continue;
         }
         let mut features = dependency.features.clone();
@@ -251,15 +439,21 @@ fn root_requirements(manifest: &Manifest) -> Result<Vec<RootRequirement>> {
         }
         output.push(RootRequirement {
             index,
-            dependency: Dependency {
-                alias: dependency.alias.clone(),
-                package: dependency.package.clone(),
-                requirement: dependency.requirement.clone(),
-                features,
-                optional: false,
-                default_features: dependency.default_features,
-                target: dependency.target.clone(),
-                kind: DependencyKind::Normal,
+            dependency: CandidateDependency {
+                dependency: Dependency {
+                    alias: dependency.alias.clone(),
+                    package: dependency.package.clone(),
+                    requirement: dependency.requirement.clone(),
+                    features,
+                    optional: false,
+                    default_features: dependency.default_features,
+                    target: dependency.target.clone(),
+                    kind: DependencyKind::Normal,
+                },
+                source: match &dependency.source {
+                    DependencySource::CratesIo => RequirementSource::CratesIo,
+                    DependencySource::Path(path) => RequirementSource::Path(path.clone()),
+                },
             },
         });
     }
@@ -348,7 +542,7 @@ fn enable_root_alias(
 struct Event {
     parent: Option<PackageKey>,
     dependency_index: usize,
-    dependency: Dependency,
+    dependency: CandidateDependency,
     context: FeatureContext,
     depth: u64,
     ancestors: BTreeSet<PackageKey>,
@@ -371,7 +565,7 @@ struct Sent {
 
 #[derive(Clone)]
 struct Node {
-    record: Record,
+    record: Candidate,
     activations: BTreeMap<FeatureContext, Activation>,
     edges: BTreeMap<(FeatureContext, usize), PackageKey>,
 }
@@ -385,7 +579,11 @@ struct State {
 
 impl State {
     fn into_resolution(self) -> Resolution {
-        let selected = self.nodes.keys().cloned().collect::<Vec<_>>();
+        let selected = self
+            .nodes
+            .iter()
+            .map(|(key, node)| (key.clone(), node.record.source.clone()))
+            .collect::<Vec<_>>();
         let mut packages = Vec::with_capacity(self.nodes.len());
         for (key, node) in self.nodes {
             let feature_sets = node
@@ -421,15 +619,16 @@ impl State {
                     let dependency = &node.record.dependencies[*dependency_index];
                     if let Some(package) = selected
                         .iter()
-                        .filter(|key| {
+                        .filter(|(key, source)| {
                             key.name == dependency.package
                                 && dependency.requirement.matches(&key.version)
+                                && source_matches(source, &dependency.source)
                         })
-                        .max_by(|left, right| left.version.cmp(&right.version))
+                        .max_by(|left, right| left.0.version.cmp(&right.0.version))
                     {
                         lock_edges
                             .entry((context.clone(), *dependency_index))
-                            .or_insert_with(|| package.clone());
+                            .or_insert_with(|| package.0.clone());
                     }
                 }
             }
@@ -443,7 +642,8 @@ impl State {
                 .collect();
             packages.push(ResolvedPackage {
                 key,
-                checksum: node.record.checksum,
+                source: node.record.source,
+                local_manifest: node.record.local_manifest,
                 feature_sets,
                 target_features,
                 host_features,
@@ -483,13 +683,16 @@ impl Failure {
 fn solve(
     state: State,
     mut queue: VecDeque<Event>,
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
 ) -> std::result::Result<State, Failure> {
-    let Some(event) = queue.pop_front() else {
+    let Some(mut event) = queue.pop_front() else {
         return Ok(state);
     };
+    catalog
+        .prepare(&mut event.dependency.source)
+        .map_err(|error| Failure::new(error.to_string()))?;
     if event.depth > options.max_depth {
         return Err(Failure::new(format!(
             "`{}` exceeds dependency depth {}",
@@ -498,12 +701,13 @@ fn solve(
     }
     let matching_selected = state
         .nodes
-        .keys()
-        .filter(|key| {
+        .iter()
+        .filter(|(key, node)| {
             key.name == event.dependency.package
                 && event.dependency.requirement.matches(&key.version)
+                && source_matches(&node.record.source, &event.dependency.source)
         })
-        .cloned()
+        .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     let mut last_failure = None;
     for key in matching_selected {
@@ -525,11 +729,11 @@ fn solve(
 
     let candidates = candidates(catalog, &event, options, locked);
     for record in candidates {
-        if state
-            .nodes
-            .keys()
-            .any(|key| key.name == record.name && semver_compatible(&key.version, &record.version))
-        {
+        if state.nodes.iter().any(|(key, node)| {
+            key.name == record.name
+                && source_matches(&node.record.source, &event.dependency.source)
+                && semver_compatible(&key.version, &record.version)
+        }) {
             if last_failure.is_none() {
                 last_failure = Some(Failure::new(format!(
                     "compatible requirements for `{}` cannot be unified",
@@ -549,6 +753,7 @@ fn solve(
         let key = PackageKey {
             name: record.name.clone(),
             version: record.version.clone(),
+            source: record.source.key(),
         };
         let mut candidate_state = state.clone();
         if let Some(links) = &record.links {
@@ -794,7 +999,7 @@ fn activate(
         }
         activation.sent.insert(index, sent.clone());
         let mut dependency = dependency.clone();
-        dependency.features = sent.features.into_iter().collect();
+        dependency.dependency.features = sent.features.into_iter().collect();
         let mut ancestors = event.ancestors.clone();
         ancestors.insert(key.clone());
         queue.push_back(Event {
@@ -814,17 +1019,22 @@ fn candidates(
     event: &Event,
     options: &Options,
     locked: &[LockedPreference],
-) -> Vec<Record> {
+) -> Vec<Candidate> {
     let mut candidates = catalog
         .records(&event.dependency.package)
         .iter()
+        .filter(|candidate| source_matches(&candidate.source, &event.dependency.source))
         .filter(|record| event.dependency.requirement.matches(&record.version))
         .filter(|record| {
             !record.yanked
                 || locked.iter().any(|locked| {
                     locked.name == record.name
                         && same_semver_identity(&locked.version, &record.version)
-                        && locked.checksum == record.checksum
+                        && matches!(
+                            record.source,
+                            ResolvedSource::CratesIo { checksum }
+                                if locked.checksum == checksum
+                        )
                 })
         })
         .cloned()
@@ -851,18 +1061,22 @@ fn candidates(
     candidates
 }
 
-fn lock_rank(record: &Record, locked: &[LockedPreference]) -> u8 {
+fn lock_rank(record: &Candidate, locked: &[LockedPreference]) -> u8 {
     locked
         .iter()
         .any(|locked| {
             locked.name == record.name
                 && same_semver_identity(&locked.version, &record.version)
-                && locked.checksum == record.checksum
+                && matches!(
+                    record.source,
+                    ResolvedSource::CratesIo { checksum }
+                        if locked.checksum == checksum
+                )
         })
         .into()
 }
 
-fn rust_compatible(record: &Record, rust_version: &Version) -> bool {
+fn rust_compatible(record: &Candidate, rust_version: &Version) -> bool {
     record
         .rust_version
         .as_ref()
@@ -871,12 +1085,13 @@ fn rust_compatible(record: &Record, rust_version: &Version) -> bool {
 
 fn validate_locked_checksums(catalog: &Catalog, locked: &[LockedPreference]) -> Result<()> {
     for locked in locked {
-        if let Some(record) = catalog
-            .records(&locked.name)
-            .iter()
-            .find(|record| same_semver_identity(&record.version, &locked.version))
-            && record.checksum != locked.checksum
-        {
+        if let Some(record) = catalog.records(&locked.name).iter().find(|record| {
+            matches!(record.source, ResolvedSource::CratesIo { .. })
+                && same_semver_identity(&record.version, &locked.version)
+        }) && !matches!(
+            record.source,
+            ResolvedSource::CratesIo { checksum } if checksum == locked.checksum
+        ) {
             return Err(Error::failure(format!(
                 "Cargo.lock checksum for `{} {}` conflicts with the sparse index",
                 locked.name, locked.version
@@ -884,6 +1099,24 @@ fn validate_locked_checksums(catalog: &Catalog, locked: &[LockedPreference]) -> 
         }
     }
     Ok(())
+}
+
+fn source_matches(source: &ResolvedSource, requirement: &RequirementSource) -> bool {
+    match (source, requirement) {
+        (ResolvedSource::CratesIo { .. }, RequirementSource::CratesIo) => true,
+        (
+            ResolvedSource::Path {
+                logical_root,
+                patched_crates_io,
+                ..
+            },
+            RequirementSource::CratesIo,
+        ) => *patched_crates_io && !logical_root.as_os_str().is_empty(),
+        (ResolvedSource::Path { logical_root, .. }, RequirementSource::Path(required)) => {
+            logical_root == required
+        }
+        (ResolvedSource::CratesIo { .. }, RequirementSource::Path(_)) => false,
+    }
 }
 
 fn normalize_context(resolver: ResolverVersion, context: FeatureContext) -> FeatureContext {
@@ -925,6 +1158,33 @@ fn same_semver_identity(left: &Version, right: &Version) -> bool {
         && left.pre == right.pre
 }
 
+fn parse_local_rust_version(package: &str, value: &str) -> Result<RustVersion> {
+    if value.is_empty() || value.starts_with('v') || value.contains(['-', '+']) {
+        return Err(Error::failure(format!(
+            "local package `{package}` has invalid `rust-version` `{value}`"
+        )));
+    }
+    let normalized = match value.split('.').count() {
+        1 => format!("{value}.0.0"),
+        2 => format!("{value}.0"),
+        3 => value.to_owned(),
+        _ => {
+            return Err(Error::failure(format!(
+                "local package `{package}` has invalid `rust-version` `{value}`"
+            )));
+        }
+    };
+    let version = Version::parse(&normalized).map_err(|error| {
+        Error::failure(format!(
+            "local package `{package}` has invalid `rust-version` `{value}`: {error}"
+        ))
+    })?;
+    Ok(RustVersion {
+        original: value.to_owned(),
+        version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,8 +1192,36 @@ mod tests {
     use semver::VersionReq;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    static NEXT_LOCAL_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    struct LocalFixture(PathBuf);
+
+    impl LocalFixture {
+        fn new() -> Self {
+            let id = NEXT_LOCAL_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("lorry-resolver-local-{}-{id}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn package(&self, relative: &str, manifest: &str) {
+            let root = self.0.join(relative);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("Cargo.toml"), manifest).unwrap();
+            fs::write(root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        }
+    }
+
+    impl Drop for LocalFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn checksum(version: &str) -> String {
         let digit = version
@@ -1342,6 +1630,145 @@ mod tests {
     }
 
     #[test]
+    fn lazily_resolves_and_hashes_unversioned_local_path_packages() {
+        let fixture = LocalFixture::new();
+        fixture.package(
+            "a",
+            "[package]\nname = \"a\"\nversion = \"1.2.3\"\nedition = \"2021\"\n\
+             [dependencies]\nb = { path = \"../b\", optional = true }\n\
+             [features]\ndefault = [\"dep:b\"]\n",
+        );
+        fixture.package(
+            "b",
+            "[package]\nname = \"b\"\nversion = \"2.0.0\"\nedition = \"2021\"\n",
+        );
+        let root = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\na = { path = \"a\" }\n",
+        )
+        .unwrap();
+        let resolution = resolve(
+            &root,
+            &Catalog::default(),
+            &options(ResolverVersion::V2),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(selected(&resolution, "a").len(), 1);
+        assert_eq!(selected(&resolution, "b").len(), 1);
+        for package in &resolution.packages {
+            let ResolvedSource::Path {
+                logical_root,
+                physical_root,
+                source_tree_sha256,
+                patched_crates_io,
+            } = &package.source
+            else {
+                panic!("local fixture resolved as a registry package");
+            };
+            assert!(logical_root.is_absolute());
+            assert_eq!(logical_root, physical_root);
+            assert_ne!(*source_tree_sha256, [0_u8; 32]);
+            assert!(!patched_crates_io);
+            assert_eq!(
+                package.local_manifest.as_ref().unwrap().name,
+                package.key.name
+            );
+        }
+
+        let constrained = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\na = { path = \"a\", version = \"=9.0.0\" }\n",
+        )
+        .unwrap();
+        assert!(
+            resolve(
+                &constrained,
+                &Catalog::default(),
+                &options(ResolverVersion::V2),
+                &[],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("no version")
+        );
+
+        let mixed = Manifest::parse(
+            &fixture.0,
+            &fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nlocal-a = { package = \"a\", path = \"a\" }\n\
+             registry-a = { package = \"a\", version = \"=1.2.3\" }\n",
+        )
+        .unwrap();
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record("a", "1.2.3", "[]", "{}", ""))
+            .unwrap();
+        let resolution = resolve(&mixed, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        assert_eq!(selected(&resolution, "a").len(), 2);
+        assert!(
+            resolution
+                .packages
+                .iter()
+                .any(|package| package.key.source == PackageSourceKey::CratesIo)
+        );
+        assert!(
+            resolution
+                .packages
+                .iter()
+                .any(|package| matches!(&package.key.source, PackageSourceKey::Path(_)))
+        );
+    }
+
+    #[test]
+    fn resolves_and_lock_checks_the_real_rush_source_graph() {
+        let manifest = Manifest::load(Path::new("../rush")).unwrap();
+        let libc = Record::parse(
+            Path::new("/fixture/libc-index-record.json"),
+            b"{\"name\":\"libc\",\"vers\":\"0.2.139\",\"deps\":[],\
+              \"cksum\":\"201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79\",\
+              \"features\":{\"default\":[\"std\"],\"std\":[]},\"yanked\":false}\n",
+        )
+        .unwrap();
+        let mut catalog = Catalog::default();
+        catalog.insert(libc).unwrap();
+        let locked = LockedPreference::from_lockfile(manifest.lock.as_ref()).unwrap();
+        let resolution = resolve(
+            &manifest,
+            &catalog,
+            &Options {
+                resolver: manifest.resolver,
+                incompatible_rust_versions: None,
+                rust_version: Version::parse("1.98.0").unwrap(),
+                max_packages: 16,
+                max_depth: 8,
+            },
+            &locked,
+        )
+        .unwrap();
+        crate::offline::validate_resolution(&manifest, &resolution).unwrap();
+        assert_eq!(selected(&resolution, "libc").len(), 1);
+        assert_eq!(selected(&resolution, "moto-sys").len(), 1);
+        assert_eq!(selected(&resolution, "moto-rt").len(), 1);
+        let moto_sys = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "moto-sys")
+            .unwrap();
+        assert_eq!(
+            moto_sys.target_features,
+            ["default", "userspace"].map(str::to_owned).into()
+        );
+        assert_eq!(moto_sys.lock_edges.len(), 1);
+        assert_eq!(moto_sys.lock_edges[0].package.name, "moto-rt");
+    }
+
+    #[test]
     fn rejects_links_conflicts_and_graph_limits() {
         let mut catalog = Catalog::default();
         catalog
@@ -1451,9 +1878,10 @@ mod tests {
         let lock = manifest.lock.as_ref().unwrap();
         for package in &lock.packages {
             if package.source.as_deref() != Some(SOURCE)
-                || catalog.records(&package.name).iter().any(|record| {
-                    record.version == Version::parse(&package.version.original).unwrap()
-                })
+                || catalog.contains_registry(
+                    &package.name,
+                    &Version::parse(&package.version.original).unwrap(),
+                )
             {
                 continue;
             }
@@ -1518,7 +1946,7 @@ mod tests {
             &locked,
         )
         .unwrap();
-        crate::offline::validate_registry_resolution(&manifest, &resolution).unwrap();
+        crate::offline::validate_resolution(&manifest, &resolution).unwrap();
         let expected = lock
             .packages
             .iter()
@@ -1533,6 +1961,7 @@ mod tests {
         let actual = resolution
             .packages
             .iter()
+            .filter(|package| matches!(&package.source, ResolvedSource::CratesIo { .. }))
             .map(|package| (package.key.name.clone(), package.key.version.clone()))
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);

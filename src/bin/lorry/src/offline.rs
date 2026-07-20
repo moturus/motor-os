@@ -1,17 +1,17 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use semver::Version;
 
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::manifest::{LockedPackage, Manifest};
-use crate::resolver::{PackageKey, Resolution};
+use crate::resolver::{PackageKey, PackageSourceKey, Resolution, ResolvedSource};
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-pub fn validate_registry_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
+pub fn validate_resolution(manifest: &Manifest, resolution: &Resolution) -> Result<()> {
     let lock = manifest
         .lock
         .as_ref()
@@ -30,12 +30,22 @@ pub fn validate_registry_resolution(manifest: &Manifest, resolution: &Resolution
                 manifest.name, manifest.version.original
             ))
         })?;
-
+    let source_kinds = resolution
+        .packages
+        .iter()
+        .map(|package| {
+            (
+                package.key.clone(),
+                matches!(&package.source, ResolvedSource::CratesIo { .. }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     validate_edges(
         "root package",
         &resolution.root_edges,
         &root.dependencies,
         &lock.packages,
+        &source_kinds,
     )?;
 
     let mut selected = BTreeSet::new();
@@ -46,19 +56,26 @@ pub fn validate_registry_resolution(manifest: &Manifest, resolution: &Resolution
                 package.key.name, package.key.version
             )));
         }
-        let locked = find_registry_package(&lock.packages, &package.key)?;
-        let expected_checksum = hex(&package.checksum);
-        if locked.checksum.as_deref() != Some(expected_checksum.as_str()) {
-            return Err(stale(format!(
-                "Cargo.lock checksum for `{} {}` does not match the resolved sparse-index checksum",
-                package.key.name, package.key.version
-            )));
-        }
+        let locked = match &package.source {
+            ResolvedSource::CratesIo { checksum } => {
+                let locked = find_registry_package(&lock.packages, &package.key)?;
+                let expected_checksum = hex(checksum);
+                if locked.checksum.as_deref() != Some(expected_checksum.as_str()) {
+                    return Err(stale(format!(
+                        "Cargo.lock checksum for `{} {}` does not match the resolved sparse-index checksum",
+                        package.key.name, package.key.version
+                    )));
+                }
+                locked
+            }
+            ResolvedSource::Path { .. } => find_path_package(&lock.packages, &package.key)?,
+        };
         validate_edges(
             &format!("package `{} {}`", package.key.name, package.key.version),
             &package.lock_edges,
             &locked.dependencies,
             &lock.packages,
+            &source_kinds,
         )?;
     }
     Ok(())
@@ -68,6 +85,12 @@ fn find_registry_package<'a>(
     packages: &'a [LockedPackage],
     key: &PackageKey,
 ) -> Result<&'a LockedPackage> {
+    if key.source != PackageSourceKey::CratesIo {
+        return Err(stale(format!(
+            "resolved package `{} {}` has inconsistent crates.io source identity",
+            key.name, key.version
+        )));
+    }
     packages
         .iter()
         .find(|package| {
@@ -84,16 +107,55 @@ fn find_registry_package<'a>(
         })
 }
 
+fn find_path_package<'a>(
+    packages: &'a [LockedPackage],
+    key: &PackageKey,
+) -> Result<&'a LockedPackage> {
+    if !matches!(key.source, PackageSourceKey::Path(_)) {
+        return Err(stale(format!(
+            "resolved package `{} {}` has inconsistent path source identity",
+            key.name, key.version
+        )));
+    }
+    packages
+        .iter()
+        .find(|package| {
+            package.name == key.name
+                && package.source.is_none()
+                && Version::parse(&package.version.original)
+                    .is_ok_and(|version| version == key.version)
+        })
+        .ok_or_else(|| {
+            stale(format!(
+                "Cargo.lock has no local path package `{} {}`",
+                key.name, key.version
+            ))
+        })
+}
+
 fn validate_edges(
     owner: &str,
     resolved: &[crate::resolver::ResolvedEdge],
     locked: &[String],
     packages: &[LockedPackage],
+    source_kinds: &BTreeMap<PackageKey, bool>,
 ) -> Result<()> {
     let expected = resolved
         .iter()
-        .map(|edge| edge.package.clone())
-        .collect::<BTreeSet<_>>();
+        .map(|edge| {
+            let registry = source_kinds.get(&edge.package).ok_or_else(|| {
+                Error::failure(format!(
+                    "resolver edge references absent package `{} {}`",
+                    edge.package.name, edge.package.version
+                ))
+            })?;
+            Ok(LockKey {
+                name: edge.package.name.clone(),
+                version: edge.package.version.clone(),
+                registry: *registry,
+            })
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
     let mut actual = BTreeSet::new();
     let mut exact_references = BTreeSet::new();
     for reference in locked {
@@ -103,16 +165,15 @@ fn validate_edges(
             )));
         }
         let package = resolve_lock_reference(reference, packages)?;
-        if package.source.as_deref() == Some(CRATES_IO_SOURCE) {
-            actual.insert(PackageKey {
-                name: package.name.clone(),
-                version: Version::parse(&package.version.original).map_err(|error| {
-                    stale(format!(
-                        "Cargo.lock dependency `{reference}` has an invalid version: {error}"
-                    ))
-                })?,
-            });
-        }
+        actual.insert(LockKey {
+            name: package.name.clone(),
+            version: Version::parse(&package.version.original).map_err(|error| {
+                stale(format!(
+                    "Cargo.lock dependency `{reference}` has an invalid version: {error}"
+                ))
+            })?,
+            registry: package.source.as_deref() == Some(CRATES_IO_SOURCE),
+        });
     }
     if actual != expected {
         return Err(stale(format!(
@@ -183,9 +244,23 @@ fn resolve_lock_reference<'a>(
     }
 }
 
-fn display_keys(keys: &BTreeSet<PackageKey>) -> String {
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct LockKey {
+    name: String,
+    version: Version,
+    registry: bool,
+}
+
+fn display_keys(keys: &BTreeSet<LockKey>) -> String {
     keys.iter()
-        .map(|key| format!("{} {}", key.name, key.version))
+        .map(|key| {
+            format!(
+                "{} {} ({})",
+                key.name,
+                key.version,
+                if key.registry { "crates.io" } else { "path" }
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -310,7 +385,7 @@ mod tests {
     #[test]
     fn accepts_the_selected_subgraph_and_unused_lock_nodes() {
         let (_temp, manifest, resolution) = fixture();
-        validate_registry_resolution(&manifest, &resolution).unwrap();
+        validate_resolution(&manifest, &resolution).unwrap();
     }
 
     #[test]
@@ -323,7 +398,7 @@ mod tests {
             .unwrap()
             .checksum = Some(checksum(0xff));
         assert!(
-            validate_registry_resolution(&manifest, &resolution)
+            validate_resolution(&manifest, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("checksum")
@@ -338,7 +413,7 @@ mod tests {
             .dependencies
             .clear();
         assert!(
-            validate_registry_resolution(&manifest, &resolution)
+            validate_resolution(&manifest, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("dependency edges")
@@ -352,7 +427,7 @@ mod tests {
             .packages
             .retain(|package| package.name != "b");
         assert!(
-            validate_registry_resolution(&manifest, &resolution)
+            validate_resolution(&manifest, &resolution)
                 .unwrap_err()
                 .to_string()
                 .contains("selects no package")
