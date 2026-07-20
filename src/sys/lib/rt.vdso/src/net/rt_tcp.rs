@@ -1253,6 +1253,15 @@ impl TcpStream {
             self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
         } else {
             self.channel().add_write_waiter(self);
+            // Close the race with a channel pass draining write_waiters
+            // between the check above and the registration: on an
+            // otherwise idle channel no later pass would re-examine us,
+            // and the WRITABLE edge would be lost (observed as mio-test
+            // tcp::test_write hanging). Re-check and raise directly; a
+            // spurious WRITABLE is level-correct, a lost one is not.
+            if self.have_write_buffer_space() {
+                self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
+            }
         }
     }
 
@@ -1498,7 +1507,10 @@ impl TcpStream {
         }
 
         if written == 0 {
-            self.channel().add_write_waiter(self);
+            // Registers and re-checks (see maybe_can_write): space
+            // appearing concurrently raises WRITABLE, and NOT_READY
+            // stays correct either way -- the caller polls and retries.
+            self.maybe_can_write();
             return Err(moto_rt::E_NOT_READY);
         }
         Ok(written)
