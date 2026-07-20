@@ -1,3 +1,7 @@
+use clap::builder::PossibleValuesParser;
+use clap::error::ErrorKind as ClapErrorKind;
+use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand};
+
 use crate::diagnostic::{Error, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,148 +62,74 @@ impl Cli {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut args = arguments.into_iter().peekable();
-        let toolchain = match args.peek() {
+        let mut arguments = arguments.into_iter().collect::<Vec<_>>();
+        let toolchain = match arguments.first() {
             Some(value) if value.starts_with('+') => {
-                let value = args.next().unwrap();
                 if value.len() == 1 {
                     return Err(Error::usage(
                         "toolchain selector `+` is empty",
                         "use `+stable`, `+nightly`, or another installed toolchain name",
                     ));
                 }
-                Some(value[1..].to_owned())
+                let value = value[1..].to_owned();
+                arguments.remove(0);
+                Some(value)
             }
             _ => None,
         };
 
-        let mut color = Color::Auto;
-        let mut color_seen = false;
-        let mut verbosity = Verbosity::Normal;
-        let mut quiet_seen = false;
-        let mut verbose_seen = false;
+        if let Some(value) = arguments.iter().find(|value| value.starts_with('+')) {
+            return Err(Error::usage(
+                format!("toolchain selector `{value}` is not first"),
+                "place `+toolchain` before global options and the command",
+            ));
+        }
 
-        let command_name = loop {
-            let Some(argument) = args.next() else {
-                return Err(Error::usage(
-                    "no command was provided",
-                    "run `lorry --help` to see the available commands",
-                ));
-            };
-            match argument.as_str() {
-                "--quiet" | "-q" => {
-                    if quiet_seen {
-                        return Err(duplicate("--quiet"));
-                    }
-                    if verbose_seen {
-                        return Err(Error::usage(
-                            "`--quiet` conflicts with `--verbose`",
-                            "choose at most one verbosity option",
-                        ));
-                    }
-                    quiet_seen = true;
-                    verbosity = Verbosity::Quiet;
-                }
-                "--verbose" | "-v" => {
-                    if verbose_seen {
-                        return Err(duplicate("--verbose"));
-                    }
-                    if quiet_seen {
-                        return Err(Error::usage(
-                            "`--verbose` conflicts with `--quiet`",
-                            "choose at most one verbosity option",
-                        ));
-                    }
-                    verbose_seen = true;
-                    verbosity = Verbosity::Verbose;
-                }
-                "--color" => {
-                    if color_seen {
-                        return Err(duplicate("--color"));
-                    }
-                    let value = args.next().ok_or_else(|| missing("--color"))?;
-                    color = parse_color(&value)?;
-                    color_seen = true;
-                }
-                value if value.starts_with("--color=") => {
-                    if color_seen {
-                        return Err(duplicate("--color"));
-                    }
-                    color = parse_color(&value["--color=".len()..])?;
-                    color_seen = true;
-                }
-                "--help" | "-h" => {
-                    if args.next().is_some() {
-                        return Err(Error::usage(
-                            "`--help` does not accept trailing arguments",
-                            "use `lorry help COMMAND` for command-specific help",
-                        ));
-                    }
-                    return Ok(Self {
-                        toolchain,
-                        color,
-                        verbosity,
-                        command: Command::Help(None),
-                    });
-                }
-                "--version" | "-V" => {
-                    if args.next().is_some() {
-                        return Err(Error::usage(
-                            "`--version` does not accept trailing arguments",
-                            "remove the trailing arguments",
-                        ));
-                    }
-                    return Ok(Self {
-                        toolchain,
-                        color,
-                        verbosity,
-                        command: Command::Version,
-                    });
-                }
-                value if value.starts_with('-') => return Err(unknown_option(value)),
-                value if value.starts_with('+') => {
-                    return Err(Error::usage(
-                        format!("toolchain selector `{value}` is not first"),
-                        "place `+toolchain` before global options and the command",
-                    ));
-                }
-                value => break value.to_owned(),
-            }
+        let matches = command_line()
+            .try_get_matches_from(
+                std::iter::once("lorry".to_owned()).chain(arguments.iter().cloned()),
+            )
+            .map_err(clap_error)?;
+        if !matches!(matches.subcommand_name(), Some("run") | Some("test"))
+            && arguments.iter().any(|argument| argument == "--")
+        {
+            return Err(Error::usage(
+                "this command does not accept arguments after `--`",
+                "only `run` and executable `test` commands accept child arguments",
+            ));
+        }
+        let color = match matches.get_one::<String>("color").map(String::as_str) {
+            None | Some("auto") => Color::Auto,
+            Some("always") => Color::Always,
+            Some("never") => Color::Never,
+            Some(_) => unreachable!("Clap restricts --color values"),
         };
-
-        let command = match command_name.as_str() {
-            "build" => Command::Build(parse_build(&mut args, "build")?),
-            "run" => Command::Run(parse_run(&mut args)?),
-            "test" => Command::Test(parse_test(&mut args)?),
-            "vendor" => Command::Vendor {
-                accept_all: parse_vendor(&mut args)?,
-            },
-            "help" => {
-                let topic = args.next();
-                if let Some(extra) = args.next() {
-                    return Err(Error::usage(
-                        format!("unexpected argument `{extra}` after help topic"),
-                        "use `lorry help COMMAND` with at most one command",
-                    ));
-                }
-                if let Some(topic) = topic.as_deref() {
-                    if !matches!(topic, "build" | "run" | "test" | "vendor" | "help") {
-                        return Err(Error::usage(
-                            format!("unknown help topic `{topic}`"),
-                            "choose build, run, test, or vendor",
-                        ));
-                    }
-                }
-                Command::Help(topic)
-            }
-            other => {
+        let verbosity = if matches.get_flag("quiet") {
+            Verbosity::Quiet
+        } else if matches.get_flag("verbose") {
+            Verbosity::Verbose
+        } else {
+            Verbosity::Normal
+        };
+        let command = if matches.get_flag("help") {
+            if matches.subcommand().is_some() {
                 return Err(Error::usage(
-                    format!("unknown command `{other}`"),
-                    "run `lorry --help` to see the available commands",
+                    "`--help` does not accept trailing arguments",
+                    "use `lorry help COMMAND` for command-specific help",
                 ));
             }
+            Command::Help(None)
+        } else if matches.get_flag("version") {
+            if matches.subcommand().is_some() {
+                return Err(Error::usage(
+                    "`--version` does not accept trailing arguments",
+                    "remove the trailing arguments",
+                ));
+            }
+            Command::Version
+        } else {
+            parse_command(&matches)?
         };
-
         Ok(Self {
             toolchain,
             color,
@@ -209,201 +139,196 @@ impl Cli {
     }
 }
 
-fn parse_build<I>(args: &mut std::iter::Peekable<I>, command: &str) -> Result<BuildOptions>
-where
-    I: Iterator<Item = String>,
-{
-    let mut release = false;
-    let mut target = None;
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--release" | "-r" => {
-                if release {
-                    return Err(duplicate("--release"));
-                }
-                release = true;
-            }
-            "--target" => {
-                if target.is_some() {
-                    return Err(duplicate("--target"));
-                }
-                let value = args.next().ok_or_else(|| missing("--target"))?;
-                target = Some(nonempty("--target", value)?);
-            }
-            value if value.starts_with("--target=") => {
-                if target.is_some() {
-                    return Err(duplicate("--target"));
-                }
-                target = Some(nonempty("--target", value["--target=".len()..].to_owned())?);
-            }
-            "--" => {
+fn command_line() -> ClapCommand {
+    ClapCommand::new("lorry")
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .disable_help_subcommand(true)
+        .args_override_self(false)
+        .arg(
+            Arg::new("quiet")
+                .long("quiet")
+                .short('q')
+                .action(ArgAction::SetTrue)
+                .conflicts_with("verbose"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .long("verbose")
+                .short('v')
+                .action(ArgAction::SetTrue)
+                .conflicts_with("quiet"),
+        )
+        .arg(
+            Arg::new("color")
+                .long("color")
+                .value_name("WHEN")
+                .num_args(1)
+                .action(ArgAction::Set)
+                .value_parser(PossibleValuesParser::new(["auto", "always", "never"])),
+        )
+        .arg(
+            Arg::new("help")
+                .long("help")
+                .short('h')
+                .action(ArgAction::SetTrue)
+                .exclusive(true),
+        )
+        .arg(
+            Arg::new("version")
+                .long("version")
+                .short('V')
+                .action(ArgAction::SetTrue)
+                .exclusive(true),
+        )
+        .subcommand(build_command("build").dont_delimit_trailing_values(true))
+        .subcommand(run_command())
+        .subcommand(test_command())
+        .subcommand(
+            ClapCommand::new("vendor")
+                .disable_help_flag(true)
+                .dont_delimit_trailing_values(true)
+                .args_override_self(false)
+                .arg(
+                    Arg::new("accept-all")
+                        .long("accept-all")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("help")
+                .disable_help_flag(true)
+                .dont_delimit_trailing_values(true)
+                .arg(
+                    Arg::new("topic")
+                        .num_args(0..=1)
+                        .value_parser(PossibleValuesParser::new([
+                            "build", "run", "test", "vendor", "help",
+                        ])),
+                ),
+        )
+}
+
+fn build_command(name: &'static str) -> ClapCommand {
+    ClapCommand::new(name)
+        .disable_help_flag(true)
+        .args_override_self(false)
+        .arg(
+            Arg::new("release")
+                .long("release")
+                .short('r')
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("TRIPLE")
+                .num_args(1)
+                .action(ArgAction::Set),
+        )
+}
+
+fn run_command() -> ClapCommand {
+    build_command("run").arg(child_arguments())
+}
+
+fn test_command() -> ClapCommand {
+    build_command("test")
+        .arg(
+            Arg::new("test")
+                .long("test")
+                .value_name("NAME")
+                .num_args(1)
+                .action(ArgAction::Set),
+        )
+        .arg(Arg::new("no-run").long("no-run").action(ArgAction::SetTrue))
+        .arg(Arg::new("bundle").long("bundle").action(ArgAction::SetTrue))
+        .arg(child_arguments())
+}
+
+fn child_arguments() -> Arg {
+    Arg::new("arguments")
+        .num_args(0..)
+        .last(true)
+        .allow_hyphen_values(true)
+        .action(ArgAction::Append)
+}
+
+fn parse_command(matches: &ArgMatches) -> Result<Command> {
+    match matches.subcommand() {
+        Some(("build", options)) => Ok(Command::Build(build_options(options))),
+        Some(("run", options)) => Ok(Command::Run(RunOptions {
+            build: build_options(options),
+            arguments: values(options, "arguments"),
+        })),
+        Some(("test", options)) => {
+            let arguments = values(options, "arguments");
+            if options.get_flag("no-run") && !arguments.is_empty() {
                 return Err(Error::usage(
-                    format!("`{command}` does not accept arguments after `--`"),
-                    "only `run` and executable `test` commands accept child arguments",
+                    "test arguments cannot be combined with `--no-run`",
+                    "remove the arguments after `--` or remove `--no-run`",
                 ));
             }
-            value if value.starts_with('-') => return Err(unknown_option(value)),
-            value => {
-                return Err(Error::usage(
-                    format!("unexpected argument `{value}` for `{command}`"),
-                    format!("run `lorry help {command}` for accepted options"),
-                ));
-            }
+            Ok(Command::Test(TestOptions {
+                build: build_options(options),
+                test: options.get_one::<String>("test").cloned(),
+                no_run: options.get_flag("no-run"),
+                bundle: options.get_flag("bundle"),
+                arguments,
+            }))
         }
-    }
-    Ok(BuildOptions { release, target })
-}
-
-fn parse_run<I>(args: &mut std::iter::Peekable<I>) -> Result<RunOptions>
-where
-    I: Iterator<Item = String>,
-{
-    let mut build_args = Vec::new();
-    let mut child_args = Vec::new();
-    let mut separator = false;
-    for argument in args.by_ref() {
-        if !separator && argument == "--" {
-            separator = true;
-        } else if separator {
-            child_args.push(argument);
-        } else {
-            build_args.push(argument);
-        }
-    }
-    let build = parse_build(&mut build_args.into_iter().peekable(), "run")?;
-    Ok(RunOptions {
-        build,
-        arguments: child_args,
-    })
-}
-
-fn parse_test<I>(args: &mut std::iter::Peekable<I>) -> Result<TestOptions>
-where
-    I: Iterator<Item = String>,
-{
-    let mut build_args = Vec::new();
-    let mut child_args = Vec::new();
-    let mut test = None;
-    let mut no_run = false;
-    let mut bundle = false;
-    let mut separator = false;
-
-    while let Some(argument) = args.next() {
-        if separator {
-            child_args.push(argument);
-            continue;
-        }
-        match argument.as_str() {
-            "--" => separator = true,
-            "--test" => {
-                if test.is_some() {
-                    return Err(duplicate("--test"));
-                }
-                let value = args.next().ok_or_else(|| missing("--test"))?;
-                test = Some(nonempty("--test", value)?);
-            }
-            value if value.starts_with("--test=") => {
-                if test.is_some() {
-                    return Err(duplicate("--test"));
-                }
-                test = Some(nonempty("--test", value["--test=".len()..].to_owned())?);
-            }
-            "--no-run" => {
-                if no_run {
-                    return Err(duplicate("--no-run"));
-                }
-                no_run = true;
-            }
-            "--bundle" => {
-                if bundle {
-                    return Err(duplicate("--bundle"));
-                }
-                bundle = true;
-            }
-            _ => build_args.push(argument),
-        }
-    }
-
-    if no_run && !child_args.is_empty() {
-        return Err(Error::usage(
-            "test arguments cannot be combined with `--no-run`",
-            "remove the arguments after `--` or remove `--no-run`",
-        ));
-    }
-
-    let build = parse_build(&mut build_args.into_iter().peekable(), "test")?;
-    Ok(TestOptions {
-        build,
-        test,
-        no_run,
-        bundle,
-        arguments: child_args,
-    })
-}
-
-fn parse_vendor<I>(args: &mut std::iter::Peekable<I>) -> Result<bool>
-where
-    I: Iterator<Item = String>,
-{
-    let mut accept_all = false;
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--accept-all" if !accept_all => accept_all = true,
-            "--accept-all" => return Err(duplicate("--accept-all")),
-            value if value.starts_with('-') => return Err(unknown_option(value)),
-            value => {
-                return Err(Error::usage(
-                    format!("unexpected argument `{value}` for `vendor`"),
-                    "run `lorry help vendor` for accepted options",
-                ));
-            }
-        }
-    }
-    Ok(accept_all)
-}
-
-fn parse_color(value: &str) -> Result<Color> {
-    match value {
-        "auto" => Ok(Color::Auto),
-        "always" => Ok(Color::Always),
-        "never" => Ok(Color::Never),
-        _ => Err(Error::usage(
-            format!("invalid color value `{value}`"),
-            "choose `auto`, `always`, or `never`",
+        Some(("vendor", options)) => Ok(Command::Vendor {
+            accept_all: options.get_flag("accept-all"),
+        }),
+        Some(("help", options)) => Ok(Command::Help(options.get_one::<String>("topic").cloned())),
+        Some((name, _)) => unreachable!("unexpected Clap subcommand {name}"),
+        None => Err(Error::usage(
+            "no command was provided",
+            "run `lorry --help` to see the available commands",
         )),
     }
 }
 
-fn nonempty(option: &str, value: String) -> Result<String> {
-    if value.is_empty() {
-        Err(Error::usage(
-            format!("`{option}` requires a non-empty value"),
-            format!("pass the value as `{option} VALUE`"),
-        ))
-    } else {
-        Ok(value)
+fn build_options(matches: &ArgMatches) -> BuildOptions {
+    BuildOptions {
+        release: matches.get_flag("release"),
+        target: matches.get_one::<String>("target").cloned(),
     }
 }
 
-fn duplicate(option: &str) -> Error {
-    Error::usage(
-        format!("option `{option}` was provided more than once"),
-        "remove the duplicate option",
-    )
+fn values(matches: &ArgMatches, name: &str) -> Vec<String> {
+    matches
+        .get_many::<String>(name)
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default()
 }
 
-fn missing(option: &str) -> Error {
-    Error::usage(
-        format!("option `{option}` is missing its value"),
-        format!("pass the value as `{option} VALUE`"),
-    )
-}
-
-fn unknown_option(option: &str) -> Error {
-    Error::usage(
-        format!("unknown option `{option}`"),
-        "run `lorry --help` to see the accepted options",
-    )
+fn clap_error(error: clap::Error) -> Error {
+    let cause = match error.kind() {
+        ClapErrorKind::UnknownArgument => "unknown option or argument",
+        ClapErrorKind::InvalidSubcommand => "unknown command",
+        ClapErrorKind::ArgumentConflict => "conflicting or duplicate option",
+        ClapErrorKind::InvalidValue => "invalid option value",
+        ClapErrorKind::TooManyValues => "too many command-line values",
+        ClapErrorKind::TooFewValues | ClapErrorKind::WrongNumberOfValues => {
+            "wrong number of option values"
+        }
+        ClapErrorKind::MissingRequiredArgument => "option is missing its value",
+        _ => "invalid command line",
+    };
+    let rendered = error.to_string();
+    let detail = rendered
+        .strip_prefix("error: ")
+        .unwrap_or(&rendered)
+        .trim_end();
+    if detail.is_empty() {
+        Error::usage(cause, "run `lorry --help` to see the accepted options")
+    } else {
+        Error::usage(
+            format!("{cause}\n{detail}"),
+            "run `lorry --help` to see the accepted options",
+        )
+    }
 }
 
 #[cfg(test)]
@@ -504,7 +429,15 @@ mod tests {
             &["--version", "build"],
             &["+"],
         ] {
-            assert!(parse(input).unwrap_err().is_usage(), "{input:?}");
+            let result = parse(input);
+            assert!(
+                result.as_ref().is_err_and(Error::is_usage),
+                "{input:?}: {result:?}"
+            );
         }
+
+        let unknown = parse(&["build", "--jobs", "2"]).unwrap_err();
+        assert!(unknown.render().starts_with("error: unknown option"));
+        assert!(!unknown.render().contains("\nerror:"));
     }
 }
