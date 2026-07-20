@@ -57,8 +57,12 @@ impl Drop for UdpSocket {
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
 
-        // TODO: is this unwrap OK?
-        self.channel().post_msg(req).unwrap();
+        // Guaranteed delivery: never drop the message (sys-io would leak the
+        // socket), never panic on a full send queue, and never deadlock when
+        // this drop runs on the runtime thread (see send_msg_guaranteed). The
+        // rx task briefly upgrades the Weak it keeps in udp_sockets, so a
+        // socket whose fd is already closed drops here, on the IO thread.
+        self.channel().send_msg_guaranteed(req);
     }
 }
 
