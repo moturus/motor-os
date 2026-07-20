@@ -2,6 +2,7 @@ mod archive;
 mod atomic;
 mod cli;
 mod config;
+mod dependency;
 mod diagnostic;
 mod engine;
 mod hash;
