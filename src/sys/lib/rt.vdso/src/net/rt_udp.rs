@@ -21,9 +21,10 @@ pub struct UdpSocket {
     channel_reservation: ChannelReservation,
     local_addr: SocketAddr,
     handle: u64,
-    event_source: Arc<EventSourceManaged>,
-    // The Stage-F seam: state-machine edges reach the poll registry through
-    // this listener (today the socket's own `event_source`).
+    // The socket's sole poll-registry handle: state-machine edges emit through
+    // it (raise_readiness), and the veneer downcasts it back to the concrete
+    // source for interest registration. No poll-registry type sits in the
+    // struct, so the state machine is movable to moto-io (Stage F).
     event_listener: Arc<dyn NetEventListener>,
     nonblocking: AtomicBool,
     subchannel_mask: u64, // Never changes.
@@ -150,8 +151,7 @@ impl UdpSocket {
                 channel_reservation,
                 handle: resp.handle,
                 nonblocking: AtomicBool::new(false),
-                event_listener: event_source.clone(),
-                event_source,
+                event_listener: event_source,
                 subchannel_mask,
                 tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
                 peer_addr: Mutex::new(None),
@@ -473,12 +473,21 @@ impl UdpSocket {
         }
 
         if events != 0 {
-            self.event_source.on_event(events);
+            self.event_source().on_event(events);
         }
     }
 
     fn raise_readiness(&self, edges: Readiness) {
         self.event_listener.on_readiness(edges);
+    }
+
+    /// The veneer's poll-registry source, recovered from the abstract
+    /// listener (see the TcpListener counterpart in rt_tcp).
+    fn event_source(&self) -> &EventSourceManaged {
+        self.event_listener
+            .as_any()
+            .downcast_ref::<EventSourceManaged>()
+            .expect("vdso net socket without an EventSourceManaged listener")
     }
 
     fn add_rx_waker(&self, waker: &core::task::Waker) {
@@ -520,7 +529,7 @@ impl PosixFile for UdpSocket {
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.on_closed_locally(rt_fd);
+        self.event_source().on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -531,7 +540,7 @@ impl PosixFile for UdpSocket {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source
+        self.event_source()
             .add_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
@@ -544,14 +553,14 @@ impl PosixFile for UdpSocket {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source
+        self.event_source()
             .set_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+        self.event_source().del_interests(r_id, source_fd)
     }
 }
 

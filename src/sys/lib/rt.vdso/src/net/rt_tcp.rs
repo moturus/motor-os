@@ -44,9 +44,10 @@ pub struct TcpListener {
     channel_reservation: ChannelReservation,
     handle: u64,
     nonblocking: AtomicBool,
-    event_source: Arc<EventSourceManaged>,
-    // The Stage-F seam: state-machine edges reach the poll registry through
-    // this listener (today the socket's own `event_source`).
+    // The socket's sole poll-registry handle: state-machine edges emit through
+    // it (raise_readiness), and the veneer downcasts it back to the concrete
+    // source for interest registration. No poll-registry type sits in the
+    // struct, so the state machine is movable to moto-io (Stage F).
     event_listener: Arc<dyn NetEventListener>,
 
     // In-flight accept requests: req_id => the reservation the accepted
@@ -94,7 +95,7 @@ impl PosixFile for TcpListener {
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.on_closed_locally(rt_fd);
+        self.event_source().on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -105,12 +106,12 @@ impl PosixFile for TcpListener {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source
+        self.event_source()
             .add_interests(r_id, source_fd, token, interests)?;
 
         let have_async_accepts = !self.async_accepts.lock().is_empty();
         if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
-            self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+            self.event_source().on_event(moto_rt::poll::POLL_READABLE);
         }
 
         Ok(())
@@ -123,19 +124,19 @@ impl PosixFile for TcpListener {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source
+        self.event_source()
             .set_interests(r_id, source_fd, token, interests)?;
 
         let have_async_accepts = !self.async_accepts.lock().is_empty();
         if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
-            self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+            self.event_source().on_event(moto_rt::poll::POLL_READABLE);
         }
 
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+        self.event_source().del_interests(r_id, source_fd)
     }
 }
 
@@ -176,6 +177,17 @@ impl TcpListener {
 
     fn raise_readiness(&self, edges: Readiness) {
         self.event_listener.on_readiness(edges);
+    }
+
+    /// The veneer's poll-registry source, recovered from the abstract
+    /// listener. Sound because the vdso always installs an `EventSourceManaged`
+    /// as the listener; a native moto-io host that registered no listener would
+    /// never reach the poll-registration paths that call this.
+    fn event_source(&self) -> &EventSourceManaged {
+        self.event_listener
+            .as_any()
+            .downcast_ref::<EventSourceManaged>()
+            .expect("vdso net socket without an EventSourceManaged listener")
     }
 }
 
@@ -222,8 +234,7 @@ impl TcpListener {
                 channel_reservation,
                 handle: resp.handle,
                 nonblocking: AtomicBool::new(false),
-                event_listener: event_source.clone(),
-                event_source,
+                event_listener: event_source,
                 accept_requests: Mutex::new(BTreeMap::new()),
                 async_accepts: Mutex::new(VecDeque::new()),
                 pending_accept_queues: Mutex::new(BTreeMap::new()),
@@ -325,8 +336,7 @@ impl TcpListener {
                 local_addr: Mutex::new(Some(self.socket_addr)),
                 remote_addr,
                 handle: AtomicU64::new(resp.handle),
-                event_listener: event_source.clone(),
-                event_source,
+                event_listener: event_source,
                 me: me.clone(),
                 nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
                 channel_reservation,
@@ -497,9 +507,10 @@ pub struct TcpStream {
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
-    event_source: Arc<EventSourceManaged>,
-    // The Stage-F seam: state-machine edges reach the poll registry through
-    // this listener (today the socket's own `event_source`).
+    // The socket's sole poll-registry handle: state-machine edges emit through
+    // it (raise_readiness), and the veneer downcasts it back to the concrete
+    // source for interest registration. No poll-registry type sits in the
+    // struct, so the state machine is movable to moto-io (Stage F).
     event_listener: Arc<dyn NetEventListener>,
     nonblocking: AtomicBool,
     me: Weak<TcpStream>,
@@ -616,7 +627,7 @@ impl PosixFile for TcpStream {
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.on_closed_locally(rt_fd);
+        self.event_source().on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -627,7 +638,7 @@ impl PosixFile for TcpStream {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source
+        self.event_source()
             .add_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
@@ -640,14 +651,14 @@ impl PosixFile for TcpStream {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source
+        self.event_source()
             .set_interests(r_id, source_fd, token, interests)?;
         self.maybe_raise_events(interests);
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source.del_interests(r_id, source_fd)
+        self.event_source().del_interests(r_id, source_fd)
     }
 }
 
@@ -679,7 +690,7 @@ impl TcpStream {
                 | moto_rt::poll::POLL_READ_CLOSED
                 | moto_rt::poll::POLL_READABLE
                 | moto_rt::poll::POLL_WRITABLE;
-            self.event_source.on_event(events);
+            self.event_source().on_event(events);
             return;
         }
 
@@ -707,7 +718,7 @@ impl TcpStream {
         }
 
         if events != 0 {
-            self.event_source.on_event(events);
+            self.event_source().on_event(events);
         }
     }
 
@@ -894,8 +905,7 @@ impl TcpStream {
                 local_addr: Mutex::new(None),
                 remote_addr: *socket_addr,
                 handle: AtomicU64::new(SysHandle::NONE.into()),
-                event_listener: event_source.clone(),
-                event_source,
+                event_listener: event_source,
                 me: me.clone(),
                 nonblocking: AtomicBool::new(nonblocking),
                 recv_queue: super::inner_rx_stream::InnerRxStream::new(),
@@ -1265,6 +1275,15 @@ impl TcpStream {
 
     fn raise_readiness(&self, edges: Readiness) {
         self.event_listener.on_readiness(edges);
+    }
+
+    /// The veneer's poll-registry source, recovered from the abstract
+    /// listener (see the TcpListener counterpart).
+    fn event_source(&self) -> &EventSourceManaged {
+        self.event_listener
+            .as_any()
+            .downcast_ref::<EventSourceManaged>()
+            .expect("vdso net socket without an EventSourceManaged listener")
     }
 
     fn have_write_buffer_space(&self) -> bool {

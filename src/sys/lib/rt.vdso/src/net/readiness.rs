@@ -45,6 +45,12 @@ impl core::ops::BitOrAssign for Readiness {
 /// A per-socket sink for readiness edges, installed by the vdso veneer at FD
 /// creation. `on_readiness` runs inline on the channel runtime thread, so the
 /// crate boundary costs one indirect call, not a scheduling hop.
+///
+/// `as_any` lets the host recover the concrete listener it installed (the vdso
+/// downcasts back to its poll-registry source for interest registration), so
+/// the socket needs to store only this one abstract handle -- keeping the
+/// state machine free of any poll-registry type.
 pub trait NetEventListener: Send + Sync {
     fn on_readiness(&self, edges: Readiness);
+    fn as_any(&self) -> &dyn core::any::Any;
 }
