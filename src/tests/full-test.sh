@@ -55,7 +55,10 @@ ping_external() {
   printf '%s\n' "$output"
   if [ "$EXTERNAL_ICMP" = "0" ]; then
     case "$output" in
-      *"Request timeout"*)
+      # NotConnected covers an AAAA-first DNS answer on a rig with no
+      # IPv6 route (qemu user-mode networking): resolution -- the part
+      # under test -- succeeded, only the echo cannot be delivered.
+      *"Request timeout"* | *"NotConnected"*)
         echo "NOTE: '$host' resolved; echo reply skipped (host has no external ICMP)"
         return
         ;;
