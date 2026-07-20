@@ -481,11 +481,10 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
 //       weird things happens that are not happening with them, related to
 //       memory on stack. Maybe there is a bug in _this_ code that these fences
 //       hide, or maybe the compiler is too aggressive (the compiler is not
-//       aware of cross-process shared memory, for example). Anyway, the code
-//       below is somewhat fragile and probably has to be refactored (again)
-//       for performance and robustness.
-//
-// Note: some or all of the above may be outdated.
+//       aware of cross-process shared memory, for example). The design calls
+//       for removing them (the wake edges now carry their own ordering), but
+//       that is a separate, independently-tested step: the fences stay through
+//       the D4b flip so a hang cannot be blamed on two changes at once.
 
 /// How the rx task completes an in-flight RPC (`msg.id != 0`).
 ///
@@ -696,15 +695,10 @@ pub struct NetChannel {
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
 
-    // Threads blocked in TcpStream::write() waiting for a free io_page.
-    // sys-io wakes this channel when it frees a page whose page-wait bit is
-    // set (the blocked writer's failed alloc sets it), which wakes the rx
-    // task, which drains + signals these at its next edge (`wake_waiters`).
-    page_waiters: Mutex<VecDeque<Arc<moto_async::SyncWaiter>>>,
-
-    // Wakers of parked TCP write futures, drained on every channel pass:
-    // the same broad wake-and-recheck semantics as page_waiters (progress
-    // may be a freed io_page or send-queue room).
+    // Wakers of parked TCP write futures, drained on every channel pass
+    // (broad wake-and-recheck: progress may be a freed io_page — sys-io
+    // wakes the channel when it frees one whose page-wait bit is set —
+    // or send-queue room).
     tx_wakers: Mutex<Vec<core::task::Waker>>,
 
     // The channel runtime's send-room notify (a leaked LocalNotify),
@@ -752,8 +746,8 @@ impl NetChannel {
     }
 
     /// Dispatch one incoming message to its stream/socket/listener
-    /// (`msg.id == 0`) or its response waiter/handler (`msg.id != 0`),
-    /// waking the blocked thread if there is one.
+    /// (`msg.id == 0`) or its RPC waiter (`msg.id != 0`); all reader/
+    /// waiter wakes happen inside the handlers.
     fn dispatch_incoming(&self, msg: io_channel::Msg) {
         fence(Ordering::SeqCst);
 
@@ -768,7 +762,7 @@ impl NetChannel {
 
         let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
 
-        let wait_handle: SysHandle = if msg.id == 0 {
+        if msg.id == 0 {
             if cmd.is_udp() {
                 self.on_udp_msg(msg);
                 return;
@@ -776,15 +770,6 @@ impl NetChannel {
 
             // This is an incoming packet, or similar, without a dedicated waiter.
             let stream_handle = msg.handle;
-            // Upgraded listener Arcs are held here and dropped only after the
-            // tcp_streams/tcp_listeners locks below are released: if such a
-            // temporary is a listener's last strong ref (the owner dropped it
-            // concurrently), its Drop runs tcp_listener_dropped(), which
-            // re-locks tcp_listeners -- self-deadlocking this rx task if the
-            // drop happened while we still held that lock (the channel wedges
-            // mid-dispatch and every socket on it hangs).
-            let mut queued_to_listener = false;
-            let mut upgraded_listeners: Vec<Arc<TcpListener>> = Vec::new();
             let stream = {
                 let mut tcp_streams = self.tcp_streams.lock();
                 if let Some(stream) = tcp_streams.get_mut(&stream_handle) {
@@ -795,34 +780,21 @@ impl NetChannel {
                     // on_orphan_message() below. And we should check the pending accept queues
                     // while holding the tcp streams lock, otherwise we could race with
                     // the accept converting into a stream...
-                    let tcp_listeners = self.tcp_listeners.lock();
+                    let mut tcp_listeners = self.tcp_listeners.lock();
                     for listener in tcp_listeners.values() {
-                        let Some(listener) = listener.upgrade() else {
-                            continue;
-                        };
-                        let did_queue = listener.add_to_pending_queue(msg);
-                        upgraded_listeners.push(listener);
-                        if did_queue {
-                            queued_to_listener = true;
-                            break;
+                        if let Some(listener) = listener.upgrade()
+                            && listener.add_to_pending_queue(msg)
+                        {
+                            return;
                         }
                     }
                     None
                 }
             };
-            // Both locks are released; dropping the upgraded listener Arcs
-            // (and a possible last-ref tcp_listener_dropped()) is now safe.
-            drop(upgraded_listeners);
-            if queued_to_listener {
-                return;
-            }
             if let Some(stream) = stream {
-                // Note: we must hold the lock while processing the message, otherwise the wait handle might get updated
-                //       and we will lose the wakeup. Sad story, don't ask...
-                stream.process_incoming_msg(msg)
+                stream.process_incoming_msg(msg);
             } else {
                 self.on_orphan_message(msg);
-                SysHandle::NONE
             }
         } else {
             // An RPC response: resolve through the RPC map. The binding
@@ -859,13 +831,6 @@ impl NetChannel {
                 }
                 None => panic!("unexpected msg"),
             }
-            SysHandle::NONE
-        };
-
-        if wait_handle != SysHandle::NONE
-            && wait_handle.as_u64() != moto_sys::UserThreadControlBlock::get().self_handle
-        {
-            let _ = moto_sys::SysCpu::wake(wait_handle);
         }
     }
 
@@ -949,18 +914,10 @@ impl NetChannel {
             self.wake_driver();
         }
 
-        // Wake writers blocked on io_page exhaustion; they re-check and
-        // re-register if still stuck. This pass runs after every wake of
-        // this thread, including sys-io's page-freed wake.
-        {
-            let mut waiters = VecDeque::new();
-            core::mem::swap(&mut waiters, &mut *self.page_waiters.lock());
-            for waiter in waiters {
-                waiter.signal();
-            }
-        }
-
-        // Likewise the write futures'.
+        // Wake writers blocked on io_page exhaustion or send-queue room;
+        // they re-check and re-register if still stuck. This pass runs
+        // after every wake of this thread, including sys-io's page-freed
+        // wake.
         self.wake_tx_wakers();
     }
 
@@ -1151,13 +1108,6 @@ impl NetChannel {
         self.send_queue.is_full()
     }
 
-    /// Register a writer blocked in TcpStream::write() on io_page
-    /// exhaustion; the channel runtime signals it on its next pass (see
-    /// `page_waiters`).
-    pub fn add_page_waiter(&self, waiter: &Arc<moto_async::SyncWaiter>) {
-        self.page_waiters.lock().push_back(waiter.clone());
-    }
-
     /// Wake the tx task: callers do this after queuing send work. The
     /// wake is a runqueue push plus, only when the runtime is parked or
     /// committing to park, a wake syscall (A5 wake elision). A None waker
@@ -1226,7 +1176,6 @@ impl NetChannel {
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
-            page_waiters: Mutex::new(VecDeque::new()),
             tx_wakers: Mutex::new(Vec::new()),
             rpc_map: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
