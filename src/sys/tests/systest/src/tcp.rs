@@ -385,11 +385,252 @@ fn test_ipv6() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
+// A blocking write with SO_SNDTIMEO against a peer that never reads makes
+// partial progress while the pipeline has room, then returns Err(TimedOut)
+// once every buffer fills -- a deterministic zero-progress stall. (A peer
+// that reads even slowly keeps freeing room, so a real write never times
+// out; that is the correct SO_SNDTIMEO contract, exercised separately by
+// the backpressure test below.) The peer stays silent until released, then
+// drains to EOF so the scope join can never strand on it.
+fn test_write_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:3335").unwrap();
+    let release = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|s| {
+        let release_ref = &release;
+        s.spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            // Read nothing until released: the writer's pipeline fills and
+            // its write times out.
+            while !release_ref.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mut sink = [0_u8; 4096];
+            loop {
+                match conn.read(&mut sink) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+
+        let mut client = std::net::TcpStream::connect("127.0.0.1:3335").unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        let chunk = [0xa5_u8; 16 * 1024];
+        let mut sent = 0_usize;
+        let mut hit_timeout = false;
+        for _ in 0..4096 {
+            match std::io::Write::write(&mut client, &chunk) {
+                Ok(n) => {
+                    assert!(n > 0, "write returned Ok(0)");
+                    sent += n;
+                }
+                Err(e) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+                    hit_timeout = true;
+                    break;
+                }
+            }
+        }
+        assert!(hit_timeout, "write never timed out against a silent peer");
+        assert!(sent > 0, "no partial progress before the timeout");
+
+        // Release the peer and close so it drains to EOF and returns.
+        release.store(true, Ordering::Release);
+        let _ = client.shutdown(std::net::Shutdown::Write);
+    });
+
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_write_timeout() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
+// Bulk write to a slow reader forces send-queue backpressure -- the write
+// future's retract-and-recopy path -- with no write timeout set, so writes
+// block until they progress. Every byte must arrive exactly once and in
+// order: a double-count or a loss in that path is the bug being hunted. A
+// lost backpressure wake would hang here (the watchdog flags it), not fail.
+fn test_write_backpressure_integrity() {
+    const N: usize = 2 * 1024 * 1024;
+    let listener = std::net::TcpListener::bind("127.0.0.1:3338").unwrap();
+    let received = Arc::new(AtomicUsize::new(0));
+    let ok = Arc::new(AtomicBool::new(true));
+
+    std::thread::scope(|s| {
+        let received_ref = &received;
+        let ok_ref = &ok;
+        s.spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let mut total = 0_usize;
+            loop {
+                match conn.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        for (pos, b) in buf[..n].iter().enumerate() {
+                            if *b != ((total + pos) & 255) as u8 {
+                                ok_ref.store(false, Ordering::Release);
+                            }
+                        }
+                        total += n;
+                        // Slow consumer: keep the writer's send queue full.
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => {
+                        ok_ref.store(false, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+            received_ref.store(total, Ordering::Release);
+        });
+
+        let mut client = std::net::TcpStream::connect("127.0.0.1:3338").unwrap();
+        let mut chunk = [0_u8; 64 * 1024];
+        let mut sent = 0_usize;
+        while sent < N {
+            for (pos, b) in chunk.iter_mut().enumerate() {
+                *b = ((sent + pos) & 255) as u8;
+            }
+            let want = (N - sent).min(chunk.len());
+            match std::io::Write::write(&mut client, &chunk[..want]) {
+                Ok(n) => {
+                    assert!(n > 0, "write returned Ok(0)");
+                    sent += n;
+                }
+                Err(e) => panic!("unexpected write error: {e:?}"),
+            }
+        }
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+
+    assert!(ok.load(Ordering::Acquire), "reader saw wrong bytes");
+    assert_eq!(received.load(Ordering::Acquire), N, "byte count mismatch");
+
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_write_backpressure_integrity() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
+// Data arriving well before the deadline must complete a timed read
+// immediately (the deadline rides the parker; the wake is the rx task's).
+// The peer reads to EOF and returns, so it can never be stranded by a
+// failed assertion in the client closure.
+fn test_read_timeout_early_data() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:3336").unwrap();
+    let elapsed = std::thread::scope(|s| {
+        s.spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = std::io::Write::write_all(&mut conn, b"hello");
+            // Block until the client closes, then return (no flag spin).
+            let mut sink = [0_u8; 8];
+            let _ = conn.read(&mut sink);
+        });
+
+        let mut client = std::net::TcpStream::connect("127.0.0.1:3336").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let start = std::time::Instant::now();
+        let mut buf = [0_u8; 64];
+        let n = client.read(&mut buf).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(&buf[..n], b"hello");
+        // Dropping the client closes it, releasing the peer's read.
+        elapsed
+    });
+
+    assert!(elapsed < Duration::from_secs(4));
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_read_timeout_early_data() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
+// Two threads blocking-read one stream through dup'd FDs (try_clone).
+// Every byte goes to exactly one reader, and at EOF BOTH must wake and
+// see Ok(0) - the wake-all-and-recheck contract of the stream's waker
+// list. A lost wake strands a reader forever (the watchdog would flag
+// the hang).
+fn test_concurrent_readers() {
+    const N: usize = 1024 * 1024;
+    let listener = std::net::TcpListener::bind("127.0.0.1:3337").unwrap();
+    let done = AtomicBool::new(false);
+
+    let bad = AtomicBool::new(false);
+    let sum = std::thread::scope(|s| {
+        let done_ref = &done;
+        s.spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let buf = [0xa5_u8; 8192];
+            let mut written = 0_usize;
+            while written < N {
+                let n = (N - written).min(buf.len());
+                if std::io::Write::write_all(&mut conn, &buf[..n]).is_err() {
+                    return;
+                }
+                written += n;
+            }
+            let _ = conn.shutdown(std::net::Shutdown::Write);
+            // Hold the connection open until both readers hit EOF, then
+            // return; never blocks on an assertion's outcome.
+            while !done_ref.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let client = std::net::TcpStream::connect("127.0.0.1:3337").unwrap();
+        let client2 = client.try_clone().unwrap();
+
+        let bad_ref = &bad;
+        let reader = move |mut conn: std::net::TcpStream| {
+            move || -> usize {
+                let mut buf = [0_u8; 4096];
+                let mut total = 0_usize;
+                loop {
+                    match conn.read(&mut buf) {
+                        Ok(0) => return total,
+                        Ok(n) => {
+                            if !buf[..n].iter().all(|b| *b == 0xa5) {
+                                bad_ref.store(true, Ordering::Release);
+                            }
+                            total += n;
+                        }
+                        Err(_) => {
+                            bad_ref.store(true, Ordering::Release);
+                            return total;
+                        }
+                    }
+                }
+            }
+        };
+        let r1 = s.spawn(reader(client));
+        let r2 = s.spawn(reader(client2));
+        let sum = r1.join().unwrap() + r2.join().unwrap();
+        // Both readers reached EOF; release the writer thread.
+        done.store(true, Ordering::Release);
+        sum
+    });
+
+    assert!(!bad.load(Ordering::Acquire), "reader saw wrong bytes or errored");
+    assert_eq!(sum, N, "concurrent readers lost or duplicated bytes");
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_concurrent_readers() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
 pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
     test_peek();
+    test_read_timeout_early_data();
+    test_write_timeout();
+    test_write_backpressure_integrity();
+    test_concurrent_readers();
 }
 
 // pub fn test_wget() {
