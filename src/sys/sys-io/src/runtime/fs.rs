@@ -432,6 +432,9 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_SET_PERMISSIONS => {
+            on_cmd_set_permissions(msg, &sender, runtime).await
+        }
         moto_sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_DELETE_ENTRY => on_cmd_delete_entry(msg, &sender, runtime).await,
         moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
@@ -919,6 +922,27 @@ async fn on_cmd_metadata(
     core::mem::drop(fs);
 
     let resp = api_fs::metadata_resp_encode(msg.id, metadata, io_page);
+    let _ = sender.send(resp).await;
+    Ok(())
+}
+
+async fn on_cmd_set_permissions(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    runtime: FsRuntime,
+) -> Result<()> {
+    let (entry_id, raw_access) = api_fs::set_permissions_msg_decode(msg);
+    let access = AccessPermissions::try_from(raw_access)?;
+
+    let mut fs = runtime.fs.write().await;
+    let resp = api_fs::empty_resp_encode(
+        msg.id,
+        fs.set_permissions(Role::System, entry_id, Role::System, access)
+            .await
+            .map_err(map_err_into_native),
+    );
+    core::mem::drop(fs);
+
     let _ = sender.send(resp).await;
     Ok(())
 }

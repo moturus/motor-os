@@ -24,6 +24,7 @@ pub const CMD_GET_NAME: u16 = 12;
 pub const CMD_MOVE_ENTRY: u16 = 13;
 pub const CMD_COPY_FILE_RANGE: u16 = 14;
 pub const CMD_FILE_LOCK: u16 = 15;
+pub const CMD_SET_PERMISSIONS: u16 = 16;
 
 pub fn file_lock_msg_encode(entry_id: EntryId, open_id: u64, operation: u8) -> Msg {
     let mut msg = Msg::new();
@@ -388,6 +389,18 @@ pub fn metadata_resp_decode(msg: Msg, receiver: &Sender) -> Result<async_fs::Met
     }
 
     Ok(metadata)
+}
+
+pub fn set_permissions_msg_encode(entry_id: EntryId, access: async_fs::AccessPermissions) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_SET_PERMISSIONS;
+    msg.payload.set_arg_128(entry_id);
+    msg.payload.args_8_mut()[23] = access as u8;
+    msg
+}
+
+pub fn set_permissions_msg_decode(msg: Msg) -> (EntryId, u8) {
+    (msg.payload.arg_128(), msg.payload.args_8()[23])
 }
 
 pub fn resize_msg_encode(file_id: u128, new_size: u64) -> Msg {

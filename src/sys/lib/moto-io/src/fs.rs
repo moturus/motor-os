@@ -26,7 +26,7 @@ use moto_rt::Result;
 use moto_sys_io::api_fs;
 
 use async_fs::BLOCK_SIZE;
-pub use async_fs::{EntryId, EntryKind, Metadata, ROOT_ID};
+pub use async_fs::{AccessPermissions, EntryId, EntryKind, Metadata, ROOT_ID, Role};
 
 pub struct FsClient {
     io_sender: moto_ipc::io_channel::Sender,
@@ -556,6 +556,19 @@ impl FsClient {
         let resp = self.clone().send_recv(msg).await?;
         let metadata = api_fs::metadata_resp_decode(resp, &self.io_sender)?;
         Ok(metadata)
+    }
+
+    /// Change the System role's permissions for a directory entry.
+    pub async fn set_permissions(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        access: AccessPermissions,
+    ) -> Result<()> {
+        let mut msg = api_fs::set_permissions_msg_encode(entry_id, access);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
     }
 
     /// Resize the file.

@@ -451,8 +451,48 @@ pub fn concurrent_flush_stress_test() {
     println!("    ---- FS: concurrent_flush_stress_test PASS");
 }
 
+fn permissions_vdso_test() {
+    use std::os::fd::AsRawFd;
+
+    const RWX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC;
+    const RX: u64 = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
+
+    let path = "/permissions_vdso_test";
+    let _ = std::fs::remove_file(path);
+    std::fs::write(path, b"permissions").unwrap();
+
+    assert_eq!(moto_rt::fs::stat(path).unwrap().perm, RWX);
+    moto_rt::fs::set_perm(path, RX).unwrap();
+    assert_eq!(moto_rt::fs::stat(path).unwrap().perm, RX);
+
+    let file = std::fs::File::open(path).unwrap();
+    assert_eq!(
+        moto_rt::fs::get_file_attr(file.as_raw_fd()).unwrap().perm,
+        RX
+    );
+    moto_rt::fs::set_file_perm(file.as_raw_fd(), moto_rt::fs::PERM_READ).unwrap();
+    assert_eq!(
+        moto_rt::fs::get_file_attr(file.as_raw_fd()).unwrap().perm,
+        moto_rt::fs::PERM_READ
+    );
+
+    assert_eq!(
+        moto_rt::fs::set_perm(path, moto_rt::fs::PERM_WRITE),
+        Err(moto_rt::Error::InvalidArgument)
+    );
+    assert_eq!(
+        moto_rt::fs::set_file_perm(-1, moto_rt::fs::PERM_READ),
+        Err(moto_rt::Error::BadHandle)
+    );
+
+    drop(file);
+    std::fs::remove_file(path).unwrap();
+    println!("    ---- FS: permissions_vdso_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
+    permissions_vdso_test();
     concurrent_flush_stress_test();
     smoke_test();
     hot_cache_read_test();
