@@ -8,6 +8,7 @@ mod hash;
 mod identity;
 mod json;
 mod manifest;
+mod offline;
 mod process;
 mod repository;
 mod resolver;

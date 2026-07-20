@@ -123,10 +123,12 @@ pub struct ResolvedPackage {
     pub target_features: BTreeSet<String>,
     pub host_features: BTreeSet<String>,
     pub edges: Vec<ResolvedEdge>,
+    pub lock_edges: Vec<ResolvedEdge>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Resolution {
+    pub root_edges: Vec<ResolvedEdge>,
     pub packages: Vec<ResolvedPackage>,
 }
 
@@ -357,6 +359,7 @@ struct Activation {
     active: BTreeSet<String>,
     enabled_optional: BTreeSet<String>,
     dependency_features: BTreeMap<String, BTreeSet<String>>,
+    weak_dependencies: BTreeSet<usize>,
     sent: BTreeMap<usize, Sent>,
 }
 
@@ -377,10 +380,12 @@ struct Node {
 struct State {
     nodes: BTreeMap<PackageKey, Node>,
     links: BTreeMap<String, PackageKey>,
+    root_edges: BTreeMap<(FeatureContext, usize), PackageKey>,
 }
 
 impl State {
     fn into_resolution(self) -> Resolution {
+        let selected = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut packages = Vec::with_capacity(self.nodes.len());
         for (key, node) in self.nodes {
             let feature_sets = node
@@ -403,6 +408,32 @@ impl State {
                 .unwrap_or_default();
             let edges = node
                 .edges
+                .iter()
+                .map(|((context, dependency_index), package)| ResolvedEdge {
+                    dependency_index: *dependency_index,
+                    context: context.clone(),
+                    package: package.clone(),
+                })
+                .collect();
+            let mut lock_edges = node.edges;
+            for (context, activation) in &node.activations {
+                for dependency_index in &activation.weak_dependencies {
+                    let dependency = &node.record.dependencies[*dependency_index];
+                    if let Some(package) = selected
+                        .iter()
+                        .filter(|key| {
+                            key.name == dependency.package
+                                && dependency.requirement.matches(&key.version)
+                        })
+                        .max_by(|left, right| left.version.cmp(&right.version))
+                    {
+                        lock_edges
+                            .entry((context.clone(), *dependency_index))
+                            .or_insert_with(|| package.clone());
+                    }
+                }
+            }
+            let lock_edges = lock_edges
                 .into_iter()
                 .map(|((context, dependency_index), package)| ResolvedEdge {
                     dependency_index,
@@ -417,9 +448,22 @@ impl State {
                 target_features,
                 host_features,
                 edges,
+                lock_edges,
             });
         }
-        Resolution { packages }
+        let root_edges = self
+            .root_edges
+            .into_iter()
+            .map(|((context, dependency_index), package)| ResolvedEdge {
+                dependency_index,
+                context,
+                package,
+            })
+            .collect();
+        Resolution {
+            root_edges,
+            packages,
+        }
     }
 }
 
@@ -577,6 +621,17 @@ fn fulfill(
                 parent.name
             )));
         }
+    } else {
+        let edge = (event.context.clone(), event.dependency_index);
+        if state
+            .root_edges
+            .insert(edge, key.clone())
+            .is_some_and(|existing| existing != *key)
+        {
+            return Err(Failure::new(
+                "root dependency edge changed selected package",
+            ));
+        }
     }
     activate(state, queue, key, event, options)
 }
@@ -701,6 +756,12 @@ fn activate(
                 .entry(dependency)
                 .or_default()
                 .insert(dependency_feature);
+        } else {
+            for (index, candidate) in record.dependencies.iter().enumerate() {
+                if candidate.alias == dependency {
+                    activation.weak_dependencies.insert(index);
+                }
+            }
         }
     }
 
@@ -1238,6 +1299,49 @@ mod tests {
     }
 
     #[test]
+    fn records_weak_lock_edges_only_when_the_package_is_selected_elsewhere() {
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "a",
+                "1.0.0",
+                &format!(
+                    "[{}]",
+                    dependency_with("weak", "weak", "1", &[], true, "normal")
+                ),
+                "{\"full\":[\"weak?/feature\"]}",
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record(
+                "other",
+                "1.0.0",
+                &format!("[{}]", dependency("weak", "1")),
+                "{}",
+                "",
+            ))
+            .unwrap();
+        catalog
+            .insert(record("weak", "1.0.0", "[]", "{\"feature\":[]}", ""))
+            .unwrap();
+        let root = manifest(
+            "a = { version = \"1\", features = [\"full\"] }\nother = \"1\"",
+            "",
+            "2",
+        );
+        let resolution = resolve(&root, &catalog, &options(ResolverVersion::V2), &[]).unwrap();
+        let a = resolution
+            .packages
+            .iter()
+            .find(|package| package.key.name == "a")
+            .unwrap();
+        assert!(a.edges.is_empty());
+        assert_eq!(a.lock_edges.len(), 1);
+        assert_eq!(a.lock_edges[0].package.name, "weak");
+    }
+
+    #[test]
     fn rejects_links_conflicts_and_graph_limits() {
         let mut catalog = Catalog::default();
         catalog
@@ -1414,6 +1518,7 @@ mod tests {
             &locked,
         )
         .unwrap();
+        crate::offline::validate_registry_resolution(&manifest, &resolution).unwrap();
         let expected = lock
             .packages
             .iter()
