@@ -294,7 +294,7 @@ fn rustc_arguments(build: &Build<'_>, identity: &Identity, staging: &Path) -> Ve
         push(&mut args, "--target");
         push(&mut args, target);
     }
-    if !build.release {
+    if !build.release && !cfg!(target_os = "motor") {
         codegen(
             &mut args,
             &format!("incremental={}", staging.join("incremental").display()),
