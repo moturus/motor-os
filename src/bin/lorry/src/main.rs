@@ -7,6 +7,7 @@ mod engine;
 mod hash;
 mod identity;
 mod json;
+mod lockfile;
 mod manifest;
 mod offline;
 mod patch;

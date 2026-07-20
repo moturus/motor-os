@@ -189,6 +189,15 @@ pub struct LockedPackage {
 
 impl Manifest {
     pub fn load(root: &Path) -> Result<Self> {
+        Self::load_root(root, true)
+    }
+
+    #[allow(dead_code)]
+    pub fn load_for_vendor(root: &Path) -> Result<Self> {
+        Self::load_root(root, false)
+    }
+
+    fn load_root(root: &Path, require_current_lock: bool) -> Result<Self> {
         let root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
                 "failed to canonicalize package directory `{}`: {error}",
@@ -210,14 +219,24 @@ impl Manifest {
 
         let lock_path = manifest.root.join(LOCK_NAME);
         if !lock_path.is_file() {
-            return Err(Error::failure(format!(
-                "required lockfile `{}` is missing",
-                lock_path.display()
-            ))
-            .with_help("create a version-4 Cargo.lock; build commands never resolve or write it"));
+            if require_current_lock {
+                return Err(Error::failure(format!(
+                    "required lockfile `{}` is missing",
+                    lock_path.display()
+                ))
+                .with_help(
+                    "create a version-4 Cargo.lock; build commands never resolve or write it",
+                ));
+            }
+            return Ok(manifest);
         }
         let lock_document = Document::load(&lock_path, "Cargo lockfile")?;
-        manifest.lock = Some(parse_lock_document(&manifest, &lock_path, &lock_document)?);
+        manifest.lock = Some(parse_lock_document(
+            &manifest,
+            &lock_path,
+            &lock_document,
+            require_current_lock,
+        )?);
         Ok(manifest)
     }
 
@@ -236,8 +255,7 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let mut manifest =
-            Self::parse_document(&root, &path, &document, ManifestMode::Dependency)?;
+        let mut manifest = Self::parse_document(&root, &path, &document, ManifestMode::Dependency)?;
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
@@ -1316,10 +1334,15 @@ fn parse_release(path: &Path, document: &Document, table: &Table) -> Result<Rele
 #[cfg(test)]
 fn validate_lock_source(manifest: &Manifest, path: &Path, source: &str) -> Result<Lockfile> {
     let document = Document::parse(path, "Cargo lockfile", source.to_owned())?;
-    parse_lock_document(manifest, path, &document)
+    parse_lock_document(manifest, path, &document, true)
 }
 
-fn parse_lock_document(manifest: &Manifest, path: &Path, document: &Document) -> Result<Lockfile> {
+fn parse_lock_document(
+    manifest: &Manifest,
+    path: &Path,
+    document: &Document,
+    require_current_root: bool,
+) -> Result<Lockfile> {
     for (key, item) in document.root().iter() {
         if !matches!(key, "version" | "package") {
             return Err(Error::at(
@@ -1443,7 +1466,7 @@ fn parse_lock_document(manifest: &Manifest, path: &Path, document: &Document) ->
                 && package.source.is_none()
         })
         .count();
-    if roots != 1 {
+    if require_current_root && roots != 1 {
         return Err(Error::failure(format!(
             "Cargo.lock is stale: expected one root path package `{} {}`, found {roots}",
             manifest.name, manifest.version.original
@@ -1888,6 +1911,9 @@ fn type_error(path: &Path, line: usize, name: &str, expected: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_VENDOR_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     const RED: &str = r#"
 [package]
@@ -2136,6 +2162,46 @@ members = ["ignored-member"]
                 && matches!(dependency.source, DependencySource::Path(_))
         }));
         assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 40);
+    }
+
+    #[test]
+    fn vendor_loading_accepts_a_missing_or_stale_v4_lock() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("lorry-vendor-manifest-{}-{id}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"vendor-root\"\nversion = \"0.2.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        assert!(Manifest::load(&root).is_err());
+        assert!(Manifest::load_for_vendor(&root).unwrap().lock.is_none());
+
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n\
+             [[package]]\nname = \"vendor-root\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert!(Manifest::load(&root).is_err());
+        assert_eq!(
+            Manifest::load_for_vendor(&root)
+                .unwrap()
+                .lock
+                .unwrap()
+                .packages[0]
+                .version
+                .original,
+            "0.1.0"
+        );
+
+        fs::write(root.join("Cargo.lock"), "version = 3\n").unwrap();
+        assert!(Manifest::load_for_vendor(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

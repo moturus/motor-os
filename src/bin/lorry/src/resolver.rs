@@ -2124,6 +2124,10 @@ mod tests {
         )
         .unwrap();
         crate::offline::validate_resolution(&manifest, &resolution).unwrap();
+        assert_eq!(
+            crate::lockfile::render(&manifest, &resolution).unwrap(),
+            fs::read("Cargo.lock").unwrap()
+        );
         let expected = lock
             .packages
             .iter()

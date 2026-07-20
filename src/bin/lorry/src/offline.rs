@@ -238,6 +238,18 @@ fn resolve_lock_reference<'a>(
         [] => Err(stale(format!(
             "Cargo.lock dependency reference `{reference}` selects no package node"
         ))),
+        packages if source.is_none() => {
+            let path_packages = packages
+                .iter()
+                .filter(|package| package.source.is_none())
+                .collect::<Vec<_>>();
+            match path_packages.as_slice() {
+                [package] => Ok(package),
+                _ => Err(stale(format!(
+                    "Cargo.lock dependency reference `{reference}` is ambiguous"
+                ))),
+            }
+        }
         _ => Err(stale(format!(
             "Cargo.lock dependency reference `{reference}` is ambiguous"
         ))),
