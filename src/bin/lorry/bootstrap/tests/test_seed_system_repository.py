@@ -3,10 +3,12 @@
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -16,11 +18,16 @@ sys.path.insert(0, str(BOOTSTRAP))
 from seed_system_repository import (  # noqa: E402
     Limits,
     RegistryPackage,
+    SeedManifest,
+    SeededGitPackage,
     extract_registry_archive,
     load_seed_manifest,
     registry_object_path,
     seed_registry_repository,
+    seed_system_repository,
+    seeded_git_object_path,
 )
+from source_tree_digest import source_tree  # noqa: E402
 
 
 TEST_LIMITS = """\
@@ -142,6 +149,76 @@ def prepare_fixture(root: Path) -> tuple[Path, Path, RegistryPackage]:
     record_cache.parent.mkdir(parents=True)
     record_cache.write_bytes(index_record(package))
     return manifest_path, cache, package
+
+
+def git(repo: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repo,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def prepare_git_fixture(
+    root: Path,
+    *,
+    with_symlink: bool = False,
+) -> SeededGitPackage:
+    repository = root / "upstream"
+    repository.mkdir()
+    git(repository, "init", "--quiet", "--initial-branch=reviewed")
+    git(repository, "config", "user.name", "Lorry Test")
+    git(repository, "config", "user.email", "lorry@example.invalid")
+    (repository / "src").mkdir()
+    (repository / "Cargo.toml").write_text(
+        '[package]\nname = "git-demo"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    (repository / "src/lib.rs").write_text(
+        "pub fn seeded() -> bool { true }\n",
+        encoding="utf-8",
+    )
+    executable = repository / "configure"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    if with_symlink:
+        (repository / "link").symlink_to("Cargo.toml")
+    git(repository, "add", ".")
+    git(repository, "commit", "--quiet", "-m", "reviewed tree")
+    commit = git(repository, "rev-parse", "HEAD")
+    tree_id = git(repository, "rev-parse", "HEAD^{tree}")
+    if with_symlink:
+        tree_sha256 = "0" * 64
+        tree_bytes = 1
+        file_count = 1
+        directory_count = 1
+    else:
+        tree = source_tree(repository)
+        tree_sha256 = tree.sha256
+        tree_bytes = tree.total_bytes
+        file_count = tree.file_count
+        directory_count = tree.directory_count
+    return SeededGitPackage(
+        "git-demo",
+        "1.0.0",
+        "MIT",
+        "1" * 64,
+        str(repository),
+        "reviewed",
+        commit,
+        tree_id,
+        tree_sha256,
+        tree_bytes,
+        file_count,
+        directory_count,
+        ("test",),
+        True,
+    )
 
 
 class SeedSystemRepositoryTests(unittest.TestCase):
@@ -268,6 +345,125 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                             Limits(1048576, 1048576, 100, 256),
                         )
                     self.assertFalse((root / "escape").exists())
+
+    def test_seeded_git_is_verified_cached_and_reproduced_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = prepare_git_fixture(root)
+            manifest = SeedManifest(
+                Limits(1048576, 1048576, 100, 256),
+                (),
+                (package,),
+            )
+            cache = root / "cache"
+            first = root / "first"
+            second = root / "second"
+
+            seed_system_repository(
+                manifest,
+                first,
+                mode="minimal",
+                cache=cache,
+                offline=False,
+                ca_bundle=None,
+                allow_local_git=True,
+            )
+            seed_system_repository(
+                manifest,
+                second,
+                mode="minimal",
+                cache=cache,
+                offline=True,
+                ca_bundle=None,
+                allow_local_git=True,
+            )
+
+            first_object = seeded_git_object_path(first, package.source_tree_sha256)
+            second_object = seeded_git_object_path(second, package.source_tree_sha256)
+            self.assertEqual(
+                (first_object / "package.toml").read_bytes(),
+                (second_object / "package.toml").read_bytes(),
+            )
+            self.assertEqual(
+                (first_object / "source-manifest.json").read_bytes(),
+                (second_object / "source-manifest.json").read_bytes(),
+            )
+            self.assertFalse((first_object / "source/.git").exists())
+            self.assertTrue((first_object / "source/configure").stat().st_mode & 0o111)
+
+            (first_object / "source/src/lib.rs").write_text(
+                "corrupt\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "count mismatch|digest mismatch"):
+                seed_system_repository(
+                    manifest,
+                    first,
+                    mode="minimal",
+                    cache=cache,
+                    offline=True,
+                    ca_bundle=None,
+                    allow_local_git=True,
+                )
+
+    def test_seeded_git_rejects_commit_tree_digest_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = prepare_git_fixture(root)
+            limits = Limits(1048576, 1048576, 100, 256)
+
+            wrong_commit = replace(valid, resolved_commit="0" * 40)
+            with self.assertRaisesRegex(ValueError, "resolved Git commit mismatch"):
+                seed_system_repository(
+                    SeedManifest(limits, (), (wrong_commit,)),
+                    root / "wrong-commit",
+                    mode="minimal",
+                    cache=None,
+                    offline=False,
+                    ca_bundle=None,
+                    allow_local_git=True,
+                )
+
+            wrong_tree = replace(valid, git_tree="0" * 40)
+            with self.assertRaisesRegex(ValueError, "Git tree mismatch"):
+                seed_system_repository(
+                    SeedManifest(limits, (), (wrong_tree,)),
+                    root / "wrong-tree",
+                    mode="minimal",
+                    cache=None,
+                    offline=False,
+                    ca_bundle=None,
+                    allow_local_git=True,
+                )
+
+            wrong_digest = replace(valid, source_tree_sha256="0" * 64)
+            with self.assertRaisesRegex(ValueError, "source-tree digest mismatch"):
+                seed_system_repository(
+                    SeedManifest(limits, (), (wrong_digest,)),
+                    root / "wrong-digest",
+                    mode="minimal",
+                    cache=None,
+                    offline=False,
+                    ca_bundle=None,
+                    allow_local_git=True,
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            linked = prepare_git_fixture(root, with_symlink=True)
+            with self.assertRaisesRegex(ValueError, "unsupported Git entry"):
+                seed_system_repository(
+                    SeedManifest(
+                        Limits(1048576, 1048576, 100, 256),
+                        (),
+                        (linked,),
+                    ),
+                    root / "linked",
+                    mode="minimal",
+                    cache=None,
+                    offline=False,
+                    ca_bundle=None,
+                    allow_local_git=True,
+                )
 
 
 if __name__ == "__main__":

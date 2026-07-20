@@ -11,6 +11,7 @@ import re
 import shutil
 import ssl
 import stat
+import subprocess
 import tarfile
 import tempfile
 import tomllib
@@ -29,6 +30,8 @@ HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 VERSION = re.compile(r"^[A-Za-z0-9.+-]+$")
+GIT_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+RING_GIT_URL = "https://github.com/moturus/ring.git"
 REPOSITORY_TOML = b'format-version = 1\nobject-hash = "sha256"\n'
 ALLOWED_PAX_KEYS = frozenset({"path", "size"})
 ZERO_BLOCK_BYTES = 1024
@@ -328,6 +331,18 @@ def load_seed_manifest(path: Path) -> SeedManifest:
         version = require_string(package["version"], f"{context}.version")
         if not PACKAGE_NAME.fullmatch(name) or not VERSION.fullmatch(version):
             raise ValueError(f"{context}: invalid package identity")
+        git_url = require_string(package["git-url"], f"{context}.git-url")
+        if git_url != RING_GIT_URL:
+            raise ValueError(f"{context}: unsupported seeded-Git URL")
+        requested_revision = require_string(
+            package["requested-revision"], f"{context}.requested-revision"
+        )
+        if (
+            not GIT_REVISION.fullmatch(requested_revision)
+            or ".." in requested_revision
+            or requested_revision.endswith(("/", "."))
+        ):
+            raise ValueError(f"{context}: unsafe requested revision")
         lock_graphs = require_strings(package["lock-graphs"], f"{context}.lock-graphs")
         if not set(lock_graphs) <= graph_ids:
             raise ValueError(f"{context}: references an unknown lock graph")
@@ -341,10 +356,8 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                     HEX_64,
                     f"{context}.upstream-crates-io-checksum",
                 ),
-                require_string(package["git-url"], f"{context}.git-url"),
-                require_string(
-                    package["requested-revision"], f"{context}.requested-revision"
-                ),
+                git_url,
+                requested_revision,
                 require_hex(
                     package["resolved-commit"], HEX_40, f"{context}.resolved-commit"
                 ),
@@ -957,6 +970,489 @@ def verify_registry_object(
         raise ValueError(f"{object_path}: source manifest mismatch")
 
 
+def git_program() -> str:
+    program = shutil.which("git")
+    if program is None or not Path(program).is_absolute():
+        raise ValueError("host git executable was not found")
+    return program
+
+
+def run_git(
+    arguments: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 120,
+) -> bytes:
+    environment = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C",
+    }
+    try:
+        result = subprocess.run(
+            [git_program(), *arguments],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(f"git command timed out: {' '.join(arguments)}") from error
+    if len(result.stdout) > 1024 * 1024 or len(result.stderr) > 1024 * 1024:
+        raise ValueError("git command output exceeded bootstrap limit")
+    if result.returncode != 0:
+        diagnostic = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(
+            f"git command failed ({' '.join(arguments)}): {diagnostic}"
+        )
+    return result.stdout
+
+
+def git_cache_path(cache: Path, package: SeededGitPackage) -> Path:
+    return cache / "seeded-git" / f"{package.resolved_commit}.git"
+
+
+def verify_git_cache(path: Path, package: SeededGitPackage) -> None:
+    if not path.is_dir():
+        raise ValueError(f"Git cache entry is not a repository: {path}")
+    commit = (
+        run_git(
+            ["rev-parse", "--verify", f"refs/lorry-seed/{package.name}^{{commit}}"],
+            cwd=path,
+        )
+        .decode("ascii")
+        .strip()
+    )
+    if commit != package.resolved_commit:
+        raise ValueError(f"Git cache commit mismatch: {path}")
+    tree = (
+        run_git(
+            ["rev-parse", "--verify", f"{commit}^{{tree}}"],
+            cwd=path,
+        )
+        .decode("ascii")
+        .strip()
+    )
+    if tree != package.git_tree:
+        raise ValueError(f"Git cache tree mismatch: {path}")
+
+
+def acquire_git_repository(
+    package: SeededGitPackage,
+    work: Path,
+    *,
+    cache: Path | None,
+    offline: bool,
+    allow_local_git: bool = False,
+) -> Path:
+    repository = work / "git"
+    repository.mkdir(mode=0o700)
+    run_git(["init", "--quiet"], cwd=repository)
+    protocol = "always" if allow_local_git else "never"
+    fetch_prefix = ["-c", f"protocol.file.allow={protocol}"]
+
+    cached_repository = git_cache_path(cache, package) if cache else None
+    if offline:
+        if cached_repository is None or not cached_repository.exists():
+            raise ValueError(
+                f"offline cache is missing Git object for {package.resolved_commit}"
+            )
+        verify_git_cache(cached_repository, package)
+        run_git(
+            [
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--depth=1",
+                str(cached_repository),
+                f"refs/lorry-seed/{package.name}",
+            ],
+            cwd=repository,
+        )
+    else:
+        if not allow_local_git and package.git_url != RING_GIT_URL:
+            raise ValueError(f"unsupported seeded-Git URL: {package.git_url}")
+        run_git(["remote", "add", "origin", package.git_url], cwd=repository)
+        revision = f"refs/heads/{package.requested_revision}"
+        run_git(
+            [
+                *fetch_prefix,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--depth=1",
+                "origin",
+                revision,
+            ],
+            cwd=repository,
+            timeout=300,
+        )
+
+    commit = (
+        run_git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"], cwd=repository)
+        .decode("ascii")
+        .strip()
+    )
+    if commit != package.resolved_commit:
+        raise ValueError(
+            f"{package.name}: resolved Git commit mismatch: expected "
+            f"{package.resolved_commit}, got {commit}"
+        )
+    tree = (
+        run_git(
+            ["rev-parse", "--verify", f"{package.resolved_commit}^{{tree}}"],
+            cwd=repository,
+        )
+        .decode("ascii")
+        .strip()
+    )
+    if tree != package.git_tree:
+        raise ValueError(
+            f"{package.name}: Git tree mismatch: expected {package.git_tree}, got {tree}"
+        )
+
+    if not offline and cached_repository is not None:
+        reference = f"refs/lorry-seed/{package.name}"
+        run_git(
+            ["update-ref", reference, package.resolved_commit],
+            cwd=repository,
+        )
+        temporary_cache = work / "download.git"
+        run_git(
+            ["init", "--quiet", "--bare", str(temporary_cache)],
+            cwd=work,
+        )
+        run_git(
+            [
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--depth=1",
+                str(repository),
+                reference,
+            ],
+            cwd=temporary_cache,
+        )
+        run_git(
+            ["update-ref", reference, "FETCH_HEAD"],
+            cwd=temporary_cache,
+        )
+        fsync_tree(temporary_cache)
+        cached_repository.parent.mkdir(parents=True, exist_ok=True)
+        if cached_repository.exists():
+            verify_git_cache(cached_repository, package)
+        else:
+            try:
+                os.rename(temporary_cache, cached_repository)
+            except FileExistsError:
+                verify_git_cache(cached_repository, package)
+            fsync_directory(cached_repository.parent)
+        verify_git_cache(cached_repository, package)
+
+    return repository
+
+
+def portable_git_path(
+    name: str,
+    package: SeededGitPackage,
+    limits: Limits,
+) -> str:
+    if name.endswith("/"):
+        name = name[:-1]
+    try:
+        encoded = name.encode("utf-8")
+    except UnicodeError as error:
+        raise ValueError(f"{package.name}: non-UTF-8 Git path") from error
+    if (
+        not encoded
+        or len(encoded) > limits.max_path_bytes
+        or encoded.startswith(b"/")
+        or b"\\" in encoded
+        or b"\0" in encoded
+        or any(byte < 0x20 or byte == 0x7F for byte in encoded)
+        or any(component in ("", ".", "..") for component in name.split("/"))
+    ):
+        raise ValueError(f"{package.name}: unsafe Git path {name!r}")
+    return name
+
+
+def extract_git_archive(
+    archive: Path,
+    destination: Path,
+    package: SeededGitPackage,
+    limits: Limits,
+) -> None:
+    destination.mkdir(mode=0o700)
+    seen = {}
+    file_count = 0
+    total_bytes = 0
+    final_offset = 0
+    with tarfile.open(archive, mode="r|") as source:
+        for member in source:
+            pax_headers = dict(member.pax_headers)
+            comment = pax_headers.pop("comment", None)
+            if comment is not None and comment != package.resolved_commit:
+                raise ValueError(
+                    f"{package.name}: Git archive commit comment mismatch"
+                )
+            if set(pax_headers) - ALLOWED_PAX_KEYS:
+                raise ValueError(
+                    f"{package.name}: unsupported Git archive PAX keys "
+                    f"{sorted(set(pax_headers) - ALLOWED_PAX_KEYS)}"
+                )
+            relative = portable_git_path(member.name, package, limits)
+            if relative in seen:
+                raise ValueError(
+                    f"{package.name}: duplicate Git archive entry {relative!r}"
+                )
+            seen[relative] = "directory" if member.isdir() else "file"
+
+            if not (member.isdir() or member.isreg()):
+                raise ValueError(
+                    f"{package.name}: unsupported Git entry {relative!r}"
+                )
+            if any(
+                component in (".git", "target")
+                for component in relative.split("/")
+            ):
+                continue
+
+            parent = relative.rpartition("/")[0]
+            ensure_real_directories(destination, parent)
+            output_path = destination.joinpath(*relative.split("/"))
+            if member.isdir():
+                try:
+                    output_path.mkdir(mode=0o700)
+                except FileExistsError:
+                    metadata = output_path.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        raise ValueError(
+                            f"{package.name}: conflicting Git entry {relative!r}"
+                        )
+                continue
+
+            if member.size > limits.max_extracted_package_bytes:
+                raise ValueError(f"{package.name}: Git file exceeds byte limit")
+            total_bytes += member.size
+            file_count += 1
+            if total_bytes > limits.max_extracted_package_bytes:
+                raise ValueError(f"{package.name}: Git tree exceeds byte limit")
+            if file_count > limits.max_package_files:
+                raise ValueError(f"{package.name}: Git tree exceeds file-count limit")
+            extracted = source.extractfile(member)
+            if extracted is None:
+                raise ValueError(f"{package.name}: cannot read {relative!r}")
+            mode = 0o700 if member.mode & 0o111 else 0o600
+            descriptor = os.open(
+                output_path,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                mode,
+            )
+            copied = 0
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as output:
+                    while block := extracted.read(1024 * 1024):
+                        copied += len(block)
+                        if copied > member.size:
+                            raise ValueError(
+                                f"{package.name}: Git entry size mismatch"
+                            )
+                        output.write(block)
+                    output.flush()
+                    os.fsync(output.fileno())
+            finally:
+                os.close(descriptor)
+            if copied != member.size:
+                raise ValueError(f"{package.name}: truncated Git entry {relative!r}")
+        final_offset = source.offset
+
+    with archive.open("rb") as source:
+        source.seek(final_offset)
+        trailing = source.read()
+    if len(trailing) < ZERO_BLOCK_BYTES or any(trailing):
+        raise ValueError(f"{package.name}: malformed or nonzero Git tar trailer")
+
+
+def cargo_git_source(package: SeededGitPackage) -> str:
+    revision = urllib.parse.quote(package.requested_revision, safe="/")
+    return (
+        f"git+{package.git_url}?branch={revision}"
+        f"#{package.resolved_commit}"
+    )
+
+
+def seeded_git_package_toml(package: SeededGitPackage, tree) -> bytes:
+    return (
+        "format-version = 1\n"
+        f"name = {toml_string(package.name)}\n"
+        f"version = {toml_string(package.version)}\n"
+        f"cargo-source = {toml_string(cargo_git_source(package))}\n"
+        f"git-url = {toml_string(package.git_url)}\n"
+        f"requested-revision = {toml_string(package.requested_revision)}\n"
+        f"resolved-commit = {toml_string(package.resolved_commit)}\n"
+        f"git-tree = {toml_string(package.git_tree)}\n"
+        f"upstream-crates-io-checksum = "
+        f"{toml_string(package.upstream_checksum)}\n"
+        f"source-tree-sha256 = {toml_string(tree.sha256)}\n"
+        f"license = {toml_string(package.license)}\n"
+        f"extracted-bytes = {tree.total_bytes}\n"
+        f"file-count = {tree.file_count}\n"
+        f"directory-count = {tree.directory_count}\n"
+        f"retained-source = {str(package.retained_source).lower()}\n"
+    ).encode("utf-8")
+
+
+def seeded_git_object_path(repository: Path, source_tree_sha256: str) -> Path:
+    return (
+        repository
+        / "objects/seeded-git/sha256"
+        / source_tree_sha256[:2]
+        / source_tree_sha256
+    )
+
+
+def build_seeded_git_object(
+    repository: Path,
+    package: SeededGitPackage,
+    acquisition_root: Path,
+    limits: Limits,
+    *,
+    cache: Path | None,
+    offline: bool,
+    allow_local_git: bool = False,
+) -> Path:
+    git_repository = acquire_git_repository(
+        package,
+        acquisition_root,
+        cache=cache,
+        offline=offline,
+        allow_local_git=allow_local_git,
+    )
+    archive = acquisition_root / "source.tar"
+    run_git(
+        [
+            "archive",
+            "--format=tar",
+            f"--output={archive}",
+            package.resolved_commit,
+        ],
+        cwd=git_repository,
+    )
+
+    object_path = seeded_git_object_path(repository, package.source_tree_sha256)
+    object_path.mkdir(parents=True, mode=0o700)
+    source = object_path / "source"
+    extract_git_archive(archive, source, package, limits)
+    tree = source_tree(
+        source,
+        limits.source_limits(),
+        excluded_directory_names=frozenset(),
+    )
+    if tree.sha256 != package.source_tree_sha256:
+        raise ValueError(
+            f"{package.name}: source-tree digest mismatch: expected "
+            f"{package.source_tree_sha256}, got {tree.sha256}"
+        )
+    if tree.total_bytes != package.extracted_bytes:
+        raise ValueError(f"{package.name}: extracted byte count mismatch")
+    if tree.file_count != package.file_count:
+        raise ValueError(f"{package.name}: file count mismatch")
+    if tree.directory_count != package.directory_count:
+        raise ValueError(f"{package.name}: directory count mismatch")
+
+    write_exclusive(object_path / "source-manifest.json", tree.manifest_bytes())
+    write_exclusive(
+        object_path / "package.toml",
+        seeded_git_package_toml(package, tree),
+    )
+    fsync_tree(object_path)
+    verify_seeded_git_object(object_path, package, limits)
+    return object_path
+
+
+def verify_seeded_git_object(
+    object_path: Path,
+    package: SeededGitPackage,
+    limits: Limits,
+) -> None:
+    actual_entries = {entry.name for entry in object_path.iterdir()}
+    expected_entries = {"package.toml", "source", "source-manifest.json"}
+    if actual_entries != expected_entries:
+        raise ValueError(
+            f"{object_path}: object entries mismatch: "
+            f"expected {sorted(expected_entries)}, got {sorted(actual_entries)}"
+        )
+    metadata_path = object_path / "package.toml"
+    with metadata_path.open("rb") as source:
+        metadata = tomllib.load(source)
+    required = frozenset(
+        {
+            "format-version",
+            "name",
+            "version",
+            "cargo-source",
+            "git-url",
+            "requested-revision",
+            "resolved-commit",
+            "git-tree",
+            "upstream-crates-io-checksum",
+            "source-tree-sha256",
+            "license",
+            "extracted-bytes",
+            "file-count",
+            "directory-count",
+            "retained-source",
+        }
+    )
+    require_keys(metadata, required=required, context=str(metadata_path))
+    expected = {
+        "format-version": 1,
+        "name": package.name,
+        "version": package.version,
+        "cargo-source": cargo_git_source(package),
+        "git-url": package.git_url,
+        "requested-revision": package.requested_revision,
+        "resolved-commit": package.resolved_commit,
+        "git-tree": package.git_tree,
+        "upstream-crates-io-checksum": package.upstream_checksum,
+        "source-tree-sha256": package.source_tree_sha256,
+        "license": package.license,
+        "extracted-bytes": package.extracted_bytes,
+        "file-count": package.file_count,
+        "directory-count": package.directory_count,
+        "retained-source": package.retained_source,
+    }
+    for key, value in expected.items():
+        if metadata[key] != value:
+            raise ValueError(f"{metadata_path}: {key} mismatch")
+    tree = source_tree(
+        object_path / "source",
+        limits.source_limits(),
+        excluded_directory_names=frozenset(),
+    )
+    if tree.sha256 != package.source_tree_sha256:
+        raise ValueError(f"{object_path}: source-tree digest mismatch")
+    if tree.total_bytes != package.extracted_bytes:
+        raise ValueError(f"{object_path}: extracted byte count mismatch")
+    if tree.file_count != package.file_count:
+        raise ValueError(f"{object_path}: file count mismatch")
+    if tree.directory_count != package.directory_count:
+        raise ValueError(f"{object_path}: directory count mismatch")
+    if (object_path / "source-manifest.json").read_bytes() != tree.manifest_bytes():
+        raise ValueError(f"{object_path}: source manifest mismatch")
+
+
 def fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -1020,13 +1516,42 @@ def install_registry_objects(
         verify_registry_object(final, package, limits)
 
 
-def seed_registry_repository(
-    manifest: SeedManifest,
+def install_seeded_git_objects(
+    staged_repository: Path,
     destination: Path,
-    *,
+    packages: Iterable[SeededGitPackage],
+    limits: Limits,
+) -> None:
+    if destination.exists():
+        verify_repository_header(destination)
+    else:
+        destination.mkdir(mode=0o755)
+        write_exclusive(destination / "repository.toml", REPOSITORY_TOML, 0o644)
+        fsync_directory(destination)
+        fsync_directory(destination.parent)
+
+    for package in packages:
+        staged = seeded_git_object_path(
+            staged_repository, package.source_tree_sha256
+        )
+        final = seeded_git_object_path(destination, package.source_tree_sha256)
+        final.parent.mkdir(parents=True, exist_ok=True)
+        if final.exists():
+            verify_seeded_git_object(final, package, limits)
+            continue
+        try:
+            os.rename(staged, final)
+        except FileExistsError:
+            verify_seeded_git_object(final, package, limits)
+        fsync_directory(final.parent)
+        verify_seeded_git_object(final, package, limits)
+
+
+def validate_seed_locations(
+    destination: Path,
     cache: Path | None,
-    offline: bool,
     ca_bundle: Path | None,
+    offline: bool,
 ) -> None:
     if not destination.is_absolute():
         raise ValueError("destination repository must be absolute")
@@ -1037,6 +1562,17 @@ def seed_registry_repository(
     if offline and cache is None:
         raise ValueError("--offline requires --cache")
     destination.parent.mkdir(parents=True, exist_ok=True)
+
+
+def seed_registry_repository(
+    manifest: SeedManifest,
+    destination: Path,
+    *,
+    cache: Path | None,
+    offline: bool,
+    ca_bundle: Path | None,
+) -> None:
+    validate_seed_locations(destination, cache, ca_bundle, offline)
 
     staging_root = Path(
         tempfile.mkdtemp(
@@ -1074,6 +1610,76 @@ def seed_registry_repository(
         shutil.rmtree(staging_root, ignore_errors=True)
 
 
+def seed_system_repository(
+    manifest: SeedManifest,
+    destination: Path,
+    *,
+    mode: str,
+    cache: Path | None,
+    offline: bool,
+    ca_bundle: Path | None,
+    allow_local_git: bool = False,
+) -> None:
+    if mode not in ("full", "minimal"):
+        raise ValueError(f"unsupported seed mode: {mode}")
+    validate_seed_locations(destination, cache, ca_bundle, offline)
+    registry = manifest.registry if mode == "full" else ()
+
+    staging_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.lorry-seed-",
+            dir=destination.parent,
+        )
+    )
+    os.chmod(staging_root, 0o700)
+    staged_repository = staging_root / "repository"
+    staged_repository.mkdir(mode=0o700)
+    write_exclusive(staged_repository / "repository.toml", REPOSITORY_TOML)
+    try:
+        for package in registry:
+            archive = cached_or_fetch_archive(
+                package, manifest.limits, cache, offline, ca_bundle
+            )
+            index_record = cached_or_fetch_index_record(
+                package, cache, offline, ca_bundle
+            )
+            build_registry_object(
+                staged_repository,
+                package,
+                archive,
+                index_record,
+                manifest.limits,
+            )
+        for index, package in enumerate(manifest.seeded_git):
+            acquisition_root = staging_root / f"git-{index}"
+            acquisition_root.mkdir(mode=0o700)
+            build_seeded_git_object(
+                staged_repository,
+                package,
+                acquisition_root,
+                manifest.limits,
+                cache=cache,
+                offline=offline,
+                allow_local_git=allow_local_git,
+            )
+
+        fsync_tree(staged_repository)
+        install_registry_objects(
+            staged_repository,
+            destination,
+            registry,
+            manifest.limits,
+        )
+        install_seeded_git_objects(
+            staged_repository,
+            destination,
+            manifest.seeded_git,
+            manifest.limits,
+        )
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build a verified Lorry system dependency repository"
@@ -1091,17 +1697,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         manifest = load_seed_manifest(args.manifest)
-        if manifest.seeded_git:
-            raise ValueError(
-                "seeded-Git support is required by this manifest but is not "
-                "available in the registry-only seeder sub-stage"
-            )
-        selected = manifest if args.mode == "full" else SeedManifest(
-            manifest.limits, (), ()
-        )
-        seed_registry_repository(
-            selected,
+        seed_system_repository(
+            manifest,
             args.destination,
+            mode=args.mode,
             cache=args.cache,
             offline=args.offline,
             ca_bundle=args.ca_bundle,
