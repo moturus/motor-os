@@ -2752,7 +2752,8 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      registry checksum manifests and the exact logical
      `.lorry/vendor/ring-0_17_14/source` path.
 
-4. **Implement Stage-2 parsing, graph, repository, and policy foundations.**
+4. **Complete (2026-07-20): implement Stage-2 parsing, graph, repository, and
+   policy foundations.**
    - Switch core Lorry to the exact Round-36 dependency graph. Add the bounded
      TOML/JSON/semver models, manifest subset, Cargo.lock v4 reader/writer,
      cfg evaluation, resolver 1/2/3, sparse-index model, feature/target graph,
@@ -2763,10 +2764,27 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      higher-layer-shadowing, and path-escape fixtures. Differential fixtures
      compare supported resolution/lock results with Cargo 1.97/1.98 without
      letting Cargo participate in Lorry's resolver.
-   - An oracle-built Stage-2 executable may be the initial test subject only
-     in this compatibility lane. It must build itself immediately from the
-     externally seeded Lorry repository; the self-built executable, not Cargo,
-     is used for every following non-oracle Stage-2 action.
+   - An oracle-built Stage-2 executable may be the initial test subject while
+     implementing these foundations and the dependency unit/build-script path
+     in Phase 5. The original placement of the self-build gate here was
+     impossible before Phase 5 supplied those compilation units. Phase 5 must
+     build Lorry from the externally seeded repository as soon as that path is
+     complete; the self-built executable, not Cargo, is then used for `rush`
+     and every following non-oracle Stage-2 acceptance action.
+
+   Closure evidence:
+   - The bounded TOML, JSON, semantic-version, manifest, Cargo.lock v4,
+     sparse-index, archive, source-tree, layered-repository, resolver 1/2/3,
+     cfg-selection, required-patch, offline validation, and two-pass policy
+     modules pass the 108-test host suite and cross-check for Motor.
+   - Offline selected-graph preparation loads only reached lock objects,
+     admits dependency-free/path-only graphs without a repository, re-verifies
+     retained sources, and privately extracts and cleans up a real seeded
+     archive-only object.
+   - The frozen offline Stage-2 resolution fixture is independently reproduced
+     byte-for-byte by Cargo 1.97 and 1.98. Lorry resolves its complete graph,
+     renders the same Cargo.lock, and derives the expected smaller Linux
+     default-feature graph without invoking Cargo.
 
 5. **Add Stage-2 units, sandboxed build scripts, and `rush`.**
    - Extend the unit DAG to libraries, the single explicit binary,
@@ -2778,6 +2796,11 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      equivalent Motor isolation hook; if Motor cannot yet enforce the contract,
      this phase pauses for the external OS feature instead of adding an
      unsandboxed mode.
+   - As soon as the dependency library and approved build-script path can
+     compile Lorry's selected core graph, require the oracle-built executable
+     to build Lorry from the external seed. Use that self-built executable for
+     the remaining `rush` work and non-oracle acceptance in this and later
+     phases.
    - Build/test `rush` in dev and release for native Linux and Linux-to-Motor,
      covering `libc 0.2.139`, Motor path crates, `CARGO_BIN_EXE_rush`, all
      discovered integration tests, `--test`, and `--no-run`. Require clean
