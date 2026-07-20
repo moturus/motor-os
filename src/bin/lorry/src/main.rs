@@ -1,8 +1,10 @@
 mod cli;
+mod config;
 mod diagnostic;
 mod manifest;
 
 use cli::{Cli, Command};
+use config::{Config, environment_rustflags};
 use diagnostic::{Error, Result};
 use manifest::Manifest;
 
@@ -46,11 +48,24 @@ where
             };
             Err(Error::unsupported(option, 1))
         }
-        Command::Build(_) | Command::Run(_) | Command::Test(_) => {
+        command @ (Command::Build(_) | Command::Run(_) | Command::Test(_)) => {
             let current = std::env::current_dir().map_err(|error| {
                 Error::failure(format!("failed to read current directory: {error}"))
             })?;
             let _manifest = Manifest::load(&current)?;
+            let config = Config::load(&current)?;
+            let command_target = match &command {
+                Command::Build(options) => options.target.as_deref(),
+                Command::Run(options) => options.build.target.as_deref(),
+                Command::Test(options) => options.build.target.as_deref(),
+                _ => unreachable!(),
+            };
+            let target = config.selected_target(command_target)?;
+            let _target_options = target
+                .as_deref()
+                .map(|target| config.target_options(target, &[]))
+                .transpose()?;
+            let _rustflags = environment_rustflags()?;
             Err(Error::failure(
                 "the Stage-1 build engine is not available in this implementation slice",
             ))
