@@ -64,6 +64,7 @@ mod platform {
     use std::fs::File;
     use std::io::{self, Read, Seek, SeekFrom};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::FileTypeExt;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
     use std::path::Path;
@@ -267,11 +268,11 @@ mod platform {
         })?;
         let access = if metadata.is_dir() {
             access
-        } else if metadata.is_file() {
+        } else if metadata.is_file() || metadata.file_type().is_char_device() {
             access & (ACCESS_EXECUTE | ACCESS_READ_FILE | ACCESS_WRITE_FILE | ACCESS_TRUNCATE)
         } else {
             return Err(Error::failure(format!(
-                "sandbox {description} path `{}` is neither a regular file nor a directory",
+                "sandbox {description} path `{}` is not a supported file or directory",
                 canonical.display()
             )));
         };
@@ -415,8 +416,6 @@ mod platform {
         const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 
         let denied = [
-            libc::SYS_socket,
-            libc::SYS_socketpair,
             libc::SYS_connect,
             libc::SYS_bind,
             libc::SYS_listen,
@@ -429,7 +428,7 @@ mod platform {
             libc::SYS_recvmsg,
             libc::SYS_recvmmsg,
         ];
-        let mut filters = Vec::with_capacity(denied.len() * 2 + 2);
+        let mut filters = Vec::with_capacity(denied.len() * 2 + 12);
         filters.push(libc::sock_filter {
             code: BPF_LD_W_ABS,
             jt: 0,
@@ -442,6 +441,38 @@ mod platform {
                 jt: 0,
                 jf: 1,
                 k: syscall as u32,
+            });
+            filters.push(libc::sock_filter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            });
+        }
+        for syscall in [libc::SYS_socket, libc::SYS_socketpair] {
+            filters.push(libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 4,
+                k: syscall as u32,
+            });
+            filters.push(libc::sock_filter {
+                code: BPF_LD_W_ABS,
+                jt: 0,
+                jf: 0,
+                k: 16,
+            });
+            filters.push(libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 1,
+                k: libc::AF_UNIX as u32,
+            });
+            filters.push(libc::sock_filter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
             });
             filters.push(libc::sock_filter {
                 code: BPF_RET_K,
@@ -547,7 +578,7 @@ mod tests {
         }
 
         fn policy(&self) -> Policy {
-            let mut read_only = vec![self.source.clone()];
+            let mut read_only = vec![self.source.clone(), PathBuf::from("/dev/null")];
             for path in ["/lib", "/lib64", "/usr/lib", "/etc/ld.so.cache"] {
                 if PathBuf::from(path).exists() {
                     read_only.push(PathBuf::from(path));
@@ -595,6 +626,7 @@ mod tests {
             "deny-source-write",
             "deny-outside-read",
             "deny-network",
+            "allow-local-ipc",
             "deny-exec",
         ] {
             let output = fixture.run(action, &policy);
@@ -648,8 +680,12 @@ mod tests {
                 std::net::TcpStream::connect("127.0.0.1:9")
                     .is_err_and(|error| { error.kind() == std::io::ErrorKind::PermissionDenied })
             ),
+            "allow-local-ipc" => {
+                let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
+                drop((left, right));
+            }
             "deny-exec" => assert!(Command::new("/bin/true").status().is_err()),
-            "allow-exec" => assert!(Command::new("/bin/true").status().unwrap().success()),
+            "allow-exec" => assert!(Command::new("/bin/true").output().unwrap().status.success()),
             _ => panic!("unknown sandbox child action {action}"),
         }
     }

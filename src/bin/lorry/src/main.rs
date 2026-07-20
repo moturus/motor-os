@@ -7,6 +7,7 @@ mod config;
 mod dependency;
 mod diagnostic;
 mod engine;
+mod executor;
 mod hash;
 mod identity;
 mod json;

@@ -23,7 +23,7 @@ pub struct TargetInfo {
 
 impl Toolchain {
     pub fn discover(selector: Option<&str>, config: &Config) -> Result<Self> {
-        let rustc = if cfg!(target_os = "motor") {
+        let mut rustc = if cfg!(target_os = "motor") {
             if selector.is_some() {
                 return Err(Error::failure(
                     "leading `+toolchain` selection requires rustup and is unavailable on Motor",
@@ -64,6 +64,9 @@ impl Toolchain {
                         .with_help("set RUSTC, configure toolchain.rustc, or add rustc to PATH")
                 })?
         };
+        if !cfg!(target_os = "motor") {
+            rustc = resolve_rustup_proxy(rustc)?;
+        }
 
         validate_program(&rustc, "rustc")?;
         let output = process::query(&rustc, &["--version", "--verbose"], "rustc version query")?;
@@ -109,6 +112,32 @@ impl Toolchain {
             cfg: CfgSet::parse(&text)?,
         })
     }
+}
+
+fn resolve_rustup_proxy(rustc: PathBuf) -> Result<PathBuf> {
+    let canonical = fs::canonicalize(&rustc).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve rustc path `{}`: {error}",
+            rustc.display()
+        ))
+    })?;
+    if canonical.file_stem().and_then(|name| name.to_str()) != Some("rustup") {
+        return Ok(rustc);
+    }
+    let rustup = find_program("rustup").ok_or_else(|| {
+        Error::failure(format!(
+            "rustc `{}` is a rustup proxy, but rustup was not found",
+            rustc.display()
+        ))
+    })?;
+    let output = process::query(&rustup, &["which", "rustc"], "rustup rustc lookup")?;
+    let value = String::from_utf8(output.stdout)
+        .map_err(|_| Error::failure("rustup returned a non-Unicode rustc path"))?;
+    let path = PathBuf::from(value.trim());
+    if path.as_os_str().is_empty() {
+        return Err(Error::failure("rustup returned no rustc path"));
+    }
+    Ok(path)
 }
 
 fn parse_verbose_version(text: &str) -> Result<BTreeMap<String, String>> {
