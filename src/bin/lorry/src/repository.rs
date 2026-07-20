@@ -10,9 +10,12 @@ use toml_edit::{Item, Table};
 
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
-use crate::hash::{Sha256, decode_hex, hex};
+#[cfg(test)]
+use crate::hash::hex;
+use crate::hash::{Sha256, decode_hex};
 use crate::json::Value;
 use crate::source_tree::{Exclusions, Limits, Tree};
+use crate::sparse::Record as SparseRecord;
 use crate::toml::Document;
 
 const CRATES_IO_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
@@ -65,6 +68,7 @@ pub struct RegistryObject {
     pub source_tree_sha256: [u8; 32],
     pub retained_archive: bool,
     pub retained_source: bool,
+    pub index: SparseRecord,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -345,7 +349,7 @@ fn verify_registry_object(
     }
     verify_exact_entries(object_path, &expected_entries)?;
 
-    verify_index_record(
+    let index = verify_index_record(
         &object_path.join("index-record.json"),
         &name,
         &version,
@@ -386,6 +390,7 @@ fn verify_registry_object(
         source_tree_sha256,
         retained_archive,
         retained_source,
+        index,
     })
 }
 
@@ -554,34 +559,19 @@ fn verify_index_record(
     expected_name: &str,
     expected_version: &Version,
     expected_checksum: [u8; 32],
-) -> Result<()> {
+) -> Result<SparseRecord> {
     let bytes = read_bounded_file(path, INDEX_RECORD_LIMIT as u64)?;
-    if !bytes.ends_with(b"\n") || bytes[..bytes.len().saturating_sub(1)].contains(&b'\n') {
-        return Err(Error::failure(format!(
-            "sparse index record `{}` is not exactly one newline-terminated record",
-            path.display()
-        )));
-    }
-    let value = Value::parse(path, "sparse index record", &bytes)?;
-    let object = value.as_object().ok_or_else(|| {
-        Error::failure(format!(
-            "sparse index record `{}` is not a JSON object",
-            path.display()
-        ))
-    })?;
-    let name = object.get("name").and_then(Value::as_str);
-    let version = object.get("vers").and_then(Value::as_str);
-    let checksum = object.get("cksum").and_then(Value::as_str);
-    if name != Some(expected_name)
-        || version != Some(expected_version.to_string().as_str())
-        || checksum != Some(hex(&expected_checksum).as_str())
+    let record = SparseRecord::parse(path, &bytes)?;
+    if record.name != expected_name
+        || record.version != *expected_version
+        || record.checksum != expected_checksum
     {
         return Err(Error::failure(format!(
             "sparse index record `{}` does not match package metadata",
             path.display()
         )));
     }
-    Ok(())
+    Ok(record)
 }
 
 fn validate_recorded_tree_limits(

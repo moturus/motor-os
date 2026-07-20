@@ -1529,7 +1529,7 @@ fn validate_feature(path: &Path, line: usize, value: &str) -> Result<()> {
         || value.len() > 256
         || !value
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'+'))
     {
         return Err(Error::at(
             path,
@@ -1704,6 +1704,7 @@ motor = "0.16"
 
 [features]
 default = ["serde/std", "dep:local-name"]
+"fast+mode" = []
 
 [patch.crates-io]
 ring = { path = ".lorry/vendor/ring/source" }
@@ -1724,6 +1725,7 @@ unsafe_code = { level = "forbid", priority = 1 }
             Some("cfg(target_os = \"motor\")")
         );
         assert_eq!(manifest.features["default"].len(), 2);
+        assert!(manifest.features.contains_key("fast+mode"));
         assert_eq!(manifest.patches[0].package, "ring");
         assert_eq!(manifest.rust_lints["unsafe_code"].priority, 1);
     }

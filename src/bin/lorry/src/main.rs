@@ -11,6 +11,7 @@ mod manifest;
 mod process;
 mod repository;
 mod source_tree;
+mod sparse;
 mod toml;
 mod toolchain;
 
