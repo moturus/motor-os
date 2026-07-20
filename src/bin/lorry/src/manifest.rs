@@ -6,6 +6,7 @@ use semver::{Version as SemVersion, VersionReq};
 use toml_edit::{Array, InlineTable, Item, Table, Value};
 
 use crate::diagnostic::{Error, Result};
+use crate::sparse::DependencyKind;
 use crate::toml::Document;
 
 const MANIFEST_NAME: &str = "Cargo.toml";
@@ -24,6 +25,7 @@ pub struct Manifest {
     pub release: ReleaseProfile,
     #[allow(dead_code)]
     pub resolver: Resolver,
+    pub links: Option<String>,
     #[allow(dead_code)]
     pub build_script: Option<PathBuf>,
     #[allow(dead_code)]
@@ -143,6 +145,7 @@ pub struct Dependency {
     pub default_features: bool,
     pub features: Vec<String>,
     pub target: Option<String>,
+    pub kind: DependencyKind,
 }
 
 #[allow(dead_code)]
@@ -194,7 +197,7 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo manifest")?;
-        let mut manifest = Self::parse_document(root, &path, &document)?;
+        let mut manifest = Self::parse_document(root, &path, &document, ManifestMode::Root)?;
         manifest.root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
                 "failed to canonicalize package directory `{}`: {error}",
@@ -226,7 +229,7 @@ impl Manifest {
             )));
         }
         let document = Document::load(&path, "Cargo path dependency manifest")?;
-        let mut manifest = Self::parse_document(root, &path, &document)?;
+        let mut manifest = Self::parse_document(root, &path, &document, ManifestMode::Dependency)?;
         manifest.root = fs::canonicalize(root).map_err(|error| {
             Error::failure(format!(
                 "failed to canonicalize path dependency directory `{}`: {error}",
@@ -241,11 +244,16 @@ impl Manifest {
     #[cfg(test)]
     pub(crate) fn parse(root: &Path, path: &Path, source: &str) -> Result<Self> {
         let document = Document::parse(path, "Cargo manifest", source.to_owned())?;
-        Self::parse_document(root, path, &document)
+        Self::parse_document(root, path, &document, ManifestMode::Root)
     }
 
-    fn parse_document(root: &Path, path: &Path, document: &Document) -> Result<Self> {
-        validate_root_tables(path, document)?;
+    fn parse_document(
+        root: &Path,
+        path: &Path,
+        document: &Document,
+        mode: ManifestMode,
+    ) -> Result<Self> {
+        validate_manifest_tables(path, document, mode)?;
         let package_item = document.root().get("package").ok_or_else(|| {
             Error::failure(format!(
                 "manifest `{}` is missing required table `[package]`",
@@ -253,7 +261,7 @@ impl Manifest {
             ))
         })?;
         let package = require_table(path, document, package_item, "package")?;
-        validate_package_keys(path, document, package)?;
+        validate_package_keys(path, document, package, mode)?;
 
         let name = required_string(path, document, package, "package", "name")?;
         validate_package_name(path, document.line_of_item(package_item), &name)?;
@@ -282,19 +290,55 @@ impl Manifest {
             }
         }
 
+        let links = optional_string(path, document, package, "package", "links")?;
         let build_script = parse_build_script(path, document, package, root)?;
-        let library = parse_library(path, document, root, &name)?;
-        let binaries = parse_binaries(path, document, root, &name)?;
+        let library = parse_library(path, document, root, &name, mode)?;
+        let binaries = if mode == ManifestMode::Root {
+            parse_binaries(path, document, root, &name)?
+        } else {
+            Vec::new()
+        };
         let mut dependencies = Vec::new();
         if let Some(item) = document.root().get("dependencies") {
             let table = require_table(path, document, item, "dependencies")?;
-            parse_dependency_table(path, document, root, table, None, &mut dependencies)?;
+            parse_dependency_table(
+                path,
+                document,
+                root,
+                table,
+                None,
+                DependencyKind::Normal,
+                &mut dependencies,
+            )?;
         }
-        parse_target_dependencies(path, document, root, &mut dependencies)?;
+        if mode == ManifestMode::Dependency
+            && let Some(item) = document.root().get("build-dependencies")
+        {
+            let table = require_table(path, document, item, "build-dependencies")?;
+            parse_dependency_table(
+                path,
+                document,
+                root,
+                table,
+                None,
+                DependencyKind::Build,
+                &mut dependencies,
+            )?;
+        }
+        validate_ignored_dev_dependencies(path, document)?;
+        parse_target_dependencies(path, document, root, mode, &mut dependencies)?;
         let features = parse_features(path, document)?;
-        let patches = parse_patches(path, document, root)?;
-        let rust_lints = parse_rust_lints(path, document)?;
-        let release = parse_profiles(path, document)?;
+        let patches = if mode == ManifestMode::Root {
+            parse_patches(path, document, root)?
+        } else {
+            Vec::new()
+        };
+        let rust_lints = parse_rust_lints(path, document, mode)?;
+        let release = if mode == ManifestMode::Root {
+            parse_profiles(path, document)?
+        } else {
+            ReleaseProfile::default()
+        };
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -306,6 +350,7 @@ impl Manifest {
             metadata,
             release,
             resolver,
+            links,
             build_script,
             library,
             binaries,
@@ -318,20 +363,47 @@ impl Manifest {
     }
 }
 
-fn validate_root_tables(path: &Path, document: &Document) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestMode {
+    Root,
+    Dependency,
+}
+
+fn validate_manifest_tables(path: &Path, document: &Document, mode: ManifestMode) -> Result<()> {
     for (key, item) in document.root().iter() {
-        if !matches!(
-            key,
-            "package"
-                | "dependencies"
-                | "target"
-                | "features"
-                | "patch"
-                | "profile"
-                | "lib"
-                | "bin"
-                | "lints"
-        ) {
+        let supported = matches!(
+            (mode, key),
+            (
+                ManifestMode::Root,
+                "package"
+                    | "dependencies"
+                    | "target"
+                    | "features"
+                    | "patch"
+                    | "profile"
+                    | "lib"
+                    | "bin"
+                    | "lints"
+            ) | (
+                ManifestMode::Dependency,
+                "package"
+                    | "dependencies"
+                    | "build-dependencies"
+                    | "dev-dependencies"
+                    | "target"
+                    | "features"
+                    | "profile"
+                    | "lib"
+                    | "bin"
+                    | "example"
+                    | "test"
+                    | "bench"
+                    | "lints"
+                    | "badges"
+                    | "workspace"
+            )
+        );
+        if !supported {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
@@ -343,8 +415,13 @@ fn validate_root_tables(path: &Path, document: &Document) -> Result<()> {
     Ok(())
 }
 
-fn validate_package_keys(path: &Path, document: &Document, package: &Table) -> Result<()> {
-    const ALLOWED: &[&str] = &[
+fn validate_package_keys(
+    path: &Path,
+    document: &Document,
+    package: &Table,
+    mode: ManifestMode,
+) -> Result<()> {
+    const ROOT_ALLOWED: &[&str] = &[
         "name",
         "version",
         "edition",
@@ -367,13 +444,51 @@ fn validate_package_keys(path: &Path, document: &Document, package: &Table) -> R
         "default-run",
         "metadata",
     ];
+    const DEPENDENCY_ONLY: &[&str] = &[
+        "links",
+        "autolib",
+        "autobins",
+        "autoexamples",
+        "autotests",
+        "autobenches",
+    ];
     for (key, item) in package.iter() {
-        if !ALLOWED.contains(&key) {
+        if !ROOT_ALLOWED.contains(&key)
+            && !(mode == ManifestMode::Dependency && DEPENDENCY_ONLY.contains(&key))
+        {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported Stage-2 manifest key `package.{key}`"),
                 "remove the key or use a later Lorry stage that supports its build semantics",
+            ));
+        }
+    }
+    if mode == ManifestMode::Dependency {
+        for key in DEPENDENCY_ONLY
+            .iter()
+            .copied()
+            .filter(|key| *key != "links")
+        {
+            if let Some(item) = package.get(key)
+                && item.as_bool().is_none()
+            {
+                return Err(type_error(
+                    path,
+                    document.line_of_item(item),
+                    &format!("package.{key}"),
+                    "a boolean",
+                ));
+            }
+        }
+        if let Some(item) = package.get("links")
+            && item.as_str().is_none()
+        {
+            return Err(type_error(
+                path,
+                document.line_of_item(item),
+                "package.links",
+                "a string",
             ));
         }
     }
@@ -508,6 +623,7 @@ fn parse_library(
     document: &Document,
     root: &Path,
     package_name: &str,
+    mode: ManifestMode,
 ) -> Result<Option<LibraryTarget>> {
     let Some(item) = document.root().get("lib") else {
         return Ok(root.join("src/lib.rs").is_file().then(|| LibraryTarget {
@@ -519,8 +635,42 @@ fn parse_library(
     };
     let table = require_table(path, document, item, "lib")?;
     for (key, item) in table.iter() {
-        if !matches!(key, "name" | "path" | "test" | "doctest" | "crate-type") {
+        if !matches!(
+            key,
+            "name" | "path" | "test" | "doctest" | "crate-type" | "bench" | "doc" | "proc-macro"
+        ) {
             return Err(unsupported_key(path, document, item, &format!("lib.{key}")));
+        }
+        if matches!(key, "bench" | "doc") && item.as_bool().is_none() {
+            return Err(type_error(
+                path,
+                document.line_of_item(item),
+                &format!("lib.{key}"),
+                "a boolean",
+            ));
+        }
+        if key == "proc-macro" && item.as_bool() != Some(false) {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                "procedural-macro libraries are not supported in Stage 2",
+                "use an ordinary Rust library dependency",
+            ));
+        }
+    }
+    if mode == ManifestMode::Root {
+        for key in ["bench", "doc"] {
+            if table
+                .get(key)
+                .is_some_and(|item| item.as_bool() != Some(false))
+            {
+                return Err(Error::at(
+                    path,
+                    item_line(document, table, key),
+                    format!("`lib.{key}` must be false in Stage 2 root packages"),
+                    "disable the unsupported library target mode",
+                ));
+            }
         }
     }
     if let Some(crate_types) = table.get("crate-type") {
@@ -644,11 +794,14 @@ fn parse_dependency_table(
     root: &Path,
     table: &Table,
     target: Option<&str>,
+    kind: DependencyKind,
     output: &mut Vec<Dependency>,
 ) -> Result<()> {
     for (alias, item) in table.iter() {
         validate_package_name(path, document.line_of_item(item), alias)?;
-        output.push(parse_dependency(path, document, root, alias, item, target)?);
+        output.push(parse_dependency(
+            path, document, root, alias, item, target, kind,
+        )?);
     }
     Ok(())
 }
@@ -660,6 +813,7 @@ fn parse_dependency(
     alias: &str,
     item: &Item,
     target: Option<&str>,
+    kind: DependencyKind,
 ) -> Result<Dependency> {
     if let Some(requirement) = item.as_str() {
         return Ok(Dependency {
@@ -671,6 +825,7 @@ fn parse_dependency(
             default_features: true,
             features: Vec::new(),
             target: target.map(str::to_owned),
+            kind,
         });
     }
     let (lookup, line) = match item {
@@ -796,6 +951,7 @@ fn parse_dependency(
             None => Vec::new(),
         },
         target: target.map(str::to_owned),
+        kind,
     })
 }
 
@@ -803,6 +959,7 @@ fn parse_target_dependencies(
     path: &Path,
     document: &Document,
     root: &Path,
+    mode: ManifestMode,
     output: &mut Vec<Dependency>,
 ) -> Result<()> {
     let Some(item) = document.root().get("target") else {
@@ -813,22 +970,40 @@ fn parse_target_dependencies(
         validate_target_selector(path, document.line_of_item(item), selector)?;
         let target = require_table(path, document, item, &format!("target.{selector}"))?;
         for (key, item) in target.iter() {
-            if key != "dependencies" {
-                return Err(Error::at(
+            let kind = match (mode, key) {
+                (_, "dependencies") => Some(DependencyKind::Normal),
+                (ManifestMode::Dependency, "build-dependencies") => Some(DependencyKind::Build),
+                (ManifestMode::Dependency, "dev-dependencies") => None,
+                _ => {
+                    return Err(Error::at(
+                        path,
+                        document.line_of_item(item),
+                        format!("root `target.{selector}.{key}` is not supported in Stage 2"),
+                        "root build-dependencies and dev-dependencies are deferred",
+                    ));
+                }
+            };
+            let dependencies =
+                require_table(path, document, item, &format!("target.{selector}.{key}"))?;
+            if let Some(kind) = kind {
+                parse_dependency_table(
                     path,
-                    document.line_of_item(item),
-                    format!("root `target.{selector}.{key}` is not supported in Stage 2"),
-                    "root build-dependencies and dev-dependencies are deferred",
-                ));
+                    document,
+                    root,
+                    dependencies,
+                    Some(selector),
+                    kind,
+                    output,
+                )?;
             }
-            let dependencies = require_table(
-                path,
-                document,
-                item,
-                &format!("target.{selector}.dependencies"),
-            )?;
-            parse_dependency_table(path, document, root, dependencies, Some(selector), output)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_ignored_dev_dependencies(path: &Path, document: &Document) -> Result<()> {
+    if let Some(item) = document.root().get("dev-dependencies") {
+        require_table(path, document, item, "dev-dependencies")?;
     }
     Ok(())
 }
@@ -917,13 +1092,17 @@ fn parse_patches(path: &Path, document: &Document, root: &Path) -> Result<Vec<Pa
     Ok(result)
 }
 
-fn parse_rust_lints(path: &Path, document: &Document) -> Result<BTreeMap<String, Lint>> {
+fn parse_rust_lints(
+    path: &Path,
+    document: &Document,
+    mode: ManifestMode,
+) -> Result<BTreeMap<String, Lint>> {
     let Some(item) = document.root().get("lints") else {
         return Ok(BTreeMap::new());
     };
     let lints = require_table(path, document, item, "lints")?;
     for (key, item) in lints.iter() {
-        if key != "rust" {
+        if key != "rust" && mode == ManifestMode::Root {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
@@ -944,34 +1123,42 @@ fn parse_rust_lints(path: &Path, document: &Document) -> Result<BTreeMap<String,
                 priority: 0,
                 check_cfg: Vec::new(),
             }
-        } else if let Some(table) = item.as_inline_table() {
-            for (key, value) in table.iter() {
+        } else if item.as_inline_table().is_some() || item.as_table().is_some() {
+            let lookup = match item {
+                Item::Value(Value::InlineTable(table)) => DependencyTable::Inline(table),
+                Item::Table(table) => DependencyTable::Regular(table),
+                _ => unreachable!(),
+            };
+            for (key, value) in lookup.entries() {
                 if !matches!(key, "level" | "priority" | "check-cfg") {
                     return Err(Error::at(
                         path,
-                        document.line_of_value(value),
+                        value.line(document),
                         format!("unknown lint configuration key `{key}`"),
                         "use only `level` and optional `priority`",
                     ));
                 }
             }
-            let level = table.get("level").and_then(Value::as_str).ok_or_else(|| {
-                Error::at(
-                    path,
-                    document.line_of_item(item),
-                    format!("lint `{name}` is missing string key `level`"),
-                    "set a supported rustc lint level",
-                )
-            })?;
+            let level = lookup
+                .get("level")
+                .and_then(TomlNode::as_str)
+                .ok_or_else(|| {
+                    Error::at(
+                        path,
+                        document.line_of_item(item),
+                        format!("lint `{name}` is missing string key `level`"),
+                        "set a supported rustc lint level",
+                    )
+                })?;
             Lint {
                 level: validate_lint_level(path, document.line_of_item(item), level)?,
-                priority: table
+                priority: lookup
                     .get("priority")
                     .map(|value| {
                         value.as_integer().ok_or_else(|| {
                             type_error(
                                 path,
-                                document.line_of_value(value),
+                                value.line(document),
                                 &format!("lints.rust.{name}.priority"),
                                 "an integer",
                             )
@@ -979,14 +1166,14 @@ fn parse_rust_lints(path: &Path, document: &Document) -> Result<BTreeMap<String,
                     })
                     .transpose()?
                     .unwrap_or(0),
-                check_cfg: match table.get("check-cfg") {
+                check_cfg: match lookup.get("check-cfg") {
                     Some(value) => string_values(
                         path,
                         document,
                         value.as_array().ok_or_else(|| {
                             type_error(
                                 path,
-                                document.line_of_value(value),
+                                value.line(document),
                                 &format!("lints.rust.{name}.check-cfg"),
                                 "an array of strings",
                             )
@@ -1308,6 +1495,13 @@ impl<'a> TomlNode<'a> {
         match self {
             Self::Item(item) => item.as_bool(),
             Self::Value(value) => value.as_bool(),
+        }
+    }
+
+    fn as_integer(self) -> Option<i64> {
+        match self {
+            Self::Item(item) => item.as_integer(),
+            Self::Value(value) => value.as_integer(),
         }
     }
 
@@ -1790,6 +1984,140 @@ unsafe_code = { level = "forbid", priority = 1 }
         assert!(manifest.features.contains_key("fast+mode"));
         assert_eq!(manifest.patches[0].package, "ring");
         assert_eq!(manifest.rust_lints["unsafe_code"].priority, 1);
+    }
+
+    #[test]
+    fn parses_dependency_only_graph_tables_without_widening_roots() {
+        let source = r#"
+[package]
+name = "dependency"
+version = "1.2.3"
+edition = "2021"
+build = "build.rs"
+links = "native"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+name = "dependency"
+path = "src/lib.rs"
+bench = true
+
+[dependencies]
+normal = "1"
+
+[build-dependencies]
+builder = "2"
+
+[dev-dependencies]
+ignored = "3"
+
+[target.'cfg(unix)'.build-dependencies]
+target-builder = "4"
+
+[target.'cfg(windows)'.dev-dependencies]
+target-ignored = "5"
+
+[lints.clippy]
+all = "warn"
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
+check-cfg = ["cfg(custom)"]
+
+[[test]]
+name = "ignored-test"
+path = "tests/ignored.rs"
+
+[workspace]
+members = ["ignored-member"]
+"#;
+        let document = Document::parse(
+            Path::new("/dependency/Cargo.toml"),
+            "dependency manifest",
+            source.to_owned(),
+        )
+        .unwrap();
+        let manifest = Manifest::parse_document(
+            Path::new("/dependency"),
+            Path::new("/dependency/Cargo.toml"),
+            &document,
+            ManifestMode::Dependency,
+        )
+        .unwrap();
+        assert_eq!(manifest.links.as_deref(), Some("native"));
+        assert!(manifest.build_script.is_some());
+        assert_eq!(manifest.dependencies.len(), 3);
+        assert_eq!(
+            manifest
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.kind == DependencyKind::Build)
+                .count(),
+            2
+        );
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .all(|dependency| dependency.package != "ignored"
+                    && dependency.package != "target-ignored")
+        );
+        assert_eq!(
+            manifest.rust_lints["unexpected_cfgs"].check_cfg,
+            ["cfg(custom)"]
+        );
+        assert!(parsed(source).is_err());
+    }
+
+    #[test]
+    fn parses_the_seeded_ring_dependency_manifest_when_requested() {
+        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
+            return;
+        };
+        let root = PathBuf::from(repository).join(
+            "objects/seeded-git/sha256/77/\
+             776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351/source",
+        );
+        let manifest = Manifest::load_path_dependency(&root).unwrap();
+        assert_eq!(manifest.name, "ring");
+        assert_eq!(manifest.version.original, "0.17.14");
+        assert_eq!(manifest.links.as_deref(), Some("ring_core_0_17_14_"));
+        assert!(manifest.build_script.is_some());
+        assert!(manifest.dependencies.iter().any(
+            |dependency| dependency.package == "cc" && dependency.kind == DependencyKind::Build
+        ));
+        assert!(
+            manifest
+                .dependencies
+                .iter()
+                .all(|dependency| dependency.kind != DependencyKind::Dev)
+        );
+    }
+
+    #[test]
+    fn parses_every_retained_stage_two_dependency_manifest_when_requested() {
+        let Some(repository) = std::env::var_os("LORRY_TEST_SEEDED_REPOSITORY") else {
+            return;
+        };
+        let objects = PathBuf::from(repository).join("objects/crates-io/sha256");
+        let mut parsed = 0;
+        for prefix in fs::read_dir(objects).unwrap() {
+            for object in fs::read_dir(prefix.unwrap().path()).unwrap() {
+                let root = object.unwrap().path().join("source");
+                if !root.join("Cargo.toml").is_file() {
+                    continue;
+                }
+                Manifest::load_path_dependency(&root).unwrap_or_else(|error| {
+                    panic!("failed to parse `{}`: {error}", root.display())
+                });
+                parsed += 1;
+            }
+        }
+        assert_eq!(parsed, 45);
     }
 
     #[test]

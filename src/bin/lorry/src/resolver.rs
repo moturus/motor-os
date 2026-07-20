@@ -106,7 +106,7 @@ impl Catalog {
                         optional: dependency.optional,
                         default_features: dependency.default_features,
                         target: dependency.target.clone(),
-                        kind: DependencyKind::Normal,
+                        kind: dependency.kind,
                     },
                     source: match &dependency.source {
                         DependencySource::CratesIo => RequirementSource::CratesIo,
@@ -134,7 +134,7 @@ impl Catalog {
             features: manifest.features.clone(),
             features2: BTreeMap::new(),
             yanked: false,
-            links: None,
+            links: manifest.links.clone(),
             schema: 1,
             rust_version,
             published: None,
