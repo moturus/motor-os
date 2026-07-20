@@ -1,0 +1,46 @@
+{
+  "format-version": 1,
+  "vectors": [
+    {
+      "entries": [],
+      "name": "empty",
+      "source-tree-sha256": "4754e3b164c100dfd3a409a5e79d39597678f136438619f04273b1bd570c89f3"
+    },
+    {
+      "entries": [
+        {
+          "executable": false,
+          "kind": "directory",
+          "length": 0,
+          "path": "bin",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        {
+          "content-hex": "23212f62696e2f73680a6578697420300a",
+          "executable": true,
+          "kind": "file",
+          "length": 17,
+          "path": "bin/tool",
+          "sha256": "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb"
+        },
+        {
+          "content-hex": "636166c3a90a",
+          "executable": false,
+          "kind": "file",
+          "length": 6,
+          "path": "café.txt",
+          "sha256": "7b49b9e063bd91a4f9252b413261f5557b9c570aa61516989499f64a62dbcdd6"
+        },
+        {
+          "executable": false,
+          "kind": "directory",
+          "length": 0,
+          "path": "empty",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "name": "portable-tree",
+      "source-tree-sha256": "a0bba2df187c38aa673c7feb41af19de82915ef9ef514589bc142fbb9a5720ed"
+    }
+  ]
+}
