@@ -26,6 +26,8 @@ use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 use moto_sys_io::api_net::TcpState;
 
+use super::readiness::NetEventListener;
+use super::readiness::Readiness;
 use super::rt_net::ChannelReservation;
 use super::rt_net::NetChannel;
 use super::rt_net::RpcWaiter;
@@ -42,7 +44,10 @@ pub struct TcpListener {
     channel_reservation: ChannelReservation,
     handle: u64,
     nonblocking: AtomicBool,
-    event_source: EventSourceManaged,
+    event_source: Arc<EventSourceManaged>,
+    // The Stage-F seam: state-machine edges reach the poll registry through
+    // this listener (today the socket's own `event_source`).
+    event_listener: Arc<dyn NetEventListener>,
 
     // In-flight accept requests: req_id => the reservation the accepted
     // stream will use. Blocking accepts additionally await a oneshot
@@ -166,7 +171,11 @@ impl TcpListener {
             self.post_accept(None);
         }
 
-        self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+        self.raise_readiness(Readiness::READABLE);
+    }
+
+    fn raise_readiness(&self, edges: Readiness) {
+        self.event_listener.on_readiness(edges);
     }
 }
 
@@ -200,25 +209,27 @@ impl TcpListener {
             socket_addr.set_port(actual_addr.port());
         }
 
-        let tcp_listener = Arc::new_cyclic(|me| TcpListener {
-            socket_addr,
-            channel_reservation,
-            handle: resp.handle,
-            nonblocking: AtomicBool::new(false),
-
+        let tcp_listener = Arc::new_cyclic(|me| {
             // While a TCP Listener never becomes writable, a MIO test expects
             // a successful WRITABLE interest registration:
             // https://github.com/tokio-rs/mio/blob/9a9d691891d5f7d91c7493b65d0b80726699faa8/tests/poll.rs#L56
             // so we have to allow that.
-            event_source: EventSourceManaged::new(
+            let event_source = Arc::new(EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ),
-
-            accept_requests: Mutex::new(BTreeMap::new()),
-            async_accepts: Mutex::new(VecDeque::new()),
-            pending_accept_queues: Mutex::new(BTreeMap::new()),
-            max_backlog: AtomicU32::new(32),
-            me: me.clone(),
+            ));
+            TcpListener {
+                socket_addr,
+                channel_reservation,
+                handle: resp.handle,
+                nonblocking: AtomicBool::new(false),
+                event_listener: event_source.clone(),
+                event_source,
+                accept_requests: Mutex::new(BTreeMap::new()),
+                async_accepts: Mutex::new(VecDeque::new()),
+                pending_accept_queues: Mutex::new(BTreeMap::new()),
+                max_backlog: AtomicU32::new(32),
+                me: me.clone(),
+            }
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
         crate::net::rt_net::stats_tcp_listener_created();
@@ -306,26 +317,30 @@ impl TcpListener {
             .unwrap()
             .clone();
 
-        let new_stream = Arc::new_cyclic(|me| TcpStream {
-            local_addr: Mutex::new(Some(self.socket_addr)),
-            remote_addr,
-            handle: AtomicU64::new(resp.handle),
-            event_source: EventSourceManaged::new(
+        let new_stream = Arc::new_cyclic(|me| {
+            let event_source = Arc::new(EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ),
-            me: me.clone(),
-            nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
-            channel_reservation,
-            recv_queue,
-            rx_wakers: Mutex::new(Vec::new()),
-            tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
-            rx_closed: AtomicBool::new(false),
-            tx_closed: AtomicBool::new(false),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
-            subchannel_mask,
-            error: AtomicU16::new(moto_rt::E_OK),
-            pending_tx: Mutex::new(VecDeque::new()),
+            ));
+            TcpStream {
+                local_addr: Mutex::new(Some(self.socket_addr)),
+                remote_addr,
+                handle: AtomicU64::new(resp.handle),
+                event_listener: event_source.clone(),
+                event_source,
+                me: me.clone(),
+                nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
+                channel_reservation,
+                recv_queue,
+                rx_wakers: Mutex::new(Vec::new()),
+                tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
+                rx_closed: AtomicBool::new(false),
+                tx_closed: AtomicBool::new(false),
+                rx_timeout_ns: AtomicU64::new(u64::MAX),
+                tx_timeout_ns: AtomicU64::new(u64::MAX),
+                subchannel_mask,
+                error: AtomicU16::new(moto_rt::E_OK),
+                pending_tx: Mutex::new(VecDeque::new()),
+            }
         });
         crate::net::rt_net::stats_tcp_stream_created();
 
@@ -482,7 +497,10 @@ pub struct TcpStream {
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
-    event_source: EventSourceManaged,
+    event_source: Arc<EventSourceManaged>,
+    // The Stage-F seam: state-machine edges reach the poll registry through
+    // this listener (today the socket's own `event_source`).
+    event_listener: Arc<dyn NetEventListener>,
     nonblocking: AtomicBool,
     me: Weak<TcpStream>,
 
@@ -784,7 +802,7 @@ impl TcpStream {
             recv_q.push_back(msg);
             drop(recv_q);
             // The RXQ was empty, this is a new (edge) event.
-            self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+            self.raise_readiness(Readiness::READABLE);
         } else if msg.command == (api_net::NetCmd::TcpStreamTx as u16) {
             // TX closed. The driver was supposed to clear IO Pages.
             drop(recv_q);
@@ -831,7 +849,7 @@ impl TcpStream {
                 // this one while the accept was in flight.
                 recv_q.push_front(msg);
                 drop(recv_q);
-                self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+                self.raise_readiness(Readiness::READABLE);
             }
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();
@@ -867,26 +885,30 @@ impl TcpStream {
             api_net::tcp_stream_connect_request(socket_addr, channel_reservation.subchannel_idx())
         };
 
-        let new_stream = Arc::new_cyclic(|me| TcpStream {
-            channel_reservation,
-            local_addr: Mutex::new(None),
-            remote_addr: *socket_addr,
-            handle: AtomicU64::new(SysHandle::NONE.into()),
-            event_source: EventSourceManaged::new(
+        let new_stream = Arc::new_cyclic(|me| {
+            let event_source = Arc::new(EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ),
-            me: me.clone(),
-            nonblocking: AtomicBool::new(nonblocking),
-            recv_queue: super::inner_rx_stream::InnerRxStream::new(),
-            rx_wakers: Mutex::new(Vec::new()),
-            tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
-            rx_closed: AtomicBool::new(false),
-            tx_closed: AtomicBool::new(false),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
-            subchannel_mask,
-            error: AtomicU16::new(moto_rt::E_OK),
-            pending_tx: Mutex::new(VecDeque::new()),
+            ));
+            TcpStream {
+                channel_reservation,
+                local_addr: Mutex::new(None),
+                remote_addr: *socket_addr,
+                handle: AtomicU64::new(SysHandle::NONE.into()),
+                event_listener: event_source.clone(),
+                event_source,
+                me: me.clone(),
+                nonblocking: AtomicBool::new(nonblocking),
+                recv_queue: super::inner_rx_stream::InnerRxStream::new(),
+                rx_wakers: Mutex::new(Vec::new()),
+                tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
+                rx_closed: AtomicBool::new(false),
+                tx_closed: AtomicBool::new(false),
+                rx_timeout_ns: AtomicU64::new(u64::MAX),
+                tx_timeout_ns: AtomicU64::new(u64::MAX),
+                subchannel_mask,
+                error: AtomicU16::new(moto_rt::E_OK),
+                pending_tx: Mutex::new(VecDeque::new()),
+            }
         });
         super::rt_net::stats_tcp_stream_created();
 
@@ -929,10 +951,8 @@ impl TcpStream {
 
             self.error.store(resp.status, Ordering::Release);
 
-            self.event_source.on_event(
-                moto_rt::poll::POLL_READ_CLOSED
-                    | moto_rt::poll::POLL_WRITE_CLOSED
-                    | moto_rt::poll::POLL_ERROR,
+            self.raise_readiness(
+                Readiness::READ_CLOSED | Readiness::WRITE_CLOSED | Readiness::ERROR,
             );
             // A reader can park while the stream is still Connecting
             // (another thread/FD); the failed connect is its EOF.
@@ -949,7 +969,7 @@ impl TcpStream {
         assert_eq!(prev, TcpState::Connecting.into());
         self.channel().tcp_stream_created(self);
 
-        self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
+        self.raise_readiness(Readiness::WRITABLE);
 
         self.ack_rx();
 
@@ -1118,22 +1138,22 @@ impl TcpStream {
             }
         }
 
-        let mut events = 0;
+        let mut edges = Readiness::EMPTY;
         if notify_rx_done {
-            events |= moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_READ_CLOSED;
+            edges |= Readiness::READABLE | Readiness::READ_CLOSED;
             // A parked reader must observe the closed read half (this
             // path is also reached from a caller-thread shutdown, where
             // no incoming message will wake it).
             self.wake_rx_waiters();
         }
         if notify_tx_done {
-            events |= moto_rt::poll::POLL_WRITABLE | moto_rt::poll::POLL_WRITE_CLOSED;
+            edges |= Readiness::WRITABLE | Readiness::WRITE_CLOSED;
             // Likewise parked writers: their close check ends the write.
             self.channel().wake_tx_wakers();
         }
 
-        if events != 0 {
-            self.event_source.on_event(events);
+        if !edges.is_empty() {
+            self.raise_readiness(edges);
         }
     }
 
@@ -1228,7 +1248,7 @@ impl TcpStream {
 
     pub fn maybe_can_write(&self) {
         if self.have_write_buffer_space() {
-            self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
+            self.raise_readiness(Readiness::WRITABLE);
         } else {
             self.channel().add_write_waiter(self);
             // Close the race with a channel pass draining write_waiters
@@ -1238,9 +1258,13 @@ impl TcpStream {
             // tcp::test_write hanging). Re-check and raise directly; a
             // spurious WRITABLE is level-correct, a lost one is not.
             if self.have_write_buffer_space() {
-                self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
+                self.raise_readiness(Readiness::WRITABLE);
             }
         }
+    }
+
+    fn raise_readiness(&self, edges: Readiness) {
+        self.event_listener.on_readiness(edges);
     }
 
     fn have_write_buffer_space(&self) -> bool {
@@ -1708,7 +1732,12 @@ impl TcpStream {
     /// `push_pending_tx` without the blocking retry: on a full send
     /// queue the entry is retracted (freeing the page) and Err returned;
     /// the caller re-copies on its next attempt. Backpressure-path cost.
-    fn try_push_pending_tx(&self, page: io_channel::IoPage, bufs: &[&[u8]], offset: usize) -> Result<usize, ()> {
+    fn try_push_pending_tx(
+        &self,
+        page: io_channel::IoPage,
+        bufs: &[&[u8]],
+        offset: usize,
+    ) -> Result<usize, ()> {
         let filled = Self::tx_copy_at(bufs, offset, page.bytes_mut());
         debug_assert!(filled > 0);
         let mut pending = self.pending_tx.lock();

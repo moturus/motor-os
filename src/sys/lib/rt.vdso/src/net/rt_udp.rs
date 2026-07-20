@@ -1,3 +1,4 @@
+use super::readiness::{NetEventListener, Readiness};
 use super::rt_net::{ChannelReservation, NetChannel};
 use super::rt_tcp::{RX_PARK_RECHECK, TX_PARK_RECHECK, block_on_recheck};
 use crate::posix::PosixKind;
@@ -20,7 +21,10 @@ pub struct UdpSocket {
     channel_reservation: ChannelReservation,
     local_addr: SocketAddr,
     handle: u64,
-    event_source: EventSourceManaged,
+    event_source: Arc<EventSourceManaged>,
+    // The Stage-F seam: state-machine edges reach the poll registry through
+    // this listener (today the socket's own `event_source`).
+    event_listener: Arc<dyn NetEventListener>,
     nonblocking: AtomicBool,
     subchannel_mask: u64, // Never changes.
 
@@ -137,23 +141,27 @@ impl UdpSocket {
             }
         }
 
-        let udp_socket = Arc::new_cyclic(|me| UdpSocket {
-            local_addr: socket_addr,
-            channel_reservation,
-            handle: resp.handle,
-            nonblocking: AtomicBool::new(false),
-            event_source: EventSourceManaged::new(
+        let udp_socket = Arc::new_cyclic(|me| {
+            let event_source = Arc::new(EventSourceManaged::new(
                 moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ),
-            subchannel_mask,
-            tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
-            peer_addr: Mutex::new(None),
-            rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
-            rx_timeout_ns: AtomicU64::new(u64::MAX),
-            tx_timeout_ns: AtomicU64::new(u64::MAX),
-            rx_wakers: Mutex::new(Vec::new()),
-            tx_wakers: Mutex::new(Vec::new()),
-            me: me.clone(),
+            ));
+            UdpSocket {
+                local_addr: socket_addr,
+                channel_reservation,
+                handle: resp.handle,
+                nonblocking: AtomicBool::new(false),
+                event_listener: event_source.clone(),
+                event_source,
+                subchannel_mask,
+                tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
+                peer_addr: Mutex::new(None),
+                rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
+                rx_timeout_ns: AtomicU64::new(u64::MAX),
+                tx_timeout_ns: AtomicU64::new(u64::MAX),
+                rx_wakers: Mutex::new(Vec::new()),
+                tx_wakers: Mutex::new(Vec::new()),
+                me: me.clone(),
+            }
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
         crate::net::rt_net::stats_udp_socket_created();
@@ -341,12 +349,12 @@ impl UdpSocket {
                     rx_queue.have_datagram().unwrap()
                 };
                 if notify {
-                    self.event_source.on_event(moto_rt::poll::POLL_READABLE);
+                    self.raise_readiness(Readiness::READABLE);
                     self.wake_rx_waiters();
                 }
             }
             api_net::NetCmd::UdpSocketTxRxAck => {
-                self.event_source.on_event(moto_rt::poll::POLL_WRITABLE);
+                self.raise_readiness(Readiness::WRITABLE);
                 self.try_tx();
                 self.wake_tx_waiters();
             }
@@ -469,6 +477,10 @@ impl UdpSocket {
         }
     }
 
+    fn raise_readiness(&self, edges: Readiness) {
+        self.event_listener.on_readiness(edges);
+    }
+
     fn add_rx_waker(&self, waker: &core::task::Waker) {
         self.rx_wakers.lock().push(waker.clone());
     }
@@ -565,12 +577,18 @@ impl core::future::Future for UdpRecvFuture<'_, '_> {
         use core::task::Poll;
 
         let this = self.get_mut();
-        match this.socket.recv_or_peek_from_nonblocking(this.buf, this.peek) {
+        match this
+            .socket
+            .recv_or_peek_from_nonblocking(this.buf, this.peek)
+        {
             Err(E_NOT_READY) => {}
             res => return Poll::Ready(res),
         }
         this.socket.add_rx_waker(cx.waker());
-        match this.socket.recv_or_peek_from_nonblocking(this.buf, this.peek) {
+        match this
+            .socket
+            .recv_or_peek_from_nonblocking(this.buf, this.peek)
+        {
             Err(E_NOT_READY) => Poll::Pending,
             res => Poll::Ready(res),
         }

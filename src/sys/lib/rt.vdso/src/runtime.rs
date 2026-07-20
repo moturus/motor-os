@@ -196,6 +196,35 @@ impl EventSourceManaged {
     }
 }
 
+/// The veneer half of the Stage-F seam: a net socket's mio-agnostic readiness
+/// edges become poll-ABI event bits here, then fan out via `on_event`. This
+/// translation is deliberately outside the state machine so the latter stays
+/// poll-agnostic.
+impl crate::net::readiness::NetEventListener for EventSourceManaged {
+    fn on_readiness(&self, edges: crate::net::readiness::Readiness) {
+        use crate::net::readiness::Readiness;
+        use moto_rt::poll;
+
+        let mut bits: EventBits = 0;
+        if edges.contains(Readiness::READABLE) {
+            bits |= poll::POLL_READABLE;
+        }
+        if edges.contains(Readiness::WRITABLE) {
+            bits |= poll::POLL_WRITABLE;
+        }
+        if edges.contains(Readiness::READ_CLOSED) {
+            bits |= poll::POLL_READ_CLOSED;
+        }
+        if edges.contains(Readiness::WRITE_CLOSED) {
+            bits |= poll::POLL_WRITE_CLOSED;
+        }
+        if edges.contains(Readiness::ERROR) {
+            bits |= poll::POLL_ERROR;
+        }
+        self.on_event(bits);
+    }
+}
+
 pub trait UnmanagedEventSourceHolder: Send + Sync {
     fn check_interests(&self, interests: Interests) -> EventBits;
     fn on_handle_error(&self);
