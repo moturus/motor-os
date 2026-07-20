@@ -16,6 +16,7 @@ use crate::resolver::{
     Catalog, LockedPreference, Options, PackageKey, Resolution, ResolvedSource, TargetSelection,
     resolve_selected,
 };
+use crate::unit::{UnitGraph, dependency_units};
 
 #[derive(Debug)]
 pub struct PreparedGraph {
@@ -29,6 +30,17 @@ pub struct PreparedPackage {
     pub manifest: Manifest,
     pub evidence: PackageEvidence,
     extracted: Option<ExtractedArchive>,
+}
+
+impl PreparedGraph {
+    pub fn dependency_units(&self) -> Result<UnitGraph> {
+        let manifests = self
+            .packages
+            .iter()
+            .map(|(key, package)| (key.clone(), package.manifest.clone()))
+            .collect();
+        dependency_units(&self.resolution, &manifests)
+    }
 }
 
 impl PreparedPackage {
@@ -291,6 +303,15 @@ mod tests {
                 .values()
                 .all(|package| package.source_root().is_dir() && !package.is_ephemeral())
         );
+        let units = graph.dependency_units().unwrap();
+        assert_eq!(units.units.len(), units.order.len());
+        assert!(units.units.keys().any(|unit| {
+            unit.package.name == "crc32fast" && unit.kind == crate::unit::UnitKind::BuildScriptRun
+        }));
+        assert!(units.units.keys().any(|unit| {
+            unit.package.name == "generic-array"
+                && unit.kind == crate::unit::UnitKind::BuildScriptRun
+        }));
     }
 
     #[test]
