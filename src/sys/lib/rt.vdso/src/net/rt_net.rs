@@ -496,13 +496,23 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
 /// the listener's pending-accept queue) that must exist before the next
 /// message for the same stream handle is dispatched; a task hop would
 /// race that and lose early state changes.
-pub enum RpcWaiter {
+pub(super) enum RpcWaiter {
     /// Resolved by send(); the receiver side is a caller thread.
     Response(moto_async::oneshot::Sender<io_channel::Msg>),
-    /// Nonblocking TcpStream::connect completion.
-    Connect(Weak<TcpStream>),
-    /// TcpListener accept completion.
-    Accept(Weak<TcpListener>),
+    /// TcpStream::connect completion. A blocking connect's caller
+    /// additionally learns the outcome through the sender; the
+    /// registration itself always runs inline here, so a message
+    /// arriving right behind the response finds the stream.
+    Connect(
+        Weak<TcpStream>,
+        Option<moto_async::oneshot::Sender<io_channel::Msg>>,
+    ),
+    /// TcpListener accept completion; a blocking accept's caller gets
+    /// the PendingAccept through the sender.
+    Accept(
+        Weak<TcpListener>,
+        Option<moto_async::oneshot::Sender<super::rt_tcp::PendingAccept>>,
+    ),
 }
 
 static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
@@ -805,16 +815,21 @@ impl NetChannel {
                         panic!("RPC receiver gone for msg {}", msg.id);
                     }
                 }
-                Some(RpcWaiter::Connect(stream)) => {
+                Some(RpcWaiter::Connect(stream, tx)) => {
                     // A stream dropped mid-connect leaves sys-io's
                     // stream behind, as today.
                     if let Some(stream) = stream.upgrade() {
                         let _ = stream.on_connect_response(msg);
                     }
+                    if let Some(tx) = tx {
+                        let _ = tx.send(msg);
+                    }
                 }
-                Some(RpcWaiter::Accept(listener)) => {
+                Some(RpcWaiter::Accept(listener, tx)) => {
+                    // A dead listener drops tx, erroring a blocked
+                    // accept — unreachable while callers hold &self.
                     if let Some(listener) = listener.upgrade() {
-                        listener.on_accept_response(msg);
+                        listener.on_accept_response(msg, tx);
                     }
                 }
                 None => panic!("unexpected msg"),
@@ -1263,7 +1278,7 @@ impl NetChannel {
     /// Insert `waiter` and queue `req`, blocking if the send queue is
     /// full. The waiter goes in first: the response must never beat it
     /// into the map.
-    pub fn send_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
+    pub(super) fn send_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) {
         assert_ne!(0, req.id);
         assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
         self.send_msg(req);
@@ -1271,7 +1286,7 @@ impl NetChannel {
 
     /// Nonblocking [`Self::send_rpc`]: on a full send queue the waiter
     /// is removed again and the caller gets `E_NOT_READY`.
-    pub fn post_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) -> Result<(), ErrorCode> {
+    pub(super) fn post_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) -> Result<(), ErrorCode> {
         assert_ne!(0, req.id);
         assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
         if self.post_msg(req).is_ok() {
