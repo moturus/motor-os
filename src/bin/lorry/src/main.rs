@@ -1,6 +1,7 @@
 mod archive;
 mod atomic;
 mod cli;
+mod compile;
 mod config;
 mod dependency;
 mod diagnostic;
