@@ -99,3 +99,25 @@ the same boot report roughly half the first-run numbers on cold paths).
 Historical bests from the perf series, different host — context only, not
 gates: bulk RX ~900-927, bulk TX ~628-734 MiB/s, RR 81-166 usec band
 depending on scheduler rounds and steal.
+
+## Stage-F paired A/B (G2, 2026-07-21)
+
+The stage-F release bench looked ~12-17% below the stage-0 RX baselines above,
+so a paired A/B was run to separate the move's cost from host drift: the
+pre-stage-F commit (`44ea049`) and the stage-F tip (`90d0531`) release images
+were built and benched back-to-back on the same host (3 rounds each, medians):
+
+| Metric | 44ea049 (pre-F) | 90d0531 (stage-F) | Paired Δ |
+|---|---|---|---|
+| RR def / bulk (usec) | 119.4 / 130.1 | 117.8 / 130.5 | parity |
+| def RX (MiB/s) | 473.7 (442-615) | 434.6 (432-628) | -8.3% (noise) |
+| def TX (MiB/s) | 299.8 | 299.5 | parity |
+| bulk RX (MiB/s) | 497.3 | 484.9 | -2.5% |
+| bulk TX (MiB/s) | 725.9 | 723.6 | parity |
+
+Conclusion: **the move is perf-neutral.** The apparent RX drop vs the recorded
+stage-0 baselines was cross-day host drift -- the pre-stage-F baseline
+reproduces the same lower RX on today's host (474/497 vs stage-0's 525/551).
+Move-attributable cost is bulk RX -2.5% and def RX -8.3%, both within the
+accepted 10% band, and def RX's 432-628 spread is host noise, not the move.
+The +2.06% vdso .text growth (lost cross-crate inlining) cost no throughput.
