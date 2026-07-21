@@ -329,6 +329,12 @@ futures are what a future Motor-native tokio reactor backend consumes
 directly, skipping mio emulation; that consumer is enabled by this design
 but not part of it.
 
+*Implemented (F4c-1 `b5051cb`, F4c-2 `b747054`): `moto-io::net` is async-first
+with no data-path `block_on`; the blocking spin/park/`SO_*TIMEO`/`O_NONBLOCK`
+lives in the veneer (`rt.vdso/src/net/blocking.rs`), mirroring `rt_fs` over
+`moto-io::fs`. Setup (bind/listen/sockopts) stays sync as sketched above. The
+`readable()`/`writable()` readiness futures exist but have no consumer yet.*
+
 ### 5.5 Lifecycle and teardown
 
 - `TcpStream`/`UdpSocket` drop: state cleanup runs synchronously as today;

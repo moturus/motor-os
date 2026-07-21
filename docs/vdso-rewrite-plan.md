@@ -5,9 +5,10 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-21, stage F move complete; F4c deferred; pending review)
+## Status (2026-07-21, stage F + F4c complete; pending review)
 
-Stage F extraction is done except the native async API (F4c). `moto-io::net`
+Stage F extraction is done, including the native async API (F4c).
+`moto-io::net`
 now holds the channel runtime and the TCP/UDP state machines
 (`moto_io::net::{channel, tcp, udp}`); the vdso keeps a thin veneer (ABI shims,
 `PosixFile` impls, poll-registry event synthesis) -- `rt_tcp.rs` 1740->193,
@@ -39,12 +40,30 @@ machine first:
 - **F4d** (`90d0531`): `test_timeout_storm_during_transfer` -- storms
   `TcpWriteFuture`'s partial-progress drop under an active transfer.
 
-**F4c (native async API) deferred.** `moto-io::fs` is async-first (a `pub async`
-surface the vdso wraps with `block_on`); making net match faithfully means
-relocating the perf-tuned blocking/timeout/spin out of the data path into the
-veneer -- a large, delicate hot-path refactor -- and the design defers the
-native async consumer that would drive it (5.4: "enabled by this design but not
-part of it"). Left as consumer-driven follow-up.
+**F4c (native async API) done.** `moto-io::net` now mirrors `moto-io::fs`:
+async-first, with no `block_on` on the data path. Two commits:
+
+- **F4c-1** (`b5051cb`): publish the async-first surface on `moto-io::net`
+  (additive, zero behavior change) -- `try_read`/`read_future`/`readable`,
+  `try_write`/`write_future`/`writable`, `read_timeout`/`write_timeout`/
+  `is_nonblocking` on `TcpStream`; the UDP mirror. The data-path future types
+  become `pub`; `readable()`/`writable()` are new readiness futures (design
+  5.4) that arm the same wakes their action futures do.
+- **F4c-2** (`b747054`): move the blocking POSIX layer (write spin,
+  `block_on_recheck`, `SO_*TIMEO`, `O_NONBLOCK`) out of `moto-io` into a new
+  veneer module `rt.vdso/src/net/blocking.rs`, mirroring how `rt_fs` blocks on
+  `moto-io::fs`. `connect`/`accept` split into async + nonblocking forms the
+  veneer picks by `is_nonblocking()` and drives with `block_on_sync`; the
+  moto-io blocking `read_or_peek`/`peek`/`write` and UDP `recv_or_peek_from`/
+  `peek`/`send_to` are deleted. Setup stays sync (bind/listen/sockopts via
+  `send_receive`) per design 5.4.
+
+Validation: full-test debug 7/7 + release 3/3 green; paired A/B bench
+(`e04f335` pre-F4c vs `b747054`, same host) perf-neutral -- every throughput
+metric flat-to-better (bulk RX +2.2%, TX +3.0%; def RX +2.2%, TX +9.7%), both
+RR deltas within the host-noise band. Behavior traced path-by-path as
+identical; the relocation preserves the async cores and blocking logic
+byte-for-byte across the crate boundary.
 
 **Stage-F gate (`90d0531`):** `full x3` 3/3 green (95/95/94s). vdso binary size
 +2.06% `.text` (~11 KB; lost cross-crate inlining now that net is a separate
@@ -459,12 +478,13 @@ purely mechanical.
 Stage gate: `full x3` + bench parity + vdso binary size check (expected
 ~neutral; moto-async and futures are already linked in).
 
-*Status: move complete (`1ae9306..90d0531`); F4c (native async API) deferred as
-consumer-driven follow-up. Actual execution decomposed F2/F3 as C0-C3 (the
-channel + socket SCC moves atomically); F4 as F4a lint / F4b cancel-safety +
-UDP waker dedup / F4d timeout-storm systest. Gate: `full x3` 3/3 green; binary
-size +2.06% .text (crate-boundary inlining, modest); bench RR/TX at-or-better,
-RX ~12-17% soft on a noisy sample -> rigorous paired A/B deferred to G2. See the
+*Status: complete (`1ae9306..b747054`). Actual execution decomposed F2/F3 as
+C0-C3 (the channel + socket SCC moves atomically); F4 as F4a lint / F4b
+cancel-safety + UDP waker dedup / F4d timeout-storm systest; F4c (native async
+API) as F4c-1 async-first surface + F4c-2 blocking-into-veneer, done in Stage G.
+Gate: `full x3` 3/3 green; binary size +2.06% .text (crate-boundary inlining,
+modest); the RX softness on the move gate resolved as host noise (G2 paired
+A/B, perf-neutral); F4c re-confirmed perf-neutral by its own paired A/B. See the
 Status section.*
 
 ## 10. Stage G — acceptance

@@ -121,3 +121,26 @@ reproduces the same lower RX on today's host (474/497 vs stage-0's 525/551).
 Move-attributable cost is bulk RX -2.5% and def RX -8.3%, both within the
 accepted 10% band, and def RX's 432-628 spread is host noise, not the move.
 The +2.06% vdso .text growth (lost cross-crate inlining) cost no throughput.
+
+## F4c paired A/B (native async net API, 2026-07-21)
+
+F4c moves the blocking POSIX layer out of `moto-io::net` into the veneer
+(`rt.vdso/src/net/blocking.rs`), leaving net async-first. Since this touches
+the hottest code (read/write/spin/park), a paired A/B ran the pre-F4c commit
+(`e04f335`) and the F4c tip (`b747054`) release images back-to-back on the same
+host (3 runs each, medians):
+
+| Metric | e04f335 (pre-F4c) | b747054 (F4c) | Paired Δ |
+|---|---|---|---|
+| RR def / bulk (usec) | 127.8 / 129.3 | 131.4 / 130.6 | +2.9% / +1.0% (noise) |
+| def RX (MiB/s) | 462.9 | 473.2 | +2.2% |
+| def TX (MiB/s) | 300.4 | 329.4 | +9.7% |
+| bulk RX (MiB/s) | 489.1 | 500.0 | +2.2% |
+| bulk TX (MiB/s) | 722.8 | 744.4 | +3.0% |
+
+Conclusion: **F4c is perf-neutral.** Every throughput metric is flat-to-better
+on the tip; both RR deltas sit inside the host-noise band (each side had a
+matching ~180 usec scheduler-steal outlier in run 3, and the def sample spans
+113-181 usec / 437-622 MiB/s as before). Expected: the relocation preserves the
+async cores and the blocking spin/park/timeout logic byte-for-byte, only moving
+them across the crate boundary.
