@@ -54,6 +54,29 @@ fn run_thread_exit_hook() {
     }
 }
 
+/// Connect to sys-io, retrying the transient `NotFound` that its per-accept
+/// listener re-arm briefly exposes under connection churn. sys-io spawns its
+/// replacement listener only after accepting the previous client, so a
+/// `connect` landing in that window finds no registered URL and fails with
+/// `NotFound` instead of waiting (see io_channel's listen/connect race note).
+/// The window is microseconds; yield and retry -- a channel-creation storm
+/// (e.g. the `test_channel_teardown` systest past `IO_SUBCHANNELS`) hits it
+/// under release timing, where an `unwrap()` here crashed the process. Any
+/// other error, or `NotFound` persisting past the deadline (sys-io genuinely
+/// gone), stays fatal.
+fn connect_to_sys_io() -> io_channel::ClientConnection {
+    let deadline = moto_rt::time::Instant::now() + core::time::Duration::from_secs(5);
+    loop {
+        match io_channel::ClientConnection::connect("sys-io") {
+            Ok(conn) => return conn,
+            Err(moto_rt::Error::NotFound) if moto_rt::time::Instant::now() < deadline => {
+                moto_sys::SysCpu::sched_yield();
+            }
+            Err(err) => panic!("connect to sys-io failed: {err:?}"),
+        }
+    }
+}
+
 // -------------------------------- implementation details ------------------------------ //
 
 // Note: we have an IO thread per net channel instead of a single IO thread:
@@ -885,7 +908,7 @@ impl NetChannel {
         }
 
         let self_ = Arc::new(NetChannel {
-            conn: io_channel::ClientConnection::connect("sys-io").unwrap(),
+            conn: connect_to_sys_io(),
             subchannels_in_use,
             tcp_streams: Mutex::new(BTreeMap::new()),
             tcp_listeners: Mutex::new(BTreeMap::new()),
