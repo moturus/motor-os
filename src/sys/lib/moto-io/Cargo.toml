@@ -9,12 +9,21 @@ categories = ["no-std"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-async-fs    = { path = "../async-fs"         , default-features = false }
-moto-async  = { path = "../../lib/moto-async" }
-moto-ipc    = { path = "../moto-ipc"          }
-moto-rt     = { path = "../moto-rt"           }
-moto-sys-io = { path = "../moto-sys-io"       }
+async-fs         = { path = "../async-fs"         , default-features = false }
+moto-async       = { path = "../../lib/moto-async" }
+moto-io-internal = { path = "../moto-io-internal"  }
+moto-ipc         = { path = "../moto-ipc"          }
+moto-rt          = { path = "../moto-rt"           }
+moto-sys         = { path = "../moto-sys"          }
+moto-sys-io      = { path = "../moto-sys-io"       }
 
 # External deps.
-async-trait = "0.1.88"
-log         = "0.4.28"
+async-trait     = "0.1.88"
+crossbeam       = { version = "0.8.4", default-features = false }
+crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
+log             = "0.4.28"
+
+[features]
+# Extra runtime checks/assertions (net leak checks), mirrored from the vdso's
+# feature of the same name; wired on by the vdso's `netdev`.
+netdev = []

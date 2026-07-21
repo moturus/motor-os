@@ -8,5 +8,8 @@
 //! The Stage-F extraction moves the pieces here in dependency order; the vdso
 //! keeps a thin veneer (poll-registry synthesis, the FD table, ABI shims).
 
+pub mod channel;
 pub mod inner_rx_stream;
 pub mod readiness;
+pub mod tcp;
+pub mod udp;

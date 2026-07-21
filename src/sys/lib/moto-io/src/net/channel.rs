@@ -4,7 +4,7 @@
 //! dedicated runtime thread, plus the channel pool (`NetRuntime`), the
 //! per-socket reservations, and the in-flight RPC map. The socket state
 //! machines whose `Weak` references this layer dispatches to live in
-//! rt_tcp/rt_udp; the two halves form one mutually-recursive cluster and
+//! tcp/udp; the two halves form one mutually-recursive cluster and
 //! move to moto-io together in Stage F.
 
 use alloc::collections::BTreeMap;
@@ -24,9 +24,9 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 
-use super::rt_tcp::TcpListener;
-use super::rt_tcp::TcpStream;
-use super::rt_udp::UdpSocket;
+use super::tcp::TcpListener;
+use super::tcp::TcpStream;
+use super::udp::UdpSocket;
 
 /// The stage-E leak check (design 5.5): a quiescent runtime holds no
 /// channels and no sockets. Reached only from the vdso's netdev-gated
@@ -100,7 +100,7 @@ pub(super) enum RpcWaiter {
     /// the PendingAccept through the sender.
     Accept(
         Weak<TcpListener>,
-        Option<moto_async::oneshot::Sender<super::rt_tcp::PendingAccept>>,
+        Option<moto_async::oneshot::Sender<super::tcp::PendingAccept>>,
     ),
 }
 
@@ -235,7 +235,7 @@ impl NetRuntime {
 
 /// The `Msg::flags` value marking a client-internal TcpStreamTx marker: it
 /// tells the IO thread to claim and send the stream's pending TX pages (see
-/// `rt_tcp::PendingTxPage`), and never reaches sys-io. The value cannot occur
+/// `tcp::PendingTxPage`), and never reaches sys-io. The value cannot occur
 /// in a real Tx message: the classic format keeps `flags` zero and the
 /// multi-page format stores `total_len <= TCP_TX_MAX_BYTES` there.
 pub(super) const TCP_TX_MARKER_FLAGS: u32 = u32::MAX;
@@ -506,7 +506,7 @@ impl NetChannel {
             {
                 // A TX marker: claim the stream's pending pages and send
                 // them as one message, binding their lengths now (see
-                // rt_tcp::PendingTxPage). An empty pending queue — an
+                // tcp::PendingTxPage). An empty pending queue — an
                 // earlier marker or the stream's drop claimed the pages
                 // already — is a no-op.
                 match self.claim_tcp_tx(msg.handle) {
@@ -959,7 +959,7 @@ impl NetChannel {
         assert_eq!(0, stream.strong_count());
     }
 
-    pub fn tcp_listener_created(&self, listener: &Arc<super::rt_tcp::TcpListener>) {
+    pub fn tcp_listener_created(&self, listener: &Arc<super::tcp::TcpListener>) {
         self.tcp_listeners
             .lock()
             .insert(listener.handle(), Arc::downgrade(listener));
@@ -1238,7 +1238,7 @@ pub fn claim_rx_page(
 }
 
 pub fn clear_rx_queue(
-    rx_queue: &Arc<Mutex<moto_io::net::inner_rx_stream::InnerRxStream>>,
+    rx_queue: &Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>,
     channel: &NetChannel,
 ) {
     // Clear RX queue: basically, free up server-allocated pages.

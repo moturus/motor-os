@@ -914,10 +914,14 @@ version = "0.1.0"
 dependencies = [
  "async-fs",
  "async-trait",
+ "crossbeam",
+ "crossbeam-queue",
  "log",
  "moto-async",
+ "moto-io-internal",
  "moto-ipc",
  "moto-rt",
+ "moto-sys",
  "moto-sys-io",
 ]
 

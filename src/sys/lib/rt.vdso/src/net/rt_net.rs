@@ -1,8 +1,9 @@
 //! The vdso net veneer: the C-ABI shims std/mio call through (bind, listen,
 //! accept, connect, the socket options, DNS), plus the netdev-gated internal
-//! helper. Everything here is caller-thread glue over the socket state
-//! machines in rt_tcp/rt_udp and the channel runtime in [`super::channel`];
-//! it is what stays in the vdso when those move to moto-io.
+//! helper. Everything here is caller-thread glue over the moto-io net stack
+//! (`moto_io::net::{tcp, udp, channel}`); it installs the concrete
+//! `EventSourceManaged` listener and downcasts posix files back to the moved
+//! socket types via the FD table.
 
 use crate::posix;
 use crate::posix::PosixFile;
@@ -16,8 +17,8 @@ use moto_rt::RtFd;
 use moto_rt::netc;
 use moto_sys::ErrorCode;
 
-use super::rt_tcp::TcpStream;
-use super::rt_udp::UdpSocket;
+use moto_io::net::tcp::TcpStream;
+use moto_io::net::udp::UdpSocket;
 
 /// Build the poll-registry event source a socket emits its readiness through.
 /// The veneer owns this choice (the concrete `EventSourceManaged` is a vdso
@@ -153,21 +154,21 @@ pub unsafe extern "C" fn dns_lookup(
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
     if proto == moto_rt::net::PROTO_UDP {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match super::rt_udp::UdpSocket::bind(&addr, new_event_source()) {
+        let udp_socket = match moto_io::net::udp::UdpSocket::bind(&addr, new_event_source()) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match super::rt_udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
+        let udp_socket = match moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
             Ok(socket) => socket,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
-        let listener = match super::rt_tcp::TcpListener::bind(&addr, new_event_source()) {
+        let listener = match moto_io::net::tcp::TcpListener::bind(&addr, new_event_source()) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
@@ -182,7 +183,7 @@ pub extern "C" fn listen(rt_fd: RtFd, max_backlog: u32) -> ErrorCode {
         return moto_rt::E_BAD_HANDLE;
     };
     let Some(listener) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
     else {
         return moto_rt::E_BAD_HANDLE;
     };
@@ -198,7 +199,7 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
         return -(moto_rt::E_BAD_HANDLE as RtFd);
     };
     let Some(listener) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
     else {
         return -(moto_rt::E_BAD_HANDLE as RtFd);
     };
@@ -241,11 +242,11 @@ pub unsafe extern "C" fn setsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
             tcp_stream.setsockopt(option, ptr, len)
         } else if let Some(tcp_listener) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
             tcp_listener.setsockopt(option, ptr, len)
         } else if let Some(udp_socket) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
         {
             udp_socket.setsockopt(option, ptr, len)
         } else if option == moto_rt::net::SO_NONBLOCKING {
@@ -274,11 +275,11 @@ pub unsafe extern "C" fn getsockopt(rt_fd: RtFd, option: u64, ptr: usize, len: u
         if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
             tcp_stream.getsockopt(option, ptr, len)
         } else if let Some(tcp_listener) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
             tcp_listener.getsockopt(option, ptr, len)
         } else if let Some(udp_socket) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
         {
             udp_socket.getsockopt(option, ptr, len)
         } else {
@@ -325,13 +326,13 @@ pub unsafe extern "C" fn socket_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> 
             return moto_rt::E_INVALID_ARGUMENT;
         };
         if let Some(udp_socket) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
         {
             *addr = (*udp_socket.local_addr()).into();
             return moto_rt::E_OK;
         };
         if let Some(tcp_listener) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_tcp::TcpListener>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::tcp::TcpListener>()
         {
             *addr = (*tcp_listener.socket_addr()).into();
             return moto_rt::E_OK;
@@ -357,7 +358,7 @@ pub unsafe extern "C" fn peer_addr(rt_fd: RtFd, addr: *mut netc::sockaddr) -> Er
             }
         }
         if let Some(udp_socket) =
-            (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+            (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
         {
             match udp_socket.peer_addr() {
                 Some(peer_addr) => {
@@ -401,7 +402,7 @@ unsafe fn udp_recv_or_peek_from(
         return -(moto_rt::E_BAD_HANDLE as i64);
     };
     let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
     else {
         return -(moto_rt::E_BAD_HANDLE as i64);
     };
@@ -427,7 +428,7 @@ pub unsafe extern "C" fn udp_send_to(
         return -(moto_rt::E_BAD_HANDLE as i64);
     };
     let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
     else {
         return -(moto_rt::E_BAD_HANDLE as i64);
     };
@@ -445,7 +446,7 @@ pub unsafe extern "C" fn udp_connect(rt_fd: RtFd, addr: *const netc::sockaddr) -
         return moto_rt::E_BAD_HANDLE;
     };
     let Some(udp_socket) =
-        (posix_file.as_ref() as &dyn Any).downcast_ref::<super::rt_udp::UdpSocket>()
+        (posix_file.as_ref() as &dyn Any).downcast_ref::<moto_io::net::udp::UdpSocket>()
     else {
         return moto_rt::E_BAD_HANDLE;
     };
@@ -465,7 +466,7 @@ pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 
             crate::rt_thread::sleep(
                 (moto_rt::time::Instant::now() + core::time::Duration::from_millis(500)).as_u64(),
             );
-            super::channel::assert_runtime_empty();
+            moto_io::net::channel::assert_runtime_empty();
         }
         _ => panic!("Unrecognized option {a1}"),
     }
