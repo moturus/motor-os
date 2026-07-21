@@ -362,6 +362,11 @@ impl NetChannel {
         self.conn.server_handle().into()
     }
 
+    // Per-channel invariant check. Unreachable since stage-E teardown drops a
+    // channel from the pool the moment its last reservation is released (so a
+    // quiescent runtime holds none to check -- NetRuntime::assert_empty covers
+    // that); kept as a debugging aid.
+    #[allow(dead_code)]
     fn assert_empty(&self) {
         assert_eq!(0, self.reservations.load(Ordering::Relaxed));
         self.conn.assert_empty();

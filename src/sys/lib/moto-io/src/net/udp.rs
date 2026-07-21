@@ -27,7 +27,6 @@ pub struct UdpSocket {
     // struct, so the state machine is movable to moto-io (Stage F).
     event_listener: Arc<dyn NetEventListener>,
     nonblocking: AtomicBool,
-    subchannel_mask: u64, // Never changes.
 
     tx_queue: Mutex<UdpFragmentingQueue>,
     rx_queue: Mutex<UdpDefragmentingQueue>,
@@ -156,7 +155,6 @@ impl UdpSocket {
                 handle: resp.handle,
                 nonblocking: AtomicBool::new(false),
                 event_listener,
-                subchannel_mask,
                 tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
                 peer_addr: Mutex::new(None),
                 rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
@@ -326,16 +324,11 @@ impl UdpSocket {
                 return;
             };
 
-            let sz = msg.payload.args_16()[10] as usize;
-            if let Err(msg) = self.try_tx_msg(msg, sz) {
+            if let Err(msg) = self.channel().post_msg(msg) {
                 tx_lock.push_front(msg);
                 return;
             }
         }
-    }
-
-    fn try_tx_msg(&self, msg: io_channel::Msg, write_sz: usize) -> Result<(), io_channel::Msg> {
-        self.channel().post_msg(msg)
     }
 
     // Note: this is called from the I/O thread so should not block.
@@ -343,7 +336,6 @@ impl UdpSocket {
         let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
         match cmd {
             api_net::NetCmd::UdpSocketTxRx => {
-                let fragment_id = msg.payload.args_16()[9];
                 let notify = {
                     let mut rx_queue = self.rx_queue.lock();
                     rx_queue
@@ -374,6 +366,9 @@ impl UdpSocket {
         self.nonblocking.store(val, Ordering::Release);
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
     pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         unsafe {
             match option {
@@ -409,6 +404,9 @@ impl UdpSocket {
         }
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
     pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         unsafe {
             match option {

@@ -351,6 +351,9 @@ impl TcpListener {
         channel.send_rpc_guaranteed(req, waiter);
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
     pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         match option {
             moto_rt::net::SO_NONBLOCKING => {
@@ -370,6 +373,9 @@ impl TcpListener {
         }
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
     pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         match option {
             moto_rt::net::SO_TTL => {
@@ -416,13 +422,6 @@ impl TcpListener {
         } else {
             Err(resp.status)
         }
-    }
-    fn set_only_v6(&self, _: bool) -> Result<(), ErrorCode> {
-        Err(moto_rt::E_NOT_IMPLEMENTED) // This is deprected since Rust 1.16
-    }
-
-    fn only_v6(&self) -> Result<bool, ErrorCode> {
-        Err(moto_rt::E_NOT_IMPLEMENTED) // This is deprected since Rust 1.16
     }
 
     fn take_error(&self) -> ErrorCode {
@@ -834,6 +833,9 @@ impl TcpStream {
         Ok(())
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
     pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         unsafe {
             match option {
@@ -879,6 +881,9 @@ impl TcpStream {
         }
     }
 
+    /// # Safety
+    ///
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
     pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
         unsafe {
             match option {
@@ -948,8 +953,9 @@ impl TcpStream {
     fn set_tcp_state(&self, new_state: TcpState) {
         let mut prev_state = self.tcp_state();
         let mut new_state = new_state;
-        let mut notify_rx_done = false;
-        let mut notify_tx_done = false;
+        // Assigned on the only loop-exit path (the successful CAS break).
+        let notify_rx_done;
+        let notify_tx_done;
 
         if !new_state.can_read() {
             self.rx_closed.store(true, Ordering::Relaxed);
@@ -1432,6 +1438,9 @@ impl TcpStream {
         resp.status
     }
 
+    // SO_LINGER is implemented against sys-io but not yet wired to the
+    // setsockopt/getsockopt dispatch; kept for when the native API adds it.
+    #[allow(dead_code)]
     fn set_linger(&self, dur: Option<Duration>) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
@@ -1446,6 +1455,7 @@ impl TcpStream {
         self.channel().send_receive(req).status
     }
 
+    #[allow(dead_code)]
     fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
