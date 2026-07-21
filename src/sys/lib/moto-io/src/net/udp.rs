@@ -483,12 +483,21 @@ impl UdpSocket {
         self.rx_queue.lock().have_datagram().unwrap()
     }
 
+    // Dedup like the TCP wakers: a blocked recv/send re-registers on every
+    // block_on_recheck tick, so without the will_wake guard the same task's
+    // waker would accumulate until the next drain (cancel-safety hygiene).
     fn add_rx_waker(&self, waker: &core::task::Waker) {
-        self.rx_wakers.lock().push(waker.clone());
+        let mut wakers = self.rx_wakers.lock();
+        if !wakers.iter().any(|w| w.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
     }
 
     fn add_tx_waker(&self, waker: &core::task::Waker) {
-        self.tx_wakers.lock().push(waker.clone());
+        let mut wakers = self.tx_wakers.lock();
+        if !wakers.iter().any(|w| w.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
     }
 
     fn wake_rx_waiters(&self) {
