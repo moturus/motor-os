@@ -18,6 +18,13 @@ lorry [+toolchain] [GLOBAL] run   [--release|-r] [--target TRIPLE] [-- ARGS...]
 lorry [+toolchain] [GLOBAL] test  [--release|-r] [--target TRIPLE] [-- ARGS...]
 ```
 
+The global `--use-cargo-registry` option is an explicit offline compatibility
+mode. It resolves crates.io packages from Cargo's populated registry cache and
+compiles them at Cargo's unchanged source paths, which is the mode used for
+Cargo/Lorry release-byte comparisons. Cached archives and extracted sources
+are verified before use; the option never fetches or repairs Cargo's cache.
+Without it, Lorry uses its configured repositories.
+
 Run and test return the executed program's status. Build and operational
 failures return 101, command-line usage errors return 1, and help/version
 return 0. Build output is isolated below `target/lorry`; Lorry never reads

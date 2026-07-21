@@ -2920,6 +2920,40 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
   cache inputs. Invalid names, malformed directives, and attempts to obtain
   ambient values remain hard failures.
 
+### Round 42: explicit Cargo-registry compatibility mode
+
+#### Resolved during Stage-2 implementation
+
+- Lorry does not rewrite physical source paths to manufacture release-byte
+  identity. Source-path normalization is visible compiler behavior and must
+  not be introduced implicitly.
+- The global `--use-cargo-registry` flag selects an explicit, offline
+  compatibility/oracle mode for `build`, `run`, and `test`. In that mode,
+  crates.io resolution and compilation use Cargo's populated registry below
+  `CARGO_HOME`, or `$HOME/.cargo` when `CARGO_HOME` is unset. Normal commands
+  continue to use only Lorry's configured repositories.
+- Every selected crates.io package must have both Cargo's cached `.crate`
+  archive and its extracted source directory in the same crates.io registry
+  cache. Lorry hashes the archive against Cargo.lock, extracts and validates it
+  privately under the normal policy limits, compares the extracted contents
+  with Cargo's source directory apart from Cargo's own top-level `.cargo-ok`
+  marker, and parses the verified cached manifest. Missing, ambiguous,
+  modified, linked, special, or checksum-mismatched cache entries are hard
+  errors; this mode never fetches or repairs Cargo's cache.
+- Resolver records for locked crates.io packages are derived from those
+  verified cached manifests and Cargo.lock checksums. Lorry repositories are
+  not consulted for crates.io index records, archives, source trees, or policy
+  evidence in this mode. Policy evaluation and all graph, archive, tree, and
+  transaction limits remain enforced.
+- Ordinary path dependencies and patches remain at their Cargo-declared
+  paths. A configured required patch must be materialized at its declared
+  logical Cargo path and match the rule's exact name, version, and source-tree
+  digest; compatibility mode does not silently redirect it to a Lorry object.
+- Because rustc receives the same physical package paths as Cargo, path text
+  embedded by macros, diagnostics, or panic locations is naturally identical.
+  No `--remap-path-prefix`, symlink view, source copy, or hidden compiler flag
+  is added. Clean Cargo/Lorry release comparisons use this explicit mode.
+
 ## Stage-1/2 design closure and external start gates
 
 Design items 1–8 are resolved by the rounds above and are reflected in the
