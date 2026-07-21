@@ -6,11 +6,15 @@ use crate::dependency;
 use crate::diagnostic::{Error, Result};
 use crate::executor;
 use crate::hash::{hex, sha256_file};
-use crate::identity::{Identity, IdentityInput, cargo_identity};
-use crate::manifest::{Edition, Lto, Manifest, Strip};
+use crate::identity::{
+    CargoUnitLto, Identity, IdentityInput, RootTargetKind, cargo_identity, root_lto,
+};
+use crate::manifest::{BinaryTarget, Edition, LibraryTarget, Manifest, Strip};
 use crate::process::{self, RustcCommand};
 use crate::repository::RepositorySet;
-use crate::resolver::{Options as ResolverOptions, Resolution, TargetSelection};
+use crate::resolver::{
+    Options as ResolverOptions, Resolution, TargetSelection, selected_root_features,
+};
 use crate::source_tree::{DEFAULT_LIMITS, Limits as TreeLimits};
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::unit::{CompilationPlan, PlanOptions, UnitKind};
@@ -94,7 +98,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             Ok(0)
         }
         Command::Run(options) => {
-            let artifact = build(Build {
+            let artifacts = build(Build {
                 manifest: &manifest,
                 config: &config,
                 toolchain: &toolchain,
@@ -111,8 +115,14 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
             })?;
+            let artifact = artifacts.binary.as_deref().ok_or_else(|| {
+                Error::failure(format!(
+                    "package `{}` has no binary target to run",
+                    manifest.name
+                ))
+            })?;
             run_artifact(
-                &artifact,
+                artifact,
                 &options.arguments,
                 &manifest.root,
                 physical_target.as_deref(),
@@ -126,7 +136,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                     "note: Stage 1 runs binary unit tests; documentation tests are not supported"
                 );
             }
-            let artifact = build(Build {
+            let artifacts = build(Build {
                 manifest: &manifest,
                 config: &config,
                 toolchain: &toolchain,
@@ -144,7 +154,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 use_cargo_registry: cli.use_cargo_registry,
             })?;
             run_artifact(
-                &artifact,
+                &artifacts.primary,
                 &options.arguments,
                 &manifest.root,
                 physical_target.as_deref(),
@@ -174,7 +184,13 @@ struct Build<'a> {
     use_cargo_registry: bool,
 }
 
-fn build(build: Build<'_>) -> Result<PathBuf> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BuildArtifacts {
+    primary: PathBuf,
+    binary: Option<PathBuf>,
+}
+
+fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     if build.verbosity != Verbosity::Quiet {
         eprintln!(
             "Compiling {} v{} ({})",
@@ -290,39 +306,11 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
     prepared
         .revalidate_cargo_registry_sources(repository_tree_limits(&build.config.policy.limits)?)?;
     let root_dependencies = root_dependencies(&prepared.resolution, &plan, &dependency_outputs)?;
-    let dependency_identities = root_dependencies
-        .iter()
-        .map(|dependency| dependency.identity.clone())
-        .collect::<Vec<_>>();
-    let identity = cargo_identity(&IdentityInput {
-        package_name: &build.manifest.name,
-        version: &build.manifest.version,
-        target_name: &build.manifest.crate_name,
-        release: build.release,
-        test: build.test,
-        logical_target: build.logical_target,
-        release_profile: &build.manifest.release,
-        rustc: build.toolchain,
-        rustflags: build.rustflags,
-        dependencies: &dependency_identities,
-    });
-    let arguments = rustc_arguments(
-        &build,
-        &identity,
-        staging.path(),
-        &host_profile,
-        &root_dependencies,
-    );
-    let environment = rustc_environment(&build, &host_profile)?;
-    RustcCommand {
-        program: &build.toolchain.rustc,
-        arguments: &arguments,
-        environment: &environment,
-        current_dir: &build.manifest.root,
-        verbose: build.verbosity == Verbosity::Verbose,
-        color: build.color,
-    }
-    .run()?;
+    let compiled = if build.test {
+        compile_legacy_test_target(&build, staging.path(), &host_profile, &root_dependencies)?
+    } else {
+        compile_root_targets(&build, staging.path(), &host_profile, &root_dependencies)?
+    };
 
     drop(prepared);
     if build.physical_target.is_some() {
@@ -334,39 +322,20 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
         })?;
     }
 
-    let dependency_artifact = dependencies.join(format!(
-        "{}{}",
-        build.manifest.crate_name, identity.extra_filename
-    ));
-    if !dependency_artifact.is_file() {
-        return Err(Error::failure(format!(
-            "rustc succeeded but expected artifact `{}` is missing",
-            dependency_artifact.display()
-        )));
-    }
-    let staged_artifact = if build.test {
-        dependency_artifact
-    } else {
-        let primary = staging.path().join(&build.manifest.crate_name);
-        match fs::hard_link(&dependency_artifact, &primary) {
-            Ok(()) => {}
-            Err(_) => {
-                fs::copy(&dependency_artifact, &primary).map_err(|error| {
-                    Error::failure(format!(
-                        "failed to install primary artifact `{}`: {error}",
-                        primary.display()
-                    ))
-                })?;
-            }
-        }
-        primary
-    };
-    let relative_artifact = staged_artifact
+    let relative_primary = compiled
+        .primary
         .strip_prefix(staging.path())
         .unwrap()
         .to_path_buf();
+    let relative_binary = compiled
+        .binary
+        .as_ref()
+        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf());
     staging.commit(&destination)?;
-    let artifact = destination.join(relative_artifact);
+    let artifacts = BuildArtifacts {
+        primary: destination.join(relative_primary),
+        binary: relative_binary.map(|artifact| destination.join(artifact)),
+    };
 
     if build.verbosity != Verbosity::Quiet {
         eprintln!(
@@ -377,17 +346,18 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
     if build.verbosity == Verbosity::Verbose {
         eprintln!(
             "Artifact {} sha256={}",
-            artifact.display(),
-            hex(&sha256_file(&artifact)?)
+            artifacts.primary.display(),
+            hex(&sha256_file(&artifacts.primary)?)
         );
     }
-    Ok(artifact)
+    Ok(artifacts)
 }
 
 struct RootDependency {
     alias: String,
     identity: Identity,
-    artifact: PathBuf,
+    rlib: PathBuf,
+    rmeta: PathBuf,
 }
 
 fn root_dependencies(
@@ -414,8 +384,10 @@ fn root_dependencies(
                 edge.package.name, edge.package.version
             )));
         }
-        let artifact = match outputs.artifacts.get(key) {
-            Some(crate::compile::RustcOutput::Library { rlib, .. }) => rlib.clone(),
+        let (rlib, rmeta) = match outputs.artifacts.get(key) {
+            Some(crate::compile::RustcOutput::Library { rlib, rmeta, .. }) => {
+                (rlib.clone(), rmeta.clone())
+            }
             _ => {
                 return Err(Error::failure(format!(
                     "root dependency `{} {}` did not produce a library artifact",
@@ -435,50 +407,352 @@ fn root_dependencies(
         result.push(RootDependency {
             alias,
             identity: planned.identity.clone(),
-            artifact,
+            rlib,
+            rmeta,
         });
     }
     Ok(result)
 }
 
+#[derive(Clone, Copy)]
+enum RootTarget<'a> {
+    Library(&'a LibraryTarget),
+    Binary(&'a BinaryTarget),
+}
+
+impl<'a> RootTarget<'a> {
+    fn name(self) -> &'a str {
+        match self {
+            Self::Library(target) => &target.name,
+            Self::Binary(target) => &target.name,
+        }
+    }
+
+    fn crate_name(self) -> String {
+        self.name().replace('-', "_")
+    }
+
+    fn path(self) -> &'a Path {
+        match self {
+            Self::Library(target) => &target.path,
+            Self::Binary(target) => &target.path,
+        }
+    }
+
+    fn kind(self) -> RootTargetKind {
+        match self {
+            Self::Library(_) => RootTargetKind::Library,
+            Self::Binary(_) => RootTargetKind::Binary,
+        }
+    }
+}
+
+struct RootLibraryArtifact {
+    identity: Identity,
+    rlib: PathBuf,
+}
+
+struct StagedArtifacts {
+    primary: PathBuf,
+    binary: Option<PathBuf>,
+}
+
+fn compile_root_targets(
+    build: &Build<'_>,
+    staging: &Path,
+    host_profile: &Path,
+    dependencies: &[RootDependency],
+) -> Result<StagedArtifacts> {
+    let features = selected_root_features(build.manifest)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let library = build
+        .manifest
+        .library
+        .as_ref()
+        .map(|target| {
+            compile_root_library(
+                build,
+                target,
+                staging,
+                host_profile,
+                dependencies,
+                &features,
+            )
+        })
+        .transpose()?;
+    let binary = build
+        .manifest
+        .binaries
+        .first()
+        .map(|target| {
+            compile_root_binary(
+                build,
+                target,
+                false,
+                staging,
+                host_profile,
+                dependencies,
+                library.as_ref(),
+                &features,
+            )
+        })
+        .transpose()?;
+    if let Some((hashed, primary)) = binary {
+        install_primary(&hashed, &primary)?;
+        return Ok(StagedArtifacts {
+            primary: primary.clone(),
+            binary: Some(primary),
+        });
+    }
+    let library = library.ok_or_else(|| {
+        Error::failure(format!(
+            "package `{}` has no supported root target",
+            build.manifest.name
+        ))
+    })?;
+    Ok(StagedArtifacts {
+        primary: library.rlib,
+        binary: None,
+    })
+}
+
+fn compile_legacy_test_target(
+    build: &Build<'_>,
+    staging: &Path,
+    host_profile: &Path,
+    dependencies: &[RootDependency],
+) -> Result<StagedArtifacts> {
+    let features = selected_root_features(build.manifest)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let binary = build
+        .manifest
+        .binaries
+        .first()
+        .filter(|target| target.test)
+        .ok_or_else(|| {
+            Error::failure("the current test engine requires an enabled binary test target")
+                .with_help("integration and library test targets are the next Stage-2 sub-stage")
+        })?;
+    let (artifact, _) = compile_root_binary(
+        build,
+        binary,
+        true,
+        staging,
+        host_profile,
+        dependencies,
+        None,
+        &features,
+    )?;
+    Ok(StagedArtifacts {
+        primary: artifact,
+        binary: None,
+    })
+}
+
+fn compile_root_library(
+    build: &Build<'_>,
+    target: &LibraryTarget,
+    staging: &Path,
+    host_profile: &Path,
+    dependencies: &[RootDependency],
+    features: &[String],
+) -> Result<RootLibraryArtifact> {
+    let identities = dependencies
+        .iter()
+        .map(|dependency| dependency.identity.clone())
+        .collect::<Vec<_>>();
+    let target = RootTarget::Library(target);
+    let identity = root_identity(build, target, false, features, &identities);
+    let arguments = rustc_arguments(
+        build,
+        target,
+        false,
+        &identity,
+        staging,
+        host_profile,
+        dependencies,
+        None,
+        features,
+    );
+    run_root_rustc(build, target, host_profile, &arguments)?;
+    let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
+    let rlib = staging.join("deps").join(format!("lib{stem}.rlib"));
+    let rmeta = staging.join("deps").join(format!("lib{stem}.rmeta"));
+    verify_artifacts([&rlib, &rmeta])?;
+    Ok(RootLibraryArtifact { identity, rlib })
+}
+
+fn compile_root_binary(
+    build: &Build<'_>,
+    target: &BinaryTarget,
+    test: bool,
+    staging: &Path,
+    host_profile: &Path,
+    dependencies: &[RootDependency],
+    library: Option<&RootLibraryArtifact>,
+    features: &[String],
+) -> Result<(PathBuf, PathBuf)> {
+    let mut identities = dependencies
+        .iter()
+        .map(|dependency| dependency.identity.clone())
+        .collect::<Vec<_>>();
+    if let Some(library) = library {
+        identities.push(library.identity.clone());
+    }
+    let target = RootTarget::Binary(target);
+    let identity = root_identity(build, target, test, features, &identities);
+    let arguments = rustc_arguments(
+        build,
+        target,
+        test,
+        &identity,
+        staging,
+        host_profile,
+        dependencies,
+        library,
+        features,
+    );
+    run_root_rustc(build, target, host_profile, &arguments)?;
+    let hashed = staging.join("deps").join(format!(
+        "{}{}",
+        target.crate_name(),
+        identity.extra_filename
+    ));
+    verify_artifacts([&hashed])?;
+    Ok((hashed, staging.join(target.name())))
+}
+
+fn root_identity(
+    build: &Build<'_>,
+    target: RootTarget<'_>,
+    test: bool,
+    features: &[String],
+    dependencies: &[Identity],
+) -> Identity {
+    cargo_identity(&IdentityInput {
+        package_name: &build.manifest.name,
+        version: &build.manifest.version,
+        target_name: target.name(),
+        target_kind: target.kind(),
+        features,
+        release: build.release,
+        test,
+        logical_target: build.logical_target,
+        release_profile: &build.manifest.release,
+        rustc: build.toolchain,
+        rustflags: build.rustflags,
+        dependencies,
+    })
+}
+
+fn run_root_rustc(
+    build: &Build<'_>,
+    target: RootTarget<'_>,
+    host_profile: &Path,
+    arguments: &[OsString],
+) -> Result<()> {
+    let environment = rustc_environment(build, host_profile, target)?;
+    RustcCommand {
+        program: &build.toolchain.rustc,
+        arguments,
+        environment: &environment,
+        current_dir: &build.manifest.root,
+        verbose: build.verbosity == Verbosity::Verbose,
+        color: build.color,
+    }
+    .run()
+}
+
+fn verify_artifacts<'a>(artifacts: impl IntoIterator<Item = &'a PathBuf>) -> Result<()> {
+    for artifact in artifacts {
+        if !artifact.is_file() {
+            return Err(Error::failure(format!(
+                "rustc succeeded but expected artifact `{}` is missing",
+                artifact.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn install_primary(source: &Path, destination: &Path) -> Result<()> {
+    match fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) => fs::copy(source, destination).map(|_| ()).map_err(|error| {
+            Error::failure(format!(
+                "failed to install primary artifact `{}`: {error}",
+                destination.display()
+            ))
+        }),
+    }
+}
+
 fn rustc_arguments(
     build: &Build<'_>,
+    target: RootTarget<'_>,
+    test: bool,
     identity: &Identity,
     staging: &Path,
     host_profile: &Path,
     root_dependencies: &[RootDependency],
+    root_library: Option<&RootLibraryArtifact>,
+    features: &[String],
 ) -> Vec<OsString> {
     let mut args = Vec::new();
     push(&mut args, "--crate-name");
-    push(&mut args, &build.manifest.crate_name);
+    push(&mut args, &target.crate_name());
     push(
         &mut args,
         &format!("--edition={}", edition_name(build.manifest.edition)),
     );
-    push(&mut args, "src/main.rs");
+    args.push(
+        target
+            .path()
+            .strip_prefix(&build.manifest.root)
+            .expect("root target path came from a validated relative manifest path")
+            .as_os_str()
+            .to_owned(),
+    );
     push(&mut args, "--error-format=json");
     push(
         &mut args,
         "--json=diagnostic-rendered-ansi,artifacts,future-incompat",
     );
-    if !build.test {
+    if !test {
         push(&mut args, "--crate-type");
-        push(&mut args, "bin");
+        push(
+            &mut args,
+            match target.kind() {
+                RootTargetKind::Library => "lib",
+                RootTargetKind::Binary => "bin",
+            },
+        );
     }
-    push(&mut args, "--emit=dep-info,link");
+    push(
+        &mut args,
+        if target.kind() == RootTargetKind::Library {
+            "--emit=dep-info,metadata,link"
+        } else {
+            "--emit=dep-info,link"
+        },
+    );
 
     if build.release {
         codegen(&mut args, "opt-level=3");
-        if build.manifest.release.panic_abort && !build.test {
+        if build.manifest.release.panic_abort && !test {
             codegen(&mut args, "panic=abort");
         }
-        match build.manifest.release.lto {
-            Lto::Default => codegen(&mut args, "embed-bitcode=no"),
-            Lto::True => codegen(&mut args, "lto"),
-            Lto::Fat => codegen(&mut args, "lto=fat"),
-            Lto::Thin => codegen(&mut args, "lto=thin"),
-            Lto::Off => codegen(&mut args, "lto=off"),
-        }
+        root_lto_arguments(
+            &mut args,
+            root_lto(
+                build.release,
+                build.manifest.release.lto,
+                target.kind(),
+                test,
+            ),
+        );
         if let Some(units) = build.manifest.release.codegen_units {
             codegen(&mut args, &format!("codegen-units={units}"));
         }
@@ -486,13 +760,28 @@ fn rustc_arguments(
         codegen(&mut args, "embed-bitcode=no");
         codegen(&mut args, "debuginfo=2");
     }
-    if build.test {
+    args.extend(crate::compile::lint_arguments(build.manifest));
+    for feature in features {
+        push(&mut args, "--cfg");
+        push(&mut args, &format!("feature=\"{feature}\""));
+    }
+    if test {
         push(&mut args, "--test");
     }
     push(&mut args, "--check-cfg");
     push(&mut args, "cfg(docsrs,test)");
     push(&mut args, "--check-cfg");
-    push(&mut args, "cfg(feature, values())");
+    push(
+        &mut args,
+        &format!(
+            "cfg(feature, values({}))",
+            crate::compile::declared_features(build.manifest)
+                .iter()
+                .map(|feature| format!("\"{feature}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
     codegen(&mut args, &format!("metadata={}", identity.metadata));
     codegen(
         &mut args,
@@ -529,22 +818,58 @@ fn rustc_arguments(
     }
     for dependency in root_dependencies {
         push(&mut args, "--extern");
-        args.push(format!("{}={}", dependency.alias, dependency.artifact.display()).into());
+        let artifact = if target.kind() == RootTargetKind::Library {
+            &dependency.rmeta
+        } else {
+            &dependency.rlib
+        };
+        args.push(format!("{}={}", dependency.alias, artifact.display()).into());
+    }
+    if let Some(library) = root_library {
+        let name = build
+            .manifest
+            .library
+            .as_ref()
+            .unwrap()
+            .name
+            .replace('-', "_");
+        push(&mut args, "--extern");
+        args.push(format!("{name}={}", library.rlib.display()).into());
     }
     args.extend(build.rustflags.iter().map(OsString::from));
     push(&mut args, "--verbose");
     args
 }
 
-fn rustc_environment(build: &Build<'_>, host_profile: &Path) -> Result<BTreeMap<String, OsString>> {
+fn root_lto_arguments(arguments: &mut Vec<OsString>, lto: CargoUnitLto<'_>) {
+    match lto {
+        CargoUnitLto::Run(None) => codegen(arguments, "lto"),
+        CargoUnitLto::Run(Some(mode)) => codegen(arguments, &format!("lto={mode}")),
+        CargoUnitLto::Off => {
+            codegen(arguments, "lto=off");
+            codegen(arguments, "embed-bitcode=no");
+        }
+        CargoUnitLto::OnlyBitcode => codegen(arguments, "linker-plugin-lto"),
+        CargoUnitLto::ObjectAndBitcode => {}
+        CargoUnitLto::OnlyObject => codegen(arguments, "embed-bitcode=no"),
+    }
+}
+
+fn rustc_environment(
+    build: &Build<'_>,
+    host_profile: &Path,
+    target: RootTarget<'_>,
+) -> Result<BTreeMap<String, OsString>> {
     let manifest = build.manifest;
     let version = &manifest.version;
     let mut values = BTreeMap::new();
     let current_exe = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
     value(&mut values, "CARGO", current_exe.as_os_str());
-    value(&mut values, "CARGO_BIN_NAME", &manifest.crate_name);
-    value(&mut values, "CARGO_CRATE_NAME", &manifest.crate_name);
+    if let RootTarget::Binary(binary) = target {
+        value(&mut values, "CARGO_BIN_NAME", &binary.name);
+    }
+    value(&mut values, "CARGO_CRATE_NAME", target.crate_name());
     value(&mut values, "CARGO_MANIFEST_DIR", manifest.root.as_os_str());
     value(
         &mut values,
@@ -818,6 +1143,23 @@ mod tests {
             )
             .unwrap();
         }
+
+        fn add_root_library(&self) {
+            let mut manifest = fs::read_to_string(self.0.join("Cargo.toml")).unwrap();
+            manifest.push_str("[features]\ndefault = [\"enabled\"]\nenabled = []\n");
+            fs::write(self.0.join("Cargo.toml"), manifest).unwrap();
+            fs::write(
+                self.0.join("src/lib.rs"),
+                "#[cfg(not(feature = \"enabled\"))]\ncompile_error!(\"default feature missing\");\n\
+                 pub fn value() -> &'static str { local_dependency::VALUE }\n",
+            )
+            .unwrap();
+            fs::write(
+                self.0.join("src/main.rs"),
+                "fn main() { print!(\"{}\", root_bin::value()); }\n",
+            )
+            .unwrap();
+        }
     }
 
     impl Drop for Fixture {
@@ -853,9 +1195,100 @@ mod tests {
             use_cargo_registry: false,
         })
         .unwrap();
-        let output = std::process::Command::new(artifact).output().unwrap();
+        let output = std::process::Command::new(artifact.binary.unwrap())
+            .output()
+            .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"dependency-ok");
+    }
+
+    #[test]
+    fn builds_the_root_library_before_the_binary() {
+        let fixture = Fixture::new();
+        fixture.add_root_library();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifacts = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: false,
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+        })
+        .unwrap();
+        let output = std::process::Command::new(artifacts.binary.unwrap())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"dependency-ok");
+        assert!(
+            fs::read_dir(fixture.0.join("target/lorry/debug/deps"))
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("libroot_bin-"))
+        );
+    }
+
+    #[test]
+    fn builds_a_library_only_root_package() {
+        let fixture = Fixture::new();
+        fs::remove_file(fixture.0.join("src/main.rs")).unwrap();
+        fs::write(
+            fixture.0.join("src/lib.rs"),
+            "pub fn value() -> &'static str { local_dependency::VALUE }\n",
+        )
+        .unwrap();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifacts = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: false,
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+        })
+        .unwrap();
+        assert!(artifacts.binary.is_none());
+        assert!(artifacts.primary.is_file());
+        assert!(
+            artifacts
+                .primary
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("libroot_bin-")
+        );
     }
 
     #[test]
@@ -901,7 +1334,9 @@ mod tests {
             use_cargo_registry: false,
         })
         .unwrap();
-        let output = std::process::Command::new(artifact).output().unwrap();
+        let output = std::process::Command::new(artifact.binary.unwrap())
+            .output()
+            .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"build-script-ok");
     }

@@ -2836,6 +2836,15 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      artifact names and executables on Linux; the closure SHA-256 for this
      checkpoint was
      `7f716130606d70b59acca2208c44215e46a8320291b061c302fa8a1ddb6ed48d`.
+   - Normal root builds now compile the supported library before the binary,
+     use metadata artifacts for library inputs and linkable artifacts for the
+     binary, preserve declared target names and Cargo's root-relative source
+     paths, forward selected default root features, and support library-only
+     packages. Frozen Stage-1 identities remain unchanged. The captured
+     `moto_rush`/`rush` release identities pass, and a clean Cargo build and
+     explicit-Cargo-registry Lorry build produced the same `moto_rush` rlib
+     and byte-identical `rush` executable with SHA-256
+     `16f893a510b7f364f7ad511d10ec165a7c1173018f76f5b54f5014a26989940c`.
 
 6. **Finish Stage-2 cache, bundle, and core self-hosting.**
    - Add the Round-22 content-addressed library/build-output cache with cold,

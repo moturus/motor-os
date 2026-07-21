@@ -17,6 +17,8 @@ pub struct IdentityInput<'a> {
     pub package_name: &'a str,
     pub version: &'a Version,
     pub target_name: &'a str,
+    pub target_kind: RootTargetKind,
+    pub features: &'a [String],
     pub release: bool,
     pub test: bool,
     /// Cargo's logical compile kind. Native Motor uses an explicit logical
@@ -34,23 +36,37 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
         package_name: input.package_name,
         version: input.version,
         source: CargoSource::Path(""),
-        features: &[],
+        features: input.features,
         profile: &profile,
         mode: if input.test {
             CargoCompileMode::Test
         } else {
             CargoCompileMode::Build
         },
-        lto: stage_one_lto(input.release, input.release_profile.lto),
+        lto: root_lto(
+            input.release,
+            input.release_profile.lto,
+            input.target_kind,
+            input.test,
+        ),
         logical_target: input.logical_target,
         target_name: input.target_name,
-        target_kind: CargoTargetKind::Bin,
+        target_kind: match input.target_kind {
+            RootTargetKind::Library => CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
+            RootTargetKind::Binary => CargoTargetKind::Bin,
+        },
         rustc: input.rustc,
         rustflags: input.rustflags,
         extra_arguments: &[],
         dependencies: input.dependencies,
         host_configuration_differs: None,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootTargetKind {
+    Library,
+    Binary,
 }
 
 pub struct CargoUnitIdentityInput<'a> {
@@ -325,7 +341,25 @@ fn manifest_strip(strip: ManifestStrip) -> CargoStrip<'static> {
     }
 }
 
-fn stage_one_lto(release: bool, profile_lto: ManifestLto) -> CargoUnitLto<'static> {
+pub fn root_lto(
+    release: bool,
+    profile_lto: ManifestLto,
+    target_kind: RootTargetKind,
+    test: bool,
+) -> CargoUnitLto<'static> {
+    if target_kind == RootTargetKind::Library && !test {
+        return if release {
+            match profile_lto {
+                ManifestLto::True | ManifestLto::Fat | ManifestLto::Thin => {
+                    CargoUnitLto::OnlyBitcode
+                }
+                ManifestLto::Off => CargoUnitLto::Off,
+                ManifestLto::Default => CargoUnitLto::OnlyObject,
+            }
+        } else {
+            CargoUnitLto::OnlyObject
+        };
+    }
     if release {
         match profile_lto {
             ManifestLto::True => CargoUnitLto::Run(None),
@@ -394,6 +428,15 @@ mod tests {
             patch: parsed.patch,
             pre: parsed.pre.to_string(),
             build: parsed.build.to_string(),
+        }
+    }
+
+    fn captured_identity(metadata: &str, extra_filename: &str) -> Identity {
+        Identity {
+            metadata: metadata.to_owned(),
+            extra_filename: extra_filename.to_owned(),
+            metadata_value: u64::from_str_radix(metadata, 16).unwrap(),
+            unit_id_value: u64::from_str_radix(extra_filename.trim_start_matches('-'), 16).unwrap(),
         }
     }
 
@@ -598,6 +641,8 @@ mod tests {
                 package_name: "red",
                 version: &version,
                 target_name: "red",
+                target_kind: RootTargetKind::Binary,
+                features: &[],
                 release,
                 test,
                 logical_target: target,
@@ -615,6 +660,47 @@ mod tests {
                 "release={release} test={test} target={target:?}"
             );
         }
+    }
+
+    #[test]
+    fn matches_the_rush_root_library_and_binary_oracle() {
+        let libc = captured_identity("e8cf5400220b6b46", "-4c594f23b34d121c");
+        let version = version();
+        let profile = profile();
+        let toolchain = native_toolchain();
+        let library = cargo_identity(&IdentityInput {
+            package_name: "moto-rush",
+            version: &version,
+            target_name: "moto_rush",
+            target_kind: RootTargetKind::Library,
+            features: &[],
+            release: true,
+            test: false,
+            logical_target: None,
+            release_profile: &profile,
+            rustc: &toolchain,
+            rustflags: &[],
+            dependencies: std::slice::from_ref(&libc),
+        });
+        assert_eq!(library.metadata, "fe7dad0dd7e45261");
+        assert_eq!(library.extra_filename, "-f04486fca22dc62e");
+
+        let binary = cargo_identity(&IdentityInput {
+            package_name: "moto-rush",
+            version: &version,
+            target_name: "rush",
+            target_kind: RootTargetKind::Binary,
+            features: &[],
+            release: true,
+            test: false,
+            logical_target: None,
+            release_profile: &profile,
+            rustc: &toolchain,
+            rustflags: &[],
+            dependencies: &[libc, library],
+        });
+        assert_eq!(binary.metadata, "08ff74a380108d7e");
+        assert_eq!(binary.extra_filename, "-96c671f6ca98063a");
     }
 
     #[test]

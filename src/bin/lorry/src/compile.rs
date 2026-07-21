@@ -477,7 +477,7 @@ fn rustc_environment(
     Ok(values)
 }
 
-fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
+pub(crate) fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
     let mut lints = manifest
         .rust_lints
         .iter()
@@ -506,7 +506,7 @@ fn lint_arguments(manifest: &Manifest) -> Vec<OsString> {
     arguments
 }
 
-fn declared_features(manifest: &Manifest) -> BTreeSet<String> {
+pub(crate) fn declared_features(manifest: &Manifest) -> BTreeSet<String> {
     let mut features = manifest.features.keys().cloned().collect::<BTreeSet<_>>();
     let namespaced = manifest
         .features

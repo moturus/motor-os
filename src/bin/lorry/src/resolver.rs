@@ -742,6 +742,17 @@ struct RootRequirement {
 }
 
 fn root_requirements(manifest: &Manifest, all_features: bool) -> Result<Vec<RootRequirement>> {
+    root_requirements_and_features(manifest, all_features).map(|(requirements, _)| requirements)
+}
+
+pub fn selected_root_features(manifest: &Manifest) -> Result<BTreeSet<String>> {
+    root_requirements_and_features(manifest, false).map(|(_, features)| features)
+}
+
+fn root_requirements_and_features(
+    manifest: &Manifest,
+    all_features: bool,
+) -> Result<(Vec<RootRequirement>, BTreeSet<String>)> {
     let mut enabled = BTreeSet::new();
     for (index, dependency) in manifest.dependencies.iter().enumerate() {
         if !dependency.optional {
@@ -849,7 +860,7 @@ fn root_requirements(manifest: &Manifest, all_features: bool) -> Result<Vec<Root
             },
         });
     }
-    Ok(output)
+    Ok((output, active))
 }
 
 fn expand_root_reference(
