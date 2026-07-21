@@ -32,6 +32,7 @@ pub struct Manifest {
     pub library: Option<LibraryTarget>,
     #[allow(dead_code)]
     pub binaries: Vec<BinaryTarget>,
+    pub integration_tests: Vec<IntegrationTestTarget>,
     #[allow(dead_code)]
     pub dependencies: Vec<Dependency>,
     #[allow(dead_code)]
@@ -134,6 +135,12 @@ pub struct BinaryTarget {
     pub test: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrationTestTarget {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dependency {
@@ -216,6 +223,7 @@ impl Manifest {
         manifest.root = root;
         manifest.path = manifest.root.join(MANIFEST_NAME);
         resolve_target_defaults(&mut manifest)?;
+        manifest.integration_tests = discover_integration_tests(&manifest.root)?;
 
         let lock_path = manifest.root.join(LOCK_NAME);
         if !lock_path.is_file() {
@@ -375,6 +383,7 @@ impl Manifest {
             build_script,
             library,
             binaries,
+            integration_tests: Vec::new(),
             dependencies,
             features,
             patches,
@@ -807,6 +816,84 @@ fn resolve_target_defaults(manifest: &mut Manifest) -> Result<()> {
         .with_help("add `src/lib.rs`, `src/main.rs`, or one supported `[[bin]]`"));
     }
     Ok(())
+}
+
+fn discover_integration_tests(root: &Path) -> Result<Vec<IntegrationTestTarget>> {
+    let directory = root.join("tests");
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to inspect integration-test directory `{}`: {error}",
+                directory.display()
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::failure(format!(
+            "integration-test path `{}` is not a real directory",
+            directory.display()
+        )));
+    }
+
+    let mut targets = Vec::new();
+    let mut crate_names = BTreeSet::new();
+    for entry in fs::read_dir(&directory).map_err(|error| {
+        Error::failure(format!(
+            "failed to read integration-test directory `{}`: {error}",
+            directory.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::failure(format!(
+                "failed to read an integration-test entry in `{}`: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect integration-test entry `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::failure(format!(
+                "integration-test entry `{}` is a symbolic link",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() || path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(Error::failure(format!(
+                "integration-test entry `{}` is not a regular file",
+                path.display()
+            )));
+        }
+        let name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                Error::failure(format!(
+                    "integration-test filename `{}` is not valid UTF-8",
+                    path.display()
+                ))
+            })?
+            .to_owned();
+        validate_package_name(&root.join(MANIFEST_NAME), 1, &name)?;
+        let crate_name = name.replace('-', "_");
+        if !crate_names.insert(crate_name.clone()) {
+            return Err(Error::failure(format!(
+                "integration-test target `{name}` has duplicate crate name `{crate_name}`"
+            )));
+        }
+        targets.push(IntegrationTestTarget { name, path });
+    }
+    targets.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(targets)
 }
 
 fn parse_dependency_table(
@@ -2206,6 +2293,82 @@ members = ["ignored-member"]
 
         fs::write(root.join("Cargo.lock"), "version = 3\n").unwrap();
         assert!(Manifest::load_for_vendor(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_sorted_direct_integration_test_targets() {
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lorry-integration-targets-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests/nested")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"integration-root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"integration-root\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("tests/z.rs"), "").unwrap();
+        fs::write(root.join("tests/a-b.rs"), "").unwrap();
+        fs::write(root.join("tests/readme.txt"), "").unwrap();
+        fs::write(root.join("tests/nested/main.rs"), "").unwrap();
+
+        let manifest = Manifest::load(&root).unwrap();
+        assert_eq!(
+            manifest
+                .integration_tests
+                .iter()
+                .map(|target| target.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a-b", "z"]
+        );
+        assert_eq!(
+            manifest.integration_tests[0].path,
+            root.join("tests/a-b.rs")
+        );
+
+        fs::write(root.join("tests/a_b.rs"), "").unwrap();
+        assert!(Manifest::load(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_linked_integration_test_entries() {
+        use std::os::unix::fs::symlink;
+
+        let id = NEXT_VENDOR_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lorry-linked-integration-targets-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"integration-root\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"integration-root\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("outside.rs"), "").unwrap();
+        symlink(root.join("outside.rs"), root.join("tests/linked.rs")).unwrap();
+
+        assert!(Manifest::load(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

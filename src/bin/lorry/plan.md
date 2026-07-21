@@ -2845,6 +2845,10 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      explicit-Cargo-registry Lorry build produced the same `moto_rush` rlib
      and byte-identical `rush` executable with SHA-256
      `16f893a510b7f364f7ad511d10ec165a7c1173018f76f5b54f5014a26989940c`.
+   - Root manifests now discover direct `tests/*.rs` integration targets in
+     deterministic target-name order, ignore out-of-scope nested/non-Rust
+     files, and reject linked, special, non-UTF-8, invalid, or crate-name-
+     colliding entries before compilation.
 
 6. **Finish Stage-2 cache, bundle, and core self-hosting.**
    - Add the Round-22 content-addressed library/build-output cache with cold,
