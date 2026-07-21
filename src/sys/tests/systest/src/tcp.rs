@@ -672,6 +672,85 @@ fn test_concurrent_readers() {
     std::thread::sleep(Duration::from_millis(10));
 }
 
+// A timeout storm during a live transfer, aimed at TcpWriteFuture's subtlest
+// rule-7 case: a write that commits partial progress to pending_tx and is then
+// dropped when SO_SNDTIMEO fires. The peer drains stop-and-go, so the client's
+// pipeline repeatedly fills during the stalls and its short-timeout writes are
+// created and dropped mid-flight -- some surrendering partial progress (Ok(n)),
+// some zero-progress (Err(TimedOut), retried). Every byte must still arrive
+// exactly once and in order: a drop that lost or double-counted bytes trips the
+// order check, and a lost backpressure wake would hang (the watchdog flags it).
+fn test_timeout_storm_during_transfer() {
+    const N: usize = 1024 * 1024;
+    let listener = std::net::TcpListener::bind("127.0.0.1:3339").unwrap();
+    let received = Arc::new(AtomicUsize::new(0));
+    let ok = Arc::new(AtomicBool::new(true));
+
+    std::thread::scope(|s| {
+        let received_ref = &received;
+        let ok_ref = &ok;
+        s.spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let mut total = 0_usize;
+            while total < N {
+                match conn.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        for (pos, b) in buf[..n].iter().enumerate() {
+                            if *b != ((total + pos) & 255) as u8 {
+                                ok_ref.store(false, Ordering::Release);
+                            }
+                        }
+                        total += n;
+                        // Stall longer than the client's write timeout so the
+                        // pipeline fills and storms the client's write futures.
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => {
+                        ok_ref.store(false, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+            received_ref.store(total, Ordering::Release);
+        });
+
+        let mut client = std::net::TcpStream::connect("127.0.0.1:3339").unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_millis(2)))
+            .unwrap();
+
+        let mut chunk = [0_u8; 8192];
+        let mut sent = 0_usize;
+        let mut timeouts = 0_usize;
+        while sent < N {
+            for (pos, b) in chunk.iter_mut().enumerate() {
+                *b = ((sent + pos) & 255) as u8;
+            }
+            let want = (N - sent).min(chunk.len());
+            match std::io::Write::write(&mut client, &chunk[..want]) {
+                Ok(n) => {
+                    assert!(n > 0, "write returned Ok(0)");
+                    sent += n;
+                }
+                Err(e) => {
+                    assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+                    timeouts += 1;
+                }
+            }
+        }
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(timeouts > 0, "the storm produced no zero-progress timeout");
+    });
+
+    assert!(ok.load(Ordering::Acquire), "peer saw wrong bytes");
+    assert_eq!(received.load(Ordering::Acquire), N, "byte count mismatch");
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_timeout_storm_during_transfer() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
 pub fn run_all_tests() {
     test_channel_teardown();
     test_ipv6();
@@ -681,6 +760,7 @@ pub fn run_all_tests() {
     test_read_timeout_early_data();
     test_write_timeout();
     test_write_backpressure_integrity();
+    test_timeout_storm_during_transfer();
     test_concurrent_readers();
 }
 
