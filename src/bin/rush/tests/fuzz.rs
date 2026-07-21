@@ -18,6 +18,8 @@
 //! of the four [`Parsed`] outcomes, and — for [`parse_source`] — never claim
 //! "incomplete", since nothing more is coming. Both are asserted below.
 
+#![cfg(unix)]
+
 use std::process::Command;
 
 const RUSH: &str = env!("CARGO_BIN_EXE_rush");
