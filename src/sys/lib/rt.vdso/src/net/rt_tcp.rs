@@ -95,7 +95,7 @@ impl PosixFile for TcpListener {
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source().on_closed_locally(rt_fd);
+        listener_event_source(self).on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -106,12 +106,10 @@ impl PosixFile for TcpListener {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source()
-            .add_interests(r_id, source_fd, token, interests)?;
+        listener_event_source(self).add_interests(r_id, source_fd, token, interests)?;
 
-        let have_async_accepts = !self.async_accepts.lock().is_empty();
-        if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
-            self.event_source().on_event(moto_rt::poll::POLL_READABLE);
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.has_async_accepts() {
+            listener_event_source(self).on_event(moto_rt::poll::POLL_READABLE);
         }
 
         Ok(())
@@ -124,20 +122,30 @@ impl PosixFile for TcpListener {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source()
-            .set_interests(r_id, source_fd, token, interests)?;
+        listener_event_source(self).set_interests(r_id, source_fd, token, interests)?;
 
-        let have_async_accepts = !self.async_accepts.lock().is_empty();
-        if (interests & moto_rt::poll::POLL_READABLE != 0) && have_async_accepts {
-            self.event_source().on_event(moto_rt::poll::POLL_READABLE);
+        if (interests & moto_rt::poll::POLL_READABLE != 0) && self.has_async_accepts() {
+            listener_event_source(self).on_event(moto_rt::poll::POLL_READABLE);
         }
 
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source().del_interests(r_id, source_fd)
+        listener_event_source(self).del_interests(r_id, source_fd)
     }
+}
+
+/// The veneer's poll-registry source for a listener, recovered from the
+/// abstract listener the vdso installed. Sound because the vdso always
+/// installs an `EventSourceManaged`; a native moto-io host that registered
+/// no listener would never reach the poll-registration paths that call this.
+fn listener_event_source(listener: &TcpListener) -> &EventSourceManaged {
+    listener
+        .event_listener()
+        .as_any()
+        .downcast_ref::<EventSourceManaged>()
+        .expect("vdso net socket without an EventSourceManaged listener")
 }
 
 impl TcpListener {
@@ -179,15 +187,16 @@ impl TcpListener {
         self.event_listener.on_readiness(edges);
     }
 
-    /// The veneer's poll-registry source, recovered from the abstract
-    /// listener. Sound because the vdso always installs an `EventSourceManaged`
-    /// as the listener; a native moto-io host that registered no listener would
-    /// never reach the poll-registration paths that call this.
-    fn event_source(&self) -> &EventSourceManaged {
-        self.event_listener
-            .as_any()
-            .downcast_ref::<EventSourceManaged>()
-            .expect("vdso net socket without an EventSourceManaged listener")
+    /// The abstract poll-registry listener the veneer downcasts back to its
+    /// concrete `EventSourceManaged` (see `listener_event_source`).
+    pub fn event_listener(&self) -> &dyn NetEventListener {
+        self.event_listener.as_ref()
+    }
+
+    /// Whether an async accept is already queued (the veneer raises READABLE
+    /// on interest registration if so).
+    pub fn has_async_accepts(&self) -> bool {
+        !self.async_accepts.lock().is_empty()
     }
 }
 
@@ -206,7 +215,7 @@ impl TcpListener {
     ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
-            crate::moto_log!("we don't currently allow binding to/listening on 0.0.0.0:0");
+            moto_log!("we don't currently allow binding to/listening on 0.0.0.0:0");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
@@ -623,7 +632,7 @@ impl PosixFile for TcpStream {
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source().on_closed_locally(rt_fd);
+        stream_event_source(self).on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -634,9 +643,8 @@ impl PosixFile for TcpStream {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source()
-            .add_interests(r_id, source_fd, token, interests)?;
-        self.maybe_raise_events(interests);
+        stream_event_source(self).add_interests(r_id, source_fd, token, interests)?;
+        stream_maybe_raise_events(self, interests);
         Ok(())
     }
 
@@ -647,14 +655,70 @@ impl PosixFile for TcpStream {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source()
-            .set_interests(r_id, source_fd, token, interests)?;
-        self.maybe_raise_events(interests);
+        stream_event_source(self).set_interests(r_id, source_fd, token, interests)?;
+        stream_maybe_raise_events(self, interests);
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source().del_interests(r_id, source_fd)
+        stream_event_source(self).del_interests(r_id, source_fd)
+    }
+}
+
+/// The veneer's poll-registry source for a stream (see the listener
+/// counterpart `listener_event_source`).
+fn stream_event_source(stream: &TcpStream) -> &EventSourceManaged {
+    stream
+        .event_listener()
+        .as_any()
+        .downcast_ref::<EventSourceManaged>()
+        .expect("vdso net socket without an EventSourceManaged listener")
+}
+
+/// Synthesize the poll events a freshly-registered interest expects, based
+/// on the stream's current state (mio semantics, somewhat ad-hoc). Called
+/// from poll_add/poll_set only; a veneer concern (it emits through the
+/// concrete `EventSourceManaged`), so it reads the moved state machine
+/// through its public accessors.
+fn stream_maybe_raise_events(stream: &TcpStream, interests: Interests) {
+    let mut events = 0;
+
+    let state = stream.tcp_state();
+    if state == TcpState::Closed {
+        // MIO TCP tests assume this.
+        events = moto_rt::poll::POLL_WRITE_CLOSED
+            | moto_rt::poll::POLL_READ_CLOSED
+            | moto_rt::poll::POLL_READABLE
+            | moto_rt::poll::POLL_WRITABLE;
+        stream_event_source(stream).on_event(events);
+        return;
+    }
+
+    match state {
+        TcpState::Listening | TcpState::PendingAccept | TcpState::Connecting => return,
+        _ => {}
+    }
+
+    if (interests & moto_rt::poll::POLL_WRITABLE != 0)
+        && stream.have_write_buffer_space()
+        && state.can_write()
+    {
+        events |= moto_rt::poll::POLL_WRITABLE;
+    }
+
+    if ((interests & moto_rt::poll::POLL_READABLE) != 0)
+        && state.can_read()
+        && stream.has_rx_bytes()
+    {
+        events |= moto_rt::poll::POLL_READABLE;
+    }
+
+    if !state.can_read() {
+        events |= moto_rt::poll::POLL_READ_CLOSED;
+    }
+
+    if events != 0 {
+        stream_event_source(stream).on_event(events);
     }
 }
 
@@ -673,49 +737,10 @@ impl TcpStream {
         self.channel_reservation.channel()
     }
 
-    fn maybe_raise_events(&self, interests: Interests) {
-        let mut events = 0;
-
-        // maybe_raise_events is called from poll_add/poll_set,
-        // so we raise events that are expected and don't raise events
-        // that are not expected (based on mio tests, so somewhat ad-hoc).
-        let state = self.tcp_state();
-        if state == TcpState::Closed {
-            // MIO TCP tests assume this.
-            events = moto_rt::poll::POLL_WRITE_CLOSED
-                | moto_rt::poll::POLL_READ_CLOSED
-                | moto_rt::poll::POLL_READABLE
-                | moto_rt::poll::POLL_WRITABLE;
-            self.event_source().on_event(events);
-            return;
-        }
-
-        match state {
-            TcpState::Listening | TcpState::PendingAccept | TcpState::Connecting => return,
-            _ => {}
-        }
-
-        if (interests & moto_rt::poll::POLL_WRITABLE != 0)
-            && self.have_write_buffer_space()
-            && state.can_write()
-        {
-            events |= moto_rt::poll::POLL_WRITABLE;
-        }
-
-        if ((interests & moto_rt::poll::POLL_READABLE) != 0)
-            && state.can_read()
-            && (!self.recv_queue.lock().is_empty())
-        {
-            events |= moto_rt::poll::POLL_READABLE;
-        }
-
-        if !state.can_read() {
-            events |= moto_rt::poll::POLL_READ_CLOSED;
-        }
-
-        if events != 0 {
-            self.event_source().on_event(events);
-        }
+    /// Whether the receive queue holds anything (the veneer raises READABLE
+    /// on interest registration only when it does).
+    pub fn has_rx_bytes(&self) -> bool {
+        !self.recv_queue.lock().is_empty()
     }
 
     /// Tell sys-io this stream is ready to receive: sys-io's RX pump does
@@ -730,7 +755,7 @@ impl TcpStream {
         self.channel().send_msg(req);
     }
 
-    fn tcp_state(&self) -> api_net::TcpState {
+    pub fn tcp_state(&self) -> api_net::TcpState {
         api_net::TcpState::try_from(self.tcp_state_driver.load(Ordering::Acquire)).unwrap()
     }
 
@@ -1218,7 +1243,7 @@ impl TcpStream {
         }
     }
 
-    fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
+    pub fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
         match self.poll_rx(bufs, peek) {
             Ok(sz) => return Ok(sz),
             Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
@@ -1271,16 +1296,13 @@ impl TcpStream {
         self.event_listener.on_readiness(edges);
     }
 
-    /// The veneer's poll-registry source, recovered from the abstract
-    /// listener (see the TcpListener counterpart).
-    fn event_source(&self) -> &EventSourceManaged {
-        self.event_listener
-            .as_any()
-            .downcast_ref::<EventSourceManaged>()
-            .expect("vdso net socket without an EventSourceManaged listener")
+    /// The abstract poll-registry listener the veneer downcasts back to its
+    /// concrete `EventSourceManaged` (see `stream_event_source`).
+    pub fn event_listener(&self) -> &dyn NetEventListener {
+        self.event_listener.as_ref()
     }
 
-    fn have_write_buffer_space(&self) -> bool {
+    pub fn have_write_buffer_space(&self) -> bool {
         if self.channel().may_alloc_page(self.subchannel_mask) {
             return true;
         }
@@ -1292,7 +1314,7 @@ impl TcpStream {
             .unwrap_or(false)
     }
 
-    fn write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+    pub fn write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
         if bufs.is_empty() {
             return Ok(0);
         }

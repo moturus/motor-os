@@ -463,35 +463,26 @@ impl UdpSocket {
         self.tx_timeout_ns.load(Ordering::Relaxed)
     }
 
-    fn maybe_raise_events(&self, interests: Interests) {
-        let mut events = 0;
-
-        if (interests & moto_rt::poll::POLL_WRITABLE != 0) && !self.tx_queue.lock().is_full() {
-            events |= moto_rt::poll::POLL_WRITABLE;
-        }
-
-        if (interests & moto_rt::poll::POLL_READABLE) != 0
-            && self.rx_queue.lock().have_datagram().unwrap()
-        {
-            events |= moto_rt::poll::POLL_READABLE;
-        }
-
-        if events != 0 {
-            self.event_source().on_event(events);
-        }
-    }
-
     fn raise_readiness(&self, edges: Readiness) {
         self.event_listener.on_readiness(edges);
     }
 
-    /// The veneer's poll-registry source, recovered from the abstract
-    /// listener (see the TcpListener counterpart in rt_tcp).
-    fn event_source(&self) -> &EventSourceManaged {
-        self.event_listener
-            .as_any()
-            .downcast_ref::<EventSourceManaged>()
-            .expect("vdso net socket without an EventSourceManaged listener")
+    /// The abstract poll-registry listener the veneer downcasts back to its
+    /// concrete `EventSourceManaged` (see the free `event_source` below).
+    pub fn event_listener(&self) -> &dyn NetEventListener {
+        self.event_listener.as_ref()
+    }
+
+    /// Whether the TX queue cannot take another datagram (veneer WRITABLE
+    /// synthesis).
+    pub fn tx_queue_full(&self) -> bool {
+        self.tx_queue.lock().is_full()
+    }
+
+    /// Whether a complete datagram is ready to receive (veneer READABLE
+    /// synthesis).
+    pub fn has_rx_datagram(&self) -> bool {
+        self.rx_queue.lock().have_datagram().unwrap()
     }
 
     fn add_rx_waker(&self, waker: &core::task::Waker) {
@@ -533,7 +524,7 @@ impl PosixFile for UdpSocket {
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source().on_closed_locally(rt_fd);
+        event_source(self).on_closed_locally(rt_fd);
         Ok(())
     }
 
@@ -544,9 +535,8 @@ impl PosixFile for UdpSocket {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source()
-            .add_interests(r_id, source_fd, token, interests)?;
-        self.maybe_raise_events(interests);
+        event_source(self).add_interests(r_id, source_fd, token, interests)?;
+        maybe_raise_events(self, interests);
         Ok(())
     }
 
@@ -557,14 +547,43 @@ impl PosixFile for UdpSocket {
         token: Token,
         interests: Interests,
     ) -> Result<(), ErrorCode> {
-        self.event_source()
-            .set_interests(r_id, source_fd, token, interests)?;
-        self.maybe_raise_events(interests);
+        event_source(self).set_interests(r_id, source_fd, token, interests)?;
+        maybe_raise_events(self, interests);
         Ok(())
     }
 
     fn poll_del(&self, r_id: u64, source_fd: RtFd) -> Result<(), ErrorCode> {
-        self.event_source().del_interests(r_id, source_fd)
+        event_source(self).del_interests(r_id, source_fd)
+    }
+}
+
+/// The veneer's poll-registry source for a UDP socket (see the TCP
+/// counterparts `stream_event_source` / `listener_event_source`).
+fn event_source(socket: &UdpSocket) -> &EventSourceManaged {
+    socket
+        .event_listener()
+        .as_any()
+        .downcast_ref::<EventSourceManaged>()
+        .expect("vdso net socket without an EventSourceManaged listener")
+}
+
+/// Synthesize the poll events a freshly-registered interest expects. Called
+/// from poll_add/poll_set only; a veneer concern (it emits through the
+/// concrete `EventSourceManaged`), reading the moved socket through its
+/// public accessors.
+fn maybe_raise_events(socket: &UdpSocket, interests: Interests) {
+    let mut events = 0;
+
+    if (interests & moto_rt::poll::POLL_WRITABLE != 0) && !socket.tx_queue_full() {
+        events |= moto_rt::poll::POLL_WRITABLE;
+    }
+
+    if (interests & moto_rt::poll::POLL_READABLE) != 0 && socket.has_rx_datagram() {
+        events |= moto_rt::poll::POLL_READABLE;
+    }
+
+    if events != 0 {
+        event_source(socket).on_event(events);
     }
 }
 
