@@ -82,19 +82,19 @@ impl PosixFile for TcpStream {
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read_or_peek(&mut [buf], false)
+        crate::net::blocking::tcp_read(self, &mut [buf], false)
     }
 
     unsafe fn read_vectored(&self, bufs: &mut [&mut [u8]]) -> Result<usize, ErrorCode> {
-        self.read_or_peek(bufs, false)
+        crate::net::blocking::tcp_read(self, bufs, false)
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.write(&[buf])
+        crate::net::blocking::tcp_write(self, &[buf])
     }
 
     unsafe fn write_vectored(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
-        self.write(bufs)
+        crate::net::blocking::tcp_write(self, bufs)
     }
 
     fn flush(&self) -> Result<(), ErrorCode> {

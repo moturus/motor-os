@@ -20,11 +20,11 @@ impl PosixFile for UdpSocket {
             return Err(moto_rt::E_NOT_CONNECTED);
         };
 
-        self.send_to(buf, &addr)
+        crate::net::blocking::udp_send(self, buf, &addr)
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.recv_or_peek_from(buf, false).map(|(sz, _)| sz)
+        crate::net::blocking::udp_recv(self, buf, false).map(|(sz, _)| sz)
     }
 
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {

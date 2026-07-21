@@ -6,14 +6,13 @@
 
 use crate::net::readiness::{NetEventListener, Readiness};
 use super::channel::{ChannelReservation, NetChannel};
-use super::tcp::{RX_PARK_RECHECK, TX_PARK_RECHECK, block_on_recheck};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
 use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
 use moto_ipc::io_channel;
-use moto_rt::{E_NOT_READY, E_TIMED_OUT};
+use moto_rt::E_NOT_READY;
 use moto_rt::{ErrorCode, mutex::Mutex};
 use moto_sys_io::api_net;
 
@@ -242,35 +241,6 @@ impl UdpSocket {
         UdpWritable { socket: self }
     }
 
-    pub fn recv_or_peek_from(
-        &self,
-        buf: &mut [u8],
-        peek: bool,
-    ) -> Result<(usize, SocketAddr), ErrorCode> {
-        if self.nonblocking.load(Ordering::Acquire) {
-            return self.recv_or_peek_from_nonblocking(buf, peek);
-        }
-
-        let deadline = {
-            let timo = self.rx_timeout_ns.load(Ordering::Relaxed);
-            if timo == u64::MAX {
-                None
-            } else {
-                Some(moto_rt::time::Instant::now() + core::time::Duration::from_nanos(timo))
-            }
-        };
-
-        let fut = UdpRecvFuture {
-            socket: self,
-            buf,
-            peek,
-        };
-        match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
-            Ok(res) => res,
-            Err(_fut) => Err(E_TIMED_OUT),
-        }
-    }
-
     fn recv_or_peek_from_nonblocking(
         &self,
         buf: &mut [u8],
@@ -328,35 +298,6 @@ impl UdpSocket {
         buf[0..sz].clone_from_slice(&bytes[0..sz]);
 
         Ok((sz, datagram.addr))
-    }
-
-    pub fn send_to(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
-        if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-
-        if self.nonblocking.load(Ordering::Acquire) {
-            return self.send_to_nonblocking(buf, addr);
-        }
-
-        let deadline = {
-            let timo = self.tx_timeout_ns.load(Ordering::Relaxed);
-            if timo == u64::MAX {
-                None
-            } else {
-                Some(moto_rt::time::Instant::now() + core::time::Duration::from_nanos(timo))
-            }
-        };
-
-        let fut = UdpSendFuture {
-            socket: self,
-            buf,
-            addr: *addr,
-        };
-        match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
-            Ok(res) => res,
-            Err(_fut) => Err(E_TIMED_OUT),
-        }
     }
 
     fn send_to_nonblocking(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
@@ -417,10 +358,6 @@ impl UdpSocket {
             }
             _ => panic!("Unexpected UDP cmd: {:?}", cmd),
         }
-    }
-
-    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.recv_or_peek_from(buf, true).map(|(sz, _)| sz)
     }
 
     fn set_nonblocking(&self, val: bool) {

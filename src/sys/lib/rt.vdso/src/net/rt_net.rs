@@ -204,7 +204,14 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
         return -(moto_rt::E_BAD_HANDLE as RtFd);
     };
 
-    let (stream, addr) = match listener.accept(&new_event_source) {
+    // Blocking is the veneer's job: a native user awaits `accept()` on its
+    // own executor. O_NONBLOCK takes the try path.
+    let accepted = if listener.is_nonblocking() {
+        listener.try_accept(&new_event_source)
+    } else {
+        moto_async::block_on_sync(listener.accept(&new_event_source))
+    };
+    let (stream, addr) = match accepted {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
@@ -226,7 +233,13 @@ pub extern "C" fn tcp_connect(
     } else {
         Some(Duration::from_nanos(timeout_ns))
     };
-    let stream = match TcpStream::connect(&addr, timeout, nonblocking, new_event_source()) {
+    // The blocking wait is the veneer's; a native user awaits `connect()`.
+    let connected = if nonblocking {
+        TcpStream::connect_nonblocking(&addr, timeout, new_event_source())
+    } else {
+        moto_async::block_on_sync(TcpStream::connect(&addr, timeout, new_event_source()))
+    };
+    let stream = match connected {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
@@ -296,15 +309,15 @@ pub extern "C" fn peek(rt_fd: i32, buf: *mut u8, buf_sz: usize) -> i64 {
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
 
     if let Some(tcp_stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<TcpStream>() {
-        match tcp_stream.peek(buf) {
+        match crate::net::blocking::tcp_peek(tcp_stream, buf) {
             Ok(sz) => return sz as i64,
             Err(err) => return -(err as i64),
         }
     }
 
     if let Some(udp_socket) = (posix_file.as_ref() as &dyn Any).downcast_ref::<UdpSocket>() {
-        match udp_socket.peek(buf) {
-            Ok(sz) => return sz as i64,
+        match crate::net::blocking::udp_recv(udp_socket, buf, true) {
+            Ok((sz, _)) => return sz as i64,
             Err(err) => return -(err as i64),
         }
     }
@@ -408,7 +421,7 @@ unsafe fn udp_recv_or_peek_from(
     };
 
     let buf = unsafe { core::slice::from_raw_parts_mut(buf, buf_sz) };
-    match udp_socket.recv_or_peek_from(buf, peek) {
+    match crate::net::blocking::udp_recv(udp_socket, buf, peek) {
         Ok((sz, from)) => {
             unsafe { *addr = from.into() };
             sz as i64
@@ -434,7 +447,7 @@ pub unsafe extern "C" fn udp_send_to(
     };
 
     let buf = unsafe { core::slice::from_raw_parts(buf, buf_sz) };
-    match udp_socket.send_to(buf, &addr) {
+    match crate::net::blocking::udp_send(udp_socket, buf, &addr) {
         Ok(sz) => sz as i64,
         Err(err) => -(err as i64),
     }

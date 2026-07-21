@@ -229,28 +229,57 @@ impl TcpListener {
         &self.socket_addr
     }
 
-    fn get_pending_accept(&self) -> Result<PendingAccept, ErrorCode> {
-        if let Some(pending_accept) = self.async_accepts.lock().pop_front() {
-            return Ok(pending_accept);
-        }
+    /// Whether the listener is in `O_NONBLOCK` mode; the veneer consults this
+    /// to choose `try_accept` over the blocking `accept`.
+    pub fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Relaxed)
+    }
 
-        if self.nonblocking.load(Ordering::Relaxed) {
-            return Err(moto_rt::E_NOT_READY);
-        };
+    /// Pop a ready incoming connection or await the next one. The vdso veneer
+    /// drives this with `block_on_sync`; a native user awaits it.
+    async fn next_pending_accept(&self) -> PendingAccept {
+        if let Some(pending_accept) = self.async_accepts.lock().pop_front() {
+            return pending_accept;
+        }
 
         let (tx, rx) = moto_async::oneshot();
         self.post_accept(Some(tx));
 
         // The sender lives in the channel's RPC map; it cannot be
         // dropped unresolved while we hold &self (see rx dispatch).
-        Ok(moto_async::block_on_sync(rx).expect("accept RPC dropped"))
+        rx.await.expect("accept RPC dropped")
     }
 
-    pub fn accept(
+    /// Nonblocking accept: an already-queued incoming connection, or
+    /// `E_NOT_READY`.
+    pub fn try_accept(
         &self,
         make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
     ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        let PendingAccept { reservation, resp } = self.get_pending_accept()?;
+        let Some(pending) = self.async_accepts.lock().pop_front() else {
+            return Err(moto_rt::E_NOT_READY);
+        };
+        self.build_accepted_stream(pending, make_listener)
+    }
+
+    /// Accept, resolving once an incoming connection is available. The vdso
+    /// veneer drives this to completion; a native user awaits it.
+    pub async fn accept(
+        &self,
+        make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
+    ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+        let pending = self.next_pending_accept().await;
+        self.build_accepted_stream(pending, make_listener)
+    }
+
+    /// Turn an accepted `PendingAccept` into a live `TcpStream`. Shared by the
+    /// blocking (`accept`) and nonblocking (`try_accept`) paths.
+    fn build_accepted_stream(
+        &self,
+        pending: PendingAccept,
+        make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
+    ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+        let PendingAccept { reservation, resp } = pending;
         if resp.status().is_err() {
             let rx_queue = self
                 .pending_accept_queues
@@ -718,17 +747,20 @@ impl TcpStream {
         }
     }
 
-    pub fn connect(
+    /// Reserve the channel and build the Connecting stream + connect request
+    /// shared by the blocking and nonblocking connect paths. `nonblocking`
+    /// only seeds the socket's O_NONBLOCK flag; it does not pick a path.
+    fn connect_setup(
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         nonblocking: bool,
         event_listener: Arc<dyn NetEventListener>,
-    ) -> Result<Arc<TcpStream>, ErrorCode> {
+    ) -> (Arc<TcpStream>, io_channel::Msg) {
         let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
 
-        let mut req = if let Some(timo) = timeout {
+        let req = if let Some(timo) = timeout {
             api_net::tcp_stream_connect_timeout_request(
                 socket_addr,
                 channel_reservation.subchannel_idx(),
@@ -761,13 +793,32 @@ impl TcpStream {
         });
         super::channel::stats_tcp_stream_created();
 
-        if nonblocking {
-            req.id = new_stream.channel().new_req_id();
-            new_stream
-                .channel()
-                .post_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), None))?;
-            return Ok(new_stream);
-        }
+        (new_stream, req)
+    }
+
+    /// Start a nonblocking connect: post the request and return the still
+    /// Connecting stream. The completion runs inline in rx dispatch.
+    pub fn connect_nonblocking(
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Arc<dyn NetEventListener>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, true, event_listener);
+        req.id = new_stream.channel().new_req_id();
+        new_stream
+            .channel()
+            .post_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), None))?;
+        Ok(new_stream)
+    }
+
+    /// Connect, resolving once the peer responds. The vdso veneer drives this
+    /// to completion with `block_on_sync`; a native user awaits it.
+    pub async fn connect(
+        socket_addr: &SocketAddr,
+        timeout: Option<Duration>,
+        event_listener: Arc<dyn NetEventListener>,
+    ) -> Result<Arc<TcpStream>, ErrorCode> {
+        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, false, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it
@@ -779,7 +830,7 @@ impl TcpStream {
         new_stream
             .channel()
             .send_rpc(req, RpcWaiter::Connect(new_stream.me.clone(), Some(tx)));
-        let resp = moto_async::block_on_sync(rx).expect("connect RPC dropped");
+        let resp = rx.await.expect("connect RPC dropped");
         if resp.status().is_err() {
             return Err(resp.status);
         }
@@ -954,10 +1005,6 @@ impl TcpStream {
     /// wrappers consult this to choose the `try_*` fast return.
     pub fn is_nonblocking(&self) -> bool {
         self.nonblocking.load(Ordering::Relaxed)
-    }
-
-    pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read_or_peek(&mut [buf], true)
     }
 
     fn set_tcp_state(&self, new_state: TcpState) {
@@ -1145,38 +1192,6 @@ impl TcpStream {
         Writable { stream: self }
     }
 
-    pub fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
-        match self.poll_rx(bufs, peek) {
-            Ok(sz) => return Ok(sz),
-            Err(err) => assert_eq!(err, moto_rt::E_NOT_READY),
-        }
-
-        if self.nonblocking.load(Ordering::Relaxed) {
-            return Err(moto_rt::E_NOT_READY);
-        }
-
-        // The rx task wakes the future on every incoming message and
-        // read-closing state edge; even a closed socket keeps reading
-        // until the buffered RX drains (poll_rx owns that logic). The
-        // recheck park (RX_PARK_RECHECK) is the old loop's 5-second
-        // read timeout kept as lost-wake insurance.
-        let rx_timeout_ns = self.rx_timeout_ns.load(Ordering::Relaxed);
-        let fut = TcpReadFuture {
-            stream: self,
-            bufs,
-            peek,
-        };
-        let deadline = if rx_timeout_ns == u64::MAX {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_nanos(rx_timeout_ns))
-        };
-        match block_on_recheck(fut, deadline, RX_PARK_RECHECK) {
-            Ok(res) => res,
-            Err(_fut) => Err(moto_rt::E_TIMED_OUT),
-        }
-    }
-
     pub fn maybe_can_write(&self) {
         if self.have_write_buffer_space() {
             self.raise_readiness(Readiness::WRITABLE);
@@ -1216,81 +1231,11 @@ impl TcpStream {
             .unwrap_or(false)
     }
 
-    pub fn write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
-        if bufs.is_empty() {
-            return Ok(0);
-        }
-        if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
-            return Err(moto_rt::E_NOT_CONNECTED);
-        }
-
-        if self.nonblocking.load(Ordering::Relaxed) {
-            return self.write_nonblocking(bufs);
-        }
-
-        let total_in: usize = bufs.iter().map(|b| b.len()).sum();
-        if total_in == 0 {
-            return Ok(0);
-        }
-
-        // Fast path before committing to a park: write what fits, then spin
-        // and yield (re-checking for page room) instead of parking. A small
-        // write that briefly outruns sys-io's drain grabs a freed page here
-        // rather than paying a park+wake syscall per write (see TX_WRITE_SPINS).
-        // A return here means at least one byte moved; only a fully backpressured
-        // write (nothing written after the whole budget) falls to the future.
-        match self.write_nonblocking(bufs) {
-            Ok(n) => return Ok(n),
-            Err(err) if err != moto_rt::E_NOT_READY => return Err(err),
-            Err(_) => {}
-        }
-        for i in 0..(TX_WRITE_SPINS + TX_WRITE_YIELDS) {
-            if i < TX_WRITE_SPINS {
-                core::hint::spin_loop();
-            } else {
-                moto_sys::SysCpu::sched_yield();
-            }
-            if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
-                return Err(moto_rt::E_NOT_CONNECTED);
-            }
-            if self.have_write_buffer_space() {
-                match self.write_nonblocking(bufs) {
-                    Ok(n) => return Ok(n),
-                    Err(err) if err != moto_rt::E_NOT_READY => return Err(err),
-                    Err(_) => {}
-                }
-            }
-        }
-
-        // The future owns the whole blocking dance: pending-page top-up,
-        // page alloc (parking on the channel's tx_wakers; the failed
-        // alloc's page-wait bits make sys-io wake the channel), marker
-        // enqueue. Committed bytes survive a timeout (design rule 7).
-        let timo_ns = self.tx_timeout_ns.load(Ordering::Relaxed);
-        let fut = TcpWriteFuture {
-            stream: self,
-            bufs,
-            total: total_in,
-            written: 0,
-        };
-        let deadline = if timo_ns == u64::MAX {
-            None
-        } else {
-            Some(Instant::now() + Duration::from_nanos(timo_ns))
-        };
-        // Bounded-recheck park (see TX_PARK_RECHECK): a lost backpressure
-        // wake self-heals within one tick instead of hanging.
-        match block_on_recheck(fut, deadline, TX_PARK_RECHECK) {
-            Ok(res) => res,
-            // Timed out: surrender partial progress (design rule 7).
-            Err(fut) => {
-                if fut.written > 0 {
-                    Ok(fut.written)
-                } else {
-                    Err(moto_rt::E_TIMED_OUT)
-                }
-            }
-        }
+    /// Whether the write half is still open: not closed by a state edge and
+    /// not locally shut down. The veneer's spin loop bails to
+    /// `E_NOT_CONNECTED` the moment this goes false.
+    pub fn can_write_now(&self) -> bool {
+        self.tcp_state().can_write() && !self.tx_closed.load(Ordering::Acquire)
     }
 
     /// Copy from `src` (skipping its first `offset` bytes) into `dst`;
@@ -1608,66 +1553,12 @@ impl TcpStream {
     }
 }
 
-// ------------------- blocking-path futures (design 5.3) ------------------- //
+// -------------------- data-path futures (design 5.3/5.4) ------------------- //
 //
-// The sync read/write paths drive these via block_on_sync /
-// block_on_sync_deadline. Copies happen in poll, i.e. on the polling
-// caller thread, never the channel runtime.
-
-/// Longest a bounded-recheck park sleeps before re-polling regardless of
-/// wakes. The TX backpressure wake crosses the process boundary (sys-io
-/// frees a page -> wakes the channel runtime -> the tx-waker list), and
-/// that path is not race-free in practice — the old blocking write loop
-/// carried an exponential sleep ladder (max 3s) for exactly this reason.
-/// A miss now costs at most one tick of extra latency instead of a hang;
-/// a healthy send never waits this long, so steady-state TX pays nothing.
-/// Also the UDP send recheck (rt_udp shares block_on_recheck).
-pub(super) const TX_PARK_RECHECK: Duration = Duration::from_millis(500);
-
-/// Read-side recheck interval: the old blocking read loop woke every 5s
-/// (its `DEBUG_TIMEOUT`) even without data, which masked any lost RX
-/// wake; kept here as the same insurance. A blocked reader waiting for
-/// data pays one wasted wakeup per interval, as it did before. Also the
-/// UDP recv recheck (rt_udp shares block_on_recheck).
-pub(super) const RX_PARK_RECHECK: Duration = Duration::from_secs(5);
-
-/// A blocking write spins then yields this many times, re-checking for TX-page
-/// room, before it commits to a park. Restores the pre-D4b ladder's cheap page
-/// grab: a small write that briefly outruns sys-io's drain catches a freed page
-/// here instead of paying a park+wake syscall per write (~30% of default-buffer
-/// bulk TX, kill checkpoint 2). Uncontended writes and RR never reach the spin.
-const TX_WRITE_SPINS: usize = 100;
-const TX_WRITE_YIELDS: usize = 100;
-
-/// Drive `fut` on the calling thread, capping each park at `recheck` so a
-/// lost wake self-heals on the next tick. `deadline` is the real
-/// `SO_*TIMEO` bound if any; `Err(fut)` is only returned once that real
-/// deadline passes (never on a recheck tick), so the caller can extract
-/// partial progress.
-pub(super) fn block_on_recheck<F: core::future::Future + Unpin>(
-    mut fut: F,
-    deadline: Option<Instant>,
-    recheck: Duration,
-) -> Result<F::Output, F> {
-    loop {
-        let now = Instant::now();
-        if let Some(d) = deadline
-            && now >= d
-        {
-            return Err(fut);
-        }
-        let tick = match deadline {
-            Some(d) => d.min(now + recheck),
-            None => now + recheck,
-        };
-        match moto_async::block_on_sync_deadline(fut, tick) {
-            Ok(v) => return Ok(v),
-            // Either the recheck tick or the real deadline fired; the loop
-            // top distinguishes them and re-polls (self-healing a lost wake).
-            Err(f) => fut = f,
-        }
-    }
-}
+// The async cores of read/write. Copies happen in poll, i.e. on the polling
+// thread (a vdso caller via the veneer's block_on, or a native app's
+// executor), never the channel runtime. The blocking spin/park/timeout that
+// drives these for the vdso lives in the veneer (rt.vdso net::blocking).
 
 impl TcpStream {
     /// `push_pending_tx` without the blocking retry: on a full send
