@@ -11,6 +11,8 @@
 //! out in `rush-to-sh-plan.md` §7: traps stay stored but only `^C` can fire one,
 //! and `kill` can only terminate.
 
+#![cfg(unix)]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
