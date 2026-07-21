@@ -28,9 +28,9 @@ use moto_sys_io::api_net::TcpState;
 
 use moto_io::net::readiness::NetEventListener;
 use moto_io::net::readiness::Readiness;
-use super::rt_net::ChannelReservation;
-use super::rt_net::NetChannel;
-use super::rt_net::RpcWaiter;
+use super::channel::ChannelReservation;
+use super::channel::NetChannel;
+use super::channel::RpcWaiter;
 
 /// An accepted-but-not-yet-claimed connection: the accept response plus
 /// the channel reservation made when the accept was posted.
@@ -80,12 +80,12 @@ impl Drop for TcpListener {
 
         while let Some((_, stream)) = { self.pending_accept_queues.lock().pop_first() } {
             // Free up server-allocated pages.
-            super::rt_net::clear_rx_queue(&stream, self.channel());
+            super::channel::clear_rx_queue(&stream, self.channel());
         }
 
         self.channel().tcp_listener_dropped(self.handle);
 
-        super::rt_net::stats_tcp_listener_dropped();
+        super::channel::stats_tcp_listener_dropped();
     }
 }
 
@@ -196,7 +196,7 @@ impl TcpListener {
         self.handle
     }
 
-    fn channel(&self) -> &super::rt_net::NetChannel {
+    fn channel(&self) -> &super::channel::NetChannel {
         self.channel_reservation.channel()
     }
 
@@ -208,7 +208,7 @@ impl TcpListener {
         }
 
         let req = api_net::bind_tcp_listener_request(&socket_addr, None);
-        let channel_reservation = super::rt_net::reserve_channel();
+        let channel_reservation = super::channel::reserve_channel();
         let resp = channel_reservation.channel().send_receive(req);
         if resp.status().is_err() {
             return Err(resp.status);
@@ -243,7 +243,7 @@ impl TcpListener {
             }
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
-        crate::net::rt_net::stats_tcp_listener_created();
+        crate::net::channel::stats_tcp_listener_created();
 
         log::debug!("new TcpListener {:?}", tcp_listener.socket_addr);
 
@@ -312,7 +312,7 @@ impl TcpListener {
                 .lock()
                 .remove(&resp.handle)
                 .unwrap();
-            crate::net::rt_net::clear_rx_queue(&rx_queue, self.channel());
+            crate::net::channel::clear_rx_queue(&rx_queue, self.channel());
             return Err(resp.status);
         }
 
@@ -352,7 +352,7 @@ impl TcpListener {
                 pending_tx: Mutex::new(VecDeque::new()),
             }
         });
-        crate::net::rt_net::stats_tcp_stream_created();
+        crate::net::channel::stats_tcp_stream_created();
 
         new_stream.channel().tcp_stream_created(&new_stream);
         // Now we can remove the queue.
@@ -389,7 +389,7 @@ impl TcpListener {
         // Because a listener can spawn thousands, millions of sockets
         // (think a long-running web server), we cannot use the listener's
         // channel for incoming connections.
-        let mut channel_reservation = crate::net::rt_net::reserve_channel();
+        let mut channel_reservation = crate::net::channel::reserve_channel();
         let channel = channel_reservation.channel().clone();
 
         channel_reservation.reserve_subchannel();
@@ -559,7 +559,7 @@ pub struct TcpStream {
 /// Writes append into the queue's back page while it has room (no page
 /// alloc, no queue traffic), so page fill adapts to how far the app runs
 /// ahead of the IO thread. Each page is pushed together with a MARKER
-/// message (see `rt_net::tcp_tx_marker_msg`) enqueued on the ordinary send
+/// message (see `channel::tcp_tx_marker_msg`) enqueued on the ordinary send
 /// queue: the IO thread claims pending pages when it pops the marker and
 /// binds their lengths at that moment ([`TcpStream::claim_pending_tx`]), so
 /// data is never delayed beyond one IO-thread pass — the same latency as a
@@ -576,7 +576,7 @@ impl Drop for TcpStream {
     fn drop(&mut self) {
         let handle = self.handle.load(Ordering::Acquire);
         if handle == 0 {
-            super::rt_net::stats_tcp_stream_dropped();
+            super::channel::stats_tcp_stream_dropped();
             return;
         }
 
@@ -593,11 +593,11 @@ impl Drop for TcpStream {
         self.channel().send_msg_guaranteed(req);
 
         // Clear RX queue: basically, free up server-allocated pages.
-        super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());
+        super::channel::clear_rx_queue(&self.recv_queue, self.channel());
         assert!(self.recv_queue.lock().is_empty());
 
         self.channel().tcp_stream_dropped(self.handle());
-        super::rt_net::stats_tcp_stream_dropped();
+        super::channel::stats_tcp_stream_dropped();
     }
 }
 
@@ -784,7 +784,7 @@ impl TcpStream {
             && self.rx_closed.load(Ordering::Acquire)
         {
             // Claiming the page(s) and dropping them frees them.
-            super::rt_net::claim_rx_page(self.channel(), &msg, &mut |_page, _len| {});
+            super::channel::claim_rx_page(self.channel(), &msg, &mut |_page, _len| {});
             self.wake_rx_waiters();
             return;
         }
@@ -882,7 +882,7 @@ impl TcpStream {
         timeout: Option<Duration>,
         nonblocking: bool,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let mut channel_reservation = super::rt_net::reserve_channel();
+        let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
 
@@ -920,7 +920,7 @@ impl TcpStream {
                 pending_tx: Mutex::new(VecDeque::new()),
             }
         });
-        super::rt_net::stats_tcp_stream_created();
+        super::channel::stats_tcp_stream_created();
 
         if nonblocking {
             req.id = new_stream.channel().new_req_id();
@@ -1179,7 +1179,7 @@ impl TcpStream {
                 .is_some_and(|msg| msg.command == (api_net::NetCmd::TcpStreamRx as u16))
             {
                 let msg = recv_q.pop_front().unwrap();
-                super::rt_net::claim_rx_page(self.channel(), &msg, &mut |page, len| {
+                super::channel::claim_rx_page(self.channel(), &msg, &mut |page, len| {
                     recv_q.push_bytes(page, len)
                 });
             }
@@ -1438,7 +1438,7 @@ impl TcpStream {
             pending.push_back(PendingTxPage { page, filled });
             if self
                 .channel()
-                .post_msg(super::rt_net::tcp_tx_marker_msg(self.handle()))
+                .post_msg(super::channel::tcp_tx_marker_msg(self.handle()))
                 .is_err()
             {
                 // Full send queue; retracting the entry drops (frees) the page.
@@ -1588,7 +1588,7 @@ impl TcpStream {
             // deliver READ_CLOSED ahead of bytes the application could still observe.
             // Any RX bytes still in flight are dropped in process_incoming_msg() (see
             // the rx_closed guard there).
-            super::rt_net::clear_rx_queue(&self.recv_queue, self.channel());
+            super::channel::clear_rx_queue(&self.recv_queue, self.channel());
             self.set_tcp_state(TcpState::WriteOnly);
         }
 
@@ -1763,7 +1763,7 @@ impl TcpStream {
         pending.push_back(PendingTxPage { page, filled });
         if self
             .channel()
-            .post_msg(super::rt_net::tcp_tx_marker_msg(self.handle()))
+            .post_msg(super::channel::tcp_tx_marker_msg(self.handle()))
             .is_ok()
         {
             return Ok(filled);

@@ -21,6 +21,7 @@ mod stdio;
 mod stdio_relay;
 
 mod net {
+    pub mod channel;
     pub mod rt_net;
     pub mod rt_tcp;
     pub mod rt_udp;
@@ -432,7 +433,7 @@ pub extern "C" fn motor_start(version: u64) {
     // thread wrapper), so it cannot auto-run thread-local destructors on exit;
     // hand it the vdso's teardown explicitly (design 5.1: the host installs
     // this so the channel layer needs no vdso reach-back).
-    net::rt_net::set_thread_exit_hook(|| unsafe { crate::rt_tls::on_thread_exiting() });
+    net::channel::set_thread_exit_hook(|| unsafe { crate::rt_tls::on_thread_exiting() });
 }
 
 /// # Safety

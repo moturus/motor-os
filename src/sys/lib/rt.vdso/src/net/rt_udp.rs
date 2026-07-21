@@ -1,5 +1,5 @@
 use moto_io::net::readiness::{NetEventListener, Readiness};
-use super::rt_net::{ChannelReservation, NetChannel};
+use super::channel::{ChannelReservation, NetChannel};
 use super::rt_tcp::{RX_PARK_RECHECK, TX_PARK_RECHECK, block_on_recheck};
 use crate::posix::PosixKind;
 use crate::{posix::PosixFile, runtime::EventSourceManaged};
@@ -71,7 +71,7 @@ impl Drop for UdpSocket {
 
         // Balance stats_udp_socket_created(): the decrement was missing, which
         // stage-E's assert_empty (now checking num_udp_sockets) would trip on.
-        crate::net::rt_net::stats_udp_socket_dropped();
+        crate::net::channel::stats_udp_socket_dropped();
     }
 }
 
@@ -115,7 +115,7 @@ impl UdpSocket {
         requested_addr: &SocketAddr,
         select_route: bool,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
-        let mut channel_reservation = super::rt_net::reserve_channel();
+        let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
         let subchannel_mask = channel_reservation.subchannel_mask();
         let req = if select_route {
@@ -164,7 +164,7 @@ impl UdpSocket {
             }
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
-        crate::net::rt_net::stats_udp_socket_created();
+        crate::net::channel::stats_udp_socket_created();
 
         log::debug!(
             "new UdpSocket 0x{:x} addr {:?}",
