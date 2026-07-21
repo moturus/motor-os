@@ -2820,6 +2820,22 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      registry and local-path libraries, host build dependencies,
      build-script compile/run units, enabled features, LTO, and sorted
      transitive dependency identities.
+   - The dependency executor compiles the selected library DAG, compiles and
+     runs admitted build scripts through the platform sandbox interface,
+     applies their validated directives and generated outputs, and supplies
+     the resulting artifacts and identities to the root unit. Path dependency
+     and dependency build-script engine fixtures pass on Linux, and the full
+     seeded Lorry graph builds without consulting Cargo artifacts.
+   - The explicit `--use-cargo-registry` lane resolves locked crates.io
+     packages from checksum-verified Cargo cache archives and manifests,
+     compiles from Cargo's unchanged physical source paths, and detects source
+     changes through the end of dependency execution. Missing pairs,
+     corruption, ambiguity, marker errors, required-patch drift, and policy
+     enforcement have deterministic fixtures. A clean Cargo release build and
+     two successive Lorry self-builds produced byte-identical dependency
+     artifact names and executables on Linux; the closure SHA-256 for this
+     checkpoint was
+     `7f716130606d70b59acca2208c44215e46a8320291b061c302fa8a1ddb6ed48d`.
 
 6. **Finish Stage-2 cache, bundle, and core self-hosting.**
    - Add the Round-22 content-addressed library/build-output cache with cold,

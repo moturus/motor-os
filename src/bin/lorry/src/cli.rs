@@ -23,6 +23,7 @@ pub struct Cli {
     pub toolchain: Option<String>,
     pub color: Color,
     pub verbosity: Verbosity,
+    pub use_cargo_registry: bool,
     pub command: Command,
 }
 
@@ -111,6 +112,7 @@ impl Cli {
         } else {
             Verbosity::Normal
         };
+        let use_cargo_registry = matches.get_flag("use-cargo-registry");
         let command = if matches.get_flag("help") {
             if matches.subcommand().is_some() {
                 return Err(Error::usage(
@@ -134,6 +136,7 @@ impl Cli {
             toolchain,
             color,
             verbosity,
+            use_cargo_registry,
             command,
         })
     }
@@ -166,6 +169,11 @@ fn command_line() -> ClapCommand {
                 .num_args(1)
                 .action(ArgAction::Set)
                 .value_parser(PossibleValuesParser::new(["auto", "always", "never"])),
+        )
+        .arg(
+            Arg::new("use-cargo-registry")
+                .long("use-cargo-registry")
+                .action(ArgAction::SetTrue),
         )
         .arg(
             Arg::new("help")
@@ -345,6 +353,7 @@ mod tests {
             "+nightly",
             "--verbose",
             "--color=always",
+            "--use-cargo-registry",
             "build",
             "-r",
             "--target",
@@ -354,6 +363,7 @@ mod tests {
         assert_eq!(cli.toolchain.as_deref(), Some("nightly"));
         assert_eq!(cli.verbosity, Verbosity::Verbose);
         assert_eq!(cli.color, Color::Always);
+        assert!(cli.use_cargo_registry);
         assert_eq!(
             cli.command,
             Command::Build(BuildOptions {

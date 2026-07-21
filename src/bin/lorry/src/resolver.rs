@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use semver::Version;
 
+use crate::cargo_registry::CargoRegistry;
 use crate::config::IncompatibleRustVersions;
 use crate::diagnostic::{Error, Result};
 use crate::hash::{decode_hex, hex};
@@ -28,39 +29,23 @@ impl Catalog {
         manifest: &Manifest,
         repositories: &RepositorySet,
     ) -> Result<Self> {
-        let lock = manifest.lock.as_ref().ok_or_else(|| {
-            Error::failure("Cargo.lock is missing")
-                .with_help("run `lorry vendor` to create a version-4 Cargo.lock")
-        })?;
-        let mut packages: BTreeMap<String, Vec<LockedRegistryPackage>> = BTreeMap::new();
-        for package in &lock.packages {
-            let (Some(source), Some(checksum)) = (&package.source, &package.checksum) else {
-                continue;
-            };
-            if source != "registry+https://github.com/rust-lang/crates.io-index" {
-                continue;
-            }
-            let version = Version::parse(&package.version.original).map_err(|error| {
-                Error::failure(format!(
-                    "invalid locked version `{} {}`: {error}",
-                    package.name, package.version.original
-                ))
-            })?;
-            packages
-                .entry(package.name.clone())
-                .or_default()
-                .push(LockedRegistryPackage {
-                    version,
-                    checksum: checksum.clone(),
-                });
-        }
-        for versions in packages.values_mut() {
-            versions.sort_unstable_by(|left, right| right.version.cmp(&left.version));
-        }
         Ok(Self {
             locked_repository: Some(LockedRepository {
-                repositories: repositories.clone(),
-                packages,
+                source: LockedRegistrySource::Lorry(repositories.clone()),
+                packages: locked_registry_packages(manifest)?,
+            }),
+            ..Self::default()
+        })
+    }
+
+    pub fn from_locked_cargo_registry(
+        manifest: &Manifest,
+        registry: &CargoRegistry,
+    ) -> Result<Self> {
+        Ok(Self {
+            locked_repository: Some(LockedRepository {
+                source: LockedRegistrySource::Cargo(registry.clone()),
+                packages: locked_registry_packages(manifest)?,
             }),
             ..Self::default()
         })
@@ -249,7 +234,7 @@ impl Catalog {
             .filter(|package| dependency.requirement.matches(&package.version))
             .cloned()
             .collect::<Vec<_>>();
-        let repositories = repository.repositories.clone();
+        let source = repository.source.clone();
 
         let has_path_candidate = self.records(&dependency.package).iter().any(|candidate| {
             dependency.requirement.matches(&candidate.version)
@@ -283,21 +268,29 @@ impl Catalog {
             }) {
                 continue;
             }
-            let Some(object) = repositories.lookup_registry(&package.checksum)? else {
-                missing.push(package);
-                continue;
+            let record = match &source {
+                LockedRegistrySource::Lorry(repositories) => {
+                    let Some(object) = repositories.lookup_registry(&package.checksum)? else {
+                        missing.push(package);
+                        continue;
+                    };
+                    if object.name != dependency.package || object.version != package.version {
+                        return Err(Error::failure(format!(
+                            "repository object `{}` identifies `{} {}`, but Cargo.lock selects `{} {}`",
+                            package.checksum,
+                            object.name,
+                            object.version,
+                            dependency.package,
+                            package.version
+                        )));
+                    }
+                    object.index
+                }
+                LockedRegistrySource::Cargo(registry) => registry
+                    .load(&dependency.package, &package.version, &package.checksum)?
+                    .record()?,
             };
-            if object.name != dependency.package || object.version != package.version {
-                return Err(Error::failure(format!(
-                    "repository object `{}` identifies `{} {}`, but Cargo.lock selects `{} {}`",
-                    package.checksum,
-                    object.name,
-                    object.version,
-                    dependency.package,
-                    package.version
-                )));
-            }
-            self.insert(object.index)?;
+            self.insert(record)?;
             available = true;
         }
         if available || has_path_candidate {
@@ -314,8 +307,18 @@ impl Catalog {
             .map(|package| format!("{} {}", dependency.package, package.version))
             .collect::<Vec<_>>()
             .join(", ");
+        let (location, action) = match source {
+            LockedRegistrySource::Lorry(_) => (
+                "the configured Lorry repositories",
+                "; run `lorry vendor` to acquire the missing package",
+            ),
+            LockedRegistrySource::Cargo(_) => (
+                "Cargo's registry cache",
+                "; run Cargo for this locked package first because Lorry does not fetch or repair Cargo's cache",
+            ),
+        };
         Err(Error::failure(format!(
-            "locked crates.io package{} {identities} {} unavailable in the configured repositories; run `lorry vendor` to acquire the missing package",
+            "locked crates.io package{} {identities} {} unavailable in {location}{action}",
             if missing.len() == 1 { "" } else { "s" },
             if missing.len() == 1 { "is" } else { "are" },
         )))
@@ -324,14 +327,55 @@ impl Catalog {
 
 #[derive(Clone, Debug)]
 struct LockedRepository {
-    repositories: RepositorySet,
+    source: LockedRegistrySource,
     packages: BTreeMap<String, Vec<LockedRegistryPackage>>,
+}
+
+#[derive(Clone, Debug)]
+enum LockedRegistrySource {
+    Lorry(RepositorySet),
+    Cargo(CargoRegistry),
 }
 
 #[derive(Clone, Debug)]
 struct LockedRegistryPackage {
     version: Version,
     checksum: String,
+}
+
+fn locked_registry_packages(
+    manifest: &Manifest,
+) -> Result<BTreeMap<String, Vec<LockedRegistryPackage>>> {
+    let lock = manifest.lock.as_ref().ok_or_else(|| {
+        Error::failure("Cargo.lock is missing")
+            .with_help("create a version-4 Cargo.lock before building")
+    })?;
+    let mut packages: BTreeMap<String, Vec<LockedRegistryPackage>> = BTreeMap::new();
+    for package in &lock.packages {
+        let (Some(source), Some(checksum)) = (&package.source, &package.checksum) else {
+            continue;
+        };
+        if source != "registry+https://github.com/rust-lang/crates.io-index" {
+            continue;
+        }
+        let version = Version::parse(&package.version.original).map_err(|error| {
+            Error::failure(format!(
+                "invalid locked version `{} {}`: {error}",
+                package.name, package.version.original
+            ))
+        })?;
+        packages
+            .entry(package.name.clone())
+            .or_default()
+            .push(LockedRegistryPackage {
+                version,
+                checksum: checksum.clone(),
+            });
+    }
+    for versions in packages.values_mut() {
+        versions.sort_unstable_by(|left, right| right.version.cmp(&left.version));
+    }
+    Ok(packages)
 }
 
 fn local_candidate(

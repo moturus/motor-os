@@ -20,6 +20,34 @@ pub fn configure(
     repositories: &RepositorySet,
     catalog: &mut Catalog,
 ) -> Result<()> {
+    configure_with(
+        manifest,
+        config,
+        RequiredSource::Repository(repositories),
+        catalog,
+    )
+}
+
+pub fn configure_cargo_registry(
+    manifest: &Manifest,
+    config: &Config,
+    catalog: &mut Catalog,
+) -> Result<()> {
+    configure_with(manifest, config, RequiredSource::DeclaredPath, catalog)
+}
+
+#[derive(Clone, Copy)]
+enum RequiredSource<'a> {
+    Repository(&'a RepositorySet),
+    DeclaredPath,
+}
+
+fn configure_with(
+    manifest: &Manifest,
+    config: &Config,
+    source: RequiredSource<'_>,
+    catalog: &mut Catalog,
+) -> Result<()> {
     validate_distinct_guards(&config.required_patches)?;
     let mut claimed = BTreeSet::new();
 
@@ -43,7 +71,7 @@ pub fn configure(
 
         let failure = if let Some((index, _)) = matches.first() {
             claimed.insert(*index);
-            match load_required_patch(id, rule, &version, &logical_root, repositories) {
+            match load_required_patch(id, rule, &version, &logical_root, source) {
                 Ok(loaded) => {
                     catalog.insert_path_patch(
                         loaded.manifest,
@@ -54,7 +82,10 @@ pub fn configure(
                     )?;
                     None
                 }
-                Err(error) => Some(required_source_error(id, rule, error)),
+                Err(error) => Some(match source {
+                    RequiredSource::Repository(_) => required_source_error(id, rule, error),
+                    RequiredSource::DeclaredPath => required_cargo_source_error(id, rule, error),
+                }),
             }
         } else {
             Some(required_manifest_error(id, rule))
@@ -77,6 +108,21 @@ struct LoadedPatch {
 }
 
 fn load_required_patch(
+    id: &str,
+    rule: &RequiredPatch,
+    version: &Version,
+    logical_root: &Path,
+    source: RequiredSource<'_>,
+) -> Result<LoadedPatch> {
+    match source {
+        RequiredSource::Repository(repositories) => {
+            load_required_patch_object(id, rule, version, logical_root, repositories)
+        }
+        RequiredSource::DeclaredPath => load_required_patch_path(id, rule, version, logical_root),
+    }
+}
+
+fn load_required_patch_object(
     id: &str,
     rule: &RequiredPatch,
     version: &Version,
@@ -120,6 +166,56 @@ fn load_required_patch(
         physical_root: manifest.root.clone(),
         manifest,
         source_tree_sha256: object.source_tree_sha256,
+    })
+}
+
+fn load_required_patch_path(
+    id: &str,
+    rule: &RequiredPatch,
+    version: &Version,
+    logical_root: &Path,
+) -> Result<LoadedPatch> {
+    let metadata = fs::symlink_metadata(logical_root).map_err(|error| {
+        Error::failure(format!(
+            "required patch `{id}` is not materialized at Cargo path `{}`: {error}",
+            logical_root.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::failure(format!(
+            "required patch `{id}` Cargo path `{}` is not a real directory",
+            logical_root.display()
+        )));
+    }
+    let manifest = Manifest::load_path_dependency(logical_root)?;
+    let source_version = Version::parse(&manifest.version.original).map_err(|error| {
+        Error::failure(format!(
+            "required patch Cargo manifest has invalid version `{} {}`: {error}",
+            manifest.name, manifest.version.original
+        ))
+    })?;
+    if manifest.name != rule.name || source_version != *version {
+        return Err(Error::failure(format!(
+            "required patch Cargo manifest identifies `{} {source_version}`, expected `{} {version}`",
+            manifest.name, rule.name
+        )));
+    }
+    let tree = Tree::scan(&manifest.root, DEFAULT_LIMITS, Exclusions::GitAndTarget)?;
+    let expected = decode_hex::<32>(&rule.source_tree_sha256).map_err(|error| {
+        Error::failure(format!(
+            "required patch `{id}` has invalid configured source-tree digest: {error}"
+        ))
+    })?;
+    if tree.sha256 != expected {
+        return Err(Error::failure(format!(
+            "required patch `{id}` Cargo path `{}` does not match its configured source-tree digest",
+            logical_root.display()
+        )));
+    }
+    Ok(LoadedPatch {
+        physical_root: manifest.root.clone(),
+        manifest,
+        source_tree_sha256: tree.sha256,
     })
 }
 
@@ -255,6 +351,14 @@ fn required_source_error(id: &str, rule: &RequiredPatch, error: Error) -> String
     format!(
         "required patch `{id}` from `{}` cannot use its verified source: {error}\n\
          run `lorry vendor`; if this is a system seed, repair it with the host seeder",
+        rule.provenance.display()
+    )
+}
+
+fn required_cargo_source_error(id: &str, rule: &RequiredPatch, error: Error) -> String {
+    format!(
+        "required patch `{id}` from `{}` cannot use its declared Cargo path: {error}\n\
+         materialize the verified source at `.lorry/vendor/{id}/source` before using --use-cargo-registry",
         rule.provenance.display()
     )
 }
@@ -545,6 +649,47 @@ mod tests {
         let error = resolve(&manifest, &rejected, &options(), &[]).unwrap_err();
         assert!(error.to_string().contains("exact identity and provenance"));
         assert!(!rejected.contains_required_patch("ring-0_17_14"));
+    }
+
+    #[test]
+    fn cargo_registry_mode_uses_the_materialized_required_patch_path() {
+        let fixture = Fixture::new();
+        let project = fixture.0.join("project");
+        root(
+            &project,
+            "ring = \"=0.17.14\"",
+            "[patch.crates-io]\nring = { path = \".lorry/vendor/ring-0_17_14/source\" }\n",
+        );
+        let source = fixture.package(
+            "project/.lorry/vendor/ring-0_17_14/source",
+            "ring",
+            "0.17.14",
+        );
+        fs::write(
+            project.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"ring\"\nversion = \"0.17.14\"\n\n\
+             [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+             dependencies = [\"ring\"]\n",
+        )
+        .unwrap();
+        let manifest = Manifest::load(&project).unwrap();
+        let tree = Tree::scan(&source, DEFAULT_LIMITS, Exclusions::GitAndTarget).unwrap();
+        let mut config = Config::default();
+        config.required_patches.insert(
+            "ring-0_17_14".to_owned(),
+            rule(&hex(&tree.sha256), Path::new("/system/lorry.toml")),
+        );
+        let mut catalog = Catalog::default();
+        configure_cargo_registry(&manifest, &config, &mut catalog).unwrap();
+        assert!(catalog.contains_required_patch("ring-0_17_14"));
+
+        fs::write(source.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+        let manifest = Manifest::load(&project).unwrap();
+        let mut catalog = Catalog::default();
+        configure_cargo_registry(&manifest, &config, &mut catalog).unwrap();
+        let error = resolve(&manifest, &catalog, &options(), &[]).unwrap_err();
+        assert!(error.to_string().contains("declared Cargo path"));
+        assert!(error.to_string().contains("source-tree digest"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
+use crate::cargo_registry::CargoRegistry;
 use crate::config::Config;
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
@@ -16,6 +17,7 @@ use crate::resolver::{
     Catalog, LockedPreference, Options, PackageKey, Resolution, ResolvedSource, TargetSelection,
     resolve_selected,
 };
+use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::unit::{
     CompilationPlan, PlanOptions, UnitGraph, dependency_units, plan_dependency_units,
 };
@@ -32,6 +34,7 @@ pub struct PreparedPackage {
     pub manifest: Manifest,
     pub evidence: PackageEvidence,
     extracted: Option<ExtractedArchive>,
+    cargo_registry: bool,
 }
 
 impl PreparedGraph {
@@ -53,6 +56,26 @@ impl PreparedGraph {
         let graph = dependency_units(&self.resolution, &manifests)?;
         plan_dependency_units(&graph, &manifests, options)
     }
+
+    pub fn revalidate_cargo_registry_sources(&self, limits: TreeLimits) -> Result<()> {
+        for (key, package) in &self.packages {
+            if !package.cargo_registry {
+                continue;
+            }
+            let tree = Tree::scan(
+                &package.manifest.root,
+                limits,
+                Exclusions::CargoRegistryMarker,
+            )?;
+            if tree.sha256 != package.evidence.source_tree_sha256 {
+                return Err(Error::failure(format!(
+                    "Cargo registry source for `{} {}` changed while it was being built",
+                    key.name, key.version
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl PreparedPackage {
@@ -73,8 +96,62 @@ pub fn prepare_locked(
     selection: TargetSelection<'_>,
     staging_parent: &Path,
 ) -> Result<PreparedGraph> {
-    let mut catalog = Catalog::from_locked_repository(manifest, repositories)?;
-    patch::configure(manifest, config, repositories, &mut catalog)?;
+    prepare_locked_with(
+        manifest,
+        config,
+        RegistrySource::Lorry(repositories),
+        options,
+        selection,
+        staging_parent,
+    )
+}
+
+pub fn prepare_locked_cargo_registry(
+    manifest: &Manifest,
+    config: &Config,
+    registry: &CargoRegistry,
+    options: &Options,
+    selection: TargetSelection<'_>,
+    staging_parent: &Path,
+) -> Result<PreparedGraph> {
+    prepare_locked_with(
+        manifest,
+        config,
+        RegistrySource::Cargo(registry),
+        options,
+        selection,
+        staging_parent,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RegistrySource<'a> {
+    Lorry(&'a RepositorySet),
+    Cargo(&'a CargoRegistry),
+}
+
+fn prepare_locked_with(
+    manifest: &Manifest,
+    config: &Config,
+    source: RegistrySource<'_>,
+    options: &Options,
+    selection: TargetSelection<'_>,
+    staging_parent: &Path,
+) -> Result<PreparedGraph> {
+    let mut catalog = match source {
+        RegistrySource::Lorry(repositories) => {
+            Catalog::from_locked_repository(manifest, repositories)?
+        }
+        RegistrySource::Cargo(registry) => Catalog::from_locked_cargo_registry(manifest, registry)?,
+    };
+    match source {
+        RegistrySource::Lorry(repositories) => {
+            patch::configure(manifest, config, repositories, &mut catalog)?
+        }
+        RegistrySource::Cargo(_) => {
+            patch::configure_cargo_registry(manifest, config, &mut catalog)?
+        }
+    }
     let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
     let resolution = resolve_selected(manifest, &catalog, options, &locked, selection)?;
     offline::validate_selected_resolution(manifest, &resolution)?;
@@ -84,37 +161,62 @@ pub fn prepare_locked(
     let mut packages = BTreeMap::new();
     for package in &resolution.packages {
         let prepared = match &package.source {
-            ResolvedSource::CratesIo { checksum } => {
-                let checksum = hex(checksum);
-                let object = repositories.lookup_registry(&checksum)?.ok_or_else(|| {
-                    Error::failure(format!(
-                        "locked crates.io package `{} {}` became unavailable while preparing its source",
-                        package.key.name, package.key.version
-                    ))
-                    .with_help("run `lorry vendor` to acquire the missing package")
-                })?;
-                let (source_root, extracted) = if object.retained_source {
-                    (object.root.join("source"), None)
-                } else {
-                    let extracted = extract_crate(
-                        &object.root.join("package.crate"),
-                        object.checksum,
-                        staging_parent,
-                        &object.name,
-                        &object.version,
-                        ArchiveLimits::from_policy(&config.policy.limits),
+            ResolvedSource::CratesIo { checksum } => match source {
+                RegistrySource::Lorry(repositories) => {
+                    let checksum = hex(checksum);
+                    let object = repositories.lookup_registry(&checksum)?.ok_or_else(|| {
+                            Error::failure(format!(
+                                "locked crates.io package `{} {}` became unavailable while preparing its source",
+                                package.key.name, package.key.version
+                            ))
+                            .with_help("run `lorry vendor` to acquire the missing package")
+                        })?;
+                    let (source_root, extracted) = if object.retained_source {
+                        (object.root.join("source"), None)
+                    } else {
+                        let extracted = extract_crate(
+                            &object.root.join("package.crate"),
+                            object.checksum,
+                            staging_parent,
+                            &object.name,
+                            &object.version,
+                            ArchiveLimits::from_policy(&config.policy.limits),
+                        )?;
+                        (extracted.path().to_owned(), Some(extracted))
+                    };
+                    let inspected_manifest = Manifest::load_path_dependency(&source_root)?;
+                    let package_evidence = PackageEvidence::from_registry(
+                        package,
+                        &object,
+                        &inspected_manifest,
+                        false,
                     )?;
-                    (extracted.path().to_owned(), Some(extracted))
-                };
-                let inspected_manifest = Manifest::load_path_dependency(&source_root)?;
-                let package_evidence =
-                    PackageEvidence::from_registry(package, &object, &inspected_manifest, false)?;
-                PreparedPackage {
-                    manifest: inspected_manifest,
-                    evidence: package_evidence,
-                    extracted,
+                    PreparedPackage {
+                        manifest: inspected_manifest,
+                        evidence: package_evidence,
+                        extracted,
+                        cargo_registry: false,
+                    }
                 }
-            }
+                RegistrySource::Cargo(registry) => {
+                    let locked_checksum = hex(checksum);
+                    let cached =
+                        registry.load(&package.key.name, &package.key.version, &locked_checksum)?;
+                    if cached.checksum != *checksum {
+                        return Err(Error::failure(format!(
+                            "Cargo registry source checksum does not match resolved package `{} {}`",
+                            package.key.name, package.key.version
+                        )));
+                    }
+                    let (manifest, evidence) = cached.into_parts();
+                    PreparedPackage {
+                        manifest,
+                        evidence,
+                        extracted: None,
+                        cargo_registry: true,
+                    }
+                }
+            },
             ResolvedSource::Path { .. } => {
                 let inspected_manifest = package.local_manifest.clone().ok_or_else(|| {
                     Error::failure(format!(
@@ -127,6 +229,7 @@ pub fn prepare_locked(
                     manifest: inspected_manifest,
                     evidence: package_evidence,
                     extracted: None,
+                    cargo_registry: false,
                 }
             }
         };

@@ -1,6 +1,7 @@
 mod archive;
 mod atomic;
 mod build_script;
+mod cargo_registry;
 mod cli;
 mod compile;
 mod config;
@@ -98,7 +99,8 @@ fn print_help(topic: Option<&str>) {
              Global options:\n  \
              -q, --quiet                 Suppress progress output\n  \
              -v, --verbose               Show commands and configuration\n  \
-                 --color <WHEN>          auto, always, or never\n\n\
+                 --color <WHEN>          auto, always, or never\n  \
+                 --use-cargo-registry    Use Cargo's verified offline registry cache\n\n\
              Commands:\n  \
              build                       Build the package\n  \
              run                         Build and run its binary\n  \

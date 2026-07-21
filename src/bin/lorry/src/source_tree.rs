@@ -72,6 +72,7 @@ pub struct Tree {
 pub enum Exclusions {
     None,
     GitAndTarget,
+    CargoRegistryMarker,
 }
 
 impl Tree {
@@ -189,7 +190,7 @@ impl Scanner<'_> {
                 ))
             })?;
             let name = portable_file_name(&path)?;
-            if self.excluded(name, &metadata) {
+            if self.excluded(&path, name, &metadata) {
                 continue;
             }
             let relative = portable_path(&path, self.root, self.limits)?;
@@ -234,9 +235,17 @@ impl Scanner<'_> {
         Ok(())
     }
 
-    fn excluded(&self, name: &str, metadata: &Metadata) -> bool {
-        self.exclusions == Exclusions::GitAndTarget
-            && ((name == ".git") || (name == "target" && metadata.is_dir()))
+    fn excluded(&self, path: &Path, name: &str, metadata: &Metadata) -> bool {
+        match self.exclusions {
+            Exclusions::None => false,
+            Exclusions::GitAndTarget => (name == ".git") || (name == "target" && metadata.is_dir()),
+            Exclusions::CargoRegistryMarker => {
+                name == ".cargo-ok"
+                    && path.parent() == Some(self.root)
+                    && metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+            }
+        }
     }
 
     fn push(&mut self, entry: Entry) -> Result<()> {
@@ -736,6 +745,23 @@ mod tests {
                 .map(|entry| entry.path.as_str())
                 .collect::<Vec<_>>(),
             ["target-file"]
+        );
+    }
+
+    #[test]
+    fn cargo_registry_exclusion_removes_only_the_root_marker() {
+        let root = TempDir::new("cargo-marker");
+        fs::write(root.0.join(".cargo-ok"), b"{\"v\":1}").unwrap();
+        fs::create_dir(root.0.join("nested")).unwrap();
+        fs::write(root.0.join("nested/.cargo-ok"), b"package data").unwrap();
+
+        let tree = Tree::scan(&root.0, DEFAULT_LIMITS, Exclusions::CargoRegistryMarker).unwrap();
+        assert_eq!(
+            tree.entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["nested", "nested/.cargo-ok"]
         );
     }
 

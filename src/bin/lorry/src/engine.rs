@@ -1,4 +1,5 @@
 use crate::atomic::AtomicDirectory;
+use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, Color, Command, Verbosity};
 use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, environment_rustflags};
 use crate::dependency;
@@ -88,6 +89,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 test: false,
                 color,
                 verbosity: cli.verbosity,
+                use_cargo_registry: cli.use_cargo_registry,
             })?;
             Ok(0)
         }
@@ -107,6 +109,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 test: false,
                 color,
                 verbosity: cli.verbosity,
+                use_cargo_registry: cli.use_cargo_registry,
             })?;
             run_artifact(
                 &artifact,
@@ -138,6 +141,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 test: true,
                 color,
                 verbosity: cli.verbosity,
+                use_cargo_registry: cli.use_cargo_registry,
             })?;
             run_artifact(
                 &artifact,
@@ -167,6 +171,7 @@ struct Build<'a> {
     test: bool,
     color: bool,
     verbosity: Verbosity,
+    use_cargo_registry: bool,
 }
 
 fn build(build: Build<'_>) -> Result<PathBuf> {
@@ -195,36 +200,50 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
         ))
     })?;
 
-    let repositories = RepositorySet::open(
-        &build.config.repositories,
-        repository_tree_limits(&build.config.policy.limits)?,
-        build.config.policy.limits.max_package_bytes,
-    )?;
     let rust_version = Version::parse(&build.toolchain.release).map_err(|error| {
         Error::failure(format!(
             "selected rustc release `{}` is not a semantic version: {error}",
             build.toolchain.release
         ))
     })?;
-    let prepared = dependency::prepare_locked(
-        build.manifest,
-        build.config,
-        &repositories,
-        &ResolverOptions {
-            resolver: build.manifest.resolver,
-            incompatible_rust_versions: build.config.incompatible_rust_versions,
-            rust_version,
-            max_packages: build.config.policy.limits.max_packages,
-            max_depth: build.config.policy.limits.max_depth,
-        },
-        TargetSelection {
-            target_triple: &build.target.triple,
-            target_cfg: &build.target.cfg,
-            host_triple: &build.host.triple,
-            host_cfg: &build.host.cfg,
-        },
-        staging.path(),
-    )?;
+    let resolver_options = ResolverOptions {
+        resolver: build.manifest.resolver,
+        incompatible_rust_versions: build.config.incompatible_rust_versions,
+        rust_version,
+        max_packages: build.config.policy.limits.max_packages,
+        max_depth: build.config.policy.limits.max_depth,
+    };
+    let selection = TargetSelection {
+        target_triple: &build.target.triple,
+        target_cfg: &build.target.cfg,
+        host_triple: &build.host.triple,
+        host_cfg: &build.host.cfg,
+    };
+    let prepared = if build.use_cargo_registry {
+        let registry = CargoRegistry::discover(staging.path(), &build.config.policy.limits)?;
+        dependency::prepare_locked_cargo_registry(
+            build.manifest,
+            build.config,
+            &registry,
+            &resolver_options,
+            selection,
+            staging.path(),
+        )?
+    } else {
+        let repositories = RepositorySet::open(
+            &build.config.repositories,
+            repository_tree_limits(&build.config.policy.limits)?,
+            build.config.policy.limits.max_package_bytes,
+        )?;
+        dependency::prepare_locked(
+            build.manifest,
+            build.config,
+            &repositories,
+            &resolver_options,
+            selection,
+            staging.path(),
+        )?
+    };
     let manifests = prepared
         .packages
         .iter()
@@ -268,6 +287,8 @@ fn build(build: Build<'_>) -> Result<PathBuf> {
             out_dir_limits: repository_tree_limits(&build.config.policy.limits)?,
         },
     )?;
+    prepared
+        .revalidate_cargo_registry_sources(repository_tree_limits(&build.config.policy.limits)?)?;
     let root_dependencies = root_dependencies(&prepared.resolution, &plan, &dependency_outputs)?;
     let dependency_identities = root_dependencies
         .iter()
@@ -829,6 +850,7 @@ mod tests {
             test: false,
             color: false,
             verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
         })
         .unwrap();
         let output = std::process::Command::new(artifact).output().unwrap();
@@ -876,6 +898,7 @@ mod tests {
             test: false,
             color: false,
             verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
         })
         .unwrap();
         let output = std::process::Command::new(artifact).output().unwrap();
