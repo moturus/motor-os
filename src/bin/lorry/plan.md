@@ -2864,10 +2864,23 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      remains covered by its existing VM self-check.
 
 6. **Finish Stage-2 cache, bundle, and core self-hosting.**
-   - Add the Round-22 content-addressed library/build-output cache with cold,
-     warm, invalidation, concurrent-writer, interruption, and corruption
-     fixtures. Confirm that final executables/harnesses relink on every
-     invocation and remain byte-identical.
+   - The Round-22 content-addressed library/build-output cache is implemented
+     below `target/lorry/.cache/v1`. Its versioned keys cover Lorry, rustc and
+     relevant sysroot/tool identities, normalized rustc arguments and the full
+     effective environment, manifests/lock/source trees, dependency artifact
+     contents, and sandboxed build-script environment, executable, directives,
+     and `OUT_DIR` contents. Canonical entry/payload/build-output manifests are
+     fully re-hashed on every hit; incomplete staging is ignored, corrupt
+     entries are warned about and quarantined, and concurrent identical writers
+     use first-writer-wins publication. Rustc dep-info is rejected if it names
+     an input outside the package and assigned `OUT_DIR`.
+   - Cold/warm/source-invalidation, concurrent-writer, interrupted-staging,
+     corruption, build-output normalization, and root-relink fixtures pass.
+     A two-build Lorry trial reused every dependency library on the second
+     build while recompiling/rerunning all build scripts and relinking the root;
+     both root executables had SHA-256
+     `4e77dd6c3fa45dee8a2436dd7082bbfaa85d63bdf703dd2422685bcd85d26aa6`.
+     The cache implementation also passes the Motor OS compile check.
    - Add the one-file test bundle and test its canonical payload, tamper
      rejection, private extraction, cleanup, argument forwarding, fail
      aggregation, `CARGO_BIN_EXE_rush`, `--test`, `--no-run`, and cross-runner

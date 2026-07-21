@@ -1,6 +1,7 @@
 mod archive;
 mod atomic;
 mod build_script;
+mod cache;
 mod cargo_registry;
 mod cli;
 mod compile;

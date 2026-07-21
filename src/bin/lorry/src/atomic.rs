@@ -235,6 +235,44 @@ impl AtomicDirectory {
         }
         Ok(())
     }
+
+    /// Publishes this staging directory only when `destination` does not
+    /// already exist. Returns `false` when another writer won the race.
+    pub fn commit_no_replace(mut self, destination: &Path) -> Result<bool> {
+        let parent = destination.parent().ok_or_else(|| {
+            Error::failure(format!(
+                "output destination `{}` has no parent",
+                destination.display()
+            ))
+        })?;
+        if self.path.parent() != Some(parent) {
+            return Err(Error::failure(
+                "atomic output staging and destination are not siblings",
+            ));
+        }
+
+        match fs::symlink_metadata(destination) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to inspect output `{}`: {error}",
+                    destination.display()
+                )));
+            }
+        }
+        match fs::rename(&self.path, destination) {
+            Ok(()) => {
+                self.committed = true;
+                Ok(true)
+            }
+            Err(_) if destination.exists() => Ok(false),
+            Err(error) => Err(Error::failure(format!(
+                "failed to atomically install output `{}`: {error}",
+                destination.display()
+            ))),
+        }
+    }
 }
 
 impl Drop for AtomicDirectory {
@@ -382,6 +420,23 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_replace_publish_preserves_the_first_complete_directory() {
+        let root = temp_root("no-replace");
+        let destination = root.join("entry");
+
+        let first = AtomicDirectory::new(&root, "entry").unwrap();
+        fs::write(first.path().join("value"), b"first").unwrap();
+        assert!(first.commit_no_replace(&destination).unwrap());
+
+        let second = AtomicDirectory::new(&root, "entry").unwrap();
+        fs::write(second.path().join("value"), b"second").unwrap();
+        assert!(!second.commit_no_replace(&destination).unwrap());
+        assert_eq!(fs::read(destination.join("value")).unwrap(), b"first");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

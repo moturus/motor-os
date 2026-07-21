@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::build_script::{self, EnvironmentOptions, RunOptions};
+use crate::cache::{BuildCache, BuildScriptInput, DependencyInput, UnitInput};
 use crate::compile::{
     BuildOutput, CommandOptions, RustcOutput, dependency_rustc_invocation,
     dependency_rustc_invocation_with_build_output,
 };
 use crate::diagnostic::{Error, Result};
+use crate::hash::sha256_file;
 use crate::manifest::Manifest;
 use crate::process::RustcCommand;
 use crate::resolver::{CompileKind, PackageKey};
@@ -35,11 +37,14 @@ pub struct Options<'a> {
     pub build_script_timeout: Duration,
     pub build_script_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
+    pub cache: Option<&'a BuildCache>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutedBuildScript {
     pub output: build_script::Output,
+    pub environment: BTreeMap<String, std::ffi::OsString>,
+    pub executable_sha256: [u8; 32],
     pub out_dir: PathBuf,
     pub temp_dir: PathBuf,
 }
@@ -211,13 +216,15 @@ fn execute_inner(
                     key.clone(),
                     ExecutedBuildScript {
                         output: build_output,
+                        environment,
+                        executable_sha256: sha256_file(executable)?,
                         out_dir,
                         temp_dir,
                     },
                 );
             }
             UnitKind::Library | UnitKind::BuildScriptCompile => {
-                let build_output = if key.kind == UnitKind::Library {
+                let executed_build_script = if key.kind == UnitKind::Library {
                     let run = planned
                         .unit
                         .dependencies
@@ -225,23 +232,21 @@ fn execute_inner(
                         .find(|edge| edge.kind == UnitEdgeKind::BuildScriptOutput)
                         .map(|edge| &edge.unit);
                     match run {
-                        Some(run) => {
-                            let output = outputs.build_scripts.get(run).ok_or_else(|| {
-                                Error::failure(format!(
-                                    "build-script output for `{} {}` was not produced first",
-                                    key.package.name, key.package.version
-                                ))
-                            })?;
-                            Some(BuildOutput {
-                                output: &output.output,
-                                out_dir: &output.out_dir,
-                            })
-                        }
+                        Some(run) => Some(outputs.build_scripts.get(run).ok_or_else(|| {
+                            Error::failure(format!(
+                                "build-script output for `{} {}` was not produced first",
+                                key.package.name, key.package.version
+                            ))
+                        })?),
                         None => None,
                     }
                 } else {
                     None
                 };
+                let build_output = executed_build_script.map(|output| BuildOutput {
+                    output: &output.output,
+                    out_dir: &output.out_dir,
+                });
                 let invocation = match build_output {
                     Some(output) => dependency_rustc_invocation_with_build_output(
                         plan,
@@ -254,6 +259,47 @@ fn execute_inner(
                 }
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
                 create_output_directories(&invocation.output)?;
+                let dependencies = if key.kind == UnitKind::Library {
+                    cache_dependencies(planned, &outputs)?
+                } else {
+                    Vec::new()
+                };
+                let cache_build_script = executed_build_script.map(cache_build_script_input);
+                let cache_key =
+                    if let Some(cache) = options.cache.filter(|_| key.kind == UnitKind::Library) {
+                        let manifest = manifests.get(&key.package).ok_or_else(|| {
+                            Error::failure(format!(
+                                "dependency execution has no manifest for `{} {}`",
+                                key.package.name, key.package.version
+                            ))
+                        })?;
+                        let cache_key = cache.key(&UnitInput {
+                            key,
+                            planned,
+                            manifest,
+                            invocation: &invocation,
+                            host_profile: options.host_profile,
+                            target_profile: options.target_profile,
+                            dependencies: &dependencies,
+                            build_script: cache_build_script,
+                        })?;
+                        if cache.restore(cache_key, &invocation.output)? {
+                            if options.verbose {
+                                eprintln!(
+                                    "Fresh {} v{} (verified Lorry cache)",
+                                    key.package.name, key.package.version
+                                );
+                            }
+                            outputs.artifacts.insert(key.clone(), invocation.output);
+                            continue;
+                        }
+                        if options.verbose {
+                            eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
+                        }
+                        Some(cache_key)
+                    } else {
+                        None
+                    };
                 if options.verbose {
                     eprintln!(
                         "Compiling {} v{} ({})",
@@ -272,6 +318,14 @@ fn execute_inner(
                 }
                 .run()?;
                 verify_outputs(&invocation.output)?;
+                validate_dep_info(
+                    &invocation.output,
+                    &invocation.current_dir,
+                    executed_build_script.map(|build| build.out_dir.as_path()),
+                )?;
+                if let (Some(cache), Some(cache_key)) = (options.cache, cache_key) {
+                    cache.store(cache_key, &invocation.output, cache_build_script.as_ref())?;
+                }
                 if let RustcOutput::BuildScript {
                     executable,
                     unhashed_executable,
@@ -285,6 +339,40 @@ fn execute_inner(
         }
     }
     Ok(outputs)
+}
+
+fn cache_build_script_input(output: &ExecutedBuildScript) -> BuildScriptInput<'_> {
+    BuildScriptInput {
+        output: &output.output,
+        environment: &output.environment,
+        executable_sha256: output.executable_sha256,
+        out_dir: &output.out_dir,
+        temp_dir: &output.temp_dir,
+    }
+}
+
+fn cache_dependencies<'a>(
+    planned: &'a crate::unit::PlannedUnit,
+    outputs: &'a Outputs,
+) -> Result<Vec<DependencyInput<'a>>> {
+    planned
+        .unit
+        .dependencies
+        .iter()
+        .filter(|edge| edge.kind == UnitEdgeKind::RustDependency)
+        .map(|edge| match outputs.artifacts.get(&edge.unit) {
+            Some(RustcOutput::Library { rlib, rmeta, .. }) => Ok(DependencyInput {
+                key: &edge.unit,
+                alias: edge.alias.as_deref(),
+                rlib,
+                rmeta,
+            }),
+            _ => Err(Error::failure(format!(
+                "cache input dependency `{} {}` has no compiled library",
+                edge.unit.package.name, edge.unit.package.version
+            ))),
+        })
+        .collect()
 }
 
 fn create_output_directories(output: &RustcOutput) -> Result<()> {
@@ -329,6 +417,162 @@ fn verify_outputs(output: &RustcOutput) -> Result<()> {
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_dep_info(
+    output: &RustcOutput,
+    package_root: &Path,
+    build_out_dir: Option<&Path>,
+) -> Result<()> {
+    const MAX_DEP_INFO_BYTES: u64 = 16 * 1024 * 1024;
+    let dep_info = match output {
+        RustcOutput::Library { dep_info, .. } | RustcOutput::BuildScript { dep_info, .. } => {
+            dep_info
+        }
+    };
+    let metadata = fs::metadata(dep_info).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect rustc dep-info `{}`: {error}",
+            dep_info.display()
+        ))
+    })?;
+    if metadata.len() > MAX_DEP_INFO_BYTES {
+        return Err(Error::failure(format!(
+            "rustc dep-info `{}` exceeds the {} byte limit",
+            dep_info.display(),
+            MAX_DEP_INFO_BYTES
+        )));
+    }
+    let bytes = fs::read(dep_info).map_err(|error| {
+        Error::failure(format!(
+            "failed to read rustc dep-info `{}`: {error}",
+            dep_info.display()
+        ))
+    })?;
+    let root = fs::canonicalize(package_root).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve package root `{}`: {error}",
+            package_root.display()
+        ))
+    })?;
+    let out_dir = build_out_dir
+        .map(|path| {
+            fs::canonicalize(path).map_err(|error| {
+                Error::failure(format!(
+                    "failed to resolve build-script OUT_DIR `{}`: {error}",
+                    path.display()
+                ))
+            })
+        })
+        .transpose()?;
+    for path in parse_dep_info_paths(&bytes)? {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        let canonical = fs::canonicalize(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to resolve rustc dep-info input `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if !canonical.starts_with(&root)
+            && !out_dir
+                .as_ref()
+                .is_some_and(|out_dir| canonical.starts_with(out_dir))
+        {
+            return Err(Error::failure(format!(
+                "rustc dep-info input `{}` is outside package root `{}`{}",
+                canonical.display(),
+                root.display(),
+                out_dir.as_ref().map_or_else(String::new, |out_dir| format!(
+                    " and build-script OUT_DIR `{}`",
+                    out_dir.display()
+                ))
+            ))
+            .with_help(
+                "keep dependency source inputs inside the package or its assigned OUT_DIR",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_dep_info_paths(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+    let mut unfolded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && bytes.get(index + 1) == Some(&b'\n') {
+            unfolded.push(b' ');
+            index += 2;
+        } else if bytes[index] == b'\\'
+            && bytes.get(index + 1) == Some(&b'\r')
+            && bytes.get(index + 2) == Some(&b'\n')
+        {
+            unfolded.push(b' ');
+            index += 3;
+        } else {
+            unfolded.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    let mut paths = Vec::new();
+    for line in unfolded.split(|byte| *byte == b'\n' || *byte == b'\r') {
+        if line
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'#')
+        {
+            continue;
+        }
+        let Some(delimiter) = line.iter().enumerate().position(|(index, byte)| {
+            *byte == b':'
+                && line
+                    .get(index + 1)
+                    .is_none_or(|next| next.is_ascii_whitespace())
+        }) else {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            return Err(Error::failure("rustc emitted malformed dep-info rule"));
+        };
+        let mut token = Vec::new();
+        let mut escaped = false;
+        for byte in &line[delimiter + 1..] {
+            if escaped {
+                token.push(*byte);
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if byte.is_ascii_whitespace() {
+                push_dep_info_path(&mut paths, &mut token)?;
+            } else if *byte == b'#' {
+                break;
+            } else {
+                token.push(*byte);
+            }
+        }
+        if escaped {
+            return Err(Error::failure(
+                "rustc emitted dep-info with a trailing escape",
+            ));
+        }
+        push_dep_info_path(&mut paths, &mut token)?;
+    }
+    Ok(paths)
+}
+
+fn push_dep_info_path(paths: &mut Vec<PathBuf>, token: &mut Vec<u8>) -> Result<()> {
+    if token.is_empty() {
+        return Ok(());
+    }
+    let value = String::from_utf8(std::mem::take(token))
+        .map_err(|_| Error::failure("rustc emitted a non-UTF-8 dep-info path"))?;
+    paths.push(PathBuf::from(value));
     Ok(())
 }
 
@@ -488,6 +732,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_makefile_escaped_dep_info_paths() {
+        let document = concat!(
+            "/output/lib.rlib: /package/src/lib.rs /package/a\\ b.rs \\\n",
+            "  /out/generated.rs\n",
+            "/package/src/lib.rs:\n",
+            "# env-dep:OUT_DIR=/out\n",
+        );
+        assert_eq!(
+            parse_dep_info_paths(document.as_bytes()).unwrap(),
+            [
+                PathBuf::from("/package/src/lib.rs"),
+                PathBuf::from("/package/a b.rs"),
+                PathBuf::from("/out/generated.rs"),
+            ]
+        );
+        assert!(parse_dep_info_paths(b"not-a-rule\n").is_err());
+        assert!(parse_dep_info_paths(b"out: trailing\\").is_err());
+    }
+
+    #[test]
     fn compiles_runs_and_consumes_a_sandboxed_build_script() {
         let fixture = Fixture::new();
         let manifest = Manifest::load_path_dependency(&fixture.0.join("package")).unwrap();
@@ -548,6 +812,7 @@ mod tests {
                 build_script_timeout: Duration::from_secs(10),
                 build_script_output_bytes: 64 * 1024,
                 out_dir_limits: DEFAULT_LIMITS,
+                cache: None,
             },
         )
         .unwrap();

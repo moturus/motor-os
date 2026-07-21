@@ -43,7 +43,7 @@ cargo test --locked
 ./tests/stage1-linux.sh
 ```
 
-The native Motor gate is:
+The native Motor OS gate is:
 
 ```sh
 ./test-native.sh --full
@@ -58,4 +58,10 @@ library and binary, and direct `tests/*.rs` integration targets. Ordinary
 harnesses; `--bundle` and `vendor` remain later Stage-2 sub-stages. Workspaces,
 custom JSON targets, compiler wrappers, and output relocation are rejected
 with actionable errors. Documentation tests are reported as omitted because
-native Motor does not ship rustdoc.
+native Motor OS does not ship rustdoc.
+
+Stage 2 reuses verified library metadata and rlibs from the versioned
+content-addressed cache below `target/lorry/.cache`. Every hit re-hashes its
+canonical payload, while incomplete entries are ignored and corrupt entries
+are quarantined. Build scripts still compile and run on every Lorry invocation,
+and final programs and test harnesses always relink.

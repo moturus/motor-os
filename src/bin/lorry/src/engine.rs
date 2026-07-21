@@ -1,4 +1,5 @@
 use crate::atomic::AtomicDirectory;
+use crate::cache;
 use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, Color, Command, Verbosity};
 use crate::config::{Config, PolicyLimits, TargetOptions, TargetSelector, environment_rustflags};
@@ -317,6 +318,18 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
+    let source_limits = repository_tree_limits(&build.config.policy.limits)?;
+    let cache = cache::BuildCache::new(&cache::Options {
+        root: &target_root.join(".cache"),
+        cargo: &cargo,
+        toolchain: build.toolchain,
+        host: build.host,
+        target: build.target,
+        host_linker: build.host_options.linker.as_deref(),
+        target_linker: build.target_options.linker.as_deref(),
+        root_manifest: build.manifest,
+        source_limits,
+    })?;
     let executor_options = executor::Options {
         cargo: &cargo,
         toolchain: build.toolchain,
@@ -332,7 +345,8 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         color: build.color,
         build_script_timeout: Duration::from_secs(build.config.policy.limits.build_script_seconds),
         build_script_output_bytes: build.config.policy.limits.build_script_output_bytes,
-        out_dir_limits: repository_tree_limits(&build.config.policy.limits)?,
+        out_dir_limits: source_limits,
+        cache: Some(&cache),
     };
     let selected_integration =
         build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
@@ -1531,6 +1545,72 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn cache_entry_count(root: &Path) -> usize {
+        let units = root.join("target/lorry/.cache/v1/units/sha256");
+        fs::read_dir(units)
+            .unwrap()
+            .map(|prefix| fs::read_dir(prefix.unwrap().path()).unwrap().count())
+            .sum()
+    }
+
+    #[test]
+    fn reuses_verified_libraries_but_relinks_roots_and_invalidates_sources() {
+        use std::os::unix::fs::MetadataExt;
+
+        let fixture = Fixture::new();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let build_once = || {
+            build(Build {
+                manifest: &manifest,
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: false,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+            })
+            .unwrap()
+        };
+
+        let cold = build_once();
+        let cold_binary = cold.binary.unwrap();
+        let cold_inode = fs::metadata(&cold_binary).unwrap().ino();
+        let cold_hash = sha256_file(&cold_binary).unwrap();
+        assert_eq!(cache_entry_count(&fixture.0), 1);
+
+        let warm = build_once();
+        let warm_binary = warm.binary.unwrap();
+        assert_ne!(fs::metadata(&warm_binary).unwrap().ino(), cold_inode);
+        assert_eq!(sha256_file(&warm_binary).unwrap(), cold_hash);
+        assert_eq!(cache_entry_count(&fixture.0), 1);
+
+        fs::write(
+            fixture.0.join("local/src/lib.rs"),
+            "pub const VALUE: &str = \"source-changed\";\n",
+        )
+        .unwrap();
+        let invalidated = build_once();
+        assert_eq!(cache_entry_count(&fixture.0), 2);
+        let output = std::process::Command::new(invalidated.binary.unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, b"source-changed");
     }
 
     #[test]
