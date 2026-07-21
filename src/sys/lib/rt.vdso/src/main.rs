@@ -21,7 +21,6 @@ mod stdio;
 mod stdio_relay;
 
 mod net {
-    pub mod inner_rx_stream;
     pub mod rt_net;
     pub mod rt_tcp;
     pub mod rt_udp;

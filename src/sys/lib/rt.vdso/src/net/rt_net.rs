@@ -1673,7 +1673,7 @@ pub fn claim_rx_page(
 }
 
 pub fn clear_rx_queue(
-    rx_queue: &Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
+    rx_queue: &Arc<Mutex<moto_io::net::inner_rx_stream::InnerRxStream>>,
     channel: &NetChannel,
 ) {
     // Clear RX queue: basically, free up server-allocated pages.

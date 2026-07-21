@@ -64,7 +64,7 @@ pub struct TcpListener {
     // the user calls accept() asynchronously (vs the I/O thread), so
     // we need a place to store messages for not-yet-accepted TCP streams.
     // MIO test actually tests this scenario.
-    pending_accept_queues: Mutex<BTreeMap<u64, Arc<Mutex<super::inner_rx_stream::InnerRxStream>>>>,
+    pending_accept_queues: Mutex<BTreeMap<u64, Arc<Mutex<moto_io::net::inner_rx_stream::InnerRxStream>>>>,
 
     max_backlog: AtomicU32,
     me: Weak<TcpListener>,
@@ -154,7 +154,7 @@ impl TcpListener {
         // pending accept (a racing accept must not miss the queue).
         self.pending_accept_queues
             .lock()
-            .insert(resp.handle, super::inner_rx_stream::InnerRxStream::new());
+            .insert(resp.handle, moto_io::net::inner_rx_stream::InnerRxStream::new());
 
         let pending = PendingAccept { reservation, resp };
 
@@ -517,7 +517,7 @@ pub struct TcpStream {
 
     // This is, most of the time, a single-producer, single-consumer queue.
     // MUST be locked before rx_buf is locked.
-    recv_queue: Arc<Mutex<super::inner_rx_stream::InnerRxStream>>,
+    recv_queue: Arc<Mutex<moto_io::net::inner_rx_stream::InnerRxStream>>,
 
     // Wakers of parked read futures, drained (wake-all-and-recheck) on
     // every incoming message and read-closing state change. Multiple
@@ -908,7 +908,7 @@ impl TcpStream {
                 event_listener: event_source,
                 me: me.clone(),
                 nonblocking: AtomicBool::new(nonblocking),
-                recv_queue: super::inner_rx_stream::InnerRxStream::new(),
+                recv_queue: moto_io::net::inner_rx_stream::InnerRxStream::new(),
                 rx_wakers: Mutex::new(Vec::new()),
                 tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
                 rx_closed: AtomicBool::new(false),
