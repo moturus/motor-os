@@ -181,6 +181,67 @@ impl UdpSocket {
         *self.peer_addr.lock() = Some(*addr);
     }
 
+    // ---------------------- async-first data-path API ---------------------- //
+    //
+    // The native surface (design 5.4), the UDP mirror of the TCP one: copies
+    // happen in the polling context, never on the channel runtime. The veneer
+    // layers blocking, `SO_*TIMEO` and `O_NONBLOCK` on top.
+
+    /// Nonblocking receive or peek: `Ok((n, from))` with a datagram,
+    /// `E_NOT_READY` when the socket would block.
+    pub fn try_recv_from(
+        &self,
+        buf: &mut [u8],
+        peek: bool,
+    ) -> Result<(usize, SocketAddr), ErrorCode> {
+        self.recv_or_peek_from_nonblocking(buf, peek)
+    }
+
+    /// The receive future the veneer parks on and a native reactor awaits.
+    /// Cancel-safe.
+    pub fn recv_from_future<'a, 'b>(
+        &'a self,
+        buf: &'b mut [u8],
+        peek: bool,
+    ) -> UdpRecvFuture<'a, 'b> {
+        UdpRecvFuture {
+            socket: self,
+            buf,
+            peek,
+        }
+    }
+
+    /// Resolves once a receive would not block. A native reactor awaits this,
+    /// then calls `try_recv_from`.
+    pub fn readable(&self) -> UdpReadable<'_> {
+        UdpReadable { socket: self }
+    }
+
+    /// Nonblocking send: `Ok(n)` when queued, `E_NOT_READY` when the TX queue
+    /// is full, `E_INVALID_ARGUMENT` when the payload is oversized.
+    pub fn try_send_to(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize, ErrorCode> {
+        if buf.len() > moto_rt::net::MAX_UDP_PAYLOAD {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        self.send_to_nonblocking(buf, addr)
+    }
+
+    /// The send future the veneer parks on and a native reactor awaits.
+    /// Cancel-safe. Callers pre-check `MAX_UDP_PAYLOAD` via `try_send_to`.
+    pub fn send_to_future<'a, 'b>(&'a self, buf: &'b [u8], addr: &SocketAddr) -> UdpSendFuture<'a, 'b> {
+        UdpSendFuture {
+            socket: self,
+            buf,
+            addr: *addr,
+        }
+    }
+
+    /// Resolves once a send would not block. A native reactor awaits this,
+    /// then calls `try_send_to`.
+    pub fn writable(&self) -> UdpWritable<'_> {
+        UdpWritable { socket: self }
+    }
+
     pub fn recv_or_peek_from(
         &self,
         buf: &mut [u8],
@@ -453,12 +514,21 @@ impl UdpSocket {
         self.tx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
     }
 
-    fn read_timeout(&self) -> u64 {
+    /// The `SO_RCVTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
+    /// A blocking receiver (the veneer) turns this into its park deadline.
+    pub fn read_timeout(&self) -> u64 {
         self.rx_timeout_ns.load(Ordering::Relaxed)
     }
 
-    fn write_timeout(&self) -> u64 {
+    /// The `SO_SNDTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
+    pub fn write_timeout(&self) -> u64 {
         self.tx_timeout_ns.load(Ordering::Relaxed)
+    }
+
+    /// Whether the socket is in `O_NONBLOCK` mode; the veneer's blocking
+    /// wrappers consult this to choose the `try_*` fast return.
+    pub fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Acquire)
     }
 
     fn raise_readiness(&self, edges: Readiness) {
@@ -519,7 +589,7 @@ impl UdpSocket {
 // most a stale waker entry. Register-then-recheck closes the race with the
 // rx task queueing between the poll's check and the waker registration.
 
-struct UdpRecvFuture<'a, 'b> {
+pub struct UdpRecvFuture<'a, 'b> {
     socket: &'a UdpSocket,
     buf: &'b mut [u8],
     peek: bool,
@@ -553,7 +623,7 @@ impl core::future::Future for UdpRecvFuture<'_, '_> {
     }
 }
 
-struct UdpSendFuture<'a, 'b> {
+pub struct UdpSendFuture<'a, 'b> {
     socket: &'a UdpSocket,
     buf: &'b [u8],
     addr: SocketAddr,
@@ -578,5 +648,67 @@ impl core::future::Future for UdpSendFuture<'_, '_> {
             Err(E_NOT_READY) => Poll::Pending,
             res => Poll::Ready(res),
         }
+    }
+}
+
+/// Receive-readiness future (design 5.4): resolves once `try_recv_from` would
+/// not block. A native reactor awaits this, then drains with `try_recv_from`;
+/// the vdso veneer parks on the richer `recv_from_future`. Cancel-safe.
+pub struct UdpReadable<'a> {
+    socket: &'a UdpSocket,
+}
+
+impl core::future::Future for UdpReadable<'_> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<()> {
+        use core::task::Poll;
+
+        let socket = self.socket;
+        if socket.has_rx_datagram() {
+            return Poll::Ready(());
+        }
+        socket.add_rx_waker(cx.waker());
+        if socket.has_rx_datagram() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    }
+}
+
+/// Send-readiness future (design 5.4): resolves once `try_send_to` would not
+/// block. First flushes already-queued datagrams (`try_tx`), then reports
+/// TX-queue room; the tx waker fires from `process_incoming_msg` when sys-io
+/// drains the queue. Cancel-safe.
+pub struct UdpWritable<'a> {
+    socket: &'a UdpSocket,
+}
+
+impl core::future::Future for UdpWritable<'_> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<()> {
+        use core::task::Poll;
+
+        let socket = self.socket;
+        if !socket.tx_queue_full() {
+            return Poll::Ready(());
+        }
+        // Push any already-queued datagrams to sys-io; that may free room.
+        socket.try_tx();
+        if !socket.tx_queue_full() {
+            return Poll::Ready(());
+        }
+        socket.add_tx_waker(cx.waker());
+        if !socket.tx_queue_full() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
     }
 }

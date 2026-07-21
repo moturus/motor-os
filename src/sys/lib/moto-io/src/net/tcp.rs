@@ -938,12 +938,22 @@ impl TcpStream {
         self.tx_timeout_ns.store(timeout_ns, Ordering::Relaxed);
     }
 
-    fn read_timeout(&self) -> u64 {
+    /// The `SO_RCVTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
+    /// A blocking reader (the veneer) turns this into its park deadline;
+    /// the async core never consults it.
+    pub fn read_timeout(&self) -> u64 {
         self.rx_timeout_ns.load(Ordering::Relaxed)
     }
 
-    fn write_timeout(&self) -> u64 {
+    /// The `SO_SNDTIMEO` deadline in nanoseconds, or `u64::MAX` for none.
+    pub fn write_timeout(&self) -> u64 {
         self.tx_timeout_ns.load(Ordering::Relaxed)
+    }
+
+    /// Whether the socket is in `O_NONBLOCK` mode; the veneer's blocking
+    /// wrappers consult this to choose the `try_*` fast return.
+    pub fn is_nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Relaxed)
     }
 
     pub fn peek(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
@@ -1068,6 +1078,71 @@ impl TcpStream {
                 }
             }
         }
+    }
+
+    // ---------------------- async-first data-path API ---------------------- //
+    //
+    // The native surface (design 5.4): copies happen in the polling context
+    // (the caller thread for a vdso `block_on`, an app's executor thread for a
+    // native user), never on the channel runtime. The veneer layers blocking,
+    // `SO_*TIMEO` and `O_NONBLOCK` on top of these.
+
+    /// Nonblocking read or peek: `Ok(n)` when bytes are copied, `Ok(0)` at
+    /// EOF, `E_NOT_READY` when the socket would block.
+    pub fn try_read(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
+        self.poll_rx(bufs, peek)
+    }
+
+    /// The read/peek future the veneer parks on and a native reactor awaits.
+    /// Cancel-safe: dropping it leaves at most a stale waker entry.
+    pub fn read_future<'a, 'b, 'c>(
+        &'a self,
+        bufs: &'b mut [&'c mut [u8]],
+        peek: bool,
+    ) -> TcpReadFuture<'a, 'b, 'c> {
+        TcpReadFuture {
+            stream: self,
+            bufs,
+            peek,
+        }
+    }
+
+    /// Resolves once a read would not block (data buffered or read half
+    /// closed). A native reactor awaits this, then calls `try_read`.
+    pub fn readable(&self) -> Readable<'_> {
+        Readable { stream: self }
+    }
+
+    /// Nonblocking write: writes what fits now (`Ok(n)`, at least one byte),
+    /// `E_NOT_READY` when fully backpressured, `E_NOT_CONNECTED` on a closed
+    /// write half.
+    pub fn try_write(&self, bufs: &[&[u8]]) -> Result<usize, ErrorCode> {
+        if bufs.is_empty() {
+            return Ok(0);
+        }
+        if !self.tcp_state().can_write() || self.tx_closed.load(Ordering::Acquire) {
+            return Err(moto_rt::E_NOT_CONNECTED);
+        }
+        self.write_nonblocking(bufs)
+    }
+
+    /// The write future the veneer parks on and a native reactor awaits. Its
+    /// `written` field carries committed bytes, so a cancelled instance can
+    /// surrender partial progress (design rule 7).
+    pub fn write_future<'a, 'b, 'c>(&'a self, bufs: &'b [&'c [u8]]) -> TcpWriteFuture<'a, 'b, 'c> {
+        let total = bufs.iter().map(|b| b.len()).sum();
+        TcpWriteFuture {
+            stream: self,
+            bufs,
+            total,
+            written: 0,
+        }
+    }
+
+    /// Resolves once a write would not block (send-queue room or write half
+    /// closed). A native reactor awaits this, then calls `try_write`.
+    pub fn writable(&self) -> Writable<'_> {
+        Writable { stream: self }
     }
 
     pub fn read_or_peek(&self, bufs: &mut [&mut [u8]], peek: bool) -> Result<usize, ErrorCode> {
@@ -1625,7 +1700,7 @@ impl TcpStream {
 /// A blocking read expressed as a future. Cancel-safe (design rule 7):
 /// all RX state lives in the stream; dropping a timed-out instance
 /// leaves at most a stale waker entry.
-pub(super) struct TcpReadFuture<'a, 'b, 'c> {
+pub struct TcpReadFuture<'a, 'b, 'c> {
     pub stream: &'a TcpStream,
     pub bufs: &'b mut [&'c mut [u8]],
     pub peek: bool,
@@ -1663,7 +1738,7 @@ impl core::future::Future for TcpReadFuture<'_, '_, '_> {
 /// write half ends the write with Ok(written); a missing io_page parks
 /// only while written == 0 (a partial write returns instead); a full
 /// send queue parks unconditionally (the marker must land).
-pub(super) struct TcpWriteFuture<'a, 'b, 'c> {
+pub struct TcpWriteFuture<'a, 'b, 'c> {
     pub stream: &'a TcpStream,
     pub bufs: &'b [&'c [u8]],
     pub total: usize,
@@ -1719,6 +1794,92 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
                         continue;
                     }
                     return Poll::Pending;
+                }
+            }
+        }
+    }
+}
+
+impl TcpStream {
+    /// Whether a read would not block: buffered RX, or the read half is
+    /// closed (an EOF read returns immediately). Mirrors the veneer's
+    /// poll-registry READABLE synthesis.
+    fn read_ready(&self) -> bool {
+        !self.tcp_state().can_read()
+            || self.rx_closed.load(Ordering::Acquire)
+            || self.has_rx_bytes()
+    }
+}
+
+/// Read-readiness future (design 5.4): resolves once `try_read` would not
+/// block. A native reactor awaits this, then drains with `try_read`; the vdso
+/// veneer parks on the richer `read_future` instead. Cancel-safe.
+pub struct Readable<'a> {
+    stream: &'a TcpStream,
+}
+
+impl core::future::Future for Readable<'_> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<()> {
+        use core::task::Poll;
+
+        let stream = self.stream;
+        if stream.read_ready() {
+            return Poll::Ready(());
+        }
+        // Register-then-recheck closes the race with the rx task queueing
+        // between the check above and the registration.
+        stream.add_rx_waker(cx.waker());
+        if stream.read_ready() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    }
+}
+
+/// Write-readiness future (design 5.4): resolves once `try_write` would not
+/// block. Arms the cross-process page-wait wake the same way the write
+/// future does — a failed probe alloc sets the subchannel's page-wait bits,
+/// so sys-io wakes the channel when it frees a page. Cancel-safe.
+pub struct Writable<'a> {
+    stream: &'a TcpStream,
+}
+
+impl core::future::Future for Writable<'_> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<()> {
+        use core::task::Poll;
+
+        let stream = self.stream;
+        if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
+            // A closed write half never blocks; the write returns an error.
+            return Poll::Ready(());
+        }
+        if stream.have_write_buffer_space() {
+            return Poll::Ready(());
+        }
+        // Register, then arm: the failed alloc sets the page-wait bits sys-io
+        // watches. A page that frees in the window is caught by the re-check.
+        stream.channel().add_tx_waker(cx.waker());
+        match stream.channel().alloc_page(stream.subchannel_mask) {
+            Ok(page) => {
+                // Room appeared; drop the probe page to free it.
+                drop(page);
+                Poll::Ready(())
+            }
+            Err(_) => {
+                if stream.have_write_buffer_space() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
                 }
             }
         }
