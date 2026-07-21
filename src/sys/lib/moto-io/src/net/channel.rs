@@ -59,18 +59,31 @@ fn run_thread_exit_hook() {
 /// replacement listener only after accepting the previous client, so a
 /// `connect` landing in that window finds no registered URL and fails with
 /// `NotFound` instead of waiting (see io_channel's listen/connect race note).
-/// The window is microseconds; yield and retry -- a channel-creation storm
-/// (e.g. the `test_channel_teardown` systest past `IO_SUBCHANNELS`) hits it
-/// under release timing, where an `unwrap()` here crashed the process. Any
-/// other error, or `NotFound` persisting past the deadline (sys-io genuinely
-/// gone), stays fatal.
+///
+/// A bare `sched_yield()` spin recovers the microsecond window, but under a
+/// sustained connection/process storm a herd of spinning clients starves
+/// sys-io's single-threaded runtime of the CPU it needs to re-arm the
+/// listener, so the window never closes and the retry budget is burned (a
+/// stress soak panicked systest/mio-test this way). We instead sleep with
+/// exponential backoff (10ms, 100ms, then 1s, capped) and +/-50% jitter,
+/// handing sys-io the CPU and de-synchronising the herd. `NotFound` persisting
+/// past a ~10s budget (sys-io genuinely gone), or any other error, stays fatal.
 fn connect_to_sys_io() -> io_channel::ClientConnection {
-    let deadline = moto_rt::time::Instant::now() + core::time::Duration::from_secs(5);
+    let deadline = moto_rt::time::Instant::now() + core::time::Duration::from_secs(10);
+    let mut backoff_ms: u64 = 10;
     loop {
         match io_channel::ClientConnection::connect("sys-io") {
             Ok(conn) => return conn,
             Err(moto_rt::Error::NotFound) if moto_rt::time::Instant::now() < deadline => {
-                moto_sys::SysCpu::sched_yield();
+                // +/-50% jitter, seeded from the TSC (which also differs across
+                // processes), spreads the retrying herd instead of lock-stepping it.
+                let seed = moto_rt::time::Instant::now().as_u64();
+                let delay_ms = backoff_ms / 2 + seed % (backoff_ms + 1);
+                let wake =
+                    moto_rt::time::Instant::now() + core::time::Duration::from_millis(delay_ms);
+                let wake = if wake < deadline { wake } else { deadline };
+                moto_rt::thread::sleep_until(wake);
+                backoff_ms = (backoff_ms * 10).min(1000);
             }
             Err(err) => panic!("connect to sys-io failed: {err:?}"),
         }
