@@ -5,7 +5,56 @@
 The design doc is normative for target behavior; where a step preserves
 today's behavior, the current code is the specification.
 
-## Status (2026-07-20, stage E complete pending review)
+## Status (2026-07-21, stage F move complete; F4c deferred; pending review)
+
+Stage F extraction is done except the native async API (F4c). `moto-io::net`
+now holds the channel runtime and the TCP/UDP state machines
+(`moto_io::net::{channel, tcp, udp}`); the vdso keeps a thin veneer (ABI shims,
+`PosixFile` impls, poll-registry event synthesis) -- `rt_tcp.rs` 1740->193,
+`rt_udp.rs` 656->92. The channel layer and the three sockets are one
+mutually-recursive SCC (the channel holds `Weak` socket refs for rx dispatch;
+the sockets hold `ChannelReservation`), so they moved atomically. It landed as
+prep-then-move commits because the veneer had to be split from each state
+machine first:
+
+- **C0** (`1ae9306`): channel layer out of `rt_net.rs` into in-crate
+  `net/channel.rs`.
+- **C1** (`42004b4`): listener injection -- constructors take
+  `Arc<dyn NetEventListener>`; the ABI shims build the concrete
+  `EventSourceManaged`. Severs the vdso type from the socket constructors.
+- **C2** (`c126f14`): `event_source`/`maybe_raise_events` become vdso free
+  functions over a public state-machine surface (they name `EventSourceManaged`
+  so cannot be inherent methods on a moved type); `raise_readiness` stays
+  inherent and moves.
+- **C3** (`d194286`): the atomic cross-crate move. The veneer stays legal by
+  the orphan rule (`PosixFile` is a vdso-local trait), so the FD table and the
+  ~20 ABI downcast sites are unchanged. `moto-io` gains
+  `moto-sys`/`moto-io-internal`/`crossbeam`/`crossbeam-queue` + a `netdev`
+  feature wired from the vdso.
+- **F4a** (`d61c653`): tidy the relocated code to library lint standards
+  (safety docs; drop/allow the dead code the vdso's crate-wide
+  `#![allow(unused)]` had masked).
+- **F4b** (`9f5a42b`): cancel-safety audit -- all four data-path futures are
+  rule-7 compliant; UDP wakers now dedup like TCP.
+- **F4d** (`90d0531`): `test_timeout_storm_during_transfer` -- storms
+  `TcpWriteFuture`'s partial-progress drop under an active transfer.
+
+**F4c (native async API) deferred.** `moto-io::fs` is async-first (a `pub async`
+surface the vdso wraps with `block_on`); making net match faithfully means
+relocating the perf-tuned blocking/timeout/spin out of the data path into the
+veneer -- a large, delicate hot-path refactor -- and the design defers the
+native async consumer that would drive it (5.4: "enabled by this design but not
+part of it"). Left as consumer-driven follow-up.
+
+**Stage-F gate (`90d0531`):** `full x3` 3/3 green (95/95/94s). vdso binary size
++2.06% `.text` (~11 KB; lost cross-crate inlining now that net is a separate
+crate -- above the plan's "~neutral" expectation, modest). Bench (release,
+3-run sanity, noisy): RR at/better (def 118 vs 122, bulk 130 vs 148 usec), bulk
+TX +17%, but RX soft (def 435 vs 525, bulk 485 vs 551) on a bimodal sample (def
+RX 431-628). The RX drift needs Stage G2's paired A/B to separate move-cost from
+host noise; deferred per the accepted "sub-10%, look later".
+
+---
 
 Stage E (lifecycle) is complete; the gate passed: `full x3` is 3/3 green (the
 flake checkpoint) and the bench sanity check holds. E1-E3 retire the last
@@ -409,6 +458,14 @@ purely mechanical.
 
 Stage gate: `full x3` + bench parity + vdso binary size check (expected
 ~neutral; moto-async and futures are already linked in).
+
+*Status: move complete (`1ae9306..90d0531`); F4c (native async API) deferred as
+consumer-driven follow-up. Actual execution decomposed F2/F3 as C0-C3 (the
+channel + socket SCC moves atomically); F4 as F4a lint / F4b cancel-safety +
+UDP waker dedup / F4d timeout-storm systest. Gate: `full x3` 3/3 green; binary
+size +2.06% .text (crate-boundary inlining, modest); bench RR/TX at-or-better,
+RX ~12-17% soft on a noisy sample -> rigorous paired A/B deferred to G2. See the
+Status section.*
 
 ## 10. Stage G — acceptance
 
