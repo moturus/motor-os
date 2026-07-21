@@ -26,8 +26,8 @@ use moto_sys_io::api_net;
 use moto_sys_io::api_net::IO_SUBCHANNELS;
 use moto_sys_io::api_net::TcpState;
 
-use super::readiness::NetEventListener;
-use super::readiness::Readiness;
+use moto_io::net::readiness::NetEventListener;
+use moto_io::net::readiness::Readiness;
 use super::rt_net::ChannelReservation;
 use super::rt_net::NetChannel;
 use super::rt_net::RpcWaiter;

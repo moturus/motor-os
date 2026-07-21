@@ -3,8 +3,8 @@
 //! installed `NetEventListener`; the vdso veneer's listener translates them
 //! into poll-registry events. A future native `moto_io::net` consumer leaves
 //! the listener unset and reads the readiness futures instead -- the edge
-//! vocabulary here never mentions the poll ABI, so the state machine can move
-//! out of the vdso with no poll dependency (Stage F).
+//! vocabulary here never mentions the poll ABI, so the state machine carries no
+//! poll dependency.
 
 /// A set of readiness edges in mio-free terms. The five edges map one-to-one
 /// onto the poll ABI's event bits, but the vocabulary is kept independent so

@@ -200,9 +200,9 @@ impl EventSourceManaged {
 /// edges become poll-ABI event bits here, then fan out via `on_event`. This
 /// translation is deliberately outside the state machine so the latter stays
 /// poll-agnostic.
-impl crate::net::readiness::NetEventListener for EventSourceManaged {
-    fn on_readiness(&self, edges: crate::net::readiness::Readiness) {
-        use crate::net::readiness::Readiness;
+impl moto_io::net::readiness::NetEventListener for EventSourceManaged {
+    fn on_readiness(&self, edges: moto_io::net::readiness::Readiness) {
+        use moto_io::net::readiness::Readiness;
         use moto_rt::poll;
 
         let mut bits: EventBits = 0;

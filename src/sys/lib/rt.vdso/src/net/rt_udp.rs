@@ -1,4 +1,4 @@
-use super::readiness::{NetEventListener, Readiness};
+use moto_io::net::readiness::{NetEventListener, Readiness};
 use super::rt_net::{ChannelReservation, NetChannel};
 use super::rt_tcp::{RX_PARK_RECHECK, TX_PARK_RECHECK, block_on_recheck};
 use crate::posix::PosixKind;
