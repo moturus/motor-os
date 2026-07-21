@@ -6,15 +6,31 @@
 
 use crate::posix;
 use crate::posix::PosixFile;
+use crate::runtime::EventSourceManaged;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::time::Duration;
+use moto_io::net::readiness::NetEventListener;
 use moto_rt::RtFd;
 use moto_rt::netc;
 use moto_sys::ErrorCode;
 
 use super::rt_tcp::TcpStream;
 use super::rt_udp::UdpSocket;
+
+/// Build the poll-registry event source a socket emits its readiness through.
+/// The veneer owns this choice (the concrete `EventSourceManaged` is a vdso
+/// type); the socket state machine only ever sees it as an opaque
+/// `Arc<dyn NetEventListener>`, so it can move to moto-io. A TCP listener
+/// never becomes writable, but a mio test expects a successful WRITABLE
+/// interest registration, so the mask includes WRITABLE for every socket:
+/// https://github.com/tokio-rs/mio/blob/9a9d691891d5f7d91c7493b65d0b80726699faa8/tests/poll.rs#L56
+fn new_event_source() -> Arc<dyn NetEventListener> {
+    Arc::new(EventSourceManaged::new(
+        moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
+    ))
+}
 
 pub unsafe extern "C" fn dns_lookup(
     host_bytes: *const u8,
@@ -137,21 +153,21 @@ pub unsafe extern "C" fn dns_lookup(
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
     if proto == moto_rt::net::PROTO_UDP {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match super::rt_udp::UdpSocket::bind(&addr) {
+        let udp_socket = match super::rt_udp::UdpSocket::bind(&addr, new_event_source()) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match super::rt_udp::UdpSocket::bind_for_remote(&addr) {
+        let udp_socket = match super::rt_udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
             Ok(socket) => socket,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
-        let listener = match super::rt_tcp::TcpListener::bind(&addr) {
+        let listener = match super::rt_tcp::TcpListener::bind(&addr, new_event_source()) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
@@ -187,7 +203,7 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
         return -(moto_rt::E_BAD_HANDLE as RtFd);
     };
 
-    let (stream, addr) = match listener.accept() {
+    let (stream, addr) = match listener.accept(&new_event_source) {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };
@@ -209,7 +225,7 @@ pub extern "C" fn tcp_connect(
     } else {
         Some(Duration::from_nanos(timeout_ns))
     };
-    let stream = match TcpStream::connect(&addr, timeout, nonblocking) {
+    let stream = match TcpStream::connect(&addr, timeout, nonblocking, new_event_source()) {
         Ok(x) => x,
         Err(err) => return -(err as RtFd),
     };

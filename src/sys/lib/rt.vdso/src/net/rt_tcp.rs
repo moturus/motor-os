@@ -200,7 +200,10 @@ impl TcpListener {
         self.channel_reservation.channel()
     }
 
-    pub fn bind(socket_addr: &SocketAddr) -> Result<Arc<TcpListener>, ErrorCode> {
+    pub fn bind(
+        socket_addr: &SocketAddr,
+        event_listener: Arc<dyn NetEventListener>,
+    ) -> Result<Arc<TcpListener>, ErrorCode> {
         let mut socket_addr = *socket_addr;
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
             crate::moto_log!("we don't currently allow binding to/listening on 0.0.0.0:0");
@@ -222,19 +225,12 @@ impl TcpListener {
         }
 
         let tcp_listener = Arc::new_cyclic(|me| {
-            // While a TCP Listener never becomes writable, a MIO test expects
-            // a successful WRITABLE interest registration:
-            // https://github.com/tokio-rs/mio/blob/9a9d691891d5f7d91c7493b65d0b80726699faa8/tests/poll.rs#L56
-            // so we have to allow that.
-            let event_source = Arc::new(EventSourceManaged::new(
-                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ));
             TcpListener {
                 socket_addr,
                 channel_reservation,
                 handle: resp.handle,
                 nonblocking: AtomicBool::new(false),
-                event_listener: event_source,
+                event_listener,
                 accept_requests: Mutex::new(BTreeMap::new()),
                 async_accepts: Mutex::new(VecDeque::new()),
                 pending_accept_queues: Mutex::new(BTreeMap::new()),
@@ -304,7 +300,10 @@ impl TcpListener {
         Ok(moto_async::block_on_sync(rx).expect("accept RPC dropped"))
     }
 
-    pub fn accept(&self) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
+    pub fn accept(
+        &self,
+        make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
+    ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
         let PendingAccept { reservation, resp } = self.get_pending_accept()?;
         if resp.status().is_err() {
             let rx_queue = self
@@ -329,14 +328,11 @@ impl TcpListener {
             .clone();
 
         let new_stream = Arc::new_cyclic(|me| {
-            let event_source = Arc::new(EventSourceManaged::new(
-                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ));
             TcpStream {
                 local_addr: Mutex::new(Some(self.socket_addr)),
                 remote_addr,
                 handle: AtomicU64::new(resp.handle),
-                event_listener: event_source,
+                event_listener: make_listener(),
                 me: me.clone(),
                 nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
                 channel_reservation,
@@ -881,6 +877,7 @@ impl TcpStream {
         socket_addr: &SocketAddr,
         timeout: Option<Duration>,
         nonblocking: bool,
+        event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
         let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
@@ -897,15 +894,12 @@ impl TcpStream {
         };
 
         let new_stream = Arc::new_cyclic(|me| {
-            let event_source = Arc::new(EventSourceManaged::new(
-                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ));
             TcpStream {
                 channel_reservation,
                 local_addr: Mutex::new(None),
                 remote_addr: *socket_addr,
                 handle: AtomicU64::new(SysHandle::NONE.into()),
-                event_listener: event_source,
+                event_listener,
                 me: me.clone(),
                 nonblocking: AtomicBool::new(nonblocking),
                 recv_queue: moto_io::net::inner_rx_stream::InnerRxStream::new(),

@@ -96,24 +96,31 @@ impl UdpSocket {
         *self.peer_addr.lock()
     }
 
-    pub fn bind(socket_addr: &SocketAddr) -> Result<Arc<UdpSocket>, ErrorCode> {
+    pub fn bind(
+        socket_addr: &SocketAddr,
+        event_listener: Arc<dyn NetEventListener>,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
         if socket_addr.port() == 0 && socket_addr.ip().is_unspecified() {
             // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(socket_addr, false)
+        Self::bind_inner(socket_addr, false, event_listener)
     }
 
-    pub fn bind_for_remote(remote_addr: &SocketAddr) -> Result<Arc<UdpSocket>, ErrorCode> {
+    pub fn bind_for_remote(
+        remote_addr: &SocketAddr,
+        event_listener: Arc<dyn NetEventListener>,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
         if remote_addr.ip().is_unspecified() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(remote_addr, true)
+        Self::bind_inner(remote_addr, true, event_listener)
     }
 
     fn bind_inner(
         requested_addr: &SocketAddr,
         select_route: bool,
+        event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         let mut channel_reservation = super::channel::reserve_channel();
         channel_reservation.reserve_subchannel();
@@ -143,15 +150,12 @@ impl UdpSocket {
         }
 
         let udp_socket = Arc::new_cyclic(|me| {
-            let event_source = Arc::new(EventSourceManaged::new(
-                moto_rt::poll::POLL_READABLE | moto_rt::poll::POLL_WRITABLE,
-            ));
             UdpSocket {
                 local_addr: socket_addr,
                 channel_reservation,
                 handle: resp.handle,
                 nonblocking: AtomicBool::new(false),
-                event_listener: event_source,
+                event_listener,
                 subchannel_mask,
                 tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
                 peer_addr: Mutex::new(None),
