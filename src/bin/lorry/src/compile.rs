@@ -729,6 +729,7 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
+                test_profile: false,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: Lto::Fat,
@@ -958,6 +959,7 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
+                test_profile: false,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: Lto::Fat,

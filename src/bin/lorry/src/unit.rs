@@ -95,6 +95,7 @@ pub struct CompilationPlan {
 pub struct PlanOptions<'a> {
     pub workspace_root: &'a Path,
     pub release: bool,
+    pub test_profile: bool,
     pub release_profile: &'a ReleaseProfile,
     pub rustc: &'a Toolchain,
     /// `None` is a native Linux build. Native Motor passes its normalized
@@ -393,7 +394,12 @@ fn validate_manifest_identity(key: &PackageKey, manifest: &Manifest) -> Result<(
 
 fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) -> UnitSettings {
     let local = matches!(key.package.source, PackageSourceKey::Path(_));
-    let mut profile = base_profile(options.release, options.release_profile, local);
+    let mut profile = base_profile(
+        options.release,
+        options.release_profile,
+        local,
+        options.test_profile,
+    );
     let for_host =
         key.kind == UnitKind::BuildScriptCompile || key.compile_kind == CompileKind::Host;
     if for_host {
@@ -440,7 +446,12 @@ fn unit_settings(graph: &UnitGraph, key: &UnitKey, options: &PlanOptions<'_>) ->
     }
 }
 
-fn base_profile(release: bool, configured: &ReleaseProfile, local: bool) -> UnitProfile {
+fn base_profile(
+    release: bool,
+    configured: &ReleaseProfile,
+    local: bool,
+    test_profile: bool,
+) -> UnitProfile {
     if release {
         UnitProfile {
             opt_level: "3",
@@ -450,7 +461,7 @@ fn base_profile(release: bool, configured: &ReleaseProfile, local: bool) -> Unit
             debug_assertions: false,
             overflow_checks: false,
             incremental: false,
-            panic: if configured.panic_abort {
+            panic: if configured.panic_abort && !test_profile {
                 CargoPanicStrategy::Abort
             } else {
                 CargoPanicStrategy::Unwind
@@ -885,6 +896,7 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
+                test_profile: false,
                 release_profile: &release_profile,
                 rustc: &toolchain(),
                 logical_target: Some("x86_64-unknown-motor"),
@@ -950,6 +962,7 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
+                test_profile: false,
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain(),
                 logical_target: None,
@@ -1083,6 +1096,7 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: true,
+                test_profile: false,
                 release_profile: &ReleaseProfile {
                     panic_abort: true,
                     lto: ManifestLto::Fat,

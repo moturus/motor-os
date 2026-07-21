@@ -60,16 +60,10 @@ where
             Ok(0)
         }
         Command::Vendor { .. } => Err(Error::unsupported("vendor", 1)),
-        Command::Test(options) if options.test.is_some() || options.no_run || options.bundle => {
-            let option = if options.test.is_some() {
-                "--test"
-            } else if options.no_run {
-                "--no-run"
-            } else {
-                "--bundle"
-            };
-            Err(Error::unsupported(option, 1))
-        }
+        Command::Test(options) if options.bundle => Err(Error::failure(
+            "test bundles are not implemented in the current Stage-2 sub-stage",
+        )
+        .with_help("remove `--bundle` to build or run separate Cargo-compatible harnesses")),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }
@@ -83,7 +77,7 @@ fn print_help(topic: Option<&str>) {
             "Build and run the package binary\n\nUsage: lorry [+toolchain] [GLOBAL] run [--release|-r] [--target TRIPLE] [-- ARGS...]"
         ),
         Some("test") => println!(
-            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [-- ARGS...]"
+            "Build and run package tests\n\nUsage: lorry [+toolchain] [GLOBAL] test [--release|-r] [--target TRIPLE] [--test NAME] [--no-run] [--bundle] [-- ARGS...]"
         ),
         Some("vendor") => println!(
             "Vendor approved dependencies (Stage 2)\n\nUsage: lorry [+toolchain] [GLOBAL] vendor [--accept-all]"
@@ -104,7 +98,7 @@ fn print_help(topic: Option<&str>) {
              Commands:\n  \
              build                       Build the package\n  \
              run                         Build and run its binary\n  \
-             test                        Build and run its binary unit tests\n  \
+             test                        Build and run unit and integration tests\n  \
              vendor                      Vendor dependencies (Stage 2)\n  \
              help                        Show this help"
         ),
@@ -116,13 +110,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_two_commands_fail_at_the_boundary() {
+    fn unfinished_stage_two_commands_fail_at_the_boundary() {
         let vendor = run(["vendor".to_owned()]).unwrap_err();
         assert_eq!(vendor.exit_code(), 101);
         assert!(vendor.to_string().contains("Stage 1"));
 
         let test = run(["test".to_owned(), "--bundle".to_owned()]).unwrap_err();
         assert_eq!(test.exit_code(), 101);
-        assert!(test.to_string().contains("--bundle"));
+        assert!(test.to_string().contains("test bundles"));
+        assert!(test.to_string().contains("Stage-2"));
     }
 }

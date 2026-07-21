@@ -21,6 +21,7 @@ pub struct IdentityInput<'a> {
     pub features: &'a [String],
     pub release: bool,
     pub test: bool,
+    pub test_profile: bool,
     /// Cargo's logical compile kind. Native Motor uses an explicit logical
     /// target here even when rustc itself is invoked without `--target`.
     pub logical_target: Option<&'a str>,
@@ -54,6 +55,7 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
         target_kind: match input.target_kind {
             RootTargetKind::Library => CargoTargetKind::Lib(vec![CargoCrateType::Lib]),
             RootTargetKind::Binary => CargoTargetKind::Bin,
+            RootTargetKind::IntegrationTest => CargoTargetKind::Test,
         },
         rustc: input.rustc,
         rustflags: input.rustflags,
@@ -67,6 +69,7 @@ pub fn cargo_identity(input: &IdentityInput<'_>) -> Identity {
 pub enum RootTargetKind {
     Library,
     Binary,
+    IntegrationTest,
 }
 
 pub struct CargoUnitIdentityInput<'a> {
@@ -280,7 +283,7 @@ fn stage_one_profile<'a>(input: &'a IdentityInput<'a>) -> CargoProfile<'a> {
             overflow_checks: false,
             rpath: false,
             incremental: false,
-            panic: if input.test || !input.release_profile.panic_abort {
+            panic: if input.test_profile || !input.release_profile.panic_abort {
                 CargoPanicStrategy::Unwind
             } else {
                 CargoPanicStrategy::Abort
@@ -645,6 +648,7 @@ mod tests {
                 features: &[],
                 release,
                 test,
+                test_profile: test,
                 logical_target: target,
                 release_profile: &profile,
                 rustc: toolchain,
@@ -676,6 +680,7 @@ mod tests {
             features: &[],
             release: true,
             test: false,
+            test_profile: false,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -693,6 +698,7 @@ mod tests {
             features: &[],
             release: true,
             test: false,
+            test_profile: false,
             logical_target: None,
             release_profile: &profile,
             rustc: &toolchain,
@@ -701,6 +707,92 @@ mod tests {
         });
         assert_eq!(binary.metadata, "08ff74a380108d7e");
         assert_eq!(binary.extra_filename, "-96c671f6ca98063a");
+    }
+
+    #[test]
+    fn matches_the_rush_release_test_target_oracle() {
+        let libc = captured_identity("ec62875fe4f4ff0c", "-d93b98bc6485d9ec");
+        let version = version();
+        let profile = profile();
+        let toolchain = native_toolchain();
+        let root_library = cargo_identity(&IdentityInput {
+            package_name: "moto-rush",
+            version: &version,
+            target_name: "moto_rush",
+            target_kind: RootTargetKind::Library,
+            features: &[],
+            release: true,
+            test: false,
+            test_profile: true,
+            logical_target: None,
+            release_profile: &profile,
+            rustc: &toolchain,
+            rustflags: &[],
+            dependencies: std::slice::from_ref(&libc),
+        });
+        assert_eq!(root_library.metadata, "55b25b27b3369b74");
+        assert_eq!(root_library.extra_filename, "-f88387e790a6d3c6");
+
+        let library_harness = cargo_identity(&IdentityInput {
+            package_name: "moto-rush",
+            version: &version,
+            target_name: "moto_rush",
+            target_kind: RootTargetKind::Library,
+            features: &[],
+            release: true,
+            test: true,
+            test_profile: true,
+            logical_target: None,
+            release_profile: &profile,
+            rustc: &toolchain,
+            rustflags: &[],
+            dependencies: std::slice::from_ref(&libc),
+        });
+        assert_eq!(library_harness.metadata, "cf2dd5a9a7673952");
+        assert_eq!(library_harness.extra_filename, "-f23575b7d2dff0ba");
+
+        let harness_dependencies = [libc, root_library];
+        let binary_harness = cargo_identity(&IdentityInput {
+            package_name: "moto-rush",
+            version: &version,
+            target_name: "rush",
+            target_kind: RootTargetKind::Binary,
+            features: &[],
+            release: true,
+            test: true,
+            test_profile: true,
+            logical_target: None,
+            release_profile: &profile,
+            rustc: &toolchain,
+            rustflags: &[],
+            dependencies: &harness_dependencies,
+        });
+        assert_eq!(binary_harness.metadata, "bc16843c2d795727");
+        assert_eq!(binary_harness.extra_filename, "-576bb2a69b604b3f");
+
+        let program = captured_identity("08ff74a380108d7e", "-96c671f6ca98063a");
+        let integration_dependencies = [
+            harness_dependencies[0].clone(),
+            harness_dependencies[1].clone(),
+            program,
+        ];
+        let integration = cargo_identity(&IdentityInput {
+            package_name: "moto-rush",
+            version: &version,
+            target_name: "phase5",
+            target_kind: RootTargetKind::IntegrationTest,
+            features: &[],
+            release: true,
+            test: true,
+            test_profile: true,
+            logical_target: None,
+            release_profile: &profile,
+            rustc: &toolchain,
+            rustflags: &[],
+            dependencies: &integration_dependencies,
+        });
+        assert_eq!(integration.metadata, "f062644c6d042c2e");
+        assert_eq!(integration.extra_filename, "-c1332ac83febc65d");
     }
 
     #[test]

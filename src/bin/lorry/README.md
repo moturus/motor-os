@@ -52,8 +52,10 @@ The native Motor gate is:
 `test-native.sh --reuse-running-vm` runs the short smoke gate inside the VM
 owned by `src/tests/full-test.sh`.
 
-Stage 1 rejects workspaces, dependencies, explicit targets in the manifest,
-custom profiles, custom JSON targets, compiler wrappers, output relocation,
-and Stage-2-only vendoring/integration-test/bundle options with actionable
-errors. Documentation tests are reported as omitted because native Motor does
-not ship rustdoc.
+Stage 2 supports locked registry and local-path dependency graphs, one root
+library and binary, and direct `tests/*.rs` integration targets. Ordinary
+`test`, `--test NAME`, and `--no-run` build Cargo-compatible separate
+harnesses; `--bundle` and `vendor` remain later Stage-2 sub-stages. Workspaces,
+custom JSON targets, compiler wrappers, and output relocation are rejected
+with actionable errors. Documentation tests are reported as omitted because
+native Motor does not ship rustdoc.

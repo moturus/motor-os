@@ -9,7 +9,9 @@ use crate::hash::{hex, sha256_file};
 use crate::identity::{
     CargoUnitLto, Identity, IdentityInput, RootTargetKind, cargo_identity, root_lto,
 };
-use crate::manifest::{BinaryTarget, Edition, LibraryTarget, Manifest, Strip};
+use crate::manifest::{
+    BinaryTarget, Edition, IntegrationTestTarget, LibraryTarget, Manifest, Strip,
+};
 use crate::process::{self, RustcCommand};
 use crate::repository::RepositorySet;
 use crate::resolver::{
@@ -91,6 +93,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 rustflags: &rustflags,
                 release,
                 test: false,
+                test_name: None,
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
@@ -111,6 +114,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 rustflags: &rustflags,
                 release,
                 test: false,
+                test_name: None,
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
@@ -131,10 +135,16 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             )
         }
         Command::Test(options) => {
+            if options.bundle {
+                return Err(Error::failure(
+                    "test bundles are not implemented in the current Stage-2 sub-stage",
+                )
+                .with_help(
+                    "remove `--bundle` to build or run separate Cargo-compatible harnesses",
+                ));
+            }
             if cli.verbosity != Verbosity::Quiet {
-                eprintln!(
-                    "note: Stage 1 runs binary unit tests; documentation tests are not supported"
-                );
+                eprintln!("note: documentation tests are not supported");
             }
             let artifacts = build(Build {
                 manifest: &manifest,
@@ -149,18 +159,31 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 rustflags: &rustflags,
                 release,
                 test: true,
+                test_name: options.test.as_deref(),
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
             })?;
-            run_artifact(
-                &artifacts.primary,
-                &options.arguments,
-                &manifest.root,
-                physical_target.as_deref(),
-                &target_options,
-                cli.verbosity,
-            )
+            if options.no_run {
+                for harness in &artifacts.harnesses {
+                    println!("{}", harness.display());
+                }
+                return Ok(0);
+            }
+            for harness in &artifacts.harnesses {
+                let status = run_artifact(
+                    harness,
+                    &options.arguments,
+                    &manifest.root,
+                    physical_target.as_deref(),
+                    &target_options,
+                    cli.verbosity,
+                )?;
+                if status != 0 {
+                    return Ok(status);
+                }
+            }
+            Ok(0)
         }
         _ => unreachable!(),
     }
@@ -179,6 +202,7 @@ struct Build<'a> {
     rustflags: &'a [String],
     release: bool,
     test: bool,
+    test_name: Option<&'a str>,
     color: bool,
     verbosity: Verbosity,
     use_cargo_registry: bool,
@@ -188,9 +212,19 @@ struct Build<'a> {
 struct BuildArtifacts {
     primary: PathBuf,
     binary: Option<PathBuf>,
+    harnesses: Vec<PathBuf>,
 }
 
 fn build(build: Build<'_>) -> Result<BuildArtifacts> {
+    if let Some(name) = build.test_name
+        && !build
+            .manifest
+            .integration_tests
+            .iter()
+            .any(|target| target.name == name)
+    {
+        return Err(unknown_integration_test(build.manifest, name));
+    }
     if build.verbosity != Verbosity::Quiet {
         eprintln!(
             "Compiling {} v{} ({})",
@@ -265,14 +299,17 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .iter()
         .map(|(key, package)| (key.clone(), package.manifest.clone()))
         .collect::<BTreeMap<_, _>>();
-    let plan = prepared.dependency_plan(&PlanOptions {
-        workspace_root: &build.manifest.root,
-        release: build.release,
-        release_profile: &build.manifest.release,
-        rustc: build.toolchain,
-        logical_target: build.logical_target,
-        rustflags: build.rustflags,
-    })?;
+    let dependency_plan = |test_profile| {
+        prepared.dependency_plan(&PlanOptions {
+            workspace_root: &build.manifest.root,
+            release: build.release,
+            test_profile,
+            release_profile: &build.manifest.release,
+            rustc: build.toolchain,
+            logical_target: build.logical_target,
+            rustflags: build.rustflags,
+        })
+    };
     let host_profile = if build.physical_target.is_some() {
         staging.path().join(".host")
     } else {
@@ -280,36 +317,73 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
     };
     let cargo = env::current_exe()
         .map_err(|error| Error::failure(format!("failed to locate Lorry executable: {error}")))?;
-    let dependency_outputs = executor::execute(
-        &plan,
-        &manifests,
-        &executor::Options {
-            cargo: &cargo,
-            toolchain: build.toolchain,
-            host: build.host,
-            target: build.target,
-            host_profile: &host_profile,
-            target_profile: staging.path(),
-            physical_target: build.physical_target,
-            host_linker: build.host_options.linker.as_deref(),
-            target_linker: build.target_options.linker.as_deref(),
-            release: build.release,
-            verbose: build.verbosity == Verbosity::Verbose,
-            color: build.color,
-            build_script_timeout: Duration::from_secs(
-                build.config.policy.limits.build_script_seconds,
-            ),
-            build_script_output_bytes: build.config.policy.limits.build_script_output_bytes,
-            out_dir_limits: repository_tree_limits(&build.config.policy.limits)?,
-        },
-    )?;
+    let executor_options = executor::Options {
+        cargo: &cargo,
+        toolchain: build.toolchain,
+        host: build.host,
+        target: build.target,
+        host_profile: &host_profile,
+        target_profile: staging.path(),
+        physical_target: build.physical_target,
+        host_linker: build.host_options.linker.as_deref(),
+        target_linker: build.target_options.linker.as_deref(),
+        release: build.release,
+        verbose: build.verbosity == Verbosity::Verbose,
+        color: build.color,
+        build_script_timeout: Duration::from_secs(build.config.policy.limits.build_script_seconds),
+        build_script_output_bytes: build.config.policy.limits.build_script_output_bytes,
+        out_dir_limits: repository_tree_limits(&build.config.policy.limits)?,
+    };
+    let selected_integration =
+        build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());
+    let needs_normal_plan =
+        !build.test || (selected_integration && !build.manifest.binaries.is_empty());
+    let normal = if needs_normal_plan {
+        let plan = dependency_plan(false)?;
+        let outputs = executor::execute(&plan, &manifests, &executor_options)?;
+        let dependencies = root_dependencies(&prepared.resolution, &plan, &outputs)?;
+        Some((plan, outputs, dependencies))
+    } else {
+        None
+    };
+    let test_dependencies = if build.test {
+        let test_plan = dependency_plan(true)?;
+        let outputs = match normal.as_ref() {
+            Some((normal_plan, normal_outputs, _)) => executor::execute_reusing(
+                &test_plan,
+                &manifests,
+                &executor_options,
+                normal_plan,
+                normal_outputs,
+            )?,
+            None => executor::execute(&test_plan, &manifests, &executor_options)?,
+        };
+        Some(root_dependencies(
+            &prepared.resolution,
+            &test_plan,
+            &outputs,
+        )?)
+    } else {
+        None
+    };
+    let normal_dependencies = normal
+        .as_ref()
+        .map(|(_, _, dependencies)| dependencies.as_slice())
+        .unwrap_or(&[]);
     prepared
         .revalidate_cargo_registry_sources(repository_tree_limits(&build.config.policy.limits)?)?;
-    let root_dependencies = root_dependencies(&prepared.resolution, &plan, &dependency_outputs)?;
     let compiled = if build.test {
-        compile_legacy_test_target(&build, staging.path(), &host_profile, &root_dependencies)?
+        compile_test_targets(
+            &build,
+            staging.path(),
+            &host_profile,
+            normal_dependencies,
+            test_dependencies.as_ref().unwrap(),
+            &destination,
+            &target_root,
+        )?
     } else {
-        compile_root_targets(&build, staging.path(), &host_profile, &root_dependencies)?
+        compile_root_targets(&build, staging.path(), &host_profile, normal_dependencies)?
     };
 
     drop(prepared);
@@ -331,10 +405,19 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .binary
         .as_ref()
         .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf());
+    let relative_harnesses = compiled
+        .harnesses
+        .iter()
+        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf())
+        .collect::<Vec<_>>();
     staging.commit(&destination)?;
     let artifacts = BuildArtifacts {
         primary: destination.join(relative_primary),
         binary: relative_binary.map(|artifact| destination.join(artifact)),
+        harnesses: relative_harnesses
+            .into_iter()
+            .map(|artifact| destination.join(artifact))
+            .collect(),
     };
 
     if build.verbosity != Verbosity::Quiet {
@@ -418,6 +501,7 @@ fn root_dependencies(
 enum RootTarget<'a> {
     Library(&'a LibraryTarget),
     Binary(&'a BinaryTarget),
+    IntegrationTest(&'a IntegrationTestTarget),
 }
 
 impl<'a> RootTarget<'a> {
@@ -425,6 +509,7 @@ impl<'a> RootTarget<'a> {
         match self {
             Self::Library(target) => &target.name,
             Self::Binary(target) => &target.name,
+            Self::IntegrationTest(target) => &target.name,
         }
     }
 
@@ -436,6 +521,7 @@ impl<'a> RootTarget<'a> {
         match self {
             Self::Library(target) => &target.path,
             Self::Binary(target) => &target.path,
+            Self::IntegrationTest(target) => &target.path,
         }
     }
 
@@ -443,6 +529,7 @@ impl<'a> RootTarget<'a> {
         match self {
             Self::Library(_) => RootTargetKind::Library,
             Self::Binary(_) => RootTargetKind::Binary,
+            Self::IntegrationTest(_) => RootTargetKind::IntegrationTest,
         }
     }
 }
@@ -455,6 +542,7 @@ struct RootLibraryArtifact {
 struct StagedArtifacts {
     primary: PathBuf,
     binary: Option<PathBuf>,
+    harnesses: Vec<PathBuf>,
 }
 
 fn compile_root_targets(
@@ -478,6 +566,7 @@ fn compile_root_targets(
                 host_profile,
                 dependencies,
                 &features,
+                false,
             )
         })
         .transpose()?;
@@ -495,14 +584,16 @@ fn compile_root_targets(
                 dependencies,
                 library.as_ref(),
                 &features,
+                false,
             )
         })
         .transpose()?;
-    if let Some((hashed, primary)) = binary {
-        install_primary(&hashed, &primary)?;
+    if let Some(binary) = binary {
+        install_primary(&binary.hashed, &binary.primary)?;
         return Ok(StagedArtifacts {
-            primary: primary.clone(),
-            binary: Some(primary),
+            primary: binary.primary.clone(),
+            binary: Some(binary.primary),
+            harnesses: Vec::new(),
         });
     }
     let library = library.ok_or_else(|| {
@@ -514,41 +605,188 @@ fn compile_root_targets(
     Ok(StagedArtifacts {
         primary: library.rlib,
         binary: None,
+        harnesses: Vec::new(),
     })
 }
 
-fn compile_legacy_test_target(
+fn compile_test_targets(
     build: &Build<'_>,
     staging: &Path,
     host_profile: &Path,
-    dependencies: &[RootDependency],
+    normal_dependencies: &[RootDependency],
+    test_dependencies: &[RootDependency],
+    destination: &Path,
+    target_root: &Path,
 ) -> Result<StagedArtifacts> {
     let features = selected_root_features(build.manifest)?
         .into_iter()
         .collect::<Vec<_>>();
-    let binary = build
+    let integration_tests = match build.test_name {
+        Some(name) => vec![
+            build
+                .manifest
+                .integration_tests
+                .iter()
+                .find(|target| target.name == name)
+                .ok_or_else(|| unknown_integration_test(build.manifest, name))?,
+        ],
+        None => build.manifest.integration_tests.iter().collect::<Vec<_>>(),
+    };
+
+    let normal_library = if integration_tests.is_empty() || build.manifest.binaries.is_empty() {
+        None
+    } else {
+        build
+            .manifest
+            .library
+            .as_ref()
+            .map(|target| {
+                compile_root_library(
+                    build,
+                    target,
+                    staging,
+                    host_profile,
+                    normal_dependencies,
+                    &features,
+                    false,
+                )
+            })
+            .transpose()?
+    };
+    let program = if integration_tests.is_empty() {
+        None
+    } else {
+        let compiled = build
+            .manifest
+            .binaries
+            .first()
+            .map(|target| {
+                compile_root_binary(
+                    build,
+                    target,
+                    false,
+                    staging,
+                    host_profile,
+                    normal_dependencies,
+                    normal_library.as_ref(),
+                    &features,
+                    false,
+                )
+            })
+            .transpose()?;
+        match compiled {
+            Some(binary) => {
+                install_primary(&binary.hashed, &binary.primary)?;
+                Some(binary)
+            }
+            None => None,
+        }
+    };
+
+    let test_library = build
         .manifest
-        .binaries
-        .first()
-        .filter(|target| target.test)
-        .ok_or_else(|| {
-            Error::failure("the current test engine requires an enabled binary test target")
-                .with_help("integration and library test targets are the next Stage-2 sub-stage")
+        .library
+        .as_ref()
+        .map(|target| {
+            compile_root_library(
+                build,
+                target,
+                staging,
+                host_profile,
+                test_dependencies,
+                &features,
+                true,
+            )
+        })
+        .transpose()?;
+    let mut harnesses = Vec::new();
+    if build.test_name.is_none() {
+        if let Some(library) = build.manifest.library.as_ref().filter(|target| target.test) {
+            harnesses.push(compile_root_harness(
+                build,
+                RootTarget::Library(library),
+                staging,
+                host_profile,
+                test_dependencies,
+                None,
+                &features,
+                None,
+                None,
+            )?);
+        }
+        if let Some(binary) = build.manifest.binaries.first().filter(|target| target.test) {
+            harnesses.push(compile_root_harness(
+                build,
+                RootTarget::Binary(binary),
+                staging,
+                host_profile,
+                test_dependencies,
+                test_library.as_ref(),
+                &features,
+                None,
+                None,
+            )?);
+        }
+    }
+
+    if !integration_tests.is_empty() {
+        let temporary_directory = target_root.join("tmp");
+        fs::create_dir_all(&temporary_directory).map_err(|error| {
+            Error::failure(format!(
+                "failed to create test temporary directory `{}`: {error}",
+                temporary_directory.display()
+            ))
         })?;
-    let (artifact, _) = compile_root_binary(
-        build,
-        binary,
-        true,
-        staging,
-        host_profile,
-        dependencies,
-        None,
-        &features,
-    )?;
+        for target in integration_tests {
+            harnesses.push(compile_root_harness(
+                build,
+                RootTarget::IntegrationTest(target),
+                staging,
+                host_profile,
+                test_dependencies,
+                test_library.as_ref(),
+                &features,
+                Some(IntegrationEnvironment {
+                    binary: build
+                        .manifest
+                        .binaries
+                        .first()
+                        .map(|target| (target.name.as_str(), destination.join(&target.name))),
+                    temporary_directory: &temporary_directory,
+                }),
+                program.as_ref().map(|binary| &binary.identity),
+            )?);
+        }
+    }
+
+    let primary = harnesses.first().cloned().ok_or_else(|| {
+        Error::failure(format!(
+            "package `{}` has no enabled test targets",
+            build.manifest.name
+        ))
+    })?;
     Ok(StagedArtifacts {
-        primary: artifact,
-        binary: None,
+        primary,
+        binary: program.map(|binary| binary.primary),
+        harnesses,
     })
+}
+
+fn unknown_integration_test(manifest: &Manifest, name: &str) -> Error {
+    let available = manifest
+        .integration_tests
+        .iter()
+        .map(|target| target.name.as_str())
+        .collect::<Vec<_>>();
+    let help = if available.is_empty() {
+        "this package has no discovered integration-test targets".to_owned()
+    } else {
+        format!(
+            "available integration-test targets: {}",
+            available.join(", ")
+        )
+    };
+    Error::failure(format!("no integration-test target named `{name}`")).with_help(help)
 }
 
 fn compile_root_library(
@@ -558,13 +796,14 @@ fn compile_root_library(
     host_profile: &Path,
     dependencies: &[RootDependency],
     features: &[String],
+    test_profile: bool,
 ) -> Result<RootLibraryArtifact> {
     let identities = dependencies
         .iter()
         .map(|dependency| dependency.identity.clone())
         .collect::<Vec<_>>();
     let target = RootTarget::Library(target);
-    let identity = root_identity(build, target, false, features, &identities);
+    let identity = root_identity(build, target, false, test_profile, features, &identities);
     let arguments = rustc_arguments(
         build,
         target,
@@ -575,8 +814,9 @@ fn compile_root_library(
         dependencies,
         None,
         features,
+        test_profile,
     );
-    run_root_rustc(build, target, host_profile, &arguments)?;
+    run_root_rustc(build, target, host_profile, &arguments, None)?;
     let stem = format!("{}{}", target.crate_name(), identity.extra_filename);
     let rlib = staging.join("deps").join(format!("lib{stem}.rlib"));
     let rmeta = staging.join("deps").join(format!("lib{stem}.rmeta"));
@@ -593,7 +833,8 @@ fn compile_root_binary(
     dependencies: &[RootDependency],
     library: Option<&RootLibraryArtifact>,
     features: &[String],
-) -> Result<(PathBuf, PathBuf)> {
+    test_profile: bool,
+) -> Result<RootBinaryArtifact> {
     let mut identities = dependencies
         .iter()
         .map(|dependency| dependency.identity.clone())
@@ -602,7 +843,7 @@ fn compile_root_binary(
         identities.push(library.identity.clone());
     }
     let target = RootTarget::Binary(target);
-    let identity = root_identity(build, target, test, features, &identities);
+    let identity = root_identity(build, target, test, test_profile, features, &identities);
     let arguments = rustc_arguments(
         build,
         target,
@@ -613,21 +854,89 @@ fn compile_root_binary(
         dependencies,
         library,
         features,
+        test_profile,
     );
-    run_root_rustc(build, target, host_profile, &arguments)?;
+    run_root_rustc(build, target, host_profile, &arguments, None)?;
     let hashed = staging.join("deps").join(format!(
         "{}{}",
         target.crate_name(),
         identity.extra_filename
     ));
     verify_artifacts([&hashed])?;
-    Ok((hashed, staging.join(target.name())))
+    Ok(RootBinaryArtifact {
+        identity,
+        hashed,
+        primary: staging.join(target.name()),
+    })
+}
+
+struct RootBinaryArtifact {
+    identity: Identity,
+    hashed: PathBuf,
+    primary: PathBuf,
+}
+
+#[derive(Clone)]
+struct IntegrationEnvironment<'a> {
+    binary: Option<(&'a str, PathBuf)>,
+    temporary_directory: &'a Path,
+}
+
+fn compile_root_harness(
+    build: &Build<'_>,
+    target: RootTarget<'_>,
+    staging: &Path,
+    host_profile: &Path,
+    dependencies: &[RootDependency],
+    library: Option<&RootLibraryArtifact>,
+    features: &[String],
+    integration_environment: Option<IntegrationEnvironment<'_>>,
+    artifact_dependency: Option<&Identity>,
+) -> Result<PathBuf> {
+    let mut identities = dependencies
+        .iter()
+        .map(|dependency| dependency.identity.clone())
+        .collect::<Vec<_>>();
+    if let Some(library) = library {
+        identities.push(library.identity.clone());
+    }
+    if let Some(artifact_dependency) = artifact_dependency {
+        identities.push(artifact_dependency.clone());
+    }
+    let identity = root_identity(build, target, true, true, features, &identities);
+    let arguments = rustc_arguments(
+        build,
+        target,
+        true,
+        &identity,
+        staging,
+        host_profile,
+        dependencies,
+        library,
+        features,
+        true,
+    );
+    run_root_rustc(
+        build,
+        target,
+        host_profile,
+        &arguments,
+        integration_environment,
+    )?;
+    let artifact = staging.join("deps").join(format!(
+        "{}{}",
+        target.crate_name(),
+        identity.extra_filename
+    ));
+    verify_artifacts([&artifact])?;
+    Ok(artifact)
 }
 
 fn root_identity(
     build: &Build<'_>,
     target: RootTarget<'_>,
     test: bool,
+    test_profile: bool,
     features: &[String],
     dependencies: &[Identity],
 ) -> Identity {
@@ -639,6 +948,7 @@ fn root_identity(
         features,
         release: build.release,
         test,
+        test_profile,
         logical_target: build.logical_target,
         release_profile: &build.manifest.release,
         rustc: build.toolchain,
@@ -652,8 +962,14 @@ fn run_root_rustc(
     target: RootTarget<'_>,
     host_profile: &Path,
     arguments: &[OsString],
+    integration_environment: Option<IntegrationEnvironment<'_>>,
 ) -> Result<()> {
-    let environment = rustc_environment(build, host_profile, target)?;
+    let environment = rustc_environment(
+        build,
+        host_profile,
+        target,
+        integration_environment.as_ref(),
+    )?;
     RustcCommand {
         program: &build.toolchain.rustc,
         arguments,
@@ -699,6 +1015,7 @@ fn rustc_arguments(
     root_dependencies: &[RootDependency],
     root_library: Option<&RootLibraryArtifact>,
     features: &[String],
+    test_profile: bool,
 ) -> Vec<OsString> {
     let mut args = Vec::new();
     push(&mut args, "--crate-name");
@@ -726,13 +1043,13 @@ fn rustc_arguments(
             &mut args,
             match target.kind() {
                 RootTargetKind::Library => "lib",
-                RootTargetKind::Binary => "bin",
+                RootTargetKind::Binary | RootTargetKind::IntegrationTest => "bin",
             },
         );
     }
     push(
         &mut args,
-        if target.kind() == RootTargetKind::Library {
+        if target.kind() == RootTargetKind::Library && !test {
             "--emit=dep-info,metadata,link"
         } else {
             "--emit=dep-info,link"
@@ -741,7 +1058,7 @@ fn rustc_arguments(
 
     if build.release {
         codegen(&mut args, "opt-level=3");
-        if build.manifest.release.panic_abort && !test {
+        if build.manifest.release.panic_abort && !test_profile {
             codegen(&mut args, "panic=abort");
         }
         root_lto_arguments(
@@ -818,7 +1135,7 @@ fn rustc_arguments(
     }
     for dependency in root_dependencies {
         push(&mut args, "--extern");
-        let artifact = if target.kind() == RootTargetKind::Library {
+        let artifact = if target.kind() == RootTargetKind::Library && !test {
             &dependency.rmeta
         } else {
             &dependency.rlib
@@ -859,6 +1176,7 @@ fn rustc_environment(
     build: &Build<'_>,
     host_profile: &Path,
     target: RootTarget<'_>,
+    integration_environment: Option<&IntegrationEnvironment<'_>>,
 ) -> Result<BTreeMap<String, OsString>> {
     let manifest = build.manifest;
     let version = &manifest.version;
@@ -868,6 +1186,20 @@ fn rustc_environment(
     value(&mut values, "CARGO", current_exe.as_os_str());
     if let RootTarget::Binary(binary) = target {
         value(&mut values, "CARGO_BIN_NAME", &binary.name);
+    }
+    if let Some(integration) = integration_environment {
+        if let Some((name, path)) = &integration.binary {
+            value(
+                &mut values,
+                &format!("CARGO_BIN_EXE_{name}"),
+                path.as_os_str(),
+            );
+        }
+        value(
+            &mut values,
+            "CARGO_TARGET_TMPDIR",
+            integration.temporary_directory.as_os_str(),
+        );
     }
     value(&mut values, "CARGO_CRATE_NAME", target.crate_name());
     value(&mut values, "CARGO_MANIFEST_DIR", manifest.root.as_os_str());
@@ -1160,6 +1492,39 @@ mod tests {
             )
             .unwrap();
         }
+
+        fn add_test_targets(&self) {
+            self.add_root_library();
+            let library = fs::read_to_string(self.0.join("src/lib.rs")).unwrap();
+            fs::write(
+                self.0.join("src/lib.rs"),
+                format!(
+                    "{library}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn library_unit() {{ assert_eq!(super::value(), \"dependency-ok\"); }}\n}}\n"
+                ),
+            )
+            .unwrap();
+            let binary = fs::read_to_string(self.0.join("src/main.rs")).unwrap();
+            fs::write(
+                self.0.join("src/main.rs"),
+                format!(
+                    "{binary}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn binary_unit() {{ assert_eq!(root_bin::value(), \"dependency-ok\"); }}\n}}\n"
+                ),
+            )
+            .unwrap();
+            fs::create_dir(self.0.join("tests")).unwrap();
+            for name in ["first", "second"] {
+                fs::write(
+                    self.0.join("tests").join(format!("{name}.rs")),
+                    "#[test]\nfn integration() {\n\
+                         assert!(std::path::Path::new(env!(\"CARGO_TARGET_TMPDIR\")).is_dir());\n\
+                         let output = std::process::Command::new(env!(\"CARGO_BIN_EXE_root-bin\")).output().unwrap();\n\
+                         assert!(output.status.success());\n\
+                         assert_eq!(output.stdout, b\"dependency-ok\");\n\
+                     }\n",
+                )
+                .unwrap();
+            }
+        }
     }
 
     impl Drop for Fixture {
@@ -1190,6 +1555,7 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
+            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
@@ -1225,6 +1591,7 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
+            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
@@ -1274,6 +1641,7 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
+            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
@@ -1329,6 +1697,7 @@ mod tests {
             rustflags: &[],
             release: false,
             test: false,
+            test_name: None,
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
@@ -1339,5 +1708,147 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"build-script-ok");
+    }
+
+    #[test]
+    fn builds_and_runs_unit_and_integration_test_harnesses() {
+        let fixture = Fixture::new();
+        fixture.add_test_targets();
+        fixture.add_build_script();
+        for relative in [
+            "src/lib.rs",
+            "src/main.rs",
+            "tests/first.rs",
+            "tests/second.rs",
+        ] {
+            let path = fixture.0.join(relative);
+            let source = fs::read_to_string(&path).unwrap();
+            fs::write(path, source.replace("dependency-ok", "build-script-ok")).unwrap();
+        }
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.policy.rules.insert(
+            "local-build-script".to_owned(),
+            PolicyRule {
+                action: PolicyAction::Allow,
+                name: Some("local-dependency".to_owned()),
+                version: None,
+                source: Some("path".to_owned()),
+                checksum: None,
+                source_tree_sha256: None,
+                license: Some("MIT".to_owned()),
+                allow_build_script: true,
+                native_tools: BTreeSet::new(),
+                provenance: fixture.0.join("lorry.toml"),
+            },
+        );
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifacts = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: true,
+            test_name: None,
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+        })
+        .unwrap();
+        assert_eq!(artifacts.harnesses.len(), 4);
+        assert!(artifacts.binary.as_ref().unwrap().is_file());
+        for harness in &artifacts.harnesses {
+            let status = std::process::Command::new(harness).status().unwrap();
+            assert!(status.success(), "harness `{}` failed", harness.display());
+        }
+    }
+
+    #[test]
+    fn named_test_builds_only_the_selected_integration_harness() {
+        let fixture = Fixture::new();
+        fixture.add_test_targets();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let artifacts = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: true,
+            test_name: Some("second"),
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+        })
+        .unwrap();
+        assert_eq!(artifacts.harnesses.len(), 1);
+        assert!(
+            artifacts.harnesses[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("second-")
+        );
+        assert!(
+            std::process::Command::new(&artifacts.harnesses[0])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn unknown_named_test_lists_discovered_integration_targets() {
+        let fixture = Fixture::new();
+        fixture.add_test_targets();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let error = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: true,
+            test_name: Some("missing"),
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+        })
+        .unwrap_err();
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("no integration-test target named `missing`"));
+        assert!(rendered.contains("first, second"));
     }
 }

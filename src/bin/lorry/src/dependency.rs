@@ -448,6 +448,7 @@ mod tests {
             .dependency_plan(&PlanOptions {
                 workspace_root: &manifest.root,
                 release: true,
+                test_profile: false,
                 release_profile: &manifest.release,
                 rustc: &toolchain(),
                 logical_target: None,

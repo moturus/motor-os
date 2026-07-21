@@ -1,6 +1,6 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage 1 complete — Stage 2 system-seeder implementation is next**
+Status: **Stage 2 in progress — root/test compilation is complete; cache, bundle, and vendoring remain**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -2849,6 +2849,19 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      deterministic target-name order, ignore out-of-scope nested/non-Rust
      files, and reject linked, special, non-UTF-8, invalid, or crate-name-
      colliding entries before compilation.
+   - Ordinary tests now build the normal panic-abort program graph and the
+     distinct panic-unwind harness graph, reusing only identical dependency
+     units. Library and binary unit harnesses precede sorted integrations;
+     named selection builds one integration plus its required library/program
+     graph, and `--no-run` prints deterministic final paths. Integrations
+     receive Cargo-compatible `CARGO_BIN_EXE_rush` and `CARGO_TARGET_TMPDIR`
+     values, and their identities include the program artifact edge. A clean
+     Cargo oracle and Lorry produced identical Linux and Motor OS release
+     identities for all 12 `rush` harnesses, with byte-identical root binary
+     and unit harnesses on both targets. The generated Linux `phase0`
+     integration harness also passed all 12 tests. Unix-only `fuzz` and Phase
+     7 host tests are explicitly target-gated; Phase 7's Motor OS behavior
+     remains covered by its existing VM self-check.
 
 6. **Finish Stage-2 cache, bundle, and core self-hosting.**
    - Add the Round-22 content-addressed library/build-output cache with cold,

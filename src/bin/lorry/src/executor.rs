@@ -55,6 +55,30 @@ pub fn execute(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &Options<'_>,
 ) -> Result<Outputs> {
+    execute_inner(plan, manifests, options, None)
+}
+
+pub fn execute_reusing(
+    plan: &CompilationPlan,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    options: &Options<'_>,
+    previous_plan: &CompilationPlan,
+    previous_outputs: &Outputs,
+) -> Result<Outputs> {
+    execute_inner(
+        plan,
+        manifests,
+        options,
+        Some((previous_plan, previous_outputs)),
+    )
+}
+
+fn execute_inner(
+    plan: &CompilationPlan,
+    manifests: &BTreeMap<PackageKey, Manifest>,
+    options: &Options<'_>,
+    previous: Option<(&CompilationPlan, &Outputs)>,
+) -> Result<Outputs> {
     create_directory(
         &options.host_profile.join("deps"),
         "host dependency directory",
@@ -80,6 +104,31 @@ pub fn execute(
                 key.kind, key.package.name, key.package.version
             ))
         })?;
+        if let Some((previous_plan, previous_outputs)) = previous
+            && previous_plan.units.get(key) == Some(planned)
+        {
+            let reused = match key.kind {
+                UnitKind::BuildScriptRun => {
+                    if let Some(output) = previous_outputs.build_scripts.get(key).cloned() {
+                        outputs.build_scripts.insert(key.clone(), output);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                UnitKind::Library | UnitKind::BuildScriptCompile => {
+                    if let Some(output) = previous_outputs.artifacts.get(key).cloned() {
+                        outputs.artifacts.insert(key.clone(), output);
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if reused {
+                continue;
+            }
+        }
         match key.kind {
             UnitKind::BuildScriptRun => {
                 let manifest = manifests.get(&key.package).ok_or_else(|| {
@@ -470,6 +519,7 @@ mod tests {
             &PlanOptions {
                 workspace_root: &fixture.0,
                 release: false,
+                test_profile: false,
                 release_profile: &ReleaseProfile::default(),
                 rustc: &toolchain,
                 logical_target: None,
