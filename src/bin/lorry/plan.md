@@ -1,6 +1,6 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage 2 in progress — root/test compilation is complete; cache, bundle, and vendoring remain**
+Status: **Stage 2 in progress — cache and test bundles are complete; vendoring and core self-hosting remain**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -152,10 +152,12 @@ It addresses two related problems:
   `lorry test --no-run` builds separate Cargo-compatible harnesses without
   executing them.
 - A test bundle verifies its embedded payload table and extracts through
-  race-resistant operations into a private directory beneath a configurable
-  absolute extraction root. It invokes payloads without a shell, forwards
-  harness arguments after `--`, aggregates failures, and protects against
-  symlink and permission attacks.
+  race-resistant operations into a directory beneath a configurable absolute
+  extraction root. It invokes payloads without a shell, forwards harness
+  arguments after `--`, and aggregates failures. All platforms reject links,
+  unexpected files, and content tampering; Unix builds additionally enforce
+  private directory, manifest, and executable modes. Platforms without Unix
+  permission modes omit only that mode-specific hardening.
 - Bundle mode is not covered by Cargo byte identity. It preserves separate Rust
   crate/harness semantics internally, but tests that require Cargo's original
   absolute artifact paths or a system with no writable extraction location may
@@ -2881,11 +2883,16 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      both root executables had SHA-256
      `4e77dd6c3fa45dee8a2436dd7082bbfaa85d63bdf703dd2422685bcd85d26aa6`.
      The cache implementation also passes the Motor OS compile check.
-   - Add the one-file test bundle and test its canonical payload, tamper
-     rejection, private extraction, cleanup, argument forwarding, fail
-     aggregation, `CARGO_BIN_EXE_rush`, `--test`, `--no-run`, and cross-runner
-     behavior. Copy a bundle to Motor and execute it independently of its
-     source/output tree.
+   - The one-file test bundle has a canonical embedded manifest and verified,
+     race-resistant extraction cache. Linux fixtures cover copying away from
+     the output tree, embedded program execution through `CARGO_BIN_EXE_*`,
+     deterministic paths/`--no-run`, argument forwarding, failure
+     aggregation, `--test`, one-shot cross-runner invocation, cleanup,
+     unexpected-file, permission, and content-tamper rejection. Its generated
+     launcher also passes the Motor OS compile check and executes in Motor OS
+     independently of its source/output tree. A real 12-harness `rush` bundle
+     passes `phase0`'s `simple_command_stdout` test through its extracted
+     `CARGO_BIN_EXE_rush` program.
    - Stage-2 Lorry vendors/verifies its exact 32-package graph from the seeded
      repository, builds itself on Linux and Motor, and repeats with the
      self-built executable and warm cache. The Cargo oracle lane separately

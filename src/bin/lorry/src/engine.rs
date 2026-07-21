@@ -1,4 +1,5 @@
 use crate::atomic::AtomicDirectory;
+use crate::bundle;
 use crate::cache;
 use crate::cargo_registry::CargoRegistry;
 use crate::cli::{Cli, Color, Command, Verbosity};
@@ -98,6 +99,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
+                bundle: false,
             })?;
             Ok(0)
         }
@@ -119,6 +121,7 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
+                bundle: false,
             })?;
             let artifact = artifacts.binary.as_deref().ok_or_else(|| {
                 Error::failure(format!(
@@ -136,14 +139,6 @@ pub fn execute(cli: &Cli) -> Result<i32> {
             )
         }
         Command::Test(options) => {
-            if options.bundle {
-                return Err(Error::failure(
-                    "test bundles are not implemented in the current Stage-2 sub-stage",
-                )
-                .with_help(
-                    "remove `--bundle` to build or run separate Cargo-compatible harnesses",
-                ));
-            }
             if cli.verbosity != Verbosity::Quiet {
                 eprintln!("note: documentation tests are not supported");
             }
@@ -164,12 +159,27 @@ pub fn execute(cli: &Cli) -> Result<i32> {
                 color,
                 verbosity: cli.verbosity,
                 use_cargo_registry: cli.use_cargo_registry,
+                bundle: options.bundle,
             })?;
             if options.no_run {
-                for harness in &artifacts.harnesses {
-                    println!("{}", harness.display());
+                if let Some(bundle) = &artifacts.bundle {
+                    println!("{}", bundle.display());
+                } else {
+                    for harness in &artifacts.harnesses {
+                        println!("{}", harness.display());
+                    }
                 }
                 return Ok(0);
+            }
+            if let Some(bundle) = &artifacts.bundle {
+                return run_artifact(
+                    bundle,
+                    &options.arguments,
+                    &manifest.root,
+                    physical_target.as_deref(),
+                    &target_options,
+                    cli.verbosity,
+                );
             }
             for harness in &artifacts.harnesses {
                 let status = run_artifact(
@@ -207,6 +217,7 @@ struct Build<'a> {
     color: bool,
     verbosity: Verbosity,
     use_cargo_registry: bool,
+    bundle: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -214,6 +225,7 @@ struct BuildArtifacts {
     primary: PathBuf,
     binary: Option<PathBuf>,
     harnesses: Vec<PathBuf>,
+    bundle: Option<PathBuf>,
 }
 
 fn build(build: Build<'_>) -> Result<BuildArtifacts> {
@@ -330,6 +342,21 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         root_manifest: build.manifest,
         source_limits,
     })?;
+    let bundle_layout = if build.test && build.bundle {
+        Some(bundle::Layout::new(&bundle::LayoutOptions {
+            extraction_root: build.config.test.extraction_root(&build.target.triple),
+            package_name: &build.manifest.name,
+            package_root: &build.manifest.root,
+            lorry: &cargo,
+            toolchain: build.toolchain,
+            target: build.target,
+            release: build.release,
+            test_name: build.test_name,
+            source_limits,
+        })?)
+    } else {
+        None
+    };
     let executor_options = executor::Options {
         cargo: &cargo,
         toolchain: build.toolchain,
@@ -393,8 +420,11 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             &host_profile,
             normal_dependencies,
             test_dependencies.as_ref().unwrap(),
-            &destination,
-            &target_root,
+            &TestOutput {
+                destination: &destination,
+                target_root: &target_root,
+                bundle_layout: bundle_layout.as_ref(),
+            },
         )?
     } else {
         compile_root_targets(&build, staging.path(), &host_profile, normal_dependencies)?
@@ -424,6 +454,10 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         .iter()
         .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf())
         .collect::<Vec<_>>();
+    let relative_bundle = compiled
+        .bundle
+        .as_ref()
+        .map(|artifact| artifact.strip_prefix(staging.path()).unwrap().to_path_buf());
     staging.commit(&destination)?;
     let artifacts = BuildArtifacts {
         primary: destination.join(relative_primary),
@@ -432,6 +466,7 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
             .into_iter()
             .map(|artifact| destination.join(artifact))
             .collect(),
+        bundle: relative_bundle.map(|artifact| destination.join(artifact)),
     };
 
     if build.verbosity != Verbosity::Quiet {
@@ -557,6 +592,13 @@ struct StagedArtifacts {
     primary: PathBuf,
     binary: Option<PathBuf>,
     harnesses: Vec<PathBuf>,
+    bundle: Option<PathBuf>,
+}
+
+struct TestOutput<'a> {
+    destination: &'a Path,
+    target_root: &'a Path,
+    bundle_layout: Option<&'a bundle::Layout>,
 }
 
 fn compile_root_targets(
@@ -608,6 +650,7 @@ fn compile_root_targets(
             primary: binary.primary.clone(),
             binary: Some(binary.primary),
             harnesses: Vec::new(),
+            bundle: None,
         });
     }
     let library = library.ok_or_else(|| {
@@ -620,6 +663,7 @@ fn compile_root_targets(
         primary: library.rlib,
         binary: None,
         harnesses: Vec::new(),
+        bundle: None,
     })
 }
 
@@ -629,8 +673,7 @@ fn compile_test_targets(
     host_profile: &Path,
     normal_dependencies: &[RootDependency],
     test_dependencies: &[RootDependency],
-    destination: &Path,
-    target_root: &Path,
+    output: &TestOutput<'_>,
 ) -> Result<StagedArtifacts> {
     let features = selected_root_features(build.manifest)?
         .into_iter()
@@ -744,13 +787,18 @@ fn compile_test_targets(
     }
 
     if !integration_tests.is_empty() {
-        let temporary_directory = target_root.join("tmp");
-        fs::create_dir_all(&temporary_directory).map_err(|error| {
-            Error::failure(format!(
-                "failed to create test temporary directory `{}`: {error}",
-                temporary_directory.display()
-            ))
-        })?;
+        let temporary_directory = output.bundle_layout.map_or_else(
+            || output.target_root.join("tmp"),
+            bundle::Layout::temporary_directory,
+        );
+        if output.bundle_layout.is_none() {
+            fs::create_dir_all(&temporary_directory).map_err(|error| {
+                Error::failure(format!(
+                    "failed to create test temporary directory `{}`: {error}",
+                    temporary_directory.display()
+                ))
+            })?;
+        }
         for target in integration_tests {
             harnesses.push(compile_root_harness(
                 build,
@@ -761,11 +809,15 @@ fn compile_test_targets(
                 test_library.as_ref(),
                 &features,
                 Some(IntegrationEnvironment {
-                    binary: build
-                        .manifest
-                        .binaries
-                        .first()
-                        .map(|target| (target.name.as_str(), destination.join(&target.name))),
+                    binary: build.manifest.binaries.first().map(|target| {
+                        (
+                            target.name.as_str(),
+                            output.bundle_layout.map_or_else(
+                                || output.destination.join(&target.name),
+                                |layout| layout.program(&target.name),
+                            ),
+                        )
+                    }),
                     temporary_directory: &temporary_directory,
                 }),
                 program.as_ref().map(|binary| &binary.identity),
@@ -773,16 +825,43 @@ fn compile_test_targets(
         }
     }
 
-    let primary = harnesses.first().cloned().ok_or_else(|| {
+    let first_harness = harnesses.first().cloned().ok_or_else(|| {
         Error::failure(format!(
             "package `{}` has no enabled test targets",
             build.manifest.name
         ))
     })?;
+    let binary = program.map(|binary| binary.primary);
+    let bundled = output
+        .bundle_layout
+        .map(|layout| {
+            if build.verbosity != Verbosity::Quiet {
+                eprintln!("Bundling {} test targets", harnesses.len());
+            }
+            bundle::build(&bundle::BuildOptions {
+                layout,
+                package_name: &build.manifest.name,
+                package_root: &build.manifest.root,
+                staging,
+                rustc: &build.toolchain.rustc,
+                physical_target: build.physical_target,
+                linker: build.target_options.linker.as_deref(),
+                rustflags: build.rustflags,
+                release: build.release,
+                verbose: build.verbosity == Verbosity::Verbose,
+                color: build.color,
+                harnesses: &harnesses,
+                program: binary
+                    .as_deref()
+                    .map(|path| (build.manifest.binaries.first().unwrap().name.as_str(), path)),
+            })
+        })
+        .transpose()?;
     Ok(StagedArtifacts {
-        primary,
-        binary: program.map(|binary| binary.primary),
+        primary: bundled.clone().unwrap_or(first_harness),
+        binary,
         harnesses,
+        bundle: bundled,
     })
 }
 
@@ -1584,6 +1663,7 @@ mod tests {
                 color: false,
                 verbosity: Verbosity::Quiet,
                 use_cargo_registry: false,
+                bundle: false,
             })
             .unwrap()
         };
@@ -1639,6 +1719,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap();
         let output = std::process::Command::new(artifact.binary.unwrap())
@@ -1675,6 +1756,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap();
         let output = std::process::Command::new(artifacts.binary.unwrap())
@@ -1725,6 +1807,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap();
         assert!(artifacts.binary.is_none());
@@ -1781,6 +1864,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap();
         let output = std::process::Command::new(artifact.binary.unwrap())
@@ -1843,6 +1927,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap();
         assert_eq!(artifacts.harnesses.len(), 4);
@@ -1854,12 +1939,168 @@ mod tests {
     }
 
     #[test]
-    fn named_test_builds_only_the_selected_integration_harness() {
+    fn builds_a_copyable_verified_aggregating_test_bundle() {
+        use std::os::unix::fs::PermissionsExt;
+
         let fixture = Fixture::new();
         fixture.add_test_targets();
+        let first = fixture.0.join("tests/first.rs");
+        let second = fixture.0.join("tests/second.rs");
+        fs::write(
+            &first,
+            format!(
+                "{}\n#[test]\nfn conditional_bundle_failure() {{\n    if std::env::var_os(\"LORRY_BUNDLE_FAIL\").is_some() {{ panic!(\"requested bundle failure\"); }}\n}}\n",
+                fs::read_to_string(&first).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &second,
+            format!(
+                "{}\n#[test]\nfn bundle_marker() {{ println!(\"BUNDLE-SECOND-RAN\"); }}\n",
+                fs::read_to_string(&second).unwrap()
+            ),
+        )
+        .unwrap();
         let manifest = Manifest::load(&fixture.0).unwrap();
         let mut config = Config::default();
         config.cargo_compat = Some(CargoCompat::V1_98);
+        config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
+        let toolchain = Toolchain::discover(None, &config).unwrap();
+        let target = toolchain.target_info(None).unwrap();
+        let target_options = TargetOptions::default();
+        let build_bundle = || {
+            build(Build {
+                manifest: &manifest,
+                config: &config,
+                toolchain: &toolchain,
+                host: &target,
+                target: &target,
+                host_options: &target_options,
+                target_options: &target_options,
+                physical_target: None,
+                logical_target: None,
+                rustflags: &[],
+                release: false,
+                test: true,
+                test_name: None,
+                color: false,
+                verbosity: Verbosity::Quiet,
+                use_cargo_registry: false,
+                bundle: true,
+            })
+        };
+        let artifacts = build_bundle().unwrap();
+        let rebuilt = build_bundle().unwrap();
+        assert_eq!(artifacts.bundle, rebuilt.bundle);
+        let bundle = artifacts.bundle.unwrap();
+        assert_eq!(artifacts.primary, bundle);
+        assert_eq!(bundle.file_name().unwrap(), "root-bin-test-bundle");
+        let copied = fixture.0.join("copied-test-bundle");
+        fs::copy(&bundle, &copied).unwrap();
+        fs::remove_dir_all(fixture.0.join("target/lorry")).unwrap();
+
+        let success = std::process::Command::new(&copied)
+            .arg("--nocapture")
+            .output()
+            .unwrap();
+        assert!(
+            success.status.success(),
+            "{}",
+            String::from_utf8_lossy(&success.stderr)
+        );
+        assert!(
+            success
+                .stdout
+                .windows(17)
+                .any(|bytes| bytes == b"BUNDLE-SECOND-RAN")
+        );
+
+        let forwarded = std::process::Command::new(&copied)
+            .args(["bundle_marker", "--exact", "--nocapture"])
+            .output()
+            .unwrap();
+        assert!(forwarded.status.success());
+        assert!(
+            forwarded
+                .stdout
+                .windows(17)
+                .any(|bytes| bytes == b"BUNDLE-SECOND-RAN")
+        );
+
+        let aggregated = std::process::Command::new(&copied)
+            .arg("--nocapture")
+            .env("LORRY_BUNDLE_FAIL", "1")
+            .output()
+            .unwrap();
+        assert_eq!(aggregated.status.code(), Some(1));
+        assert!(
+            aggregated
+                .stdout
+                .windows(17)
+                .any(|bytes| bytes == b"BUNDLE-SECOND-RAN")
+        );
+
+        let extraction_root = config.test.extraction_root.as_ref().unwrap();
+        let extraction = fs::read_dir(extraction_root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::metadata(&extraction).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(fs::read_dir(extraction_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("staging")
+        }));
+        fs::set_permissions(&extraction, fs::Permissions::from_mode(0o755)).unwrap();
+        let public = std::process::Command::new(&copied).output().unwrap();
+        assert_eq!(public.status.code(), Some(101));
+        assert!(String::from_utf8_lossy(&public.stderr).contains("permissions 755"));
+        fs::set_permissions(&extraction, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let unexpected = extraction.join("unexpected");
+        fs::write(&unexpected, b"unexpected").unwrap();
+        let noncanonical = std::process::Command::new(&copied).output().unwrap();
+        assert_eq!(noncanonical.status.code(), Some(101));
+        assert!(String::from_utf8_lossy(&noncanonical.stderr).contains("file set"));
+        fs::remove_file(unexpected).unwrap();
+
+        let tampered = fs::read_dir(extraction.join("tests"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::write(tampered, b"tampered").unwrap();
+        let rejected = std::process::Command::new(&copied).output().unwrap();
+        assert_eq!(rejected.status.code(), Some(101));
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("was modified"));
+    }
+
+    #[test]
+    fn named_test_builds_only_the_selected_integration_harness() {
+        let fixture = Fixture::new();
+        fixture.add_test_targets();
+        let selected = fixture.0.join("tests/second.rs");
+        fs::write(
+            &selected,
+            format!(
+                "{}\n#[test]\nfn selected_second() {{}}\n",
+                fs::read_to_string(&selected).unwrap()
+            ),
+        )
+        .unwrap();
+        let manifest = Manifest::load(&fixture.0).unwrap();
+        let mut config = Config::default();
+        config.cargo_compat = Some(CargoCompat::V1_98);
+        config.test.extraction_root = Some(fixture.0.join("target/bundle-extraction"));
         let toolchain = Toolchain::discover(None, &config).unwrap();
         let target = toolchain.target_info(None).unwrap();
         let target_options = TargetOptions::default();
@@ -1880,6 +2121,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap();
         assert_eq!(artifacts.harnesses.len(), 1);
@@ -1896,6 +2138,63 @@ mod tests {
                 .unwrap()
                 .success()
         );
+
+        let bundled = build(Build {
+            manifest: &manifest,
+            config: &config,
+            toolchain: &toolchain,
+            host: &target,
+            target: &target,
+            host_options: &target_options,
+            target_options: &target_options,
+            physical_target: None,
+            logical_target: None,
+            rustflags: &[],
+            release: false,
+            test: true,
+            test_name: Some("second"),
+            color: false,
+            verbosity: Verbosity::Quiet,
+            use_cargo_registry: false,
+            bundle: true,
+        })
+        .unwrap();
+        assert_eq!(bundled.harnesses.len(), 1);
+        let bundle = bundled.bundle.unwrap();
+        let output = std::process::Command::new(&bundle)
+            .arg("--list")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("selected_second: test"));
+        assert!(!stdout.contains("library_unit"));
+
+        let runner_marker = fixture.0.join("runner-invocations");
+        let runner_options = TargetOptions {
+            runner: Some(vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!(
+                    "printf 'invoked\\n' >> '{}'; exec \"$0\" \"$@\"",
+                    runner_marker.display()
+                ),
+            ]),
+            ..TargetOptions::default()
+        };
+        assert_eq!(
+            run_artifact(
+                &bundle,
+                &["--list".to_owned()],
+                &fixture.0,
+                Some("cross-target"),
+                &runner_options,
+                Verbosity::Quiet,
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(fs::read_to_string(runner_marker).unwrap(), "invoked\n");
     }
 
     #[test]
@@ -1925,6 +2224,7 @@ mod tests {
             color: false,
             verbosity: Verbosity::Quiet,
             use_cargo_registry: false,
+            bundle: false,
         })
         .unwrap_err();
         let rendered = format!("{error:?}");

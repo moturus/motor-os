@@ -128,21 +128,20 @@ pub struct NetworkConfig {
     pub ca_bundle: Option<PathBuf>,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TestConfig {
-    pub extraction_root: PathBuf,
+    pub extraction_root: Option<PathBuf>,
 }
 
-impl Default for TestConfig {
-    fn default() -> Self {
-        Self {
-            extraction_root: if cfg!(target_os = "motor") {
-                PathBuf::from("/user/tmp/lorry/test-extraction")
+impl TestConfig {
+    pub fn extraction_root(&self, target: &str) -> &Path {
+        self.extraction_root.as_deref().unwrap_or_else(|| {
+            if target.rsplit('-').next() == Some("motor") {
+                Path::new("/user/tmp/lorry/test-extraction")
             } else {
-                PathBuf::from("/tmp/lorry-tests")
-            },
-        }
+                Path::new("/tmp/lorry-tests")
+            }
+        })
     }
 }
 
@@ -626,7 +625,8 @@ fn merge_test(path: &Path, document: &Document, config: &mut Config) -> Result<(
     let table = require_table(path, document, item, "test")?;
     reject_unknown_keys(path, document, table, "test", &["extraction-root"])?;
     if let Some(item) = table.get("extraction-root") {
-        config.test.extraction_root = absolute_path(path, document, item, "test.extraction-root")?;
+        config.test.extraction_root =
+            Some(absolute_path(path, document, item, "test.extraction-root")?);
     }
     Ok(())
 }
@@ -1958,6 +1958,27 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     struct TempDir(PathBuf);
+
+    #[test]
+    fn default_test_extraction_root_follows_the_execution_target() {
+        let defaults = TestConfig::default();
+        assert_eq!(
+            defaults.extraction_root("x86_64-unknown-linux-gnu"),
+            Path::new("/tmp/lorry-tests")
+        );
+        assert_eq!(
+            defaults.extraction_root("x86_64-unknown-motor"),
+            Path::new("/user/tmp/lorry/test-extraction")
+        );
+
+        let configured = TestConfig {
+            extraction_root: Some(PathBuf::from("/explicit")),
+        };
+        assert_eq!(
+            configured.extraction_root("x86_64-unknown-motor"),
+            Path::new("/explicit")
+        );
+    }
 
     impl TempDir {
         fn new() -> Self {

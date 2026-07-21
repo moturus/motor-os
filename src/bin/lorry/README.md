@@ -55,10 +55,16 @@ owned by `src/tests/full-test.sh`.
 Stage 2 supports locked registry and local-path dependency graphs, one root
 library and binary, and direct `tests/*.rs` integration targets. Ordinary
 `test`, `--test NAME`, and `--no-run` build Cargo-compatible separate
-harnesses; `--bundle` and `vendor` remain later Stage-2 sub-stages. Workspaces,
-custom JSON targets, compiler wrappers, and output relocation are rejected
-with actionable errors. Documentation tests are reported as omitted because
-native Motor OS does not ship rustdoc.
+harnesses. Explicit `test --bundle` packages the selected harnesses and any
+required package binary into one verified, self-extracting target executable;
+`--no-run` prints its deterministic path. Bundle arguments are forwarded to
+every harness and failures are aggregated. The extraction cache location is
+configured by the absolute `[test].extraction-root` path. Unix builds enforce
+private file modes; platforms without Unix permission modes retain the
+symlink, canonical-file-set, and content-integrity checks. `vendor` remains a
+later Stage-2 sub-stage. Workspaces, custom JSON targets, compiler wrappers,
+and output relocation are rejected with actionable errors. Documentation
+tests are reported as omitted because native Motor OS does not ship rustdoc.
 
 Stage 2 reuses verified library metadata and rlibs from the versioned
 content-addressed cache below `target/lorry/.cache`. Every hit re-hashes its

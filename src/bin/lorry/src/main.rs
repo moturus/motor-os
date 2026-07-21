@@ -1,6 +1,7 @@
 mod archive;
 mod atomic;
 mod build_script;
+mod bundle;
 mod cache;
 mod cargo_registry;
 mod cli;
@@ -61,10 +62,6 @@ where
             Ok(0)
         }
         Command::Vendor { .. } => Err(Error::unsupported("vendor", 1)),
-        Command::Test(options) if options.bundle => Err(Error::failure(
-            "test bundles are not implemented in the current Stage-2 sub-stage",
-        )
-        .with_help("remove `--bundle` to build or run separate Cargo-compatible harnesses")),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }
@@ -115,10 +112,5 @@ mod tests {
         let vendor = run(["vendor".to_owned()]).unwrap_err();
         assert_eq!(vendor.exit_code(), 101);
         assert!(vendor.to_string().contains("Stage 1"));
-
-        let test = run(["test".to_owned(), "--bundle".to_owned()]).unwrap_err();
-        assert_eq!(test.exit_code(), 101);
-        assert!(test.to_string().contains("test bundles"));
-        assert!(test.to_string().contains("Stage-2"));
     }
 }
