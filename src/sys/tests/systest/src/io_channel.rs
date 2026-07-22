@@ -201,10 +201,78 @@ fn test_page_alloc() {
     println!("----- io_channel::test_page_alloc PASS");
 }
 
+// Verifies the io_channel error handler (set_error_handler) fires -- instead of
+// a panic -- when a page is double-freed. This is the mechanism sys-io will use
+// to drop a client that names an already-recovered page in two TX messages. We
+// reproduce the double free locally by building two IoPages over one allocated
+// page (as the server does recovering a client-named page twice) and dropping
+// both: the second free reports the page as not-in-use, which must reach the
+// handler rather than crash the process.
+fn test_error_handler_on_double_free() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    static CALLED: AtomicBool = AtomicBool::new(false);
+    static REMOTE: AtomicU64 = AtomicU64::new(0);
+
+    fn on_error(remote: moto_sys::SysHandle, error: moto_ipc::io_channel::ChannelError) {
+        assert!(matches!(
+            error,
+            moto_ipc::io_channel::ChannelError::FreeingUnusedPage { .. }
+        ));
+        REMOTE.store(u64::from(remote), Ordering::SeqCst);
+        CALLED.store(true, Ordering::SeqCst);
+    }
+    moto_ipc::io_channel::set_error_handler(on_error);
+
+    // A server that accepts and holds the connection, so the client's recovered
+    // pages carry a live remote handle (the client the handler would drop).
+    let server_started = std::sync::Arc::new(AtomicBool::new(false));
+    let waiter = server_started.clone();
+    let server = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let listener = moto_ipc::io_channel::listen("systest_err_handler");
+            server_started.store(true, Ordering::Release);
+            let (_sender, mut receiver) = listener.await.unwrap();
+            let _ = receiver.recv().await; // Hold until the client signals done.
+        });
+    });
+    while !waiter.load(Ordering::Relaxed) {
+        core::hint::spin_loop();
+    }
+
+    let client = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let (sender, _receiver) = moto_ipc::io_channel::connect("systest_err_handler").unwrap();
+
+            // into_u16 disarms this owner's Drop and leaves the shared in-use
+            // bit set, so both get_page handles free the same page on drop.
+            let page = sender.alloc_page(u64::MAX).await.unwrap();
+            let idx = moto_ipc::io_channel::IoPage::into_u16(page);
+            let p1 = sender.get_page(idx).unwrap();
+            let p2 = sender.get_page(idx).unwrap();
+
+            drop(p1); // First free: the page was in use -> cleared, no error.
+            drop(p2); // Second free: not in use -> the handler fires (no panic).
+
+            let mut done = moto_ipc::io_channel::Msg::new();
+            done.id = 1;
+            let _ = sender.send(done).await; // Release the server.
+        });
+    });
+
+    let _ = client.join();
+    let _ = server.join();
+
+    assert!(CALLED.load(Ordering::SeqCst), "error handler was not called");
+    assert_ne!(0, REMOTE.load(Ordering::SeqCst), "handler got no remote handle");
+    println!("----- io_channel::test_error_handler_on_double_free PASS");
+}
+
 pub fn run_all_tests() {
     basic_test();
     test_ping_pong();
     test_page_alloc();
+    test_error_handler_on_double_free();
 
     println!("io_channel: ALL PASS");
 }
