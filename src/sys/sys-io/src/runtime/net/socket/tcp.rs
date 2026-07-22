@@ -504,8 +504,20 @@ impl MotoSocket {
             let tcp_state = socket_ref.state.unwrap_tcp_mut();
             tcp_state.remote_addr = Some(remote_addr);
 
-            let tcp_listener = tcp_state.tcp_listener.take().unwrap();
-            tcp_listener.upgrade().unwrap()
+            // The listener can be dropped (client closed it, or teardown under
+            // socket churn) while this handshake completes. If it is gone there
+            // is no one to accept this connection, so abort cleanly rather than
+            // crash sys-io -- the half-open socket self-closes via the
+            // keep-alive/timeout set above.
+            let Some(weak_listener) = tcp_state.tcp_listener.take() else {
+                log::debug!("socket 0x{socket_id:x}: incoming connection, no listener; dropping.");
+                return;
+            };
+            let Some(tcp_listener) = weak_listener.upgrade() else {
+                log::debug!("socket 0x{socket_id:x}: listener dropped during accept; dropping.");
+                return;
+            };
+            tcp_listener
         };
 
         let (accepted_tx, accepted_rx) = moto_async::oneshot();
