@@ -22,6 +22,10 @@ pub(crate) mod net;
 pub static MMIO_PAGE: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
+    // Route io_channel peer-misbehavior (e.g. a client double-freeing a TX
+    // page) to on_channel_error instead of letting the library panic sys-io.
+    io_channel::set_error_handler(on_channel_error);
+
     assert_eq!(0, MMIO_PAGE.load(std::sync::atomic::Ordering::Relaxed));
     MMIO_PAGE.store(
         moto_sys::SysMem::alloc(moto_sys::sys_mem::PAGE_SIZE_MID, 1)
@@ -59,6 +63,21 @@ fn conn_name(handle: SysHandle) -> String {
     } else {
         "<unknown>".to_owned()
     }
+}
+
+/// Process-wide io_channel error handler (installed in [`init`]). The library
+/// calls this from `IoPage::drop` when a channel operation detects peer
+/// misbehavior, so sys-io stays up instead of panicking. A client page
+/// double-free means a misbehaving or corrupt client named an already-recovered
+/// TX page twice: drop that one connection. A server page double-free is a bug
+/// in sys-io itself, not the peer, so keep the historical panic to surface it.
+fn on_channel_error(remote: SysHandle, error: io_channel::ChannelError) {
+    log::warn!(
+        "io_channel error from conn 0x{:x} ({}): \n\t{error:?}; dropping connection.",
+        remote.as_u64(),
+        conn_name(remote)
+    );
+    let _ = moto_sys::SysCpu::kill_remote(remote);
 }
 
 // ----------------------- Async Runtime ---------------------------- //
