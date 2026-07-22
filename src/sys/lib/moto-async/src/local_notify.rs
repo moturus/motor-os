@@ -10,9 +10,16 @@ use core::task::{Context, Poll};
 #[derive(PartialEq, Eq, Clone, Copy)]
 struct WaiterId(u64);
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum WaiterState {
+    Waiting,
+    NotifiedOne,
+    NotifiedAll,
+}
+
 struct Waiter {
     id: WaiterId,
-    fired: bool,
+    state: WaiterState,
     waker: Option<LocalWaker>,
 }
 
@@ -44,8 +51,10 @@ impl LocalNotify {
         }
     }
 
-    fn fire(waiter: &mut Waiter) {
-        waiter.fired = true;
+    fn fire(waiter: &mut Waiter, state: WaiterState) {
+        debug_assert_eq!(waiter.state, WaiterState::Waiting);
+        debug_assert_ne!(state, WaiterState::Waiting);
+        waiter.state = state;
         if let Some(waker) = waiter.waker.take() {
             waker.wake();
         }
@@ -53,8 +62,13 @@ impl LocalNotify {
 
     /// Wakes the oldest waiter, or stores a permit for the next one.
     pub fn notify_one(&self) {
-        if let Some(waiter) = self.waiters.borrow_mut().iter_mut().find(|w| !w.fired) {
-            Self::fire(waiter);
+        if let Some(waiter) = self
+            .waiters
+            .borrow_mut()
+            .iter_mut()
+            .find(|w| w.state == WaiterState::Waiting)
+        {
+            Self::fire(waiter, WaiterState::NotifiedOne);
         } else {
             self.notified.set(true);
         }
@@ -64,7 +78,9 @@ impl LocalNotify {
     /// arrives later needs its own notification.
     pub fn notify_all(&self) {
         for waiter in self.waiters.borrow_mut().iter_mut() {
-            Self::fire(waiter);
+            if waiter.state == WaiterState::Waiting {
+                Self::fire(waiter, WaiterState::NotifiedAll);
+            }
         }
     }
 
@@ -76,7 +92,7 @@ impl LocalNotify {
         self.next_id.set(id.0 + 1);
         self.waiters.borrow_mut().push_back(Waiter {
             id,
-            fired: false,
+            state: WaiterState::Waiting,
             waker: None,
         });
         NotifiedFuture { notify: self, id }
@@ -96,10 +112,15 @@ impl Drop for NotifiedFuture<'_> {
             return; // Completed; nothing queued.
         };
         let waiter = waiters.remove(pos).unwrap();
-        if waiter.fired {
-            // Cancelled after being picked: re-dispatch.
-            if let Some(next) = waiters.iter_mut().find(|w| !w.fired) {
-                LocalNotify::fire(next);
+        if waiter.state == WaiterState::NotifiedOne {
+            // A cancelled notify_one must pass its permit on. A notify_all
+            // wake belongs only to the waiters present at that broadcast,
+            // so cancelling one of those waiters must not re-dispatch it.
+            if let Some(next) = waiters
+                .iter_mut()
+                .find(|w| w.state == WaiterState::Waiting)
+            {
+                LocalNotify::fire(next, WaiterState::NotifiedOne);
             } else {
                 self.notify.notified.set(true);
             }
@@ -116,7 +137,7 @@ impl Future for NotifiedFuture<'_> {
             return Poll::Ready(()); // Polled again after Ready.
         };
 
-        if waiters[pos].fired || self.notify.notified.replace(false) {
+        if waiters[pos].state != WaiterState::Waiting || self.notify.notified.replace(false) {
             waiters.remove(pos);
             return Poll::Ready(());
         }

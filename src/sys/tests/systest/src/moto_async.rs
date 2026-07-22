@@ -752,6 +752,30 @@ fn test_local_notify_cancel_redispatch() {
     println!("----- moto_async::test_local_notify_cancel_redispatch PASS");
 }
 
+fn test_local_notify_notify_all_cancel() {
+    moto_async::LocalRuntime::new().block_on(async move {
+        let notify = moto_async::LocalNotify::new();
+
+        let first = notify.notified();
+        let second = notify.notified();
+
+        // Both waiters are part of this broadcast. Cancelling one must not
+        // transfer its broadcast wake or manufacture a stored permit.
+        notify.notify_all();
+        drop(first);
+        second.await;
+
+        let late = notify.notified();
+        futures::select! {
+            _ = futures::FutureExt::fuse(late) => {
+                panic!("cancelled notify_all waiter left a permit")
+            }
+            _ = moto_async::sleep(Duration::from_millis(10)).fuse() => (),
+        }
+    });
+    println!("----- moto_async::test_local_notify_notify_all_cancel PASS");
+}
+
 fn test_wake_elision_counters() {
     let (issued_0, elided_0) = moto_async::wake_counters();
 
@@ -895,6 +919,7 @@ pub fn run_all_tests() {
     test_local_notify_deferred();
     test_local_notify_multi_waiter();
     test_local_notify_cancel_redispatch();
+    test_local_notify_notify_all_cancel();
     test_wake_elision_counters();
     test_for_each_concurrent();
     test_wake_on_sleep_fold();
