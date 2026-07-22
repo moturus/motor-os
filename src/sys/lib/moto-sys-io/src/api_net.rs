@@ -298,10 +298,25 @@ pub fn tcp_stream_tx_multi_decode(
 
     let num_pages = (total_len as usize).div_ceil(io_channel::PAGE_SIZE);
     let mut pages = alloc::vec::Vec::with_capacity(num_pages);
+    let mut seen: u64 = 0; // Client page ids are < CHANNEL_PAGE_COUNT (64).
     for idx in 0..num_pages {
-        // Note: pages already recovered are dropped (freed) if a later
-        // get_page fails.
-        pages.push(sender.get_page(msg.payload.shared_pages()[idx])?);
+        let page_id = msg.payload.shared_pages()[idx];
+        // Reject a duplicate id within one request before recovering it: two
+        // IoPages over one page would double-free it on drop. Dedup must run
+        // before get_client_page_checked -- building the second IoPage first
+        // and dropping it clears the shared bit while the first copy still
+        // lives in `pages`, reintroducing the double-free we guard against.
+        let bit = 1u64 << (page_id as u64 & 63);
+        if (seen & bit) != 0 {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        seen |= bit;
+        // A flags/pages count mismatch makes this index point past the slots
+        // the client actually filled (an unfilled slot reads as id 0, whose
+        // in-use bit is clear), so get_client_page_checked rejects it here
+        // rather than us freeing a page the client never allocated. Pages
+        // recovered so far are freed when `pages` drops on this early return.
+        pages.push(sender.get_client_page_checked(page_id)?);
     }
 
     Ok((pages, total_len))

@@ -371,6 +371,25 @@ impl RawChannel {
         }
     }
 
+    /// True if the page named by `page_idx` (its top bit selects the client
+    /// vs. server bitmap, as in [`IoPage::into_u16`]) is currently marked in
+    /// use. The server consults this before wrapping an untrusted,
+    /// client-supplied page id in an [`IoPage`]: a stale, phantom, or
+    /// already-freed id has a clear bit, so recovering it would later free a
+    /// page that was never allocated.
+    fn page_in_use(&self, page_idx: u16) -> bool {
+        let idx = page_idx & !IoPage::SERVER_FLAG;
+        if (idx as usize) >= CHANNEL_PAGE_COUNT {
+            return false;
+        }
+        let bitmap = if (page_idx & IoPage::SERVER_FLAG) == 0 {
+            &self.client_pages_in_use
+        } else {
+            &self.server_pages_in_use
+        };
+        (bitmap.load(Ordering::Acquire) & (1u64 << idx)) != 0
+    }
+
     fn client_queue_full(&self) -> bool {
         let pos = self.client_queue_head.load(Ordering::Relaxed);
         let slot = &self.client_queue[(pos & QUEUE_MASK) as usize];
@@ -1274,6 +1293,34 @@ impl Sender {
                 self.inner.remote_handle,
             ))
         }
+    }
+
+    /// Recover a page named in an untrusted client message. Unlike
+    /// [`Self::get_page`], which blindly wraps any in-range id in an
+    /// [`IoPage`] whose `Drop` frees it, this rejects an id that is not a
+    /// currently-in-use client page: a server that recovered a stale,
+    /// phantom, already-freed, or server-owned id would, on drop, free a page
+    /// it never received -- panicking in `free_page` ("freeing unused page")
+    /// or aliasing a live page. Callers that recover several ids from one
+    /// message must additionally reject duplicates (two `IoPage`s over one
+    /// page double-free it).
+    pub fn get_client_page_checked(&self, page_idx: u16) -> Result<IoPage> {
+        if (page_idx & IoPage::SERVER_FLAG) != 0 {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        if !self.raw_channel().page_in_use(page_idx) {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        self.get_page(page_idx)
+    }
+
+    /// (client, server) in-use page bitmaps -- a racy snapshot for diagnostics.
+    pub fn pages_in_use(&self) -> (u64, u64) {
+        let rc = self.raw_channel();
+        (
+            rc.client_pages_in_use.load(Ordering::Relaxed),
+            rc.server_pages_in_use.load(Ordering::Relaxed),
+        )
     }
 }
 

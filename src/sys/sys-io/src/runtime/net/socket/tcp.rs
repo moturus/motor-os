@@ -1276,6 +1276,35 @@ impl MotoSocket {
         Ok(())
     }
 
+    /// Log a rejected TX request -- an untrusted client whose `flags`/
+    /// `shared_pages` name a malformed page set -- with enough of the message
+    /// and channel state to classify it (count/page mismatch vs. duplicate
+    /// vs. stale id: compare `flags`-implied page count and `shared_pages`
+    /// against `client_pages`), then drop the offending connection. This
+    /// replaces the historical `free_page` double-free panic: a bad page set
+    /// no longer frees a page sys-io never received.
+    fn reject_tx(
+        runtime: &NetRuntime,
+        msg: &moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+        reason: &str,
+    ) {
+        let conn = sender.remote_handle();
+        let pid = runtime.connection_pid(conn);
+        let (client_pages, _server_pages) = sender.pages_in_use();
+        log::warn!(
+            "NET TX rejected ({reason}): conn 0x{:x} pid {pid} socket 0x{:x} \
+             flags {} args64[1] {} client_pages 0x{client_pages:x} shared_pages {:?}; \
+             dropping connection.",
+            conn.as_u64(),
+            msg.handle,
+            msg.flags,
+            msg.payload.args_64()[1],
+            msg.payload.shared_pages(),
+        );
+        let _ = moto_sys::SysCpu::kill_remote(conn);
+    }
+
     pub async fn tcp_tx(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,
@@ -1287,20 +1316,25 @@ impl MotoSocket {
         // multi-page (flags = total size, pages full except the last) — see
         // api_net::tcp_stream_tx_multi_msg.
         let mut pages: Vec<(moto_ipc::io_channel::IoPage, usize)> = if msg.flags == 0 {
-            let page_idx = msg.payload.shared_pages()[0];
-            let Ok(page) = sender.get_page(page_idx) else {
-                return Err(ErrorKind::InvalidInput.into());
-            };
-
             let sz = msg.payload.args_64()[1] as usize;
             if sz > moto_ipc::io_channel::PAGE_SIZE {
-                // TODO: drop the connection?
+                Self::reject_tx(runtime, &msg, sender, "single-page size exceeds a page");
                 return Err(ErrorKind::InvalidInput.into());
             }
+            let page_idx = msg.payload.shared_pages()[0];
+            let Ok(page) = sender.get_client_page_checked(page_idx) else {
+                Self::reject_tx(runtime, &msg, sender, "single-page id is not an in-use client page");
+                return Err(ErrorKind::InvalidInput.into());
+            };
             vec![(page, sz)]
         } else {
             let Ok((pages, total_len)) = api_net::tcp_stream_tx_multi_decode(&msg, sender) else {
-                // TODO: drop the connection?
+                Self::reject_tx(
+                    runtime,
+                    &msg,
+                    sender,
+                    "multi-page decode: bad length, count/page mismatch, duplicate, or stale page",
+                );
                 return Err(ErrorKind::InvalidInput.into());
             };
             let mut remaining = total_len as usize;
