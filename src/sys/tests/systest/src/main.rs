@@ -500,6 +500,14 @@ fn input_listener() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "test-native-net-cancellation" {
+        tcp::test_native_net_cancellation();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {
+        tcp::test_native_listener_drop_backpressure();
+        return;
+    }
     if args.len() > 1 {
         subcommand::run_child(args)
     }

@@ -4,7 +4,348 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, atomic::*};
+use std::task::{Context, Poll};
 use std::time::Duration;
+
+use moto_io::net::readiness::{NetEventListener, Readiness};
+use moto_io::net::tcp::{TcpListener as NativeTcpListener, TcpStream as NativeTcpStream};
+
+struct NoopNetEventListener;
+
+impl NetEventListener for NoopNetEventListener {
+    fn on_readiness(&self, _edges: Readiness) {}
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn read_sys_io_metric(name: &str) -> u64 {
+    let provider = moto_stats::Collector::provider_by_name("sys-io")
+        .expect("sys-io stats provider is not registered");
+    let metric = moto_stats::Collector::describe(&provider)
+        .unwrap()
+        .into_iter()
+        .find(|metric| metric.name == name)
+        .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
+    moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL).unwrap()
+}
+
+fn read_tcp_socket_stats() -> Vec<moto_sys_io::stats::TcpSocketStatsV1> {
+    let mut service = moto_sys_io::stats::IoStatsService::connect().unwrap();
+    let mut result = Vec::new();
+    let mut start_id = 0;
+    loop {
+        let page = service.get_tcp_socket_stats(start_id).unwrap();
+        let Some(last) = page.last() else {
+            return result;
+        };
+        let next_id = last.id + 1;
+        let done = page.len() < moto_sys_io::stats::MAX_TCP_SOCKET_STATS;
+        result.extend_from_slice(page);
+        if done {
+            return result;
+        }
+        start_id = next_id;
+    }
+}
+
+fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool) -> u64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let value = read_sys_io_metric(name);
+        if predicate(value) {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {name}; last value was {value}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_cancelled_accept_cleanup(listener_addr: SocketAddr, client_addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let client_is_live = sockets.iter().any(|socket| {
+            socket.local_addr() == Some(client_addr) && socket.remote_addr() == Some(listener_addr)
+        });
+        let abandoned_accept_is_live = sockets.iter().any(|socket| {
+            socket.local_addr() == Some(listener_addr) && socket.remote_addr() == Some(client_addr)
+        });
+        if client_is_live && !abandoned_accept_is_live {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cancelled accept was not reclaimed; matching sockets: {:?}",
+            sockets
+                .iter()
+                .filter(|socket| {
+                    socket.local_addr() == Some(listener_addr)
+                        || socket.local_addr() == Some(client_addr)
+                })
+                .collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let client_is_live = sockets.iter().any(|socket| {
+            socket.local_addr() == Some(client_addr) && socket.remote_addr() == Some(listener_addr)
+        });
+        let server_is_live = sockets.iter().any(|socket| {
+            socket.local_addr() == Some(listener_addr) && socket.remote_addr() == Some(client_addr)
+        });
+        if client_is_live && server_is_live {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for accepted socket pair; matching sockets: {:?}",
+            sockets
+                .iter()
+                .filter(|socket| {
+                    socket.local_addr() == Some(listener_addr)
+                        || socket.local_addr() == Some(client_addr)
+                })
+                .collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_cancelled_connect_cleanup(pairs: &[(SocketAddr, SocketAddr)]) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let sockets = read_tcp_socket_stats();
+        let all_reclaimed = pairs.iter().all(|(listener_addr, client_addr)| {
+            let server_is_live = sockets.iter().any(|socket| {
+                socket.local_addr() == Some(*listener_addr)
+                    && socket.remote_addr() == Some(*client_addr)
+            });
+            let abandoned_connect_is_live = sockets.iter().any(|socket| {
+                socket.local_addr() == Some(*client_addr)
+                    && socket.remote_addr() == Some(*listener_addr)
+            });
+            server_is_live && !abandoned_connect_is_live
+        });
+        if all_reclaimed {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cancelled connect was not reclaimed; pairs: {pairs:?}, sockets: {sockets:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A dropped native connect future must not strand the socket that sys-io
+/// creates when the already-posted connect RPC later completes. The keeper
+/// listener deliberately holds the native channel open after each future
+/// releases its own reservation, reproducing the leak's required condition.
+fn test_cancelled_native_connect_closes_socket() {
+    use std::future::Future;
+
+    const CONNECTIONS: usize = 4;
+
+    let total_before = read_sys_io_metric("net.total_tcp_sockets");
+    let keeper = NativeTcpListener::bind(
+        &"127.0.0.1:0".parse().unwrap(),
+        Arc::new(NoopNetEventListener),
+    )
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+
+    for _ in 0..CONNECTIONS {
+        let mut connect = Box::pin(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(connect.as_mut().poll(&mut context), Poll::Pending));
+        drop(connect);
+    }
+
+    let mut servers = Vec::with_capacity(CONNECTIONS);
+    let mut pairs = Vec::with_capacity(CONNECTIONS);
+    for _ in 0..CONNECTIONS {
+        let (server, client_addr) = listener.accept().unwrap();
+        pairs.push((listener_addr, client_addr));
+        servers.push(server);
+    }
+
+    wait_for_sys_io_metric("net.total_tcp_sockets", |value| {
+        value >= total_before + (CONNECTIONS as u64) * 2
+    });
+    wait_for_cancelled_connect_cleanup(&pairs);
+
+    drop(servers);
+    drop(listener);
+    drop(keeper);
+    println!("test_cancelled_native_connect_closes_socket() PASS");
+}
+
+/// A dropped native accept future must not strand the socket that sys-io
+/// creates when its already-posted accept RPC later completes.
+fn test_cancelled_native_accept_closes_socket() {
+    use std::future::Future;
+
+    let total_before = read_sys_io_metric("net.total_tcp_sockets");
+    let listener = NativeTcpListener::bind(
+        &"127.0.0.1:0".parse().unwrap(),
+        Arc::new(NoopNetEventListener),
+    )
+    .unwrap();
+    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
+
+    // The first poll posts an accept RPC. Dropping while it is pending is the
+    // cancellation being tested; the connection below completes that RPC.
+    let mut accept = Box::pin(listener.accept(&make_listener));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
+    drop(accept);
+
+    let listener_addr = *listener.socket_addr();
+    let client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let client_addr = client.local_addr().unwrap();
+
+    // Both halves were allocated, so this cannot pass merely because the
+    // connection never reached the accept response. Only the client half
+    // should remain live after cancellation cleanup. Match the two loopback
+    // endpoints directly so unrelated system socket churn cannot skew this.
+    wait_for_sys_io_metric("net.total_tcp_sockets", |value| value >= total_before + 2);
+    wait_for_cancelled_accept_cleanup(listener_addr, client_addr);
+
+    drop(client);
+    drop(listener);
+    println!("test_cancelled_native_accept_closes_socket() PASS");
+}
+
+/// Cancellation after the accept response has reached the one-shot but before
+/// the future consumes it must reclaim the accepted stream as well.
+fn test_delivered_then_cancelled_native_accept_closes_socket() {
+    use std::future::Future;
+
+    struct WakeFlag(AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let listener = NativeTcpListener::bind(
+        &"127.0.0.1:0".parse().unwrap(),
+        Arc::new(NoopNetEventListener),
+    )
+    .unwrap();
+    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
+
+    let mut accept = Box::pin(listener.accept(&make_listener));
+    let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+    let waker = std::task::Waker::from(wake_flag.clone());
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
+
+    let listener_addr = *listener.socket_addr();
+    let client = std::net::TcpStream::connect(listener_addr).unwrap();
+    let client_addr = client.local_addr().unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !wake_flag.0.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "accept response was not delivered to the waiting future"
+        );
+        std::thread::yield_now();
+    }
+    wait_for_tcp_pair(listener_addr, client_addr);
+
+    // Do not poll the woken future: cancellation must drop and roll back the
+    // successful PendingAccept stored in the one-shot channel.
+    drop(accept);
+    wait_for_cancelled_accept_cleanup(listener_addr, client_addr);
+
+    drop(client);
+    drop(listener);
+    println!("test_delivered_then_cancelled_native_accept_closes_socket() PASS");
+}
+
+/// Releasing the final listener reference on its channel runtime must remain
+/// nonblocking when the runtime's staging queue is full. The netdev hook makes
+/// the otherwise narrow last-reference/backpressure race deterministic.
+fn test_native_listener_drop_under_backpressure() {
+    use std::future::Future;
+
+    let listener = NativeTcpListener::bind(
+        &"127.0.0.1:0".parse().unwrap(),
+        Arc::new(NoopNetEventListener),
+    )
+    .unwrap();
+    moto_io::net::channel::arm_listener_drop_backpressure_test(listener.handle());
+
+    // Post an accept and cancel it. Its eventual response makes the channel
+    // runtime temporarily upgrade the listener Weak to an Arc.
+    let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
+    let mut accept = Box::pin(listener.accept(&make_listener));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(accept.as_mut().poll(&mut context), Poll::Pending));
+    drop(accept);
+
+    let client = std::net::TcpStream::connect(*listener.socket_addr()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::listener_drop_backpressure_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not reach the listener-drop backpressure hook"
+        );
+        std::thread::yield_now();
+    }
+
+    // The channel runtime now owns the only remaining listener Arc and its
+    // send queue is full. Releasing the hook runs TcpListener::drop there.
+    drop(listener);
+    moto_io::net::channel::release_listener_drop_backpressure_test();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::listener_drop_backpressure_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "TcpListener::drop blocked its channel runtime on a full send queue"
+        );
+        std::thread::yield_now();
+    }
+
+    drop(client);
+    println!("test_native_listener_drop_under_backpressure() PASS");
+}
+
+pub fn test_native_net_cancellation() {
+    test_cancelled_native_connect_closes_socket();
+    test_cancelled_native_accept_closes_socket();
+    test_delivered_then_cancelled_native_accept_closes_socket();
+}
+
+pub fn test_native_listener_drop_backpressure() {
+    test_native_listener_drop_under_backpressure();
+}
 
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
 // than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
@@ -753,6 +1094,7 @@ fn test_timeout_storm_during_transfer() {
 
 pub fn run_all_tests() {
     test_channel_teardown();
+    test_native_net_cancellation();
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();

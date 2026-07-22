@@ -10,6 +10,7 @@ edition = "2024"
 moto-async   = { path = "../../lib/moto-async"  }
 moto-rt      = { path = "../../lib/moto-rt"     }
 moto-ipc     = { path = "../../lib/moto-ipc"    , features = ["stdio-pipe"]}
+moto-io      = { path = "../../lib/moto-io"     , features = ["netdev"] }
 moto-log     = { path = "../../lib/moto-log"    }
 moto-sys     = { path = "../../lib/moto-sys"    }
 moto-stats   = { path = "../../lib/moto-stats"  }

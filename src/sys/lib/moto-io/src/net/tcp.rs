@@ -31,8 +31,51 @@ use super::channel::RpcWaiter;
 /// An accepted-but-not-yet-claimed connection: the accept response plus
 /// the channel reservation made when the accept was posted.
 pub(super) struct PendingAccept {
+    // Must drop before `reservation`: cleanup may need the reserved channel
+    // runtime to deliver the close for an unclaimed successful accept.
+    cleanup: PendingAcceptCleanup,
     reservation: ChannelReservation,
     resp: moto_ipc::io_channel::Msg,
+}
+
+struct PendingAcceptCleanup {
+    listener: Weak<TcpListener>,
+    channel: Arc<NetChannel>,
+    recv_queue: Option<Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>,
+    handle: u64,
+    close_stream: bool,
+}
+
+impl PendingAcceptCleanup {
+    fn recv_queue(&self) -> Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>> {
+        self.recv_queue.as_ref().unwrap().clone()
+    }
+
+    fn disarm(mut self) {
+        self.recv_queue = None;
+    }
+}
+
+impl Drop for PendingAcceptCleanup {
+    fn drop(&mut self) {
+        let Some(recv_queue) = self.recv_queue.take() else {
+            return;
+        };
+
+        if let Some(listener) = self.listener.upgrade() {
+            let removed = listener.pending_accept_queues.lock().remove(&self.handle);
+            debug_assert!(
+                removed
+                    .as_ref()
+                    .is_none_or(|queue| Arc::ptr_eq(queue, &recv_queue))
+            );
+        }
+
+        super::channel::clear_rx_queue(&recv_queue, &self.channel);
+        if self.close_stream {
+            self.channel.close_tcp_stream(self.handle);
+        }
+    }
 }
 
 pub struct TcpListener {
@@ -72,7 +115,10 @@ impl Drop for TcpListener {
         msg.command = api_net::NetCmd::TcpListenerDrop as u16;
         msg.handle = self.handle;
 
-        self.channel().send_msg(msg);
+        // Incoming dispatch can temporarily own the last listener Arc, so
+        // this destructor may run on the channel runtime itself. A blocking
+        // send would deadlock that runtime when its staging queue is full.
+        self.channel().send_msg_guaranteed(msg);
 
         while let Some((_, stream)) = { self.pending_accept_queues.lock().pop_first() } {
             // Free up server-allocated pages.
@@ -97,14 +143,28 @@ impl TcpListener {
 
         // First, create the pending_accept_queue; only then publish the
         // pending accept (a racing accept must not miss the queue).
+        let recv_queue = crate::net::inner_rx_stream::InnerRxStream::new();
         self.pending_accept_queues
             .lock()
-            .insert(resp.handle, crate::net::inner_rx_stream::InnerRxStream::new());
+            .insert(resp.handle, recv_queue.clone());
 
-        let pending = PendingAccept { reservation, resp };
+        let cleanup = PendingAcceptCleanup {
+            listener: self.me.clone(),
+            channel: reservation.channel().clone(),
+            recv_queue: Some(recv_queue),
+            handle: resp.handle,
+            close_stream: resp.status().is_ok(),
+        };
+        let pending = PendingAccept {
+            cleanup,
+            reservation,
+            resp,
+        };
 
         if let Some(tx) = sync_tx {
-            // The blocking accept's caller awaits this on its parker.
+            // The accept caller awaits this through the one-shot receiver.
+            // PendingAccept owns rollback, so either a failed send or a later
+            // receiver cancellation closes an unclaimed successful stream.
             let _ = tx.send(pending);
             return;
         }
@@ -279,28 +339,24 @@ impl TcpListener {
         pending: PendingAccept,
         make_listener: &dyn Fn() -> Arc<dyn NetEventListener>,
     ) -> Result<(Arc<TcpStream>, SocketAddr), ErrorCode> {
-        let PendingAccept { reservation, resp } = pending;
-        if resp.status().is_err() {
-            let rx_queue = self
-                .pending_accept_queues
-                .lock()
-                .remove(&resp.handle)
-                .unwrap();
-            crate::net::channel::clear_rx_queue(&rx_queue, self.channel());
-            return Err(resp.status);
+        if pending.resp.status().is_err() {
+            let status = pending.resp.status;
+            drop(pending);
+            return Err(status);
         }
 
+        let PendingAccept {
+            cleanup,
+            reservation: channel_reservation,
+            resp,
+        } = pending;
+        let cleanup = cleanup;
+
         let remote_addr = api_net::get_socket_addr(&resp.payload);
-        let channel_reservation = reservation;
         let subchannel_mask = channel_reservation.subchannel_mask();
 
         // Don't remove the queue until the channel can access it via the new stream.
-        let recv_queue = self
-            .pending_accept_queues
-            .lock()
-            .get(&resp.handle)
-            .unwrap()
-            .clone();
+        let recv_queue = cleanup.recv_queue();
 
         let new_stream = Arc::new_cyclic(|me| {
             TcpStream {
@@ -333,6 +389,7 @@ impl TcpListener {
                 .remove(&resp.handle)
                 .is_some()
         );
+        cleanup.disarm();
 
         new_stream.ack_rx();
         new_stream.on_accepted();

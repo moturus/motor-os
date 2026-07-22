@@ -152,6 +152,69 @@ static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
     num_udp_sockets: AtomicU64::new(0),
 });
 
+// Deterministic netdev regression hook for listener destruction under channel
+// backpressure. The accept-response path temporarily owns the listener's last
+// Arc, just like ordinary incoming dispatch can. The hook fills the private
+// send queue while the rx task is running, then lets the test drop its Arc and
+// release that temporary reference. Placeholder messages are removed before
+// the tx task can run, so they never reach sys-io.
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_IDLE: u8 = 0;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_ARMED: u8 = 1;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_HELD: u8 = 2;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_RELEASED: u8 = 3;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_DONE: u8 = 4;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_MSG_ID: u64 = u64::MAX;
+#[cfg(feature = "netdev")]
+static LISTENER_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "netdev")]
+static LISTENER_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(LISTENER_DROP_TEST_IDLE);
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn arm_listener_drop_backpressure_test(handle: u64) {
+    assert_ne!(0, handle);
+    LISTENER_DROP_TEST_HANDLE.store(handle, Ordering::Relaxed);
+    LISTENER_DROP_TEST_STATE
+        .compare_exchange(
+            LISTENER_DROP_TEST_IDLE,
+            LISTENER_DROP_TEST_ARMED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn listener_drop_backpressure_test_is_held() -> bool {
+    LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_HELD
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn release_listener_drop_backpressure_test() {
+    LISTENER_DROP_TEST_STATE
+        .compare_exchange(
+            LISTENER_DROP_TEST_HELD,
+            LISTENER_DROP_TEST_RELEASED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn listener_drop_backpressure_test_is_done() -> bool {
+    LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_DONE
+}
+
 pub fn stats_tcp_listener_created() {
     #[cfg(feature = "netdev")]
     NET.lock().num_tcp_listeners.fetch_add(1, Ordering::Relaxed);
@@ -499,25 +562,76 @@ impl NetChannel {
                     }
                 }
                 Some(RpcWaiter::Connect(stream, tx)) => {
-                    // A stream dropped mid-connect leaves sys-io's
-                    // stream behind, as today.
                     if let Some(stream) = stream.upgrade() {
                         let _ = stream.on_connect_response(msg);
+                    } else if msg.status().is_ok() {
+                        // The connecting future and its last stream owner were
+                        // dropped before sys-io transferred the new handle to
+                        // us. Complete the ownership transfer by closing it.
+                        self.close_tcp_stream(msg.handle);
                     }
                     if let Some(tx) = tx {
                         let _ = tx.send(msg);
                     }
                 }
                 Some(RpcWaiter::Accept(listener, tx)) => {
-                    // A dead listener drops tx, erroring a blocked
-                    // accept — unreachable while callers hold &self.
                     if let Some(listener) = listener.upgrade() {
                         listener.on_accept_response(msg, tx);
+                        #[cfg(feature = "netdev")]
+                        self.maybe_run_listener_drop_backpressure_test(listener);
+                    } else if msg.status().is_ok() {
+                        // The listener went away after posting this accept but
+                        // before sys-io returned the accepted stream.
+                        self.close_tcp_stream(msg.handle);
                     }
                 }
                 None => panic!("unexpected msg"),
             }
         }
+    }
+
+    #[cfg(feature = "netdev")]
+    fn maybe_run_listener_drop_backpressure_test(&self, listener: Arc<TcpListener>) {
+        if LISTENER_DROP_TEST_HANDLE.load(Ordering::Relaxed) != listener.handle()
+            || LISTENER_DROP_TEST_STATE
+                .compare_exchange(
+                    LISTENER_DROP_TEST_ARMED,
+                    LISTENER_DROP_TEST_HELD,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+
+        let mut placeholder = io_channel::Msg::new();
+        placeholder.id = LISTENER_DROP_TEST_MSG_ID;
+        placeholder.command = u16::MAX;
+        placeholder.handle = u64::MAX;
+        while self.send_queue.push(placeholder).is_ok() {}
+        assert!(self.send_queue.is_full());
+
+        // The test drops its owning Arc while this rx-task Arc is held, then
+        // releases us to perform the last drop with a full send queue.
+        while LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) != LISTENER_DROP_TEST_RELEASED {
+            core::hint::spin_loop();
+        }
+        drop(listener);
+
+        // The runtime-safe destructor returns here. Remove only this hook's
+        // placeholders, preserving real closes that were already queued.
+        let mut retained = VecDeque::new();
+        while let Some(msg) = self.send_queue.pop() {
+            if msg.id != LISTENER_DROP_TEST_MSG_ID {
+                retained.push_back(msg);
+            }
+        }
+        for msg in retained {
+            self.send_queue.push(msg).unwrap();
+        }
+        LISTENER_DROP_TEST_STATE.store(LISTENER_DROP_TEST_DONE, Ordering::Release);
+        self.maybe_wake_io_thread();
     }
 
     fn on_udp_msg(&self, msg: io_channel::Msg) {
@@ -1032,6 +1146,17 @@ impl NetChannel {
                 waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
             self.wait_can_send(waiter);
         }
+    }
+
+    /// Close a stream handle that sys-io created but no client-side stream
+    /// took ownership of. Response dispatch runs on this channel's runtime,
+    /// so the guaranteed path is required when its staging queue is full.
+    pub(super) fn close_tcp_stream(&self, handle: u64) {
+        debug_assert_ne!(0, handle);
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamClose as u16;
+        req.handle = handle;
+        self.send_msg_guaranteed(req);
     }
 
     /// Insert `waiter` and queue `req`, blocking if the send queue is

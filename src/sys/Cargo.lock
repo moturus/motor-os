@@ -1551,6 +1551,7 @@ dependencies = [
  "futures",
  "log",
  "moto-async",
+ "moto-io",
  "moto-ipc",
  "moto-log",
  "moto-mpmc",
