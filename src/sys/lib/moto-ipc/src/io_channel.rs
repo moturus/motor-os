@@ -182,6 +182,46 @@ pub const QUEUE_SIZE: u64 = 64;
 const QUEUE_MASK: u64 = QUEUE_SIZE - 1;
 pub const CHANNEL_PAGE_COUNT: usize = 64;
 
+/// What a channel operation detected about the peer's misbehavior. Reported to
+/// the installed [`ChannelErrorHandler`]; the enum leaves room for other error
+/// sites to route through the same handler later.
+#[derive(Clone, Copy, Debug)]
+pub enum ChannelError {
+    /// A page was freed that was not in use -- a double free. On a server
+    /// channel a client causes this by naming an already-recovered (still
+    /// server-held) page in a second message, so its second recovery frees a
+    /// page the server already freed. `server_page` distinguishes a client
+    /// page (peer misbehavior) from a server page (a local bug).
+    FreeingUnusedPage { page_idx: u16, server_page: bool },
+}
+
+/// A hook a server installs to be notified when a channel operation detects
+/// peer misbehavior, instead of the library panicking -- so it can drop the
+/// offending client (`remote`, the connection's peer handle) and keep serving.
+/// See [`set_error_handler`].
+pub type ChannelErrorHandler = fn(remote: SysHandle, error: ChannelError);
+
+// Process-global, matching the THREAD_EXIT_HOOK idiom in moto-io's channel
+// runtime: a single server process (sys-io) installs it once. 0 == unset,
+// which keeps the historical panic -- correct for a client-side double free (a
+// local bug) and for tests/clients that install no handler.
+static ERROR_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the process-wide channel error handler (see [`ChannelErrorHandler`]).
+/// Last writer wins; typically called once at server startup.
+pub fn set_error_handler(handler: ChannelErrorHandler) {
+    ERROR_HANDLER.store(handler as usize, Ordering::Release);
+}
+
+fn error_handler() -> Option<ChannelErrorHandler> {
+    match ERROR_HANDLER.load(Ordering::Acquire) {
+        0 => None,
+        // Safety: only a ChannelErrorHandler fn pointer is ever stored here,
+        // by set_error_handler.
+        addr => Some(unsafe { core::mem::transmute::<usize, ChannelErrorHandler>(addr) }),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum EndpointType {
     Client,
@@ -360,12 +400,10 @@ impl RawChannel {
 
         let bit = 1u64 << raw_page.page_idx;
         if (bitmap.fetch_xor(bit, Ordering::AcqRel) & bit) == 0 {
-            // The page was not actually used.
-            panic!(
-                "io_channel: freeing unused page 0x{:x?}; used pages: 0x{:x}",
-                raw_page,
-                bitmap.load(Ordering::Relaxed)
-            )
+            // The page was not in use: a double free. Report it rather than
+            // panicking here, where the offending connection is unknown --
+            // IoPage::drop routes it to the installed error handler or panics.
+            Err(moto_rt::Error::AlreadyInUse)
         } else {
             Ok(())
         }
@@ -491,7 +529,23 @@ impl Debug for IoPage {
 impl Drop for IoPage {
     fn drop(&mut self) {
         if self.raw_page.page_idx != u16::MAX {
-            self.raw_channel.free_page(self.raw_page).unwrap();
+            if self.raw_channel.free_page(self.raw_page).is_err() {
+                // free_page fails one way for a live page: the page was not in
+                // use -- a double free. On a server this means the peer named
+                // an already-recovered page, so hand it to the installed
+                // handler (which drops that client) instead of crashing. With
+                // no handler (client side, tests) it is a local bug -- panic,
+                // as the library always has.
+                let error = ChannelError::FreeingUnusedPage {
+                    page_idx: self.raw_page.page_idx,
+                    server_page: matches!(self.raw_page.s_type, EndpointType::Server),
+                };
+                match error_handler() {
+                    Some(handler) => handler(self.remote_handle, error),
+                    None => panic!("io_channel: freeing unused page 0x{:x?}", self.raw_page),
+                }
+                return;
+            }
             if self.remote_handle != SysHandle::NONE {
                 assert!(self.raw_page.page_idx < 64);
                 let page_mask = 1_u64 << (self.raw_page.page_idx as u64);
