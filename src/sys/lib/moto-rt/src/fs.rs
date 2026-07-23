@@ -64,6 +64,12 @@ pub const SEEK_SET: u8 = 0;
 pub const SEEK_CUR: u8 = 1;
 pub const SEEK_END: u8 = 2;
 
+pub const LOCK_SHARED: u8 = 1;
+pub const LOCK_EXCLUSIVE: u8 = 2;
+pub const TRY_LOCK_SHARED: u8 = 3;
+pub const TRY_LOCK_EXCLUSIVE: u8 = 4;
+pub const UNLOCK: u8 = 5;
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct FileAttr {
@@ -170,6 +176,17 @@ pub fn close(rt_fd: RtFd) -> Result<()> {
     };
 
     into_result(vdso_close(rt_fd))
+}
+
+pub fn file_lock(rt_fd: RtFd, operation: u8) -> Result<()> {
+    let entry = RtVdsoVtable::get().fs_file_lock.load(Ordering::Relaxed);
+    if entry == 0 {
+        return Err(Error::NotImplemented);
+    }
+    let vdso_file_lock: extern "C" fn(RtFd, u8) -> ErrorCode = unsafe {
+        core::mem::transmute(entry as usize as *const ())
+    };
+    into_result(vdso_file_lock(rt_fd, operation))
 }
 
 pub fn get_file_attr(rt_fd: RtFd) -> Result<FileAttr> {
