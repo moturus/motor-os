@@ -696,6 +696,18 @@ impl TcpStream {
             msg.handle
         );
 
+        // sys-io returns the original id-zero TX message only when an
+        // asynchronous write fails (normally because it raced a close). It
+        // carries no RX page and must never enter recv_queue: if unread data
+        // is present, poll_rx() and clear_rx_queue() both interpret queued
+        // messages as RX data or an ordered state change.
+        if msg.command == (api_net::NetCmd::TcpStreamTx as u16) {
+            debug_assert_ne!(msg.status, moto_rt::E_OK);
+            log::debug!("TX reply for stream 0x{:x}", msg.handle);
+            self.wake_rx_waiters();
+            return;
+        }
+
         // The main challenge/nuance here is that sometimes we need to raise
         // poll events here, and sometimes we have to delay them. For example,
         // while there are messages in RXQ, we should not raise POLL_READ_CLOSED.
@@ -741,10 +753,6 @@ impl TcpStream {
             drop(recv_q);
             // The RXQ was empty, this is a new (edge) event.
             self.raise_readiness(Readiness::READABLE);
-        } else if msg.command == (api_net::NetCmd::TcpStreamTx as u16) {
-            // TX closed. The driver was supposed to clear IO Pages.
-            drop(recv_q);
-            log::debug!("TX reply for stream 0x{:x}", msg.handle);
         } else if msg.command == (api_net::NetCmd::EvtTcpStreamStateChanged as u16) {
             drop(recv_q);
             let new_state = TcpState::try_from(msg.payload.args_32()[0]).unwrap();

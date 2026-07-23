@@ -347,6 +347,57 @@ pub fn test_native_listener_drop_backpressure() {
     test_native_listener_drop_under_backpressure();
 }
 
+/// A failed asynchronous TX is reported with a `TcpStreamTx` message. If RX
+/// data is already queued, that control message must not become part of the RX
+/// stream: dropping the socket drains the queue as RX pages and used to assert
+/// that the TX command was `TcpStreamRx`.
+pub fn test_tx_error_with_queued_rx() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_peer = Arc::new(AtomicBool::new(false));
+    let peer_release = release_peer.clone();
+
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"unread").unwrap();
+        while !peer_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !stream.has_rx_bytes() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "peer data did not reach the native stream"
+        );
+        std::thread::yield_now();
+    }
+
+    // sys-io returns the original id-zero TX message when it rejects an
+    // asynchronous write (for example, because the peer has closed). Inject
+    // that protocol result after real RX data to deterministically exercise
+    // the same ordering seen under HTTP production traffic.
+    let mut tx_error = moto_ipc::io_channel::Msg::new();
+    tx_error.command = moto_sys_io::api_net::NetCmd::TcpStreamTx as u16;
+    tx_error.handle = stream.handle();
+    tx_error.status = moto_rt::E_NOT_CONNECTED;
+    stream.process_incoming_msg(tx_error);
+
+    drop(stream);
+    release_peer.store(true, Ordering::Release);
+    peer.join().unwrap();
+    println!("test_tx_error_with_queued_rx() PASS");
+}
+
 // Stage-E channel teardown (design 5.5): churn more concurrent connections
 // than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
 // close everything, then assert the net runtime tore every channel down.
@@ -1095,6 +1146,7 @@ fn test_timeout_storm_during_transfer() {
 pub fn run_all_tests() {
     test_channel_teardown();
     test_native_net_cancellation();
+    test_tx_error_with_queued_rx();
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
