@@ -51,6 +51,9 @@ pub trait PosixFile: Any + Send + Sync {
     fn flush(&self) -> Result<(), ErrorCode> {
         Err(E_BAD_HANDLE)
     }
+    fn file_lock(&self, _operation: u8) -> Result<(), ErrorCode> {
+        Err(E_BAD_HANDLE)
+    }
 
     // rt_fd indicates which FD is closed.
     fn close(&self, rt_fd: RtFd) -> Result<(), ErrorCode> {
@@ -156,6 +159,16 @@ pub extern "C" fn posix_flush(rt_fd: i32) -> ErrorCode {
     };
 
     match posix_file.flush() {
+        Ok(()) => E_OK,
+        Err(err) => err,
+    }
+}
+
+pub extern "C" fn posix_file_lock(rt_fd: RtFd, operation: u8) -> ErrorCode {
+    let Some(posix_file) = get_file(rt_fd) else {
+        return E_BAD_HANDLE;
+    };
+    match posix_file.file_lock(operation) {
         Ok(()) => E_OK,
         Err(err) => err,
     }

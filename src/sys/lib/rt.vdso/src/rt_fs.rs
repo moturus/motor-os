@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::ops::Deref;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use moto_async::AsFuture;
 use moto_io::fs::{EntryId, EntryKind, FsClient, ROOT_ID};
@@ -208,9 +208,14 @@ impl AsyncFsClient {
         mut tasks_rx: moto_async::channel::Receiver<IoTask>,
         fs_client: Rc<moto_io::fs::FsClient>,
     ) {
+        fs_client.enable_response_pump();
+        moto_async::LocalRuntime::spawn(fs_client.clone().run_response_pump());
         loop {
             let io_task = tasks_rx.recv().await.unwrap();
-            let result = io_task(fs_client.clone()).await;
+            let fs_client = fs_client.clone();
+            moto_async::LocalRuntime::spawn(async move {
+                io_task(fs_client).await;
+            });
         }
     }
 
@@ -331,6 +336,7 @@ impl AsyncFsClient {
         log::debug!("file_open('{}', {opts:x}) -> {entry_id:x}", path.abs_path);
         Ok(File {
             entry_id,
+            open_id: NEXT_OPEN_ID.fetch_add(1, Ordering::Relaxed),
             pos: AtomicU64::new(pos),
             readable: (opts & moto_rt::fs::O_READ) != 0,
             // `O_APPEND` grants write access on its own: appending *is* writing,
@@ -341,6 +347,7 @@ impl AsyncFsClient {
             // the open succeeded, then each write failed with `E_NOT_ALLOWED`.
             writable: (opts & (moto_rt::fs::O_WRITE | moto_rt::fs::O_APPEND)) != 0,
             nonblocking: AtomicBool::new(false),
+            lock_state: AtomicU8::new(FILE_LOCK_UNLOCKED),
         })
     }
 
@@ -557,10 +564,38 @@ impl AsyncFsClient {
 
 struct File {
     entry_id: moto_io::fs::EntryId,
+    open_id: u64,
     pos: AtomicU64,
     readable: bool,
     writable: bool,
     nonblocking: AtomicBool,
+    lock_state: AtomicU8,
+}
+
+const FILE_LOCK_UNLOCKED: u8 = 0;
+const FILE_LOCK_ACQUIRING: u8 = 1;
+const FILE_LOCK_LOCKED: u8 = 2;
+const FILE_LOCK_RELEASING: u8 = 3;
+
+static NEXT_OPEN_ID: AtomicU64 = AtomicU64::new(1);
+
+impl Drop for File {
+    fn drop(&mut self) {
+        if self.lock_state.load(Ordering::Acquire) == FILE_LOCK_LOCKED
+            && let Ok(client) = AsyncFsClient::get()
+            && let Err(err) = client.blocking_run({
+                let entry_id = self.entry_id;
+                let open_id = self.open_id;
+                move |fs_client| async move {
+                    fs_client
+                        .file_lock(entry_id, open_id, moto_rt::fs::UNLOCK)
+                        .await
+                }
+            })
+        {
+            log::warn!("failed to release file lock during close: {err:?}");
+        }
+    }
 }
 
 impl PosixFile for File {
@@ -623,6 +658,68 @@ impl PosixFile for File {
             .unwrap()
             .flush()
             .map_err(|err| err as moto_rt::ErrorCode)
+    }
+
+    fn file_lock(&self, operation: u8) -> core::result::Result<(), moto_rt::ErrorCode> {
+        let is_unlock = operation == moto_rt::fs::UNLOCK;
+        if !is_unlock
+            && !matches!(
+                operation,
+                moto_rt::fs::LOCK_SHARED
+                    | moto_rt::fs::LOCK_EXCLUSIVE
+                    | moto_rt::fs::TRY_LOCK_SHARED
+                    | moto_rt::fs::TRY_LOCK_EXCLUSIVE
+            )
+        {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let rollback = if is_unlock {
+            match self.lock_state.compare_exchange(
+                FILE_LOCK_LOCKED,
+                FILE_LOCK_RELEASING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => FILE_LOCK_LOCKED,
+                Err(FILE_LOCK_UNLOCKED) => return Ok(()),
+                Err(_) => return Err(moto_rt::E_INVALID_ARGUMENT),
+            }
+        } else {
+            self.lock_state
+                .compare_exchange(
+                    FILE_LOCK_UNLOCKED,
+                    FILE_LOCK_ACQUIRING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .map_err(|_| moto_rt::E_INVALID_ARGUMENT)?;
+            FILE_LOCK_UNLOCKED
+        };
+
+        let result = match AsyncFsClient::get() {
+            Ok(client) => client
+                .blocking_run({
+                    let entry_id = self.entry_id;
+                    let open_id = self.open_id;
+                    move |fs_client| async move {
+                        fs_client.file_lock(entry_id, open_id, operation).await
+                    }
+                })
+                .map_err(|err| err as moto_rt::ErrorCode),
+            Err(err) => Err(err as moto_rt::ErrorCode),
+        };
+        self.lock_state.store(
+            if result.is_err() {
+                rollback
+            } else if is_unlock {
+                FILE_LOCK_UNLOCKED
+            } else {
+                FILE_LOCK_LOCKED
+            },
+            Ordering::Release,
+        );
+        result
     }
 
     // rt_fd indicates which FD is closed.

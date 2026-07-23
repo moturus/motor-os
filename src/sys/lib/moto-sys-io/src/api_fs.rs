@@ -1,5 +1,5 @@
 use async_fs::EntryId;
-use moto_ipc::io_channel::{IoPage, Msg, PAGE_SIZE, Receiver, Sender};
+use moto_ipc::io_channel::{IoPage, Msg, PAGE_SIZE, Sender};
 use moto_rt::Result;
 use moto_rt::fs::MAX_PATH_LEN;
 
@@ -23,6 +23,20 @@ pub const CMD_GET_NEXT_ENTRY: u16 = 11;
 pub const CMD_GET_NAME: u16 = 12;
 pub const CMD_MOVE_ENTRY: u16 = 13;
 pub const CMD_COPY_FILE_RANGE: u16 = 14;
+pub const CMD_FILE_LOCK: u16 = 15;
+
+pub fn file_lock_msg_encode(entry_id: EntryId, open_id: u64, operation: u8) -> Msg {
+    let mut msg = Msg::new();
+    msg.command = CMD_FILE_LOCK;
+    msg.payload.set_arg_128(entry_id);
+    msg.handle = open_id;
+    msg.payload.args_8_mut()[16] = operation;
+    msg
+}
+
+pub fn file_lock_msg_decode(msg: Msg) -> Result<(EntryId, u64, u8)> {
+    Ok((msg.payload.arg_128(), msg.handle, msg.payload.args_8()[16]))
+}
 
 pub fn stat_msg_encode(parent_id: u128, fname: &str, io_page: IoPage) -> Msg {
     assert!(fname.len() <= MAX_PATH_LEN);
@@ -264,7 +278,7 @@ pub fn read_multi_resp_encode(msg_id: u64, total_len: u32, pages: Vec<IoPage>) -
 }
 
 /// Decode a multi-page read response: (total bytes read, that data's pages).
-pub fn read_multi_resp_decode(msg: Msg, receiver: &Receiver) -> Result<(u32, Vec<IoPage>)> {
+pub fn read_multi_resp_decode(msg: Msg, receiver: &Sender) -> Result<(u32, Vec<IoPage>)> {
     msg.status()?;
 
     let total_len = msg.flags & READ_RESP_LEN_MASK;
@@ -316,7 +330,7 @@ pub fn read_resp_encode(msg_id: u64, len: u16, io_page: IoPage) -> Msg {
     msg
 }
 
-pub fn read_resp_decode(msg: Msg, receiver: &Receiver) -> Result<(u16, IoPage)> {
+pub fn read_resp_decode(msg: Msg, receiver: &Sender) -> Result<(u16, IoPage)> {
     msg.status()?;
 
     let io_page_idx = msg.payload.shared_pages()[11];
@@ -357,7 +371,7 @@ pub fn metadata_resp_encode(msg_id: u64, metadata: async_fs::Metadata, io_page: 
     msg
 }
 
-pub fn metadata_resp_decode(msg: Msg, receiver: &Receiver) -> Result<async_fs::Metadata> {
+pub fn metadata_resp_decode(msg: Msg, receiver: &Sender) -> Result<async_fs::Metadata> {
     msg.status()?;
 
     let io_page_idx = msg.payload.shared_pages()[11];
@@ -493,7 +507,7 @@ pub fn get_name_resp_encode(msg_id: u64, name: &str, io_page: IoPage) -> Msg {
     msg
 }
 
-pub fn get_name_resp_decode(msg: Msg, receiver: &Receiver) -> Result<String> {
+pub fn get_name_resp_decode(msg: Msg, receiver: &Sender) -> Result<String> {
     msg.status()?;
 
     let io_page_idx = msg.payload.shared_pages()[11];

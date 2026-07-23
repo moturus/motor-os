@@ -33,7 +33,6 @@
 //! the typical/standard/legacy I/O paradigms, such as file systems and standard
 //! networking protocols.
 
-#![feature(local_waker)]
 #![no_std]
 
 extern crate alloc;

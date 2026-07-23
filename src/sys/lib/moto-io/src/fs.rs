@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use core::pin::Pin;
 use core::{
     cell::{Cell, RefCell},
-    task::{LocalWaker, Poll},
+    task::{Poll, Waker},
 };
 use moto_ipc::io_channel::Msg;
 use moto_rt::Result;
@@ -36,10 +36,12 @@ pub struct FsClient {
     request_counter: Cell<u64>,
 
     responses: RefCell<BTreeMap<u64, ResponseWaiter>>,
+    response_pump: Cell<bool>,
+    response_error: Cell<Option<moto_rt::Error>>,
 }
 
 enum ResponseWaiter {
-    Waker(LocalWaker),
+    Waker(Waker),
     Msg(Msg),
 }
 
@@ -62,11 +64,11 @@ impl Future for ResponseFuture {
         let mut responses = fs_client.responses.borrow_mut();
         match responses.entry(self.request_id) {
             alloc::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(ResponseWaiter::Waker(cx.local_waker().clone()));
+                entry.insert(ResponseWaiter::Waker(cx.waker().clone()));
             }
             alloc::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
                 ResponseWaiter::Waker(local_waker) => {
-                    *local_waker = cx.local_waker().clone();
+                    *local_waker = cx.waker().clone();
                 }
                 ResponseWaiter::Msg(msg) => {
                     let msg = *msg;
@@ -76,6 +78,14 @@ impl Future for ResponseFuture {
             },
         }
         core::mem::drop(responses);
+
+        if fs_client.response_pump.get() {
+            if let Some(err) = fs_client.response_error.get() {
+                fs_client.responses.borrow_mut().remove(&self.request_id);
+                return Poll::Ready(Err(err));
+            }
+            return Poll::Pending;
+        }
 
         let result = loop {
             match fs_client.io_receiver.borrow_mut().poll_recv(cx) {
@@ -147,7 +157,48 @@ impl FsClient {
             io_receiver: RefCell::new(io_receiver),
             request_counter: Cell::new(0),
             responses: Default::default(),
+            response_pump: Cell::new(false),
+            response_error: Cell::new(None),
         }))
+    }
+
+    pub fn enable_response_pump(&self) {
+        assert!(!self.response_pump.replace(true));
+    }
+
+    #[allow(clippy::await_holding_refcell_ref)] // This task is the receiver's sole borrower.
+    pub async fn run_response_pump(self: Rc<Self>) {
+        assert!(self.response_pump.get());
+        loop {
+            match self.io_receiver.borrow_mut().recv().await {
+                Ok(msg) => {
+                    let mut responses = self.responses.borrow_mut();
+                    match responses.entry(msg.id) {
+                        alloc::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(ResponseWaiter::Msg(msg));
+                        }
+                        alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                            let ResponseWaiter::Waker(waker) =
+                                entry.insert(ResponseWaiter::Msg(msg))
+                            else {
+                                panic!("duplicate filesystem response");
+                            };
+                            waker.wake();
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.response_error.set(Some(err));
+                    let mut responses = self.responses.borrow_mut();
+                    for waiter in responses.values_mut() {
+                        if let ResponseWaiter::Waker(waker) = waiter {
+                            waker.wake_by_ref();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     /// Find a file or directory by its full path.
@@ -421,10 +472,10 @@ impl FsClient {
                 // The response format follows the request length we chose:
                 // one page carries it => single-page format.
                 let decoded = if req_len as usize <= BLOCK_SIZE {
-                    api_fs::read_resp_decode(resp, &self.io_receiver.borrow())
+                    api_fs::read_resp_decode(resp, &self.io_sender)
                         .map(|(len, io_page)| (len as u32, alloc::vec![io_page]))
                 } else {
-                    api_fs::read_multi_resp_decode(resp, &self.io_receiver.borrow())
+                    api_fs::read_multi_resp_decode(resp, &self.io_sender)
                 };
                 // Pages freed on drop, so error/discard paths below leak nothing.
                 let (total, pages) = match decoded {
@@ -446,9 +497,7 @@ impl FsClient {
                 let mut copied = 0_usize;
                 let mut valid = total <= req_len;
                 if valid {
-                    for (io_page, chunk) in
-                        pages.iter().zip(api_fs::io_chunks(req_offset, total))
-                    {
+                    for (io_page, chunk) in pages.iter().zip(api_fs::io_chunks(req_offset, total)) {
                         buf_running[copied..(copied + chunk)]
                             .clone_from_slice(&io_page.bytes()[..chunk]);
                         copied += chunk;
@@ -505,7 +554,7 @@ impl FsClient {
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;
-        let metadata = api_fs::metadata_resp_decode(resp, &self.io_receiver.borrow())?;
+        let metadata = api_fs::metadata_resp_decode(resp, &self.io_sender)?;
         Ok(metadata)
     }
 
@@ -533,6 +582,17 @@ impl FsClient {
 
         let resp = self.clone().send_recv(msg).await?;
         resp.status()
+    }
+
+    pub async fn file_lock(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        open_id: u64,
+        operation: u8,
+    ) -> Result<()> {
+        let mut msg = api_fs::file_lock_msg_encode(entry_id, open_id, operation);
+        msg.id = self.new_request_id();
+        self.clone().send_recv(msg).await?.status()
     }
 
     /// Rename and/or move the file or directory.
@@ -579,7 +639,7 @@ impl FsClient {
         msg.id = self.new_request_id();
 
         let resp = self.clone().send_recv(msg).await?;
-        api_fs::get_name_resp_decode(resp, &self.io_receiver.borrow())
+        api_fs::get_name_resp_decode(resp, &self.io_sender)
     }
 
     /// The total number of blocks in the FS.

@@ -3,6 +3,7 @@
 #![feature(random)]
 
 // mod channel_test;
+mod file_locking;
 mod fs;
 mod icmp;
 mod io_channel;
@@ -509,6 +510,13 @@ fn main() {
         return;
     }
     if args.len() > 1 {
+        if args[1] == "file-lock-test" {
+            file_locking::run_tests();
+            return;
+        }
+        if args[1] == "file-lock-child" {
+            file_locking::child()
+        }
         subcommand::run_child(args)
     }
 
@@ -533,6 +541,7 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    file_locking::run_tests();
     // return;
 
     // Test that a userspace interrupt is handled correctly.

@@ -15,6 +15,7 @@ use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
+mod lock_manager;
 mod mbr;
 pub mod stats;
 mod virtio_partition;
@@ -240,6 +241,15 @@ impl FileSystem for FS {
 pub(crate) struct FsRuntime {
     fs: Rc<LocalRwLock<FS>>,
     fs_stats: Rc<stats::FsStats>,
+    locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
+}
+
+struct PendingLockResponse {
+    entry_id: EntryId,
+    connection_id: u64,
+    open_id: u64,
+    sender: moto_ipc::io_channel::Sender,
+    response: moto_ipc::io_channel::Msg,
 }
 
 pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<LocalRwLock<FS>>> {
@@ -308,6 +318,7 @@ pub(super) async fn init(block_device: virtio_async::VirtioDevice) -> Result<Rc<
     let runtime = FsRuntime {
         fs: fs.clone(),
         fs_stats,
+        locks: Default::default(),
     };
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime);
@@ -397,7 +408,14 @@ async fn fs_listener(
                     let _ = ticket_tx.send(()).await;
                 });
             }
-            Err(err) => return Ok(()), // The client dropped.
+            Err(_) => {
+                let grants = runtime
+                    .locks
+                    .borrow_mut()
+                    .disconnect(sender.remote_handle().as_u64());
+                send_lock_grants(grants, &runtime).await;
+                return Ok(());
+            }
         }
     }
 }
@@ -428,6 +446,7 @@ async fn on_msg(
         moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => {
             on_cmd_copy_file_range(msg, &sender, runtime).await
         }
+        moto_sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
 
         cmd => {
             log::warn!("Unrecognized FS command: {cmd}.");
@@ -436,6 +455,78 @@ async fn on_msg(
     } {
         let resp = api_fs::empty_resp_encode(msg.id, Err(map_err_into_native(err)));
         let _ = sender.send(resp).await;
+    }
+}
+
+async fn on_cmd_file_lock(
+    msg: moto_ipc::io_channel::Msg,
+    sender: &moto_ipc::io_channel::Sender,
+    runtime: FsRuntime,
+) -> Result<()> {
+    use lock_manager::{Acquire, Mode};
+
+    let request_id = msg.id;
+    let (entry_id, open_id, operation) =
+        api_fs::file_lock_msg_decode(msg).map_err(map_native_error)?;
+    let connection_id = sender.remote_handle().as_u64();
+    if operation == moto_rt::fs::UNLOCK {
+        let grants = runtime
+            .locks
+            .borrow_mut()
+            .release(entry_id, connection_id, open_id)
+            .map_err(|_| std::io::Error::from(ErrorKind::InvalidInput))?;
+        sender
+            .send(api_fs::empty_resp_encode(request_id, Ok(())))
+            .await
+            .map_err(map_native_error)?;
+        send_lock_grants(grants, &runtime).await;
+        return Ok(());
+    }
+    let (mode, blocking) = match operation {
+        moto_rt::fs::LOCK_SHARED => (Mode::Shared, true),
+        moto_rt::fs::LOCK_EXCLUSIVE => (Mode::Exclusive, true),
+        moto_rt::fs::TRY_LOCK_SHARED => (Mode::Shared, false),
+        moto_rt::fs::TRY_LOCK_EXCLUSIVE => (Mode::Exclusive, false),
+        _ => return Err(ErrorKind::InvalidInput.into()),
+    };
+    let pending = PendingLockResponse {
+        entry_id,
+        connection_id,
+        open_id,
+        sender: sender.clone(),
+        response: api_fs::empty_resp_encode(request_id, Ok(())),
+    };
+    let result = runtime.locks.borrow_mut().acquire(
+        entry_id,
+        connection_id,
+        open_id,
+        mode,
+        blocking,
+        pending,
+    );
+    match result {
+        Acquire::Granted => sender
+            .send(api_fs::empty_resp_encode(request_id, Ok(())))
+            .await
+            .map_err(map_native_error),
+        Acquire::Queued => Ok(()),
+        Acquire::WouldBlock => Err(ErrorKind::WouldBlock.into()),
+        Acquire::AlreadyOwned(_) => Err(ErrorKind::InvalidInput.into()),
+        Acquire::QueueFull(_) => Err(ErrorKind::OutOfMemory.into()),
+    }
+}
+
+async fn send_lock_grants(mut grants: Vec<PendingLockResponse>, runtime: &FsRuntime) {
+    while let Some(grant) = grants.pop() {
+        if grant.sender.send(grant.response).await.is_err() {
+            grants.extend(
+                runtime
+                    .locks
+                    .borrow_mut()
+                    .release(grant.entry_id, grant.connection_id, grant.open_id)
+                    .expect("granted lock cannot have a pending acquisition"),
+            );
+        }
     }
 }
 

@@ -55,6 +55,11 @@ pub extern "C" fn motor_start(version: u64) {
     let self_addr = motor_start as *const () as usize as u64;
     assert_eq!(vtable.vdso_entry.load(Ordering::Acquire), self_addr);
 
+    vtable.fs_file_lock.store(
+        posix::posix_file_lock as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
+
     // Memory management.
     vtable.alloc.store(
         rt_alloc::alloc as *const () as usize as u64,
