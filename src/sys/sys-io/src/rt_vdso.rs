@@ -22,10 +22,14 @@ pub fn load() {
         panic!("rt.bin has a dynamic interpreter.");
     }
 
-    let mut loader = VsdoLoader {};
+    let mut loader = VsdoLoader {
+        mapped_regions: [(0, 0, 0); VsdoLoader::MAX_REGIONS],
+        num_regions: 0,
+    };
     elf_binary
         .load(&mut loader)
         .expect("Error loading rt.bin elf.");
+    core::mem::drop(loader); // Unmaps the RW aliases.
 
     let vdso_entry_addr: u64 = elf_binary.entry_point() + moto_rt::RT_VDSO_START;
     assert_ne!(0, vdso_entry_addr);
@@ -106,7 +110,49 @@ pub fn load() {
     }
 }
 
-struct VsdoLoader {}
+struct VsdoLoader {
+    // Segment regions: (unoffset vaddr, local RW alias, num_pages).
+    // W^X: the vdso text is mapped R+X at its fixed address; all writes
+    // (loading, relocation) go through the R+W alias side of a self-share.
+    //
+    // NO HEAP ALLOCATIONS here: the global allocator dispatches through
+    // the vdso vtable, which is initialized only after this loader runs.
+    mapped_regions: [(u64, u64, u64); Self::MAX_REGIONS],
+    num_regions: usize,
+}
+
+impl VsdoLoader {
+    const MAX_REGIONS: usize = 16;
+
+    // `dst` is an unoffset vdso vaddr; writes through the RW alias.
+    unsafe fn write_via_alias(&self, dst: u64, src: *const u8, sz: u64) {
+        let mut region: Option<(u64, u64, u64)> = None;
+        for entry in &self.mapped_regions[..self.num_regions] {
+            let region_sz = entry.2 << moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2;
+            if entry.0 <= dst && (dst + sz) <= (entry.0 + region_sz) {
+                region = Some(*entry);
+                break;
+            }
+        }
+        let (region_start, alias_start, _) = region.unwrap();
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src,
+                (alias_start + (dst - region_start)) as usize as *mut u8,
+                sz as usize,
+            )
+        };
+    }
+}
+
+impl Drop for VsdoLoader {
+    fn drop(&mut self) {
+        for (_, alias, _) in &self.mapped_regions[..self.num_regions] {
+            moto_sys::SysMem::unmap(moto_sys::SysHandle::SELF, 0, u64::MAX, *alias).unwrap();
+        }
+    }
+}
 
 impl ElfLoader for VsdoLoader {
     fn allocate(&mut self, load_headers: LoadableHeaders) -> Result<(), ElfLoaderErr> {
@@ -116,36 +162,44 @@ impl ElfLoader for VsdoLoader {
         // is mostly security theader: https://grsecurity.net/kaslr_an_exercise_in_cargo_cult_security
         for header in load_headers {
             let vaddr_start =
-                (RT_VDSO_START + header.virtual_addr()) & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
+                header.virtual_addr() & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
             let vaddr_end = moto_sys::align_up(
-                RT_VDSO_START + header.virtual_addr() + header.mem_size(),
+                header.virtual_addr() + header.mem_size(),
                 moto_sys::sys_mem::PAGE_SIZE_SMALL,
             );
 
-            // Always readable; must be writable to actually load it in there.
-            let flags = moto_sys::SysMem::F_CUSTOM_USER
-                | moto_sys::SysMem::F_READABLE
-                | moto_sys::SysMem::F_WRITABLE;
+            let mut flags = moto_sys::SysMem::F_SHARE_SELF;
+            if header.flags().is_read() {
+                flags |= moto_sys::SysMem::F_READABLE;
+            }
+            if header.flags().is_write() {
+                flags |= moto_sys::SysMem::F_WRITABLE;
+            }
+            if header.flags().is_execute() && !header.flags().is_write() {
+                flags |= moto_sys::SysMem::F_EXECUTABLE;
+            }
 
             let num_pages = (vaddr_end - vaddr_start) >> moto_sys::sys_mem::PAGE_SIZE_SMALL_LOG2;
-            let addr = moto_sys::SysMem::map(
+            let (addr, alias) = moto_sys::SysMem::map2(
                 moto_sys::SysHandle::SELF,
                 flags,
                 u64::MAX,
-                vaddr_start,
+                RT_VDSO_START + vaddr_start,
                 moto_sys::sys_mem::PAGE_SIZE_SMALL,
                 num_pages,
             )
             .map_err(|_| ElfLoaderErr::OutOfMemory)?;
-            assert_eq!(addr, vaddr_start);
+            assert_eq!(addr, RT_VDSO_START + vaddr_start);
+            assert!(self.num_regions < Self::MAX_REGIONS);
+            self.mapped_regions[self.num_regions] = (vaddr_start, alias, num_pages);
+            self.num_regions += 1;
         }
         Ok(())
     }
 
     fn load(&mut self, _flags: Flags, base: VAddr, region: &[u8]) -> Result<(), ElfLoaderErr> {
         unsafe {
-            let addr = (moto_rt::RT_VDSO_START + base) as usize as *mut u8;
-            core::ptr::copy_nonoverlapping(region.as_ptr(), addr, region.len());
+            self.write_via_alias(base, region.as_ptr(), region.len() as u64);
         }
         Ok(())
     }
@@ -154,7 +208,6 @@ impl ElfLoader for VsdoLoader {
         use RelocationType::x86_64;
         use elfloader::arch::x86_64::RelocationTypes::*;
 
-        let addr: u64 = moto_rt::RT_VDSO_START + entry.offset;
         match entry.rtype {
             x86_64(R_AMD64_RELATIVE) => {
                 // This type requires addend to be present.
@@ -163,8 +216,13 @@ impl ElfLoader for VsdoLoader {
                     .ok_or(ElfLoaderErr::UnsupportedRelocationEntry)?;
 
                 // Need to write (addend + base) into addr.
+                let value = moto_rt::RT_VDSO_START + addend;
                 unsafe {
-                    *(addr as usize as *mut u64) = moto_rt::RT_VDSO_START + addend;
+                    self.write_via_alias(
+                        entry.offset,
+                        &value as *const _ as *const u8,
+                        core::mem::size_of::<u64>() as u64,
+                    );
                 }
 
                 Ok(())

@@ -58,6 +58,18 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn exec_heap(&mut self) {
+        use std::io::Write;
+        self.stdin.write_all(b"exec_heap\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    pub fn exec_stack(&mut self) {
+        use std::io::Write;
+        self.stdin.write_all(b"exec_stack\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.inst.try_wait()
     }
@@ -123,6 +135,29 @@ fn do_command(cmd: String) {
         "oom" => {
             assert_eq!(1, words.len());
             trigger_oom()
+        }
+        // W^X: executing from R+W memory must get this process killed; if
+        // it survives, exit(0) so the parent's !success() assert fires.
+        "exec_heap" => {
+            let addr =
+                moto_sys::SysMem::alloc(moto_sys::sys_mem::PAGE_SIZE_SMALL, 1).unwrap() as usize;
+            unsafe {
+                (addr as *mut u8).write_volatile(0xc3); // ret
+                let f: extern "C" fn() = core::mem::transmute(addr);
+                f();
+            }
+            println!("exec_heap: still alive (NX not enforced)");
+            std::process::exit(0);
+        }
+        "exec_stack" => {
+            let code = [0xc3_u8]; // ret
+            unsafe {
+                let f: extern "C" fn() =
+                    core::mem::transmute(std::hint::black_box(code.as_ptr()));
+                f();
+            }
+            println!("exec_stack: still alive (NX not enforced)");
+            std::process::exit(0);
         }
         "spin" => {
             assert_eq!(2, words.len());

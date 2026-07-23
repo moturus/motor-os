@@ -335,6 +335,21 @@ fn test_oom() {
     println!("test_oom() PASS");
 }
 
+// W^X: executing from heap or stack must kill the process (NX).
+fn test_nx() {
+    let mut child = subcommand::spawn();
+    child.exec_heap();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    let mut child = subcommand::spawn();
+    child.exec_stack();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    println!("test_nx() PASS");
+}
+
 fn test_caps() {
     assert_eq!(
         0,
@@ -571,6 +586,7 @@ fn main() {
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
     test_oom();
+    test_nx();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     tcp::run_all_tests();

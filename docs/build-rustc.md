@@ -246,7 +246,13 @@ git switch -c motor-os-rustc moturus/motor-os-rustc
 # bootstrap from resetting it to the stale LLVM gitlink.
 git submodule init src/llvm-project
 LLVM_COMMIT="$(git -C "$LLVM" rev-parse HEAD)"
-if ! git -C src/llvm-project rev-parse --git-dir >/dev/null 2>&1; then
+LLVM_TOP=
+if [ -e src/llvm-project/.git ]; then
+    LLVM_TOP="$(git -C src/llvm-project rev-parse --show-toplevel \
+        2>/dev/null || true)"
+fi
+if [ "$(readlink -f "$LLVM_TOP" 2>/dev/null || true)" != \
+     "$(readlink -f src/llvm-project)" ]; then
     git -c protocol.file.allow=always clone --no-checkout --shared \
         "$LLVM" src/llvm-project
     git submodule absorbgitdirs src/llvm-project
@@ -540,6 +546,17 @@ executed entirely on Motor OS.
 
 ## Pitfalls (each cost real debugging time)
 
+- **An empty submodule directory is not an initialized submodule.** In
+  particular, `git -C src/llvm-project rev-parse --git-dir` is an unsafe test:
+  Git walks up from an empty `src/llvm-project`, finds the Rust superproject's
+  `.git`, and succeeds. A script that trusts that result skips initialization
+  and then runs its LLVM fetch against a directory with no checkout (or against
+  the Rust repository). Stage R1 instead requires `src/llvm-project/.git` and
+  verifies that `src/llvm-project` itself is the reported worktree root. The
+  `warning: unable to rmdir 'library/backtrace': Directory not empty` sometimes
+  printed while switching Rust branches is separate and harmless: it is Git
+  retaining that separately initialized submodule directory while it updates
+  the superproject.
 - **A rustc relink silently poisons every cargo cache that used the old
   binary.** Two builds of the same tree produce byte-different compilers with
   *identical* `rustc -vV` output, which is all cargo fingerprints. Cargo then

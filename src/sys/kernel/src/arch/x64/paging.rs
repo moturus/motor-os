@@ -68,6 +68,11 @@ impl PTE {
     // the kernel TLB. Kernel unmaps MUST then invalidate explicitly on every
     // CPU — see tlb.rs / `invalidate()`: kernel-PT shootdowns never skip.
     const GLOBAL: u64 = 0b1_0000_0000; // bit 8.
+    // Leaf-only: no instruction fetches through this translation (needs
+    // EFER.NXE, set per-CPU in GS::init). Set on every user leaf that was
+    // not mapped with MappingOptions::EXECUTABLE — only ELF text segments
+    // and nothing else may execute. Never set on kernel leaves (this round).
+    const NX: u64 = 1 << 63;
     const MMIO_RW: u64 = 0b_0011_1011; // bit 0: present; bit 1: writable;
                                        // bit 3: write through; bit 4: no cache; bit 5: accessed.
 
@@ -730,6 +735,11 @@ impl PageTable {
             options.remove(MappingOptions::USER_ACCESSIBLE);
         }
 
+        let executable = options.contains(MappingOptions::EXECUTABLE);
+        if executable {
+            options.remove(MappingOptions::EXECUTABLE);
+        }
+
         // Can we use a match expression below? The complier treats "ORs" as matching ORs, not
         // matching to ORed bitflags (i.e. matches single bits only).
         let mut pte_flags = if options == (MappingOptions::READABLE | MappingOptions::WRITABLE) {
@@ -752,6 +762,12 @@ impl PageTable {
 
         if user {
             pte_flags |= PTE::USER;
+            // W^X: user pages are NX unless explicitly mapped EXECUTABLE
+            // (ELF text segments only; the sys_mem API rejects W+X).
+            // Kernel leaves are left executable this round.
+            if !executable {
+                pte_flags |= PTE::NX;
+            }
         }
 
         if kind != PageType::SmallPage {

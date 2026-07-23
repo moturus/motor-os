@@ -176,7 +176,7 @@ update_rust() {
 	# inputs under MOTORH. Keep protocol.file.allow scoped to those commands;
 	# never weaken the user's global Git policy. --shared preserves the original
 	# --reference optimization, and absorbgitdirs restores the normal submodule
-	# gitdir layout. Existing and half-initialized submodules are repaired too.
+	# gitdir layout.
 	local rust_llvm="$RUST/src/llvm-project"
 	local llvm_commit llvm_url
 	llvm_commit="$(git -C "$LLVM" rev-parse HEAD)"
@@ -185,7 +185,19 @@ update_rust() {
 	[ -n "$llvm_url" ] || die "rust fork has no src/llvm-project URL in .gitmodules"
 
 	git -C "$RUST" submodule init src/llvm-project >/dev/null
-	if git -C "$rust_llvm" rev-parse --git-dir >/dev/null 2>&1; then
+
+	# An uninitialized Rust LLVM submodule can still leave an empty directory
+	# here. `git -C "$rust_llvm" rev-parse --git-dir` is not a valid
+	# initialization test: Git walks up from that directory, finds $RUST/.git,
+	# and reports the *superproject* as though it were the submodule. Require a
+	# .git entry of its own and verify that Git considers rust_llvm—not RUST—the
+	# worktree root.
+	local rust_llvm_top=
+	if [ -e "$rust_llvm/.git" ]; then
+		rust_llvm_top="$(git -C "$rust_llvm" rev-parse --show-toplevel \
+			2>/dev/null || true)"
+	fi
+	if [ "$(readlink -f "$rust_llvm_top" 2>/dev/null || true)" = "$rust_llvm" ]; then
 		skip "rust LLVM submodule already initialized"
 	else
 		if [ -e "$rust_llvm" ] && [ -n "$(ls -A "$rust_llvm" 2>/dev/null)" ]; then
