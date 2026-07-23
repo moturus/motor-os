@@ -20,6 +20,28 @@
 #                      kernel crash marker, data corruption, a stall, or a
 #                      "connect to sys-io failed" regression.
 #   MOTOR_STRESS_OUT   base dir for run output (default /tmp/motor-stress).
+#   MOTO_SMP           guest vCPU count (default 4). Read by run-qemu.sh.
+#   MOTO_CPU_AFFINITY  host cpuset to pin qemu to via taskset (default: no pin).
+#                      Read by run-qemu.sh; each run stamps its config as the
+#                      first console.log line ("run-qemu: -smp N ...").
+#
+# The bugs this soak hunts are client<->sys-io concurrency races (io_channel
+# ring/page-bitmap double-free; net-path lost-wake freeze). The 4-vCPU-on-a-
+# 24-core KVM default gives each vCPU a near-dedicated core = least-perturbed
+# timing, so races are rare. Vary the CPU config to flush them out (x86+KVM is
+# strong-ordered/TSO, so this fuzzes INTERLEAVINGS, not memory reorderings):
+#
+#   # Oversubscribe: 8 vCPUs multiplexed onto 2 host cores (4:1) -- widens the
+#   # scheduling windows lost-wakes and the ring race need (sharpest trigger).
+#   MOTO_SMP=8 MOTO_CPU_AFFINITY=0,1 RESILIENT=1 \
+#     bash src/tests/stress-soak.sh release 7200 oversub1
+#
+#   # Classifier: 1 vCPU kills true parallelism -- a bug that still fires is a
+#   # logic/ordering bug, not a cross-core data race.
+#   MOTO_SMP=1 RESILIENT=1 bash src/tests/stress-soak.sh release 3600 smp1
+#
+#   # More contention, still 1:1 on the 24-core host (stays fast):
+#   MOTO_SMP=16 RESILIENT=1 bash src/tests/stress-soak.sh release 7200 smp16
 #
 # Paths are derived from this script's location ($ROOT = repo root), so it can
 # be run from anywhere. Run output goes OUTSIDE the repo (see MOTOR_STRESS_OUT)
@@ -77,6 +99,28 @@ START=$(date +%s)
 declare -a WL_PIDS=()
 STOP_REASON=""
 QEMU_STARTED=0
+
+# Dry-run (STRESS_DRYRUN=1): resolve every derived path through the real config
+# above and confirm the host-side prerequisites exist, then exit before booting.
+# This validates the script is runnable from any working directory (paths derive
+# from $SCRIPT_DIR, not $PWD) without paying for a full soak. Placed before the
+# EXIT trap is installed, so exiting here does not run teardown.
+if [ "${STRESS_DRYRUN:-0}" = 1 ]; then
+  echo "stress-soak dry-run:"
+  echo "  invoked as : ${BASH_SOURCE[0]}"
+  echo "  cwd        : $(pwd)"
+  echo "  SCRIPT_DIR : $SCRIPT_DIR"
+  echo "  ROOT       : $ROOT"
+  echo "  KEY        : $KEY"
+  echo "  IMG_DIR    : $IMG_DIR"
+  echo "  HOST_RNET  : $HOST_RNET"
+  rc=0
+  [ -f "$KEY" ]                 && echo "  [ok]      ssh key present"        || { echo "  [MISSING] ssh key"; rc=1; }
+  [ -x "$IMG_DIR/run-qemu.sh" ] && echo "  [ok]      run-qemu.sh present"    || { echo "  [MISSING] $IMG_DIR/run-qemu.sh (run: make BUILD=$BUILD all)"; rc=1; }
+  [ -x "$HOST_RNET" ]           && echo "  [ok]      host rnetbench present" || echo "  [warn]    $HOST_RNET absent -> net-rr/net-bulk workloads self-disable"
+  [ "$rc" = 0 ] && echo "  DRY-RUN OK" || echo "  DRY-RUN FOUND MISSING PREREQS"
+  exit "$rc"
+fi
 
 # ------------------------------------------------------------------ forensics
 mon_cmd() { { printf '%s\n' "$1"; sleep 1; } | timeout 8 nc "$MON_HOST" "$MON_PORT" 2>/dev/null; }
@@ -227,6 +271,11 @@ if ! timeout 20 "$HOST_RNET" --client "$VM_IP:$RNET_PORT" -t 2 >/dev/null 2>&1; 
 # ------------------------------------------------------------------ workload primitives
 # each workload rewrites <name>.stat every iteration: "iters=N fails=M last_rc=R beat=EPOCH last=STR"
 write_stat() { # name iters fails rc last
+  # Record every failing rc (in order) to <name>.failrcs so the monitor can
+  # classify a NEW failure by the rc that actually failed. last_rc in the .stat
+  # is the most recent iteration -- usually a later success (0) -- so it cannot
+  # be trusted to hold the failing code.
+  [ "$4" -ne 0 ] && echo "$4" >> "$OUT/$1.failrcs"
   printf 'iters=%d fails=%d last_rc=%d beat=%d last=%s\n' "$2" "$3" "$4" "$(date +%s)" "$5" > "$OUT/$1.stat"
 }
 # Pace the loops: a small gap between healthy iterations, and a HARD backoff on
@@ -361,8 +410,12 @@ while :; do
     capture_forensics "$STOP_REASON"; break
   fi
 
-  # 3. per-workload: tiered anomaly policy.
+  # 3. per-workload: tiered anomaly policy (classified by the actual failing rc,
+  #    recorded per iteration in <name>.failrcs).
   #    immediate stop: stall, data corruption (rc 97/98/99), any suite failure.
+  #    soft-OOM      : new failures whose rc(s) are all 126 (rush could not spawn
+  #                    a child under memory pressure) are log-only in RESILIENT
+  #                    mode -- the class the kernel now absorbs and recovers from.
   #    burst stop    : >=BURST_FAILS new failures in one tick (fast-failing path).
   #    chronic stop  : cumulative fails >= CHRONIC_FAILS (slow-bleeding path).
   #    else          : log to failures.log and keep soaking (transient noise).
@@ -380,10 +433,19 @@ while :; do
     if [ $(( now - beat )) -gt "$STALL_SEC" ] && [ "$consec_liveness_fail" = 0 ]; then
       anomaly="workload-stall:$name (no progress $(( now - beat ))s; $line)"; break; fi
     if [ "$newf" -gt 0 ]; then
-      echo "[$(date +%H:%M:%S) +$((now-START))s] NEW-FAIL $name newf=$newf $line" >> "$OUT/failures.log"
-      case "$lastrc" in
-        97|98|99) anomaly="data-corruption:$name ($line)"; break;;
-      esac
+      # Classify by the rc(s) that actually failed this tick (last_rc in the
+      # .stat is the most recent iteration, usually a later success == 0).
+      newrcs=$(tail -n "$newf" "$OUT/$name.failrcs" 2>/dev/null)
+      newrcs1=$(echo $newrcs | tr '\n' ' ')
+      # Deterministic counts over this tick's new failing rc(s) -- grep -c always
+      # consumes all input (a negated grep -q all-match test proved flaky here).
+      n_new=$(printf '%s\n' "$newrcs" | grep -cE '^[0-9]+$')
+      n_oom=$(printf '%s\n' "$newrcs" | grep -cE '^126$')
+      n_corrupt=$(printf '%s\n' "$newrcs" | grep -cE '^(97|98|99)$')
+      echo "[$(date +%H:%M:%S) +$((now-START))s] NEW-FAIL $name newf=$newf rcs=[$newrcs1] $line" >> "$OUT/failures.log"
+      # Data corruption (rc 97/98/99) always stops, in any mode.
+      if [ "$n_corrupt" -gt 0 ]; then
+        anomaly="data-corruption:$name (rcs [$newrcs1]; $line)"; break; fi
       if [ "$name" = suites ]; then
         # RESILIENT: tolerate suites' own intermittent flakes (e.g. the udp
         # AlreadyInUse port-reuse race) so the load generator keeps running --
@@ -399,6 +461,17 @@ while :; do
       # do not abort. Corruption (rc 97/98/99) and stall above still stop.
       if [ "${RESILIENT:-0}" = 1 ]; then
         case "$name" in http-std|http-axum) continue;; esac
+      fi
+      # Transient process-spawn OutOfMemory (soft OOM): rush returns 126 ("found
+      # but not executable", exec.rs) when it cannot spawn a child under memory
+      # pressure -- the class the kernel now absorbs (mem.soft_oom_user) and
+      # recovers from, not a subsystem defect. In RESILIENT mode, tolerate a new
+      # failure whose recorded rc(s) are ALL 126 (log-only). A hang (124), an
+      # ssh/net wedge (255), corruption (above), or any other code (e.g. 222)
+      # still counts toward burst/chronic and can stop the soak.
+      if [ "${RESILIENT:-0}" = 1 ] && [ "$n_new" -gt 0 ] && [ "$n_oom" -eq "$n_new" ]; then
+        echo "[$(date +%H:%M:%S) +$((now-START))s] SOFT-OOM-TOLERATED $name rcs=[$newrcs1]" >> "$OUT/failures.log"
+        continue
       fi
       if [ "$newf" -ge "$BURST_FAILS" ]; then anomaly="burst-fail:$name ($newf new; $line)"; break; fi
       if [ "$fails" -ge "$CHRONIC_FAILS" ]; then anomaly="chronic-fail:$name ($fails total; $line)"; break; fi
