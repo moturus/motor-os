@@ -27,6 +27,7 @@ use moto_sys_io::api_net::IO_SUBCHANNELS;
 use super::tcp::TcpListener;
 use super::tcp::TcpStream;
 use super::udp::UdpSocket;
+use super::wait::{WaitSet, WaiterId};
 
 /// The stage-E leak check (design 5.5): a quiescent runtime holds no
 /// channels and no sockets. Reached only from the vdso's netdev-gated
@@ -396,11 +397,10 @@ pub struct NetChannel {
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
 
-    // Wakers of parked TCP write futures, drained on every channel pass
-    // (broad wake-and-recheck: progress may be a freed io_page — sys-io
-    // wakes the channel when it frees one whose page-wait bit is set —
-    // or send-queue room).
-    tx_wakers: Mutex<Vec<core::task::Waker>>,
+    // Cancellation-aware registrations of parked TCP write futures. Drained
+    // on every channel pass (broad wake-and-recheck: progress may be a freed
+    // io_page or send-queue room).
+    tx_waiters: WaitSet,
 
     // The channel runtime's send-room notify (a leaked LocalNotify),
     // signaled by the tx task whenever the send queue has room; awaited by
@@ -721,14 +721,10 @@ impl NetChannel {
         self.wake_tx_wakers();
     }
 
-    /// Wake parked write futures. drain() keeps the Vec's capacity: no
-    /// allocation per park/wake cycle. Waking under the lock is fine
-    /// (a bridge-waker wake never blocks).
+    /// Wake parked write futures, removing registrations before invoking
+    /// arbitrary waker code.
     pub(super) fn wake_tx_wakers(&self) {
-        let mut wakers = self.tx_wakers.lock();
-        for waker in wakers.drain(..) {
-            waker.wake();
-        }
+        self.tx_waiters.wake_all();
     }
 
     /// The rx task: the receive half of the old IO thread loop as a
@@ -940,11 +936,17 @@ impl NetChannel {
     /// Register a write future's waker for the next channel pass. The
     /// caller must re-check its condition after registering (the pass
     /// that made room may already have drained the list).
-    pub(super) fn add_tx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.tx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    pub(super) fn add_tx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.tx_waiters.register(id, waker);
+    }
+
+    pub(super) fn remove_tx_waker(&self, id: &mut Option<WaiterId>) {
+        self.tx_waiters.unregister(id);
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn tx_waiter_count(&self) -> usize {
+        self.tx_waiters.len()
     }
 
     pub(super) fn send_queue_is_full(&self) -> bool {
@@ -1045,7 +1047,7 @@ impl NetChannel {
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
-            tx_wakers: Mutex::new(Vec::new()),
+            tx_waiters: WaitSet::new(),
             rpc_map: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),

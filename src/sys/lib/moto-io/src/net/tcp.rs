@@ -688,6 +688,23 @@ impl TcpStream {
         self.rx_waiters.len()
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn tx_waiter_count(&self) -> usize {
+        self.channel().tx_waiter_count()
+    }
+
+    /// Run a netdev test while this stream has no allocatable TX pages.
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
+        let mut pages = alloc::vec::Vec::new();
+        while let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
+            pages.push(page);
+        }
+        f();
+    }
+
     // Note: this is called from the rx task, so must not sleep. Every
     // path ends in wake_rx_waiters(): parked readers re-check after any
     // RX progress or state change (wake-all-and-recheck).
@@ -1255,13 +1272,17 @@ impl TcpStream {
             bufs,
             total,
             written: 0,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a write would not block (send-queue room or write half
     /// closed). A native reactor awaits this, then calls `try_write`.
     pub fn writable(&self) -> Writable<'_> {
-        Writable { stream: self }
+        Writable {
+            stream: self,
+            waiter_id: None,
+        }
     }
 
     pub fn maybe_can_write(&self) {
@@ -1719,6 +1740,13 @@ pub struct TcpWriteFuture<'a, 'b, 'c> {
     pub bufs: &'b [&'c [u8]],
     pub total: usize,
     pub written: usize,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for TcpWriteFuture<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.stream.channel().remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
@@ -1734,6 +1762,7 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
         let stream = this.stream;
         loop {
             if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
                 return Poll::Ready(Ok(this.written));
             }
 
@@ -1741,6 +1770,7 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
             // queue traffic.
             this.written += stream.append_pending_tx(this.bufs, this.written);
             if this.written == this.total {
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
                 return Poll::Ready(Ok(this.written));
             }
 
@@ -1748,12 +1778,15 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
                 if this.written > 0 {
                     // Partial write: return it rather than wait for
                     // pages (the old loop's opportunistic tail).
+                    stream.channel().remove_tx_waker(&mut this.waiter_id);
                     return Poll::Ready(Ok(this.written));
                 }
                 // The failed alloc set the subchannel's page-wait bits;
                 // sys-io will wake the channel, whose next pass drains
-                // tx_wakers. Register, then re-check via the loop.
-                stream.channel().add_tx_waker(cx.waker());
+                // TX waiters. Register, then re-check via the loop.
+                stream
+                    .channel()
+                    .add_tx_waker(&mut this.waiter_id, cx.waker());
                 if stream.channel().may_alloc_page(stream.subchannel_mask) {
                     continue;
                 }
@@ -1765,7 +1798,9 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
                 Err(()) => {
                     // Full send queue. Register, re-check, park; the
                     // page was freed and is re-allocated on retry.
-                    stream.channel().add_tx_waker(cx.waker());
+                    stream
+                        .channel()
+                        .add_tx_waker(&mut this.waiter_id, cx.waker());
                     if !stream.channel().send_queue_is_full() {
                         continue;
                     }
@@ -1833,6 +1868,13 @@ impl core::future::Future for Readable<'_> {
 /// so sys-io wakes the channel when it frees a page. Cancel-safe.
 pub struct Writable<'a> {
     stream: &'a TcpStream,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for Writable<'_> {
+    fn drop(&mut self) {
+        self.stream.channel().remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for Writable<'_> {
@@ -1844,25 +1886,32 @@ impl core::future::Future for Writable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let stream = self.stream;
+        let this = self.get_mut();
+        let stream = this.stream;
         if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
             // A closed write half never blocks; the write returns an error.
+            stream.channel().remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         if stream.have_write_buffer_space() {
+            stream.channel().remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         // Register, then arm: the failed alloc sets the page-wait bits sys-io
         // watches. A page that frees in the window is caught by the re-check.
-        stream.channel().add_tx_waker(cx.waker());
+        stream
+            .channel()
+            .add_tx_waker(&mut this.waiter_id, cx.waker());
         match stream.channel().alloc_page(stream.subchannel_mask) {
             Ok(page) => {
                 // Room appeared; drop the probe page to free it.
                 drop(page);
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
                 Poll::Ready(())
             }
             Err(_) => {
                 if stream.have_write_buffer_space() {
+                    stream.channel().remove_tx_waker(&mut this.waiter_id);
                     Poll::Ready(())
                 } else {
                     Poll::Pending

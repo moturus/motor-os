@@ -212,9 +212,9 @@ fn test_cancelled_native_connect_closes_socket() {
     println!("test_cancelled_native_connect_closes_socket() PASS");
 }
 
-/// Distinct cancelled native futures must physically remove their RX wakers;
+/// Distinct cancelled native futures must physically remove their I/O wakers;
 /// a quiet live socket provides no later event that could clean stale entries.
-fn test_cancelled_native_rx_waiters_are_removed() {
+fn test_cancelled_native_io_waiters_are_removed() {
     use std::future::Future;
     use std::task::{Wake, Waker};
 
@@ -266,10 +266,34 @@ fn test_cancelled_native_rx_waiters_are_removed() {
         assert_eq!(stream.rx_waiter_count(), 0);
     }
 
+    stream.with_tx_pages_exhausted_for_test(|| {
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.writable());
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(stream.tx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(stream.tx_waiter_count(), 0);
+        }
+
+        let byte = [0_u8; 1];
+        let bufs: [&[u8]; 1] = [&byte];
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.write_future(&bufs));
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(stream.tx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(stream.tx_waiter_count(), 0);
+        }
+    });
+
     drop(stream);
     release_peer.store(true, Ordering::Release);
     peer.join().unwrap();
-    println!("test_cancelled_native_rx_waiters_are_removed() PASS");
+    println!("test_cancelled_native_io_waiters_are_removed() PASS");
 }
 
 /// A dropped native accept future must not strand the socket that sys-io
@@ -415,7 +439,7 @@ fn test_native_listener_drop_under_backpressure() {
 
 pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
-    test_cancelled_native_rx_waiters_are_removed();
+    test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }
