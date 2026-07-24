@@ -8,7 +8,6 @@ use crate::net::readiness::{NetEventListener, Readiness};
 use crate::net::wait::{WaitSet, WaiterId};
 use super::channel::{ChannelReservation, NetChannel};
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
 use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
@@ -36,10 +35,9 @@ pub struct UdpSocket {
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
 
-    // Parked receive futures own cancellation-aware registrations. TX still
-    // uses the earlier wake-all list and is converted separately.
+    // Parked futures own cancellation-aware registrations.
     rx_waiters: WaitSet,
-    tx_wakers: Mutex<Vec<core::task::Waker>>,
+    tx_waiters: WaitSet,
 
     me: Weak<UdpSocket>,
 }
@@ -160,7 +158,7 @@ impl UdpSocket {
                 rx_timeout_ns: AtomicU64::new(u64::MAX),
                 tx_timeout_ns: AtomicU64::new(u64::MAX),
                 rx_waiters: WaitSet::new(),
-                tx_wakers: Mutex::new(Vec::new()),
+                tx_waiters: WaitSet::new(),
                 me: me.clone(),
             }
         });
@@ -236,13 +234,17 @@ impl UdpSocket {
             socket: self,
             buf,
             addr: *addr,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a send would not block. A native reactor awaits this,
     /// then calls `try_send_to`.
     pub fn writable(&self) -> UdpWritable<'_> {
-        UdpWritable { socket: self }
+        UdpWritable {
+            socket: self,
+            waiter_id: None,
+        }
     }
 
     fn recv_or_peek_from_nonblocking(
@@ -502,11 +504,12 @@ impl UdpSocket {
         self.rx_waiters.unregister(id);
     }
 
-    fn add_tx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.tx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    fn add_tx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.tx_waiters.register(id, waker);
+    }
+
+    fn remove_tx_waker(&self, id: &mut Option<WaiterId>) {
+        self.tx_waiters.unregister(id);
     }
 
     fn wake_rx_waiters(&self) {
@@ -514,15 +517,33 @@ impl UdpSocket {
     }
 
     fn wake_tx_waiters(&self) {
-        for waker in self.tx_wakers.lock().drain(..) {
-            waker.wake();
-        }
+        self.tx_waiters.wake_all();
     }
 
     #[doc(hidden)]
     #[cfg(feature = "netdev")]
     pub fn rx_waiter_count(&self) -> usize {
         self.rx_waiters.len()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn tx_waiter_count(&self) -> usize {
+        self.tx_waiters.len()
+    }
+
+    /// Run a netdev test while this socket has no allocatable TX pages.
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
+        let mut pages = alloc::vec::Vec::new();
+        while let Ok(page) = self
+            .channel()
+            .alloc_page(self.channel_reservation.subchannel_mask())
+        {
+            pages.push(page);
+        }
+        f();
     }
 }
 
@@ -582,6 +603,13 @@ pub struct UdpSendFuture<'a, 'b> {
     socket: &'a UdpSocket,
     buf: &'b [u8],
     addr: SocketAddr,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpSendFuture<'_, '_> {
+    fn drop(&mut self) {
+        self.socket.remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpSendFuture<'_, '_> {
@@ -596,12 +624,18 @@ impl core::future::Future for UdpSendFuture<'_, '_> {
         let this = self.get_mut();
         match this.socket.send_to_nonblocking(this.buf, &this.addr) {
             Err(E_NOT_READY) => {}
-            res => return Poll::Ready(res),
+            res => {
+                this.socket.remove_tx_waker(&mut this.waiter_id);
+                return Poll::Ready(res);
+            }
         }
-        this.socket.add_tx_waker(cx.waker());
+        this.socket.add_tx_waker(&mut this.waiter_id, cx.waker());
         match this.socket.send_to_nonblocking(this.buf, &this.addr) {
             Err(E_NOT_READY) => Poll::Pending,
-            res => Poll::Ready(res),
+            res => {
+                this.socket.remove_tx_waker(&mut this.waiter_id);
+                Poll::Ready(res)
+            }
         }
     }
 }
@@ -650,6 +684,13 @@ impl core::future::Future for UdpReadable<'_> {
 /// drains the queue. Cancel-safe.
 pub struct UdpWritable<'a> {
     socket: &'a UdpSocket,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpWritable<'_> {
+    fn drop(&mut self) {
+        self.socket.remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpWritable<'_> {
@@ -661,17 +702,21 @@ impl core::future::Future for UdpWritable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let socket = self.socket;
+        let this = self.get_mut();
+        let socket = this.socket;
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         // Push any already-queued datagrams to sys-io; that may free room.
         socket.try_tx();
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
-        socket.add_tx_waker(cx.waker());
+        socket.add_tx_waker(&mut this.waiter_id, cx.waker());
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         Poll::Pending

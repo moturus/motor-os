@@ -209,7 +209,7 @@ fn test_udp_timeouts() {
     println!("-- test_udp_timeouts() PASS");
 }
 
-fn test_cancelled_native_rx_waiters_are_removed() {
+fn test_cancelled_native_io_waiters_are_removed() {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
@@ -245,7 +245,43 @@ fn test_cancelled_native_rx_waiters_are_removed() {
         assert_eq!(socket.rx_waiter_count(), 0);
     }
 
-    println!("-- test_cancelled_native_rx_waiters_are_removed() PASS");
+    socket.with_tx_pages_exhausted_for_test(|| {
+        let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
+        let byte = [1_u8];
+        let mut queued = 0;
+        loop {
+            match socket.try_send_to(&byte, &destination) {
+                Ok(1) => {
+                    queued += 1;
+                    assert!(queued < 64, "UDP TX queue did not fill");
+                }
+                Err(moto_rt::E_NOT_READY) => break,
+                result => panic!("unexpected UDP send result: {result:?}"),
+            }
+        }
+
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(socket.writable());
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(socket.tx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(socket.tx_waiter_count(), 0);
+        }
+
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(socket.send_to_future(&byte, &destination));
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(socket.tx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(socket.tx_waiter_count(), 0);
+        }
+    });
+
+    println!("-- test_cancelled_native_io_waiters_are_removed() PASS");
 }
 
 pub fn run_all_tests() {
@@ -254,6 +290,6 @@ pub fn run_all_tests() {
     test_udp_double_bind();
     test_udp_connect();
     test_udp_timeouts();
-    test_cancelled_native_rx_waiters_are_removed();
+    test_cancelled_native_io_waiters_are_removed();
     println!("UDP tests PASS");
 }
