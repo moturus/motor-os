@@ -535,6 +535,23 @@ impl LockedPreference {
         }
         Ok(preferences)
     }
+
+    pub fn from_resolution(resolution: &Resolution) -> Vec<Self> {
+        resolution
+            .packages
+            .iter()
+            .filter_map(|package| {
+                let ResolvedSource::CratesIo { checksum } = package.source else {
+                    return None;
+                };
+                Some(Self {
+                    name: package.key.name.clone(),
+                    version: package.key.version.clone(),
+                    checksum,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -636,13 +653,71 @@ pub struct Resolution {
     pub packages: Vec<ResolvedPackage>,
 }
 
+pub fn merge_resolutions(resolutions: impl IntoIterator<Item = Resolution>) -> Result<Resolution> {
+    let mut root_edges = Vec::new();
+    let mut packages = BTreeMap::<PackageKey, ResolvedPackage>::new();
+    for resolution in resolutions {
+        for edge in resolution.root_edges {
+            if !root_edges.contains(&edge) {
+                root_edges.push(edge);
+            }
+        }
+        for package in resolution.packages {
+            let Some(existing) = packages.get_mut(&package.key) else {
+                packages.insert(package.key.clone(), package);
+                continue;
+            };
+            if existing.source != package.source
+                || existing.local_manifest != package.local_manifest
+            {
+                return Err(Error::failure(format!(
+                    "target resolutions disagree about source identity for `{} {}`",
+                    package.key.name, package.key.version
+                )));
+            }
+            for (context, features) in package.feature_sets {
+                existing
+                    .feature_sets
+                    .entry(context)
+                    .or_default()
+                    .extend(features);
+            }
+            existing.compile_kinds.extend(package.compile_kinds);
+            existing.target_features.extend(package.target_features);
+            existing.host_features.extend(package.host_features);
+            for edge in package.edges {
+                if !existing.edges.contains(&edge) {
+                    existing.edges.push(edge);
+                }
+            }
+            for edge in package.lock_edges {
+                if !existing.lock_edges.contains(&edge) {
+                    existing.lock_edges.push(edge);
+                }
+            }
+        }
+    }
+    Ok(Resolution {
+        root_edges,
+        packages: packages.into_values().collect(),
+    })
+}
+
 pub fn resolve(
     manifest: &Manifest,
     catalog: &Catalog,
     options: &Options,
     locked: &[LockedPreference],
 ) -> Result<Resolution> {
-    resolve_with_scope(manifest, catalog, options, locked, Scope::Complete)
+    let mut catalog = catalog.clone();
+    resolve_with_scope(
+        manifest,
+        &mut catalog,
+        options,
+        locked,
+        Scope::Complete,
+        &mut |_, _| Ok(()),
+    )
 }
 
 pub fn resolve_selected(
@@ -652,24 +727,61 @@ pub fn resolve_selected(
     locked: &[LockedPreference],
     selection: TargetSelection<'_>,
 ) -> Result<Resolution> {
+    let mut catalog = catalog.clone();
+    resolve_with_scope(
+        manifest,
+        &mut catalog,
+        options,
+        locked,
+        Scope::Selected(selection),
+        &mut |_, _| Ok(()),
+    )
+}
+
+pub fn resolve_dynamic(
+    manifest: &Manifest,
+    catalog: &mut Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+) -> Result<Resolution> {
+    resolve_with_scope(
+        manifest,
+        catalog,
+        options,
+        locked,
+        Scope::Complete,
+        loader,
+    )
+}
+
+pub fn resolve_selected_dynamic(
+    manifest: &Manifest,
+    catalog: &mut Catalog,
+    options: &Options,
+    locked: &[LockedPreference],
+    selection: TargetSelection<'_>,
+    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+) -> Result<Resolution> {
     resolve_with_scope(
         manifest,
         catalog,
         options,
         locked,
         Scope::Selected(selection),
+        loader,
     )
 }
 
 fn resolve_with_scope(
     manifest: &Manifest,
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
     scope: Scope<'_>,
+    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
     validate_locked_checksums(catalog, locked)?;
-    let mut catalog = catalog.clone();
     let requirements = root_requirements(manifest, matches!(scope, Scope::Complete))?;
     let mut queue = VecDeque::new();
     for requirement in requirements {
@@ -692,10 +804,11 @@ fn resolve_with_scope(
     let state = solve(
         State::default(),
         queue,
-        &mut catalog,
+        catalog,
         options,
         locked,
         scope,
+        loader,
     )
     .map_err(|failure| {
         Error::failure(format!("dependency resolution failed: {}", failure.message))
@@ -1111,10 +1224,15 @@ fn solve(
     options: &Options,
     locked: &[LockedPreference],
     scope: Scope<'_>,
+    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
 ) -> std::result::Result<State, Failure> {
     let Some(mut event) = queue.pop_front() else {
         return Ok(state);
     };
+    if event.dependency.source == RequirementSource::CratesIo {
+        loader(&event.dependency.package, catalog)
+            .map_err(|error| Failure::new(error.to_string()))?;
+    }
     catalog
         .prepare(&mut event.dependency)
         .map_err(|error| Failure::new(error.to_string()))?;
@@ -1154,6 +1272,7 @@ fn solve(
                 options,
                 locked,
                 scope,
+                loader,
             )
         }) {
             Ok(state) => return Ok(state),
@@ -1226,6 +1345,7 @@ fn solve(
                 options,
                 locked,
                 scope,
+                loader,
             )
         }) {
             Ok(state) => return Ok(state),
@@ -1922,6 +2042,94 @@ mod tests {
             selected(&resolution, "shared"),
             [&Version::parse("1.0.0").unwrap()]
         );
+    }
+
+    #[test]
+    fn dynamically_loads_only_names_reached_by_resolution() {
+        let root = manifest("a = \"1\"", "", "2");
+        let mut catalog = Catalog::default();
+        let mut loaded = Vec::new();
+        let mut loader = |name: &str, catalog: &mut Catalog| {
+            loaded.push(name.to_owned());
+            match name {
+                "a" => catalog.insert(record(
+                    "a",
+                    "1.0.0",
+                    &format!("[{}]", dependency("b", "1")),
+                    "{}",
+                    "",
+                )),
+                "b" => catalog.insert(record("b", "1.0.0", "[]", "{}", "")),
+                _ => panic!("resolver requested unexpected sparse record `{name}`"),
+            }
+        };
+
+        let resolution = resolve_dynamic(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut loader,
+        )
+        .unwrap();
+
+        assert_eq!(loaded, ["a", "b"]);
+        assert_eq!(resolution.packages.len(), 2);
+        assert_eq!(selected(&resolution, "a").len(), 1);
+        assert_eq!(selected(&resolution, "b").len(), 1);
+    }
+
+    #[test]
+    fn merges_target_resolutions_and_derives_lock_preferences() {
+        let mut catalog = Catalog::default();
+        catalog
+            .insert(record(
+                "shared",
+                "1.0.0",
+                "[]",
+                "{\"unix\":[],\"windows\":[]}",
+                "",
+            ))
+            .unwrap();
+        let root = target_manifest("2");
+        let host_cfg = CfgSet::parse("unix\n").unwrap();
+        let unix = CfgSet::parse("unix\n").unwrap();
+        let windows = CfgSet::parse("windows\n").unwrap();
+        let resolve_for = |triple, cfg| {
+            resolve_selected(
+                &root,
+                &catalog,
+                &options(ResolverVersion::V2),
+                &[],
+                TargetSelection {
+                    target_triple: triple,
+                    target_cfg: cfg,
+                    host_triple: "x86_64-unknown-linux-gnu",
+                    host_cfg: &host_cfg,
+                },
+            )
+            .unwrap()
+        };
+
+        let merged = merge_resolutions([
+            resolve_for("x86_64-unknown-linux-musl", &unix),
+            resolve_for("x86_64-pc-windows-msvc", &windows),
+        ])
+        .unwrap();
+
+        let shared = merged
+            .packages
+            .iter()
+            .find(|package| package.key.name == "shared")
+            .unwrap();
+        assert_eq!(shared.target_features, BTreeSet::from(["unix".into(), "windows".into()]));
+        let locked = LockedPreference::from_resolution(&merged);
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].name, "shared");
+        let ResolvedSource::CratesIo { checksum } = &shared.source else {
+            panic!("shared fixture unexpectedly resolved to a path");
+        };
+        assert_eq!(locked[0].checksum, *checksum);
     }
 
     #[test]
