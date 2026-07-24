@@ -25,6 +25,7 @@ pub const CMD_MOVE_ENTRY: u16 = 13;
 pub const CMD_COPY_FILE_RANGE: u16 = 14;
 pub const CMD_FILE_LOCK: u16 = 15;
 pub const CMD_SET_PERMISSIONS: u16 = 16;
+pub const CMD_MOVE_NOREPLACE: u16 = 17;
 
 pub fn file_lock_msg_encode(entry_id: EntryId, open_id: u64, operation: u8) -> Msg {
     let mut msg = Msg::new();
@@ -553,6 +554,17 @@ pub fn move_entry_req_encode(
     bytes[2..(2 + new_name.len())].clone_from_slice(new_name.as_bytes());
 
     msg.payload.shared_pages_mut()[11] = IoPage::into_u16(io_page);
+    msg
+}
+
+pub fn move_noreplace_req_encode(
+    entry_id: EntryId,
+    new_parent_id: EntryId,
+    new_name: &str,
+    io_page: IoPage,
+) -> Msg {
+    let mut msg = move_entry_req_encode(entry_id, new_parent_id, new_name, io_page);
+    msg.command = CMD_MOVE_NOREPLACE;
     msg
 }
 

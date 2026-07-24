@@ -47,6 +47,46 @@ fn remove_dir_all_test() {
     println!("    ---- FS: remove_dir_all_test PASS");
 }
 
+fn move_noreplace_test() {
+    let root = temp_dir();
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let source = root.join("move_noreplace_source");
+    let target = root.join("move_noreplace_target");
+    std::fs::write(&source, b"source").unwrap();
+    std::fs::write(&target, b"target").unwrap();
+
+    assert_eq!(
+        moto_rt::fs::move_noreplace(source.to_str().unwrap(), target.to_str().unwrap()),
+        Err(moto_rt::Error::AlreadyInUse)
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), b"source");
+    assert_eq!(std::fs::read(&target).unwrap(), b"target");
+
+    std::fs::remove_file(&target).unwrap();
+    moto_rt::fs::move_noreplace(source.to_str().unwrap(), target.to_str().unwrap()).unwrap();
+    assert!(!std::fs::exists(&source).unwrap());
+    assert_eq!(std::fs::read(&target).unwrap(), b"source");
+
+    let source_dir = root.join("move_noreplace_source_dir");
+    let target_dir = root.join("move_noreplace_target_dir");
+    std::fs::create_dir(&source_dir).unwrap();
+    std::fs::create_dir(&target_dir).unwrap();
+    assert_eq!(
+        moto_rt::fs::move_noreplace(source_dir.to_str().unwrap(), target_dir.to_str().unwrap()),
+        Err(moto_rt::Error::AlreadyInUse)
+    );
+    std::fs::remove_dir(&target_dir).unwrap();
+    moto_rt::fs::move_noreplace(source_dir.to_str().unwrap(), target_dir.to_str().unwrap())
+        .unwrap();
+    assert!(!std::fs::exists(&source_dir).unwrap());
+    assert!(std::fs::metadata(&target_dir).unwrap().is_dir());
+
+    std::fs::remove_dir_all(&root).unwrap();
+    println!("    ---- FS: move_noreplace_test PASS");
+}
+
 fn copy_test() {
     let root = temp_dir();
     let _ = std::fs::remove_dir_all(&root);
@@ -494,6 +534,7 @@ pub fn run_tests() {
     println!("running FS tests ...");
     permissions_vdso_test();
     concurrent_flush_stress_test();
+    move_noreplace_test();
     smoke_test();
     hot_cache_read_test();
     copy_test();

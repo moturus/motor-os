@@ -59,6 +59,10 @@ pub extern "C" fn motor_start(version: u64) {
         posix::posix_file_lock as *const () as usize as u64,
         Ordering::Relaxed,
     );
+    vtable.fs_move_noreplace.store(
+        rt_fs::move_noreplace as *const () as usize as u64,
+        Ordering::Relaxed,
+    );
 
     // Memory management.
     vtable.alloc.store(

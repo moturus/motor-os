@@ -623,6 +623,21 @@ impl FsClient {
         resp.status()
     }
 
+    /// Rename and/or move the file or directory. Fail if the destination exists.
+    pub async fn move_noreplace(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::move_noreplace_req_encode(entry_id, new_parent_id, new_name, io_page);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
     /// Get the first entry in a directory.
     pub async fn get_first_entry(self: &Rc<Self>, parent_id: EntryId) -> Result<Option<EntryId>> {
         let mut msg = api_fs::get_first_entry_req_encode(parent_id);

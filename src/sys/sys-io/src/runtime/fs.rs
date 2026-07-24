@@ -461,7 +461,10 @@ async fn on_msg(
             on_cmd_get_next_entry(msg, &sender, runtime).await
         }
         moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, runtime).await,
+        moto_sys_io::api_fs::CMD_MOVE_ENTRY => on_cmd_move_entry(msg, &sender, runtime, true).await,
+        moto_sys_io::api_fs::CMD_MOVE_NOREPLACE => {
+            on_cmd_move_entry(msg, &sender, runtime, false).await
+        }
         moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => {
             on_cmd_copy_file_range(msg, &sender, runtime).await
         }
@@ -1076,17 +1079,20 @@ async fn on_cmd_move_entry(
     msg: moto_ipc::io_channel::Msg,
     sender: &moto_ipc::io_channel::Sender,
     runtime: FsRuntime,
+    replace: bool,
 ) -> Result<()> {
     let (entry_id, new_parent_id, fname) =
         api_fs::move_entry_req_decode(msg, sender).map_err(map_native_error)?;
 
     let mut fs = runtime.fs.write().await;
-    let resp = api_fs::empty_resp_encode(
-        msg.id,
+    let result = if replace {
         fs.move_entry(Role::System, entry_id, new_parent_id, fname.as_str())
             .await
-            .map_err(map_err_into_native),
-    );
+    } else {
+        fs.move_noreplace(Role::System, entry_id, new_parent_id, fname.as_str())
+            .await
+    };
+    let resp = api_fs::empty_resp_encode(msg.id, result.map_err(map_err_into_native));
     core::mem::drop(fs);
 
     let _ = sender.send(resp).await;
