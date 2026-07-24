@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use moto_dns::{
     validate_request, Address, AddressFamily, Client, ClientError, LookupRequest, LookupResponse,
-    Status, MAX_NAME_LEN, PROTOCOL_VERSION, RESPONSE_FLAG_TRUNCATED, SERVICE_URL,
+    LookupResult, Status, MAX_NAME_LEN, PROTOCOL_VERSION, RESPONSE_FLAG_TRUNCATED, SERVICE_URL,
 };
 use moto_ipc::sync::{ChannelSize, ClientConnection, LocalServer};
 use moto_sys::SysHandle;
@@ -153,6 +153,26 @@ fn assert_v4(address: &Address, expected: [u8; 4]) {
     assert_eq!(address.bytes[4..], [0; 12]);
 }
 
+/// A live external lookup can transiently fail right after boot, before the
+/// network stack and the upstream resolver are reachable. TemporaryFailure,
+/// TimedOut, and Busy all map to E_NOT_READY -- "ask again" -- so poll to a
+/// deadline instead of betting the very first query succeeds. Terminal statuses
+/// (Ok, NotFound, a malformed answer) return at once for the caller to assert on.
+fn resolve_external(name: &[u8], family: AddressFamily) -> bridge::Result {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let result = bridge::lookup(name, family);
+        match result.status {
+            Status::TemporaryFailure | Status::TimedOut | Status::Busy
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => return result,
+        }
+    }
+}
+
 fn bridge_self_test() {
     let numeric = bridge::lookup(b"192.0.2.1", AddressFamily::Any);
     assert_eq!(numeric.status, Status::Ok);
@@ -183,7 +203,7 @@ fn bridge_self_test() {
         .iter()
         .all(|address| address.family == AddressFamily::V6 as u8));
 
-    let dns = bridge::lookup(b"google.com", AddressFamily::V4);
+    let dns = resolve_external(b"google.com", AddressFamily::V4);
     assert_eq!(dns.status, Status::Ok);
     assert!(dns.len > 0);
     assert!(dns.addresses[..dns.len]
@@ -263,6 +283,31 @@ fn malformed_ipc_test() {
     send_malformed_request(&mut connection, 6, |request| request.reserved_1 = 1);
 }
 
+/// The IPC counterpart of `resolve_external`: retry a live lookup over the
+/// resolver service while it reports a transient condition. A transient
+/// resolver status arrives as `Resolver(TemporaryFailure|TimedOut|Busy)`, and a
+/// cold upstream that never answers within the per-family timeout as `TimedOut`.
+fn client_resolve_external(
+    client: &mut Client,
+    name: &str,
+    family: AddressFamily,
+) -> Result<LookupResult, ClientError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match client.lookup(name, family) {
+            Err(ClientError::Resolver(
+                Status::TemporaryFailure | Status::TimedOut | Status::Busy,
+            ))
+            | Err(ClientError::TimedOut)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn ipc_self_test() {
     assert!(matches!(
         Client::connect_to("moto-dns-resolver-intentionally-missing"),
@@ -278,7 +323,7 @@ fn ipc_self_test() {
     assert!(hosts.addresses.len() >= 2);
     assert_eq!(hosts.addresses[0].family, AddressFamily::V4 as u8);
 
-    let dns = client.lookup("google.com", AddressFamily::V4).unwrap();
+    let dns = client_resolve_external(&mut client, "google.com", AddressFamily::V4).unwrap();
     assert!(!dns.addresses.is_empty());
 
     malformed_ipc_test();
