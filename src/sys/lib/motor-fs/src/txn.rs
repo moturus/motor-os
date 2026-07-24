@@ -296,6 +296,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         old_parent_id: EntryIdInternal,
         new_parent_id: EntryIdInternal,
         new_name: &str,
+        replace: bool,
     ) -> Result<()> {
         // Renaming is an atomic FS operation (both in Linux, Windows, and Rust).
         // If the target exists, it is deleted.
@@ -315,6 +316,9 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         // by write on both parents, so it must not additionally require
         // traverse/`x` on the destination.
         if let Some((target, _)) = txn.fs().lookup_child(new_parent_id, new_name).await? {
+            if !replace {
+                return Err(ErrorKind::AlreadyExists.into());
+            }
             let target_id: EntryIdInternal = target.into();
             if target_id == entry_id {
                 return Err(ErrorKind::InvalidInput.into());
@@ -345,7 +349,6 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
             DirEntryBlock::from_block_mut(entry_ref)
                 .set_name(new_name)
                 .unwrap(); // new_name has been validated => unwrap().
-            DirEntryBlock::from_block_mut(entry_ref).set_parent_id(new_parent_id);
             DirEntryBlock::from_block_mut(entry_ref).set_parent_id(new_parent_id);
             DirEntryBlock::from_block_mut(entry_ref)
                 .metadata_mut()

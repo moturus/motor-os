@@ -422,6 +422,66 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             self.block_cache.prefetch_range(run_first, run_len).await;
         }
     }
+
+    async fn move_entry_inner(
+        &mut self,
+        role: Role,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+        replace: bool,
+    ) -> Result<()> {
+        self.check_err()?;
+        let new_parent_id = if new_parent_id == async_fs::ROOT_ID {
+            ROOT_DIR_ID
+        } else {
+            new_parent_id
+        };
+
+        if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        if entry_id == new_parent_id {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        validate_filename(new_name)?;
+
+        // Check that we are not moving an entry down to its own child,
+        // which will create a detached cycle.
+        let mut ancestor_id = new_parent_id;
+        loop {
+            let Some(grandparent_id) = self.get_parent(role, ancestor_id).await? else {
+                assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL.into());
+                break;
+            };
+            if grandparent_id == entry_id {
+                log::debug!("MotorFS::move_entry: cannot move an entry under its own child.");
+                return Err(ErrorKind::InvalidInput.into());
+            }
+            ancestor_id = grandparent_id;
+        }
+
+        let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
+
+        // Moving requires write on both the source and destination directories.
+        self.require_access(role, old_parent_id.into(), Need::Write)
+            .await?;
+        self.require_access(role, new_parent_id.into(), Need::Write)
+            .await?;
+
+        log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
+        Txn::do_move_entry_txn(
+            self,
+            entry_id.into(),
+            old_parent_id.into(),
+            new_parent_id.into(),
+            new_name,
+            replace,
+        )
+        .await
+    }
 }
 
 #[async_trait(?Send)]
@@ -556,55 +616,19 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         new_parent_id: EntryId,
         new_name: &str,
     ) -> Result<()> {
-        self.check_err()?;
-        let new_parent_id = if new_parent_id == async_fs::ROOT_ID {
-            ROOT_DIR_ID
-        } else {
-            new_parent_id
-        };
+        self.move_entry_inner(role, entry_id, new_parent_id, new_name, true)
+            .await
+    }
 
-        if entry_id == ROOT_DIR_ID_INTERNAL.into() || entry_id == async_fs::ROOT_ID {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        if entry_id == new_parent_id {
-            return Err(ErrorKind::InvalidInput.into());
-        }
-
-        validate_filename(new_name)?;
-
-        // Check that we are not moving an entry down to its own child,
-        // which will create a detached cycle.
-        let mut ancestor_id = new_parent_id;
-        loop {
-            let Some(grandparent_id) = self.get_parent(role, ancestor_id).await? else {
-                assert_eq!(ancestor_id, ROOT_DIR_ID_INTERNAL.into());
-                break;
-            };
-            if grandparent_id == entry_id {
-                log::debug!("MotorFS::move_entry: cannot move an entry under its own child.");
-                return Err(ErrorKind::InvalidInput.into());
-            }
-            ancestor_id = grandparent_id;
-        }
-
-        let old_parent_id = self.get_parent(role, entry_id).await?.unwrap();
-
-        // Moving requires write on both the source and destination directories.
-        self.require_access(role, old_parent_id.into(), Need::Write)
-            .await?;
-        self.require_access(role, new_parent_id.into(), Need::Write)
-            .await?;
-
-        log::debug!("move_entry {entry_id:x} to parent {new_parent_id:x} with name '{new_name}'");
-        Txn::do_move_entry_txn(
-            self,
-            entry_id.into(),
-            old_parent_id.into(),
-            new_parent_id.into(),
-            new_name,
-        )
-        .await
+    async fn move_noreplace(
+        &mut self,
+        role: Role,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        self.move_entry_inner(role, entry_id, new_parent_id, new_name, false)
+            .await
     }
 
     /// Get the first entry in a directory.
