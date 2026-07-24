@@ -48,6 +48,14 @@ fn basic() {
 }
 
 #[test]
+fn move_noreplace() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(move_noreplace_test()).unwrap();
+}
+
+#[test]
 fn readdir() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -493,6 +501,73 @@ async fn basic_test() -> Result<()> {
     );
 
     println!("basic_test PASS");
+    Ok(())
+}
+
+async fn move_noreplace_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let mut fs = create_fs("motor_fs_move_noreplace_test", NUM_BLOCKS).await?;
+    let root = crate::ROOT_DIR_ID;
+
+    let from = fs
+        .create_entry(
+            Role::System,
+            root,
+            EntryKind::Directory,
+            "from",
+            [AccessPermissions::Rwx; 3],
+        )
+        .await?;
+    let to = fs
+        .create_entry(
+            Role::System,
+            root,
+            EntryKind::Directory,
+            "to",
+            [AccessPermissions::Rwx; 3],
+        )
+        .await?;
+    let source = fs
+        .create_entry(
+            Role::System,
+            from,
+            EntryKind::File,
+            "source",
+            [AccessPermissions::Rwx; 3],
+        )
+        .await?;
+    let target = fs
+        .create_entry(
+            Role::System,
+            to,
+            EntryKind::File,
+            "target",
+            [AccessPermissions::Rwx; 3],
+        )
+        .await?;
+
+    let err = fs
+        .move_noreplace(Role::System, source, to, "target")
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(
+        fs.stat(Role::System, from, "source").await?,
+        Some((source, EntryKind::File))
+    );
+    assert_eq!(
+        fs.stat(Role::System, to, "target").await?,
+        Some((target, EntryKind::File))
+    );
+
+    fs.move_noreplace(Role::System, source, to, "moved").await?;
+    assert!(fs.stat(Role::System, from, "source").await?.is_none());
+    assert_eq!(
+        fs.stat(Role::System, to, "moved").await?,
+        Some((source, EntryKind::File))
+    );
+
+    println!("move_noreplace_test PASS");
     Ok(())
 }
 

@@ -125,6 +125,22 @@ impl FileSystem for FS {
         }
     }
 
+    async fn move_noreplace(
+        &mut self,
+        role: Role,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        match self {
+            FS::MotorFs(motor_fs) => {
+                motor_fs
+                    .move_noreplace(role, entry_id, new_parent_id, new_name)
+                    .await
+            }
+        }
+    }
+
     /// Get the first entry in a directory.
     async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>> {
         match self {

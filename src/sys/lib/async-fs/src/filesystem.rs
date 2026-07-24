@@ -358,6 +358,15 @@ pub trait FileSystem {
         new_name: &str,
     ) -> Result<()>;
 
+    /// Rename and/or move the file or directory. Fail if the destination exists.
+    async fn move_noreplace(
+        &mut self,
+        role: Role,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()>;
+
     /// Get the first entry in a directory.
     async fn get_first_entry(&self, role: Role, parent_id: EntryId) -> Result<Option<EntryId>>;
 
