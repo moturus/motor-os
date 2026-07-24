@@ -8,11 +8,14 @@
 //!
 //! Async: ServerConnection uses local wakers, ClientConnection uses cross-thread wakers.
 use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 use core::{fmt::Debug, sync::atomic::*};
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use moto_async::AsFuture;
+use moto_rt::mutex::Mutex;
 use moto_rt::Result;
 use moto_sys::*;
 
@@ -529,10 +532,192 @@ impl RawChannel {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PageWaiterId(u64);
+
+struct PageWaiter {
+    id: PageWaiterId,
+    waker: Waker,
+}
+
+struct PageWaitersInner {
+    next_id: u64,
+    waiters: Vec<PageWaiter>,
+}
+
+struct PageWaiters {
+    // Bit zero publishes whether `inner.waiters` may be non-empty. The other
+    // bits form a generation that advances on every local page free.
+    state: AtomicU64,
+    inner: Mutex<PageWaitersInner>,
+}
+
+impl PageWaiters {
+    const WAITERS_PRESENT: u64 = 1;
+    const GENERATION_STEP: u64 = 2;
+    const GENERATION_MASK: u64 = !Self::WAITERS_PRESENT;
+
+    const fn new() -> Self {
+        Self {
+            state: AtomicU64::new(0),
+            inner: Mutex::new(PageWaitersInner {
+                next_id: 0,
+                waiters: Vec::new(),
+            }),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.state.load(Ordering::Acquire) & Self::GENERATION_MASK
+    }
+
+    fn remove_waiter(inner: &mut PageWaitersInner, id: PageWaiterId) -> bool {
+        let Some(index) = inner.waiters.iter().position(|waiter| waiter.id == id) else {
+            return false;
+        };
+        inner.waiters.swap_remove(index);
+        true
+    }
+
+    fn register(&self, id: &mut Option<PageWaiterId>, generation: u64, waker: &Waker) -> bool {
+        let mut inner = self.inner.lock();
+        let registered = if let Some(id) = *id {
+            if let Some(waiter) = inner.waiters.iter_mut().find(|waiter| waiter.id == id) {
+                if !waiter.waker.will_wake(waker) {
+                    waiter.waker.clone_from(waker);
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !registered {
+            let new_id = PageWaiterId(inner.next_id);
+            inner.next_id = inner
+                .next_id
+                .checked_add(1)
+                .expect("page waiter identity exhausted");
+            inner.waiters.push(PageWaiter {
+                id: new_id,
+                waker: waker.clone(),
+            });
+            *id = Some(new_id);
+        }
+
+        // One RMW both publishes this waiter and observes the generation. A
+        // concurrent notifier must either see the bit or advance the generation.
+        let state = self.state.fetch_or(Self::WAITERS_PRESENT, Ordering::AcqRel);
+        if state & Self::GENERATION_MASK == generation {
+            return true;
+        }
+
+        let id = id.take().unwrap();
+        assert!(Self::remove_waiter(&mut inner, id));
+        if inner.waiters.is_empty() {
+            self.state
+                .fetch_and(!Self::WAITERS_PRESENT, Ordering::Release);
+        }
+        false
+    }
+
+    fn unregister(&self, id: &mut Option<PageWaiterId>) {
+        let Some(id) = id.take() else {
+            return;
+        };
+        let mut inner = self.inner.lock();
+        if Self::remove_waiter(&mut inner, id) && inner.waiters.is_empty() {
+            self.state
+                .fetch_and(!Self::WAITERS_PRESENT, Ordering::Release);
+        }
+    }
+
+    fn notify_all(&self) {
+        let state = self
+            .state
+            .fetch_add(Self::GENERATION_STEP, Ordering::AcqRel);
+        assert_ne!(
+            state & Self::GENERATION_MASK,
+            Self::GENERATION_MASK,
+            "page wait generation exhausted"
+        );
+        if state & Self::WAITERS_PRESENT == 0 {
+            return;
+        }
+
+        let mut waiters = {
+            let mut inner = self.inner.lock();
+            let waiters = core::mem::take(&mut inner.waiters);
+            self.state
+                .fetch_and(!Self::WAITERS_PRESENT, Ordering::Release);
+            waiters
+        };
+        for waiter in waiters.drain(..) {
+            waiter.waker.wake();
+        }
+
+        let mut inner = self.inner.lock();
+        if waiters.capacity() > inner.waiters.capacity() {
+            waiters.append(&mut inner.waiters);
+            core::mem::swap(&mut inner.waiters, &mut waiters);
+        }
+    }
+
+    fn wait(&self, generation: u64, remote_handle: SysHandle) -> PageWaitFuture<'_> {
+        PageWaitFuture {
+            waiters: self,
+            generation,
+            waiter_id: None,
+            remote: remote_handle.as_future(),
+        }
+    }
+}
+
+struct PageWaitFuture<'a> {
+    waiters: &'a PageWaiters,
+    generation: u64,
+    waiter_id: Option<PageWaiterId>,
+    remote: moto_async::SysHandleFuture,
+}
+
+impl Drop for PageWaitFuture<'_> {
+    fn drop(&mut self) {
+        self.waiters.unregister(&mut self.waiter_id);
+    }
+}
+
+impl Future for PageWaitFuture<'_> {
+    type Output = Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Poll::Ready(result) = Pin::new(&mut this.remote).poll(cx) {
+            this.waiters.unregister(&mut this.waiter_id);
+            return Poll::Ready(result);
+        }
+        if !this
+            .waiters
+            .register(&mut this.waiter_id, this.generation, cx.waker())
+        {
+            this.waiters.unregister(&mut this.waiter_id);
+            return Poll::Ready(Ok(()));
+        }
+        Poll::Pending
+    }
+}
+
+enum PageWake {
+    None,
+    Local(Arc<PageWaiters>),
+    Remote(SysHandle),
+}
+
 pub struct IoPage {
     raw_page: RawIoPage,
     raw_channel: &'static RawChannel,
-    remote_handle: SysHandle,
+    wake: PageWake,
 }
 
 #[cfg(debug_assertions)]
@@ -564,32 +749,43 @@ impl Drop for IoPage {
                     page_idx: self.raw_page.page_idx,
                     server_page: matches!(self.raw_page.s_type, EndpointType::Server),
                 };
+                let remote_handle = match &self.wake {
+                    PageWake::Remote(handle) => *handle,
+                    _ => SysHandle::NONE,
+                };
                 match error_handler() {
-                    Some(handler) => handler(self.remote_handle, error),
+                    Some(handler) => handler(remote_handle, error),
                     None => panic!("io_channel: freeing unused page 0x{:x?}", self.raw_page),
                 }
                 return;
             }
-            if self.remote_handle != SysHandle::NONE {
-                assert!(self.raw_page.page_idx < 64);
-                let page_mask = 1_u64 << (self.raw_page.page_idx as u64);
+            match &self.wake {
+                PageWake::None => {}
+                PageWake::Local(waiters) => waiters.notify_all(),
+                PageWake::Remote(remote_handle) if *remote_handle != SysHandle::NONE => {
+                    assert!(self.raw_page.page_idx < 64);
+                    let page_mask = 1_u64 << (self.raw_page.page_idx as u64);
 
-                match self.raw_page.s_type {
-                    EndpointType::Client => {
-                        if self.raw_channel.client_page_waits.load(Ordering::Acquire) & page_mask
-                            != 0
-                        {
-                            let _ = moto_sys::SysCpu::wake(self.remote_handle);
+                    match self.raw_page.s_type {
+                        EndpointType::Client => {
+                            if self.raw_channel.client_page_waits.load(Ordering::Acquire)
+                                & page_mask
+                                != 0
+                            {
+                                let _ = moto_sys::SysCpu::wake(*remote_handle);
+                            }
                         }
-                    }
-                    EndpointType::Server => {
-                        if self.raw_channel.server_page_waits.load(Ordering::Acquire) & page_mask
-                            != 0
-                        {
-                            let _ = moto_sys::SysCpu::wake(self.remote_handle);
+                        EndpointType::Server => {
+                            if self.raw_channel.server_page_waits.load(Ordering::Acquire)
+                                & page_mask
+                                != 0
+                            {
+                                let _ = moto_sys::SysCpu::wake(*remote_handle);
+                            }
                         }
                     }
                 }
+                PageWake::Remote(_) => {}
             }
         }
     }
@@ -635,7 +831,7 @@ impl IoPage {
                     s_type: EndpointType::Client,
                 },
                 raw_channel,
-                remote_handle,
+                wake: PageWake::Remote(remote_handle),
             },
             Self::SERVER_FLAG => Self {
                 raw_page: RawIoPage {
@@ -643,7 +839,7 @@ impl IoPage {
                     s_type: EndpointType::Server,
                 },
                 raw_channel,
-                remote_handle,
+                wake: PageWake::Remote(remote_handle),
             },
             _ => unreachable!(),
         }
@@ -841,7 +1037,7 @@ impl ClientConnection {
                 return Ok(IoPage {
                     raw_page,
                     raw_channel: self.raw_channel(),
-                    remote_handle: SysHandle::NONE,
+                    wake: PageWake::None,
                 });
             } else {
                 if first_attempt {
@@ -1097,7 +1293,7 @@ impl ServerConnection {
             Ok(IoPage {
                 raw_page,
                 raw_channel: self.raw_channel(),
-                remote_handle: SysHandle::NONE,
+                wake: PageWake::None,
             })
         } else {
             Err(moto_rt::Error::NotReady)
@@ -1150,6 +1346,7 @@ struct IoChannelImpl {
     raw_channel: AtomicPtr<RawChannel>,
     remote_handle: SysHandle,
     endpoint_type: EndpointType,
+    page_waiters: Arc<PageWaiters>,
 }
 
 impl Drop for IoChannelImpl {
@@ -1326,7 +1523,7 @@ impl Sender {
             Ok(IoPage {
                 raw_page,
                 raw_channel: self.raw_channel(),
-                remote_handle: SysHandle::NONE,
+                wake: PageWake::Local(self.inner.page_waiters.clone()),
             })
         } else {
             Err(moto_rt::Error::NotReady)
@@ -1334,11 +1531,10 @@ impl Sender {
     }
 
     pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
-        use moto_async::AsFuture;
-
         self.clear_page_wait(subchannel_mask);
         let mut wait_flag_set = false;
         loop {
+            let generation = self.inner.page_waiters.generation();
             match self.try_alloc_page(subchannel_mask) {
                 Err(moto_rt::Error::NotReady) => {
                     if !wait_flag_set {
@@ -1346,34 +1542,44 @@ impl Sender {
                         wait_flag_set = true;
                         continue; // Try one more alloc() before waiting.
                     } else {
-                        self.inner.remote_handle.as_future().await?;
+                        self.inner
+                            .page_waiters
+                            .wait(generation, self.inner.remote_handle)
+                            .await?;
                         self.clear_page_wait(subchannel_mask);
                         wait_flag_set = false;
                     }
                 }
                 Err(err) => return Err(err),
-                Ok(page) => return Ok(page),
+                Ok(page) => {
+                    if wait_flag_set {
+                        self.clear_page_wait(subchannel_mask);
+                    }
+                    return Ok(page);
+                }
             }
         }
     }
 
     /// Atomically reserves `count` pages, waiting until all are available.
     pub async fn alloc_pages(&self, count: usize, subchannel_mask: u64) -> Result<Vec<IoPage>> {
-        use moto_async::AsFuture;
-
         let subchannel = match self.inner.endpoint_type {
             EndpointType::Client => SubChannel::Client(subchannel_mask),
             EndpointType::Server => SubChannel::Server(subchannel_mask),
         };
         let mut wait_flag_set = false;
         loop {
+            let generation = self.inner.page_waiters.generation();
             match self.raw_channel().alloc_pages(subchannel, count) {
                 Err(moto_rt::Error::NotReady) if !wait_flag_set => {
                     self.set_page_wait(subchannel_mask);
                     wait_flag_set = true;
                 }
                 Err(moto_rt::Error::NotReady) => {
-                    self.inner.remote_handle.as_future().await?;
+                    self.inner
+                        .page_waiters
+                        .wait(generation, self.inner.remote_handle)
+                        .await?;
                     self.clear_page_wait(subchannel_mask);
                     wait_flag_set = false;
                 }
@@ -1387,7 +1593,7 @@ impl Sender {
                         .map(|raw_page| IoPage {
                             raw_page,
                             raw_channel: self.raw_channel(),
-                            remote_handle: SysHandle::NONE,
+                            wake: PageWake::Local(self.inner.page_waiters.clone()),
                         })
                         .collect());
                 }
@@ -1600,6 +1806,7 @@ pub fn connect(url: &str) -> Result<(Sender, Receiver)> {
             raw_channel,
             remote_handle,
             endpoint_type: EndpointType::Client,
+            page_waiters: Arc::new(PageWaiters::new()),
         }),
     };
     let receiver = Receiver {
@@ -1667,6 +1874,7 @@ pub fn listen(url: &str) -> impl Future<Output = Result<(Sender, Receiver)>> {
                 raw_channel,
                 remote_handle,
                 endpoint_type: EndpointType::Server,
+                page_waiters: Arc::new(PageWaiters::new()),
             }),
         };
         let receiver = Receiver {
