@@ -5,6 +5,7 @@
 //! [`crate::net::readiness::NetEventListener`], naming no vdso type.
 
 use crate::net::readiness::{NetEventListener, Readiness};
+use crate::net::wait::{WaitSet, WaiterId};
 use super::channel::{ChannelReservation, NetChannel};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -35,10 +36,9 @@ pub struct UdpSocket {
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
 
-    // Wakers of parked blocking recv/send futures, drained (wake-all-and-
-    // recheck) at the RX / TX-ack points -- the D5 replacement for the old
-    // EventSourceManaged readable/writable futex pair.
-    rx_wakers: Mutex<Vec<core::task::Waker>>,
+    // Parked receive futures own cancellation-aware registrations. TX still
+    // uses the earlier wake-all list and is converted separately.
+    rx_waiters: WaitSet,
     tx_wakers: Mutex<Vec<core::task::Waker>>,
 
     me: Weak<UdpSocket>,
@@ -159,7 +159,7 @@ impl UdpSocket {
                 rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
                 rx_timeout_ns: AtomicU64::new(u64::MAX),
                 tx_timeout_ns: AtomicU64::new(u64::MAX),
-                rx_wakers: Mutex::new(Vec::new()),
+                rx_waiters: WaitSet::new(),
                 tx_wakers: Mutex::new(Vec::new()),
                 me: me.clone(),
             }
@@ -207,13 +207,17 @@ impl UdpSocket {
             socket: self,
             buf,
             peek,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a receive would not block. A native reactor awaits this,
     /// then calls `try_recv_from`.
     pub fn readable(&self) -> UdpReadable<'_> {
-        UdpReadable { socket: self }
+        UdpReadable {
+            socket: self,
+            waiter_id: None,
+        }
     }
 
     /// Nonblocking send: `Ok(n)` when queued, `E_NOT_READY` when the TX queue
@@ -490,14 +494,12 @@ impl UdpSocket {
         self.rx_queue.lock().have_datagram().unwrap()
     }
 
-    // Dedup like the TCP wakers: a blocked recv/send re-registers on every
-    // block_on_recheck tick, so without the will_wake guard the same task's
-    // waker would accumulate until the next drain (cancel-safety hygiene).
-    fn add_rx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.rx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    fn add_rx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.rx_waiters.register(id, waker);
+    }
+
+    fn remove_rx_waker(&self, id: &mut Option<WaiterId>) {
+        self.rx_waiters.unregister(id);
     }
 
     fn add_tx_waker(&self, waker: &core::task::Waker) {
@@ -508,9 +510,7 @@ impl UdpSocket {
     }
 
     fn wake_rx_waiters(&self) {
-        for waker in self.rx_wakers.lock().drain(..) {
-            waker.wake();
-        }
+        self.rx_waiters.wake_all();
     }
 
     fn wake_tx_waiters(&self) {
@@ -518,18 +518,30 @@ impl UdpSocket {
             waker.wake();
         }
     }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn rx_waiter_count(&self) -> usize {
+        self.rx_waiters.len()
+    }
 }
 
 // ------------- blocking-path futures (design 5.3): the UDP mirror of ------------
 // the tcp read/write futures, driven by the shared block_on_recheck. All
-// state lives in the socket, so a dropped (timed-out) instance leaves at
-// most a stale waker entry. Register-then-recheck closes the race with the
-// rx task queueing between the poll's check and the waker registration.
+// data-path state lives in the socket. Register-then-recheck closes the race
+// with the rx task queueing between the poll's check and waker registration.
 
 pub struct UdpRecvFuture<'a, 'b> {
     socket: &'a UdpSocket,
     buf: &'b mut [u8],
     peek: bool,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpRecvFuture<'_, '_> {
+    fn drop(&mut self) {
+        self.socket.remove_rx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpRecvFuture<'_, '_> {
@@ -547,15 +559,21 @@ impl core::future::Future for UdpRecvFuture<'_, '_> {
             .recv_or_peek_from_nonblocking(this.buf, this.peek)
         {
             Err(E_NOT_READY) => {}
-            res => return Poll::Ready(res),
+            res => {
+                this.socket.remove_rx_waker(&mut this.waiter_id);
+                return Poll::Ready(res);
+            }
         }
-        this.socket.add_rx_waker(cx.waker());
+        this.socket.add_rx_waker(&mut this.waiter_id, cx.waker());
         match this
             .socket
             .recv_or_peek_from_nonblocking(this.buf, this.peek)
         {
             Err(E_NOT_READY) => Poll::Pending,
-            res => Poll::Ready(res),
+            res => {
+                this.socket.remove_rx_waker(&mut this.waiter_id);
+                Poll::Ready(res)
+            }
         }
     }
 }
@@ -593,6 +611,13 @@ impl core::future::Future for UdpSendFuture<'_, '_> {
 /// the vdso veneer parks on the richer `recv_from_future`. Cancel-safe.
 pub struct UdpReadable<'a> {
     socket: &'a UdpSocket,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpReadable<'_> {
+    fn drop(&mut self) {
+        self.socket.remove_rx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpReadable<'_> {
@@ -604,12 +629,15 @@ impl core::future::Future for UdpReadable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let socket = self.socket;
+        let this = self.get_mut();
+        let socket = this.socket;
         if socket.has_rx_datagram() {
+            socket.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
-        socket.add_rx_waker(cx.waker());
+        socket.add_rx_waker(&mut this.waiter_id, cx.waker());
         if socket.has_rx_datagram() {
+            socket.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         Poll::Pending

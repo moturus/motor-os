@@ -1,5 +1,20 @@
 #![allow(clippy::slow_vector_initialization)]
 
+use std::sync::Arc;
+
+use moto_io::net::readiness::{NetEventListener, Readiness};
+use moto_io::net::udp::UdpSocket as NativeUdpSocket;
+
+struct NoopNetEventListener;
+
+impl NetEventListener for NoopNetEventListener {
+    fn on_readiness(&self, _edges: Readiness) {}
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Bind, tolerating a transient `AlreadyInUse` left behind by a previous run.
 ///
 /// These tests use fixed loopback ports, and sys-io reclaims a dead process's
@@ -194,11 +209,51 @@ fn test_udp_timeouts() {
     println!("-- test_udp_timeouts() PASS");
 }
 
+fn test_cancelled_native_rx_waiters_are_removed() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct DistinctWake(AtomicUsize);
+    impl Wake for DistinctWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
+    let socket = NativeUdpSocket::bind(&addr, Arc::new(NoopNetEventListener)).unwrap();
+
+    for _ in 0..128 {
+        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Box::pin(socket.readable());
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(socket.rx_waiter_count(), 1);
+        drop(future);
+        assert_eq!(socket.rx_waiter_count(), 0);
+    }
+
+    for _ in 0..128 {
+        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0_u8; 1];
+        let mut future = Box::pin(socket.recv_from_future(&mut byte, false));
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(socket.rx_waiter_count(), 1);
+        drop(future);
+        assert_eq!(socket.rx_waiter_count(), 0);
+    }
+
+    println!("-- test_cancelled_native_rx_waiters_are_removed() PASS");
+}
+
 pub fn run_all_tests() {
     test_udp_basic();
     test_udp_large_packets();
     test_udp_double_bind();
     test_udp_connect();
     test_udp_timeouts();
+    test_cancelled_native_rx_waiters_are_removed();
     println!("UDP tests PASS");
 }
