@@ -1,5 +1,45 @@
 use std::{io::Seek, path::PathBuf};
 
+/// sys-io FS metric ids read by the benchmarks below (see
+/// `sys-io/src/runtime/fs/stats.rs`).
+const FS_METRICS: std::ops::Range<u32> = 1002..1014;
+
+/// Read every metric in [`FS_METRICS`] from one snapshot.
+///
+/// Two reasons not to call `Collector::read()` per metric: it issues a full
+/// query per call (12 RPCs, each round-tripping into sys-io's FS runtime), and
+/// each call samples a different instant. It is also flaky under load — sys-io
+/// assembles this list by asking its FS/NET runtimes for a snapshot, and that
+/// request's failure mode is an empty or short metric set returned as success,
+/// so an individual read can report NotFound for a metric that always exists.
+/// Retry until a complete snapshot arrives; only a persistent absence fails.
+fn read_sys_io_fs_metrics(provider: &moto_stats::ProviderInfo) -> [u64; 12] {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let snapshot = moto_stats::Collector::query(provider).unwrap_or_default();
+        let mut vals = [0_u64; 12];
+        let missing = FS_METRICS.clone().position(|metric| {
+            match snapshot.iter().find(|e| e.metric == metric) {
+                Some(entry) => {
+                    vals[(metric - FS_METRICS.start) as usize] = entry.value;
+                    false
+                }
+                None => true,
+            }
+        });
+        let Some(missing) = missing else {
+            return vals;
+        };
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sys-io stats: metric {} absent from {} entries",
+            FS_METRICS.start + missing as u32,
+            snapshot.len()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn temp_dir() -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push("systest");
@@ -160,11 +200,7 @@ pub fn smoke_test() {
         .find(|p| p.id == 2)
         .unwrap();
 
-    let mut stats_before = [0_u64; 12];
-    for idx in 0..12 {
-        stats_before[idx] =
-            moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
-    }
+    let stats_before = read_sys_io_fs_metrics(&sys_io_provider);
 
     // WRITE.
     let ts0 = std::time::Instant::now();
@@ -183,11 +219,7 @@ pub fn smoke_test() {
     let cpu_usage_read = crate::mpmc::get_cpu_usage();
     run_pstat("after");
 
-    let mut stats_after = [0_u64; 12];
-    for idx in 0..12 {
-        stats_after[idx] =
-            moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
-    }
+    let stats_after = read_sys_io_fs_metrics(&sys_io_provider);
 
     for idx in 0..12 {
         println!(
@@ -269,11 +301,7 @@ pub fn hot_cache_read_test() {
         .find(|p| p.id == 2)
         .unwrap();
 
-    let mut stats_before = [0_u64; 12];
-    for idx in 0..12 {
-        stats_before[idx] =
-            moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
-    }
+    let stats_before = read_sys_io_fs_metrics(&sys_io_provider);
 
     run_pstat("hot before");
     let ts = std::time::Instant::now();
@@ -285,11 +313,7 @@ pub fn hot_cache_read_test() {
     let cpu_usage = crate::mpmc::get_cpu_usage();
     run_pstat("hot after");
 
-    let mut stats_after = [0_u64; 12];
-    for idx in 0..12 {
-        stats_after[idx] =
-            moto_stats::Collector::read(&sys_io_provider, 1002 + idx as u32, 0).unwrap();
-    }
+    let stats_after = read_sys_io_fs_metrics(&sys_io_provider);
 
     for idx in 0..12 {
         println!(
@@ -410,9 +434,47 @@ pub fn concurrent_flush_stress_test() {
 
     const THREADS: usize = 4;
     const ITERS: usize = 4000;
+    /// Wall-clock cap on the stress loop.
+    ///
+    /// The iteration count alone is not a bound on duration: this loop is
+    /// throughput-limited by sys-io's FS runtime, so on a host that
+    /// oversubscribes vCPUs (the stress-soak configuration) it runs roughly 25x
+    /// slower and 4000 iterations take ~5.5 min -- past the soak's 240s
+    /// per-suite timeout, which then killed systest mid-test and reported it as
+    /// a hang. Stop early instead; the race this guards (the flush-batch
+    /// double-borrow) is hit thousands of times either way.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 
+    // Per-thread progress, so a stall here is distinguishable from mere
+    // slowness (this test is the heaviest fs load systest generates).
+    let progress: std::sync::Arc<Vec<std::sync::atomic::AtomicUsize>> =
+        std::sync::Arc::new((0..THREADS).map(|_| Default::default()).collect());
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = {
+        let (progress, done) = (progress.clone(), done.clone());
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let counts: Vec<usize> = progress
+                    .iter()
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .collect();
+                println!(
+                    "    ---- FS: concurrent_flush_stress_test +{}s: {counts:?} of {ITERS}",
+                    start.elapsed().as_secs()
+                );
+            }
+        })
+    };
+
+    let started = std::time::Instant::now();
     let mut handles = Vec::with_capacity(THREADS);
     for t in 0..THREADS {
+        let progress = progress.clone();
         handles.push(std::thread::spawn(move || {
             let path = format!("/flush_stress_{t}");
             let _ = std::fs::remove_file(&path);
@@ -437,6 +499,11 @@ pub fn concurrent_flush_stress_test() {
                 // the batch empty -> the branch that used to double-borrow.
                 moto_rt::fs::flush(fd).unwrap();
                 moto_rt::fs::flush(fd).unwrap();
+                progress[t].store(i + 1, std::sync::atomic::Ordering::Relaxed);
+
+                if (i & 63) == 63 && started.elapsed() > BUDGET {
+                    break;
+                }
             }
 
             drop(file);
@@ -447,8 +514,17 @@ pub fn concurrent_flush_stress_test() {
     for h in handles {
         h.join().unwrap();
     }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = watchdog.join();
 
-    println!("    ---- FS: concurrent_flush_stress_test PASS");
+    let iters: Vec<usize> = progress
+        .iter()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        .collect();
+    println!(
+        "    ---- FS: concurrent_flush_stress_test PASS ({}ms, {iters:?} of {ITERS} per thread)",
+        started.elapsed().as_millis()
+    );
 }
 
 pub fn run_tests() {
