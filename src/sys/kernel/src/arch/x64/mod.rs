@@ -289,6 +289,41 @@ impl GS {
             )
         }
 
+        // EFER.NXE (bit 11): PTE bit 63 becomes NX instead of reserved.
+        // Must be set on every CPU before it can walk a user page table
+        // (all user data leaves are NX — see PTE::NX in paging.rs); done
+        // here because GS::init is the first per-CPU init step.
+        const MSR_IA32_EFER: u32 = 0xc000_0080;
+        const EFER_NXE: u64 = 1 << 11;
+        wrmsr(MSR_IA32_EFER, rdmsr(MSR_IA32_EFER) | EFER_NXE);
+
+        // SMEP (CR4 bit 20) / SMAP (CR4 bit 21): the kernel must never
+        // execute user pages, and never read/write them through their user
+        // mappings — every kernel access to user memory goes through the
+        // direct map (kernel PTEs), so no stac/clac windows are needed
+        // anywhere. Gated on CPUID.(7,0):EBX (bit 7 = SMEP, bit 20 = SMAP).
+        let cpuid7 = core::arch::x86_64::__cpuid_count(7, 0);
+        let mut cr4_security = 0_u64;
+        if (cpuid7.ebx & (1 << 7)) != 0 {
+            cr4_security |= 1 << 20; // SMEP
+        }
+        if (cpuid7.ebx & (1 << 20)) != 0 {
+            cr4_security |= 1 << 21; // SMAP
+        }
+        if cr4_security != 0 {
+            unsafe {
+                core::arch::asm!(
+                    "
+                    mov rax, cr4
+                    or  rax, {bits}
+                    mov cr4, rax
+                    ",
+                    bits = in(reg) cr4_security,
+                    out("rax") _
+                )
+            }
+        }
+
         let gs_val =
             crate::mm::virt::vmem_allocate_pages(crate::mm::virt::VmemKind::KernelStatic, 1)
                 .unwrap()

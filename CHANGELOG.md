@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-07
+
+* libc port (mlibc)
+* native llvm
+* native rustc
+* dns lookup
+* ping
+* red (a text editor, mimicking vim)
+
 ## 2026-06-17
 
 * Motor OS now uses Motor FS by default.

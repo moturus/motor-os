@@ -220,8 +220,20 @@ fn sys_map(
             opts |= MappingOptions::WRITABLE;
             flags &= !SysMem::F_WRITABLE;
         }
+        // F_EXECUTABLE applies to the target side only (ELF text loading);
+        // the caller's side of the sharing is always mapped R+W, which is
+        // how loaders write text into a mapping the target can't write.
+        if (flags & SysMem::F_EXECUTABLE) != 0 {
+            opts |= MappingOptions::EXECUTABLE;
+            flags &= !SysMem::F_EXECUTABLE;
+        }
         if flags != 0 {
             log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
+            return ResultBuilder::invalid_argument();
+        }
+        // W^X: no user mapping may be writable and executable.
+        if opts.contains(MappingOptions::EXECUTABLE) && opts.contains(MappingOptions::WRITABLE) {
+            log::debug!("sys_mem_impl: W+X mapping rejected");
             return ResultBuilder::invalid_argument();
         }
 

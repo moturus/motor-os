@@ -5,6 +5,15 @@ use std::path::PathBuf;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[cfg(target_os = "motor")]
+fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
+    moto_rt::fill_random_bytes(dest);
+    Ok(())
+}
+
+#[cfg(target_os = "motor")]
+getrandom::register_custom_getrandom!(motor_getrandom);
+
 #[derive(Parser)]
 struct Args {
     #[arg(short, long)]

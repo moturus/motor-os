@@ -17,9 +17,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.47.1", features = ["net", "rt", "rt-multi-thread", "macros"] }
 
-[patch.crates-io]
+[target.'cfg(target_os = "motor")'.dependencies]
+getrandom = { version = "=0.2.17", features = ["custom"] }
 moto-rt = { path = "../../sys/lib/moto-rt" }
-ring = { git = "https://github.com/moturus/ring.git", branch = "motor-os_2025-09-20" }
+
+[patch.crates-io]
+ring  = { git = "https://github.com/moturus/ring.git", branch = "motor-os-0.17.14" }
 mio   = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }
 tokio = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
 

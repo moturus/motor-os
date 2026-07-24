@@ -271,7 +271,7 @@ impl PageType {
 
 bitflags! {
     #[derive(Default)]
-    pub struct MappingOptions: u8 {
+    pub struct MappingOptions: u16 {
         const READABLE        = 1;
         const WRITABLE        = 2;
         const USER_ACCESSIBLE = 4;
@@ -280,6 +280,7 @@ bitflags! {
         const LAZY            = 32;
         const GUARD           = 64;
         const PRIVATE         = 128;  // Used by vmem_pages.
+        const EXECUTABLE      = 256;  // W^X: only ELF text is mapped with this.
     }
 }
 

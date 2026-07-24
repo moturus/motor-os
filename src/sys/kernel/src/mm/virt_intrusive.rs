@@ -465,6 +465,17 @@ impl VmemSegment {
         debug_assert_eq!(error_code & 4, 4);
         let error_code = error_code ^ 4;
 
+        // Protection violations are never fixable: faults on present pages
+        // (P, bit 0 — there are no CoW or other lazy-present mappings) and
+        // instruction fetches (I/D, bit 4 — W^X: nothing executable is
+        // lazily mapped). Without this check a fault on a present page
+        // (e.g. an NX violation, or a write to rodata) would be "fixed" by
+        // the concurrent-fault shortcut below and refault forever.
+        if (error_code & (1 | 0x10)) != 0 {
+            log::debug!("#PF: protection violation: 0x{:x}", error_code | 4);
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
         let page = self.find_page_mut(pf_addr).unwrap();
         assert!(page.contains(pf_addr));
 
