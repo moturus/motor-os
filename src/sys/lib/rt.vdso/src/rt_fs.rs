@@ -540,6 +540,19 @@ impl AsyncFsClient {
         })
     }
 
+    fn move_noreplace(
+        &self,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: String,
+    ) -> Result<()> {
+        self.blocking_run(move |fs_client| async move {
+            fs_client
+                .move_noreplace(entry_id, new_parent_id, new_name.as_str())
+                .await
+        })
+    }
+
     fn unlink_recursively(&self, entry_id: EntryId) -> Result<()> {
         // We don't want to ddos sys-io, so we do the loop here.
         let metadata =
@@ -1197,6 +1210,23 @@ pub extern "C" fn rename(
     let old = unsafe { core::str::from_utf8_unchecked(old_bytes) };
     let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_size) };
     let new = unsafe { core::str::from_utf8_unchecked(new_bytes) };
+    move_path(old, new, true)
+}
+
+pub extern "C" fn move_noreplace(
+    old_ptr: *const u8,
+    old_size: usize,
+    new_ptr: *const u8,
+    new_size: usize,
+) -> moto_rt::ErrorCode {
+    let old_bytes = unsafe { core::slice::from_raw_parts(old_ptr, old_size) };
+    let old = unsafe { core::str::from_utf8_unchecked(old_bytes) };
+    let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_size) };
+    let new = unsafe { core::str::from_utf8_unchecked(new_bytes) };
+    move_path(old, new, false)
+}
+
+fn move_path(old: &str, new: &str, replace: bool) -> moto_rt::ErrorCode {
     let client = AsyncFsClient::get().unwrap();
 
     let old_path = match CanonicalPath::parse(old) {
@@ -1232,9 +1262,12 @@ pub extern "C" fn rename(
     }
 
     // Do the move.
-    client
-        .move_entry(entry_id, new_parent_id, new_path.filename().to_owned())
-        .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
+    let result = if replace {
+        client.move_entry(entry_id, new_parent_id, new_path.filename().to_owned())
+    } else {
+        client.move_noreplace(entry_id, new_parent_id, new_path.filename().to_owned())
+    };
+    result.map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }
 
 pub extern "C" fn rmdir_all(path_ptr: *const u8, path_size: usize) -> moto_rt::ErrorCode {

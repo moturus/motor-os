@@ -236,8 +236,9 @@ pub struct RtVdsoVtable {
     pub internal_helper: AtomicU64,
     pub current_exe: AtomicU64,
 
-    // Optional ABI-16 extension; keep additions at the end.
+    // Optional ABI-16 extensions; keep additions at the end.
     pub fs_file_lock: AtomicU64,
+    pub fs_move_noreplace: AtomicU64,
 }
 
 #[cfg(not(feature = "base"))]

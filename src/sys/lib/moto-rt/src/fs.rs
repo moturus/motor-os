@@ -355,6 +355,26 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     ))
 }
 
+pub fn move_noreplace(old: &str, new: &str) -> Result<()> {
+    let entry = RtVdsoVtable::get()
+        .fs_move_noreplace
+        .load(Ordering::Relaxed);
+    if entry == 0 {
+        return Err(Error::NotImplemented);
+    }
+    let vdso_move_noreplace: extern "C" fn(*const u8, usize, *const u8, usize) -> ErrorCode =
+        unsafe { core::mem::transmute(entry as usize as *const ()) };
+
+    let old = old.as_bytes();
+    let new = new.as_bytes();
+    into_result(vdso_move_noreplace(
+        old.as_ptr(),
+        old.len(),
+        new.as_ptr(),
+        new.len(),
+    ))
+}
+
 pub fn rmdir(path: &str) -> Result<()> {
     let vdso_rmdir: extern "C" fn(*const u8, usize) -> ErrorCode = unsafe {
         core::mem::transmute(
