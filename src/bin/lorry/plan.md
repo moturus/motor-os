@@ -1,8 +1,7 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage 2 paused before vendoring — cache and test bundles are complete;
-Motor OS whole-file locking is the external resume gate, after which vendoring
-and core self-hosting remain**
+Status: **Stage 2 vendoring in progress — whole-file locking is complete;
+repository publication is paused for a Motor OS atomic no-replace rename API**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -3030,24 +3029,50 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
 
 ### Round 43: Motor OS whole-file locking prerequisite
 
-#### Resolved during Stage-2 implementation
+#### Satisfied during Stage-2 implementation
 
 - Stage-2 vendoring requires the project-scoped process-lifetime lock already
-  specified in Rounds 19 and 20. Linux supplies the required stable
-  `std::fs::File` API, but the Motor OS standard-library backend currently
-  returns `Unsupported` for its whole-file locking methods.
+  specified in Rounds 19 and 20. Motor OS now supplies the stable
+  `std::fs::File` whole-file locking API and native locking coverage.
 - The Motor OS implementation is a platform prerequisite, specified
   independently in `docs/file-locking-plan.md`. It must be completed in the
   filesystem/runtime/standard-library layers rather than worked around in
   Lorry.
-- Lorry Stage 2 is paused before implementation-sequence item 7. Work resumes
-  at that item once the current Motor OS toolchain implements the standard
-  locking API and a native two-process test proves that an exclusive lock
-  blocks a second opener until release and is reclaimed when the owner exits.
-- After the gate is green, Lorry uses `std::fs::File::lock` directly, retains
-  the `File` for the entire vendor transaction, adds its Linux and Motor OS
-  concurrency fixtures, and then continues with the existing `lorry-fetch`,
-  vendoring, and self-hosting sequence. No Lorry-specific fallback is planned.
+- Lorry now uses `std::fs::File::lock` directly and retains the owning `File`.
+  Its multi-process fixture proves same-project exclusion and different-project
+  independence; the lock will be wired around the complete vendor transaction
+  when that command is enabled.
+
+### Round 44: vendoring implementation checkpoint and atomic rename gate
+
+#### Completed incremental patches
+
+- Lorry's Motor dependency pin follows the in-tree `moto-rt` 0.16.2.
+- The project vendor lock, staged-lockfile fsync/close operation, lazy sparse
+  catalog loading seam, multi-target resolution union, and resolution-derived
+  lock preferences are implemented with focused tests.
+- Writable repositories are initialized transactionally with the exact
+  format-1 layout. Downloaded crates can be checksum-verified, safely
+  extracted beneath private transaction staging, rendered into canonical
+  repository metadata, retained according to configuration, and fully
+  re-verified before publication. No staged object is published yet.
+
+#### Current pause and remaining work
+
+- Repository objects are shared by different projects, so the project lock is
+  deliberately insufficient for publication. The design requires an atomic
+  directory rename that fails if the destination exists. Linux has
+  `renameat2(RENAME_NOREPLACE)`; Motor OS does not yet expose the corresponding
+  stable operation. Motor will add it separately rather than weakening Lorry
+  to a check-then-replace sequence or repository-wide cooperative lock.
+- Once that API and a native competing-publisher fixture are green, the next
+  patches publish and re-verify immutable objects, then wire the project lock,
+  staged `Cargo.lock`, and all-or-none commit ordering into `lorry vendor`.
+- Still to do in implementation item 7: the version-1 `lorry-fetch` helper,
+  bounded sparse-index/archive acquisition, approval UI and `--accept-all`,
+  interrupted/concurrent transaction fixtures, configured native compiler and
+  archiver roles, patched `ring`/helper self-builds, and Linux/native-Motor
+  fresh-repository acceptance cycles.
 
 ## Stage-1/2 design closure and external start gates
 
@@ -3099,16 +3124,20 @@ but each blocks the indicated Stage-2 work:
     suffice, the acceptance fixture records that fact; otherwise the Motor OS
     feature is delivered outside this Lorry effort. This must be green before
     Phase 5 starts and before final Stage-2 acceptance.
-12. Motor OS implements the stable `std::fs::File` whole-file locking APIs as
+12. **Satisfied.** Motor OS implements the stable `std::fs::File` whole-file locking APIs as
     specified in `docs/file-locking-plan.md`, and the native two-process
-    exclusive-lock/release test passes. This must be green before ordered
-    implementation item 7 (vendoring) resumes.
+    exclusive-lock/release coverage is present. Lorry's process fixture also
+    verifies same-project exclusion and different-project independence.
+13. Motor OS exposes a stable atomic no-replace directory rename operation and
+    a native competing-publisher test. This must be green before writable
+    repository objects become visible and item 7's commit state machine is
+    enabled.
 
-Gates 9 and 10 are green, and the checked-in Cargo-oracle inputs pass. Phase 0
-and the cache/bundle portions of implementation item 6 are complete. Stage 2
-is now paused on Gate 12 before item 7; vendoring then enables the remaining
-core self-hosting work. Gate 11 remains required for the sandbox and final
-acceptance work described above.
+Gates 9, 10, and 12 are green, and the checked-in Cargo-oracle inputs pass.
+Phase 0 and the cache/bundle portions of implementation item 6 are complete.
+The pre-publication portions of item 7 listed in Round 44 are implemented.
+Stage 2 is paused on Gate 13 before repository publication; Gate 11 remains
+required for the sandbox and final acceptance work described above.
 
 ### Design stop point
 
@@ -3116,7 +3145,7 @@ The Stage-1/2 product boundary, dependency graphs, formats, security policy,
 commands, Cargo-compatibility contract, portability model, bootstrap path,
 implementation order, and acceptance gates are now settled. Detailed
 Stage-3+ design remains intentionally frozen. The next Lorry implementation
-work is item 7 and resumes when Gate 12 is satisfied.
+work is item 7 repository publication and resumes when Gate 13 is satisfied.
 
 ## Deferred post-stage-2 design
 
