@@ -1,5 +1,15 @@
 #!/bin/bash
 
+if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
+  export FULL_TEST_TIMEOUT_ACTIVE=1
+  timeout 600s "$0" "$@"
+  status=$?
+  if [ "$status" -eq 124 ]; then
+    echo "full-test: timed out after 600 seconds" >&2
+  fi
+  exit "$status"
+fi
+
 # abort on error
 set -e
 
@@ -136,11 +146,13 @@ echo ""
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
 
-# It takes some time to start sshd, especially with a debug build, so we
-# have a large timeout and several retries. And the first "test" is just an empty echo.
-
-ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=30 -o ConnectionAttempts=10 \
-  motor@192.168.4.2 /bin/echo " "
+# A refused connection returns immediately, so OpenSSH's ConnectionAttempts
+# does not reliably cover a slow debug boot. Retry explicitly; the overall
+# 600-second harness timeout bounds this loop.
+until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+  motor@192.168.4.2 /bin/echo " "; do
+  sleep 1
+done
 
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost
