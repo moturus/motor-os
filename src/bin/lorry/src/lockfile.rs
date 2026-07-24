@@ -198,7 +198,7 @@ fn dependency_reference(dependency: &Identity, identities: &[Identity]) -> Strin
     }
 }
 
-fn write_toml_string(output: &mut String, value: &str) {
+pub(crate) fn write_toml_string(output: &mut String, value: &str) {
     output.push('"');
     for character in value.chars() {
         match character {

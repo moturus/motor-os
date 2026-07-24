@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,14 +9,14 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use toml_edit::{Item, Table};
 
-use crate::archive::Limits as ArchiveLimits;
+use crate::archive::{Limits as ArchiveLimits, extract_crate};
 use crate::atomic::AtomicDirectory;
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
-#[cfg(test)]
-use crate::hash::hex;
-use crate::hash::{Sha256, decode_hex};
+use crate::hash::{Sha256, decode_hex, hex};
 use crate::json::Value;
+use crate::lockfile::write_toml_string;
+use crate::manifest::Manifest;
 use crate::source_tree::{Exclusions, Limits, Tree};
 use crate::sparse::Record as SparseRecord;
 use crate::toml::Document;
@@ -106,6 +107,13 @@ pub struct RepositoryWriter {
 pub struct RepositoryTransaction {
     writer: RepositoryWriter,
     staging: AtomicDirectory,
+    objects: Vec<StagedRegistryObject>,
+}
+
+#[derive(Debug)]
+pub struct StagedRegistryObject {
+    object: RegistryObject,
+    manifest: Manifest,
 }
 
 impl RepositorySet {
@@ -278,6 +286,7 @@ impl RepositoryWriter {
         Ok(RepositoryTransaction {
             writer: self,
             staging,
+            objects: Vec::new(),
         })
     }
 }
@@ -287,6 +296,178 @@ impl RepositoryTransaction {
         self.staging.path()
     }
 
+    pub fn stage_registry(
+        &mut self,
+        record: &SparseRecord,
+        archive: &Path,
+    ) -> Result<&StagedRegistryObject> {
+        if self
+            .objects
+            .iter()
+            .any(|object| object.object.checksum == record.checksum)
+        {
+            return Err(Error::failure(format!(
+                "vendor transaction repeats crates.io object `{}`",
+                hex(&record.checksum)
+            )));
+        }
+        let checksum = hex(&record.checksum);
+        let objects = self.staging.path().join("objects");
+        if !objects.exists() {
+            fs::create_dir(&objects).map_err(|error| {
+                Error::failure(format!(
+                    "failed to create vendor object staging `{}`: {error}",
+                    objects.display()
+                ))
+            })?;
+        }
+        let object_path = objects.join(&checksum);
+        fs::create_dir(&object_path).map_err(|error| {
+            Error::failure(format!(
+                "failed to create repository object staging `{}`: {error}",
+                object_path.display()
+            ))
+        })?;
+
+        let archive_bytes = fs::symlink_metadata(archive)
+            .map_err(|error| {
+                Error::failure(format!(
+                    "failed to inspect downloaded archive `{}`: {error}",
+                    archive.display()
+                ))
+            })?
+            .len();
+        let extracted = extract_crate(
+            archive,
+            record.checksum,
+            &object_path,
+            &record.name,
+            &record.version,
+            self.writer.archive_limits,
+        )?;
+        let manifest = Manifest::load_path_dependency(extracted.path())?;
+        let manifest_version = Version::parse(&manifest.version.original).map_err(|error| {
+            Error::failure(format!(
+                "downloaded package has invalid version `{} {}`: {error}",
+                manifest.name, manifest.version.original
+            ))
+        })?;
+        if manifest.name != record.name || manifest_version != record.version {
+            return Err(Error::failure(format!(
+                "downloaded archive identifies `{} {}`, but sparse index selected `{} {}`",
+                manifest.name, manifest.version.original, record.name, record.version
+            )));
+        }
+        if manifest.metadata.license.is_empty() {
+            return Err(Error::failure(format!(
+                "downloaded package `{} {}` has no license expression",
+                record.name, record.version
+            )));
+        }
+        let tree = extracted.tree().clone();
+        write_new(
+            &object_path.join("package.toml"),
+            &registry_package_toml(
+                record,
+                &manifest.metadata.license,
+                archive_bytes,
+                &tree,
+                self.writer.keep_artifacts,
+                self.writer.keep_sources,
+            ),
+        )?;
+        write_new(&object_path.join("index-record.json"), &record.exact_bytes)?;
+        if self.writer.keep_artifacts {
+            copy_new(archive, &object_path.join("package.crate"))?;
+        }
+        if self.writer.keep_sources {
+            write_new(
+                &object_path.join("source-manifest.json"),
+                &tree.manifest_bytes(),
+            )?;
+            extracted.commit(&object_path.join("source"))?;
+        }
+        let object = verify_registry_object(
+            self.writer.layer,
+            &object_path,
+            record.checksum,
+            self.writer.limits,
+            self.writer.archive_limits.max_compressed_bytes,
+        )?;
+        self.objects
+            .push(StagedRegistryObject { object, manifest });
+        Ok(self.objects.last().unwrap())
+    }
+
+    pub fn objects(&self) -> &[StagedRegistryObject] {
+        &self.objects
+    }
+}
+
+impl StagedRegistryObject {
+    pub fn object(&self) -> &RegistryObject {
+        &self.object
+    }
+
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+}
+
+fn registry_package_toml(
+    record: &SparseRecord,
+    license: &str,
+    archive_bytes: u64,
+    tree: &Tree,
+    retained_archive: bool,
+    retained_source: bool,
+) -> Vec<u8> {
+    let mut output = String::from("format-version = 1\nname = ");
+    write_toml_string(&mut output, &record.name);
+    output.push_str("\nversion = ");
+    write_toml_string(&mut output, &record.version.to_string());
+    output.push_str("\nsource = ");
+    write_toml_string(&mut output, CRATES_IO_SOURCE);
+    output.push_str("\nchecksum = ");
+    write_toml_string(&mut output, &hex(&record.checksum));
+    output.push_str("\nlicense = ");
+    write_toml_string(&mut output, license);
+    writeln!(
+        output,
+        "\narchive-bytes = {archive_bytes}\nextracted-bytes = {}\nfile-count = {}\n\
+         directory-count = {}\nsource-tree-sha256 = \"{}\"\nretained-archive = \
+         {retained_archive}\nretained-source = {retained_source}",
+        tree.total_bytes,
+        tree.file_count,
+        tree.directory_count,
+        hex(&tree.sha256),
+    )
+    .unwrap();
+    output.into_bytes()
+}
+
+fn copy_new(source: &Path, destination: &Path) -> Result<()> {
+    let mut source_file = File::open(source).map_err(|error| {
+        Error::failure(format!("failed to open `{}`: {error}", source.display()))
+    })?;
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to create `{}`: {error}",
+                destination.display()
+            ))
+        })?;
+    std::io::copy(&mut source_file, &mut destination_file)
+        .and_then(|_| destination_file.sync_all())
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to persist `{}`: {error}",
+                destination.display()
+            ))
+        })
 }
 
 fn initialize_repository(root: &Path) -> Result<()> {
@@ -1217,6 +1398,9 @@ fn field_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -1382,6 +1566,51 @@ mod tests {
         }
     }
 
+    fn crate_archive(name: &str, version: &str) -> Vec<u8> {
+        fn put_octal(field: &mut [u8], value: u64) {
+            let text = format!("{value:0width$o}", width = field.len() - 1);
+            field[..text.len()].copy_from_slice(text.as_bytes());
+        }
+        fn append_file(tar: &mut Vec<u8>, path: &str, contents: &[u8]) {
+            let mut header = [0_u8; 512];
+            header[..path.len()].copy_from_slice(path.as_bytes());
+            put_octal(&mut header[100..108], 0o644);
+            put_octal(&mut header[108..116], 0);
+            put_octal(&mut header[116..124], 0);
+            put_octal(&mut header[124..136], contents.len() as u64);
+            put_octal(&mut header[136..148], 0);
+            header[148..156].fill(b' ');
+            header[156] = b'0';
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            let checksum = header.iter().map(|byte| *byte as u64).sum::<u64>();
+            header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+            tar.extend_from_slice(&header);
+            tar.extend_from_slice(contents);
+            tar.resize((tar.len() + 511) / 512 * 512, 0);
+        }
+
+        let root = format!("{name}-{version}");
+        let mut tar = Vec::new();
+        append_file(
+            &mut tar,
+            &format!("{root}/Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
+                 edition = \"2021\"\nlicense = \"MIT OR Apache-2.0\"\n"
+            )
+            .as_bytes(),
+        );
+        append_file(
+            &mut tar,
+            &format!("{root}/src/lib.rs"),
+            b"pub fn fixture() {}\n",
+        );
+        tar.resize(tar.len() + 1024, 0);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&tar).unwrap();
+        gzip.finish().unwrap()
+    }
 
     #[test]
     fn initializes_the_preferred_writable_repository_and_cleans_staging() {
@@ -1416,6 +1645,43 @@ mod tests {
         assert_eq!(fs::read_dir(local.join(".staging")).unwrap().count(), 0);
     }
 
+    #[test]
+    fn stages_and_reverifies_a_downloaded_registry_object() {
+        let root = TempDir::new("stage-registry");
+        let repository = root.0.join("repository");
+        let writer = RepositoryWriter::open(
+            &Repositories {
+                local: Some(repository),
+                ..Repositories::default()
+            },
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        let mut transaction = writer.begin().unwrap();
+        let archive = transaction.path().join("demo.crate");
+        let bytes = crate_archive("demo", "1.2.3");
+        fs::write(&archive, &bytes).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(&bytes);
+        let checksum = hex(&digest.finish());
+        let record_bytes = format!(
+            "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
+             \"cksum\":\"{checksum}\",\"features\":{{}},\"yanked\":false}}\n"
+        );
+        let record = SparseRecord::parse(
+            Path::new("/fixture/index-record.json"),
+            record_bytes.as_bytes(),
+        )
+        .unwrap();
+
+        let staged = transaction.stage_registry(&record, &archive).unwrap();
+
+        assert_eq!(staged.object().name, "demo");
+        assert_eq!(staged.manifest().metadata.license, "MIT OR Apache-2.0");
+        assert!(staged.object().root.join("source/src/lib.rs").is_file());
+        assert_eq!(transaction.objects().len(), 1);
+    }
 
     #[test]
     fn writer_requires_a_configured_writable_layer() {
