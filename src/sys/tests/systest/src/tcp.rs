@@ -212,6 +212,66 @@ fn test_cancelled_native_connect_closes_socket() {
     println!("test_cancelled_native_connect_closes_socket() PASS");
 }
 
+/// Distinct cancelled native futures must physically remove their RX wakers;
+/// a quiet live socket provides no later event that could clean stale entries.
+fn test_cancelled_native_rx_waiters_are_removed() {
+    use std::future::Future;
+    use std::task::{Wake, Waker};
+
+    struct DistinctWake(AtomicUsize);
+    impl Wake for DistinctWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_peer = Arc::new(AtomicBool::new(false));
+    let peer_release = release_peer.clone();
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        while !peer_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+
+    for _ in 0..128 {
+        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Box::pin(stream.readable());
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(stream.rx_waiter_count(), 1);
+        drop(future);
+        assert_eq!(stream.rx_waiter_count(), 0);
+    }
+
+    for _ in 0..128 {
+        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0_u8; 1];
+        let mut bufs: [&mut [u8]; 1] = [&mut byte];
+        let mut future = Box::pin(stream.read_future(&mut bufs, false));
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(stream.rx_waiter_count(), 1);
+        drop(future);
+        assert_eq!(stream.rx_waiter_count(), 0);
+    }
+
+    drop(stream);
+    release_peer.store(true, Ordering::Release);
+    peer.join().unwrap();
+    println!("test_cancelled_native_rx_waiters_are_removed() PASS");
+}
+
 /// A dropped native accept future must not strand the socket that sys-io
 /// creates when its already-posted accept RPC later completes.
 fn test_cancelled_native_accept_closes_socket() {
@@ -355,6 +415,7 @@ fn test_native_listener_drop_under_backpressure() {
 
 pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
+    test_cancelled_native_rx_waiters_are_removed();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }
