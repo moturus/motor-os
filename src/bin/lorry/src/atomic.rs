@@ -84,18 +84,22 @@ impl AtomicFile {
             })
     }
 
-    pub fn commit(mut self) -> Result<()> {
-        let file = self
-            .file
-            .take()
-            .ok_or_else(|| Error::failure("atomic file staging is already closed"))?;
+    /// Persists and closes the staged file without making it visible.
+    pub fn persist(&mut self) -> Result<()> {
+        let Some(file) = self.file.take() else {
+            return Ok(());
+        };
         file.sync_all().map_err(|error| {
             Error::failure(format!(
                 "failed to persist staged file `{}`: {error}",
                 self.path.display()
             ))
         })?;
-        drop(file);
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<()> {
+        self.persist()?;
 
         match fs::symlink_metadata(&self.destination) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -457,6 +461,23 @@ mod tests {
         staging.commit().unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"new");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_file_remains_hidden_until_commit() {
+        let root = temp_root("persist-file");
+        let destination = root.join("Cargo.lock");
+        fs::write(&destination, b"old").unwrap();
+
+        let mut staging = AtomicFile::new(&destination).unwrap();
+        staging.write_all(b"new").unwrap();
+        staging.persist().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"old");
+        assert!(staging.write_all(b"late").is_err());
+
+        staging.commit().unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new");
         fs::remove_dir_all(root).unwrap();
     }
 }
