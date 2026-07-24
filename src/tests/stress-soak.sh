@@ -315,11 +315,19 @@ http_hammer() { # name port expected_size ; 8 concurrent GETs/iter
   done
 }
 w_suites() {  # cycle the three heavy suites; classify on exit code (block-buffer-safe)
-  local n=0 f=0 rc s; local -a suites=("$SYSTEST" "$TOKIO" "$MIO")
+  local n=0 f=0 rc s cmd tmo; local -a suites=("$SYSTEST" "$TOKIO" "$MIO")
   while :; do
     for s in "${suites[@]}"; do
       n=$((n+1))
-      timeout 240 ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$s" \
+      # systest asserts scheduling-latency SLOs that only hold when the guest's
+      # vCPUs are not multiplexed onto fewer host cores; --under-load relaxes
+      # exactly those bounds (never a correctness check) for this harness.
+      # It also runs high-iteration fs/tcp work that is ~10x slower under
+      # oversubscription (~540-680s vs ~57s idle), so it gets a longer timeout;
+      # tokio/mio finish well under 240s, so that window stays a hang detector.
+      cmd="$s"; tmo=240
+      [ "$s" = "$SYSTEST" ] && { cmd="$s --under-load"; tmo=900; }
+      timeout "$tmo" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$cmd" \
         >>"$OUT/suites.log" 2>&1; rc=$?
       echo "iter=$n suite=$(basename "$s") rc=$rc" >>"$OUT/suites.log"
       [ "$rc" -ne 0 ] && f=$((f+1)); write_stat suites "$n" "$f" "$rc" "$(basename "$s")"; pace "$rc"
