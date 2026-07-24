@@ -796,20 +796,17 @@ async fn on_cmd_read_multi(
         num_chunks += 1;
     }
 
-    // One page pool, one FS lock acquire, one tree-walk warmup for the whole
-    // message. `alloc_page` may wait for the pool; pages recycle as soon as
-    // the client consumes earlier responses, independent of the FS lock, so
-    // waiting here (holding a read guard) cannot deadlock.
-    let mut pages: Vec<moto_ipc::io_channel::IoPage> = Vec::with_capacity(num_chunks);
+    // Reserve the whole response atomically: concurrent responses must not
+    // each hold a partial allocation and exhaust the finite page pool.
+    let mut pages = sender
+        .alloc_pages(num_chunks, u64::MAX)
+        .await
+        .map_err(map_native_error)?;
     let mut total = 0_u32;
     {
         let fs_guard = runtime.fs.read().await;
         let mut chunk_offset = offset;
-        for &size in &chunk_sizes[..num_chunks] {
-            let io_page = sender
-                .alloc_page(u64::MAX)
-                .await
-                .map_err(map_native_error)?;
+        for (&size, io_page) in chunk_sizes[..num_chunks].iter().zip(&pages) {
             let read = fs_guard
                 .read(
                     Role::System,
@@ -818,7 +815,6 @@ async fn on_cmd_read_multi(
                     &mut io_page.bytes_mut()[..size],
                 )
                 .await?; // On error: `pages` drops, freeing them; on_msg sends the error response.
-            pages.push(io_page);
             total += read as u32;
             chunk_offset += read as u64;
             if read < size {

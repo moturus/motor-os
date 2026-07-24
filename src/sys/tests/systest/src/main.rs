@@ -550,6 +550,9 @@ fn main() {
         tcp::test_native_listener_drop_backpressure();
         return;
     }
+    if io_channel::is_spawn_read_child(&args) {
+        return;
+    }
     if args.len() > 1 {
         if args[1] == "file-lock-test" {
             file_locking::run_tests();
