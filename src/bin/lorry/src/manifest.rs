@@ -2418,7 +2418,7 @@ members = ["ignored-member"]
             })
             .unwrap();
         let moto_rt = Manifest::load_path_dependency(moto_rt_path).unwrap();
-        assert_eq!(moto_rt.version.original, "0.16.1");
+        assert_eq!(moto_rt.version.original, "0.16.2");
         assert_eq!(
             moto_rt.rust_lints["unexpected_cfgs"].check_cfg,
             ["cfg(test)"]
@@ -2449,7 +2449,7 @@ members = ["ignored-member"]
                 .unwrap()
                 .version
                 .original,
-            "0.16.1"
+            "0.16.2"
         );
     }
 
