@@ -196,7 +196,17 @@ udp_sockets="$(vm_ssh /bin/stats get 2 |
 [ "$udp_sockets" = "0" ] ||
   fail "restarted DNS service left $udp_sockets active UDP socket(s)"
 
-vm_ssh sys/tests/systest
+systest_output=""
+if systest_output="$(vm_ssh sys/tests/systest 2>&1)"; then
+  printf '%s\n' "$systest_output"
+else
+  systest_status="$?"
+  printf '%s\n' "$systest_output"
+  fail "systest exited with status $systest_status"
+fi
+
+[ "${systest_output##*$'\n'}" = "PASS" ] ||
+  fail "systest did not finish with PASS"
 
 # Inherited-stdio relay smoke: a nested rush spawns its child with
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
