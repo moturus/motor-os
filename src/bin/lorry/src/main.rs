@@ -28,6 +28,7 @@ mod sparse;
 mod toml;
 mod toolchain;
 mod unit;
+mod vendor_lock;
 
 use cli::{Cli, Command};
 use diagnostic::{Error, Result};
