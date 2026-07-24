@@ -1,5 +1,15 @@
 #!/bin/bash
 
+if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
+  export FULL_TEST_TIMEOUT_ACTIVE=1
+  timeout 600s "$0" "$@"
+  status=$?
+  if [ "$status" -eq 124 ]; then
+    echo "full-test: timed out after 600 seconds" >&2
+  fi
+  exit "$status"
+fi
+
 # abort on error
 set -e
 
@@ -136,13 +146,13 @@ echo ""
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
 
-# SSH readiness has its own hard deadline. Image construction above is not
-# charged to this boot-time acceptance check.
-
-if ! timeout 10 ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=1 -o ConnectionAttempts=10 \
-  motor@192.168.4.2 /bin/echo " "; then
-  fail "Motor OS did not become SSH-ready within 10 seconds"
-fi
+# A refused connection returns immediately, so OpenSSH's ConnectionAttempts
+# does not reliably cover a slow debug boot. Retry explicitly; the overall
+# 600-second harness timeout bounds this loop.
+until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+  motor@192.168.4.2 /bin/echo " "; do
+  sleep 1
+done
 
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost

@@ -11,6 +11,7 @@ use core::future::Future;
 use core::{fmt::Debug, sync::atomic::*};
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use moto_async::AsFuture;
 use moto_rt::Result;
 use moto_sys::*;
@@ -385,6 +386,48 @@ impl RawChannel {
                 page_idx: ones as u16,
                 s_type: subchannel.into(),
             });
+        }
+    }
+
+    fn alloc_pages(&self, subchannel: SubChannel, count: usize) -> Result<Vec<RawIoPage>> {
+        let (bitmap_ref, subchannel_mask) = match subchannel {
+            SubChannel::Client(mask) => (&self.client_pages_in_use, mask),
+            SubChannel::Server(mask) => (&self.server_pages_in_use, mask),
+        };
+        if count > subchannel_mask.count_ones() as usize {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+
+        loop {
+            let bitmap = bitmap_ref.load(Ordering::Relaxed);
+            let mut available = !bitmap & subchannel_mask;
+            if available.count_ones() < count as u32 {
+                return Err(moto_rt::Error::NotReady);
+            }
+
+            let mut selected = 0_u64;
+            for _ in 0..count {
+                let bit = 1_u64 << available.trailing_zeros();
+                selected |= bit;
+                available &= !bit;
+            }
+            if bitmap_ref
+                .compare_exchange_weak(
+                    bitmap,
+                    bitmap | selected,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return Ok((0..64)
+                    .filter(|idx| selected & (1_u64 << idx) != 0)
+                    .map(|idx| RawIoPage {
+                        page_idx: idx,
+                        s_type: subchannel.into(),
+                    })
+                    .collect());
+            }
         }
     }
 
@@ -1142,6 +1185,20 @@ impl Sender {
         self.inner.raw_channel()
     }
 
+    fn set_page_wait(&self, subchannel_mask: u64) {
+        match self.inner.endpoint_type {
+            EndpointType::Client => self.raw_channel().set_client_page_wait(subchannel_mask),
+            EndpointType::Server => self.raw_channel().set_server_page_wait(subchannel_mask),
+        }
+    }
+
+    fn clear_page_wait(&self, subchannel_mask: u64) {
+        match self.inner.endpoint_type {
+            EndpointType::Client => self.raw_channel().clear_client_page_wait(subchannel_mask),
+            EndpointType::Server => self.raw_channel().clear_server_page_wait(subchannel_mask),
+        }
+    }
+
     pub fn remote_handle(&self) -> SysHandle {
         self.inner.remote_handle
     }
@@ -1279,41 +1336,61 @@ impl Sender {
     pub async fn alloc_page(&self, subchannel_mask: u64) -> Result<IoPage> {
         use moto_async::AsFuture;
 
-        match self.inner.endpoint_type {
-            EndpointType::Client => self.raw_channel().clear_client_page_wait(subchannel_mask),
-            EndpointType::Server => self.raw_channel().clear_server_page_wait(subchannel_mask),
-        }
+        self.clear_page_wait(subchannel_mask);
         let mut wait_flag_set = false;
         loop {
             match self.try_alloc_page(subchannel_mask) {
                 Err(moto_rt::Error::NotReady) => {
                     if !wait_flag_set {
-                        match self.inner.endpoint_type {
-                            EndpointType::Client => {
-                                self.raw_channel().set_client_page_wait(subchannel_mask)
-                            }
-                            EndpointType::Server => {
-                                self.raw_channel().set_server_page_wait(subchannel_mask)
-                            }
-                        }
-
+                        self.set_page_wait(subchannel_mask);
                         wait_flag_set = true;
                         continue; // Try one more alloc() before waiting.
                     } else {
                         self.inner.remote_handle.as_future().await?;
-                        match self.inner.endpoint_type {
-                            EndpointType::Client => {
-                                self.raw_channel().clear_client_page_wait(subchannel_mask)
-                            }
-                            EndpointType::Server => {
-                                self.raw_channel().clear_server_page_wait(subchannel_mask)
-                            }
-                        }
+                        self.clear_page_wait(subchannel_mask);
                         wait_flag_set = false;
                     }
                 }
                 Err(err) => return Err(err),
                 Ok(page) => return Ok(page),
+            }
+        }
+    }
+
+    /// Atomically reserves `count` pages, waiting until all are available.
+    pub async fn alloc_pages(&self, count: usize, subchannel_mask: u64) -> Result<Vec<IoPage>> {
+        use moto_async::AsFuture;
+
+        let subchannel = match self.inner.endpoint_type {
+            EndpointType::Client => SubChannel::Client(subchannel_mask),
+            EndpointType::Server => SubChannel::Server(subchannel_mask),
+        };
+        let mut wait_flag_set = false;
+        loop {
+            match self.raw_channel().alloc_pages(subchannel, count) {
+                Err(moto_rt::Error::NotReady) if !wait_flag_set => {
+                    self.set_page_wait(subchannel_mask);
+                    wait_flag_set = true;
+                }
+                Err(moto_rt::Error::NotReady) => {
+                    self.inner.remote_handle.as_future().await?;
+                    self.clear_page_wait(subchannel_mask);
+                    wait_flag_set = false;
+                }
+                Err(err) => return Err(err),
+                Ok(raw_pages) => {
+                    if wait_flag_set {
+                        self.clear_page_wait(subchannel_mask);
+                    }
+                    return Ok(raw_pages
+                        .into_iter()
+                        .map(|raw_page| IoPage {
+                            raw_page,
+                            raw_channel: self.raw_channel(),
+                            remote_handle: SysHandle::NONE,
+                        })
+                        .collect());
+                }
             }
         }
     }

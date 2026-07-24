@@ -28,7 +28,23 @@ fn read_sys_io_metric(name: &str) -> u64 {
         .into_iter()
         .find(|metric| metric.name == name)
         .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
-    moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL).unwrap()
+    // read() polls sys-io's net runtime for a live snapshot; under load that
+    // round-trip can come back empty and surface as NotFound for a metric that
+    // always exists (same race as fs.rs::read_sys_io_fs_metrics). Retry to a
+    // deadline; a metric that never appears still fails.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL) {
+            Ok(value) => return value,
+            Err(err) => {
+                assert!(
+                    err == moto_rt::E_NOT_FOUND && std::time::Instant::now() < deadline,
+                    "read sys-io metric {name:?}: {err}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 fn read_tcp_socket_stats() -> Vec<moto_sys_io::stats::TcpSocketStatsV1> {
@@ -196,6 +212,66 @@ fn test_cancelled_native_connect_closes_socket() {
     println!("test_cancelled_native_connect_closes_socket() PASS");
 }
 
+/// Distinct cancelled native futures must physically remove their RX wakers;
+/// a quiet live socket provides no later event that could clean stale entries.
+fn test_cancelled_native_rx_waiters_are_removed() {
+    use std::future::Future;
+    use std::task::{Wake, Waker};
+
+    struct DistinctWake(AtomicUsize);
+    impl Wake for DistinctWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_peer = Arc::new(AtomicBool::new(false));
+    let peer_release = release_peer.clone();
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        while !peer_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+
+    for _ in 0..128 {
+        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = Box::pin(stream.readable());
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(stream.rx_waiter_count(), 1);
+        drop(future);
+        assert_eq!(stream.rx_waiter_count(), 0);
+    }
+
+    for _ in 0..128 {
+        let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0_u8; 1];
+        let mut bufs: [&mut [u8]; 1] = [&mut byte];
+        let mut future = Box::pin(stream.read_future(&mut bufs, false));
+        assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(stream.rx_waiter_count(), 1);
+        drop(future);
+        assert_eq!(stream.rx_waiter_count(), 0);
+    }
+
+    drop(stream);
+    release_peer.store(true, Ordering::Release);
+    peer.join().unwrap();
+    println!("test_cancelled_native_rx_waiters_are_removed() PASS");
+}
+
 /// A dropped native accept future must not strand the socket that sys-io
 /// creates when its already-posted accept RPC later completes.
 fn test_cancelled_native_accept_closes_socket() {
@@ -339,6 +415,7 @@ fn test_native_listener_drop_under_backpressure() {
 
 pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
+    test_cancelled_native_rx_waiters_are_removed();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }
@@ -890,14 +967,15 @@ fn test_write_timeout() {
     std::thread::sleep(Duration::from_millis(10));
 }
 
-// Bulk write to a slow reader forces send-queue backpressure -- the write
-// future's retract-and-recopy path -- with no write timeout set, so writes
-// block until they progress. Every byte must arrive exactly once and in
-// order: a double-count or a loss in that path is the bug being hunted. A
-// lost backpressure wake would hang here (the watchdog flags it), not fail.
-fn test_write_backpressure_integrity() {
-    const N: usize = 2 * 1024 * 1024;
-    let listener = std::net::TcpListener::bind("127.0.0.1:3338").unwrap();
+// One backpressure exchange: bulk-write `N` bytes to a deliberately slow
+// reader (forcing send-queue backpressure), then shutdown(Write). Returns
+// (bytes the reader received, whether every received byte was correct). A
+// correct stack yields (N, true): shutdown must drain the accepted send queue
+// before FIN, so the reader sees every acknowledged byte then a clean EOF.
+// `port` differs per call so a lingering socket from the previous iteration
+// cannot collide on rebind.
+fn run_write_backpressure_once(port: u16, n: usize) -> (usize, bool) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
     let received = Arc::new(AtomicUsize::new(0));
     let ok = Arc::new(AtomicBool::new(true));
 
@@ -930,18 +1008,18 @@ fn test_write_backpressure_integrity() {
             received_ref.store(total, Ordering::Release);
         });
 
-        let mut client = std::net::TcpStream::connect("127.0.0.1:3338").unwrap();
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         let mut chunk = [0_u8; 64 * 1024];
         let mut sent = 0_usize;
-        while sent < N {
+        while sent < n {
             for (pos, b) in chunk.iter_mut().enumerate() {
                 *b = ((sent + pos) & 255) as u8;
             }
-            let want = (N - sent).min(chunk.len());
+            let want = (n - sent).min(chunk.len());
             match std::io::Write::write(&mut client, &chunk[..want]) {
-                Ok(n) => {
-                    assert!(n > 0, "write returned Ok(0)");
-                    sent += n;
+                Ok(w) => {
+                    assert!(w > 0, "write returned Ok(0)");
+                    sent += w;
                 }
                 Err(e) => panic!("unexpected write error: {e:?}"),
             }
@@ -949,12 +1027,84 @@ fn test_write_backpressure_integrity() {
         client.shutdown(std::net::Shutdown::Write).unwrap();
     });
 
-    assert!(ok.load(Ordering::Acquire), "reader saw wrong bytes");
-    assert_eq!(received.load(Ordering::Acquire), N, "byte count mismatch");
+    (received.load(Ordering::Acquire), ok.load(Ordering::Acquire))
+}
+
+// Bulk write to a slow reader forces send-queue backpressure -- the write
+// future's retract-and-recopy path -- with no write timeout set, so writes
+// block until they progress. Every byte must arrive exactly once and in
+// order: a double-count or a loss in that path is the bug being hunted. A
+// lost backpressure wake would hang here (the watchdog flags it), not fail.
+fn test_write_backpressure_integrity() {
+    const N: usize = 2 * 1024 * 1024;
+    let (received, ok) = run_write_backpressure_once(3338, N);
+    assert!(ok, "reader saw wrong bytes");
+    assert_eq!(received, N, "byte count mismatch");
 
     std::thread::sleep(Duration::from_millis(10));
     println!("test_write_backpressure_integrity() PASS");
     std::thread::sleep(Duration::from_millis(10));
+}
+
+// Run `workers` concurrent backpressure exchanges, each looping `rounds`
+// times, and return how many lost or corrupted data. The loss this guards
+// against needs sys-io's single device task to fall behind so the send buffer
+// still holds *un-transmitted* bytes when the client's close races the FIN;
+// many concurrent flows starve that task the way the soak's mixed load does.
+// Each (worker, round) uses a distinct port so a lingering socket from the
+// previous round cannot collide on rebind. With `verbose`, every failure is
+// printed (the standalone repro); otherwise the caller asserts on the count.
+fn run_backpressure_concurrent(workers: usize, rounds: usize, n: usize, verbose: bool) -> usize {
+    let failures = Arc::new(AtomicUsize::new(0));
+    std::thread::scope(|s| {
+        for w in 0..workers {
+            let failures = &failures;
+            s.spawn(move || {
+                for r in 0..rounds {
+                    let port = 20000 + (w * rounds + r) as u16;
+                    let (received, ok) = run_write_backpressure_once(port, n);
+                    if !ok {
+                        if verbose {
+                            println!("worker {w} round {r}: CORRUPTION received={received}");
+                        }
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    } else if received != n {
+                        if verbose {
+                            println!(
+                                "worker {w} round {r}: LOSS received={received} of {n} (lost {})",
+                                n - received
+                            );
+                        }
+                        failures.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+    failures.load(Ordering::Relaxed)
+}
+
+// Regression guard for shutdown(Write) dropping acknowledged send data: many
+// concurrent slow-reader flows, each of which shuts down its write half while
+// the send queue is backed up. Every accepted byte must reach the peer before
+// FIN, so not one exchange may come up short.
+fn test_write_backpressure_concurrent() {
+    const N: usize = 512 * 1024;
+    let failures = run_backpressure_concurrent(8, 4, N, false);
+    assert_eq!(failures, 0, "shutdown(Write) lost data on {failures} exchange(s)");
+    std::thread::sleep(Duration::from_millis(10));
+    println!("test_write_backpressure_concurrent() PASS");
+    std::thread::sleep(Duration::from_millis(10));
+}
+
+// Heavier standalone repro (96 exchanges) for reproducing/observing the bug by
+// hand: `systest test-tcp-shutdown-repro`. Prints each shortfall rather than
+// asserting, so it reports the full loss distribution.
+pub fn test_tcp_shutdown_repro() {
+    const N: usize = 1024 * 1024;
+    let total = 8 * 12;
+    let failures = run_backpressure_concurrent(8, 12, N, true);
+    println!("test_tcp_shutdown_repro DONE: {failures}/{total} exchanges lost data");
 }
 
 // Data arriving well before the deadline must complete a timed read
@@ -1133,7 +1283,17 @@ fn test_timeout_storm_during_transfer() {
             }
         }
         client.shutdown(std::net::Shutdown::Write).unwrap();
-        assert!(timeouts > 0, "the storm produced no zero-progress timeout");
+        // The storm premise -- writer outpaces reader, so the send queue fills
+        // and a 2ms write hits a zero-progress timeout -- only holds when the
+        // writer runs at full speed. Under --under-load the writer is itself
+        // starved of CPU, so the (deliberately slow) reader keeps the queue
+        // drained and no write times out. That is a coverage assumption, not a
+        // correctness property; the integrity checks below still run in both
+        // modes. Require a timeout only when the writer isn't CPU-starved.
+        assert!(
+            timeouts > 0 || crate::under_load(),
+            "the storm produced no zero-progress timeout"
+        );
     });
 
     assert!(ok.load(Ordering::Acquire), "peer saw wrong bytes");
@@ -1154,6 +1314,7 @@ pub fn run_all_tests() {
     test_read_timeout_early_data();
     test_write_timeout();
     test_write_backpressure_integrity();
+    test_write_backpressure_concurrent();
     test_timeout_storm_during_transfer();
     test_concurrent_readers();
 }

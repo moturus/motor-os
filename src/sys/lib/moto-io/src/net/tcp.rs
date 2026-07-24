@@ -9,7 +9,6 @@ use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
-use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
 use core::time::Duration;
@@ -24,6 +23,7 @@ use moto_sys_io::api_net::TcpState;
 
 use crate::net::readiness::NetEventListener;
 use crate::net::readiness::Readiness;
+use crate::net::wait::{WaitSet, WaiterId};
 use super::channel::ChannelReservation;
 use super::channel::NetChannel;
 use super::channel::RpcWaiter;
@@ -368,7 +368,7 @@ impl TcpListener {
                 nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
                 channel_reservation,
                 recv_queue,
-                rx_wakers: Mutex::new(Vec::new()),
+                rx_waiters: WaitSet::new(),
                 tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
                 rx_closed: AtomicBool::new(false),
                 tx_closed: AtomicBool::new(false),
@@ -550,7 +550,7 @@ pub struct TcpStream {
     // every incoming message and read-closing state change. Multiple
     // entries = concurrent readers on dup'd FDs, all correct candidates
     // for the next byte.
-    rx_wakers: Mutex<Vec<core::task::Waker>>,
+    rx_waiters: WaitSet,
 
     // This reflects the state as reported by the driver (sys-io).
     tcp_state_driver: AtomicU32, // rt_api::TcpState
@@ -668,21 +668,24 @@ impl TcpStream {
     /// Register a read future's waker. The caller must re-check for RX
     /// progress after registering (register-then-recheck closes the race
     /// with the rx task queueing in between).
-    fn add_rx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.rx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    fn add_rx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.rx_waiters.register(id, waker);
     }
 
-    /// Wake parked read futures. drain() keeps the Vec's capacity: no
-    /// allocation per park/wake cycle. Waking under the lock is fine
-    /// (a bridge-waker wake never blocks).
+    fn remove_rx_waker(&self, id: &mut Option<WaiterId>) {
+        self.rx_waiters.unregister(id);
+    }
+
+    /// Wake parked read futures, removing their registrations before invoking
+    /// arbitrary waker code.
     fn wake_rx_waiters(&self) {
-        let mut wakers = self.rx_wakers.lock();
-        for waker in wakers.drain(..) {
-            waker.wake();
-        }
+        self.rx_waiters.wake_all();
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn rx_waiter_count(&self) -> usize {
+        self.rx_waiters.len()
     }
 
     // Note: this is called from the rx task, so must not sleep. Every
@@ -845,7 +848,7 @@ impl TcpStream {
                 me: me.clone(),
                 nonblocking: AtomicBool::new(nonblocking),
                 recv_queue: crate::net::inner_rx_stream::InnerRxStream::new(),
-                rx_wakers: Mutex::new(Vec::new()),
+                rx_waiters: WaitSet::new(),
                 tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
                 rx_closed: AtomicBool::new(false),
                 tx_closed: AtomicBool::new(false),
@@ -1206,7 +1209,7 @@ impl TcpStream {
     }
 
     /// The read/peek future the veneer parks on and a native reactor awaits.
-    /// Cancel-safe: dropping it leaves at most a stale waker entry.
+    /// Cancel-safe: dropping it unregisters its waker immediately.
     pub fn read_future<'a, 'b, 'c>(
         &'a self,
         bufs: &'b mut [&'c mut [u8]],
@@ -1216,13 +1219,17 @@ impl TcpStream {
             stream: self,
             bufs,
             peek,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a read would not block (data buffered or read half
     /// closed). A native reactor awaits this, then calls `try_read`.
     pub fn readable(&self) -> Readable<'_> {
-        Readable { stream: self }
+        Readable {
+            stream: self,
+            waiter_id: None,
+        }
     }
 
     /// Nonblocking write: writes what fits now (`Ok(n)`, at least one byte),
@@ -1654,12 +1661,19 @@ impl TcpStream {
 }
 
 /// A blocking read expressed as a future. Cancel-safe (design rule 7):
-/// all RX state lives in the stream; dropping a timed-out instance
-/// leaves at most a stale waker entry.
+/// all RX state lives in the stream, and dropping an instance unregisters
+/// its waker immediately.
 pub struct TcpReadFuture<'a, 'b, 'c> {
     pub stream: &'a TcpStream,
     pub bufs: &'b mut [&'c mut [u8]],
     pub peek: bool,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for TcpReadFuture<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.stream.remove_rx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for TcpReadFuture<'_, '_, '_> {
@@ -1674,14 +1688,20 @@ impl core::future::Future for TcpReadFuture<'_, '_, '_> {
         let this = self.get_mut();
         match this.stream.poll_rx(this.bufs, this.peek) {
             Err(moto_rt::E_NOT_READY) => {}
-            res => return Poll::Ready(res),
+            res => {
+                this.stream.remove_rx_waker(&mut this.waiter_id);
+                return Poll::Ready(res);
+            }
         }
         // Register-then-recheck closes the race with the rx task
         // queueing between the check above and the registration.
-        this.stream.add_rx_waker(cx.waker());
+        this.stream.add_rx_waker(&mut this.waiter_id, cx.waker());
         match this.stream.poll_rx(this.bufs, this.peek) {
             Err(moto_rt::E_NOT_READY) => Poll::Pending,
-            res => Poll::Ready(res),
+            res => {
+                this.stream.remove_rx_waker(&mut this.waiter_id);
+                Poll::Ready(res)
+            }
         }
     }
 }
@@ -1772,6 +1792,13 @@ impl TcpStream {
 /// veneer parks on the richer `read_future` instead. Cancel-safe.
 pub struct Readable<'a> {
     stream: &'a TcpStream,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for Readable<'_> {
+    fn drop(&mut self) {
+        self.stream.remove_rx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for Readable<'_> {
@@ -1783,14 +1810,17 @@ impl core::future::Future for Readable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let stream = self.stream;
+        let this = self.get_mut();
+        let stream = this.stream;
         if stream.read_ready() {
+            stream.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         // Register-then-recheck closes the race with the rx task queueing
         // between the check above and the registration.
-        stream.add_rx_waker(cx.waker());
+        stream.add_rx_waker(&mut this.waiter_id, cx.waker());
         if stream.read_ready() {
+            stream.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         Poll::Pending

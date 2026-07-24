@@ -1,10 +1,34 @@
 #![allow(clippy::slow_vector_initialization)]
 
+/// Bind, tolerating a transient `AlreadyInUse` left behind by a previous run.
+///
+/// These tests use fixed loopback ports, and sys-io reclaims a dead process's
+/// sockets asynchronously. A run starting seconds after one that was killed or
+/// panicked -- which is exactly what the stress harness does -- can still see
+/// the old bind, so a single attempt is a race rather than a real conflict.
+/// A port held indefinitely still fails the test.
+fn bind_retry(addr: std::net::SocketAddr) -> std::net::UdpSocket {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match std::net::UdpSocket::bind(addr) {
+            Ok(sock) => return sock,
+            Err(err) => {
+                assert!(
+                    err.kind() == std::io::ErrorKind::AlreadyExists
+                        && std::time::Instant::now() < deadline,
+                    "UdpSocket::bind({addr}): {err:?}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 fn test_udp_basic() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
-    let s1 = std::net::UdpSocket::bind(a1).unwrap();
-    let s2 = std::net::UdpSocket::bind(a2).unwrap();
+    let s1 = bind_retry(a1);
+    let s2 = bind_retry(a2);
 
     assert_eq!(a1, s1.local_addr().unwrap());
     assert_eq!(a2, s2.local_addr().unwrap());
@@ -31,8 +55,8 @@ fn test_udp_basic() {
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
-    let s1 = std::net::UdpSocket::bind(a1).unwrap();
-    let s2 = std::net::UdpSocket::bind(a2).unwrap();
+    let s1 = bind_retry(a1);
+    let s2 = bind_retry(a2);
 
     let mut buf1 = vec![];
     buf1.resize(moto_rt::net::MAX_UDP_PAYLOAD, 0); // 65493
@@ -65,10 +89,14 @@ fn test_udp_large_packets() {
 
 fn test_udp_double_bind() {
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
-    let sock = std::net::UdpSocket::bind(addr).unwrap();
+    let sock = bind_retry(addr);
     assert!(std::net::UdpSocket::bind(addr).is_err()); // Can't bind again to the same address.
     drop(sock);
-    let _ = std::net::UdpSocket::bind(addr).unwrap(); // Can bind now that `sock` is dropped.
+    // The rebind must eventually succeed, but `sock`'s teardown -- like any
+    // socket release -- reaches sys-io asynchronously, so an immediate retry can
+    // still observe the old bind. bind_retry waits for the release; the strict
+    // is_err() above already proved the double-bind is rejected while live.
+    let _ = bind_retry(addr); // Can bind now that `sock` is dropped.
     println!("-- test_udp_double_bind() PASS");
 }
 
@@ -76,9 +104,9 @@ fn test_udp_connect() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:10000").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:10001").unwrap();
     let a3 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:10002").unwrap();
-    let s1 = std::net::UdpSocket::bind(a1).unwrap();
-    let s2 = std::net::UdpSocket::bind(a2).unwrap();
-    let s3 = std::net::UdpSocket::bind(a3).unwrap();
+    let s1 = bind_retry(a1);
+    let s2 = bind_retry(a2);
+    let s3 = bind_retry(a3);
 
     s1.connect(a2).unwrap();
     assert_eq!(s1.local_addr().unwrap(), a1);
@@ -119,7 +147,7 @@ fn test_udp_connect() {
 
 fn test_udp_timeouts() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
-    let s1 = std::net::UdpSocket::bind(a1).unwrap();
+    let s1 = bind_retry(a1);
 
     // No timeouts by default.
     assert!(s1.write_timeout().unwrap().is_none());

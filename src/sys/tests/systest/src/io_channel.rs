@@ -268,11 +268,40 @@ fn test_error_handler_on_double_free() {
     println!("----- io_channel::test_error_handler_on_double_free PASS");
 }
 
+const SPAWN_READ_CHILD: &str = "io-channel-spawn-read-child";
+
+pub fn is_spawn_read_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == SPAWN_READ_CHILD
+}
+
+fn test_concurrent_spawn_reads() {
+    let exe = std::env::current_exe().unwrap();
+    for _ in 0..8 {
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    assert!(
+                        std::process::Command::new(&exe)
+                            .arg(SPAWN_READ_CHILD)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                });
+            }
+        });
+    }
+    println!("----- io_channel::test_concurrent_spawn_reads PASS");
+}
+
 pub fn run_all_tests() {
     basic_test();
     test_ping_pong();
     test_page_alloc();
     test_error_handler_on_double_free();
+    test_concurrent_spawn_reads();
 
     println!("io_channel: ALL PASS");
 }
