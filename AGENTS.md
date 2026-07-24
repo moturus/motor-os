@@ -15,6 +15,7 @@ General guidelines:
 
 * Split your work in small (100-300 loc) patches, including tests.
 * Only rarely, when it is hard to make a smaller change, make a larger patch.
+* Document your code with comments, but use them sparingly: the ratio of comments to code should be about 1:5 on average.
 * Stop if any non-obvious decision is required and ask for guidance.
 * Stop if any preexisting bug, including in test harness, is found and ask for guidance.
 * Make sure your tests are included in src/tests/full-test.sh either directly or transitively.
