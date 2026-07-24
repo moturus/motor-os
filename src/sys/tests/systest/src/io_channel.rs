@@ -201,6 +201,67 @@ fn test_page_alloc() {
     println!("----- io_channel::test_page_alloc PASS");
 }
 
+fn test_local_page_free_wakes_waiter() {
+    use std::future::Future;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waiter = server_started.clone();
+    let server = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let listener = moto_ipc::io_channel::listen("systest_local_page_free");
+            server_started.store(true, Ordering::Release);
+            let (_sender, mut receiver) = listener.await.unwrap();
+            receiver.recv().await.unwrap();
+        });
+    });
+    while !waiter.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+
+    let client = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let (sender, _receiver) =
+                moto_ipc::io_channel::connect("systest_local_page_free").unwrap();
+            let mut pages = sender.alloc_pages(3, 7).await.unwrap();
+            let (pending_tx, pending_rx) = std::sync::mpsc::sync_channel(0);
+            let (allocated_tx, allocated_rx) = std::sync::mpsc::channel();
+            let allocator_sender = sender.clone();
+            let allocator = std::thread::spawn(move || {
+                moto_async::LocalRuntime::new().block_on(async move {
+                    let mut allocation = Box::pin(allocator_sender.alloc_pages(2, 7));
+                    futures::future::poll_fn(|cx| match allocation.as_mut().poll(cx) {
+                        Poll::Pending => {
+                            pending_tx.send(()).unwrap();
+                            Poll::Ready(())
+                        }
+                        Poll::Ready(_) => panic!("page allocation unexpectedly completed"),
+                    })
+                    .await;
+                    allocated_tx.send(allocation.await.unwrap()).unwrap();
+                });
+            });
+
+            pending_rx.recv().unwrap();
+            pages.truncate(1);
+            let allocated = allocated_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("locally freed pages did not wake the allocator");
+            drop(allocated);
+            allocator.join().unwrap();
+
+            let mut done = moto_ipc::io_channel::Msg::new();
+            done.id = 1;
+            sender.send(done).await.unwrap();
+        });
+    });
+
+    client.join().unwrap();
+    server.join().unwrap();
+    println!("----- io_channel::test_local_page_free_wakes_waiter PASS");
+}
+
 // Verifies the io_channel error handler (set_error_handler) fires -- instead of
 // a panic -- when a page is double-freed. This is the mechanism sys-io will use
 // to drop a client that names an already-recovered page in two TX messages. We
@@ -226,23 +287,23 @@ fn test_error_handler_on_double_free() {
 
     // A server that accepts and holds the connection, so the client's recovered
     // pages carry a live remote handle (the client the handler would drop).
-    let server_started = std::sync::Arc::new(AtomicBool::new(false));
-    let waiter = server_started.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(0);
     let server = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
             let listener = moto_ipc::io_channel::listen("systest_err_handler");
-            server_started.store(true, Ordering::Release);
+            started_tx.send(()).unwrap();
             let (_sender, mut receiver) = listener.await.unwrap();
+            accepted_tx.send(()).unwrap();
             let _ = receiver.recv().await; // Hold until the client signals done.
         });
     });
-    while !waiter.load(Ordering::Relaxed) {
-        core::hint::spin_loop();
-    }
+    started_rx.recv().unwrap();
 
     let client = std::thread::spawn(move || {
         moto_async::LocalRuntime::new().block_on(async move {
             let (sender, _receiver) = moto_ipc::io_channel::connect("systest_err_handler").unwrap();
+            accepted_rx.recv().unwrap();
 
             // into_u16 disarms this owner's Drop and leaves the shared in-use
             // bit set, so both get_page handles free the same page on drop.
@@ -300,6 +361,7 @@ pub fn run_all_tests() {
     basic_test();
     test_ping_pong();
     test_page_alloc();
+    test_local_page_free_wakes_waiter();
     test_error_handler_on_double_free();
     test_concurrent_spawn_reads();
 
