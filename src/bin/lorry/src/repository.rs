@@ -1,13 +1,15 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-use std::fs::{self, File, Metadata};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
 use toml_edit::{Item, Table};
 
+use crate::archive::Limits as ArchiveLimits;
+use crate::atomic::AtomicDirectory;
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
 #[cfg(test)]
@@ -88,6 +90,22 @@ pub struct SeededGitObject {
     pub extracted_bytes: u64,
     pub file_count: u64,
     pub directory_count: u64,
+}
+
+#[derive(Debug)]
+pub struct RepositoryWriter {
+    root: PathBuf,
+    layer: Layer,
+    limits: Limits,
+    archive_limits: ArchiveLimits,
+    keep_artifacts: bool,
+    keep_sources: bool,
+}
+
+#[derive(Debug)]
+pub struct RepositoryTransaction {
+    writer: RepositoryWriter,
+    staging: AtomicDirectory,
 }
 
 impl RepositorySet {
@@ -209,6 +227,160 @@ impl Repository {
             present: true,
         })
     }
+}
+
+impl RepositoryWriter {
+    pub fn open(
+        repositories: &Repositories,
+        limits: Limits,
+        archive_limits: ArchiveLimits,
+    ) -> Result<Self> {
+        let (layer, root) = if let Some(root) = &repositories.local {
+            (Layer::Local, root.clone())
+        } else if let Some(root) = &repositories.user {
+            (Layer::User, root.clone())
+        } else {
+            return Err(Error::failure(
+                "vendoring registry packages requires a writable Lorry repository",
+            )
+            .with_help(
+                "configure an absolute `repositories.local` or `repositories.user` path",
+            ));
+        };
+        initialize_repository(&root)?;
+        verify_repository_header(&root)?;
+        for relative in [
+            "objects",
+            "objects/crates-io",
+            "objects/crates-io/sha256",
+            "objects/seeded-git",
+            "objects/seeded-git/sha256",
+            ".staging",
+        ] {
+            require_real_directory(&root.join(relative), "repository directory")?;
+        }
+        Ok(Self {
+            root,
+            layer,
+            limits,
+            archive_limits,
+            keep_artifacts: repositories.keep_artifacts,
+            keep_sources: repositories.keep_sources,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn begin(self) -> Result<RepositoryTransaction> {
+        let staging = AtomicDirectory::new(&self.root.join(".staging"), "vendor")?;
+        Ok(RepositoryTransaction {
+            writer: self,
+            staging,
+        })
+    }
+}
+
+impl RepositoryTransaction {
+    pub fn path(&self) -> &Path {
+        self.staging.path()
+    }
+
+}
+
+fn initialize_repository(root: &Path) -> Result<()> {
+    match fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(Error::failure(format!(
+                "writable repository `{}` is not a real directory",
+                root.display()
+            )));
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to inspect writable repository `{}`: {error}",
+                root.display()
+            )));
+        }
+    }
+    let parent = root.parent().ok_or_else(|| {
+        Error::failure(format!(
+            "writable repository `{}` has no parent",
+            root.display()
+        ))
+    })?;
+    require_real_directory(parent, "writable repository parent")?;
+    let label = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repository");
+    let staging = AtomicDirectory::new(parent, label)?;
+    write_new(
+        &staging.path().join("repository.toml"),
+        b"format-version = 1\nobject-hash = \"sha256\"\n",
+    )?;
+    for relative in [
+        "objects",
+        "objects/crates-io",
+        "objects/crates-io/sha256",
+        "objects/seeded-git",
+        "objects/seeded-git/sha256",
+        ".staging",
+    ] {
+        fs::create_dir(staging.path().join(relative)).map_err(|error| {
+            Error::failure(format!(
+                "failed to create repository directory `{relative}`: {error}"
+            ))
+        })?;
+    }
+    persist_repository_tree(staging.path())?;
+    if !staging.commit_no_replace(root)? {
+        verify_repository_header(root)?;
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            Error::failure(format!("failed to create `{}`: {error}", path.display()))
+        })?;
+    std::io::Write::write_all(&mut file, bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| Error::failure(format!("failed to persist `{}`: {error}", path.display())))
+}
+
+fn persist_repository_tree(root: &Path) -> Result<()> {
+    for relative in [
+        "objects/crates-io/sha256",
+        "objects/crates-io",
+        "objects/seeded-git/sha256",
+        "objects/seeded-git",
+        "objects",
+        ".staging",
+        "",
+    ] {
+        sync_directory(&root.join(relative))?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to persist repository directory `{}`: {error}",
+                path.display()
+            ))
+        })
 }
 
 fn shadow_error(repository: &Repository, object_path: &Path, error: Error) -> Error {
@@ -1198,6 +1370,62 @@ mod tests {
             keep_artifacts: true,
             keep_sources: true,
         }
+    }
+
+    fn archive_limits() -> ArchiveLimits {
+        ArchiveLimits {
+            max_compressed_bytes: 1024,
+            max_expanded_bytes: 4096,
+            max_files: 32,
+            max_path_bytes: 256,
+            max_file_bytes: 1024,
+        }
+    }
+
+
+    #[test]
+    fn initializes_the_preferred_writable_repository_and_cleans_staging() {
+        let root = TempDir::new("writer");
+        let local = root.0.join("local");
+        let user = root.0.join("user");
+        let repositories = Repositories {
+            local: Some(local.clone()),
+            user: Some(user),
+            ..Repositories::default()
+        };
+
+        let writer = RepositoryWriter::open(
+            &repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        assert_eq!(writer.root(), local);
+        verify_repository_header(&local).unwrap();
+        for relative in [
+            "objects/crates-io/sha256",
+            "objects/seeded-git/sha256",
+            ".staging",
+        ] {
+            assert!(local.join(relative).is_dir());
+        }
+
+        let transaction = writer.begin().unwrap();
+        assert!(transaction.path().is_dir());
+        drop(transaction);
+        assert_eq!(fs::read_dir(local.join(".staging")).unwrap().count(), 0);
+    }
+
+
+    #[test]
+    fn writer_requires_a_configured_writable_layer() {
+        let error = RepositoryWriter::open(
+            &Repositories::default(),
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("writable Lorry repository"));
     }
 
     #[test]
