@@ -19,7 +19,8 @@ General guidelines:
 * Stop if any non-obvious decision is required and ask for guidance.
 * Stop if any preexisting bug, including in test harness, is found and ask for guidance.
 * Make sure your tests are included in src/tests/full-test.sh either directly or transitively.
-* Make sure src/tests/full-test.sh passes consistently (at least three times sequentially) before committing a patch.
+* Make sure src/tests/full-test.sh passes consistently as both debug and release
+  builds/runs at least three times each before committing a patch.
 * Complexity is frowned upon, and is tolerated only when really needed.
 * On larger tasks, first create a plan in an *.md file in docs/plans/, ask for review, then proceed
   in incremental steps. Do not change any code during the planning step.
@@ -28,3 +29,10 @@ General guidelines:
 * Format your changes with `cargo +nightly fmt`.
 * Be careful not to introduce performance regressions.
 * Explicit user instructions may override anything stated above.
+
+General commands:
+
+* build (debug): `make -j$(nproc)`
+* build (release): `make -j$(nproc) BUILD=release`
+* the full test (debug): `src/tests/full-test.sh`
+* the full test (release): `src/tests/full-test.sh --release`
