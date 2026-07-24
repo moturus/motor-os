@@ -745,14 +745,7 @@ pub fn resolve_dynamic(
     locked: &[LockedPreference],
     loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
-    resolve_with_scope(
-        manifest,
-        catalog,
-        options,
-        locked,
-        Scope::Complete,
-        loader,
-    )
+    resolve_with_scope(manifest, catalog, options, locked, Scope::Complete, loader)
 }
 
 pub fn resolve_selected_dynamic(
@@ -2122,7 +2115,10 @@ mod tests {
             .iter()
             .find(|package| package.key.name == "shared")
             .unwrap();
-        assert_eq!(shared.target_features, BTreeSet::from(["unix".into(), "windows".into()]));
+        assert_eq!(
+            shared.target_features,
+            BTreeSet::from(["unix".into(), "windows".into()])
+        );
         let locked = LockedPreference::from_resolution(&merged);
         assert_eq!(locked.len(), 1);
         assert_eq!(locked[0].name, "shared");

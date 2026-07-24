@@ -251,9 +251,7 @@ impl RepositoryWriter {
             return Err(Error::failure(
                 "vendoring registry packages requires a writable Lorry repository",
             )
-            .with_help(
-                "configure an absolute `repositories.local` or `repositories.user` path",
-            ));
+            .with_help("configure an absolute `repositories.local` or `repositories.user` path"));
         };
         initialize_repository(&root)?;
         verify_repository_header(&root)?;
@@ -394,8 +392,7 @@ impl RepositoryTransaction {
             self.writer.limits,
             self.writer.archive_limits.max_compressed_bytes,
         )?;
-        self.objects
-            .push(StagedRegistryObject { object, manifest });
+        self.objects.push(StagedRegistryObject { object, manifest });
         Ok(self.objects.last().unwrap())
     }
 
