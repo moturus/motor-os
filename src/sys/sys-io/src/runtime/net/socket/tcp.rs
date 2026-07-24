@@ -1063,22 +1063,16 @@ impl MotoSocket {
         // Need to determine when to abort and when to notify. The logic is convoluted.
         // Can it be made more clear?
         let abort =
-            Self::with_tcp_smoltcp_socket(&moto_socket, |socket_id, smoltcp_socket, state| {
-                let abort = if smoltcp_socket.may_send() {
-                    if state.tx_queue.is_empty() && smoltcp_socket.send_queue() == 0 {
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                };
-
-                if abort || Some(0) == state.linger_secs {
-                    true
-                } else {
-                    false
-                }
+            Self::with_tcp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, state| {
+                // Abort (RST) only when nothing remains to deliver. Aborting with a
+                // non-empty send buffer drops already-acknowledged writes, and since
+                // the FIN sits after them the peer sees a cleanly truncated stream;
+                // when data remains we linger so the device task drains it and
+                // completes the FIN first. `may_send()` must not gate this: after the
+                // graceful `close()` the socket is in FIN-WAIT (may_send() == false)
+                // with its buffer still draining. SO_LINGER(0) still aborts at once.
+                let drained = state.tx_queue.is_empty() && smoltcp_socket.send_queue() == 0;
+                drained || Some(0) == state.linger_secs
             });
 
         let (linger_secs, delayed_notify) = {
