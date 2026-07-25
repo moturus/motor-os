@@ -30,6 +30,14 @@ General guidelines:
 * Be careful not to introduce performance regressions.
 * Explicit user instructions may override anything stated above.
 
+Note:
+
+Do not add retries, longer timeouts, ignored failures, or other workarounds
+that can conceal a defect or make a failing test appear reliable.
+Diagnose and fix the underlying issue instead. A bounded retry is permitted
+only when the operation is explicitly designed to tolerate a documented
+transient external failure, and only with prior user approval.
+
 General commands:
 
 * build (debug): `make -j$(nproc)`
