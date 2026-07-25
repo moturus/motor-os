@@ -7,6 +7,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+getrandom = { version = "=0.2.17", features = ["custom"] }
+rustls = { version = "=0.23.42", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "=2.2.0"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-rt = { path = "../../sys/lib/moto-rt" }
+
+[patch.crates-io]
+ring = { path = ".lorry/vendor/ring-0_17_14/source" }
 
 [profile.release]
 panic = "abort"
