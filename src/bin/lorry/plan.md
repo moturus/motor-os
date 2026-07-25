@@ -1,7 +1,7 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage 2 vendoring in progress — atomic object publication and
-path-only vendor transactions are complete; direct curl acquisition is next**
+Status: **Stage 2 vendoring in progress — the reviewed curl graph and
+composite ring seed are complete; direct curl acquisition is next**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -3107,9 +3107,37 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
   curl from that repository. Thus Motor's network utility is itself buildable
   by Stage-2 Lorry.
 - The bootstrap manifest's graph ID and lockfile path change from
-  `lorry-fetch` to `curl` when the reviewed curl Cargo.toml/Cargo.lock graph is
-  added. Until that implementation patch, the existing 45-object seed remains
-  the exact dependency inventory; only its eventual owning package changes.
+  `lorry-fetch` to `curl`. The reviewed curl Cargo.toml/Cargo.lock graph and
+  the corresponding 45-object production seed are now checked in.
+
+### Round 46: composite crates.io-plus-Git `ring` seed
+
+#### Completed implementation
+
+- The complete buildable base is the exact crates.io `ring 0.17.14` archive
+  with SHA-256
+  `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7`.
+  Safe archive extraction preserves its published `pregenerated/` assembly,
+  which is not present in a Git checkout.
+- The independently acquired Git commit
+  `b1dad2579de791d0c31ad33300187e584ba6c268` and tree
+  `824d5b8e9755603070a8167e0c5529acb627d956` supply exactly two reviewed
+  replacement blobs: `build.rs` and `src/rand.rs`. The seeder requires that
+  both paths are mode-`100644` regular blobs at that commit and that each
+  replacement changes an existing regular archive file.
+- `patch-files` is closed manifest and repository-object metadata. The
+  resulting immutable source tree contains 391 files, 63 directories, and
+  7,757,154 file bytes. Its `lorry-source-tree-v1` digest is
+  `c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6`.
+- Online acquisition followed by fully offline reproduction produced the
+  production seed fingerprint
+  `0f12be3e526e48aee5aa6fb761cadc43ffa1a8f5498e19384c113d7d5f5a0bcd`.
+  The bootstrap fixture proves that unpatched archive files, including a
+  pregenerated artifact, survive and that linked Git patch paths are rejected.
+- This round supersedes the whole-Git-export build-source statements in
+  Rounds 31, 32, 34, and 37 and their former seed fingerprints. The full Git
+  tree identity remains independently verified provenance; the composite
+  source-tree digest is the build object identity.
 
 ## Stage-1/2 design closure and external start gates
 
@@ -3147,11 +3175,11 @@ were present, tested, and their concrete evidence was recorded:
 10. **Satisfied.** The reviewed `moturus/ring` commit based on upstream
     `ring 0.17.14` is fetchable at
     `b1dad2579de791d0c31ad33300187e584ba6c268`. Its Git tree ID is
-    `824d5b8e9755603070a8167e0c5529acb627d956`, and its
-    `lorry-source-tree-v1` digest is
-    `776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351`.
-    These values appear in this plan and the checked-in bootstrap/config
-    inputs.
+    `824d5b8e9755603070a8167e0c5529acb627d956`. Round 46 defines the
+    buildable composite source derived from the exact crates.io archive plus
+    its two reviewed Git blobs; its source-tree digest is
+    `c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6`.
+    These identities appear in the checked-in bootstrap/config inputs.
 
 The following later external gates do not prevent the completed Stage-1 work,
 but each blocks the indicated Stage-2 work:
