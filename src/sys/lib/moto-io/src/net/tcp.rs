@@ -378,7 +378,7 @@ impl TcpListener {
             event_listener: make_listener(),
             me: me.clone(),
             nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
-            channel_reservation,
+            channel_reservation: Some(channel_reservation),
             recv_queue,
             rx_waiters: WaitSet::new(),
             tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
@@ -573,7 +573,7 @@ impl TcpListener {
 }
 
 pub struct TcpStream {
-    channel_reservation: ChannelReservation,
+    channel_reservation: Option<ChannelReservation>,
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
@@ -658,24 +658,30 @@ impl Drop for TcpStream {
             return;
         }
 
-        // Written bytes must reach the wire before the close.
-        self.flush_pending_tx();
+        let reservation = self.channel_reservation.take().unwrap();
+        let channel = reservation.channel().clone();
+
+        // Transfer written bytes and the close as one FIFO record. Its
+        // reservation keeps the channel alive until the driver has accepted
+        // every message; drop itself never waits for staging/ring room.
+        let mut messages = VecDeque::new();
+        while let Some(msg) = self.claim_pending_tx() {
+            messages.push_back(msg);
+        }
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamClose as u16;
         req.handle = self.handle();
-
-        // Guaranteed delivery: never drop the close (sys-io would leak the
-        // stream), never panic on a full send queue, and never deadlock when
-        // this drop runs on the IO thread (see send_msg_guaranteed).
-        self.channel().send_msg_guaranteed(req);
+        messages.push_back(req);
 
         // Clear RX queue: basically, free up server-allocated pages.
-        super::channel::clear_rx_queue(&self.recv_queue, self.channel());
+        super::channel::clear_rx_queue(&self.recv_queue, &channel);
         assert!(self.recv_queue.lock().is_empty());
 
-        self.channel().tcp_stream_dropped(self.handle());
+        channel.tcp_stream_dropped(self.handle());
         super::channel::stats_tcp_stream_dropped();
+
+        channel.enqueue_teardown_messages(reservation, messages);
     }
 }
 
@@ -691,7 +697,7 @@ impl TcpStream {
     }
 
     fn channel(&self) -> &NetChannel {
-        self.channel_reservation.channel()
+        self.channel_reservation.as_ref().unwrap().channel()
     }
 
     /// Whether the receive queue holds anything (the veneer raises READABLE
@@ -754,6 +760,12 @@ impl TcpStream {
             pages.push(page);
         }
         f();
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn fill_stream_drop_send_queue_for_test(&self) {
+        self.channel().fill_stream_drop_send_queue_for_test();
     }
 
     // Note: this is called from the rx task, so must not sleep. Every
@@ -907,7 +919,7 @@ impl TcpStream {
         };
 
         let new_stream = Arc::new_cyclic(|me| TcpStream {
-            channel_reservation,
+            channel_reservation: Some(channel_reservation),
             local_addr: Mutex::new(None),
             remote_addr: *socket_addr,
             handle: AtomicU64::new(SysHandle::NONE.into()),
@@ -1542,10 +1554,9 @@ impl TcpStream {
         }
     }
 
-    /// Send all pending TX bytes now, ahead of a Close/shutdown(write)
+    /// Send all pending TX bytes now, ahead of a blocking shutdown(write)
     /// control message; the pages' markers, still queued behind us, then
-    /// no-op on the emptied queue. Guaranteed delivery, because this runs
-    /// from drop, potentially on the IO thread itself.
+    /// no-op on the emptied queue.
     fn flush_pending_tx(&self) {
         while let Some(msg) = self.claim_pending_tx() {
             self.channel().send_msg_guaranteed(msg);

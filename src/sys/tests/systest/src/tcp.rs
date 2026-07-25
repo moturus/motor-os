@@ -441,6 +441,84 @@ fn test_native_async_shutdown() {
     println!("test_native_async_shutdown() PASS");
 }
 
+/// Dropping a stream with pending bytes must neither block on a full staging
+/// queue nor let its close overtake those bytes.
+fn test_native_stream_drop_under_backpressure() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_trigger = Arc::new(AtomicBool::new(false));
+    let release_trigger_peer = release_trigger.clone();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        while !release_trigger_peer.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        stream.write_all(&[1]).unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        received
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+    moto_io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
+    release_trigger.store(true, Ordering::Release);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::stream_drop_backpressure_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not reach the stream-drop backpressure hook"
+        );
+        std::thread::yield_now();
+    }
+
+    // Sixteen pages become two multi-page teardown messages. Their ordinary
+    // queue markers remain ahead of the placeholders used to fill staging.
+    let expected = vec![0x5a_u8; 64 * 1024];
+    let bufs = [expected.as_slice()];
+    assert_eq!(stream.try_write(&bufs), Ok(expected.len()));
+    stream.fill_stream_drop_send_queue_for_test();
+
+    let drop_done = Arc::new(AtomicBool::new(false));
+    let drop_done_thread = drop_done.clone();
+    let drop_thread = std::thread::spawn(move || {
+        drop(stream);
+        drop_done_thread.store(true, Ordering::Release);
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !drop_done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let drop_was_nonblocking = drop_done.load(Ordering::Acquire);
+
+    // Always release the runtime before asserting so a regression reports
+    // cleanly instead of stranding the test process.
+    moto_io::net::channel::release_stream_drop_backpressure_test();
+    drop_thread.join().unwrap();
+    assert!(
+        drop_was_nonblocking,
+        "TcpStream::drop waited for staging-queue room"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::stream_drop_backpressure_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "TcpStream::drop blocked its channel runtime on a full send queue"
+        );
+        std::thread::yield_now();
+    }
+
+    assert_eq!(peer.join().unwrap(), expected);
+    println!("test_native_stream_drop_under_backpressure() PASS");
+}
+
 /// A dropped native accept future must not strand the socket that sys-io
 /// creates when its already-posted accept RPC later completes.
 fn test_cancelled_native_accept_closes_socket() {
@@ -632,6 +710,7 @@ pub fn test_native_net_cancellation() {
     test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_rpc_response_is_tolerated();
     test_native_async_shutdown();
+    test_native_stream_drop_under_backpressure();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }

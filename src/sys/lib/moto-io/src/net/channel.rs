@@ -178,6 +178,29 @@ static LISTENER_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "netdev")]
 static LISTENER_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(LISTENER_DROP_TEST_IDLE);
 
+// Deterministic netdev regression hook for stream destruction with pending TX
+// under channel backpressure. Unlike the listener hook, the test fills the
+// staging queue after the runtime is held so it can first queue real TX
+// markers. Placeholder messages are removed before the tx task can run.
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_IDLE: u8 = 0;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_ARMED: u8 = 1;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_PREPARING: u8 = 2;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_HELD: u8 = 3;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_RELEASED: u8 = 4;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_DONE: u8 = 5;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_MSG_ID: u64 = u64::MAX - 1;
+#[cfg(feature = "netdev")]
+static STREAM_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "netdev")]
+static STREAM_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(STREAM_DROP_TEST_IDLE);
+
 // Hold one ordinary RPC response between map removal and oneshot delivery,
 // allowing systest to cancel the receiver at that exact ownership boundary.
 #[cfg(feature = "netdev")]
@@ -231,6 +254,46 @@ pub fn release_listener_drop_backpressure_test() {
 #[cfg(feature = "netdev")]
 pub fn listener_drop_backpressure_test_is_done() -> bool {
     LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_DONE
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn arm_stream_drop_backpressure_test(handle: u64) {
+    assert_ne!(0, handle);
+    STREAM_DROP_TEST_HANDLE.store(handle, Ordering::Relaxed);
+    STREAM_DROP_TEST_STATE
+        .compare_exchange(
+            STREAM_DROP_TEST_IDLE,
+            STREAM_DROP_TEST_ARMED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn stream_drop_backpressure_test_is_held() -> bool {
+    STREAM_DROP_TEST_STATE.load(Ordering::Acquire) == STREAM_DROP_TEST_HELD
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn release_stream_drop_backpressure_test() {
+    STREAM_DROP_TEST_STATE
+        .compare_exchange(
+            STREAM_DROP_TEST_HELD,
+            STREAM_DROP_TEST_RELEASED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn stream_drop_backpressure_test_is_done() -> bool {
+    STREAM_DROP_TEST_STATE.load(Ordering::Acquire) == STREAM_DROP_TEST_DONE
 }
 
 #[doc(hidden)]
@@ -666,6 +729,8 @@ impl NetChannel {
             }
             if let Some(stream) = stream {
                 stream.process_incoming_msg(msg);
+                #[cfg(feature = "netdev")]
+                self.maybe_run_stream_drop_backpressure_test(stream);
             } else {
                 self.on_orphan_message(msg);
             }
@@ -771,6 +836,46 @@ impl NetChannel {
             self.send_queue.push(msg).unwrap();
         }
         LISTENER_DROP_TEST_STATE.store(LISTENER_DROP_TEST_DONE, Ordering::Release);
+        self.maybe_wake_io_thread();
+    }
+
+    #[cfg(feature = "netdev")]
+    fn maybe_run_stream_drop_backpressure_test(&self, stream: Arc<TcpStream>) {
+        if STREAM_DROP_TEST_HANDLE.load(Ordering::Relaxed) != stream.handle()
+            || STREAM_DROP_TEST_STATE
+                .compare_exchange(
+                    STREAM_DROP_TEST_ARMED,
+                    STREAM_DROP_TEST_PREPARING,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+
+        // Release the rx task's temporary Arc before publishing HELD. The
+        // test can then perform the final stream drop while both channel
+        // tasks remain unable to drain the staging queue.
+        drop(stream);
+        STREAM_DROP_TEST_STATE.store(STREAM_DROP_TEST_HELD, Ordering::Release);
+        while STREAM_DROP_TEST_STATE.load(Ordering::Acquire) != STREAM_DROP_TEST_RELEASED {
+            core::hint::spin_loop();
+        }
+
+        // Remove only the hook's placeholders. Preserve real TX markers
+        // queued before the stream was dropped; they become harmless no-ops
+        // after the teardown record claims all pending pages.
+        let mut retained = VecDeque::new();
+        while let Some(msg) = self.send_queue.pop() {
+            if msg.id != STREAM_DROP_TEST_MSG_ID {
+                retained.push_back(msg);
+            }
+        }
+        for msg in retained {
+            self.send_queue.push(msg).unwrap();
+        }
+        STREAM_DROP_TEST_STATE.store(STREAM_DROP_TEST_DONE, Ordering::Release);
         self.maybe_wake_io_thread();
     }
 
@@ -1482,12 +1587,31 @@ impl NetChannel {
     }
 
     pub(super) fn enqueue_teardown(&self, reservation: ChannelReservation, msg: io_channel::Msg) {
+        self.enqueue_teardown_messages(reservation, VecDeque::from([msg]));
+    }
+
+    pub(super) fn enqueue_teardown_messages(
+        &self,
+        reservation: ChannelReservation,
+        messages: VecDeque<io_channel::Msg>,
+    ) {
         debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
+        debug_assert!(!messages.is_empty());
         self.teardown_queue.push(TeardownRecord {
-            messages: VecDeque::from([msg]),
+            messages,
             _reservation: reservation,
         });
         self.maybe_wake_io_thread();
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn fill_stream_drop_send_queue_for_test(&self) {
+        let mut placeholder = io_channel::Msg::new();
+        placeholder.id = STREAM_DROP_TEST_MSG_ID;
+        placeholder.command = u16::MAX;
+        placeholder.handle = u64::MAX;
+        while self.send_queue.push(placeholder).is_ok() {}
+        assert!(self.send_queue.is_full());
     }
 
     fn on_io_thread(&self) -> bool {
