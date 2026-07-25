@@ -222,15 +222,19 @@ udp_sockets="$(read_udp_socket_count)"
 [ "$udp_sockets" = "0" ] ||
   fail "restarted DNS service left $udp_sockets active UDP socket(s)"
 
-systest_output=""
-if systest_output="$(vm_ssh sys/tests/systest 2>&1)"; then
-  printf '%s\n' "$systest_output"
-else
-  systest_status="$?"
-  printf '%s\n' "$systest_output"
+# Let systest output flow to the console as it happens; tee keeps a copy so
+# the verdict can still be checked. pipefail makes the pipeline carry
+# systest's own status rather than tee's.
+SYSTEST_LOG=/tmp/full-test-systest.log
+systest_status=0
+set -o pipefail
+vm_ssh sys/tests/systest 2>&1 | tee "$SYSTEST_LOG" || systest_status="$?"
+set +o pipefail
+[ "$systest_status" -eq 0 ] ||
   fail "systest exited with status $systest_status"
-fi
 
+# $(...) drops trailing newlines, so this is the last non-empty line.
+systest_output="$(cat "$SYSTEST_LOG")"
 [ "${systest_output##*$'\n'}" = "PASS" ] ||
   fail "systest did not finish with PASS"
 
