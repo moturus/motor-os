@@ -85,6 +85,7 @@ pub struct SeededGitObject {
     pub requested_revision: String,
     pub resolved_commit: String,
     pub git_tree: String,
+    pub patch_files: Vec<String>,
     pub upstream_crates_io_checksum: [u8; 32],
     pub source_tree_sha256: [u8; 32],
     pub license: String,
@@ -906,6 +907,7 @@ fn verify_seeded_git_object(
         "requested-revision",
         "resolved-commit",
         "git-tree",
+        "patch-files",
         "upstream-crates-io-checksum",
         "source-tree-sha256",
         "license",
@@ -932,6 +934,25 @@ fn verify_seeded_git_object(
     )?;
     let resolved_commit = require_hex_string(&package_path, &document, "resolved-commit", 40)?;
     let git_tree = require_hex_string(&package_path, &document, "git-tree", 40)?;
+    let patch_files =
+        require_string_array(&package_path, &document, document.root(), "patch-files")?;
+    if patch_files.is_empty()
+        || patch_files.iter().any(|path| {
+            path.is_empty()
+                || path.len() > 4096
+                || path.starts_with('/')
+                || path.contains('\\')
+                || path
+                    .split('/')
+                    .any(|component| component.is_empty() || component == "." || component == "..")
+        })
+        || patch_files.iter().collect::<BTreeSet<_>>().len() != patch_files.len()
+    {
+        return Err(Error::failure(format!(
+            "`{}` has invalid or duplicate Git patch paths",
+            package_path.display()
+        )));
+    }
     let upstream_crates_io_checksum = require_digest(
         &package_path,
         &document,
@@ -1004,6 +1025,7 @@ fn verify_seeded_git_object(
         requested_revision,
         resolved_commit,
         git_tree,
+        patch_files,
         upstream_crates_io_checksum,
         source_tree_sha256,
         license,
@@ -1433,6 +1455,36 @@ fn require_bool(path: &Path, document: &Document, table: &Table, key: &str) -> R
     })
 }
 
+fn require_string_array(
+    path: &Path,
+    document: &Document,
+    table: &Table,
+    key: &str,
+) -> Result<Vec<String>> {
+    let item = require_item(path, table, key)?;
+    let array = item.as_array().ok_or_else(|| {
+        field_error(
+            path,
+            document,
+            item,
+            format!("repository metadata `{key}` must be an array of strings"),
+        )
+    })?;
+    array
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                field_error(
+                    path,
+                    document,
+                    item,
+                    format!("repository metadata `{key}` must contain only strings"),
+                )
+            })
+        })
+        .collect()
+}
+
 fn require_digest(path: &Path, document: &Document, table: &Table, key: &str) -> Result<[u8; 32]> {
     let item = require_item(path, table, key)?;
     let value = item.as_str().ok_or_else(|| {
@@ -1669,6 +1721,7 @@ mod tests {
                  requested-revision = \"motor-os-0.17.14\"\n\
                  resolved-commit = \"{commit}\"\n\
                  git-tree = \"{git_tree}\"\n\
+                 patch-files = [\"build.rs\", \"src/rand.rs\"]\n\
                  upstream-crates-io-checksum = \"{upstream}\"\n\
                  source-tree-sha256 = \"{digest}\"\n\
                  license = \"Apache-2.0 AND ISC\"\n\

@@ -14,8 +14,8 @@ id = "stage2-core"
 path = "src/bin/lorry/Cargo.lock"
 
 [[lock-graph]]
-id = "lorry-fetch"
-path = "src/bin/lorry-fetch/Cargo.lock"
+id = "curl"
+path = "src/bin/curl/Cargo.lock"
 
 [[crates-io]]
 name = "adler2"
@@ -49,7 +49,7 @@ name = "cc"
 version = "1.3.0"
 checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -58,7 +58,7 @@ name = "cfg-if"
 version = "1.0.4"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["stage2-core", "lorry-fetch"]
+lock-graphs = ["stage2-core", "curl"]
 retained-archive = true
 retained-source = true
 
@@ -140,7 +140,7 @@ name = "find-msvc-tools"
 version = "0.1.9"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -168,7 +168,7 @@ name = "getrandom"
 version = "0.2.17"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -204,7 +204,7 @@ name = "libc"
 version = "0.2.186"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
@@ -232,7 +232,7 @@ name = "once_cell"
 version = "1.21.4"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -241,7 +241,7 @@ name = "rustls"
 version = "0.23.42"
 checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 license = "Apache-2.0 OR ISC OR MIT"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 allow-build-script = true
 retained-archive = true
 retained-source = true
@@ -251,7 +251,7 @@ name = "rustls-pemfile"
 version = "2.2.0"
 checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
 license = "Apache-2.0 OR ISC OR MIT"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -260,7 +260,7 @@ name = "rustls-pki-types"
 version = "1.15.0"
 checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -269,7 +269,7 @@ name = "rustls-webpki"
 version = "0.103.13"
 checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 license = "ISC"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -327,7 +327,7 @@ name = "shlex"
 version = "2.0.1"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 license = "MIT OR Apache-2.0"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -354,7 +354,7 @@ name = "subtle"
 version = "2.6.1"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 license = "BSD-3-Clause"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -390,7 +390,7 @@ name = "untrusted"
 version = "0.9.0"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 license = "ISC"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -417,7 +417,7 @@ name = "zeroize"
 version = "1.9.0"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 license = "Apache-2.0 OR MIT"
-lock-graphs = ["lorry-fetch"]
+lock-graphs = ["curl"]
 retained-archive = true
 retained-source = true
 
@@ -440,9 +440,10 @@ git-url = "https://github.com/moturus/ring.git"
 requested-revision = "motor-os-0.17.14"
 resolved-commit = "b1dad2579de791d0c31ad33300187e584ba6c268"
 git-tree = "824d5b8e9755603070a8167e0c5529acb627d956"
-source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
-extracted-bytes = 11764800
-file-count = 414
-directory-count = 71
-lock-graphs = ["lorry-fetch"]
+patch-files = ["build.rs", "src/rand.rs"]
+source-tree-sha256 = "c05dbfa4d748bce2b66093633c0a644cc1e5f480d73f3b0a975e409f69386af6"
+extracted-bytes = 7757154
+file-count = 391
+directory-count = 63
+lock-graphs = ["curl"]
 retained-source = true

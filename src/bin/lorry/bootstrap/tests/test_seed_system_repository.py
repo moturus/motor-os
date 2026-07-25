@@ -84,6 +84,26 @@ def write_crate(
     return path.read_bytes()
 
 
+def write_patch_crate(path: Path) -> bytes:
+    root = "git-demo-1.0.0"
+    with tarfile.open(path, "w:gz", format=tarfile.GNU_FORMAT) as archive:
+        add_directory(archive, root)
+        add_directory(archive, f"{root}/src")
+        add_directory(archive, f"{root}/pregenerated")
+        add_file(
+            archive,
+            f"{root}/Cargo.toml",
+            b'[package]\nname = "git-demo"\nversion = "1.0.0"\nbase = true\n',
+        )
+        add_file(
+            archive,
+            f"{root}/src/lib.rs",
+            b"pub fn seeded() -> bool { false }\n",
+        )
+        add_file(archive, f"{root}/pregenerated/generated.S", b"base assembly\n")
+    return path.read_bytes()
+
+
 def index_record(package: RegistryPackage) -> bytes:
     return (
         json.dumps(
@@ -193,30 +213,30 @@ def prepare_git_fixture(
     git(repository, "commit", "--quiet", "-m", "reviewed tree")
     commit = git(repository, "rev-parse", "HEAD")
     tree_id = git(repository, "rev-parse", "HEAD^{tree}")
-    if with_symlink:
-        tree_sha256 = "0" * 64
-        tree_bytes = 1
-        file_count = 1
-        directory_count = 1
-    else:
-        tree = source_tree(repository)
-        tree_sha256 = tree.sha256
-        tree_bytes = tree.total_bytes
-        file_count = tree.file_count
-        directory_count = tree.directory_count
+    archive_path = root / "cache/archives/git-demo-1.0.0.crate"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive = write_patch_crate(archive_path)
+    derived = root / "derived"
+    (derived / "src").mkdir(parents=True)
+    (derived / "pregenerated").mkdir()
+    (derived / "Cargo.toml").write_bytes((repository / "Cargo.toml").read_bytes())
+    (derived / "src/lib.rs").write_bytes((repository / "src/lib.rs").read_bytes())
+    (derived / "pregenerated/generated.S").write_bytes(b"base assembly\n")
+    tree = source_tree(derived)
     return SeededGitPackage(
         "git-demo",
         "1.0.0",
         "MIT",
-        "1" * 64,
+        hashlib.sha256(archive).hexdigest(),
         str(repository),
         "reviewed",
         commit,
         tree_id,
-        tree_sha256,
-        tree_bytes,
-        file_count,
-        directory_count,
+        ("Cargo.toml", "src/lib.rs"),
+        tree.sha256,
+        tree.total_bytes,
+        tree.file_count,
+        tree.directory_count,
         ("test",),
         True,
     )
@@ -408,7 +428,14 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                 (second_object / "source-manifest.json").read_bytes(),
             )
             self.assertFalse((first_object / "source/.git").exists())
-            self.assertTrue((first_object / "source/configure").stat().st_mode & 0o111)
+            self.assertFalse((first_object / "source/configure").exists())
+            self.assertTrue(
+                (first_object / "source/pregenerated/generated.S").is_file()
+            )
+            self.assertIn(
+                'patch-files = ["Cargo.toml", "src/lib.rs"]',
+                (first_object / "package.toml").read_text(encoding="utf-8"),
+            )
 
             (first_object / "source/src/lib.rs").write_text(
                 "corrupt\n", encoding="utf-8"
@@ -436,7 +463,7 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                     SeedManifest(limits, (), (wrong_commit,)),
                     root / "wrong-commit",
                     mode="minimal",
-                    cache=None,
+                    cache=root / "cache",
                     offline=False,
                     ca_bundle=None,
                     allow_local_git=True,
@@ -448,7 +475,7 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                     SeedManifest(limits, (), (wrong_tree,)),
                     root / "wrong-tree",
                     mode="minimal",
-                    cache=None,
+                    cache=root / "cache",
                     offline=False,
                     ca_bundle=None,
                     allow_local_git=True,
@@ -460,7 +487,7 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                     SeedManifest(limits, (), (wrong_digest,)),
                     root / "wrong-digest",
                     mode="minimal",
-                    cache=None,
+                    cache=root / "cache",
                     offline=False,
                     ca_bundle=None,
                     allow_local_git=True,
@@ -469,7 +496,12 @@ class SeedSystemRepositoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             linked = prepare_git_fixture(root, with_symlink=True)
-            with self.assertRaisesRegex(ValueError, "unsupported Git entry"):
+            linked = replace(
+                linked,
+                patch_files=("link",),
+                source_tree_sha256="0" * 64,
+            )
+            with self.assertRaisesRegex(ValueError, "not one regular file"):
                 seed_system_repository(
                     SeedManifest(
                         Limits(1048576, 1048576, 100, 256),
@@ -478,7 +510,7 @@ class SeedSystemRepositoryTests(unittest.TestCase):
                     ),
                     root / "linked",
                     mode="minimal",
-                    cache=None,
+                    cache=root / "cache",
                     offline=False,
                     ca_bundle=None,
                     allow_local_git=True,

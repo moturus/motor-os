@@ -101,7 +101,7 @@ class SeedManifestTests(unittest.TestCase):
         fetch = {
             package["name"]
             for package in packages
-            if "lorry-fetch" in package["lock-graphs"]
+            if "curl" in package["lock-graphs"]
         }
         self.assertEqual(core, CORE_PACKAGES)
         self.assertEqual(fetch, FETCH_PACKAGES)
@@ -118,7 +118,7 @@ class SeedManifestTests(unittest.TestCase):
     def test_every_registry_object_has_closed_integrity_metadata(self) -> None:
         manifest = load_toml("stage2-seed.toml")
         graph_ids = {graph["id"] for graph in manifest["lock-graph"]}
-        self.assertEqual(graph_ids, {"stage2-core", "lorry-fetch"})
+        self.assertEqual(graph_ids, {"stage2-core", "curl"})
 
         checksums = set()
         for package in manifest["crates-io"]:
@@ -149,6 +149,7 @@ class SeedManifestTests(unittest.TestCase):
             "requested-revision",
             "resolved-commit",
             "git-tree",
+            "patch-files",
             "source-tree-sha256",
             "extracted-bytes",
             "file-count",

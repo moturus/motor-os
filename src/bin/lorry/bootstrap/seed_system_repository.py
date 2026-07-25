@@ -94,12 +94,28 @@ class SeededGitPackage:
     requested_revision: str
     resolved_commit: str
     git_tree: str
+    patch_files: tuple[str, ...]
     source_tree_sha256: str
     extracted_bytes: int
     file_count: int
     directory_count: int
     lock_graphs: tuple[str, ...]
     retained_source: bool
+
+    @property
+    def archive_name(self) -> str:
+        return f"{self.name}-{self.version}.crate"
+
+    @property
+    def archive_url(self) -> str:
+        return (
+            f"https://static.crates.io/crates/{self.name}/"
+            f"{self.name}-{self.version}.crate"
+        )
+
+    @property
+    def archive_root(self) -> str:
+        return f"{self.name}-{self.version}"
 
 
 @dataclass(frozen=True)
@@ -327,6 +343,7 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                     "requested-revision",
                     "resolved-commit",
                     "git-tree",
+                    "patch-files",
                     "source-tree-sha256",
                     "extracted-bytes",
                     "file-count",
@@ -356,6 +373,13 @@ def load_seed_manifest(path: Path) -> SeedManifest:
         lock_graphs = require_strings(package["lock-graphs"], f"{context}.lock-graphs")
         if not set(lock_graphs) <= graph_ids:
             raise ValueError(f"{context}: references an unknown lock graph")
+        patch_files = require_strings(
+            package["patch-files"], f"{context}.patch-files"
+        )
+        if git_url == RING_GIT_URL and patch_files != ("build.rs", "src/rand.rs"):
+            raise ValueError(
+                f"{context}: ring patch-files must be build.rs and src/rand.rs"
+            )
         seeded_git.append(
             SeededGitPackage(
                 name,
@@ -372,6 +396,7 @@ def load_seed_manifest(path: Path) -> SeedManifest:
                     package["resolved-commit"], HEX_40, f"{context}.resolved-commit"
                 ),
                 require_hex(package["git-tree"], HEX_40, f"{context}.git-tree"),
+                patch_files,
                 require_hex(
                     package["source-tree-sha256"],
                     HEX_64,
@@ -1325,6 +1350,81 @@ def extract_git_archive(
         raise ValueError(f"{package.name}: malformed or nonzero Git tar trailer")
 
 
+def git_patch_blob(
+    repository: Path,
+    package: SeededGitPackage,
+    path: str,
+    limits: Limits,
+) -> bytes:
+    path = portable_git_path(path, package, limits)
+    entry = run_git(
+        [
+            "ls-tree",
+            "--full-tree",
+            package.resolved_commit,
+            "--",
+            path,
+        ],
+        cwd=repository,
+    )
+    try:
+        metadata, separator, actual_path = entry.decode("utf-8").rstrip("\n").partition(
+            "\t"
+        )
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{package.name}: non-UTF-8 Git patch entry") from error
+    fields = metadata.split()
+    if (
+        separator != "\t"
+        or actual_path != path
+        or len(fields) != 3
+        or fields[0] != "100644"
+        or fields[1] != "blob"
+        or not HEX_40.fullmatch(fields[2])
+    ):
+        raise ValueError(
+            f"{package.name}: Git patch path is not one regular file: {path}"
+        )
+    contents = run_git(["cat-file", "blob", fields[2]], cwd=repository)
+    if len(contents) > limits.max_extracted_package_bytes:
+        raise ValueError(f"{package.name}: Git patch file exceeds byte limit")
+    return contents
+
+
+def apply_git_overlay(
+    repository: Path,
+    source: Path,
+    package: SeededGitPackage,
+    limits: Limits,
+) -> None:
+    for relative in package.patch_files:
+        contents = git_patch_blob(repository, package, relative, limits)
+        destination = source.joinpath(*relative.split("/"))
+        metadata = destination.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(
+                f"{package.name}: upstream patch path is not a regular file: {relative}"
+            )
+        if destination.read_bytes() == contents:
+            raise ValueError(
+                f"{package.name}: Git patch does not change upstream file: {relative}"
+            )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".lorry-git-overlay-", dir=destination.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, stat.S_IMODE(metadata.st_mode))
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(contents)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, destination)
+            fsync_directory(destination.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def cargo_git_source(package: SeededGitPackage) -> str:
     revision = urllib.parse.quote(package.requested_revision, safe="/")
     return (
@@ -1343,6 +1443,7 @@ def seeded_git_package_toml(package: SeededGitPackage, tree) -> bytes:
         f"requested-revision = {toml_string(package.requested_revision)}\n"
         f"resolved-commit = {toml_string(package.resolved_commit)}\n"
         f"git-tree = {toml_string(package.git_tree)}\n"
+        f"patch-files = [{', '.join(toml_string(path) for path in package.patch_files)}]\n"
         f"upstream-crates-io-checksum = "
         f"{toml_string(package.upstream_checksum)}\n"
         f"source-tree-sha256 = {toml_string(tree.sha256)}\n"
@@ -1371,6 +1472,7 @@ def build_seeded_git_object(
     *,
     cache: Path | None,
     offline: bool,
+    ca_bundle: Path | None,
     allow_local_git: bool = False,
 ) -> Path:
     git_repository = acquire_git_repository(
@@ -1380,21 +1482,26 @@ def build_seeded_git_object(
         offline=offline,
         allow_local_git=allow_local_git,
     )
-    archive = acquisition_root / "source.tar"
-    run_git(
-        [
-            "archive",
-            "--format=tar",
-            f"--output={archive}",
-            package.resolved_commit,
-        ],
-        cwd=git_repository,
+    upstream = RegistryPackage(
+        package.name,
+        package.version,
+        package.upstream_checksum,
+        package.license,
+        package.lock_graphs,
+        True,
+        True,
+    )
+    archive_data = cached_or_fetch_archive(
+        upstream, limits, cache, offline, ca_bundle
     )
 
     object_path = seeded_git_object_path(repository, package.source_tree_sha256)
     object_path.mkdir(parents=True, mode=0o700)
+    archive = acquisition_root / package.archive_name
+    write_exclusive(archive, archive_data)
     source = object_path / "source"
-    extract_git_archive(archive, source, package, limits)
+    extract_registry_archive(archive, source, upstream, limits)
+    apply_git_overlay(git_repository, source, package, limits)
     tree = source_tree(
         source,
         limits.source_limits(),
@@ -1406,11 +1513,20 @@ def build_seeded_git_object(
             f"{package.source_tree_sha256}, got {tree.sha256}"
         )
     if tree.total_bytes != package.extracted_bytes:
-        raise ValueError(f"{package.name}: extracted byte count mismatch")
+        raise ValueError(
+            f"{package.name}: extracted byte count mismatch: expected "
+            f"{package.extracted_bytes}, got {tree.total_bytes}"
+        )
     if tree.file_count != package.file_count:
-        raise ValueError(f"{package.name}: file count mismatch")
+        raise ValueError(
+            f"{package.name}: file count mismatch: expected "
+            f"{package.file_count}, got {tree.file_count}"
+        )
     if tree.directory_count != package.directory_count:
-        raise ValueError(f"{package.name}: directory count mismatch")
+        raise ValueError(
+            f"{package.name}: directory count mismatch: expected "
+            f"{package.directory_count}, got {tree.directory_count}"
+        )
 
     write_exclusive(object_path / "source-manifest.json", tree.manifest_bytes())
     write_exclusive(
@@ -1447,6 +1563,7 @@ def verify_seeded_git_object(
             "requested-revision",
             "resolved-commit",
             "git-tree",
+            "patch-files",
             "upstream-crates-io-checksum",
             "source-tree-sha256",
             "license",
@@ -1466,6 +1583,7 @@ def verify_seeded_git_object(
         "requested-revision": package.requested_revision,
         "resolved-commit": package.resolved_commit,
         "git-tree": package.git_tree,
+        "patch-files": list(package.patch_files),
         "upstream-crates-io-checksum": package.upstream_checksum,
         "source-tree-sha256": package.source_tree_sha256,
         "license": package.license,
@@ -1701,6 +1819,7 @@ def seed_system_repository(
                 manifest.limits,
                 cache=cache,
                 offline=offline,
+                ca_bundle=ca_bundle,
                 allow_local_git=allow_local_git,
             )
 

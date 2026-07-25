@@ -572,6 +572,7 @@ mod tests {
                  requested-revision = \"motor-os-0.17.14\"\n\
                  resolved-commit = \"{COMMIT}\"\n\
                  git-tree = \"2222222222222222222222222222222222222222\"\n\
+                 patch-files = [\"build.rs\", \"src/rand.rs\"]\n\
                  upstream-crates-io-checksum = \"{UPSTREAM}\"\n\
                  source-tree-sha256 = \"{digest}\"\n\
                  license = \"Apache-2.0 AND ISC\"\n\
