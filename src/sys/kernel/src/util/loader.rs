@@ -12,6 +12,10 @@ impl elfloader::ElfLoader for Loader<'_> {
         load_headers: elfloader::LoadableHeaders,
     ) -> Result<(), elfloader::ElfLoaderErr> {
         for header in load_headers {
+            if header.flags().is_write() && header.flags().is_execute() {
+                return Err(elfloader::ElfLoaderErr::UnsupportedElfFormat);
+            }
+
             let vaddr_start = crate::mm::align_down(header.virtual_addr(), PAGE_SIZE_SMALL);
             let vaddr_end =
                 crate::mm::align_up(header.virtual_addr() + header.mem_size(), PAGE_SIZE_SMALL);
@@ -31,11 +35,9 @@ impl elfloader::ElfLoader for Loader<'_> {
             if header.flags().is_write() {
                 mapping_options |= MappingOptions::WRITABLE;
             }
-            // W^X: text is executable, and only text (a W+X segment would
-            // stay NX; well-formed binaries have none). The kernel writes
-            // the segment bytes via copy_to_user (the direct map), so the
-            // user-side W bit doesn't matter for loading.
-            if header.flags().is_execute() && !header.flags().is_write() {
+            // The kernel writes through the direct map, so the user-side W
+            // bit does not need to be set while loading executable text.
+            if header.flags().is_execute() {
                 mapping_options |= MappingOptions::EXECUTABLE;
             }
 
