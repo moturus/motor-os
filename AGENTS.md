@@ -25,7 +25,8 @@ General guidelines:
 * On larger tasks, first create a plan in an *.md file in docs/plans/, ask for review, then proceed
   in incremental steps. Do not change any code during the planning step.
 * Quite often the workflow implies no commits, only local changes. If unclear, ask for clarification.
-* Make sure your code does not introduce any new compiler or clippy warnings.
+* Make sure your code does not introduce any new compiler or clippy warnings. Warnings in crates/packages
+  outside of core Motor OS repo are tolerated (this file is in the root of the core Motor OS repo).
 * Format your changes with `cargo +nightly fmt`.
 * Be careful not to introduce performance regressions.
 * Explicit user instructions may override anything stated above.
