@@ -32,6 +32,9 @@ else
   make -C "$ROOT_DIR" all -j"$(nproc)"
 fi
 
+# The benchmark's deadline tests use deliberately stalled host TCP peers.
+cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"
 

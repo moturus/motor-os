@@ -121,12 +121,12 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
             crate::CMD_TCP_THROUGHPUT_IN => crate::do_throughput_read(
                 handshake(addr, cmd, args.buf_size).unwrap(),
                 buf_size,
-                Some(&args),
+                Some(duration),
             ),
             crate::CMD_TCP_THROUGHPUT_OUT => crate::do_throughput_write(
                 handshake(addr, cmd, args.buf_size).unwrap(),
                 buf_size,
-                Some(&args),
+                Some(duration),
             ),
             _ => panic!(),
         };
@@ -199,7 +199,7 @@ fn do_throughput_cmd(cmd: u64, addr: SocketAddr, args: &crate::Args) -> Result<(
     Ok(())
 }
 
-fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
+pub(crate) fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
     let mut buf: [u8; 1500] = [0; 1500];
     println!(
         "{}: starting TCP round-robin test (64 byte buffers)...",
@@ -207,15 +207,26 @@ fn do_rr(mut stream: TcpStream, duration: Duration) -> Result<()> {
     );
     let mut rr_iters = 0_u64;
     let start = std::time::Instant::now();
+    let deadline = crate::IoDeadline::new(&stream, start + duration);
     while start.elapsed() < duration {
+        if let Err(err) = stream.write_all(&buf[0..64]) {
+            if start.elapsed() < duration {
+                return Err(err);
+            }
+            break;
+        }
+        if let Err(err) = stream.read_exact(&mut buf[0..64]) {
+            if start.elapsed() < duration {
+                return Err(err);
+            }
+            break;
+        }
         rr_iters += 1;
-
-        stream.write_all(&buf[0..64])?;
-        stream.read_exact(&mut buf[0..64])?;
     }
+    drop(deadline);
     let stop = std::time::Instant::now();
 
-    stream.shutdown(std::net::Shutdown::Both)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     core::mem::drop(stream);
 
     let iters_per_sec = (rr_iters as f64) / ((stop - start).as_secs_f64());

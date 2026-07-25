@@ -3,7 +3,9 @@
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpStream;
+use std::sync::mpsc;
 use std::time::Duration;
+use std::time::Instant;
 
 use clap::Parser;
 
@@ -119,19 +121,54 @@ fn make_pattern(buf_size: usize) -> Vec<u8> {
     (0..(256 + buf_size)).map(|j| (j & 0xff) as u8).collect()
 }
 
+struct IoDeadline {
+    cancel: Option<mpsc::Sender<()>>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IoDeadline {
+    fn new(stream: &TcpStream, deadline: Instant) -> Self {
+        let stream = stream
+            .try_clone()
+            .expect("failed to clone benchmark socket");
+        let (cancel, receiver) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if matches!(
+                receiver.recv_timeout(remaining),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        IoDeadline {
+            cancel: Some(cancel),
+            watchdog: Some(watchdog),
+        }
+    }
+}
+
+impl Drop for IoDeadline {
+    fn drop(&mut self) {
+        let _ = self.cancel.take().unwrap().send(());
+        self.watchdog.take().unwrap().join().unwrap();
+    }
+}
+
 fn do_throughput_read(
     mut stream: TcpStream,
     buf_size: usize,
-    client_args: Option<&Args>,
+    duration: Option<Duration>,
 ) -> (Duration, usize) {
     let pattern = make_pattern(buf_size);
     let mut buffer = vec![0u8; buf_size];
     let mut total_bytes_read = 0usize;
-    let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
     // println!("throughput read starting");
     let mut counter: usize = 0;
-    let start = std::time::Instant::now();
+    let start = Instant::now();
+    let deadline = duration.map(|duration| IoDeadline::new(&stream, start + duration));
     loop {
         if let Some(duration) = duration {
             if start.elapsed() >= duration {
@@ -157,6 +194,7 @@ fn do_throughput_read(
         assert_eq!(total_bytes_read, counter);
     }
 
+    drop(deadline);
     let _ = stream.flush();
     let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -177,15 +215,15 @@ fn rdrand() -> u64 {
 fn do_throughput_write(
     mut stream: TcpStream,
     buf_size: usize,
-    client_args: Option<&Args>,
+    duration: Option<Duration>,
 ) -> (Duration, usize) {
     let pattern = make_pattern(buf_size);
     let mut data = vec![0u8; buf_size];
     let mut total_bytes_sent = 0usize;
-    let duration = client_args.map(|args| Duration::from_secs(args.time as u64));
 
     // println!("throughput write starting");
-    let start = std::time::Instant::now();
+    let start = Instant::now();
+    let deadline = duration.map(|duration| IoDeadline::new(&stream, start + duration));
     let mut counter: usize = 0;
     'outer: loop {
         if let Some(duration) = duration {
@@ -219,10 +257,75 @@ fn do_throughput_write(
         assert_eq!(written, len);
     }
 
+    drop(deadline);
     let _ = stream.flush();
     let duration = start.elapsed();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 
     // println!("throughput write done");
     (duration, total_bytes_sent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    const TEST_DURATION: Duration = Duration::from_millis(100);
+    const PEER_FALLBACK: Duration = Duration::from_secs(2);
+
+    fn stalled_connection() -> (TcpStream, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        let (release, wait) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let _peer = peer;
+            let _ = wait.recv_timeout(PEER_FALLBACK);
+        });
+        (client, release, peer)
+    }
+
+    fn assert_deadline(elapsed: Duration) {
+        assert!(elapsed >= TEST_DURATION);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "blocking I/O exceeded its deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn timed_read_interrupts_blocking_io() {
+        let (client, release, peer) = stalled_connection();
+        let (elapsed, bytes) = do_throughput_read(client, 64, Some(TEST_DURATION));
+        let _ = release.send(());
+        peer.join().unwrap();
+
+        assert_eq!(bytes, 0);
+        assert_deadline(elapsed);
+    }
+
+    #[test]
+    fn timed_write_interrupts_blocking_io() {
+        let (client, release, peer) = stalled_connection();
+        let (elapsed, bytes) =
+            do_throughput_write(client, MAX_BUF_SIZE as usize, Some(TEST_DURATION));
+        let _ = release.send(());
+        peer.join().unwrap();
+
+        assert!(bytes > 0);
+        assert_deadline(elapsed);
+    }
+
+    #[test]
+    fn rr_interrupts_blocking_io() {
+        let (client, release, peer) = stalled_connection();
+        let start = Instant::now();
+        crate::client::do_rr(client, TEST_DURATION).unwrap();
+        let elapsed = start.elapsed();
+        let _ = release.send(());
+        peer.join().unwrap();
+
+        assert_deadline(elapsed);
+    }
 }
