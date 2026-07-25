@@ -74,9 +74,9 @@ impl IoBuf {
 
         let mut pages = self.phys_pages.borrow_mut();
         if pages.is_empty() {
-            let num_pages =
-                (((virt_start + self.inner.capacity() as u64 - 1) >> 12) - (virt_start >> 12) + 1)
-                    as usize;
+            let num_pages = (((virt_start + self.inner.capacity() as u64 - 1) >> 12)
+                - (virt_start >> 12)
+                + 1) as usize;
             pages.resize(num_pages, 0);
         }
         if pages[page_idx] == 0 {

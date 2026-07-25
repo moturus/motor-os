@@ -648,10 +648,7 @@ fn history_persists_across_sessions_through_histfile() {
     let mut pty = Pty::spawn(80, &[("HISTFILE", &path)]);
     std::thread::sleep(Duration::from_millis(150));
     pty.send(b"\x1b[A");
-    assert_eq!(
-        prompt_line(&pty.screen(80)),
-        "$ echo remembered"
-    );
+    assert_eq!(prompt_line(&pty.screen(80)), "$ echo remembered");
     drop(pty);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -740,7 +737,8 @@ fn tab_inserts_the_common_prefix_and_lists_the_ambiguity() {
     // basenames, as bash does.
     let rows = typed(format!("cat {dir}/al\t\t").as_bytes(), 200);
     assert!(
-        rows.iter().any(|r| r.contains("alpha.txt") && r.contains("alpine.txt")),
+        rows.iter()
+            .any(|r| r.contains("alpha.txt") && r.contains("alpine.txt")),
         "{rows:?}"
     );
     std::fs::remove_dir_all(&dir).unwrap();
@@ -841,7 +839,8 @@ fn ctrl_d_mid_command_reports_the_syntax_error_and_carries_on() {
     pty.send(b"\x04");
     let rows = pty.screen(80);
     assert!(
-        rows.iter().any(|r| r.contains("unterminated quoted string")),
+        rows.iter()
+            .any(|r| r.contains("unterminated quoted string")),
         "{rows:?}"
     );
     // Still alive, and back at PS1.
@@ -890,7 +889,10 @@ fn ctrl_c_abandons_a_whole_multi_line_command() {
     pty.send(b"echo after\r");
     let rows = pty.screen(80);
     assert!(rows.iter().any(|r| r == "after"), "{rows:?}");
-    assert!(!rows.iter().any(|r| r == "1"), "the loop never ran: {rows:?}");
+    assert!(
+        !rows.iter().any(|r| r == "1"),
+        "the loop never ran: {rows:?}"
+    );
 }
 
 #[test]

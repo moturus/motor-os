@@ -88,14 +88,20 @@ fn default_and_alternate_modifiers() {
     assert_eq!(run_c("u=set; echo ${u:+yes}").stdout, "yes\n");
     assert_eq!(run_c("echo ${u:+yes}").stdout, "\n");
     // := assigns and expands.
-    assert_eq!(run_c("echo ${w:=assigned}; echo $w").stdout, "assigned\nassigned\n");
+    assert_eq!(
+        run_c("echo ${w:=assigned}; echo $w").stdout,
+        "assigned\nassigned\n"
+    );
 }
 
 #[test]
 fn length_and_trimming() {
     assert_eq!(run_c("s=hello; echo ${#s}").stdout, "5\n");
     assert_eq!(run_c("p=/usr/local/bin; echo ${p##*/}").stdout, "bin\n");
-    assert_eq!(run_c("p=/usr/local/bin; echo ${p%/*}").stdout, "/usr/local\n");
+    assert_eq!(
+        run_c("p=/usr/local/bin; echo ${p%/*}").stdout,
+        "/usr/local\n"
+    );
     assert_eq!(run_c("f=a.tar.gz; echo ${f%%.*}").stdout, "a\n");
 }
 
@@ -112,7 +118,10 @@ fn field_splitting_respects_quotes() {
 
 #[test]
 fn custom_ifs_preserves_empty_fields() {
-    assert_eq!(run_c("IFS=:; p=a:b::c; printf '<%s>' $p").stdout, "<a><b><><c>");
+    assert_eq!(
+        run_c("IFS=:; p=a:b::c; printf '<%s>' $p").stdout,
+        "<a><b><><c>"
+    );
 }
 
 // ---- command substitution --------------------------------------------------
@@ -124,7 +133,10 @@ fn command_substitution_dollar_and_backtick() {
     // Nested.
     assert_eq!(run_c("echo $(echo $(echo deep))").stdout, "deep\n");
     // Trailing newlines are stripped.
-    assert_eq!(run_c("x=$(printf 'a\\nb\\n'); printf '[%s]' \"$x\"").stdout, "[a\nb]");
+    assert_eq!(
+        run_c("x=$(printf 'a\\nb\\n'); printf '[%s]' \"$x\"").stdout,
+        "[a\nb]"
+    );
 }
 
 #[test]
@@ -149,7 +161,10 @@ fn arithmetic_expansion() {
 
 #[test]
 fn multi_stage_pipeline() {
-    assert_eq!(run_c("printf 'c\\nb\\na\\n' | sort | head -1").stdout, "a\n");
+    assert_eq!(
+        run_c("printf 'c\\nb\\na\\n' | sort | head -1").stdout,
+        "a\n"
+    );
     // Pipeline status is the last stage's.
     assert_eq!(run_c("false | true").code, 0);
     assert_eq!(run_c("true | false").code, 1);
@@ -161,9 +176,20 @@ fn multi_stage_pipeline() {
 fn file_redirections_round_trip() {
     let path = tmp("redir");
     let _ = std::fs::remove_file(&path);
-    assert_eq!(run_c(&format!("echo one > {p}", p = path.display())).code, 0);
-    assert_eq!(run_c(&format!("echo two >> {p}", p = path.display())).code, 0);
-    assert_eq!(run_c(&format!("wc -l < {p}", p = path.display())).stdout.trim(), "2");
+    assert_eq!(
+        run_c(&format!("echo one > {p}", p = path.display())).code,
+        0
+    );
+    assert_eq!(
+        run_c(&format!("echo two >> {p}", p = path.display())).code,
+        0
+    );
+    assert_eq!(
+        run_c(&format!("wc -l < {p}", p = path.display()))
+            .stdout
+            .trim(),
+        "2"
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
     let _ = std::fs::remove_file(&path);
 }
@@ -175,7 +201,11 @@ fn stderr_redirection_and_dup() {
     // 2> sends only stderr to the file; stdout stays empty.
     let r = run_c(&format!("ls /no_such_rush_dir 2> {p}", p = path.display()));
     assert_eq!(r.stdout, "");
-    assert!(std::fs::read_to_string(&path).unwrap().contains("no_such_rush_dir"));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("no_such_rush_dir")
+    );
 
     // > file 2>&1 merges both streams into the file.
     let both = tmp("both");
@@ -184,7 +214,11 @@ fn stderr_redirection_and_dup() {
         "ls /no_such_rush_dir > {p} 2>&1",
         p = both.display()
     ));
-    assert!(std::fs::read_to_string(&both).unwrap().contains("no_such_rush_dir"));
+    assert!(
+        std::fs::read_to_string(&both)
+            .unwrap()
+            .contains("no_such_rush_dir")
+    );
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&both);
@@ -220,10 +254,16 @@ fn pathname_expansion() {
     assert_eq!(r.stdout, format!("{base}/a.txt {base}/b.txt\n"));
 
     // No match: the pattern is left literal.
-    assert_eq!(run_c(&format!("echo {base}/*.zzz")).stdout, format!("{base}/*.zzz\n"));
+    assert_eq!(
+        run_c(&format!("echo {base}/*.zzz")).stdout,
+        format!("{base}/*.zzz\n")
+    );
 
     // Quoted metacharacters are literal.
-    assert_eq!(run_c(&format!("echo \"{base}/*.txt\"")).stdout, format!("{base}/*.txt\n"));
+    assert_eq!(
+        run_c(&format!("echo \"{base}/*.txt\"")).stdout,
+        format!("{base}/*.txt\n")
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

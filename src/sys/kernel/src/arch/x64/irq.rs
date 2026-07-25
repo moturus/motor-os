@@ -3,10 +3,10 @@ use crate::arch::syscall::ThreadControlBlock;
 use crate::config::uCpus;
 use crate::util::StaticPerCpu;
 use crate::util::StaticRef;
+use crate::xray::stats::MetricType;
 use alloc::boxed::Box;
 use core::arch::asm;
 use core::arch::naked_asm;
-use crate::xray::stats::MetricType;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
 // Note: we use super::serial::write_serial_!() below instead of raw_log!()
@@ -583,8 +583,7 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
                         .adjust_metric(MetricType::IrqFastReturnWake, 1);
                 } else {
                     crate::sched::local_wake();
-                    crate::xray::stats::kernel_stats()
-                        .adjust_metric(MetricType::IrqPreemptWake, 1);
+                    crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqPreemptWake, 1);
                     ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn, EOIs.
                 }
             } else {
@@ -609,8 +608,7 @@ pub extern "C" fn irq_handler_inner(rsp: u64, irq_num: u64) {
                         .adjust_metric(MetricType::IrqFastReturnWake, 1);
                 } else {
                     crate::sched::local_wake();
-                    crate::xray::stats::kernel_stats()
-                        .adjust_metric(MetricType::IrqPreemptWake, 1);
+                    crate::xray::stats::kernel_stats().adjust_metric(MetricType::IrqPreemptWake, 1);
                     ThreadControlBlock::preempt_current_thread_irq(irq_stack); // noreturn, EOIs.
                 }
             } else {

@@ -1,9 +1,4 @@
-use std::{
-    fs,
-    ffi::OsStr,
-    io,
-    path::Path,
-};
+use std::{ffi::OsStr, fs, io, path::Path};
 
 use walkdir::WalkDir;
 
@@ -24,7 +19,7 @@ fn pass() {
 // Compiler messages may change between versions
 // We don't want to have to track these too closely for `bitflags`, but
 // having some message to check makes sure user-facing errors are sensical.
-// 
+//
 // The approach we use is to run the test on all compilers, but only check stderr
 // output on beta (which is the next stable release). We do this by default ignoring
 // any `.stderr` files in the `compile-fail` directory, and copying `.stderr.beta` files

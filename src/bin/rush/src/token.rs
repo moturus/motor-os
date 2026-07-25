@@ -61,14 +61,14 @@ pub enum Token {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
     // Control operators (§2.10.1).
-    Semi,    // ;
-    DSemi,   // ;;
-    Amp,     // &
-    AndAnd,  // &&
-    Pipe,    // |
-    OrOr,    // ||
-    LParen,  // (
-    RParen,  // )
+    Semi,   // ;
+    DSemi,  // ;;
+    Amp,    // &
+    AndAnd, // &&
+    Pipe,   // |
+    OrOr,   // ||
+    LParen, // (
+    RParen, // )
     // Redirection operators. `<<` / `<<-` are represented by Token::HereDoc,
     // not here, because they also carry a collected body.
     Less,      // <

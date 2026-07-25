@@ -10,23 +10,31 @@ impl RustHighlighter {
     pub fn new() -> Self {
         RustHighlighter {
             keywords: &[
-                "fn", "let", "pub", "struct", "impl", "match", "if", "else", "for", "while",
-                "in", "return", "use", "mod", "crate", "enum", "type", "const", "static", "mut",
-                "self", "Self", "as", "loop", "break", "continue", "unsafe", "where", "trait"
+                "fn", "let", "pub", "struct", "impl", "match", "if", "else", "for", "while", "in",
+                "return", "use", "mod", "crate", "enum", "type", "const", "static", "mut", "self",
+                "Self", "as", "loop", "break", "continue", "unsafe", "where", "trait",
             ],
             types: &[
                 "usize", "isize", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64",
-                "i128", "f32", "f64", "bool", "char", "str", "String", "Option", "Result", "Vec"
+                "i128", "f32", "f64", "bool", "char", "str", "String", "Option", "Result", "Vec",
             ],
         }
     }
 }
 
 impl SyntaxHighlighter for RustHighlighter {
-    fn name(&self) -> &str { "Rust" }
-    fn file_extensions(&self) -> &[&str] { &["rs"] }
+    fn name(&self) -> &str {
+        "Rust"
+    }
+    fn file_extensions(&self) -> &[&str] {
+        &["rs"]
+    }
 
-    fn highlight_line(&self, chars: &[char], mut state: LexerState) -> (Vec<HighlightType>, LexerState) {
+    fn highlight_line(
+        &self,
+        chars: &[char],
+        mut state: LexerState,
+    ) -> (Vec<HighlightType>, LexerState) {
         let mut highlights = vec![HighlightType::Normal; chars.len()];
         let mut i = 0;
 
@@ -85,13 +93,14 @@ impl SyntaxHighlighter for RustHighlighter {
 
             if ch == '\'' {
                 // Check if it is a character literal (e.g., 'a' or '\n')
-                let is_char_lit = if i + 2 < chars.len() && chars[i + 2] == '\'' && chars[i + 1] != '\\' {
-                    true
-                } else if i + 3 < chars.len() && chars[i + 1] == '\\' && chars[i + 3] == '\'' {
-                    true
-                } else {
-                    false
-                };
+                let is_char_lit =
+                    if i + 2 < chars.len() && chars[i + 2] == '\'' && chars[i + 1] != '\\' {
+                        true
+                    } else if i + 3 < chars.len() && chars[i + 1] == '\\' && chars[i + 3] == '\'' {
+                        true
+                    } else {
+                        false
+                    };
 
                 if is_char_lit {
                     highlights[i] = HighlightType::StringLiteral;

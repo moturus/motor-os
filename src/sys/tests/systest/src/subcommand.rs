@@ -152,8 +152,7 @@ fn do_command(cmd: String) {
         "exec_stack" => {
             let code = [0xc3_u8]; // ret
             unsafe {
-                let f: extern "C" fn() =
-                    core::mem::transmute(std::hint::black_box(code.as_ptr()));
+                let f: extern "C" fn() = core::mem::transmute(std::hint::black_box(code.as_ptr()));
                 f();
             }
             println!("exec_stack: still alive (NX not enforced)");

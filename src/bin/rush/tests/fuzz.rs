@@ -277,10 +277,10 @@ fn the_parser_never_panics_on_bytes_argv_cannot_carry() {
     for bytes in [
         &b"echo a\0b"[..],
         &b"\0\0\0"[..],
-        &b"echo \xff\xfe"[..],           // invalid UTF-8
-        &b"echo '\xc3'"[..],             // a truncated UTF-8 sequence
-        &b"\xef\xbb\xbfecho bom"[..],    // a byte-order mark
-        &b"echo hi\r\n"[..],             // CRLF line endings
+        &b"echo \xff\xfe"[..],        // invalid UTF-8
+        &b"echo '\xc3'"[..],          // a truncated UTF-8 sequence
+        &b"\xef\xbb\xbfecho bom"[..], // a byte-order mark
+        &b"echo hi\r\n"[..],          // CRLF line endings
     ] {
         std::fs::write(&path, bytes).unwrap();
         let out = Command::new(RUSH)

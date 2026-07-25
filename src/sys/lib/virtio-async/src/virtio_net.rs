@@ -100,8 +100,7 @@ fn maybe_set_needs_csum(packet: &mut [u8], header: &mut NetHeader) -> Option<Tcp
     }
 
     // (csum_start, ones'-complement pseudo-header sum), or not ours.
-    let (csum_start, mut sum): (usize, u32) = match u16::from_be_bytes([packet[12], packet[13]])
-    {
+    let (csum_start, mut sum): (usize, u32) = match u16::from_be_bytes([packet[12], packet[13]]) {
         ETHERTYPE_IPV4 => {
             let ip = &packet[ETH..];
             let ihl = ((ip[0] & 0xf) as usize) * 4;
@@ -483,8 +482,7 @@ impl NetDevice {
         while offset < len {
             let phys = bytes.phys_addr_at(offset);
             let run_len = ((PAGE_SIZE_SMALL as usize) - (phys as usize & 0xfff)).min(len - offset);
-            if num_runs > 0
-                && runs[num_runs - 1].phys_addr + runs[num_runs - 1].len as u64 == phys
+            if num_runs > 0 && runs[num_runs - 1].phys_addr + runs[num_runs - 1].len as u64 == phys
             {
                 runs[num_runs - 1].len += run_len as u32;
             } else {

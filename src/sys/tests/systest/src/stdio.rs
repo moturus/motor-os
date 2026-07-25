@@ -354,14 +354,16 @@ fn test_stdio_reader_wake_on_writer_drop() {
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
 
-    let reader_thread = std::thread::spawn(move || loop {
-        let mut buf = [0; 64];
+    let reader_thread = std::thread::spawn(move || {
+        loop {
+            let mut buf = [0; 64];
 
-        let Ok(read) = reader.read(&mut buf) else {
-            break;
-        };
-        if read == 0 {
-            break;
+            let Ok(read) = reader.read(&mut buf) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
         }
     });
 
@@ -409,14 +411,16 @@ fn test_stdio_writer_wake_on_reader_drop() {
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
 
-    let writer_thread = std::thread::spawn(move || loop {
-        let buf = [0; 64];
+    let writer_thread = std::thread::spawn(move || {
+        loop {
+            let buf = [0; 64];
 
-        let Ok(written) = writer.write(&buf) else {
-            break;
-        };
-        if written == 0 {
-            break;
+            let Ok(written) = writer.write(&buf) else {
+                break;
+            };
+            if written == 0 {
+                break;
+            }
         }
     });
 

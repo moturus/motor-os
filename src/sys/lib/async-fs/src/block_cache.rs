@@ -458,11 +458,7 @@ struct PendingReadGuard<'a, BD: AsyncBlockDevice> {
 
 impl<BD: AsyncBlockDevice> Drop for PendingReadGuard<'_, BD> {
     fn drop(&mut self) {
-        let pending = self
-            .cache
-            .pending_reads
-            .borrow_mut()
-            .remove(&self.block_no);
+        let pending = self.cache.pending_reads.borrow_mut().remove(&self.block_no);
         // Wake outside of the borrow.
         if let Some(pending) = pending {
             for waker in pending.wakers {
@@ -775,9 +771,7 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             // Skip blocks that are cached or have a device read in flight.
             // (`get_cached`, not `is_cached`: it also resurrects expiring
             // blocks, which must not be re-read into a second identity.)
-            if self.get_cached(next).is_some()
-                || self.pending_reads.borrow().contains_key(&next)
-            {
+            if self.get_cached(next).is_some() || self.pending_reads.borrow().contains_key(&next) {
                 next += 1;
                 continue;
             }
@@ -825,18 +819,13 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
             Ok(()) => {
                 for (idx, block) in bufs.into_iter().enumerate() {
                     let block_no = first_block_no + idx as u64;
-                    let cached_block = CachedBlock::new(
-                        block_no,
-                        Rc::new(block),
-                        self.supporting_caches.clone(),
-                    );
+                    let cached_block =
+                        CachedBlock::new(block_no, Rc::new(block), self.supporting_caches.clone());
                     self.push_block(block_no, cached_block);
                 }
             }
             Err(err) => {
-                log::error!(
-                    "Error reading {count} blocks at 0x{first_block_no:x}: {err:?}."
-                );
+                log::error!("Error reading {count} blocks at 0x{first_block_no:x}: {err:?}.");
                 let mut caches = self.supporting_caches.borrow_mut();
                 for block in bufs {
                     caches.push_free_block(Rc::new(block));

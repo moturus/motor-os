@@ -25,7 +25,12 @@ pub struct Config {
 impl Default for Config {
     /// Default configuration.
     fn default() -> Self {
-        Self { tab_stop: 4, quit_times: 2, message_dur: Duration::new(3, 0), show_line_num: true }
+        Self {
+            tab_stop: 4,
+            quit_times: 2,
+            message_dur: Duration::new(3, 0),
+            show_line_num: true,
+        }
     }
 }
 
@@ -43,8 +48,9 @@ impl Config {
                         tab_stop => conf.tab_stop = tab_stop,
                     },
                     "quit_times" => conf.quit_times = parse_value(value)?,
-                    "message_duration" =>
-                        conf.message_dur = Duration::from_secs_f32(parse_value(value)?),
+                    "message_duration" => {
+                        conf.message_dur = Duration::from_secs_f32(parse_value(value)?)
+                    }
                     "show_line_numbers" => conf.show_line_num = parse_value(value)?,
                     _ => return Err(format!("Invalid key: {key}")),
                 };
@@ -61,7 +67,9 @@ impl Config {
 /// The `kv_fn` function will be called for each key-value pair in the file. Typically, this
 /// function will update a configuration instance.
 pub fn process_ini_file<F>(path: &Path, kv_fn: &mut F) -> Result<(), Error>
-where F: FnMut(&str, &str) -> Result<(), String> {
+where
+    F: FnMut(&str, &str) -> Result<(), String>,
+{
     let file = File::open(path).map_err(|e| ConfErr(path.into(), 0, e.to_string()))?;
     for (i, line) in BufReader::new(file).lines().enumerate() {
         let (i, line) = (i + 1, line?);
@@ -78,7 +86,10 @@ where F: FnMut(&str, &str) -> Result<(), String> {
 
 /// Trim a value (right-hand side of a key=value INI line) and parses it.
 pub fn parse_value<T: FromStr<Err = E>, E: Display>(value: &str) -> Result<T, String> {
-    value.trim().parse().map_err(|e| format!("Parser error: {e}"))
+    value
+        .trim()
+        .parse()
+        .map_err(|e| format!("Parser error: {e}"))
 }
 
 /// Split a comma-separated list of values (right-hand side of a key=value1,value2,... INI line) and
@@ -99,7 +110,9 @@ mod tests {
     use super::*;
 
     fn ini_processing_helper<F>(ini_content: &str, kv_fn: &mut F) -> Result<(), Error>
-    where F: FnMut(&str, &str) -> Result<(), String> {
+    where
+        F: FnMut(&str, &str) -> Result<(), String>,
+    {
         let tmp_dir = TempDir::new().expect("Could not create temporary directory");
         let file_path = tmp_dir.path().join("test_config.ini");
         fs::write(&file_path, ini_content).expect("Could not write INI file");
@@ -194,7 +207,10 @@ mod tests {
                 Some(value) => env::set_var(key, value),
                 None => env::remove_var(key),
             }
-            TempEnvVar { key: key.into(), orig_value }
+            TempEnvVar {
+                key: key.into(),
+                orig_value,
+            }
         }
     }
 
@@ -208,7 +224,11 @@ mod tests {
     }
 
     fn test_config_dir(env_key: &OsStr, env_val: &OsStr, kibi_config_home: &Path) {
-        let custom_config = Config { tab_stop: 99, quit_times: 50, ..Config::default() };
+        let custom_config = Config {
+            tab_stop: 99,
+            quit_times: 50,
+            ..Config::default()
+        };
         let ini_content = format!(
             "# Configuration file
              tab_stop  = {}

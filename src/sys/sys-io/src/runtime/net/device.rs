@@ -602,8 +602,7 @@ impl<'a> NetDev<'a> {
     }
 
     pub(super) fn get_icmp_identifier(&mut self) -> Option<u16> {
-        (1..=u16::MAX)
-            .find(|identifier| self.icmp_identifiers_in_use.insert(*identifier))
+        (1..=u16::MAX).find(|identifier| self.icmp_identifiers_in_use.insert(*identifier))
     }
 
     pub(super) fn free_icmp_identifier(&mut self, identifier: u16) {

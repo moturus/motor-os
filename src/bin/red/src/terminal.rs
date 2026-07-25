@@ -1,7 +1,7 @@
-use std::io::{self, Write, Read, IsTerminal};
+use std::io::{self, IsTerminal, Read, Write};
 use std::process::Command;
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 // Global flag to track if raw mode is active.
 // Used to prevent blocking on stdin reads in environments where raw mode is not active (like cargo test).
@@ -52,10 +52,7 @@ fn enable_raw_mode() {
 }
 
 fn disable_raw_mode() {
-    let _ = Command::new("stty")
-        .arg("-raw")
-        .arg("echo")
-        .status();
+    let _ = Command::new("stty").arg("-raw").arg("echo").status();
     RAW_MODE_ENABLED.store(false, Ordering::SeqCst);
 }
 
@@ -71,7 +68,10 @@ pub fn get_terminal_size() -> Option<(usize, usize)> {
 
     // 1. Hide cursor and write ANSI escape query sequence to stdout
     // We hide the cursor (\x1b[?25l) to prevent visible flashing at the bottom-right.
-    if io::stdout().write_all(b"\x1b[?25l\x1b[9999;9999H\x1b[6n").is_err() {
+    if io::stdout()
+        .write_all(b"\x1b[?25l\x1b[9999;9999H\x1b[6n")
+        .is_err()
+    {
         let _ = io::stdout().write_all(b"\x1b[?25h"); // Ensure shown on error
         return None;
     }
@@ -84,7 +84,7 @@ pub fn get_terminal_size() -> Option<(usize, usize)> {
     let mut buf = Vec::new();
     let mut temp = [0u8; 1];
     let mut stdin = io::stdin();
-    
+
     let mut attempts = 0;
     let mut success = false;
     while attempts < 10 {
@@ -117,7 +117,7 @@ pub fn get_terminal_size() -> Option<(usize, usize)> {
     let buf_str = String::from_utf8_lossy(&buf);
     let esc_idx = buf_str.rfind("\x1b[")?;
     let r_idx = buf_str.rfind('R')?;
-    
+
     if esc_idx >= r_idx {
         return None;
     }

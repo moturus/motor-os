@@ -416,9 +416,7 @@ impl Virtqueue {
                 // publishing itself waits for completions, as with
                 // multi-descriptor TX chains exhausting the table.
                 let event_idx = self.used_ring.avail_event.read_volatile();
-                if new_idx
-                    .wrapping_sub(event_idx)
-                    .wrapping_sub(1)
+                if new_idx.wrapping_sub(event_idx).wrapping_sub(1)
                     < new_idx.wrapping_sub(self.last_kick_idx)
                 {
                     (*self.notify_bar).write_u16(self.notify_offset, 0);

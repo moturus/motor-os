@@ -37,9 +37,8 @@ fn out(script: &str) -> String {
 
 #[test]
 fn exported_var_reaches_child_but_bare_assignment_does_not() {
-    let script = format!(
-        "export EXPORTED=yes; LOCAL=no; {RUSH} -c 'echo exp=$EXPORTED local=$LOCAL'"
-    );
+    let script =
+        format!("export EXPORTED=yes; LOCAL=no; {RUSH} -c 'echo exp=$EXPORTED local=$LOCAL'");
     let run = run_c(&script);
     assert_eq!(run.stdout, "exp=yes local=\n");
     assert_eq!(run.code, 0);
@@ -97,7 +96,10 @@ fn printf_conversions() {
 
 #[test]
 fn printf_width_precision_and_flags() {
-    assert_eq!(out("printf '%5d|%-5d|%05d\\n' 7 7 7"), "    7|7    |00007\n");
+    assert_eq!(
+        out("printf '%5d|%-5d|%05d\\n' 7 7 7"),
+        "    7|7    |00007\n"
+    );
     assert_eq!(out("printf '%+d %+d\\n' 5 -5"), "+5 -5\n");
     assert_eq!(out("printf '%.3s\\n' abcdef"), "abc\n");
 }
@@ -159,11 +161,20 @@ fn test_file_predicates() {
 
 #[test]
 fn read_splits_on_ifs_with_remainder() {
-    assert_eq!(out("echo 'a b c' | { read x y z; echo \"$x|$y|$z\"; }"), "a|b|c\n");
+    assert_eq!(
+        out("echo 'a b c' | { read x y z; echo \"$x|$y|$z\"; }"),
+        "a|b|c\n"
+    );
     // The last variable absorbs the remainder.
-    assert_eq!(out("echo 'a b c d' | { read x y; echo \"$x|$y\"; }"), "a|b c d\n");
+    assert_eq!(
+        out("echo 'a b c d' | { read x y; echo \"$x|$y\"; }"),
+        "a|b c d\n"
+    );
     // Custom IFS.
-    assert_eq!(out("printf '1:2:3\\n' | { IFS=: read a b c; echo \"$a-$b-$c\"; }"), "1-2-3\n");
+    assert_eq!(
+        out("printf '1:2:3\\n' | { IFS=: read a b c; echo \"$a-$b-$c\"; }"),
+        "1-2-3\n"
+    );
     // Fewer fields than vars leaves the tail empty.
     assert_eq!(out("echo a | { read x y z; echo \"$x|$y|$z\"; }"), "a||\n");
 }
@@ -171,10 +182,19 @@ fn read_splits_on_ifs_with_remainder() {
 #[test]
 fn read_raw_vs_backslash() {
     // `-r` keeps a backslash literal; plain `read` consumes it as an escape.
-    assert_eq!(out("printf '%s\\n' 'a\\b' | { read -r x; printf '[%s]\\n' \"$x\"; }"), "[a\\b]\n");
-    assert_eq!(out("printf '%s\\n' 'a\\b' | { read x; printf '[%s]\\n' \"$x\"; }"), "[ab]\n");
+    assert_eq!(
+        out("printf '%s\\n' 'a\\b' | { read -r x; printf '[%s]\\n' \"$x\"; }"),
+        "[a\\b]\n"
+    );
+    assert_eq!(
+        out("printf '%s\\n' 'a\\b' | { read x; printf '[%s]\\n' \"$x\"; }"),
+        "[ab]\n"
+    );
     // Without -r, a backslash-escaped space is literal (not a field split).
-    assert_eq!(out("printf 'a\\\\ b c\\n' | { read x y; echo \"$x|$y\"; }"), "a b|c\n");
+    assert_eq!(
+        out("printf 'a\\\\ b c\\n' | { read x y; echo \"$x|$y\"; }"),
+        "a b|c\n"
+    );
 }
 
 #[test]
@@ -227,7 +247,10 @@ fn shift_past_end_is_fatal() {
 #[test]
 fn unset_variable_and_function() {
     assert_eq!(out("x=5; unset x; echo \"[$x]\""), "[]\n");
-    assert_eq!(out("f() { echo hi; }; unset -f f; type f 2>/dev/null; echo done"), "done\n");
+    assert_eq!(
+        out("f() { echo hi; }; unset -f f; type f 2>/dev/null; echo done"),
+        "done\n"
+    );
 }
 
 #[test]
@@ -260,7 +283,9 @@ fn getopts_simple_flags() {
     // getopts does not shift; `$1` is still `-a` (OPTIND now points past the
     // options).
     assert_eq!(
-        out("set -- -a -b foo; while getopts ab opt; do echo \"opt=$opt\"; done; echo rest=$1 idx=$OPTIND"),
+        out(
+            "set -- -a -b foo; while getopts ab opt; do echo \"opt=$opt\"; done; echo rest=$1 idx=$OPTIND"
+        ),
         "opt=a\nopt=b\nrest=-a idx=3\n"
     );
 }
@@ -268,14 +293,19 @@ fn getopts_simple_flags() {
 #[test]
 fn getopts_option_with_argument() {
     assert_eq!(
-        out("set -- -o out.txt -v file; while getopts o:v opt; do case $opt in o) echo out=$OPTARG;; v) echo verbose;; esac; done"),
+        out(
+            "set -- -o out.txt -v file; while getopts o:v opt; do case $opt in o) echo out=$OPTARG;; v) echo verbose;; esac; done"
+        ),
         "out=out.txt\nverbose\n"
     );
 }
 
 #[test]
 fn getopts_combined_flags() {
-    assert_eq!(out("set -- -ab; while getopts ab o; do echo $o; done"), "a\nb\n");
+    assert_eq!(
+        out("set -- -ab; while getopts ab o; do echo $o; done"),
+        "a\nb\n"
+    );
 }
 
 // ---- type / command ---------------------------------------------------------
@@ -308,7 +338,10 @@ fn eval_runs_in_current_shell() {
     assert_eq!(out("eval 'x=5; echo $x'"), "5\n");
     // eval builds a variable name dynamically.
     assert_eq!(out("n=x; eval \"$n=hello\"; echo $x"), "hello\n");
-    assert_eq!(out("for v in A B C; do eval \"$v=1\"; done; echo \"$A$B$C\""), "111\n");
+    assert_eq!(
+        out("for v in A B C; do eval \"$v=1\"; done; echo \"$A$B$C\""),
+        "111\n"
+    );
 }
 
 #[test]
@@ -341,14 +374,20 @@ fn alias_defines_lists_and_expands() {
     // dash's parse-time behavior), so `ll` runs even in a `-c` string.
     assert_eq!(out("alias ll='echo LL'; ll"), "LL\n");
     assert_eq!(out("alias a=b; alias a"), "a='b'\n");
-    assert_eq!(out("alias g='echo G'; unalias g; g 2>/dev/null; echo done"), "done\n");
+    assert_eq!(
+        out("alias g='echo G'; unalias g; g 2>/dev/null; echo done"),
+        "done\n"
+    );
 }
 
 // ---- trap -------------------------------------------------------------------
 
 #[test]
 fn trap_exit_fires_once() {
-    assert_eq!(out("trap 'echo cleanup' EXIT; echo main"), "main\ncleanup\n");
+    assert_eq!(
+        out("trap 'echo cleanup' EXIT; echo main"),
+        "main\ncleanup\n"
+    );
     assert_eq!(out("trap 'echo bye' EXIT; exit 0"), "bye\n");
 }
 
@@ -356,7 +395,10 @@ fn trap_exit_fires_once() {
 
 #[test]
 fn builtins_in_pipelines() {
-    assert_eq!(out("printf 'apple\\nbanana\\napricot\\n' | grep ^a | wc -l"), "2\n");
+    assert_eq!(
+        out("printf 'apple\\nbanana\\napricot\\n' | grep ^a | wc -l"),
+        "2\n"
+    );
     assert_eq!(out("echo hi | cat"), "hi\n");
     assert_eq!(out("printf 'a\\nb\\nc\\n' | wc -l"), "3\n");
 }
@@ -365,8 +407,10 @@ fn builtins_in_pipelines() {
 
 #[test]
 fn recursive_function_with_arithmetic() {
-    assert_eq!(out("f() { if [ \"$1\" -le 0 ]; then echo done; else echo \"$1\"; f $(($1-1)); fi; }; f 3"),
-        "3\n2\n1\ndone\n");
+    assert_eq!(
+        out("f() { if [ \"$1\" -le 0 ]; then echo done; else echo \"$1\"; f $(($1-1)); fi; }; f 3"),
+        "3\n2\n1\ndone\n"
+    );
 }
 
 #[test]

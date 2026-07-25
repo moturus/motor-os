@@ -180,7 +180,11 @@ fn token_display(t: &Token) -> String {
 /// valid name in its leading unquoted literal run — i.e. it is a shell
 /// assignment. Returns `None` for ordinary words.
 fn split_assignment(w: &Word) -> Option<(String, Word)> {
-    let WordPart::Literal { text, quoted: false } = w.0.first()? else {
+    let WordPart::Literal {
+        text,
+        quoted: false,
+    } = w.0.first()?
+    else {
         return None;
     };
     let eq = text.find('=')?;
@@ -277,7 +281,13 @@ pub fn is_reserved_word(s: &str) -> bool {
 /// matching one. (Whether it is *treated* as reserved is the caller's decision,
 /// based on position.)
 fn reserved_of_word(w: &Word) -> Option<Reserved> {
-    let [WordPart::Literal { text, quoted: false }] = w.0.as_slice() else {
+    let [
+        WordPart::Literal {
+            text,
+            quoted: false,
+        },
+    ] = w.0.as_slice()
+    else {
         return None;
     };
     Reserved::from_text(text)
@@ -293,7 +303,13 @@ fn reserved_of_token(t: &Token) -> Option<Reserved> {
 /// The text of a single unquoted-literal word that is a valid name — used for a
 /// `for` loop variable or a function name.
 fn word_as_name(w: &Word) -> Option<&str> {
-    let [WordPart::Literal { text, quoted: false }] = w.0.as_slice() else {
+    let [
+        WordPart::Literal {
+            text,
+            quoted: false,
+        },
+    ] = w.0.as_slice()
+    else {
         return None;
     };
     if crate::is_valid_var_name(text) {
@@ -376,7 +392,10 @@ impl Parser {
                 // follows (a terminator, EOF, or an error) is the caller's to
                 // validate.
                 _ => {
-                    items.push(ListItem { and_or, sep: Separator::Seq });
+                    items.push(ListItem {
+                        and_or,
+                        sep: Separator::Seq,
+                    });
                     break;
                 }
             };
@@ -451,8 +470,14 @@ impl Parser {
             // Function definition: `name ( )`.
             if reserved_of_word(w).is_none()
                 && word_as_name(w).is_some()
-                && matches!(self.toks.get(self.pos + 1), Some(Token::Op(Operator::LParen)))
-                && matches!(self.toks.get(self.pos + 2), Some(Token::Op(Operator::RParen)))
+                && matches!(
+                    self.toks.get(self.pos + 1),
+                    Some(Token::Op(Operator::LParen))
+                )
+                && matches!(
+                    self.toks.get(self.pos + 2),
+                    Some(Token::Op(Operator::RParen))
+                )
             {
                 return self.parse_function_def();
             }
@@ -485,9 +510,9 @@ impl Parser {
         }
         match self.peek() {
             None => Err(PErr::Incomplete),
-            Some(Token::Newline) => {
-                Err(PErr::Syntax("syntax error near unexpected newline".to_string()))
-            }
+            Some(Token::Newline) => Err(PErr::Syntax(
+                "syntax error near unexpected newline".to_string(),
+            )),
             Some(Token::Op(op)) if !is_redirect_op(*op) => Err(PErr::Syntax(format!(
                 "syntax error near unexpected token `{}`",
                 op_display(*op)
@@ -901,7 +926,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_partial, parse_source, Parsed};
+    use super::{Parsed, parse_partial, parse_source};
     use crate::ast::{AndOrOp, Command, CompoundCommand, List, RedirOp, Redirect, Separator};
     use crate::token::WordPart;
 
@@ -1075,8 +1100,14 @@ mod tests {
         assert!(matches!(parse_partial("echo a &&"), Parsed::Incomplete));
         assert!(matches!(parse_partial("echo a |"), Parsed::Incomplete));
         // Lexer-level incompleteness surfaces the same way.
-        assert!(matches!(parse_partial("echo 'unterminated"), Parsed::Incomplete));
-        assert!(matches!(parse_partial("cat <<EOF\nbody"), Parsed::Incomplete));
+        assert!(matches!(
+            parse_partial("echo 'unterminated"),
+            Parsed::Incomplete
+        ));
+        assert!(matches!(
+            parse_partial("cat <<EOF\nbody"),
+            Parsed::Incomplete
+        ));
     }
 
     #[test]

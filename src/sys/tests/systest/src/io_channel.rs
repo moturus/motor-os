@@ -324,8 +324,15 @@ fn test_error_handler_on_double_free() {
     let _ = client.join();
     let _ = server.join();
 
-    assert!(CALLED.load(Ordering::SeqCst), "error handler was not called");
-    assert_ne!(0, REMOTE.load(Ordering::SeqCst), "handler got no remote handle");
+    assert!(
+        CALLED.load(Ordering::SeqCst),
+        "error handler was not called"
+    );
+    assert_ne!(
+        0,
+        REMOTE.load(Ordering::SeqCst),
+        "handler got no remote handle"
+    );
     println!("----- io_channel::test_error_handler_on_double_free PASS");
 }
 

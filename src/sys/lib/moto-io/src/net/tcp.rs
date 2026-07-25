@@ -21,12 +21,12 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::TcpState;
 
-use crate::net::readiness::NetEventListener;
-use crate::net::readiness::Readiness;
-use crate::net::wait::{WaitSet, WaiterId};
 use super::channel::ChannelReservation;
 use super::channel::NetChannel;
 use super::channel::RpcWaiter;
+use crate::net::readiness::NetEventListener;
+use crate::net::readiness::Readiness;
+use crate::net::wait::{WaitSet, WaiterId};
 
 /// An accepted-but-not-yet-claimed connection: the accept response plus
 /// the channel reservation made when the accept was posted.
@@ -103,7 +103,8 @@ pub struct TcpListener {
     // the user calls accept() asynchronously (vs the I/O thread), so
     // we need a place to store messages for not-yet-accepted TCP streams.
     // MIO test actually tests this scenario.
-    pending_accept_queues: Mutex<BTreeMap<u64, Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>>,
+    pending_accept_queues:
+        Mutex<BTreeMap<u64, Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>>,
 
     max_backlog: AtomicU32,
     me: Weak<TcpListener>,
@@ -242,19 +243,17 @@ impl TcpListener {
             socket_addr.set_port(actual_addr.port());
         }
 
-        let tcp_listener = Arc::new_cyclic(|me| {
-            TcpListener {
-                socket_addr,
-                channel_reservation,
-                handle: resp.handle,
-                nonblocking: AtomicBool::new(false),
-                event_listener,
-                accept_requests: Mutex::new(BTreeMap::new()),
-                async_accepts: Mutex::new(VecDeque::new()),
-                pending_accept_queues: Mutex::new(BTreeMap::new()),
-                max_backlog: AtomicU32::new(32),
-                me: me.clone(),
-            }
+        let tcp_listener = Arc::new_cyclic(|me| TcpListener {
+            socket_addr,
+            channel_reservation,
+            handle: resp.handle,
+            nonblocking: AtomicBool::new(false),
+            event_listener,
+            accept_requests: Mutex::new(BTreeMap::new()),
+            async_accepts: Mutex::new(VecDeque::new()),
+            pending_accept_queues: Mutex::new(BTreeMap::new()),
+            max_backlog: AtomicU32::new(32),
+            me: me.clone(),
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
         crate::net::channel::stats_tcp_listener_created();
@@ -370,26 +369,24 @@ impl TcpListener {
         // Don't remove the queue until the channel can access it via the new stream.
         let recv_queue = cleanup.recv_queue();
 
-        let new_stream = Arc::new_cyclic(|me| {
-            TcpStream {
-                local_addr: Mutex::new(Some(self.socket_addr)),
-                remote_addr,
-                handle: AtomicU64::new(resp.handle),
-                event_listener: make_listener(),
-                me: me.clone(),
-                nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
-                channel_reservation,
-                recv_queue,
-                rx_waiters: WaitSet::new(),
-                tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
-                rx_closed: AtomicBool::new(false),
-                tx_closed: AtomicBool::new(false),
-                rx_timeout_ns: AtomicU64::new(u64::MAX),
-                tx_timeout_ns: AtomicU64::new(u64::MAX),
-                subchannel_mask,
-                error: AtomicU16::new(moto_rt::E_OK),
-                pending_tx: Mutex::new(VecDeque::new()),
-            }
+        let new_stream = Arc::new_cyclic(|me| TcpStream {
+            local_addr: Mutex::new(Some(self.socket_addr)),
+            remote_addr,
+            handle: AtomicU64::new(resp.handle),
+            event_listener: make_listener(),
+            me: me.clone(),
+            nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
+            channel_reservation,
+            recv_queue,
+            rx_waiters: WaitSet::new(),
+            tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
+            rx_closed: AtomicBool::new(false),
+            tx_closed: AtomicBool::new(false),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_mask,
+            error: AtomicU16::new(moto_rt::E_OK),
+            pending_tx: Mutex::new(VecDeque::new()),
         });
         crate::net::channel::stats_tcp_stream_created();
 
@@ -899,26 +896,24 @@ impl TcpStream {
             api_net::tcp_stream_connect_request(socket_addr, channel_reservation.subchannel_idx())
         };
 
-        let new_stream = Arc::new_cyclic(|me| {
-            TcpStream {
-                channel_reservation,
-                local_addr: Mutex::new(None),
-                remote_addr: *socket_addr,
-                handle: AtomicU64::new(SysHandle::NONE.into()),
-                event_listener,
-                me: me.clone(),
-                nonblocking: AtomicBool::new(nonblocking),
-                recv_queue: crate::net::inner_rx_stream::InnerRxStream::new(),
-                rx_waiters: WaitSet::new(),
-                tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
-                rx_closed: AtomicBool::new(false),
-                tx_closed: AtomicBool::new(false),
-                rx_timeout_ns: AtomicU64::new(u64::MAX),
-                tx_timeout_ns: AtomicU64::new(u64::MAX),
-                subchannel_mask,
-                error: AtomicU16::new(moto_rt::E_OK),
-                pending_tx: Mutex::new(VecDeque::new()),
-            }
+        let new_stream = Arc::new_cyclic(|me| TcpStream {
+            channel_reservation,
+            local_addr: Mutex::new(None),
+            remote_addr: *socket_addr,
+            handle: AtomicU64::new(SysHandle::NONE.into()),
+            event_listener,
+            me: me.clone(),
+            nonblocking: AtomicBool::new(nonblocking),
+            recv_queue: crate::net::inner_rx_stream::InnerRxStream::new(),
+            rx_waiters: WaitSet::new(),
+            tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
+            rx_closed: AtomicBool::new(false),
+            tx_closed: AtomicBool::new(false),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_mask,
+            error: AtomicU16::new(moto_rt::E_OK),
+            pending_tx: Mutex::new(VecDeque::new()),
         });
         super::channel::stats_tcp_stream_created();
 
@@ -947,7 +942,8 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, false, event_listener);
+        let (new_stream, mut req) =
+            Self::connect_setup(socket_addr, timeout, false, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it

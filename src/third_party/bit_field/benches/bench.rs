@@ -111,7 +111,7 @@ const LEN: usize = 256;
 
 fn set_bitfield<T: BitField>(v: &mut Vec<T>) {
     for i in 0..v.len() * T::BIT_LENGTH {
-        v.as_mut_slice().set_bit(i, true);;
+        v.as_mut_slice().set_bit(i, true);
     }
 }
 

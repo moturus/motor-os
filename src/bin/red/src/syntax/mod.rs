@@ -1,20 +1,24 @@
-pub mod rust;
 pub mod bash;
 pub mod c;
-pub mod toml;
 pub mod plain;
+pub mod rust;
+pub mod toml;
 
 use crate::buffer::{HighlightType, LexerState};
-use rust::RustHighlighter;
 use bash::BashHighlighter;
 use c::CHighlighter;
-use toml::TomlHighlighter;
 use plain::PlainHighlighter;
+use rust::RustHighlighter;
+use toml::TomlHighlighter;
 
 pub trait SyntaxHighlighter {
     fn name(&self) -> &str;
     fn file_extensions(&self) -> &[&str];
-    fn highlight_line(&self, chars: &[char], start_state: LexerState) -> (Vec<HighlightType>, LexerState);
+    fn highlight_line(
+        &self,
+        chars: &[char],
+        start_state: LexerState,
+    ) -> (Vec<HighlightType>, LexerState);
 }
 
 pub struct SyntaxManager {
@@ -51,13 +55,13 @@ impl SyntaxManager {
 
 pub fn get_ansi_style(hl: HighlightType) -> &'static str {
     match hl {
-        HighlightType::Normal => "\x1b[m",             // Reset
-        HighlightType::Keyword => "\x1b[1;33m",        // Bold Yellow
-        HighlightType::Type => "\x1b[36m",             // Cyan
-        HighlightType::StringLiteral => "\x1b[32m",    // Green
-        HighlightType::Comment => "\x1b[90m",          // Dark Gray
-        HighlightType::Number => "\x1b[35m",           // Magenta
-        HighlightType::Macro => "\x1b[1;36m",          // Bold Cyan
-        HighlightType::Preprocessor => "\x1b[1;35m",   // Bold Magenta
+        HighlightType::Normal => "\x1b[m",           // Reset
+        HighlightType::Keyword => "\x1b[1;33m",      // Bold Yellow
+        HighlightType::Type => "\x1b[36m",           // Cyan
+        HighlightType::StringLiteral => "\x1b[32m",  // Green
+        HighlightType::Comment => "\x1b[90m",        // Dark Gray
+        HighlightType::Number => "\x1b[35m",         // Magenta
+        HighlightType::Macro => "\x1b[1;36m",        // Bold Cyan
+        HighlightType::Preprocessor => "\x1b[1;35m", // Bold Magenta
     }
 }

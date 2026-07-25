@@ -1260,7 +1260,10 @@ fn run_backpressure_concurrent(workers: usize, rounds: usize, n: usize, verbose:
 fn test_write_backpressure_concurrent() {
     const N: usize = 512 * 1024;
     let failures = run_backpressure_concurrent(8, 4, N, false);
-    assert_eq!(failures, 0, "shutdown(Write) lost data on {failures} exchange(s)");
+    assert_eq!(
+        failures, 0,
+        "shutdown(Write) lost data on {failures} exchange(s)"
+    );
     std::thread::sleep(Duration::from_millis(10));
     println!("test_write_backpressure_concurrent() PASS");
     std::thread::sleep(Duration::from_millis(10));
@@ -1376,7 +1379,10 @@ fn test_concurrent_readers() {
         sum
     });
 
-    assert!(!bad.load(Ordering::Acquire), "reader saw wrong bytes or errored");
+    assert!(
+        !bad.load(Ordering::Acquire),
+        "reader saw wrong bytes or errored"
+    );
     assert_eq!(sum, N, "concurrent readers lost or duplicated bytes");
     std::thread::sleep(Duration::from_millis(10));
     println!("test_concurrent_readers() PASS");

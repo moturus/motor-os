@@ -116,10 +116,7 @@ impl Drop for NotifiedFuture<'_> {
             // A cancelled notify_one must pass its permit on. A notify_all
             // wake belongs only to the waiters present at that broadcast,
             // so cancelling one of those waiters must not re-dispatch it.
-            if let Some(next) = waiters
-                .iter_mut()
-                .find(|w| w.state == WaiterState::Waiting)
-            {
+            if let Some(next) = waiters.iter_mut().find(|w| w.state == WaiterState::Waiting) {
                 LocalNotify::fire(next, WaiterState::NotifiedOne);
             } else {
                 self.notify.notified.set(true);

@@ -1,10 +1,10 @@
+use std::cell::Cell;
 use std::io::{self, Read};
-use std::sync::OnceLock;
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Duration;
-use std::cell::Cell;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Key {
@@ -24,7 +24,7 @@ pub enum Key {
     PageDown,
     Ctrl(char),
     TerminalResponse(usize, usize), // (rows, cols)
-    None, // Timeout or Error
+    None,                           // Timeout or Error
 }
 
 thread_local! {
@@ -119,7 +119,8 @@ pub fn read_key() -> Key {
                         let s = String::from_utf8_lossy(payload);
                         let mut parts = s.split(';');
                         if let (Some(r_str), Some(c_str)) = (parts.next(), parts.next()) {
-                            if let (Ok(r), Ok(c)) = (r_str.parse::<usize>(), c_str.parse::<usize>()) {
+                            if let (Ok(r), Ok(c)) = (r_str.parse::<usize>(), c_str.parse::<usize>())
+                            {
                                 return Key::TerminalResponse(r, c);
                             }
                         }

@@ -100,7 +100,10 @@ pub fn detach_cap_grant() -> Option<(&'static str, String)> {
     }
     let child =
         moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_LOG | moto_sys::caps::CAP_SPAWN_DETACHED;
-    Some((moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{child:x}")))
+    Some((
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        format!("0x{child:x}"),
+    ))
 }
 
 // ---- process control -------------------------------------------------------

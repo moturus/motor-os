@@ -396,7 +396,10 @@ fn diff(case: &str, tag: &str) -> Option<String> {
 
     let mut why = Vec::new();
     if r.stdout != d.stdout {
-        why.push(format!("stdout: rush {:?} vs dash {:?}", r.stdout, d.stdout));
+        why.push(format!(
+            "stdout: rush {:?} vs dash {:?}",
+            r.stdout, d.stdout
+        ));
     }
     if r.code != d.code {
         why.push(format!("status: rush {} vs dash {}", r.code, d.code));

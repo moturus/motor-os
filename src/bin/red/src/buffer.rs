@@ -81,7 +81,11 @@ impl Line {
             }
 
             current_chars.push(ch);
-            let hl = self.highlights.get(i).copied().unwrap_or(HighlightType::Normal);
+            let hl = self
+                .highlights
+                .get(i)
+                .copied()
+                .unwrap_or(HighlightType::Normal);
             current_hl.push(hl);
 
             // Recomputed rather than reusing char_w: a wrap just above may have
@@ -226,7 +230,10 @@ mod tests {
     #[test]
     fn test_lines_are_terminated_not_separated() {
         // The whole point: the final newline must survive a save.
-        assert_eq!(buffer_of(&["hello", "world"]).to_file_content(), "hello\nworld\n");
+        assert_eq!(
+            buffer_of(&["hello", "world"]).to_file_content(),
+            "hello\nworld\n"
+        );
     }
 
     #[test]
@@ -243,7 +250,10 @@ mod tests {
 
     #[test]
     fn test_leading_and_interior_blank_lines_survive() {
-        assert_eq!(buffer_of(&["", "a", "", "b"]).to_file_content(), "\na\n\nb\n");
+        assert_eq!(
+            buffer_of(&["", "a", "", "b"]).to_file_content(),
+            "\na\n\nb\n"
+        );
     }
 
     #[test]

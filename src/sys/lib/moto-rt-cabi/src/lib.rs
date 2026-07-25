@@ -690,12 +690,22 @@ pub extern "C" fn moto_rt_poll_new() -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn moto_rt_poll_add(poll_fd: i32, source_fd: i32, token: u64, interests: u64) -> i32 {
+pub extern "C" fn moto_rt_poll_add(
+    poll_fd: i32,
+    source_fd: i32,
+    token: u64,
+    interests: u64,
+) -> i32 {
     ret0(moto_rt::poll::add(poll_fd, source_fd, token, interests))
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn moto_rt_poll_set(poll_fd: i32, source_fd: i32, token: u64, interests: u64) -> i32 {
+pub extern "C" fn moto_rt_poll_set(
+    poll_fd: i32,
+    source_fd: i32,
+    token: u64,
+    interests: u64,
+) -> i32 {
     ret0(moto_rt::poll::set(poll_fd, source_fd, token, interests))
 }
 
@@ -858,7 +868,11 @@ pub unsafe extern "C" fn moto_rt_waitpid(pid: i32, exit_status: *mut i32) -> i32
 
 /// timeout_nanos == u64::MAX means "no timeout". Returns 1 = woken, 0 = timed out.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moto_rt_futex_wait(addr: *const u32, expected: u32, timeout_nanos: u64) -> i32 {
+pub unsafe extern "C" fn moto_rt_futex_wait(
+    addr: *const u32,
+    expected: u32,
+    timeout_nanos: u64,
+) -> i32 {
     let futex = unsafe { &*(addr as *const core::sync::atomic::AtomicU32) };
     let timeout =
         (timeout_nanos != u64::MAX).then(|| core::time::Duration::from_nanos(timeout_nanos));

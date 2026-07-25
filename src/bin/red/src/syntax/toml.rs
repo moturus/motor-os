@@ -10,10 +10,18 @@ impl TomlHighlighter {
 }
 
 impl SyntaxHighlighter for TomlHighlighter {
-    fn name(&self) -> &str { "TOML" }
-    fn file_extensions(&self) -> &[&str] { &["toml"] }
+    fn name(&self) -> &str {
+        "TOML"
+    }
+    fn file_extensions(&self) -> &[&str] {
+        &["toml"]
+    }
 
-    fn highlight_line(&self, chars: &[char], _state: LexerState) -> (Vec<HighlightType>, LexerState) {
+    fn highlight_line(
+        &self,
+        chars: &[char],
+        _state: LexerState,
+    ) -> (Vec<HighlightType>, LexerState) {
         let mut highlights = vec![HighlightType::Normal; chars.len()];
         let mut i = 0;
         let mut seen_equals = false;
@@ -102,7 +110,15 @@ impl SyntaxHighlighter for TomlHighlighter {
             // 4. Numbers (only after equals)
             if seen_equals && (ch.is_ascii_digit() || ch == '-' || ch == '+') {
                 let start = i;
-                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == '_' || chars[i] == 'e' || chars[i] == 'E' || chars[i] == '-' || chars[i] == '+') {
+                while i < chars.len()
+                    && (chars[i].is_ascii_digit()
+                        || chars[i] == '.'
+                        || chars[i] == '_'
+                        || chars[i] == 'e'
+                        || chars[i] == 'E'
+                        || chars[i] == '-'
+                        || chars[i] == '+')
+                {
                     highlights[i] = HighlightType::Number;
                     i += 1;
                 }
@@ -130,7 +146,9 @@ impl SyntaxHighlighter for TomlHighlighter {
             // 6. Keys (bare words before equals)
             if !seen_equals && (ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
                 let start = i;
-                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '-') {
+                while i < chars.len()
+                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '-')
+                {
                     i += 1;
                 }
                 for j in start..i {

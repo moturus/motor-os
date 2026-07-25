@@ -210,10 +210,9 @@ pub extern "C" fn motor_start(version: u64) {
         rt_fs::get_file_attr as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.fs_fsync.store(
-        rt_fs::fsync as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
+    vtable
+        .fs_fsync
+        .store(rt_fs::fsync as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_datasync.store(
         rt_fs::datasync as *const () as usize as u64,
         Ordering::Relaxed,
@@ -242,14 +241,12 @@ pub extern "C" fn motor_start(version: u64) {
         posix::posix_flush as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.fs_seek.store(
-        rt_fs::seek as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
-    vtable.fs_mkdir.store(
-        rt_fs::mkdir as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
+    vtable
+        .fs_seek
+        .store(rt_fs::seek as *const () as usize as u64, Ordering::Relaxed);
+    vtable
+        .fs_mkdir
+        .store(rt_fs::mkdir as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_unlink.store(
         rt_fs::unlink as *const () as usize as u64,
         Ordering::Relaxed,
@@ -258,10 +255,9 @@ pub extern "C" fn motor_start(version: u64) {
         rt_fs::rename as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.fs_rmdir.store(
-        rt_fs::rmdir as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
+    vtable
+        .fs_rmdir
+        .store(rt_fs::rmdir as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_rmdir_all.store(
         rt_fs::rmdir_all as *const () as usize as u64,
         Ordering::Relaxed,
@@ -274,18 +270,16 @@ pub extern "C" fn motor_start(version: u64) {
         rt_fs::set_file_perm as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.fs_stat.store(
-        rt_fs::stat as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
+    vtable
+        .fs_stat
+        .store(rt_fs::stat as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_canonicalize.store(
         rt_fs::canonicalize as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.fs_copy.store(
-        rt_fs::copy as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
+    vtable
+        .fs_copy
+        .store(rt_fs::copy as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_opendir.store(
         rt_fs::opendir as *const () as usize as u64,
         Ordering::Relaxed,
@@ -302,10 +296,9 @@ pub extern "C" fn motor_start(version: u64) {
         rt_fs::getcwd as *const () as usize as u64,
         Ordering::Relaxed,
     );
-    vtable.fs_chdir.store(
-        rt_fs::chdir as *const () as usize as u64,
-        Ordering::Relaxed,
-    );
+    vtable
+        .fs_chdir
+        .store(rt_fs::chdir as *const () as usize as u64, Ordering::Relaxed);
     vtable.fs_duplicate.store(
         posix::posix_duplicate as *const () as usize as u64,
         Ordering::Relaxed,

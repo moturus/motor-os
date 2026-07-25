@@ -2,15 +2,15 @@ pub mod buffer;
 pub mod config;
 pub mod editor;
 pub mod input;
-pub mod terminal;
 pub mod syntax;
+pub mod terminal;
 
 use config::Config;
 use editor::Editor;
-use input::{read_key, Key};
-use terminal::TerminalGuard;
-use std::time::{Instant, Duration};
+use input::{Key, read_key};
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
+use terminal::TerminalGuard;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
