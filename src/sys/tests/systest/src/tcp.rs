@@ -532,9 +532,8 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     println!("test_delivered_then_cancelled_native_accept_closes_socket() PASS");
 }
 
-/// Releasing the final listener reference on its channel runtime must remain
-/// nonblocking when the runtime's staging queue is full. The netdev hook makes
-/// the otherwise narrow last-reference/backpressure race deterministic.
+/// Releasing the final listener reference on another thread must remain
+/// nonblocking while its channel runtime is held with a full staging queue.
 fn test_native_listener_drop_under_backpressure() {
     use std::future::Future;
 
@@ -593,10 +592,27 @@ fn test_native_listener_drop_under_backpressure() {
         assert_eq!(listener.channel_rpc_waiter_count_for_test(), 0);
     }
 
-    // The channel runtime now owns the only remaining listener Arc and its
-    // send queue is full. Releasing the hook runs TcpListener::drop there.
-    drop(listener);
+    // The hook released its temporary Arc before publishing HELD, so this
+    // thread performs the last drop while the channel runtime cannot make
+    // staging-queue progress. A blocking destructor would strand this thread
+    // until the hook is released.
+    let drop_done = Arc::new(AtomicBool::new(false));
+    let drop_done_thread = drop_done.clone();
+    let drop_thread = std::thread::spawn(move || {
+        drop(listener);
+        drop_done_thread.store(true, Ordering::Release);
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !drop_done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let drop_was_nonblocking = drop_done.load(Ordering::Acquire);
     moto_io::net::channel::release_listener_drop_backpressure_test();
+    drop_thread.join().unwrap();
+    assert!(
+        drop_was_nonblocking,
+        "TcpListener::drop waited for staging-queue room"
+    );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !moto_io::net::channel::listener_drop_backpressure_test_is_done() {

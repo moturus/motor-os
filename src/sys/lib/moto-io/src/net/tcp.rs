@@ -80,7 +80,7 @@ impl Drop for PendingAcceptCleanup {
 
 pub struct TcpListener {
     socket_addr: SocketAddr,
-    channel_reservation: ChannelReservation,
+    channel_reservation: Option<ChannelReservation>,
     handle: u64,
     nonblocking: AtomicBool,
     // The socket's sole poll-registry handle: state-machine edges emit through
@@ -116,11 +116,6 @@ impl Drop for TcpListener {
         msg.command = api_net::NetCmd::TcpListenerDrop as u16;
         msg.handle = self.handle;
 
-        // Incoming dispatch can temporarily own the last listener Arc, so
-        // this destructor may run on the channel runtime itself. A blocking
-        // send would deadlock that runtime when its staging queue is full.
-        self.channel().send_msg_guaranteed(msg);
-
         while let Some((_, stream)) = { self.pending_accept_queues.lock().pop_first() } {
             // Free up server-allocated pages.
             super::channel::clear_rx_queue(&stream, self.channel());
@@ -129,6 +124,13 @@ impl Drop for TcpListener {
         self.channel().tcp_listener_dropped(self.handle);
 
         super::channel::stats_tcp_listener_dropped();
+
+        // Transfer both the close and the reservation to the driver. Drop
+        // never waits for staging/ring room, and the reservation keeps this
+        // channel alive until sys-io accepts the close.
+        let reservation = self.channel_reservation.take().unwrap();
+        let channel = reservation.channel().clone();
+        channel.enqueue_teardown(reservation, msg);
     }
 }
 
@@ -216,7 +218,7 @@ impl TcpListener {
     }
 
     fn channel(&self) -> &super::channel::NetChannel {
-        self.channel_reservation.channel()
+        self.channel_reservation.as_ref().unwrap().channel()
     }
 
     pub fn bind(
@@ -245,7 +247,7 @@ impl TcpListener {
 
         let tcp_listener = Arc::new_cyclic(|me| TcpListener {
             socket_addr,
-            channel_reservation,
+            channel_reservation: Some(channel_reservation),
             handle: resp.handle,
             nonblocking: AtomicBool::new(false),
             event_listener,

@@ -164,11 +164,13 @@ const LISTENER_DROP_TEST_IDLE: u8 = 0;
 #[cfg(feature = "netdev")]
 const LISTENER_DROP_TEST_ARMED: u8 = 1;
 #[cfg(feature = "netdev")]
-const LISTENER_DROP_TEST_HELD: u8 = 2;
+const LISTENER_DROP_TEST_PREPARING: u8 = 2;
 #[cfg(feature = "netdev")]
-const LISTENER_DROP_TEST_RELEASED: u8 = 3;
+const LISTENER_DROP_TEST_HELD: u8 = 3;
 #[cfg(feature = "netdev")]
-const LISTENER_DROP_TEST_DONE: u8 = 4;
+const LISTENER_DROP_TEST_RELEASED: u8 = 4;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_DONE: u8 = 5;
 #[cfg(feature = "netdev")]
 const LISTENER_DROP_TEST_MSG_ID: u64 = u64::MAX;
 #[cfg(feature = "netdev")]
@@ -416,6 +418,14 @@ enum TxBatch {
     BatchLimit,
 }
 
+/// Driver-owned work transferred by a destructor. Holding the reservation
+/// keeps both the channel and one capacity slot alive until every message in
+/// the record has been sent.
+struct TeardownRecord {
+    messages: VecDeque<io_channel::Msg>,
+    _reservation: ChannelReservation,
+}
+
 /// A communication channel between the current process and sys-io.
 ///
 /// Each channel has a dedicated runtime thread hosting its rx and tx
@@ -443,6 +453,11 @@ pub struct NetChannel {
 
     // This is a multi-producer, single-consumer queue.
     send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
+
+    // Destructors cannot await send-queue room. They transfer teardown work
+    // here; the retained reservation bounds the queue and keeps the driver
+    // alive until delivery.
+    teardown_queue: crossbeam_queue::SegQueue<TeardownRecord>,
 
     // Threads waiting to add their msg to send_queue. Signaled one per
     // quiescent tx poll; a stale or duplicate entry costs a spurious
@@ -719,7 +734,7 @@ impl NetChannel {
             || LISTENER_DROP_TEST_STATE
                 .compare_exchange(
                     LISTENER_DROP_TEST_ARMED,
-                    LISTENER_DROP_TEST_HELD,
+                    LISTENER_DROP_TEST_PREPARING,
                     Ordering::Release,
                     Ordering::Relaxed,
                 )
@@ -735,14 +750,16 @@ impl NetChannel {
         while self.send_queue.push(placeholder).is_ok() {}
         assert!(self.send_queue.is_full());
 
-        // The test drops its owning Arc while this rx-task Arc is held, then
-        // releases us to perform the last drop with a full send queue.
+        // Release the rx task's Arc before publishing HELD. The test can now
+        // perform the last listener drop from a different thread while this
+        // runtime remains unable to drain its full staging queue.
+        drop(listener);
+        LISTENER_DROP_TEST_STATE.store(LISTENER_DROP_TEST_HELD, Ordering::Release);
         while LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) != LISTENER_DROP_TEST_RELEASED {
             core::hint::spin_loop();
         }
-        drop(listener);
 
-        // The runtime-safe destructor returns here. Remove only this hook's
+        // The nonblocking destructor returned. Remove only this hook's
         // placeholders, preserving real closes that were already queued.
         let mut retained = VecDeque::new();
         while let Some(msg) = self.send_queue.pop() {
@@ -776,9 +793,23 @@ impl NetChannel {
     /// Send one batch from `carry` + `send_queue`, expanding TX markers.
     /// `carry` holds messages already popped from `send_queue` but not yet
     /// sent; they are older than anything in the queue and are sent first.
-    fn tx_send_batch(&self, carry: &mut VecDeque<io_channel::Msg>) -> TxBatch {
+    fn tx_send_batch(
+        &self,
+        carry: &mut VecDeque<io_channel::Msg>,
+        teardown: &mut Option<TeardownRecord>,
+    ) -> TxBatch {
         let mut sent_messages = 0;
-        while let Some(msg) = carry.pop_front().or_else(|| self.send_queue.pop()) {
+        while let Some(msg) = carry
+            .pop_front()
+            // Teardown outranks ordinary staging work so a reservation-pinning
+            // record cannot starve under sustained send load. This may put a
+            // close ahead of an already-queued, subsequently-cancelled RPC for
+            // the same handle. sys-io allocates handles monotonically and does
+            // not reuse them; its option handlers return NotFound after close,
+            // and the resulting response safely completes the cancelled RPC.
+            .or_else(|| self.next_teardown_msg(teardown))
+            .or_else(|| self.send_queue.pop())
+        {
             let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
                 && msg.flags == TCP_TX_MARKER_FLAGS
             {
@@ -809,6 +840,22 @@ impl NetChannel {
 
         TxBatch::Drained {
             sent_any: sent_messages > 0,
+        }
+    }
+
+    fn next_teardown_msg(&self, teardown: &mut Option<TeardownRecord>) -> Option<io_channel::Msg> {
+        loop {
+            if let Some(msg) = teardown
+                .as_mut()
+                .and_then(|record| record.messages.pop_front())
+            {
+                return Some(msg);
+            }
+
+            // Replacing an exhausted record drops its reservation only after
+            // its final message was accepted by the sys-io ring.
+            *teardown = self.teardown_queue.pop();
+            teardown.as_ref()?;
         }
     }
 
@@ -950,9 +997,10 @@ impl NetChannel {
         // full-ring leftover or a coalescing run terminator); older than
         // anything in `send_queue`, so always sent first.
         let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
+        let mut teardown = None;
 
         loop {
-            let batch = self.tx_send_batch(&mut carry);
+            let batch = self.tx_send_batch(&mut carry, &mut teardown);
 
             // Any batch that popped messages may have made send-queue room;
             // release guaranteed-send tasks awaiting it (they re-check and
@@ -1056,7 +1104,10 @@ impl NetChannel {
             *self.tx_task_waker.lock() = Some(cx.waker().clone());
             // Teardown wakes this waker after setting `exiting`; return so the
             // tx loop re-checks its exit condition instead of re-parking.
-            if !self.send_queue.is_empty() || self.exiting.load(Ordering::Acquire) {
+            if !self.send_queue.is_empty()
+                || !self.teardown_queue.is_empty()
+                || self.exiting.load(Ordering::Acquire)
+            {
                 return Poll::Ready(());
             }
             // Quiescent and the queue is empty: one blocked sender can
@@ -1198,6 +1249,7 @@ impl NetChannel {
             reservations: AtomicU8::new(0),
             next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
+            teardown_queue: crossbeam_queue::SegQueue::new(),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
             tx_waiters: WaitSet::new(),
@@ -1427,6 +1479,15 @@ impl NetChannel {
         } else {
             Err(req)
         }
+    }
+
+    pub(super) fn enqueue_teardown(&self, reservation: ChannelReservation, msg: io_channel::Msg) {
+        debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
+        self.teardown_queue.push(TeardownRecord {
+            messages: VecDeque::from([msg]),
+            _reservation: reservation,
+        });
+        self.maybe_wake_io_thread();
     }
 
     fn on_io_thread(&self) -> bool {
