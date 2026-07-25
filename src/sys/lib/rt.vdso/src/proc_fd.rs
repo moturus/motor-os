@@ -9,7 +9,7 @@ use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
-use moto_rt::{ErrorCode, RtFd, E_BAD_HANDLE, E_INVALID_ARGUMENT};
+use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
 use moto_sys::SysHandle;
 
 pub fn new_child_fd(handle: SysHandle) -> RtFd {

@@ -72,10 +72,7 @@ pub unsafe extern "C" fn dns_lookup(
         *result_addr = 0;
         *result_len = 0;
     }
-    if host_bytes.is_null()
-        || host_bytes_sz == 0
-        || host_bytes_sz > moto_dns::MAX_NAME_LEN
-    {
+    if host_bytes.is_null() || host_bytes_sz == 0 || host_bytes_sz > moto_dns::MAX_NAME_LEN {
         return moto_rt::E_INVALID_ARGUMENT;
     }
 
@@ -161,10 +158,11 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
-            Ok(socket) => socket,
-            Err(err) => return -(err as RtFd),
-        };
+        let udp_socket =
+            match moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
+                Ok(socket) => socket,
+                Err(err) => return -(err as RtFd),
+            };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };

@@ -206,10 +206,8 @@ impl ThreadControlBlock {
                 options(nostack, preserves_flags)
             );
         }
-        self.fp_env.store(
-            (mxcsr as u64) | ((fcw as u64) << 32),
-            Ordering::Relaxed,
-        );
+        self.fp_env
+            .store((mxcsr as u64) | ((fcw as u64) << 32), Ordering::Relaxed);
     }
 
     fn restore_fp_env(&self) {
@@ -312,9 +310,10 @@ impl ThreadControlBlock {
         };
 
         crate::util::full_fence(); // The kernel does a #PF without this.
-        // W7: the thread that went off-CPU may not be `self` — a direct
-        // switch chain can leave a different thread's TOCR in this frame.
-        let off_tcb = unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
+                                   // W7: the thread that went off-CPU may not be `self` — a direct
+                                   // switch chain can leave a different thread's TOCR in this frame.
+        let off_tcb =
+            unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
         off_tcb
             .owner()
             .trace("spawn_usermode_thread back", off_tcb.syscall_rsp, 0);
@@ -442,7 +441,8 @@ impl ThreadControlBlock {
         crate::util::full_fence();
         // W7: see spawn_usermode_thread — the off-CPU thread is gs:[32]'s
         // owner, not necessarily `self`.
-        let off_tcb = unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
+        let off_tcb =
+            unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
         off_tcb.owner().trace("tcb::resume ret", ret, maybe_addr);
         off_tcb.thread_off_cpu_reason(ret, maybe_addr)
     }
@@ -538,7 +538,8 @@ impl ThreadControlBlock {
         crate::util::full_fence();
         // W7: see spawn_usermode_thread — the off-CPU thread is gs:[32]'s
         // owner, not necessarily `self`.
-        let off_tcb = unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
+        let off_tcb =
+            unsafe { (super::GS::current_tcb() as usize as *const Self).as_ref() }.unwrap();
         off_tcb
             .owner()
             .trace("tcb::resume_preempted_thread ret", ret, maybe_addr);

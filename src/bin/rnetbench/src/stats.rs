@@ -118,8 +118,9 @@ mod imp {
                 let Some(id) = names.iter().find(|d| d.name == name).map(|d| d.id) else {
                     return 0.0;
                 };
-                let value =
-                    |entries: &[MetricEntry]| entries.iter().find(|e| e.metric == id).map(|e| e.value);
+                let value = |entries: &[MetricEntry]| {
+                    entries.iter().find(|e| e.metric == id).map(|e| e.value)
+                };
                 match (value(&after.net), value(&before.net)) {
                     (Some(a), Some(b)) => a.saturating_sub(b) as f64,
                     _ => 0.0,

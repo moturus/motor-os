@@ -159,7 +159,9 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 continue 'outer;
             }
         }
-        return Err(format!("unexpected character `{c}` in arithmetic expression"));
+        return Err(format!(
+            "unexpected character `{c}` in arithmetic expression"
+        ));
     }
     Ok(toks)
 }
@@ -167,13 +169,14 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
 /// Parse a C-style integer literal: `0x…` hex, `0…` octal, else decimal.
 fn parse_number(chars: &[char], start: usize) -> Result<(i64, usize), String> {
     let mut i = start;
-    let (radix, digit_start) = if chars[i] == '0' && i + 1 < chars.len() && matches!(chars[i + 1], 'x' | 'X') {
-        (16, i + 2)
-    } else if chars[i] == '0' {
-        (8, i)
-    } else {
-        (10, i)
-    };
+    let (radix, digit_start) =
+        if chars[i] == '0' && i + 1 < chars.len() && matches!(chars[i + 1], 'x' | 'X') {
+            (16, i + 2)
+        } else if chars[i] == '0' {
+            (8, i)
+        } else {
+            (10, i)
+        };
     i = digit_start;
     let ds = i;
     while i < chars.len() && chars[i].is_digit(radix) {
@@ -187,7 +190,10 @@ fn parse_number(chars: &[char], start: usize) -> Result<(i64, usize), String> {
     };
     match i64::from_str_radix(&text, radix) {
         Ok(v) => Ok((v, i)),
-        Err(_) => Err(format!("invalid number `{}`", chars[start..i].iter().collect::<String>())),
+        Err(_) => Err(format!(
+            "invalid number `{}`",
+            chars[start..i].iter().collect::<String>()
+        )),
     }
 }
 
@@ -535,7 +541,7 @@ fn apply_binary(op: Op, l: i64, r: i64) -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{eval, ArithEnv};
+    use super::{ArithEnv, eval};
     use std::collections::HashMap;
 
     #[derive(Default)]

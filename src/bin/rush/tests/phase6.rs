@@ -101,7 +101,10 @@ fn errexit_suppression_reaches_inside_a_compound_condition() {
 
 #[test]
 fn errexit_fires_on_the_last_command_of_an_and_or_list() {
-    for script in ["set -e; true && false; echo done", "set -e; false || false; echo done"] {
+    for script in [
+        "set -e; true && false; echo done",
+        "set -e; false || false; echo done",
+    ] {
         let run = run_c(script);
         assert_eq!(run.stdout, "", "{script}");
         assert_eq!(run.code, 1, "{script}");
@@ -175,7 +178,11 @@ fn nounset_aborts_on_an_unset_parameter() {
         let run = run_c(script);
         assert_eq!(run.stdout, "", "{script}");
         assert_eq!(run.code, 2, "{script}");
-        assert!(run.stderr.contains("parameter not set"), "{script}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("parameter not set"),
+            "{script}: {}",
+            run.stderr
+        );
     }
 }
 
@@ -186,7 +193,10 @@ fn nounset_allows_what_posix_exempts() {
     for (script, want) in [
         ("set -u; echo \"${FOO:-d}\"; echo done", "d\ndone\n"),
         ("set -u; echo ${FOO+set}; echo done", "\ndone\n"),
-        ("set -u; echo ${FOO=assigned}; echo done", "assigned\ndone\n"),
+        (
+            "set -u; echo ${FOO=assigned}; echo done",
+            "assigned\ndone\n",
+        ),
         ("set -u; FOO=; echo $FOO; echo done", "\ndone\n"),
         ("set -u; echo $@; echo done", "\ndone\n"),
         ("set -u; echo $*; echo done", "\ndone\n"),
@@ -222,7 +232,11 @@ fn error_if_unset_modifier_aborts() {
 
     // dash distinguishes the `:?` wording, and a null value only trips `:?`.
     let run = run_c("echo ${FOO:?}; echo done");
-    assert!(run.stderr.contains("parameter not set or null"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("parameter not set or null"),
+        "{}",
+        run.stderr
+    );
     assert_eq!(run_c("FOO=; echo ${FOO?}; echo done").code, 0);
 }
 
@@ -245,7 +259,10 @@ fn xtrace_covers_assignments_pipelines_and_loop_bodies() {
         run_c("set -x; for i in 1 2; do echo $i; done").stderr,
         "+ echo 1\n+ echo 2\n"
     );
-    assert_eq!(run_c("set -x; if true; then echo y; fi").stderr, "+ true\n+ echo y\n");
+    assert_eq!(
+        run_c("set -x; if true; then echo y; fi").stderr,
+        "+ true\n+ echo y\n"
+    );
 }
 
 #[test]
@@ -338,9 +355,15 @@ fn pipefail_reports_the_last_failing_stage() {
     assert_eq!(run_c("false | true").code, 0);
     assert_eq!(run_c("set -o pipefail; false | true").code, 1);
     assert_eq!(run_c("set -o pipefail; true | true").code, 0);
-    assert_eq!(run_c("set -o pipefail; set +o pipefail; false | true").code, 0);
+    assert_eq!(
+        run_c("set -o pipefail; set +o pipefail; false | true").code,
+        0
+    );
     // The *last* failing stage wins, not the first.
-    assert_eq!(run_c("set -o pipefail; sh -c 'exit 3' | sh -c 'exit 4'").code, 4);
+    assert_eq!(
+        run_c("set -o pipefail; sh -c 'exit 3' | sh -c 'exit 4'").code,
+        4
+    );
     assert_eq!(run_c("set -o pipefail; sh -c 'exit 3' | true").code, 3);
 }
 
@@ -362,7 +385,10 @@ fn dollar_dash_reports_the_enabled_options() {
 fn dollar_dash_reports_invocation_options() {
     assert_eq!(run_args(&["-e", "-c", "echo $-"], "").stdout, "e\n");
     assert_eq!(run_args(&["-ec", "echo $-"], "").stdout, "e\n");
-    assert_eq!(run_args(&["-o", "noglob", "-c", "echo $-"], "").stdout, "f\n");
+    assert_eq!(
+        run_args(&["-o", "noglob", "-c", "echo $-"], "").stdout,
+        "f\n"
+    );
     // An interactive stdin shell reports both `s` and `i`.
     let run = run_args(&["--piped"], "echo [$-]\n");
     assert!(run.stdout.contains("[is]"), "{}", run.stdout);
@@ -371,9 +397,21 @@ fn dollar_dash_reports_invocation_options() {
 #[test]
 fn set_o_lists_options() {
     let run = run_c("set -e; set -o");
-    assert!(run.stdout.starts_with("Current option settings\n"), "{}", run.stdout);
-    assert!(run.stdout.contains("errexit         on\n"), "{}", run.stdout);
-    assert!(run.stdout.contains("noglob          off\n"), "{}", run.stdout);
+    assert!(
+        run.stdout.starts_with("Current option settings\n"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("errexit         on\n"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("noglob          off\n"),
+        "{}",
+        run.stdout
+    );
 }
 
 #[test]
@@ -403,8 +441,14 @@ fn set_rejects_an_unknown_option_fatally() {
 #[test]
 fn set_options_do_not_disturb_positional_parameters() {
     // Only operands (or a bare `--`) touch them.
-    assert_eq!(run_args(&["-c", "set -e; echo $#", "N", "a", "b"], "").stdout, "2\n");
-    assert_eq!(run_args(&["-c", "set --; echo $#", "N", "a", "b"], "").stdout, "0\n");
+    assert_eq!(
+        run_args(&["-c", "set -e; echo $#", "N", "a", "b"], "").stdout,
+        "2\n"
+    );
+    assert_eq!(
+        run_args(&["-c", "set --; echo $#", "N", "a", "b"], "").stdout,
+        "0\n"
+    );
     assert_eq!(out("set -- x y z; echo $# $1 $3"), "3 x z\n");
 }
 
@@ -420,9 +464,18 @@ fn subshell_option_changes_do_not_leak() {
 fn dash_c_sets_positional_parameters_from_operands() {
     // The headline break from rush's old parsing, which joined the operands into
     // the command string: `rush -c 'echo $1' NAME hello` printed "$1 NAME hello".
-    assert_eq!(run_args(&["-c", "echo $1", "NAME", "hello"], "").stdout, "hello\n");
-    assert_eq!(run_args(&["-c", "echo $0 $1 $2", "NAME", "a", "b"], "").stdout, "NAME a b\n");
-    assert_eq!(run_args(&["-c", "echo $#", "NAME", "a", "b"], "").stdout, "2\n");
+    assert_eq!(
+        run_args(&["-c", "echo $1", "NAME", "hello"], "").stdout,
+        "hello\n"
+    );
+    assert_eq!(
+        run_args(&["-c", "echo $0 $1 $2", "NAME", "a", "b"], "").stdout,
+        "NAME a b\n"
+    );
+    assert_eq!(
+        run_args(&["-c", "echo $#", "NAME", "a", "b"], "").stdout,
+        "2\n"
+    );
     // With no `name` operand, `$0` stays the shell's own name.
     assert!(run_args(&["-c", "echo $0"], "").stdout.contains("rush"));
 }
@@ -455,7 +508,10 @@ fn script_operands_set_positional_parameters() {
 #[test]
 fn stdin_mode_reads_the_script_from_stdin() {
     // `-s`, explicitly and by default (no operands).
-    assert_eq!(run_args(&["-s", "ARG1"], "echo \"[$1]\"\n").stdout, "[ARG1]\n");
+    assert_eq!(
+        run_args(&["-s", "ARG1"], "echo \"[$1]\"\n").stdout,
+        "[ARG1]\n"
+    );
     assert_eq!(run_args(&[], "echo from-stdin\n").stdout, "from-stdin\n");
 }
 
@@ -477,10 +533,18 @@ fn an_unreadable_script_operand_exits_2() {
 
 #[test]
 fn an_illegal_option_is_a_usage_error() {
-    for args in [vec!["-z"], vec!["--version"], vec!["-o", "bogus", "-c", "echo hi"]] {
+    for args in [
+        vec!["-z"],
+        vec!["--version"],
+        vec!["-o", "bogus", "-c", "echo hi"],
+    ] {
         let run = run_args(&args, "");
         assert_eq!(run.code, 2, "{args:?}");
-        assert!(run.stderr.contains("illegal option"), "{args:?}: {}", run.stderr);
+        assert!(
+            run.stderr.contains("illegal option"),
+            "{args:?}: {}",
+            run.stderr
+        );
     }
     // `-c` with no command string.
     assert_eq!(run_args(&["-c"], "").code, 2);
@@ -583,16 +647,26 @@ fn ps1_drives_the_interactive_prompt() {
 
 #[test]
 fn ps2_drives_the_continuation_prompt() {
-    let run = run_args(&["--piped"], "PS1=\nPS2='cont> '\nfor i in 1 2\ndo\necho $i\ndone\n");
+    let run = run_args(
+        &["--piped"],
+        "PS1=\nPS2='cont> '\nfor i in 1 2\ndo\necho $i\ndone\n",
+    );
     assert!(run.stdout.contains("cont> "), "{}", run.stdout);
-    assert!(run.stdout.contains('1') && run.stdout.contains('2'), "{}", run.stdout);
+    assert!(
+        run.stdout.contains('1') && run.stdout.contains('2'),
+        "{}",
+        run.stdout
+    );
 }
 
 #[test]
 fn pwd_is_maintained() {
     // POSIX requires the shell to set PWD at startup and keep it through `cd`.
     let run = run_c("echo \"$PWD\"");
-    assert_eq!(run.stdout.trim_end(), std::env::current_dir().unwrap().to_str().unwrap());
+    assert_eq!(
+        run.stdout.trim_end(),
+        std::env::current_dir().unwrap().to_str().unwrap()
+    );
     assert_eq!(out("cd /; echo $PWD"), "/\n");
     assert_eq!(out("cd /tmp; cd /; echo $OLDPWD"), "/tmp\n");
 }
@@ -625,7 +699,9 @@ fn append_redirection_appends() {
     // went unreported (fixed above) — so assert the *contents*, not the status.
     let path = temp_path("append");
     let p = path.display();
-    let run = run_c(&format!("echo one > {p}; echo two >> {p}; printf 'three\\n' >> {p}"));
+    let run = run_c(&format!(
+        "echo one > {p}; echo two >> {p}; printf 'three\\n' >> {p}"
+    ));
     assert_eq!(run.code, 0);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\nthree\n");
     // `>>` also creates a missing file.

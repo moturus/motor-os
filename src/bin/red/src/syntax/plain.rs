@@ -18,7 +18,11 @@ impl SyntaxHighlighter for PlainHighlighter {
         &[]
     }
 
-    fn highlight_line(&self, chars: &[char], _start_state: LexerState) -> (Vec<HighlightType>, LexerState) {
+    fn highlight_line(
+        &self,
+        chars: &[char],
+        _start_state: LexerState,
+    ) -> (Vec<HighlightType>, LexerState) {
         (vec![HighlightType::Normal; chars.len()], LexerState::Normal)
     }
 }

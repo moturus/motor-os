@@ -27,6 +27,7 @@ use moto_sys_io::api_net::IO_SUBCHANNELS;
 use super::tcp::TcpListener;
 use super::tcp::TcpStream;
 use super::udp::UdpSocket;
+use super::wait::{WaitSet, WaiterId};
 
 /// The stage-E leak check (design 5.5): a quiescent runtime holds no
 /// channels and no sockets. Reached only from the vdso's netdev-gated
@@ -163,17 +164,57 @@ const LISTENER_DROP_TEST_IDLE: u8 = 0;
 #[cfg(feature = "netdev")]
 const LISTENER_DROP_TEST_ARMED: u8 = 1;
 #[cfg(feature = "netdev")]
-const LISTENER_DROP_TEST_HELD: u8 = 2;
+const LISTENER_DROP_TEST_PREPARING: u8 = 2;
 #[cfg(feature = "netdev")]
-const LISTENER_DROP_TEST_RELEASED: u8 = 3;
+const LISTENER_DROP_TEST_HELD: u8 = 3;
 #[cfg(feature = "netdev")]
-const LISTENER_DROP_TEST_DONE: u8 = 4;
+const LISTENER_DROP_TEST_RELEASED: u8 = 4;
+#[cfg(feature = "netdev")]
+const LISTENER_DROP_TEST_DONE: u8 = 5;
 #[cfg(feature = "netdev")]
 const LISTENER_DROP_TEST_MSG_ID: u64 = u64::MAX;
 #[cfg(feature = "netdev")]
 static LISTENER_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "netdev")]
 static LISTENER_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(LISTENER_DROP_TEST_IDLE);
+
+// Deterministic netdev regression hook for stream destruction with pending TX
+// under channel backpressure. Unlike the listener hook, the test fills the
+// staging queue after the runtime is held so it can first queue real TX
+// markers. Placeholder messages are removed before the tx task can run.
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_IDLE: u8 = 0;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_ARMED: u8 = 1;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_PREPARING: u8 = 2;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_HELD: u8 = 3;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_RELEASED: u8 = 4;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_DONE: u8 = 5;
+#[cfg(feature = "netdev")]
+const STREAM_DROP_TEST_MSG_ID: u64 = u64::MAX - 1;
+#[cfg(feature = "netdev")]
+static STREAM_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "netdev")]
+static STREAM_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(STREAM_DROP_TEST_IDLE);
+
+// Hold one ordinary RPC response between map removal and oneshot delivery,
+// allowing systest to cancel the receiver at that exact ownership boundary.
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_IDLE: u8 = 0;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_ARMED: u8 = 1;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_HELD: u8 = 2;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_RELEASED: u8 = 3;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_DONE: u8 = 4;
+#[cfg(feature = "netdev")]
+static RPC_CANCEL_TEST_STATE: AtomicU8 = AtomicU8::new(RPC_CANCEL_TEST_IDLE);
 
 #[doc(hidden)]
 #[cfg(feature = "netdev")]
@@ -213,6 +254,86 @@ pub fn release_listener_drop_backpressure_test() {
 #[cfg(feature = "netdev")]
 pub fn listener_drop_backpressure_test_is_done() -> bool {
     LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_DONE
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn arm_stream_drop_backpressure_test(handle: u64) {
+    assert_ne!(0, handle);
+    STREAM_DROP_TEST_HANDLE.store(handle, Ordering::Relaxed);
+    STREAM_DROP_TEST_STATE
+        .compare_exchange(
+            STREAM_DROP_TEST_IDLE,
+            STREAM_DROP_TEST_ARMED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn stream_drop_backpressure_test_is_held() -> bool {
+    STREAM_DROP_TEST_STATE.load(Ordering::Acquire) == STREAM_DROP_TEST_HELD
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn release_stream_drop_backpressure_test() {
+    STREAM_DROP_TEST_STATE
+        .compare_exchange(
+            STREAM_DROP_TEST_HELD,
+            STREAM_DROP_TEST_RELEASED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn stream_drop_backpressure_test_is_done() -> bool {
+    STREAM_DROP_TEST_STATE.load(Ordering::Acquire) == STREAM_DROP_TEST_DONE
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn arm_rpc_response_cancel_test() {
+    let state = RPC_CANCEL_TEST_STATE.load(Ordering::Acquire);
+    assert!(state == RPC_CANCEL_TEST_IDLE || state == RPC_CANCEL_TEST_DONE);
+    RPC_CANCEL_TEST_STATE
+        .compare_exchange(
+            state,
+            RPC_CANCEL_TEST_ARMED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn rpc_response_cancel_test_is_held() -> bool {
+    RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_HELD
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn release_rpc_response_cancel_test() {
+    RPC_CANCEL_TEST_STATE
+        .compare_exchange(
+            RPC_CANCEL_TEST_HELD,
+            RPC_CANCEL_TEST_RELEASED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn rpc_response_cancel_test_is_done() -> bool {
+    RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_DONE
 }
 
 pub fn stats_tcp_listener_created() {
@@ -360,6 +481,14 @@ enum TxBatch {
     BatchLimit,
 }
 
+/// Driver-owned work transferred by a destructor. Holding the reservation
+/// keeps both the channel and one capacity slot alive until every message in
+/// the record has been sent.
+struct TeardownRecord {
+    messages: VecDeque<io_channel::Msg>,
+    _reservation: ChannelReservation,
+}
+
 /// A communication channel between the current process and sys-io.
 ///
 /// Each channel has a dedicated runtime thread hosting its rx and tx
@@ -388,6 +517,11 @@ pub struct NetChannel {
     // This is a multi-producer, single-consumer queue.
     send_queue: crossbeam_queue::ArrayQueue<io_channel::Msg>,
 
+    // Destructors cannot await send-queue room. They transfer teardown work
+    // here; the retained reservation bounds the queue and keeps the driver
+    // alive until delivery.
+    teardown_queue: crossbeam_queue::SegQueue<TeardownRecord>,
+
     // Threads waiting to add their msg to send_queue. Signaled one per
     // quiescent tx poll; a stale or duplicate entry costs a spurious
     // signal the waiter's re-check absorbs.
@@ -396,11 +530,10 @@ pub struct NetChannel {
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
 
-    // Wakers of parked TCP write futures, drained on every channel pass
-    // (broad wake-and-recheck: progress may be a freed io_page — sys-io
-    // wakes the channel when it frees one whose page-wait bit is set —
-    // or send-queue room).
-    tx_wakers: Mutex<Vec<core::task::Waker>>,
+    // Cancellation-aware registrations of parked async sends and TCP write
+    // futures. Drained on every channel pass (broad wake-and-recheck:
+    // progress may be a freed io_page or send-queue room).
+    tx_waiters: WaitSet,
 
     // The channel runtime's send-room notify (a leaked LocalNotify),
     // signaled by the tx task whenever the send queue has room; awaited by
@@ -432,6 +565,60 @@ pub struct NetChannel {
     io_thread_wake_handle: AtomicU64,
 
     exiting: CachePadded<AtomicBool>,
+}
+
+/// Cancellation-aware wait to place one message in the staging queue.
+pub(super) struct SendFuture<'a> {
+    channel: &'a NetChannel,
+    msg: Option<io_channel::Msg>,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for SendFuture<'_> {
+    fn drop(&mut self) {
+        self.channel.remove_tx_waker(&mut self.waiter_id);
+    }
+}
+
+impl Future for SendFuture<'_> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        loop {
+            let msg = this.msg.take().expect("polled SendFuture after completion");
+            match this.channel.post_msg(msg) {
+                Ok(()) => {
+                    this.channel.remove_tx_waker(&mut this.waiter_id);
+                    return Poll::Ready(());
+                }
+                Err(msg) => this.msg = Some(msg),
+            }
+
+            this.channel.add_tx_waker(&mut this.waiter_id, cx.waker());
+            if this.channel.send_queue_is_full() {
+                return Poll::Pending;
+            }
+        }
+    }
+}
+
+struct RpcRegistration<'a> {
+    channel: &'a NetChannel,
+    id: u64,
+    sent: bool,
+}
+
+impl Drop for RpcRegistration<'_> {
+    fn drop(&mut self) {
+        if !self.sent {
+            let removed = self.channel.rpc_map.lock().remove(&self.id);
+            debug_assert!(matches!(removed, Some(RpcWaiter::Response(_))));
+        }
+    }
 }
 
 impl Drop for NetChannel {
@@ -542,6 +729,8 @@ impl NetChannel {
             }
             if let Some(stream) = stream {
                 stream.process_incoming_msg(msg);
+                #[cfg(feature = "netdev")]
+                self.maybe_run_stream_drop_backpressure_test(stream);
             } else {
                 self.on_orphan_message(msg);
             }
@@ -552,14 +741,28 @@ impl NetChannel {
             let waiter = self.rpc_map.lock().remove(&msg.id);
             match waiter {
                 Some(RpcWaiter::Response(tx)) => {
-                    // The send wakes the receiver — a caller thread
-                    // parked in block_on_sync.
-                    if tx.send(msg).is_err() {
-                        // Receivers are never dropped before completion
-                        // (block_on_sync polls to Ready; teardown is
-                        // stage E).
-                        panic!("RPC receiver gone for msg {}", msg.id);
+                    #[cfg(feature = "netdev")]
+                    if RPC_CANCEL_TEST_STATE
+                        .compare_exchange(
+                            RPC_CANCEL_TEST_ARMED,
+                            RPC_CANCEL_TEST_HELD,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        while RPC_CANCEL_TEST_STATE.load(Ordering::Acquire)
+                            != RPC_CANCEL_TEST_RELEASED
+                        {
+                            core::hint::spin_loop();
+                        }
+                        RPC_CANCEL_TEST_STATE.store(RPC_CANCEL_TEST_DONE, Ordering::Release);
                     }
+
+                    // An async caller may cancel after the request was sent.
+                    // The response still completes protocol ownership; only
+                    // delivery to the dropped receiver is skipped.
+                    let _ = tx.send(msg);
                 }
                 Some(RpcWaiter::Connect(stream, tx)) => {
                     if let Some(stream) = stream.upgrade() {
@@ -596,7 +799,7 @@ impl NetChannel {
             || LISTENER_DROP_TEST_STATE
                 .compare_exchange(
                     LISTENER_DROP_TEST_ARMED,
-                    LISTENER_DROP_TEST_HELD,
+                    LISTENER_DROP_TEST_PREPARING,
                     Ordering::Release,
                     Ordering::Relaxed,
                 )
@@ -612,14 +815,16 @@ impl NetChannel {
         while self.send_queue.push(placeholder).is_ok() {}
         assert!(self.send_queue.is_full());
 
-        // The test drops its owning Arc while this rx-task Arc is held, then
-        // releases us to perform the last drop with a full send queue.
+        // Release the rx task's Arc before publishing HELD. The test can now
+        // perform the last listener drop from a different thread while this
+        // runtime remains unable to drain its full staging queue.
+        drop(listener);
+        LISTENER_DROP_TEST_STATE.store(LISTENER_DROP_TEST_HELD, Ordering::Release);
         while LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) != LISTENER_DROP_TEST_RELEASED {
             core::hint::spin_loop();
         }
-        drop(listener);
 
-        // The runtime-safe destructor returns here. Remove only this hook's
+        // The nonblocking destructor returned. Remove only this hook's
         // placeholders, preserving real closes that were already queued.
         let mut retained = VecDeque::new();
         while let Some(msg) = self.send_queue.pop() {
@@ -631,6 +836,46 @@ impl NetChannel {
             self.send_queue.push(msg).unwrap();
         }
         LISTENER_DROP_TEST_STATE.store(LISTENER_DROP_TEST_DONE, Ordering::Release);
+        self.maybe_wake_io_thread();
+    }
+
+    #[cfg(feature = "netdev")]
+    fn maybe_run_stream_drop_backpressure_test(&self, stream: Arc<TcpStream>) {
+        if STREAM_DROP_TEST_HANDLE.load(Ordering::Relaxed) != stream.handle()
+            || STREAM_DROP_TEST_STATE
+                .compare_exchange(
+                    STREAM_DROP_TEST_ARMED,
+                    STREAM_DROP_TEST_PREPARING,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+
+        // Release the rx task's temporary Arc before publishing HELD. The
+        // test can then perform the final stream drop while both channel
+        // tasks remain unable to drain the staging queue.
+        drop(stream);
+        STREAM_DROP_TEST_STATE.store(STREAM_DROP_TEST_HELD, Ordering::Release);
+        while STREAM_DROP_TEST_STATE.load(Ordering::Acquire) != STREAM_DROP_TEST_RELEASED {
+            core::hint::spin_loop();
+        }
+
+        // Remove only the hook's placeholders. Preserve real TX markers
+        // queued before the stream was dropped; they become harmless no-ops
+        // after the teardown record claims all pending pages.
+        let mut retained = VecDeque::new();
+        while let Some(msg) = self.send_queue.pop() {
+            if msg.id != STREAM_DROP_TEST_MSG_ID {
+                retained.push_back(msg);
+            }
+        }
+        for msg in retained {
+            self.send_queue.push(msg).unwrap();
+        }
+        STREAM_DROP_TEST_STATE.store(STREAM_DROP_TEST_DONE, Ordering::Release);
         self.maybe_wake_io_thread();
     }
 
@@ -653,9 +898,23 @@ impl NetChannel {
     /// Send one batch from `carry` + `send_queue`, expanding TX markers.
     /// `carry` holds messages already popped from `send_queue` but not yet
     /// sent; they are older than anything in the queue and are sent first.
-    fn tx_send_batch(&self, carry: &mut VecDeque<io_channel::Msg>) -> TxBatch {
+    fn tx_send_batch(
+        &self,
+        carry: &mut VecDeque<io_channel::Msg>,
+        teardown: &mut Option<TeardownRecord>,
+    ) -> TxBatch {
         let mut sent_messages = 0;
-        while let Some(msg) = carry.pop_front().or_else(|| self.send_queue.pop()) {
+        while let Some(msg) = carry
+            .pop_front()
+            // Teardown outranks ordinary staging work so a reservation-pinning
+            // record cannot starve under sustained send load. This may put a
+            // close ahead of an already-queued, subsequently-cancelled RPC for
+            // the same handle. sys-io allocates handles monotonically and does
+            // not reuse them; its option handlers return NotFound after close,
+            // and the resulting response safely completes the cancelled RPC.
+            .or_else(|| self.next_teardown_msg(teardown))
+            .or_else(|| self.send_queue.pop())
+        {
             let msg = if msg.command == api_net::NetCmd::TcpStreamTx as u16
                 && msg.flags == TCP_TX_MARKER_FLAGS
             {
@@ -689,12 +948,42 @@ impl NetChannel {
         }
     }
 
+    fn next_teardown_msg(&self, teardown: &mut Option<TeardownRecord>) -> Option<io_channel::Msg> {
+        loop {
+            if let Some(msg) = teardown
+                .as_mut()
+                .and_then(|record| record.messages.pop_front())
+            {
+                return Some(msg);
+            }
+
+            // Replacing an exhausted record drops its reservation only after
+            // its final message was accepted by the sys-io ring.
+            *teardown = self.teardown_queue.pop();
+            teardown.as_ref()?;
+        }
+    }
+
     /// Claim stream `handle`'s pending TX pages in response to a marker.
     /// None if the stream is gone (its drop flushed the pages) or the
     /// pending queue is empty.
     fn claim_tcp_tx(&self, handle: u64) -> Option<io_channel::Msg> {
         let stream = self.tcp_streams.lock().get(&handle)?.upgrade()?;
         stream.claim_pending_tx()
+    }
+
+    fn progress_udp_tx(&self) {
+        // Upgrade under the map lock, but invoke socket code after releasing it.
+        // Live entries are bounded by the channel's subchannel count.
+        let sockets: Vec<Arc<UdpSocket>> = self
+            .udp_sockets
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for socket in sockets {
+            socket.on_channel_tx_progress();
+        }
     }
 
     /// Wake the channel's registered waiters. Runs after every pass of
@@ -719,16 +1008,23 @@ impl NetChannel {
         // after every wake of this thread, including sys-io's page-freed
         // wake.
         self.wake_tx_wakers();
+        self.progress_udp_tx();
     }
 
-    /// Wake parked write futures. drain() keeps the Vec's capacity: no
-    /// allocation per park/wake cycle. Waking under the lock is fine
-    /// (a bridge-waker wake never blocks).
+    #[cfg(feature = "netdev")]
+    pub(super) fn wake_waiters_for_test(&self) {
+        self.wake_waiters();
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn udp_socket_count_for_test(&self) -> usize {
+        self.udp_sockets.lock().len()
+    }
+
+    /// Wake parked write futures, removing registrations before invoking
+    /// arbitrary waker code.
     pub(super) fn wake_tx_wakers(&self) {
-        let mut wakers = self.tx_wakers.lock();
-        for waker in wakers.drain(..) {
-            waker.wake();
-        }
+        self.tx_waiters.wake_all();
     }
 
     /// The rx task: the receive half of the old IO thread loop as a
@@ -806,9 +1102,10 @@ impl NetChannel {
         // full-ring leftover or a coalescing run terminator); older than
         // anything in `send_queue`, so always sent first.
         let mut carry: VecDeque<io_channel::Msg> = VecDeque::new();
+        let mut teardown = None;
 
         loop {
-            let batch = self.tx_send_batch(&mut carry);
+            let batch = self.tx_send_batch(&mut carry, &mut teardown);
 
             // Any batch that popped messages may have made send-queue room;
             // release guaranteed-send tasks awaiting it (they re-check and
@@ -912,7 +1209,10 @@ impl NetChannel {
             *self.tx_task_waker.lock() = Some(cx.waker().clone());
             // Teardown wakes this waker after setting `exiting`; return so the
             // tx loop re-checks its exit condition instead of re-parking.
-            if !self.send_queue.is_empty() || self.exiting.load(Ordering::Acquire) {
+            if !self.send_queue.is_empty()
+                || !self.teardown_queue.is_empty()
+                || self.exiting.load(Ordering::Acquire)
+            {
                 return Poll::Ready(());
             }
             // Quiescent and the queue is empty: one blocked sender can
@@ -937,14 +1237,25 @@ impl NetChannel {
         self.write_waiters.lock().push_back(stream.weak());
     }
 
-    /// Register a write future's waker for the next channel pass. The
-    /// caller must re-check its condition after registering (the pass
-    /// that made room may already have drained the list).
-    pub(super) fn add_tx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.tx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    /// Register an async sender's waker for the next channel pass. The caller
+    /// must re-check its condition after registering (the pass that made room
+    /// may already have drained the list).
+    pub(super) fn add_tx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.tx_waiters.register(id, waker);
+    }
+
+    pub(super) fn remove_tx_waker(&self, id: &mut Option<WaiterId>) {
+        self.tx_waiters.unregister(id);
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn tx_waiter_count(&self) -> usize {
+        self.tx_waiters.len()
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn rpc_waiter_count(&self) -> usize {
+        self.rpc_map.lock().len()
     }
 
     pub(super) fn send_queue_is_full(&self) -> bool {
@@ -1043,9 +1354,10 @@ impl NetChannel {
             reservations: AtomicU8::new(0),
             next_msg_id: CachePadded::new(AtomicU64::new(1)),
             send_queue: crossbeam_queue::ArrayQueue::new(io_channel::CHANNEL_PAGE_COUNT),
+            teardown_queue: crossbeam_queue::SegQueue::new(),
             send_waiters: Mutex::new(VecDeque::new()),
             write_waiters: Mutex::new(VecDeque::new()),
-            tx_wakers: Mutex::new(Vec::new()),
+            tx_waiters: WaitSet::new(),
             rpc_map: Mutex::new(BTreeMap::new()),
             send_room: AtomicUsize::new(0),
             tx_task_waker: Mutex::new(None),
@@ -1109,6 +1421,11 @@ impl NetChannel {
         );
     }
 
+    pub fn udp_socket_dropped(&self, handle: u64) {
+        let socket = self.udp_sockets.lock().remove(&handle).unwrap();
+        assert_eq!(0, socket.strong_count());
+    }
+
     pub fn tcp_stream_dropped(&self, handle: u64) {
         let stream = self.tcp_streams.lock().remove(&handle).unwrap();
         assert_eq!(0, stream.strong_count());
@@ -1142,10 +1459,58 @@ impl NetChannel {
                 return;
             }
 
-            let waiter =
-                waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
+            let waiter = waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
             self.wait_can_send(waiter);
         }
+    }
+
+    /// Enqueue one message without parking the polling thread.
+    pub(super) fn send(&self, msg: io_channel::Msg) -> SendFuture<'_> {
+        SendFuture {
+            channel: self,
+            msg: Some(msg),
+            waiter_id: None,
+        }
+    }
+
+    /// Send an ordinary request and await its response without blocking.
+    ///
+    /// Cancellation before queueing removes the RPC-map entry. Once queued,
+    /// response dispatch owns completion and tolerates a dropped receiver.
+    pub(super) async fn rpc(&self, req: io_channel::Msg) -> io_channel::Msg {
+        self.rpc_after_send(req, || {}).await
+    }
+
+    /// Send an ordinary request, run `after_send` once the staging queue owns
+    /// it, then await its response.
+    ///
+    /// There is no suspension point between the successful queue insertion
+    /// and `after_send`, so cancellation either leaves both untouched or
+    /// leaves the queued request and its local commit in place.
+    pub(super) async fn rpc_after_send(
+        &self,
+        mut req: io_channel::Msg,
+        after_send: impl FnOnce(),
+    ) -> io_channel::Msg {
+        let (tx, rx) = moto_async::oneshot();
+        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            self.rpc_map
+                .lock()
+                .insert(req.id, RpcWaiter::Response(tx))
+                .is_none()
+        );
+
+        let mut registration = RpcRegistration {
+            channel: self,
+            id: req.id,
+            sent: false,
+        };
+        self.send(req).await;
+        registration.sent = true;
+        after_send();
+
+        rx.await.expect("RPC sender dropped")
     }
 
     /// Close a stream handle that sys-io created but no client-side stream
@@ -1183,7 +1548,11 @@ impl NetChannel {
 
     /// Nonblocking [`Self::send_rpc`]: on a full send queue the waiter
     /// is removed again and the caller gets `E_NOT_READY`.
-    pub(super) fn post_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) -> Result<(), ErrorCode> {
+    pub(super) fn post_rpc(
+        &self,
+        req: io_channel::Msg,
+        waiter: RpcWaiter,
+    ) -> Result<(), ErrorCode> {
         assert_ne!(0, req.id);
         assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
         if self.post_msg(req).is_ok() {
@@ -1215,6 +1584,34 @@ impl NetChannel {
         } else {
             Err(req)
         }
+    }
+
+    pub(super) fn enqueue_teardown(&self, reservation: ChannelReservation, msg: io_channel::Msg) {
+        self.enqueue_teardown_messages(reservation, VecDeque::from([msg]));
+    }
+
+    pub(super) fn enqueue_teardown_messages(
+        &self,
+        reservation: ChannelReservation,
+        messages: VecDeque<io_channel::Msg>,
+    ) {
+        debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
+        debug_assert!(!messages.is_empty());
+        self.teardown_queue.push(TeardownRecord {
+            messages,
+            _reservation: reservation,
+        });
+        self.maybe_wake_io_thread();
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn fill_stream_drop_send_queue_for_test(&self) {
+        let mut placeholder = io_channel::Msg::new();
+        placeholder.id = STREAM_DROP_TEST_MSG_ID;
+        placeholder.command = u16::MAX;
+        placeholder.handle = u64::MAX;
+        while self.send_queue.push(placeholder).is_ok() {}
+        assert!(self.send_queue.is_full());
     }
 
     fn on_io_thread(&self) -> bool {

@@ -31,6 +31,8 @@ pub enum NetCmd {
     UdpSocketDrop,
     IcmpEcho,
     UdpSocketBindForRemote,
+    UdpSocketSetOption,
+    UdpSocketGetOption,
     NetCmdMax,
 }
 
@@ -60,6 +62,8 @@ impl NetCmd {
                 | NetCmd::UdpSocketTxRx
                 | NetCmd::UdpSocketTxRxAck
                 | NetCmd::UdpSocketDrop
+                | NetCmd::UdpSocketSetOption
+                | NetCmd::UdpSocketGetOption
         )
     }
 }
@@ -69,6 +73,8 @@ pub const TCP_OPTION_SHUT_WR: u64 = 1 << 1;
 pub const TCP_OPTION_NODELAY: u64 = 1 << 2;
 pub const TCP_OPTION_TTL: u64 = 1 << 3;
 pub const TCP_OPTION_LINGER: u64 = 1 << 4;
+
+pub const UDP_OPTION_TTL: u64 = 1 << 0;
 
 pub const ICMP_ECHO_MAX_TIMEOUT_MS: u32 = 60_000;
 pub const ICMP_ECHO_MAX_DATA_LEN: u16 = 65_507;

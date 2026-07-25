@@ -70,23 +70,108 @@ use Support::{Accepted, Live};
 
 /// Every option, in the canonical order used by `$-`, `set -o`, and `set +o`.
 pub const SPECS: &[Spec] = &[
-    Spec { opt: Opt::AllExport,   letter: Some('a'), name: "allexport",   support: Live },
-    Spec { opt: Opt::Notify,      letter: Some('b'), name: "notify",      support: Accepted },
-    Spec { opt: Opt::NoClobber,   letter: Some('C'), name: "noclobber",   support: Live },
-    Spec { opt: Opt::ErrExit,     letter: Some('e'), name: "errexit",     support: Live },
-    Spec { opt: Opt::NoGlob,      letter: Some('f'), name: "noglob",      support: Live },
-    Spec { opt: Opt::HashAll,     letter: Some('h'), name: "hashall",     support: Accepted },
-    Spec { opt: Opt::Interactive, letter: Some('i'), name: "interactive", support: Live },
-    Spec { opt: Opt::Monitor,     letter: Some('m'), name: "monitor",     support: Accepted },
-    Spec { opt: Opt::NoExec,      letter: Some('n'), name: "noexec",      support: Live },
-    Spec { opt: Opt::Stdin,       letter: Some('s'), name: "stdin",       support: Live },
-    Spec { opt: Opt::NoUnset,     letter: Some('u'), name: "nounset",     support: Live },
-    Spec { opt: Opt::Verbose,     letter: Some('v'), name: "verbose",     support: Live },
-    Spec { opt: Opt::XTrace,      letter: Some('x'), name: "xtrace",      support: Live },
-    Spec { opt: Opt::IgnoreEof,   letter: None,      name: "ignoreeof",   support: Accepted },
-    Spec { opt: Opt::NoLog,       letter: None,      name: "nolog",       support: Accepted },
-    Spec { opt: Opt::Vi,          letter: None,      name: "vi",          support: Accepted },
-    Spec { opt: Opt::PipeFail,    letter: None,      name: "pipefail",    support: Live },
+    Spec {
+        opt: Opt::AllExport,
+        letter: Some('a'),
+        name: "allexport",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::Notify,
+        letter: Some('b'),
+        name: "notify",
+        support: Accepted,
+    },
+    Spec {
+        opt: Opt::NoClobber,
+        letter: Some('C'),
+        name: "noclobber",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::ErrExit,
+        letter: Some('e'),
+        name: "errexit",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::NoGlob,
+        letter: Some('f'),
+        name: "noglob",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::HashAll,
+        letter: Some('h'),
+        name: "hashall",
+        support: Accepted,
+    },
+    Spec {
+        opt: Opt::Interactive,
+        letter: Some('i'),
+        name: "interactive",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::Monitor,
+        letter: Some('m'),
+        name: "monitor",
+        support: Accepted,
+    },
+    Spec {
+        opt: Opt::NoExec,
+        letter: Some('n'),
+        name: "noexec",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::Stdin,
+        letter: Some('s'),
+        name: "stdin",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::NoUnset,
+        letter: Some('u'),
+        name: "nounset",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::Verbose,
+        letter: Some('v'),
+        name: "verbose",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::XTrace,
+        letter: Some('x'),
+        name: "xtrace",
+        support: Live,
+    },
+    Spec {
+        opt: Opt::IgnoreEof,
+        letter: None,
+        name: "ignoreeof",
+        support: Accepted,
+    },
+    Spec {
+        opt: Opt::NoLog,
+        letter: None,
+        name: "nolog",
+        support: Accepted,
+    },
+    Spec {
+        opt: Opt::Vi,
+        letter: None,
+        name: "vi",
+        support: Accepted,
+    },
+    Spec {
+        opt: Opt::PipeFail,
+        letter: None,
+        name: "pipefail",
+        support: Live,
+    },
 ];
 
 const N_OPTS: usize = SPECS.len();
@@ -130,9 +215,7 @@ impl Options {
     /// a doc comment, is the source of truth for what rush enforces.
     #[cfg(test)]
     fn is_accepted_only(opt: Opt) -> bool {
-        SPECS
-            .iter()
-            .any(|s| s.opt == opt && s.support == Accepted)
+        SPECS.iter().any(|s| s.opt == opt && s.support == Accepted)
     }
 
     /// `$-`: the letters of the currently-enabled options that have one.
@@ -183,7 +266,11 @@ mod tests {
         // an `Opt` variant without its spec (or out of order) would silently
         // read the wrong option's flag, so assert it rather than trust it.
         for (i, spec) in SPECS.iter().enumerate() {
-            assert_eq!(spec.opt as usize, i, "{} is out of order in SPECS", spec.name);
+            assert_eq!(
+                spec.opt as usize, i,
+                "{} is out of order in SPECS",
+                spec.name
+            );
         }
         // …and that `flags` is exactly as wide as the table.
         assert_eq!(N_OPTS, SPECS.len());
@@ -258,10 +345,7 @@ mod tests {
         assert_eq!(o.listing().len(), SPECS.len());
         assert!(o.listing().contains(&"errexit         on".to_string()));
         assert!(o.listing().contains(&"noglob          off".to_string()));
-        assert!(
-            o.listing_reinput()
-                .contains(&"set -o errexit".to_string())
-        );
+        assert!(o.listing_reinput().contains(&"set -o errexit".to_string()));
         assert!(o.listing_reinput().contains(&"set +o noglob".to_string()));
     }
 }

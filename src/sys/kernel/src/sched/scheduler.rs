@@ -380,9 +380,7 @@ impl Scheduler {
             // not lost: the pusher either wakes this CPU (local queue) or
             // keeps polling itself (global queue), and the next iteration
             // sees the counter.
-            if curr_iteration.is_multiple_of(3)
-                && self.queue_length.load(Ordering::Acquire) != 0
-            {
+            if curr_iteration.is_multiple_of(3) && self.queue_length.load(Ordering::Acquire) != 0 {
                 // Note: we cannot combine the two statements below into one, like this:
                 //     if let Some(job) = self.normal_queue.lock().pop_front() {
                 //         job.run();

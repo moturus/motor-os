@@ -244,7 +244,10 @@ fn complete_variable(scan: &Scan, shell: &Shell) -> Option<Completion> {
         if !(first.is_ascii_alphabetic() || first == '_') {
             return None;
         }
-        if !name[1..].iter().all(|c| c.is_ascii_alphanumeric() || *c == '_') {
+        if !name[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == '_')
+        {
             return None;
         }
     }
@@ -355,9 +358,7 @@ fn complete_path(prefix: &str, shell: &Shell) -> Vec<String> {
         }
         let is_dir = entry
             .file_type()
-            .map(|t| {
-                t.is_dir() || (t.is_symlink() && Path::new(&dir_path).join(&name).is_dir())
-            })
+            .map(|t| t.is_dir() || (t.is_symlink() && Path::new(&dir_path).join(&name).is_dir()))
             .unwrap_or(false);
         let suffix = if is_dir { "/" } else { "" };
         out.push(format!("{dir_text}{name}{suffix}"));
@@ -484,7 +485,9 @@ mod tests {
 
     #[test]
     fn an_operator_starts_a_new_command() {
-        for line in ["ls; ec", "ls | ec", "ls && ec", "ls || ec", "(ec", "ls & ec"] {
+        for line in [
+            "ls; ec", "ls | ec", "ls && ec", "ls || ec", "(ec", "ls & ec",
+        ] {
             assert!(scan_end(line).command_position, "in {line:?}");
         }
     }
@@ -772,4 +775,3 @@ mod tests {
         assert!(got.candidates.len() >= 4);
     }
 }
-

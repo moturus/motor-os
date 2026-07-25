@@ -432,6 +432,78 @@ impl MotoSocket {
         Ok(())
     }
 
+    pub async fn udp_getsockopt(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let socket_ref = moto_socket.borrow();
+            if socket_ref.base.sender().remote_handle() != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+            if !matches!(socket_ref.state, SocketState::Udp(_)) {
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        if msg.payload.args_64()[0] != api_net::UDP_OPTION_TTL {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        let ttl =
+            Self::with_udp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+                smoltcp_socket.hop_limit().unwrap_or(64)
+            });
+        let mut resp = msg;
+        resp.payload.args_32_mut()[0] = ttl as u32;
+        resp.status = moto_rt::E_OK;
+        let _ = sender.send(resp).await;
+        Ok(())
+    }
+
+    pub async fn udp_setsockopt(
+        runtime: &NetRuntime,
+        msg: moto_ipc::io_channel::Msg,
+        sender: &moto_ipc::io_channel::Sender,
+    ) -> std::io::Result<()> {
+        let socket_id = msg.handle;
+        let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
+            return Err(ErrorKind::NotFound.into());
+        };
+
+        {
+            let socket_ref = moto_socket.borrow();
+            if socket_ref.base.sender().remote_handle() != sender.remote_handle() {
+                return Err(ErrorKind::NotFound.into());
+            }
+            if !matches!(socket_ref.state, SocketState::Udp(_)) {
+                return Err(ErrorKind::InvalidData.into());
+            }
+        }
+
+        if msg.payload.args_64()[0] != api_net::UDP_OPTION_TTL {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let ttl = msg.payload.args_32()[2];
+        if ttl == 0 || ttl > u8::MAX as u32 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+
+        Self::with_udp_smoltcp_socket(&moto_socket, |_socket_id, smoltcp_socket, _state| {
+            smoltcp_socket.set_hop_limit(Some(ttl as u8));
+        });
+        let mut resp = msg;
+        resp.status = moto_rt::E_OK;
+        let _ = sender.send(resp).await;
+        Ok(())
+    }
+
     pub async fn udp_socket_drop(
         runtime: &NetRuntime,
         msg: moto_ipc::io_channel::Msg,

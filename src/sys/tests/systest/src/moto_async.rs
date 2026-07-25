@@ -815,12 +815,13 @@ fn test_for_each_concurrent() {
     // FuturesUnordered used to decode the combinator's waker as a task id
     // and hang, so for_each_concurrent never completed.
     let count = std::cell::Cell::new(0u32);
-    moto_async::LocalRuntime::new().block_on(
-        futures::stream::iter(0..100u32).for_each_concurrent(8, |_| async {
+    moto_async::LocalRuntime::new().block_on(futures::stream::iter(0..100u32).for_each_concurrent(
+        8,
+        |_| async {
             moto_async::sleep(Duration::from_micros(100)).await;
             count.set(count.get() + 1);
-        }),
-    );
+        },
+    ));
     assert_eq!(count.get(), 100);
     println!("----- moto_async::test_for_each_concurrent PASS");
 }
@@ -844,7 +845,10 @@ fn spawn_wake_probe() -> (std::thread::JoinHandle<()>, SysHandle) {
     while handle_slot.load(Ordering::Acquire) == 0 {
         std::thread::sleep(Duration::from_millis(1));
     }
-    (probe, SysHandle::from_u64(handle_slot.load(Ordering::Acquire)))
+    (
+        probe,
+        SysHandle::from_u64(handle_slot.load(Ordering::Acquire)),
+    )
 }
 
 fn test_wake_on_sleep_fold() {

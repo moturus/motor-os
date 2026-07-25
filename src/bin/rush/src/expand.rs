@@ -766,7 +766,11 @@ mod tests {
     use crate::token::{Token, Word};
 
     fn word(src: &str) -> Word {
-        match lexer::tokenize(src, lexer::AtEof::Yes).unwrap().into_iter().next() {
+        match lexer::tokenize(src, lexer::AtEof::Yes)
+            .unwrap()
+            .into_iter()
+            .next()
+        {
             Some(Token::Word(w)) => w,
             other => panic!("expected a single word, got {other:?}"),
         }

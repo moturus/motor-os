@@ -63,15 +63,15 @@ impl PTE {
     const USER: u64 = 0b_0000_0100; // bit 2.
     const ACCESSED: u64 = 0b_0010_0000; // bit 5.
     const HUGE: u64 = 0b_1000_0000; // bit 7.
-    // Leaf-only: the translation survives `mov cr3` (needs CR4.PGE). Set on
-    // all kernel leaves (W6a) so syscall/preempt CR3 switches stop wiping
-    // the kernel TLB. Kernel unmaps MUST then invalidate explicitly on every
-    // CPU — see tlb.rs / `invalidate()`: kernel-PT shootdowns never skip.
+                                    // Leaf-only: the translation survives `mov cr3` (needs CR4.PGE). Set on
+                                    // all kernel leaves (W6a) so syscall/preempt CR3 switches stop wiping
+                                    // the kernel TLB. Kernel unmaps MUST then invalidate explicitly on every
+                                    // CPU — see tlb.rs / `invalidate()`: kernel-PT shootdowns never skip.
     const GLOBAL: u64 = 0b1_0000_0000; // bit 8.
-    // Leaf-only: no instruction fetches through this translation (needs
-    // EFER.NXE, set per-CPU in GS::init). Set on every user leaf that was
-    // not mapped with MappingOptions::EXECUTABLE — only ELF text segments
-    // and nothing else may execute. Never set on kernel leaves (this round).
+                                       // Leaf-only: no instruction fetches through this translation (needs
+                                       // EFER.NXE, set per-CPU in GS::init). Set on every user leaf that was
+                                       // not mapped with MappingOptions::EXECUTABLE — only ELF text segments
+                                       // and nothing else may execute. Never set on kernel leaves (this round).
     const NX: u64 = 1 << 63;
     const MMIO_RW: u64 = 0b_0011_1011; // bit 0: present; bit 1: writable;
                                        // bit 3: write through; bit 4: no cache; bit 5: accessed.

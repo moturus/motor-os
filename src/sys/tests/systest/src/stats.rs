@@ -7,8 +7,8 @@
 //! discoverable. (The kernel handles same-process shared-memory IPC, so serving
 //! and connecting from the same process is fine.)
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use moto_ipc::sync::*;
 use moto_stats::{Collector, MetricDescWire, MetricEntry, PagedRequest, ProviderInfo};

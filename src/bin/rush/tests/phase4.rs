@@ -48,7 +48,10 @@ fn run_script_args(tag: &str, body: &str, args: &[&str]) -> String {
 #[test]
 fn if_then_else() {
     assert_eq!(run_c("if true; then echo yes; fi").stdout, "yes\n");
-    assert_eq!(run_c("if false; then echo yes; else echo no; fi").stdout, "no\n");
+    assert_eq!(
+        run_c("if false; then echo yes; else echo no; fi").stdout,
+        "no\n"
+    );
     assert_eq!(
         run_c("if false; then echo a; elif true; then echo b; else echo c; fi").stdout,
         "b\n"
@@ -67,9 +70,15 @@ fn if_status_is_the_taken_branch() {
 
 #[test]
 fn for_over_word_list() {
-    assert_eq!(run_c("for x in a b c; do echo $x; done").stdout, "a\nb\nc\n");
+    assert_eq!(
+        run_c("for x in a b c; do echo $x; done").stdout,
+        "a\nb\nc\n"
+    );
     // Globs and expansions expand in the word list.
-    assert_eq!(run_c("for n in 1 2 3; do echo $((n*n)); done").stdout, "1\n4\n9\n");
+    assert_eq!(
+        run_c("for n in 1 2 3; do echo $((n*n)); done").stdout,
+        "1\n4\n9\n"
+    );
 }
 
 #[test]
@@ -81,7 +90,10 @@ fn for_without_in_uses_positional_params() {
 
 #[test]
 fn for_empty_list_runs_body_zero_times() {
-    assert_eq!(run_c("for x in; do echo $x; done; echo end").stdout, "end\n");
+    assert_eq!(
+        run_c("for x in; do echo $x; done; echo end").stdout,
+        "end\n"
+    );
 }
 
 // ---- while / until ---------------------------------------------------------
@@ -157,7 +169,10 @@ fn case_matches_patterns() {
 
 #[test]
 fn case_alternation_and_no_match() {
-    assert_eq!(run_c("case yes in y|yes|yeah) echo hit;; esac").stdout, "hit\n");
+    assert_eq!(
+        run_c("case yes in y|yes|yeah) echo hit;; esac").stdout,
+        "hit\n"
+    );
     // No match → status 0, no output.
     let r = run_c("case zzz in a) echo a;; esac; echo done=$?");
     assert_eq!(r.stdout, "done=0\n");
@@ -166,8 +181,14 @@ fn case_alternation_and_no_match() {
 #[test]
 fn case_quoted_pattern_is_literal() {
     // A quoted `*` in a pattern matches only a literal asterisk.
-    assert_eq!(run_c("case '*' in \"*\") echo literal;; esac").stdout, "literal\n");
-    assert_eq!(run_c("case abc in \"*\") echo lit;; *) echo glob;; esac").stdout, "glob\n");
+    assert_eq!(
+        run_c("case '*' in \"*\") echo literal;; esac").stdout,
+        "literal\n"
+    );
+    assert_eq!(
+        run_c("case abc in \"*\") echo lit;; *) echo glob;; esac").stdout,
+        "glob\n"
+    );
 }
 
 // ---- brace group & subshell ------------------------------------------------
@@ -278,7 +299,10 @@ do
 done
 ";
     std::fs::write(&path, script).unwrap();
-    let out = Command::new(RUSH).arg(path.to_str().unwrap()).output().expect("spawn");
+    let out = Command::new(RUSH)
+        .arg(path.to_str().unwrap())
+        .output()
+        .expect("spawn");
     let _ = std::fs::remove_file(&path);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),

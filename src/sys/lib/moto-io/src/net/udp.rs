@@ -4,10 +4,10 @@
 //! [`super::channel`] and emits readiness through an abstract
 //! [`crate::net::readiness::NetEventListener`], naming no vdso type.
 
-use crate::net::readiness::{NetEventListener, Readiness};
 use super::channel::{ChannelReservation, NetChannel};
+use crate::net::readiness::{NetEventListener, Readiness};
+use crate::net::wait::{WaitSet, WaiterId};
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::sync::atomic::*;
 use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
@@ -35,11 +35,9 @@ pub struct UdpSocket {
     rx_timeout_ns: AtomicU64,
     tx_timeout_ns: AtomicU64,
 
-    // Wakers of parked blocking recv/send futures, drained (wake-all-and-
-    // recheck) at the RX / TX-ack points -- the D5 replacement for the old
-    // EventSourceManaged readable/writable futex pair.
-    rx_wakers: Mutex<Vec<core::task::Waker>>,
-    tx_wakers: Mutex<Vec<core::task::Waker>>,
+    // Parked futures own cancellation-aware registrations.
+    rx_waiters: WaitSet,
+    tx_waiters: WaitSet,
 
     me: Weak<UdpSocket>,
 }
@@ -59,6 +57,8 @@ impl Drop for UdpSocket {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
+
+        self.channel().udp_socket_dropped(self.handle());
 
         // Guaranteed delivery: never drop the message (sys-io would leak the
         // socket), never panic on a full send queue, and never deadlock when
@@ -147,22 +147,20 @@ impl UdpSocket {
             }
         }
 
-        let udp_socket = Arc::new_cyclic(|me| {
-            UdpSocket {
-                local_addr: socket_addr,
-                channel_reservation,
-                handle: resp.handle,
-                nonblocking: AtomicBool::new(false),
-                event_listener,
-                tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
-                peer_addr: Mutex::new(None),
-                rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
-                rx_timeout_ns: AtomicU64::new(u64::MAX),
-                tx_timeout_ns: AtomicU64::new(u64::MAX),
-                rx_wakers: Mutex::new(Vec::new()),
-                tx_wakers: Mutex::new(Vec::new()),
-                me: me.clone(),
-            }
+        let udp_socket = Arc::new_cyclic(|me| UdpSocket {
+            local_addr: socket_addr,
+            channel_reservation,
+            handle: resp.handle,
+            nonblocking: AtomicBool::new(false),
+            event_listener,
+            tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
+            peer_addr: Mutex::new(None),
+            rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            rx_waiters: WaitSet::new(),
+            tx_waiters: WaitSet::new(),
+            me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
         crate::net::channel::stats_udp_socket_created();
@@ -207,13 +205,17 @@ impl UdpSocket {
             socket: self,
             buf,
             peek,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a receive would not block. A native reactor awaits this,
     /// then calls `try_recv_from`.
     pub fn readable(&self) -> UdpReadable<'_> {
-        UdpReadable { socket: self }
+        UdpReadable {
+            socket: self,
+            waiter_id: None,
+        }
     }
 
     /// Nonblocking send: `Ok(n)` when queued, `E_NOT_READY` when the TX queue
@@ -227,18 +229,26 @@ impl UdpSocket {
 
     /// The send future the veneer parks on and a native reactor awaits.
     /// Cancel-safe. Callers pre-check `MAX_UDP_PAYLOAD` via `try_send_to`.
-    pub fn send_to_future<'a, 'b>(&'a self, buf: &'b [u8], addr: &SocketAddr) -> UdpSendFuture<'a, 'b> {
+    pub fn send_to_future<'a, 'b>(
+        &'a self,
+        buf: &'b [u8],
+        addr: &SocketAddr,
+    ) -> UdpSendFuture<'a, 'b> {
         UdpSendFuture {
             socket: self,
             buf,
             addr: *addr,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a send would not block. A native reactor awaits this,
     /// then calls `try_send_to`.
     pub fn writable(&self) -> UdpWritable<'_> {
-        UdpWritable { socket: self }
+        UdpWritable {
+            socket: self,
+            waiter_id: None,
+        }
     }
 
     fn recv_or_peek_from_nonblocking(
@@ -353,15 +363,49 @@ impl UdpSocket {
             }
             api_net::NetCmd::UdpSocketTxRxAck => {
                 self.raise_readiness(Readiness::WRITABLE);
-                self.try_tx();
-                self.wake_tx_waiters();
+                self.on_channel_tx_progress();
             }
             _ => panic!("Unexpected UDP cmd: {:?}", cmd),
         }
     }
 
+    /// Re-drive queued datagrams and wake senders after channel TX progress.
+    pub(super) fn on_channel_tx_progress(&self) {
+        self.try_tx();
+        self.wake_tx_waiters();
+    }
+
     fn set_nonblocking(&self, val: bool) {
         self.nonblocking.store(val, Ordering::Release);
+    }
+
+    /// Set the unicast TTL without blocking the polling thread.
+    pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        req.payload.args_32_mut()[2] = ttl;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the unicast TTL without blocking the polling thread.
+    pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_32()[0])
+        } else {
+            Err(resp.status)
+        }
     }
 
     /// # Safety
@@ -393,9 +437,8 @@ impl UdpSocket {
                 }
                 moto_rt::net::SO_TTL => {
                     assert_eq!(len, 4);
-                    let _ttl = *(ptr as *const u32);
-                    // self.set_ttl(ttl)
-                    panic!("UDP: set_ttl() not implemented")
+                    let ttl = *(ptr as *const u32);
+                    self.set_ttl(ttl)
                 }
                 _ => panic!("unrecognized option {option}"),
             }
@@ -422,14 +465,13 @@ impl UdpSocket {
                 }
                 moto_rt::net::SO_TTL => {
                     assert_eq!(len, 4);
-                    panic!("UDP: ttl() not implemented")
-                    // match self.ttl() {
-                    //     Ok(ttl) => {
-                    //         *(ptr as *mut u32) = ttl;
-                    //         moto_rt::E_OK
-                    //     }
-                    //     Err(err) => err,
-                    // }
+                    match self.ttl() {
+                        Ok(ttl) => {
+                            *(ptr as *mut u32) = ttl;
+                            moto_rt::E_OK
+                        }
+                        Err(err) => err,
+                    }
                 }
                 moto_rt::net::SO_ERROR => {
                     assert_eq!(len, 2);
@@ -440,6 +482,28 @@ impl UdpSocket {
                 }
                 _ => panic!("unrecognized option {option}"),
             }
+        }
+    }
+
+    fn set_ttl(&self, ttl: u32) -> ErrorCode {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        req.payload.args_32_mut()[2] = ttl;
+        self.channel().send_receive(req).status
+    }
+
+    fn ttl(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        let resp = self.channel().send_receive(req);
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_32()[0])
+        } else {
+            Err(resp.status)
         }
     }
 
@@ -490,46 +554,81 @@ impl UdpSocket {
         self.rx_queue.lock().have_datagram().unwrap()
     }
 
-    // Dedup like the TCP wakers: a blocked recv/send re-registers on every
-    // block_on_recheck tick, so without the will_wake guard the same task's
-    // waker would accumulate until the next drain (cancel-safety hygiene).
-    fn add_rx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.rx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    fn add_rx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.rx_waiters.register(id, waker);
     }
 
-    fn add_tx_waker(&self, waker: &core::task::Waker) {
-        let mut wakers = self.tx_wakers.lock();
-        if !wakers.iter().any(|w| w.will_wake(waker)) {
-            wakers.push(waker.clone());
-        }
+    fn remove_rx_waker(&self, id: &mut Option<WaiterId>) {
+        self.rx_waiters.unregister(id);
+    }
+
+    fn add_tx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
+        self.tx_waiters.register(id, waker);
+    }
+
+    fn remove_tx_waker(&self, id: &mut Option<WaiterId>) {
+        self.tx_waiters.unregister(id);
     }
 
     fn wake_rx_waiters(&self) {
-        for waker in self.rx_wakers.lock().drain(..) {
-            waker.wake();
-        }
+        self.rx_waiters.wake_all();
     }
 
     fn wake_tx_waiters(&self) {
-        for waker in self.tx_wakers.lock().drain(..) {
-            waker.wake();
+        self.tx_waiters.wake_all();
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn rx_waiter_count(&self) -> usize {
+        self.rx_waiters.len()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn tx_waiter_count(&self) -> usize {
+        self.tx_waiters.len()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn channel_udp_socket_count_for_test(&self) -> usize {
+        self.channel().udp_socket_count_for_test()
+    }
+
+    /// Run a netdev test while this socket has no allocatable TX pages.
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
+        let mut pages = alloc::vec::Vec::new();
+        while let Ok(page) = self
+            .channel()
+            .alloc_page(self.channel_reservation.subchannel_mask())
+        {
+            pages.push(page);
         }
+        f();
+        drop(pages);
+        self.channel().wake_waiters_for_test();
     }
 }
 
 // ------------- blocking-path futures (design 5.3): the UDP mirror of ------------
 // the tcp read/write futures, driven by the shared block_on_recheck. All
-// state lives in the socket, so a dropped (timed-out) instance leaves at
-// most a stale waker entry. Register-then-recheck closes the race with the
-// rx task queueing between the poll's check and the waker registration.
+// data-path state lives in the socket. Register-then-recheck closes the race
+// with the rx task queueing between the poll's check and waker registration.
 
 pub struct UdpRecvFuture<'a, 'b> {
     socket: &'a UdpSocket,
     buf: &'b mut [u8],
     peek: bool,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpRecvFuture<'_, '_> {
+    fn drop(&mut self) {
+        self.socket.remove_rx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpRecvFuture<'_, '_> {
@@ -547,15 +646,21 @@ impl core::future::Future for UdpRecvFuture<'_, '_> {
             .recv_or_peek_from_nonblocking(this.buf, this.peek)
         {
             Err(E_NOT_READY) => {}
-            res => return Poll::Ready(res),
+            res => {
+                this.socket.remove_rx_waker(&mut this.waiter_id);
+                return Poll::Ready(res);
+            }
         }
-        this.socket.add_rx_waker(cx.waker());
+        this.socket.add_rx_waker(&mut this.waiter_id, cx.waker());
         match this
             .socket
             .recv_or_peek_from_nonblocking(this.buf, this.peek)
         {
             Err(E_NOT_READY) => Poll::Pending,
-            res => Poll::Ready(res),
+            res => {
+                this.socket.remove_rx_waker(&mut this.waiter_id);
+                Poll::Ready(res)
+            }
         }
     }
 }
@@ -564,6 +669,13 @@ pub struct UdpSendFuture<'a, 'b> {
     socket: &'a UdpSocket,
     buf: &'b [u8],
     addr: SocketAddr,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpSendFuture<'_, '_> {
+    fn drop(&mut self) {
+        self.socket.remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpSendFuture<'_, '_> {
@@ -578,12 +690,18 @@ impl core::future::Future for UdpSendFuture<'_, '_> {
         let this = self.get_mut();
         match this.socket.send_to_nonblocking(this.buf, &this.addr) {
             Err(E_NOT_READY) => {}
-            res => return Poll::Ready(res),
+            res => {
+                this.socket.remove_tx_waker(&mut this.waiter_id);
+                return Poll::Ready(res);
+            }
         }
-        this.socket.add_tx_waker(cx.waker());
+        this.socket.add_tx_waker(&mut this.waiter_id, cx.waker());
         match this.socket.send_to_nonblocking(this.buf, &this.addr) {
             Err(E_NOT_READY) => Poll::Pending,
-            res => Poll::Ready(res),
+            res => {
+                this.socket.remove_tx_waker(&mut this.waiter_id);
+                Poll::Ready(res)
+            }
         }
     }
 }
@@ -593,6 +711,13 @@ impl core::future::Future for UdpSendFuture<'_, '_> {
 /// the vdso veneer parks on the richer `recv_from_future`. Cancel-safe.
 pub struct UdpReadable<'a> {
     socket: &'a UdpSocket,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpReadable<'_> {
+    fn drop(&mut self) {
+        self.socket.remove_rx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpReadable<'_> {
@@ -604,12 +729,15 @@ impl core::future::Future for UdpReadable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let socket = self.socket;
+        let this = self.get_mut();
+        let socket = this.socket;
         if socket.has_rx_datagram() {
+            socket.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
-        socket.add_rx_waker(cx.waker());
+        socket.add_rx_waker(&mut this.waiter_id, cx.waker());
         if socket.has_rx_datagram() {
+            socket.remove_rx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         Poll::Pending
@@ -618,10 +746,17 @@ impl core::future::Future for UdpReadable<'_> {
 
 /// Send-readiness future (design 5.4): resolves once `try_send_to` would not
 /// block. First flushes already-queued datagrams (`try_tx`), then reports
-/// TX-queue room; the tx waker fires from `process_incoming_msg` when sys-io
-/// drains the queue. Cancel-safe.
+/// TX-queue room; the tx waker fires when an acknowledgement or other channel
+/// progress may have made room. Cancel-safe.
 pub struct UdpWritable<'a> {
     socket: &'a UdpSocket,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for UdpWritable<'_> {
+    fn drop(&mut self) {
+        self.socket.remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for UdpWritable<'_> {
@@ -633,17 +768,21 @@ impl core::future::Future for UdpWritable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let socket = self.socket;
+        let this = self.get_mut();
+        let socket = this.socket;
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         // Push any already-queued datagrams to sys-io; that may free room.
         socket.try_tx();
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
-        socket.add_tx_waker(cx.waker());
+        socket.add_tx_waker(&mut this.waiter_id, cx.waker());
         if !socket.tx_queue_full() {
+            socket.remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         Poll::Pending

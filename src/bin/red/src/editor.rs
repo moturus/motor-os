@@ -1,8 +1,8 @@
-use crate::buffer::{char_width, Line, Buffer, HighlightType, LexerState};
+use crate::buffer::{Buffer, HighlightType, LexerState, Line, char_width};
 use crate::config::Config;
 use crate::input::Key;
-use crate::terminal::get_terminal_size;
 use crate::syntax::SyntaxManager;
+use crate::terminal::get_terminal_size;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -220,13 +220,13 @@ impl Editor {
         let tab_stop = self.config.tabstop;
 
         let buf = self.current_buffer_mut();
-        
+
         // 1. If cursor is above the top of the screen, scroll up immediately
         if buf.cy < buf.row_offset {
             buf.row_offset = buf.cy;
             changed = true;
         }
-        
+
         // 2. Vertical scrolling constraints (if cursor is below the bottom of the screen)
         if text_cols > 0 {
             if !wrap {
@@ -237,7 +237,7 @@ impl Editor {
                 }
             } else {
                 // Wrapped vertical scrolling: check if cursor visual segment is below viewport.
-                
+
                 // First, compute the cursor's segment index on its own line
                 let mut cursor_segment_idx = 0;
                 if buf.cy < buf.lines.len() {
@@ -274,10 +274,10 @@ impl Editor {
                 if is_off_screen {
                     // Backwards scanning algorithm to find the new target_row_offset in O(screen_rows) time!
                     let mut remaining_rows = screen_rows;
-                    
+
                     // The cursor line itself takes some rows. We only care about rows up to the cursor's segment.
                     let cursor_line_rows_needed = cursor_segment_idx + 1;
-                    
+
                     if cursor_line_rows_needed >= remaining_rows {
                         // If the cursor line alone takes up the whole screen, the top-most visible line is just buf.cy
                         buf.row_offset = buf.cy;
@@ -285,11 +285,12 @@ impl Editor {
                     } else {
                         remaining_rows -= cursor_line_rows_needed;
                         let mut target_row_offset = buf.cy;
-                        
+
                         // Scan upwards from buf.cy - 1
                         while target_row_offset > 0 {
                             let r = target_row_offset - 1;
-                            let line_rows = buf.lines[r].wrapped_segments_count(text_cols, tab_stop);
+                            let line_rows =
+                                buf.lines[r].wrapped_segments_count(text_cols, tab_stop);
                             if line_rows <= remaining_rows {
                                 remaining_rows -= line_rows;
                                 target_row_offset = r;
@@ -298,7 +299,7 @@ impl Editor {
                                 break;
                             }
                         }
-                        
+
                         if buf.row_offset != target_row_offset {
                             buf.row_offset = target_row_offset;
                             changed = true;
@@ -332,7 +333,7 @@ impl Editor {
 
     pub fn highlight_buffer_from(&mut self, start_row: usize, force: bool) {
         let filename = self.buffers[self.current_buffer_idx].filename.clone();
-        
+
         // Split borrow: borrow syntax_manager immutably
         let highlighter = self.syntax_manager.get_highlighter(&filename);
 
@@ -349,7 +350,8 @@ impl Editor {
             let line = &mut buf.lines[row];
             let old_end_state = line.end_state;
 
-            let (new_highlights, new_end_state) = highlighter.highlight_line(&line.chars, current_state);
+            let (new_highlights, new_end_state) =
+                highlighter.highlight_line(&line.chars, current_state);
             line.highlights = new_highlights;
             line.end_state = new_end_state;
 
@@ -369,7 +371,7 @@ impl Editor {
         let buf = self.current_buffer();
         let gutter_w = self.get_gutter_width();
         let text_cols = self.screen_cols.saturating_sub(gutter_w);
-        
+
         let mut visible = Vec::new();
         if text_cols == 0 {
             return visible;
@@ -396,16 +398,21 @@ impl Editor {
                 let mut seg_chars = Vec::new();
                 let mut seg_hl = Vec::new();
                 let mut rx = 0;
-                
+
                 for (i, &ch) in line.chars.iter().enumerate() {
                     if rx >= buf.col_offset && rx < buf.col_offset + text_cols {
                         seg_chars.push(ch);
-                        seg_hl.push(line.highlights.get(i).copied().unwrap_or(HighlightType::Normal));
+                        seg_hl.push(
+                            line.highlights
+                                .get(i)
+                                .copied()
+                                .unwrap_or(HighlightType::Normal),
+                        );
                     }
 
                     rx += char_width(ch, rx, self.config.tabstop);
                 }
-                
+
                 visible.push(VisibleRow {
                     buffer_line_idx: r,
                     segment_idx: 0,
@@ -442,12 +449,12 @@ impl Editor {
         if buf.cy < buf.lines.len() {
             let line = &buf.lines[buf.cy];
             let mut current_segment_rx = 0;
-            
+
             for (i, &ch) in line.chars.iter().enumerate() {
                 if i == buf.cx {
                     break;
                 }
-                
+
                 let char_w = char_width(ch, current_segment_rx, self.config.tabstop);
 
                 if current_segment_rx > 0 && current_segment_rx + char_w > text_cols {
@@ -540,7 +547,11 @@ impl Editor {
         let mut repainted = false;
         let empty: Vec<Cell> = Vec::new();
         for (r, row) in frame.iter().enumerate() {
-            let old = if cache_valid { &self.prev_frame[r] } else { &empty };
+            let old = if cache_valid {
+                &self.prev_frame[r]
+            } else {
+                &empty
+            };
             if Self::diff_row_into(&mut out, r + 1, old, row) {
                 repainted = true;
             }
@@ -549,12 +560,18 @@ impl Editor {
         // 3. Determine where to place the cursor.
         let buf = self.current_buffer();
         let (screen_x, screen_y) = match self.mode {
-            Mode::Command => (self.command_buffer.chars().count() + 2, self.screen_rows + 2),
+            Mode::Command => (
+                self.command_buffer.chars().count() + 2,
+                self.screen_rows + 2,
+            ),
             _ => {
                 if self.wrap {
                     self.get_cursor_screen_position()
                 } else {
-                    (buf.rx - buf.col_offset + 1 + gutter_w, buf.cy - buf.row_offset + 1)
+                    (
+                        buf.rx - buf.col_offset + 1 + gutter_w,
+                        buf.cy - buf.row_offset + 1,
+                    )
                 }
             }
         };
@@ -580,9 +597,18 @@ impl Editor {
     // gutter plus the visible text segment, or "~" past the buffer. Each cell
     // carries its own self-contained style, so draw() can repaint any subset of
     // columns; positioning/clearing is added by draw().
-    fn render_text_row(&self, screen_row: usize, visible_rows: &[VisibleRow], text_cols: usize, gutter_w: usize) -> Vec<Cell> {
+    fn render_text_row(
+        &self,
+        screen_row: usize,
+        visible_rows: &[VisibleRow],
+        text_cols: usize,
+        gutter_w: usize,
+    ) -> Vec<Cell> {
         if screen_row >= visible_rows.len() {
-            return vec![Cell { ch: '~', style: STYLE_NORMAL }];
+            return vec![Cell {
+                ch: '~',
+                style: STYLE_NORMAL,
+            }];
         }
         let vr = &visible_rows[screen_row];
         let mut cells: Vec<Cell> = Vec::new();
@@ -595,7 +621,10 @@ impl Editor {
                 format!("{:>width$} ", vr.buffer_line_idx + 1, width = gutter_w - 1)
             };
             for ch in g.chars() {
-                cells.push(Cell { ch, style: STYLE_GUTTER });
+                cells.push(Cell {
+                    ch,
+                    style: STYLE_GUTTER,
+                });
             }
         }
 
@@ -632,14 +661,18 @@ impl Editor {
                 _ => false,
             };
             if should_highlight {
-                cells.push(Cell { ch: ' ', style: STYLE_INVERT });
+                cells.push(Cell {
+                    ch: ' ',
+                    style: STYLE_INVERT,
+                });
             }
         } else {
             // Find absolute character index in buffer line for selection matching
             let mut char_start_idx = 0;
             if self.wrap {
                 let buf = self.current_buffer();
-                let segments = buf.lines[vr.buffer_line_idx].wrapped_segments(text_cols, self.config.tabstop);
+                let segments =
+                    buf.lines[vr.buffer_line_idx].wrapped_segments(text_cols, self.config.tabstop);
                 for seg in segments.iter().take(vr.segment_idx) {
                     char_start_idx += seg.0.len();
                 }
@@ -690,8 +723,16 @@ impl Editor {
                     _ => false,
                 };
 
-                let char_hl = vr.highlights.get(seg_char_idx).copied().unwrap_or(HighlightType::Normal);
-                let style = if is_selected { STYLE_INVERT } else { cell_syntax_style(char_hl) };
+                let char_hl = vr
+                    .highlights
+                    .get(seg_char_idx)
+                    .copied()
+                    .unwrap_or(HighlightType::Normal);
+                let style = if is_selected {
+                    STYLE_INVERT
+                } else {
+                    cell_syntax_style(char_hl)
+                };
 
                 if ch == '\t' {
                     let spaces = char_width(ch, rx, self.config.tabstop);
@@ -710,7 +751,10 @@ impl Editor {
                 if let Some((start, end)) = selection {
                     if vr.buffer_line_idx >= start.1 && vr.buffer_line_idx <= end.1 {
                         for _ in rx..text_cols {
-                            cells.push(Cell { ch: ' ', style: STYLE_INVERT });
+                            cells.push(Cell {
+                                ch: ' ',
+                                style: STYLE_INVERT,
+                            });
                         }
                     }
                 }
@@ -725,7 +769,13 @@ impl Editor {
         let buf = self.current_buffer();
         let filename = buf.filename.as_deref().unwrap_or("[No Name]");
         let dirty_str = if buf.dirty { " (modified)" } else { "" };
-        let left_status = format!(" [{}] {}{} - {} lines", buf.id, filename, dirty_str, buf.lines.len());
+        let left_status = format!(
+            " [{}] {}{} - {} lines",
+            buf.id,
+            filename,
+            dirty_str,
+            buf.lines.len()
+        );
 
         let mode_str = match self.mode {
             Mode::Normal => "NORMAL",
@@ -752,7 +802,12 @@ impl Editor {
         if cur < total_width {
             line.push_str(&" ".repeat(total_width - cur));
         }
-        line.chars().map(|ch| Cell { ch, style: STYLE_INVERT }).collect()
+        line.chars()
+            .map(|ch| Cell {
+                ch,
+                style: STYLE_INVERT,
+            })
+            .collect()
     }
 
     // Render the message bar as cells. Positioning/clear added by draw().
@@ -771,7 +826,12 @@ impl Editor {
                 }
             }
         };
-        msg.chars().map(|ch| Cell { ch, style: STYLE_NORMAL }).collect()
+        msg.chars()
+            .map(|ch| Cell {
+                ch,
+                style: STYLE_NORMAL,
+            })
+            .collect()
     }
 
     pub fn handle_resize(&mut self) {
@@ -1080,7 +1140,8 @@ impl Editor {
             } else {
                 let text = if start.1 == end.1 {
                     let line = &buf.lines[start.1];
-                    let selected_chars = &line.chars[start.0..=std::cmp::min(end.0, line.chars.len() - 1)];
+                    let selected_chars =
+                        &line.chars[start.0..=std::cmp::min(end.0, line.chars.len() - 1)];
                     selected_chars.iter().collect::<String>()
                 } else {
                     let mut selected_parts = Vec::new();
@@ -1156,14 +1217,18 @@ impl Editor {
                         buf.lines.remove(start.1);
                     }
 
-                    buf.lines.insert(start.1, Line {
-                        chars: merged_chars,
-                        highlights: Vec::new(),
-                        end_state: LexerState::Normal,
-                    });
+                    buf.lines.insert(
+                        start.1,
+                        Line {
+                            chars: merged_chars,
+                            highlights: Vec::new(),
+                            end_state: LexerState::Normal,
+                        },
+                    );
 
                     buf.cy = start.1;
-                    buf.cx = std::cmp::min(start.0, buf.lines[buf.cy].chars.len().saturating_sub(1));
+                    buf.cx =
+                        std::cmp::min(start.0, buf.lines[buf.cy].chars.len().saturating_sub(1));
                 }
             }
 
@@ -1212,11 +1277,14 @@ impl Editor {
                 let mut last_line_chars: Vec<char> = parts[parts.len() - 1].chars().collect();
                 last_line_chars.extend(right.to_vec());
                 let len = last_line_chars.len();
-                buf.lines.insert(last_idx, Line {
-                    chars: last_line_chars,
-                    highlights: vec![HighlightType::Normal; len],
-                    end_state: LexerState::Normal,
-                });
+                buf.lines.insert(
+                    last_idx,
+                    Line {
+                        chars: last_line_chars,
+                        highlights: vec![HighlightType::Normal; len],
+                        end_state: LexerState::Normal,
+                    },
+                );
 
                 buf.cy = last_idx;
                 buf.cx = parts[parts.len() - 1].chars().count();
@@ -1504,11 +1572,14 @@ impl Editor {
                     let (left, right) = current_line_chars.split_at(buf.cx);
 
                     buf.lines[buf.cy].chars = left.to_vec();
-                    buf.lines.insert(buf.cy + 1, Line {
-                        chars: right.to_vec(),
-                        highlights: vec![HighlightType::Normal; right.len()],
-                        end_state: LexerState::Normal,
-                    });
+                    buf.lines.insert(
+                        buf.cy + 1,
+                        Line {
+                            chars: right.to_vec(),
+                            highlights: vec![HighlightType::Normal; right.len()],
+                            end_state: LexerState::Normal,
+                        },
+                    );
 
                     let original_cy = buf.cy;
                     buf.cy += 1;
@@ -1630,7 +1701,9 @@ impl Editor {
             let line2_chars = &buf.lines[next_row].chars;
 
             let mut first_non_ws = 0;
-            while first_non_ws < line2_chars.len() && (line2_chars[first_non_ws] == ' ' || line2_chars[first_non_ws] == '\t') {
+            while first_non_ws < line2_chars.len()
+                && (line2_chars[first_non_ws] == ' ' || line2_chars[first_non_ws] == '\t')
+            {
                 first_non_ws += 1;
             }
 
@@ -1647,12 +1720,21 @@ impl Editor {
                 false
             };
 
-            (buf.cy, next_row, first_non_ws, insert_space, line1.chars.len(), line2_remaining_len)
+            (
+                buf.cy,
+                next_row,
+                first_non_ws,
+                insert_space,
+                line1.chars.len(),
+                line2_remaining_len,
+            )
         };
 
         // Mutate the buffer line
         {
-            let next_row_chars = self.buffers[self.current_buffer_idx].lines[next_row].chars.clone();
+            let next_row_chars = self.buffers[self.current_buffer_idx].lines[next_row]
+                .chars
+                .clone();
             let line2_trimmed = &next_row_chars[first_non_ws..];
 
             let line1 = &mut self.buffers[self.current_buffer_idx].lines[cy];
@@ -1735,7 +1817,7 @@ impl Editor {
 
         let cursor_y = self.buffers[self.current_buffer_idx].cy;
         let cursor_x = self.buffers[self.current_buffer_idx].cx;
-        
+
         let idx = if self.search_backward {
             // Find the last match at or before the cursor
             let mut target_idx = None;
@@ -1765,7 +1847,11 @@ impl Editor {
         final_buf.cy = target_row;
         final_buf.cx = target_col;
         self.redraw_target = RedrawTarget::Everything;
-        self.set_status(&format!("Found match {} of {}", idx + 1, self.search_matches.len()));
+        self.set_status(&format!(
+            "Found match {} of {}",
+            idx + 1,
+            self.search_matches.len()
+        ));
     }
 
     fn jump_to_next_match(&mut self) {
@@ -1821,7 +1907,11 @@ impl Editor {
         final_buf.cy = target_row;
         final_buf.cx = target_col;
         self.redraw_target = RedrawTarget::Everything;
-        self.set_status(&format!("Found match {} of {}", idx + 1, self.search_matches.len()));
+        self.set_status(&format!(
+            "Found match {} of {}",
+            idx + 1,
+            self.search_matches.len()
+        ));
     }
 
     fn jump_to_prev_match(&mut self) {
@@ -1877,7 +1967,11 @@ impl Editor {
         final_buf.cy = target_row;
         final_buf.cx = target_col;
         self.redraw_target = RedrawTarget::Everything;
-        self.set_status(&format!("Found match {} of {}", idx + 1, self.search_matches.len()));
+        self.set_status(&format!(
+            "Found match {} of {}",
+            idx + 1,
+            self.search_matches.len()
+        ));
     }
 
     // --- Buffer Management Actions ---
@@ -1893,8 +1987,16 @@ impl Editor {
         }
         self.current_buffer_idx = (self.current_buffer_idx + 1) % self.buffers.len();
         self.redraw_target = RedrawTarget::Everything;
-        let name = self.current_buffer().filename.as_deref().unwrap_or("[No Name]");
-        self.set_status(&format!("Switched to buffer [{}]: {}", self.current_buffer().id, name));
+        let name = self
+            .current_buffer()
+            .filename
+            .as_deref()
+            .unwrap_or("[No Name]");
+        self.set_status(&format!(
+            "Switched to buffer [{}]: {}",
+            self.current_buffer().id,
+            name
+        ));
     }
 
     fn switch_to_prev_buffer(&mut self, force: bool) {
@@ -1912,8 +2014,16 @@ impl Editor {
             self.current_buffer_idx -= 1;
         }
         self.redraw_target = RedrawTarget::Everything;
-        let name = self.current_buffer().filename.as_deref().unwrap_or("[No Name]");
-        self.set_status(&format!("Switched to buffer [{}]: {}", self.current_buffer().id, name));
+        let name = self
+            .current_buffer()
+            .filename
+            .as_deref()
+            .unwrap_or("[No Name]");
+        self.set_status(&format!(
+            "Switched to buffer [{}]: {}",
+            self.current_buffer().id,
+            name
+        ));
     }
 
     fn switch_to_buffer_by_id(&mut self, id: usize, force: bool) {
@@ -1924,7 +2034,11 @@ impl Editor {
         if let Some(pos) = self.buffers.iter().position(|b| b.id == id) {
             self.current_buffer_idx = pos;
             self.redraw_target = RedrawTarget::Everything;
-            let name = self.current_buffer().filename.as_deref().unwrap_or("[No Name]");
+            let name = self
+                .current_buffer()
+                .filename
+                .as_deref()
+                .unwrap_or("[No Name]");
             self.set_status(&format!("Switched to buffer [{}]: {}", id, name));
         } else {
             self.set_status(&format!("Buffer {} not found", id));
@@ -1937,12 +2051,22 @@ impl Editor {
             return;
         }
         if let Some(pos) = self.buffers.iter().position(|b| {
-            b.filename.as_ref().map_or(false, |f| f.contains(name) || f.ends_with(name))
+            b.filename
+                .as_ref()
+                .map_or(false, |f| f.contains(name) || f.ends_with(name))
         }) {
             self.current_buffer_idx = pos;
             self.redraw_target = RedrawTarget::Everything;
-            let actual_name = self.current_buffer().filename.as_deref().unwrap_or("[No Name]");
-            self.set_status(&format!("Switched to buffer [{}]: {}", self.current_buffer().id, actual_name));
+            let actual_name = self
+                .current_buffer()
+                .filename
+                .as_deref()
+                .unwrap_or("[No Name]");
+            self.set_status(&format!(
+                "Switched to buffer [{}]: {}",
+                self.current_buffer().id,
+                actual_name
+            ));
         } else {
             self.set_status(&format!("No buffer matching: {}", name));
         }
@@ -1972,12 +2096,17 @@ impl Editor {
     }
 
     fn load_file_into_new_buffer(&mut self, filename: String) {
-        if let Some(pos) = self.buffers.iter().position(|b| {
-            b.filename.as_ref().map_or(false, |f| f == &filename)
-        }) {
+        if let Some(pos) = self
+            .buffers
+            .iter()
+            .position(|b| b.filename.as_ref().map_or(false, |f| f == &filename))
+        {
             self.current_buffer_idx = pos;
             self.redraw_target = RedrawTarget::Everything;
-            self.set_status(&format!("Buffer already loaded, switched to [{}]", self.buffers[pos].id));
+            self.set_status(&format!(
+                "Buffer already loaded, switched to [{}]",
+                self.buffers[pos].id
+            ));
             return;
         }
 
@@ -1986,8 +2115,12 @@ impl Editor {
         self.buffers.push(new_buf);
         self.current_buffer_idx = self.buffers.len() - 1;
         self.redraw_target = RedrawTarget::Everything;
-        self.set_status(&format!("Opened buffer [{}]: {}", self.current_buffer().id, filename));
-        
+        self.set_status(&format!(
+            "Opened buffer [{}]: {}",
+            self.current_buffer().id,
+            filename
+        ));
+
         self.highlight_buffer_from(0, true);
     }
 
@@ -1998,7 +2131,10 @@ impl Editor {
             let name = b.filename.as_deref().unwrap_or("[No Name]");
             let dirty_char = if b.dirty { "+" } else { "" };
             let active_char = if b.id == active_id { "%" } else { " " };
-            parts.push(format!("{}{}: \"{}\"{}", active_char, b.id, name, dirty_char));
+            parts.push(format!(
+                "{}{}: \"{}\"{}",
+                active_char, b.id, name, dirty_char
+            ));
         }
         let msg = parts.join("  |  ");
         self.set_status(&msg);
@@ -2040,7 +2176,9 @@ impl Editor {
                     if self.current_buffer().dirty {
                         self.set_status("No write since last change (add ! to override)");
                     } else {
-                        self.set_status("Warning: other buffers have unsaved changes (add ! to override)");
+                        self.set_status(
+                            "Warning: other buffers have unsaved changes (add ! to override)",
+                        );
                     }
                 } else {
                     self.quit_requested = true;
@@ -2253,10 +2391,7 @@ mod tests {
     #[test]
     fn test_normal_mode_motions() {
         let mut editor = Editor::new(Vec::new(), Config::default());
-        editor.current_buffer_mut().lines = vec![
-            Line::new("line one"),
-            Line::new("line two"),
-        ];
+        editor.current_buffer_mut().lines = vec![Line::new("line one"), Line::new("line two")];
 
         let buf = editor.current_buffer();
         assert_eq!(buf.cx, 0);
@@ -2288,22 +2423,22 @@ mod tests {
         editor.current_buffer_mut().lines = (1..=20)
             .map(|i| Line::new(&format!("line {}", i)))
             .collect();
-            
+
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().row_offset, 0);
-        
+
         editor.process_keypress(Key::Ctrl('f'));
         assert_eq!(editor.current_buffer().row_offset, 5);
         assert_eq!(editor.current_buffer().cy, 5);
-        
+
         editor.process_keypress(Key::Ctrl('f'));
         assert_eq!(editor.current_buffer().row_offset, 10);
         assert_eq!(editor.current_buffer().cy, 10);
-        
+
         editor.process_keypress(Key::Ctrl('b'));
         assert_eq!(editor.current_buffer().row_offset, 5);
         assert_eq!(editor.current_buffer().cy, 5);
-        
+
         editor.process_keypress(Key::Ctrl('b'));
         assert_eq!(editor.current_buffer().row_offset, 0);
         assert_eq!(editor.current_buffer().cy, 0);
@@ -2313,7 +2448,7 @@ mod tests {
     fn test_command_mode_transition() {
         let mut editor = Editor::new(Vec::new(), Config::default());
         assert_eq!(editor.mode, Mode::Normal);
-        
+
         editor.process_keypress(Key::Char(':'));
         assert_eq!(editor.mode, Mode::Command);
         assert!(editor.command_buffer.is_empty());
@@ -2345,22 +2480,22 @@ mod tests {
     fn test_visual_char_mode_yank_paste() {
         let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![Line::new("hello world")];
-        
+
         editor.process_keypress(Key::Char('v'));
         assert_eq!(editor.mode, Mode::VisualChar);
         assert_eq!(editor.visual_anchor_x, 0);
         assert_eq!(editor.visual_anchor_y, 0);
-        
+
         for _ in 0..4 {
             editor.process_keypress(Key::Right);
         }
         assert_eq!(editor.current_buffer().cx, 4);
-        
+
         editor.process_keypress(Key::Char('y'));
         assert_eq!(editor.mode, Mode::Normal);
         assert_eq!(editor.clipboard.content, "hello");
         assert!(!editor.clipboard.is_line_wise);
-        
+
         editor.process_keypress(Key::Char('p'));
         let line_content: String = editor.current_buffer().lines[0].chars.iter().collect();
         assert_eq!(line_content, "hellohello world");
@@ -2369,22 +2504,19 @@ mod tests {
     #[test]
     fn test_visual_line_mode_yank_paste() {
         let mut editor = Editor::new(Vec::new(), Config::default());
-        editor.current_buffer_mut().lines = vec![
-            Line::new("line one"),
-            Line::new("line two"),
-        ];
-        
+        editor.current_buffer_mut().lines = vec![Line::new("line one"), Line::new("line two")];
+
         editor.process_keypress(Key::Char('V'));
         assert_eq!(editor.mode, Mode::VisualLine);
-        
+
         editor.process_keypress(Key::Char('y'));
         assert_eq!(editor.mode, Mode::Normal);
         assert_eq!(editor.clipboard.content, "line one");
         assert!(editor.clipboard.is_line_wise);
-        
+
         editor.process_keypress(Key::Char('j'));
         editor.process_keypress(Key::Char('p'));
-        
+
         assert_eq!(editor.current_buffer().lines.len(), 3);
         let line3: String = editor.current_buffer().lines[2].chars.iter().collect();
         assert_eq!(line3, "line one");
@@ -2394,12 +2526,12 @@ mod tests {
     fn test_visual_mode_delete() {
         let mut editor = Editor::new(Vec::new(), Config::default());
         editor.current_buffer_mut().lines = vec![Line::new("hello world")];
-        
+
         editor.process_keypress(Key::Char('v'));
         for _ in 0..5 {
             editor.process_keypress(Key::Right);
         }
-        
+
         editor.process_keypress(Key::Char('d'));
         let line_content: String = editor.current_buffer().lines[0].chars.iter().collect();
         assert_eq!(line_content, "world");
@@ -2410,31 +2542,28 @@ mod tests {
     #[test]
     fn test_insert_mode_arrow_navigation() {
         let mut editor = Editor::new(Vec::new(), Config::default());
-        editor.current_buffer_mut().lines = vec![
-            Line::new("hello"),
-            Line::new("world"),
-        ];
-        
+        editor.current_buffer_mut().lines = vec![Line::new("hello"), Line::new("world")];
+
         editor.process_keypress(Key::Char('i'));
         assert_eq!(editor.mode, Mode::Insert);
         assert_eq!(editor.current_buffer().cx, 0);
         assert_eq!(editor.current_buffer().cy, 0);
-        
+
         for _ in 0..5 {
             editor.process_keypress(Key::Right);
         }
         assert_eq!(editor.current_buffer().cx, 5);
-        
+
         editor.process_keypress(Key::Right);
         assert_eq!(editor.current_buffer().cx, 5);
-        
+
         editor.process_keypress(Key::Down);
         assert_eq!(editor.current_buffer().cy, 1);
         assert_eq!(editor.current_buffer().cx, 5);
-        
+
         editor.process_keypress(Key::Left);
         assert_eq!(editor.current_buffer().cx, 4);
-        
+
         editor.process_keypress(Key::Up);
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().cx, 4);
@@ -2443,27 +2572,21 @@ mod tests {
     #[test]
     fn test_join_lines() {
         let mut editor = Editor::new(Vec::new(), Config::default());
-        editor.current_buffer_mut().lines = vec![
-            Line::new("hello"),
-            Line::new("   world"),
-        ];
-        
+        editor.current_buffer_mut().lines = vec![Line::new("hello"), Line::new("   world")];
+
         editor.process_keypress(Key::Char('J'));
-        
+
         assert_eq!(editor.current_buffer().lines.len(), 1);
         let line_content: String = editor.current_buffer().lines[0].chars.iter().collect();
         assert_eq!(line_content, "hello world");
         assert_eq!(editor.current_buffer().cx, 5);
         assert!(editor.current_buffer().dirty);
-        
-        editor.current_buffer_mut().lines = vec![
-            Line::new("hello "),
-            Line::new("world"),
-        ];
+
+        editor.current_buffer_mut().lines = vec![Line::new("hello "), Line::new("world")];
         editor.current_buffer_mut().cy = 0;
         editor.current_buffer_mut().cx = 0;
         editor.current_buffer_mut().dirty = false;
-        
+
         editor.process_keypress(Key::Char('J'));
         let line_content2: String = editor.current_buffer().lines[0].chars.iter().collect();
         assert_eq!(line_content2, "hello world");
@@ -2474,11 +2597,17 @@ mod tests {
 
     #[test]
     fn test_multi_buffer_switching_and_editing() {
-        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()], Config::default());
+        let mut editor = Editor::new(
+            vec!["file1.rs".to_string(), "file2.rs".to_string()],
+            Config::default(),
+        );
         assert_eq!(editor.buffers.len(), 2);
         assert_eq!(editor.current_buffer_idx, 0);
         assert_eq!(editor.current_buffer().id, 1);
-        assert_eq!(editor.current_buffer().filename.as_deref(), Some("file1.rs"));
+        assert_eq!(
+            editor.current_buffer().filename.as_deref(),
+            Some("file1.rs")
+        );
 
         // Type in buffer 1
         editor.process_keypress(Key::Char('i'));
@@ -2497,7 +2626,10 @@ mod tests {
         editor.execute_command("bn!");
         assert_eq!(editor.current_buffer_idx, 1); // Switched!
         assert_eq!(editor.current_buffer().id, 2);
-        assert_eq!(editor.current_buffer().filename.as_deref(), Some("file2.rs"));
+        assert_eq!(
+            editor.current_buffer().filename.as_deref(),
+            Some("file2.rs")
+        );
 
         // Buffer 2 should be empty and clean
         assert_eq!(editor.current_buffer().lines[0].chars.len(), 0);
@@ -2522,14 +2654,20 @@ mod tests {
 
     #[test]
     fn test_buffer_deletion() {
-        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()], Config::default());
+        let mut editor = Editor::new(
+            vec!["file1.rs".to_string(), "file2.rs".to_string()],
+            Config::default(),
+        );
         assert_eq!(editor.buffers.len(), 2);
 
         // Delete buffer 1 (it's clean, so it should succeed immediately)
         editor.execute_command("bd");
         assert_eq!(editor.buffers.len(), 1);
         assert_eq!(editor.current_buffer().id, 2); // Buffer 2 is now active
-        assert_eq!(editor.current_buffer().filename.as_deref(), Some("file2.rs"));
+        assert_eq!(
+            editor.current_buffer().filename.as_deref(),
+            Some("file2.rs")
+        );
 
         // Edit buffer 2
         editor.process_keypress(Key::Char('i'));
@@ -2549,7 +2687,10 @@ mod tests {
 
     #[test]
     fn test_normal_mode_arrow_buffer_switching() {
-        let mut editor = Editor::new(vec!["file1.rs".to_string(), "file2.rs".to_string()], Config::default());
+        let mut editor = Editor::new(
+            vec!["file1.rs".to_string(), "file2.rs".to_string()],
+            Config::default(),
+        );
         assert_eq!(editor.current_buffer_idx, 0);
 
         // Press Right arrow in Normal Mode -> switch to next buffer
@@ -2569,7 +2710,7 @@ mod tests {
     fn test_syntax_highlighting_rust() {
         let mut editor = Editor::new(vec!["test.rs".to_string()], Config::default());
         editor.process_keypress(Key::Char('i'));
-        
+
         // Type a Rust keyword: "let"
         for ch in "let x = 123; // comment".chars() {
             editor.process_keypress(Key::Char(ch));
@@ -2577,24 +2718,24 @@ mod tests {
         editor.process_keypress(Key::Esc);
 
         let buf = editor.current_buffer();
-        
+
         // Let's verify the characters typed match their highlight types:
         // "let" -> Keyword
         assert_eq!(buf.lines[0].highlights[0], HighlightType::Keyword);
         assert_eq!(buf.lines[0].highlights[1], HighlightType::Keyword);
         assert_eq!(buf.lines[0].highlights[2], HighlightType::Keyword);
-        
+
         // " " -> Normal
         assert_eq!(buf.lines[0].highlights[3], HighlightType::Normal);
-        
+
         // "x" -> Normal
         assert_eq!(buf.lines[0].highlights[4], HighlightType::Normal);
-        
+
         // "123" -> Number
         assert_eq!(buf.lines[0].highlights[8], HighlightType::Number);
         assert_eq!(buf.lines[0].highlights[9], HighlightType::Number);
         assert_eq!(buf.lines[0].highlights[10], HighlightType::Number);
-        
+
         // "// comment" -> Comment
         assert_eq!(buf.lines[0].highlights[13], HighlightType::Comment);
         assert_eq!(buf.lines[0].highlights[17], HighlightType::Comment);
@@ -2604,7 +2745,7 @@ mod tests {
     fn test_syntax_highlighting_rust_lifetimes() {
         let mut editor = Editor::new(vec!["test.rs".to_string()], Config::default());
         editor.process_keypress(Key::Char('i'));
-        
+
         // Type a line containing both a lifetime and a character literal
         // "impl<'a> MyStruct { let c = 'a'; }"
         for ch in "impl<'a> MyStruct { let c = 'a'; }".chars() {
@@ -2613,7 +2754,7 @@ mod tests {
         editor.process_keypress(Key::Esc);
 
         let buf = editor.current_buffer();
-        
+
         // Verify lifetime 'a -> Type highlight:
         // "impl<" is index 0..5
         // "'" is index 5 -> Type
@@ -2636,33 +2777,33 @@ mod tests {
     fn test_syntax_highlighting_toml() {
         let mut editor = Editor::new(vec!["Cargo.toml".to_string()], Config::default());
         editor.process_keypress(Key::Char('i'));
-        
+
         for ch in "[package]".chars() {
             editor.process_keypress(Key::Char(ch));
         }
         editor.process_keypress(Key::Enter);
-        
+
         for ch in "name = \"red\" # comment".chars() {
             editor.process_keypress(Key::Char(ch));
         }
         editor.process_keypress(Key::Enter);
-        
+
         for ch in "version = 0.1.0".chars() {
             editor.process_keypress(Key::Char(ch));
         }
         editor.process_keypress(Key::Enter);
-        
+
         for ch in "inline = { key = true }".chars() {
             editor.process_keypress(Key::Char(ch));
         }
         editor.process_keypress(Key::Esc);
 
         let buf = editor.current_buffer();
-        
+
         assert_eq!(buf.lines[0].highlights[0], HighlightType::Keyword);
         assert_eq!(buf.lines[0].highlights[1], HighlightType::Keyword);
         assert_eq!(buf.lines[0].highlights[8], HighlightType::Keyword);
-        
+
         assert_eq!(buf.lines[1].highlights[0], HighlightType::Type);
         assert_eq!(buf.lines[1].highlights[3], HighlightType::Type);
         assert_eq!(buf.lines[1].highlights[4], HighlightType::Normal);
@@ -2673,10 +2814,10 @@ mod tests {
         assert_eq!(buf.lines[1].highlights[11], HighlightType::StringLiteral);
         assert_eq!(buf.lines[1].highlights[13], HighlightType::Comment);
         assert_eq!(buf.lines[1].highlights[21], HighlightType::Comment);
-        
+
         assert_eq!(buf.lines[2].highlights[0], HighlightType::Type);
         assert_eq!(buf.lines[2].highlights[10], HighlightType::Number);
-        
+
         assert_eq!(buf.lines[3].highlights[0], HighlightType::Type);
         assert_eq!(buf.lines[3].highlights[11], HighlightType::Type);
         assert_eq!(buf.lines[3].highlights[17], HighlightType::Keyword);
@@ -2689,35 +2830,35 @@ mod tests {
         let mut editor = Editor::new(vec!["test.rs".to_string()], Config::default());
         editor.wrap = true;
         editor.show_line_numbers = true; // Gutter width = 4
-        editor.screen_cols = 14;         // text_cols = 14 - 4 = 10
-        
+        editor.screen_cols = 14; // text_cols = 14 - 4 = 10
+
         // Long buffer line of length 25
         editor.current_buffer_mut().lines = vec![Line::new("abcdefghijklmnopqrstuvwxy")];
-        
+
         // Verify wrapping segment lengths
         let segments = editor.current_buffer().lines[0].wrapped_segments(10, editor.config.tabstop);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].0.len(), 10); // "abcdefghij"
         assert_eq!(segments[1].0.len(), 10); // "klmnopqrst"
-        assert_eq!(segments[2].0.len(), 5);  // "uvwxy"
-        
+        assert_eq!(segments[2].0.len(), 5); // "uvwxy"
+
         // Case 1: cx = 5 (char 'f' on segment 0)
         editor.current_buffer_mut().cx = 5;
         let (sx1, sy1) = editor.get_cursor_screen_position();
         assert_eq!(sx1, 1 + 4 + 5); // x = 10
-        assert_eq!(sy1, 1 + 0);     // y = 1 (segment 0)
+        assert_eq!(sy1, 1 + 0); // y = 1 (segment 0)
 
         // Case 2: cx = 15 (char 'p' on segment 1)
         editor.current_buffer_mut().cx = 15;
         let (sx2, sy2) = editor.get_cursor_screen_position();
         assert_eq!(sx2, 1 + 4 + 5); // x = 10
-        assert_eq!(sy2, 1 + 1);     // y = 2 (segment 1)
+        assert_eq!(sy2, 1 + 1); // y = 2 (segment 1)
 
         // Case 3: cx = 22 (char 'w' on segment 2)
         editor.current_buffer_mut().cx = 22;
         let (sx3, sy3) = editor.get_cursor_screen_position();
         assert_eq!(sx3, 1 + 4 + 2); // x = 7
-        assert_eq!(sy3, 1 + 2);     // y = 3 (segment 2)
+        assert_eq!(sy3, 1 + 2); // y = 3 (segment 2)
     }
 
     #[test]
@@ -2728,19 +2869,19 @@ mod tests {
             Line::new("line two"),
             Line::new("line three"),
         ];
-        
+
         // Starts at (0, 0)
         assert_eq!(editor.current_buffer().cy, 0);
-        
+
         // Jump to line 2
         editor.execute_command("2");
         assert_eq!(editor.current_buffer().cy, 1);
         assert_eq!(editor.current_buffer().cx, 0);
-        
+
         // Jump to line 1
         editor.execute_command("1");
         assert_eq!(editor.current_buffer().cy, 0);
-        
+
         // Jump past the end (should clamp to line 3)
         editor.execute_command("10");
         assert_eq!(editor.current_buffer().cy, 2);
@@ -2754,48 +2895,48 @@ mod tests {
             Line::new("cpp"),
             Line::new("rust"),
         ];
-        
+
         // Press '/' to enter Search mode
         editor.process_keypress(Key::Char('/'));
         assert_eq!(editor.mode, Mode::Search);
-        
+
         // Type "rust"
         for ch in "rust".chars() {
             editor.process_keypress(Key::Char(ch));
         }
         // Press Enter to search
         editor.process_keypress(Key::Enter);
-        
+
         // Mode should return to Normal, and cursor should jump to the first match at (0, 0)
         assert_eq!(editor.mode, Mode::Normal);
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().cx, 0);
-        
+
         // Jump to next match -> index 5 in line 0
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().cx, 5); // "rust [r]ust rust"
-        
+
         // Jump to next match -> index 10 in line 0
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().cx, 10); // "rust rust [r]ust"
-        
+
         // Jump to next match -> line 2 index 0
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 2);
         assert_eq!(editor.current_buffer().cx, 0); // Line 2: "[r]ust"
-        
+
         // Next match wraps around to line 0 index 0
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().cx, 0);
-        
+
         // Prev match wraps around to line 2 index 0
         editor.process_keypress(Key::Char('N'));
         assert_eq!(editor.current_buffer().cy, 2);
         assert_eq!(editor.current_buffer().cx, 0);
-        
+
         // Prev match to line 0 index 10
         editor.process_keypress(Key::Char('N'));
         assert_eq!(editor.current_buffer().cy, 0);
@@ -2805,46 +2946,43 @@ mod tests {
     #[test]
     fn test_backward_search_mode_and_navigation() {
         let mut editor = Editor::new(Vec::new(), Config::default());
-        editor.current_buffer_mut().lines = vec![
-            Line::new("rust"),
-            Line::new("cpp"),
-            Line::new("rust rust"),
-        ];
-        
+        editor.current_buffer_mut().lines =
+            vec![Line::new("rust"), Line::new("cpp"), Line::new("rust rust")];
+
         // Put cursor at the end of the file: line 2, index 9 (end of "rust rust")
         editor.current_buffer_mut().cy = 2;
         editor.current_buffer_mut().cx = 9;
-        
+
         // Press '?' to enter Search mode (backward)
         editor.process_keypress(Key::Char('?'));
         assert_eq!(editor.mode, Mode::Search);
         assert!(editor.search_backward);
-        
+
         // Type "rust"
         for ch in "rust".chars() {
             editor.process_keypress(Key::Char(ch));
         }
         editor.process_keypress(Key::Enter);
-        
+
         // Should jump to the match at line 2 index 5 ("rust [r]ust")
         assert_eq!(editor.current_buffer().cy, 2);
         assert_eq!(editor.current_buffer().cx, 5);
-        
+
         // Press 'n' (jump backward) -> line 2 index 0 ("[r]ust rust")
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 2);
         assert_eq!(editor.current_buffer().cx, 0);
-        
+
         // Press 'n' (jump backward) -> line 0 index 0 (Line 0: "[r]ust")
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 0);
         assert_eq!(editor.current_buffer().cx, 0);
-        
+
         // Press 'n' (wraps around to the bottom-most match) -> line 2 index 5 ("rust [r]ust")
         editor.process_keypress(Key::Char('n'));
         assert_eq!(editor.current_buffer().cy, 2);
         assert_eq!(editor.current_buffer().cx, 5);
-        
+
         // Press 'N' (jump forward) -> wraps around to the top-most match -> line 0 index 0
         editor.process_keypress(Key::Char('N'));
         assert_eq!(editor.current_buffer().cy, 0);
@@ -2996,10 +3134,7 @@ mod tests {
     fn round_trip(tag: &str, original: &str) -> String {
         let path = temp_path(tag);
         std::fs::write(&path, original).unwrap();
-        let mut editor = Editor::new(
-            vec![path.to_string_lossy().into_owned()],
-            Config::default(),
-        );
+        let mut editor = Editor::new(vec![path.to_string_lossy().into_owned()], Config::default());
         assert!(editor.save_to_file(None), "save failed for {tag}");
         let got = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();

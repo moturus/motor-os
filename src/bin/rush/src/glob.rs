@@ -293,10 +293,7 @@ mod tests {
         let base = dir.to_str().unwrap();
         let mut got = glob(&format!("{base}/*.txt"));
         got.sort();
-        assert_eq!(
-            got,
-            vec![format!("{base}/a.txt"), format!("{base}/b.txt")]
-        );
+        assert_eq!(got, vec![format!("{base}/a.txt"), format!("{base}/b.txt")]);
 
         // Leading-dot files are not matched by a leading `*`.
         let all = glob(&format!("{base}/*"));

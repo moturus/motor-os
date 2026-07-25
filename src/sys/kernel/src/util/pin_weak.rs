@@ -45,12 +45,13 @@ macro_rules! implementation {
         }
 
         impl<T> PinWeak<T> {
-            pub fn new_cyclic<F>(data_fn: F) -> Pin<$Rc<T>> where F: FnOnce(&Self) -> T {
-
+            pub fn new_cyclic<F>(data_fn: F) -> Pin<$Rc<T>>
+            where
+                F: FnOnce(&Self) -> T,
+            {
                 let rc = $Rc::new_cyclic(|weak| data_fn(&Self(weak.clone())));
                 // Safety: Nobody else had access to the unpinned Rc before.
                 unsafe { Pin::new_unchecked(rc) }
-
             }
         }
     };

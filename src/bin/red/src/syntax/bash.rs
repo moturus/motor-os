@@ -9,18 +9,26 @@ impl BashHighlighter {
     pub fn new() -> Self {
         BashHighlighter {
             keywords: &[
-                "if", "fi", "then", "else", "elif", "for", "while", "do", "done",
-                "case", "esac", "in", "function", "select", "until", "local", "declare"
+                "if", "fi", "then", "else", "elif", "for", "while", "do", "done", "case", "esac",
+                "in", "function", "select", "until", "local", "declare",
             ],
         }
     }
 }
 
 impl SyntaxHighlighter for BashHighlighter {
-    fn name(&self) -> &str { "Bash" }
-    fn file_extensions(&self) -> &[&str] { &["sh", "bash"] }
+    fn name(&self) -> &str {
+        "Bash"
+    }
+    fn file_extensions(&self) -> &[&str] {
+        &["sh", "bash"]
+    }
 
-    fn highlight_line(&self, chars: &[char], _state: LexerState) -> (Vec<HighlightType>, LexerState) {
+    fn highlight_line(
+        &self,
+        chars: &[char],
+        _state: LexerState,
+    ) -> (Vec<HighlightType>, LexerState) {
         let mut highlights = vec![HighlightType::Normal; chars.len()];
         let mut i = 0;
 

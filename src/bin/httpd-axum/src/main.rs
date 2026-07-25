@@ -54,7 +54,9 @@ async fn main() {
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
 
     let app = Router::new()
@@ -66,7 +68,13 @@ async fn main() {
                 let start = std::time::Instant::now();
                 let res = next.run(req).await;
                 let latency = start.elapsed();
-                tracing::info!("{} {} {} ({}us)", method, uri, res.status().as_u16(), latency.as_micros());
+                tracing::info!(
+                    "{} {} {} ({}us)",
+                    method,
+                    uri,
+                    res.status().as_u16(),
+                    latency.as_micros()
+                );
                 res
             },
         ));

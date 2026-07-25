@@ -181,9 +181,7 @@ impl SysObject {
         let tid = thread.tid();
         let mut waiting = self.waiting_threads.lock(line!());
         match &mut *waiting {
-            WaitingThreads::Empty => {
-                *waiting = WaitingThreads::One(tid, thread.get_weak(), handle)
-            }
+            WaitingThreads::Empty => *waiting = WaitingThreads::One(tid, thread.get_weak(), handle),
             WaitingThreads::One(tid0, thread0, handle0) => {
                 if *tid0 == tid {
                     // Same semantics as BTreeMap::insert: overwrite.

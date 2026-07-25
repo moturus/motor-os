@@ -271,19 +271,18 @@ impl<const ORDER: usize> Node<ORDER> {
                 log::error!("Bad B+ Tree Node {}.", this_block_no.as_u64());
                 return Err(ErrorKind::InvalidData.into());
             }
-            let pos = match node.kv[..(node.num_keys as usize)]
-                .binary_search_by_key(&key, |kv| kv.key)
-            {
-                Ok(pos) => pos,
-                Err(pos) => {
-                    if node.is_leaf() {
-                        log::error!("replace_link: key {key} not found");
-                        return Err(ErrorKind::NotFound.into());
+            let pos =
+                match node.kv[..(node.num_keys as usize)].binary_search_by_key(&key, |kv| kv.key) {
+                    Ok(pos) => pos,
+                    Err(pos) => {
+                        if node.is_leaf() {
+                            log::error!("replace_link: key {key} not found");
+                            return Err(ErrorKind::NotFound.into());
+                        }
+                        assert!(pos > 0);
+                        pos - 1
                     }
-                    assert!(pos > 0);
-                    pos - 1
-                }
-            };
+                };
             (node.is_leaf(), pos, node.kv[pos].child_block_no)
         };
 

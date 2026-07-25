@@ -2251,7 +2251,10 @@ mod tests {
     #[test]
     fn every_name_in_the_table_resolves() {
         for name in names() {
-            assert!(lookup(name).is_some(), "{name} is named but not dispatchable");
+            assert!(
+                lookup(name).is_some(),
+                "{name} is named but not dispatchable"
+            );
         }
     }
 

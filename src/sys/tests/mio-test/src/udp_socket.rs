@@ -168,9 +168,7 @@ fn smoke_test_unconnected_udp_socket(mut socket1: UdpSocket, mut socket2: UdpSoc
     assert!(socket2.take_error().unwrap().is_none());
 }
 
-/*
-#[test]
-fn set_get_ttl() {
+fn test_set_get_ttl() {
     let socket1 = UdpSocket::bind(any_local_address()).unwrap();
 
     // set TTL, get TTL, make sure it has the expected value
@@ -178,16 +176,20 @@ fn set_get_ttl() {
     socket1.set_ttl(TTL).unwrap();
     assert_eq!(socket1.ttl().unwrap(), TTL);
     assert!(socket1.take_error().unwrap().is_none());
+
+    println!("udp_socket::set_get_ttl PASS");
 }
 
-#[test]
-fn get_ttl_without_previous_set() {
+fn test_get_ttl_without_previous_set() {
     let socket1 = UdpSocket::bind(any_local_address()).unwrap();
 
     // expect a get TTL to work w/o any previous set_ttl
     socket1.ttl().expect("unable to get TTL for UDP socket");
+
+    println!("udp_socket::get_ttl_without_previous_set PASS");
 }
 
+/*
 #[test]
 fn set_get_broadcast() {
     let socket1 = UdpSocket::bind(any_local_address()).unwrap();
@@ -1181,6 +1183,8 @@ pub fn run_all_tests() {
     test_unconnected_udp_socket_ipv4();
     test_unconnected_udp_socket_ipv6();
     test_unconnected_udp_socket_std();
+    test_set_get_ttl();
+    test_get_ttl_without_previous_set();
     test_connected_udp_socket_ipv4();
     test_connected_udp_socket_ipv6();
     test_connected_udp_socket_std();

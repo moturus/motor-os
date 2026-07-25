@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use moto_io::net::readiness::{NetEventListener, Readiness};
-use moto_io::net::tcp::{TcpListener as NativeTcpListener, TcpStream as NativeTcpStream};
+use moto_io::net::tcp::{
+    Shutdown as NativeShutdown, TcpListener as NativeTcpListener, TcpStream as NativeTcpStream,
+};
 
 struct NoopNetEventListener;
 
@@ -212,9 +214,9 @@ fn test_cancelled_native_connect_closes_socket() {
     println!("test_cancelled_native_connect_closes_socket() PASS");
 }
 
-/// Distinct cancelled native futures must physically remove their RX wakers;
+/// Distinct cancelled native futures must physically remove their I/O wakers;
 /// a quiet live socket provides no later event that could clean stale entries.
-fn test_cancelled_native_rx_waiters_are_removed() {
+fn test_cancelled_native_io_waiters_are_removed() {
     use std::future::Future;
     use std::task::{Wake, Waker};
 
@@ -266,10 +268,255 @@ fn test_cancelled_native_rx_waiters_are_removed() {
         assert_eq!(stream.rx_waiter_count(), 0);
     }
 
+    stream.with_tx_pages_exhausted_for_test(|| {
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.writable());
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(stream.tx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(stream.tx_waiter_count(), 0);
+        }
+
+        let byte = [0_u8; 1];
+        let bufs: [&[u8]; 1] = [&byte];
+        for _ in 0..128 {
+            let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
+            let mut cx = Context::from_waker(&waker);
+            let mut future = Box::pin(stream.write_future(&bufs));
+            assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(stream.tx_waiter_count(), 1);
+            drop(future);
+            assert_eq!(stream.tx_waiter_count(), 0);
+        }
+    });
+
     drop(stream);
     release_peer.store(true, Ordering::Release);
     peer.join().unwrap();
-    println!("test_cancelled_native_rx_waiters_are_removed() PASS");
+    println!("test_cancelled_native_io_waiters_are_removed() PASS");
+}
+
+fn test_cancelled_native_rpc_response_is_tolerated() {
+    use std::future::Future;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_peer = Arc::new(AtomicBool::new(false));
+    let peer_release = release_peer.clone();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(&[0x5a]).unwrap();
+        while !peer_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+
+    moto_io::net::channel::arm_rpc_response_cancel_test();
+    let mut future = Box::pin(stream.nodelay_async());
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::rpc_response_cancel_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not hold the RPC response"
+        );
+        std::thread::yield_now();
+    }
+    drop(future);
+    moto_io::net::channel::release_rpc_response_cancel_test();
+
+    while !moto_io::net::channel::rpc_response_cancel_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not finish the cancelled RPC response"
+        );
+        std::thread::yield_now();
+    }
+
+    moto_async::LocalRuntime::new().block_on(async {
+        stream.set_nodelay_async(true).await.unwrap();
+        assert!(stream.nodelay_async().await.unwrap());
+        stream.set_nodelay_async(false).await.unwrap();
+        assert!(!stream.nodelay_async().await.unwrap());
+        stream.set_ttl_async(43).await.unwrap();
+        assert_eq!(stream.ttl_async().await.unwrap(), 43);
+        assert_eq!(stream.linger_async().await.unwrap(), None);
+        stream
+            .set_linger_async(Some(Duration::from_secs(7)))
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.linger_async().await.unwrap(),
+            Some(Duration::from_secs(7))
+        );
+        stream.set_linger_async(Some(Duration::MAX)).await.unwrap();
+        assert_eq!(
+            stream.linger_async().await.unwrap(),
+            Some(Duration::from_secs(u32::MAX as u64))
+        );
+        stream.set_linger_async(None).await.unwrap();
+        assert_eq!(stream.linger_async().await.unwrap(), None);
+        stream.readable().await;
+    });
+    assert!(stream.has_rx_bytes());
+
+    moto_io::net::channel::arm_rpc_response_cancel_test();
+    let mut future = Box::pin(stream.shutdown_async(NativeShutdown::Read));
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::rpc_response_cancel_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not hold the shutdown response"
+        );
+        std::thread::yield_now();
+    }
+    assert!(!stream.has_rx_bytes());
+    let mut empty = [0_u8; 1];
+    assert_eq!(stream.try_read(&mut [&mut empty], false), Ok(0));
+    drop(future);
+    moto_io::net::channel::release_rpc_response_cancel_test();
+    while !moto_io::net::channel::rpc_response_cancel_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not finish the cancelled shutdown response"
+        );
+        std::thread::yield_now();
+    }
+
+    drop(stream);
+    release_peer.store(true, Ordering::Release);
+    peer.join().unwrap();
+    println!("test_cancelled_native_rpc_response_is_tolerated() PASS");
+}
+
+fn test_native_async_shutdown() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let expected = vec![0x5a_u8; 256 * 1024];
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        received
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let mut written = 0;
+        while written < expected.len() {
+            let bufs = [&expected[written..]];
+            let n = stream.write_future(&bufs).await.unwrap();
+            assert!(n > 0);
+            written += n;
+        }
+        stream.shutdown_async(NativeShutdown::Write).await.unwrap();
+        assert_eq!(
+            stream.try_write(&[b"after shutdown"]),
+            Err(moto_rt::E_NOT_CONNECTED)
+        );
+    });
+
+    drop(stream);
+    assert_eq!(peer.join().unwrap(), expected);
+    println!("test_native_async_shutdown() PASS");
+}
+
+/// Dropping a stream with pending bytes must neither block on a full staging
+/// queue nor let its close overtake those bytes.
+fn test_native_stream_drop_under_backpressure() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_trigger = Arc::new(AtomicBool::new(false));
+    let release_trigger_peer = release_trigger.clone();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        while !release_trigger_peer.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        stream.write_all(&[1]).unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        received
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+    moto_io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
+    release_trigger.store(true, Ordering::Release);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::stream_drop_backpressure_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not reach the stream-drop backpressure hook"
+        );
+        std::thread::yield_now();
+    }
+
+    // Sixteen pages become two multi-page teardown messages. Their ordinary
+    // queue markers remain ahead of the placeholders used to fill staging.
+    let expected = vec![0x5a_u8; 64 * 1024];
+    let bufs = [expected.as_slice()];
+    assert_eq!(stream.try_write(&bufs), Ok(expected.len()));
+    stream.fill_stream_drop_send_queue_for_test();
+
+    let drop_done = Arc::new(AtomicBool::new(false));
+    let drop_done_thread = drop_done.clone();
+    let drop_thread = std::thread::spawn(move || {
+        drop(stream);
+        drop_done_thread.store(true, Ordering::Release);
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !drop_done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let drop_was_nonblocking = drop_done.load(Ordering::Acquire);
+
+    // Always release the runtime before asserting so a regression reports
+    // cleanly instead of stranding the test process.
+    moto_io::net::channel::release_stream_drop_backpressure_test();
+    drop_thread.join().unwrap();
+    assert!(
+        drop_was_nonblocking,
+        "TcpStream::drop waited for staging-queue room"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::stream_drop_backpressure_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "TcpStream::drop blocked its channel runtime on a full send queue"
+        );
+        std::thread::yield_now();
+    }
+
+    assert_eq!(peer.join().unwrap(), expected);
+    println!("test_native_stream_drop_under_backpressure() PASS");
 }
 
 /// A dropped native accept future must not strand the socket that sys-io
@@ -363,17 +610,30 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
     println!("test_delivered_then_cancelled_native_accept_closes_socket() PASS");
 }
 
-/// Releasing the final listener reference on its channel runtime must remain
-/// nonblocking when the runtime's staging queue is full. The netdev hook makes
-/// the otherwise narrow last-reference/backpressure race deterministic.
+/// Releasing the final listener reference on another thread must remain
+/// nonblocking while its channel runtime is held with a full staging queue.
 fn test_native_listener_drop_under_backpressure() {
     use std::future::Future;
+
+    struct DistinctWake;
+
+    impl std::task::Wake for DistinctWake {
+        fn wake(self: Arc<Self>) {}
+    }
 
     let listener = NativeTcpListener::bind(
         &"127.0.0.1:0".parse().unwrap(),
         Arc::new(NoopNetEventListener),
     )
     .unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        listener.set_ttl_async(41).await.unwrap();
+        assert_eq!(listener.ttl_async().await.unwrap(), 41);
+        assert_eq!(
+            listener.set_ttl_async(u8::MAX as u32 + 1).await,
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+    });
     moto_io::net::channel::arm_listener_drop_backpressure_test(listener.handle());
 
     // Post an accept and cancel it. Its eventual response makes the channel
@@ -395,10 +655,42 @@ fn test_native_listener_drop_under_backpressure() {
         std::thread::yield_now();
     }
 
-    // The channel runtime now owns the only remaining listener Arc and its
-    // send queue is full. Releasing the hook runs TcpListener::drop there.
-    drop(listener);
+    // The held channel runtime cannot drain its now-full staging queue. Each
+    // TTL query therefore registers both an RPC response and a queue-space
+    // waiter. Cancelling must remove both before the next query is polled.
+    for _ in 0..128 {
+        let waker = std::task::Waker::from(Arc::new(DistinctWake));
+        let mut context = Context::from_waker(&waker);
+        let mut ttl = Box::pin(listener.ttl_async());
+        assert!(matches!(ttl.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(listener.channel_tx_waiter_count_for_test(), 1);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 1);
+        drop(ttl);
+        assert_eq!(listener.channel_tx_waiter_count_for_test(), 0);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 0);
+    }
+
+    // The hook released its temporary Arc before publishing HELD, so this
+    // thread performs the last drop while the channel runtime cannot make
+    // staging-queue progress. A blocking destructor would strand this thread
+    // until the hook is released.
+    let drop_done = Arc::new(AtomicBool::new(false));
+    let drop_done_thread = drop_done.clone();
+    let drop_thread = std::thread::spawn(move || {
+        drop(listener);
+        drop_done_thread.store(true, Ordering::Release);
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !drop_done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let drop_was_nonblocking = drop_done.load(Ordering::Acquire);
     moto_io::net::channel::release_listener_drop_backpressure_test();
+    drop_thread.join().unwrap();
+    assert!(
+        drop_was_nonblocking,
+        "TcpListener::drop waited for staging-queue room"
+    );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while !moto_io::net::channel::listener_drop_backpressure_test_is_done() {
@@ -415,7 +707,10 @@ fn test_native_listener_drop_under_backpressure() {
 
 pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
-    test_cancelled_native_rx_waiters_are_removed();
+    test_cancelled_native_io_waiters_are_removed();
+    test_cancelled_native_rpc_response_is_tolerated();
+    test_native_async_shutdown();
+    test_native_stream_drop_under_backpressure();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }
@@ -745,6 +1040,43 @@ fn test_tcp_loopback() {
     std::thread::sleep(std::time::Duration::from_millis(10));
     println!("test_tcp_loopback() PASS");
     std::thread::sleep(std::time::Duration::from_millis(10));
+}
+
+fn test_tcp_linger() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::scope(|scope| {
+        let accept = scope.spawn(move || listener.accept().unwrap().0);
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let peer = accept.join().unwrap();
+        let fd = client.as_raw_fd();
+
+        assert_eq!(moto_rt::net::linger(fd).unwrap(), None);
+
+        moto_rt::net::set_linger(fd, Some(Duration::ZERO)).unwrap();
+        assert_eq!(moto_rt::net::linger(fd).unwrap(), Some(Duration::ZERO));
+
+        moto_rt::net::set_linger(fd, Some(Duration::from_secs(7))).unwrap();
+        assert_eq!(
+            moto_rt::net::linger(fd).unwrap(),
+            Some(Duration::from_secs(7))
+        );
+
+        moto_rt::net::set_linger(fd, Some(Duration::from_secs(120))).unwrap();
+        assert_eq!(
+            moto_rt::net::linger(fd).unwrap(),
+            Some(Duration::from_secs(60))
+        );
+
+        moto_rt::net::set_linger(fd, None).unwrap();
+        assert_eq!(moto_rt::net::linger(fd).unwrap(), None);
+
+        drop(client);
+        drop(peer);
+    });
+    println!("test_tcp_linger() PASS");
 }
 
 pub fn test_zero_port_listen() {
@@ -1091,7 +1423,10 @@ fn run_backpressure_concurrent(workers: usize, rounds: usize, n: usize, verbose:
 fn test_write_backpressure_concurrent() {
     const N: usize = 512 * 1024;
     let failures = run_backpressure_concurrent(8, 4, N, false);
-    assert_eq!(failures, 0, "shutdown(Write) lost data on {failures} exchange(s)");
+    assert_eq!(
+        failures, 0,
+        "shutdown(Write) lost data on {failures} exchange(s)"
+    );
     std::thread::sleep(Duration::from_millis(10));
     println!("test_write_backpressure_concurrent() PASS");
     std::thread::sleep(Duration::from_millis(10));
@@ -1207,7 +1542,10 @@ fn test_concurrent_readers() {
         sum
     });
 
-    assert!(!bad.load(Ordering::Acquire), "reader saw wrong bytes or errored");
+    assert!(
+        !bad.load(Ordering::Acquire),
+        "reader saw wrong bytes or errored"
+    );
     assert_eq!(sum, N, "concurrent readers lost or duplicated bytes");
     std::thread::sleep(Duration::from_millis(10));
     println!("test_concurrent_readers() PASS");
@@ -1310,6 +1648,7 @@ pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
+    test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();
     test_write_timeout();

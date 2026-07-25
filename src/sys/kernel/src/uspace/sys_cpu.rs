@@ -51,9 +51,8 @@ fn process_wait_handles(
             heap_handles = alloc::vec![0_u64; h_sz as usize];
             &mut heap_handles
         };
-        let dst_bytes = unsafe {
-            core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 8)
-        };
+        let dst_bytes =
+            unsafe { core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut u8, dst.len() * 8) };
         if let Err(err) = curr
             .owner()
             .address_space()

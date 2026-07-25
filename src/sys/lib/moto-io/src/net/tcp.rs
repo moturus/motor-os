@@ -21,12 +21,12 @@ use moto_sys::SysHandle;
 use moto_sys_io::api_net;
 use moto_sys_io::api_net::TcpState;
 
-use crate::net::readiness::NetEventListener;
-use crate::net::readiness::Readiness;
-use crate::net::wait::{WaitSet, WaiterId};
 use super::channel::ChannelReservation;
 use super::channel::NetChannel;
 use super::channel::RpcWaiter;
+use crate::net::readiness::NetEventListener;
+use crate::net::readiness::Readiness;
+use crate::net::wait::{WaitSet, WaiterId};
 
 /// An accepted-but-not-yet-claimed connection: the accept response plus
 /// the channel reservation made when the accept was posted.
@@ -80,7 +80,7 @@ impl Drop for PendingAcceptCleanup {
 
 pub struct TcpListener {
     socket_addr: SocketAddr,
-    channel_reservation: ChannelReservation,
+    channel_reservation: Option<ChannelReservation>,
     handle: u64,
     nonblocking: AtomicBool,
     // The socket's sole poll-registry handle: state-machine edges emit through
@@ -103,7 +103,8 @@ pub struct TcpListener {
     // the user calls accept() asynchronously (vs the I/O thread), so
     // we need a place to store messages for not-yet-accepted TCP streams.
     // MIO test actually tests this scenario.
-    pending_accept_queues: Mutex<BTreeMap<u64, Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>>,
+    pending_accept_queues:
+        Mutex<BTreeMap<u64, Arc<Mutex<crate::net::inner_rx_stream::InnerRxStream>>>>,
 
     max_backlog: AtomicU32,
     me: Weak<TcpListener>,
@@ -115,11 +116,6 @@ impl Drop for TcpListener {
         msg.command = api_net::NetCmd::TcpListenerDrop as u16;
         msg.handle = self.handle;
 
-        // Incoming dispatch can temporarily own the last listener Arc, so
-        // this destructor may run on the channel runtime itself. A blocking
-        // send would deadlock that runtime when its staging queue is full.
-        self.channel().send_msg_guaranteed(msg);
-
         while let Some((_, stream)) = { self.pending_accept_queues.lock().pop_first() } {
             // Free up server-allocated pages.
             super::channel::clear_rx_queue(&stream, self.channel());
@@ -128,6 +124,13 @@ impl Drop for TcpListener {
         self.channel().tcp_listener_dropped(self.handle);
 
         super::channel::stats_tcp_listener_dropped();
+
+        // Transfer both the close and the reservation to the driver. Drop
+        // never waits for staging/ring room, and the reservation keeps this
+        // channel alive until sys-io accepts the close.
+        let reservation = self.channel_reservation.take().unwrap();
+        let channel = reservation.channel().clone();
+        channel.enqueue_teardown(reservation, msg);
     }
 }
 
@@ -202,8 +205,20 @@ impl TcpListener {
         self.handle
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn channel_tx_waiter_count_for_test(&self) -> usize {
+        self.channel().tx_waiter_count()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn channel_rpc_waiter_count_for_test(&self) -> usize {
+        self.channel().rpc_waiter_count()
+    }
+
     fn channel(&self) -> &super::channel::NetChannel {
-        self.channel_reservation.channel()
+        self.channel_reservation.as_ref().unwrap().channel()
     }
 
     pub fn bind(
@@ -230,19 +245,17 @@ impl TcpListener {
             socket_addr.set_port(actual_addr.port());
         }
 
-        let tcp_listener = Arc::new_cyclic(|me| {
-            TcpListener {
-                socket_addr,
-                channel_reservation,
-                handle: resp.handle,
-                nonblocking: AtomicBool::new(false),
-                event_listener,
-                accept_requests: Mutex::new(BTreeMap::new()),
-                async_accepts: Mutex::new(VecDeque::new()),
-                pending_accept_queues: Mutex::new(BTreeMap::new()),
-                max_backlog: AtomicU32::new(32),
-                me: me.clone(),
-            }
+        let tcp_listener = Arc::new_cyclic(|me| TcpListener {
+            socket_addr,
+            channel_reservation: Some(channel_reservation),
+            handle: resp.handle,
+            nonblocking: AtomicBool::new(false),
+            event_listener,
+            accept_requests: Mutex::new(BTreeMap::new()),
+            async_accepts: Mutex::new(VecDeque::new()),
+            pending_accept_queues: Mutex::new(BTreeMap::new()),
+            max_backlog: AtomicU32::new(32),
+            me: me.clone(),
         });
         tcp_listener.channel().tcp_listener_created(&tcp_listener);
         crate::net::channel::stats_tcp_listener_created();
@@ -358,26 +371,24 @@ impl TcpListener {
         // Don't remove the queue until the channel can access it via the new stream.
         let recv_queue = cleanup.recv_queue();
 
-        let new_stream = Arc::new_cyclic(|me| {
-            TcpStream {
-                local_addr: Mutex::new(Some(self.socket_addr)),
-                remote_addr,
-                handle: AtomicU64::new(resp.handle),
-                event_listener: make_listener(),
-                me: me.clone(),
-                nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
-                channel_reservation,
-                recv_queue,
-                rx_waiters: WaitSet::new(),
-                tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
-                rx_closed: AtomicBool::new(false),
-                tx_closed: AtomicBool::new(false),
-                rx_timeout_ns: AtomicU64::new(u64::MAX),
-                tx_timeout_ns: AtomicU64::new(u64::MAX),
-                subchannel_mask,
-                error: AtomicU16::new(moto_rt::E_OK),
-                pending_tx: Mutex::new(VecDeque::new()),
-            }
+        let new_stream = Arc::new_cyclic(|me| TcpStream {
+            local_addr: Mutex::new(Some(self.socket_addr)),
+            remote_addr,
+            handle: AtomicU64::new(resp.handle),
+            event_listener: make_listener(),
+            me: me.clone(),
+            nonblocking: AtomicBool::new(self.nonblocking.load(Ordering::Relaxed)),
+            channel_reservation: Some(channel_reservation),
+            recv_queue,
+            rx_waiters: WaitSet::new(),
+            tcp_state_driver: AtomicU32::new(api_net::TcpState::ReadWrite.into()),
+            rx_closed: AtomicBool::new(false),
+            tx_closed: AtomicBool::new(false),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_mask,
+            error: AtomicU16::new(moto_rt::E_OK),
+            pending_tx: Mutex::new(VecDeque::new()),
         });
         crate::net::channel::stats_tcp_stream_created();
 
@@ -435,6 +446,38 @@ impl TcpListener {
 
         let waiter = RpcWaiter::Accept(self.me.clone(), sync_tx);
         channel.send_rpc_guaranteed(req, waiter);
+    }
+
+    /// Set the listener TTL without blocking the polling thread.
+    pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
+        if ttl > u8::MAX as u32 {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        req.payload.args_8_mut()[23] = ttl as u8;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the listener TTL without blocking the polling thread.
+    pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_8()[23] as u32)
+        } else {
+            Err(resp.status)
+        }
     }
 
     /// # Safety
@@ -530,7 +573,7 @@ impl TcpListener {
 }
 
 pub struct TcpStream {
-    channel_reservation: ChannelReservation,
+    channel_reservation: Option<ChannelReservation>,
     local_addr: Mutex<Option<SocketAddr>>,
     remote_addr: SocketAddr,
     handle: AtomicU64,
@@ -599,6 +642,14 @@ struct PendingTxPage {
     filled: usize,
 }
 
+/// Which half of a TCP stream to shut down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}
+
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let handle = self.handle.load(Ordering::Acquire);
@@ -607,24 +658,30 @@ impl Drop for TcpStream {
             return;
         }
 
-        // Written bytes must reach the wire before the close.
-        self.flush_pending_tx();
+        let reservation = self.channel_reservation.take().unwrap();
+        let channel = reservation.channel().clone();
+
+        // Transfer written bytes and the close as one FIFO record. Its
+        // reservation keeps the channel alive until the driver has accepted
+        // every message; drop itself never waits for staging/ring room.
+        let mut messages = VecDeque::new();
+        while let Some(msg) = self.claim_pending_tx() {
+            messages.push_back(msg);
+        }
 
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamClose as u16;
         req.handle = self.handle();
-
-        // Guaranteed delivery: never drop the close (sys-io would leak the
-        // stream), never panic on a full send queue, and never deadlock when
-        // this drop runs on the IO thread (see send_msg_guaranteed).
-        self.channel().send_msg_guaranteed(req);
+        messages.push_back(req);
 
         // Clear RX queue: basically, free up server-allocated pages.
-        super::channel::clear_rx_queue(&self.recv_queue, self.channel());
+        super::channel::clear_rx_queue(&self.recv_queue, &channel);
         assert!(self.recv_queue.lock().is_empty());
 
-        self.channel().tcp_stream_dropped(self.handle());
+        channel.tcp_stream_dropped(self.handle());
         super::channel::stats_tcp_stream_dropped();
+
+        channel.enqueue_teardown_messages(reservation, messages);
     }
 }
 
@@ -640,7 +697,7 @@ impl TcpStream {
     }
 
     fn channel(&self) -> &NetChannel {
-        self.channel_reservation.channel()
+        self.channel_reservation.as_ref().unwrap().channel()
     }
 
     /// Whether the receive queue holds anything (the veneer raises READABLE
@@ -686,6 +743,29 @@ impl TcpStream {
     #[cfg(feature = "netdev")]
     pub fn rx_waiter_count(&self) -> usize {
         self.rx_waiters.len()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn tx_waiter_count(&self) -> usize {
+        self.channel().tx_waiter_count()
+    }
+
+    /// Run a netdev test while this stream has no allocatable TX pages.
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn with_tx_pages_exhausted_for_test(&self, f: impl FnOnce()) {
+        let mut pages = alloc::vec::Vec::new();
+        while let Ok(page) = self.channel().alloc_page(self.subchannel_mask) {
+            pages.push(page);
+        }
+        f();
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn fill_stream_drop_send_queue_for_test(&self) {
+        self.channel().fill_stream_drop_send_queue_for_test();
     }
 
     // Note: this is called from the rx task, so must not sleep. Every
@@ -838,26 +918,24 @@ impl TcpStream {
             api_net::tcp_stream_connect_request(socket_addr, channel_reservation.subchannel_idx())
         };
 
-        let new_stream = Arc::new_cyclic(|me| {
-            TcpStream {
-                channel_reservation,
-                local_addr: Mutex::new(None),
-                remote_addr: *socket_addr,
-                handle: AtomicU64::new(SysHandle::NONE.into()),
-                event_listener,
-                me: me.clone(),
-                nonblocking: AtomicBool::new(nonblocking),
-                recv_queue: crate::net::inner_rx_stream::InnerRxStream::new(),
-                rx_waiters: WaitSet::new(),
-                tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
-                rx_closed: AtomicBool::new(false),
-                tx_closed: AtomicBool::new(false),
-                rx_timeout_ns: AtomicU64::new(u64::MAX),
-                tx_timeout_ns: AtomicU64::new(u64::MAX),
-                subchannel_mask,
-                error: AtomicU16::new(moto_rt::E_OK),
-                pending_tx: Mutex::new(VecDeque::new()),
-            }
+        let new_stream = Arc::new_cyclic(|me| TcpStream {
+            channel_reservation: Some(channel_reservation),
+            local_addr: Mutex::new(None),
+            remote_addr: *socket_addr,
+            handle: AtomicU64::new(SysHandle::NONE.into()),
+            event_listener,
+            me: me.clone(),
+            nonblocking: AtomicBool::new(nonblocking),
+            recv_queue: crate::net::inner_rx_stream::InnerRxStream::new(),
+            rx_waiters: WaitSet::new(),
+            tcp_state_driver: AtomicU32::new(api_net::TcpState::Connecting.into()),
+            rx_closed: AtomicBool::new(false),
+            tx_closed: AtomicBool::new(false),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            subchannel_mask,
+            error: AtomicU16::new(moto_rt::E_OK),
+            pending_tx: Mutex::new(VecDeque::new()),
         });
         super::channel::stats_tcp_stream_created();
 
@@ -886,7 +964,8 @@ impl TcpStream {
         timeout: Option<Duration>,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpStream>, ErrorCode> {
-        let (new_stream, mut req) = Self::connect_setup(socket_addr, timeout, false, event_listener);
+        let (new_stream, mut req) =
+            Self::connect_setup(socket_addr, timeout, false, event_listener);
 
         // The completion (tcp_streams registration, state, events) runs
         // inline in rx dispatch, exactly like the nonblocking path: if it
@@ -995,6 +1074,16 @@ impl TcpStream {
                     let ttl = *(ptr as *const u32);
                     self.set_ttl(ttl)
                 }
+                moto_rt::net::SO_LINGER => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let millis = *(ptr as *const u64);
+                    let duration = if millis == u64::MAX {
+                        None
+                    } else {
+                        Some(Duration::from_millis(millis))
+                    };
+                    self.set_linger(duration)
+                }
                 _ => panic!("unrecognized option {option}"),
             }
         }
@@ -1033,6 +1122,18 @@ impl TcpStream {
                     match self.ttl() {
                         Ok(ttl) => {
                             *(ptr as *mut u32) = ttl;
+                            moto_rt::E_OK
+                        }
+                        Err(err) => err,
+                    }
+                }
+                moto_rt::net::SO_LINGER => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    match self.linger() {
+                        Ok(duration) => {
+                            *(ptr as *mut u64) = duration
+                                .map(|duration| duration.as_millis() as u64)
+                                .unwrap_or(u64::MAX);
                             moto_rt::E_OK
                         }
                         Err(err) => err,
@@ -1255,13 +1356,17 @@ impl TcpStream {
             bufs,
             total,
             written: 0,
+            waiter_id: None,
         }
     }
 
     /// Resolves once a write would not block (send-queue room or write half
     /// closed). A native reactor awaits this, then calls `try_write`.
     pub fn writable(&self) -> Writable<'_> {
-        Writable { stream: self }
+        Writable {
+            stream: self,
+            waiter_id: None,
+        }
     }
 
     pub fn maybe_can_write(&self) {
@@ -1449,10 +1554,9 @@ impl TcpStream {
         }
     }
 
-    /// Send all pending TX bytes now, ahead of a Close/shutdown(write)
+    /// Send all pending TX bytes now, ahead of a blocking shutdown(write)
     /// control message; the pages' markers, still queued behind us, then
-    /// no-op on the emptied queue. Guaranteed delivery, because this runs
-    /// from drop, potentially on the IO thread itself.
+    /// no-op on the emptied queue.
     fn flush_pending_tx(&self) {
         while let Some(msg) = self.claim_pending_tx() {
             self.channel().send_msg_guaranteed(msg);
@@ -1530,9 +1634,56 @@ impl TcpStream {
         resp.status
     }
 
-    // SO_LINGER is implemented against sys-io but not yet wired to the
-    // setsockopt/getsockopt dispatch; kept for when the native API adds it.
-    #[allow(dead_code)]
+    /// Shut down one or both halves without blocking the polling thread.
+    ///
+    /// Cancellation before the request enters the channel leaves the stream
+    /// unchanged. Once queued, the local shutdown remains committed even if
+    /// the future is dropped, matching the request sys-io now owns.
+    pub async fn shutdown_async(&self, shutdown: Shutdown) -> Result<(), ErrorCode> {
+        let (read, write) = match shutdown {
+            Shutdown::Read => (true, false),
+            Shutdown::Write => (false, true),
+            Shutdown::Both => (true, true),
+        };
+        let mut option = 0_u64;
+        if read {
+            option |= api_net::TCP_OPTION_SHUT_RD;
+        }
+        if write {
+            option |= api_net::TCP_OPTION_SHUT_WR;
+        }
+
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = option;
+        let resp = self
+            .channel()
+            .rpc_after_send(req, || {
+                if read {
+                    self.rx_closed.store(true, Ordering::Release);
+                    // SHUT_RD is local and discards already-buffered data.
+                    // Complete it at the queue-ownership boundary so dropping
+                    // the response future cannot retain pages or lose EOF.
+                    super::channel::clear_rx_queue(&self.recv_queue, self.channel());
+                    self.set_tcp_state(TcpState::WriteOnly);
+                }
+                if write {
+                    // Every completed write queued its TX marker before this
+                    // request. The channel expands those markers in FIFO
+                    // order, so sys-io receives all committed bytes first.
+                    self.tx_closed.store(true, Ordering::Release);
+                }
+            })
+            .await;
+
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
     fn set_linger(&self, dur: Option<Duration>) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
@@ -1547,7 +1698,6 @@ impl TcpStream {
         self.channel().send_receive(req).status
     }
 
-    #[allow(dead_code)]
     fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
@@ -1562,6 +1712,99 @@ impl TcpStream {
                 let secs = resp.payload.args_32()[3];
                 Ok(Some(Duration::from_secs(secs as u64)))
             }
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Set the stream's linger behavior without blocking the polling thread.
+    pub async fn set_linger_async(&self, duration: Option<Duration>) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+        if let Some(duration) = duration {
+            req.payload.args_32_mut()[2] = 1;
+            req.payload.args_32_mut()[3] = u32::try_from(duration.as_secs()).unwrap_or(u32::MAX);
+        }
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the stream's linger behavior without blocking the polling thread.
+    pub async fn linger_async(&self) -> Result<Option<Duration>, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+        let resp = self.channel().rpc(req).await;
+        if !resp.status().is_ok() {
+            return Err(resp.status);
+        }
+        if resp.payload.args_32()[2] == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(Duration::from_secs(resp.payload.args_32()[3] as u64)))
+        }
+    }
+
+    /// Set `TCP_NODELAY` without blocking the polling thread.
+    pub async fn set_nodelay_async(&self, nodelay: bool) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
+        req.payload.args_64_mut()[1] = nodelay as u64;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read `TCP_NODELAY` without blocking the polling thread.
+    pub async fn nodelay_async(&self) -> Result<bool, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_64()[0] != 0)
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Set the stream TTL without blocking the polling thread.
+    pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        req.payload.args_32_mut()[2] = ttl;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the stream TTL without blocking the polling thread.
+    pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_32()[0])
         } else {
             Err(resp.status)
         }
@@ -1719,6 +1962,13 @@ pub struct TcpWriteFuture<'a, 'b, 'c> {
     pub bufs: &'b [&'c [u8]],
     pub total: usize,
     pub written: usize,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for TcpWriteFuture<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.stream.channel().remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
@@ -1734,6 +1984,7 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
         let stream = this.stream;
         loop {
             if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
                 return Poll::Ready(Ok(this.written));
             }
 
@@ -1741,6 +1992,7 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
             // queue traffic.
             this.written += stream.append_pending_tx(this.bufs, this.written);
             if this.written == this.total {
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
                 return Poll::Ready(Ok(this.written));
             }
 
@@ -1748,12 +2000,15 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
                 if this.written > 0 {
                     // Partial write: return it rather than wait for
                     // pages (the old loop's opportunistic tail).
+                    stream.channel().remove_tx_waker(&mut this.waiter_id);
                     return Poll::Ready(Ok(this.written));
                 }
                 // The failed alloc set the subchannel's page-wait bits;
                 // sys-io will wake the channel, whose next pass drains
-                // tx_wakers. Register, then re-check via the loop.
-                stream.channel().add_tx_waker(cx.waker());
+                // TX waiters. Register, then re-check via the loop.
+                stream
+                    .channel()
+                    .add_tx_waker(&mut this.waiter_id, cx.waker());
                 if stream.channel().may_alloc_page(stream.subchannel_mask) {
                     continue;
                 }
@@ -1765,7 +2020,9 @@ impl core::future::Future for TcpWriteFuture<'_, '_, '_> {
                 Err(()) => {
                     // Full send queue. Register, re-check, park; the
                     // page was freed and is re-allocated on retry.
-                    stream.channel().add_tx_waker(cx.waker());
+                    stream
+                        .channel()
+                        .add_tx_waker(&mut this.waiter_id, cx.waker());
                     if !stream.channel().send_queue_is_full() {
                         continue;
                     }
@@ -1833,6 +2090,13 @@ impl core::future::Future for Readable<'_> {
 /// so sys-io wakes the channel when it frees a page. Cancel-safe.
 pub struct Writable<'a> {
     stream: &'a TcpStream,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for Writable<'_> {
+    fn drop(&mut self) {
+        self.stream.channel().remove_tx_waker(&mut self.waiter_id);
+    }
 }
 
 impl core::future::Future for Writable<'_> {
@@ -1844,25 +2108,32 @@ impl core::future::Future for Writable<'_> {
     ) -> core::task::Poll<()> {
         use core::task::Poll;
 
-        let stream = self.stream;
+        let this = self.get_mut();
+        let stream = this.stream;
         if !stream.tcp_state().can_write() || stream.tx_closed.load(Ordering::Acquire) {
             // A closed write half never blocks; the write returns an error.
+            stream.channel().remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         if stream.have_write_buffer_space() {
+            stream.channel().remove_tx_waker(&mut this.waiter_id);
             return Poll::Ready(());
         }
         // Register, then arm: the failed alloc sets the page-wait bits sys-io
         // watches. A page that frees in the window is caught by the re-check.
-        stream.channel().add_tx_waker(cx.waker());
+        stream
+            .channel()
+            .add_tx_waker(&mut this.waiter_id, cx.waker());
         match stream.channel().alloc_page(stream.subchannel_mask) {
             Ok(page) => {
                 // Room appeared; drop the probe page to free it.
                 drop(page);
+                stream.channel().remove_tx_waker(&mut this.waiter_id);
                 Poll::Ready(())
             }
             Err(_) => {
                 if stream.have_write_buffer_space() {
+                    stream.channel().remove_tx_waker(&mut this.waiter_id);
                     Poll::Ready(())
                 } else {
                     Poll::Pending

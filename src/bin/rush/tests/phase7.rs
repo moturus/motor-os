@@ -429,11 +429,16 @@ fn an_interactive_shell_reaps_background_jobs_it_was_never_asked_to_wait_for() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"sleep 0.05 &\nsleep 0.05 &\nsleep 0.05 &\nsleep 0.5\nps -o stat= --ppid $$\nexit\n")
+        .write_all(
+            b"sleep 0.05 &\nsleep 0.05 &\nsleep 0.05 &\nsleep 0.5\nps -o stat= --ppid $$\nexit\n",
+        )
         .expect("failed to write stdin");
     let out = child.wait_with_output().expect("failed to wait for rush");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let zombies = stdout.lines().filter(|l| l.trim_start().starts_with('Z')).count();
+    let zombies = stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('Z'))
+        .count();
     assert_eq!(zombies, 0, "unreaped background jobs:\n{stdout}");
 }
 

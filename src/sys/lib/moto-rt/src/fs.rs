@@ -184,9 +184,8 @@ pub fn file_lock(rt_fd: RtFd, operation: u8) -> Result<()> {
     if entry == 0 {
         return Err(Error::NotImplemented);
     }
-    let vdso_file_lock: extern "C" fn(RtFd, u8) -> ErrorCode = unsafe {
-        core::mem::transmute(entry as usize as *const ())
-    };
+    let vdso_file_lock: extern "C" fn(RtFd, u8) -> ErrorCode =
+        unsafe { core::mem::transmute(entry as usize as *const ()) };
     into_result(vdso_file_lock(rt_fd, operation))
 }
 

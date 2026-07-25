@@ -1272,8 +1272,7 @@ impl Thread {
                         // a Running thread stays on its CPU until it passes
                         // through the scheduler, which would see Killed.
                         let utcb = unsafe {
-                            (self.user_tcb_kernel_addr as usize
-                                as *const UserThreadControlBlock)
+                            (self.user_tcb_kernel_addr as usize as *const UserThreadControlBlock)
                                 .as_ref()
                                 .unwrap_unchecked()
                         };

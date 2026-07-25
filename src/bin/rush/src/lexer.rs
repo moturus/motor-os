@@ -891,7 +891,7 @@ fn heredoc_delim(w: &Word) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, AtEof, Incomplete, LexError};
+    use super::{AtEof, Incomplete, LexError, tokenize};
     use crate::token::{ExpansionKind, HereDoc, Operator, Token, Word, WordPart};
 
     /// Lex a buffer that may still grow — the interactive loop's view, and the
@@ -934,7 +934,10 @@ mod tests {
 
     #[test]
     fn control_operators() {
-        assert_eq!(toks("a;b"), vec![uword("a"), op(Operator::Semi), uword("b")]);
+        assert_eq!(
+            toks("a;b"),
+            vec![uword("a"), op(Operator::Semi), uword("b")]
+        );
         assert_eq!(
             toks("a && b || c"),
             vec![
@@ -945,8 +948,14 @@ mod tests {
                 uword("c")
             ]
         );
-        assert_eq!(toks("a|b"), vec![uword("a"), op(Operator::Pipe), uword("b")]);
-        assert_eq!(toks("a & b"), vec![uword("a"), op(Operator::Amp), uword("b")]);
+        assert_eq!(
+            toks("a|b"),
+            vec![uword("a"), op(Operator::Pipe), uword("b")]
+        );
+        assert_eq!(
+            toks("a & b"),
+            vec![uword("a"), op(Operator::Amp), uword("b")]
+        );
         assert_eq!(
             toks("( a )"),
             vec![op(Operator::LParen), uword("a"), op(Operator::RParen)]
@@ -1059,7 +1068,10 @@ mod tests {
 
     #[test]
     fn comments() {
-        assert_eq!(toks("echo hi # a comment"), vec![uword("echo"), uword("hi")]);
+        assert_eq!(
+            toks("echo hi # a comment"),
+            vec![uword("echo"), uword("hi")]
+        );
         assert_eq!(toks("# whole line"), vec![]);
         // `#` is literal inside a word and inside quotes.
         assert_eq!(toks("a#b"), vec![word(vec![lit("a#b", false)])]);
@@ -1216,10 +1228,7 @@ mod tests {
         // Nothing left to continue onto: `rush -c 'echo a\'` prints `a\`.
         assert_eq!(
             toks_eof("echo a\\"),
-            [
-                uword("echo"),
-                word(vec![lit("a", false), lit("\\", true)]),
-            ]
+            [uword("echo"), word(vec![lit("a", false), lit("\\", true)]),]
         );
         // But a backslash-newline is still a continuation, even at end of input.
         assert_eq!(toks_eof("echo a\\\n"), [uword("echo"), uword("a")]);

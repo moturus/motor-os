@@ -210,7 +210,10 @@ fn finish_csi(params: &str, final_byte: char) -> Key {
     let parts: Vec<&str> = params.split(';').collect();
     let num = |i: usize| -> usize { parts.get(i).and_then(|s| s.parse().ok()).unwrap_or(0) };
     // `ESC[1;5C` = Ctrl-Right, `ESC[1;3C` = Alt-Right: 5 is Ctrl, 3 is Alt.
-    let by_word = matches!(parts.get(1).and_then(|s| s.parse::<u32>().ok()), Some(3 | 5));
+    let by_word = matches!(
+        parts.get(1).and_then(|s| s.parse::<u32>().ok()),
+        Some(3 | 5)
+    );
     match final_byte {
         'A' => Key::Up,
         'B' => Key::Down,
@@ -718,7 +721,12 @@ impl Term {
         // Everything before the first character that differs is already on the
         // screen, in the cells it belongs in — the prompt and the width have not
         // moved, so nothing before the change can have moved either.
-        let k = prev.line.iter().zip(line).take_while(|(a, b)| a == b).count();
+        let k = prev
+            .line
+            .iter()
+            .zip(line)
+            .take_while(|(a, b)| a == b)
+            .count();
 
         let mut buf = String::new();
         let mut at = (prev.crow, prev.ccol);
@@ -1509,11 +1517,10 @@ mod tests {
     fn an_unknown_sequence_does_not_swallow_the_next_key() {
         // A `^C` arriving inside a half-finished escape must survive: the
         // sequence is abandoned and the byte handed back.
-        assert_eq!(keys(&[0x1b, b'[', 0x03, b'a']), [
-            Key::Unknown,
-            Key::Ctrl('c'),
-            Key::Char('a')
-        ]);
+        assert_eq!(
+            keys(&[0x1b, b'[', 0x03, b'a']),
+            [Key::Unknown, Key::Ctrl('c'), Key::Char('a')]
+        );
     }
 
     #[test]
@@ -1523,13 +1530,16 @@ mod tests {
         assert_eq!(key("日".as_bytes()), Key::Char('日'));
         assert_eq!(key("🦀".as_bytes()), Key::Char('🦀'));
         // A whole typed word, one key at a time.
-        assert_eq!(keys("héllo".as_bytes()), [
-            Key::Char('h'),
-            Key::Char('é'),
-            Key::Char('l'),
-            Key::Char('l'),
-            Key::Char('o')
-        ]);
+        assert_eq!(
+            keys("héllo".as_bytes()),
+            [
+                Key::Char('h'),
+                Key::Char('é'),
+                Key::Char('l'),
+                Key::Char('l'),
+                Key::Char('o')
+            ]
+        );
     }
 
     #[test]
@@ -1566,12 +1576,15 @@ mod tests {
     #[test]
     fn layout_of_a_line_that_fits_is_one_row() {
         let l = layout(2, &chars("echo hi"), 7, 80);
-        assert_eq!(l, Layout {
-            rows: 1,
-            crow: 0,
-            ccol: 9,
-            wrapped_end: false
-        });
+        assert_eq!(
+            l,
+            Layout {
+                rows: 1,
+                crow: 0,
+                ccol: 9,
+                wrapped_end: false
+            }
+        );
     }
 
     #[test]
@@ -1597,7 +1610,10 @@ mod tests {
         // Prompt 2 + 4 chars fills a 6-column row exactly.
         let l = layout(2, &chars("abcd"), 4, 6);
         assert!(l.wrapped_end);
-        assert_eq!(l.rows, 2, "the empty next row is real: the terminal is on it");
+        assert_eq!(
+            l.rows, 2,
+            "the empty next row is real: the terminal is on it"
+        );
         assert_eq!((l.crow, l.ccol), (1, 0), "the cursor moved to it");
     }
 
@@ -1626,14 +1642,17 @@ mod tests {
         // and counting that as two runs the typed line and then a blank one —
         // two prompts for one keypress, which is what this is here to stop.
         assert_eq!(keys(b"\r\n"), [Key::Enter]);
-        assert_eq!(keys(b"ab\r\ncd\r\n"), [
-            Key::Char('a'),
-            Key::Char('b'),
-            Key::Enter,
-            Key::Char('c'),
-            Key::Char('d'),
-            Key::Enter
-        ]);
+        assert_eq!(
+            keys(b"ab\r\ncd\r\n"),
+            [
+                Key::Char('a'),
+                Key::Char('b'),
+                Key::Enter,
+                Key::Char('c'),
+                Key::Char('d'),
+                Key::Enter
+            ]
+        );
     }
 
     #[test]
@@ -1658,7 +1677,10 @@ mod tests {
         assert_eq!(read_key(&mut Fake::new(b"\r"), &mut after_cr), Key::Enter);
         assert!(after_cr);
         // A whole command later, from a source that knows nothing of the CR:
-        assert_eq!(read_key(&mut Fake::new(b"\nx"), &mut after_cr), Key::Char('x'));
+        assert_eq!(
+            read_key(&mut Fake::new(b"\nx"), &mut after_cr),
+            Key::Char('x')
+        );
     }
 
     #[test]

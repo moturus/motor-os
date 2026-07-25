@@ -121,6 +121,34 @@ wait_for_ping_error() {
   fail "ping '$host' did not settle on '$expected'"
 }
 
+read_udp_socket_count() {
+  local output=""
+  local count=""
+  local last_count=""
+
+  for _ in $(seq 1 20); do
+    count=""
+    if output="$(vm_ssh /bin/stats get 2 2>&1)"; then
+      count="$(printf '%s\n' "$output" |
+        awk '$2 == "net.udp_sockets" { print $3 }')"
+      if [ "$count" = "0" ]; then
+        printf '0\n'
+        return
+      fi
+      [ -z "$count" ] || last_count="$count"
+    fi
+    sleep 0.1
+  done
+
+  if [ -n "$last_count" ]; then
+    printf '%s\n' "$last_count"
+    return
+  fi
+
+  printf '%s\n' "$output" >&2
+  fail "stats did not report net.udp_sockets"
+}
+
 DNS_RESOLVER_SSH_PID=""
 
 # cleanup routine
@@ -162,8 +190,7 @@ vm_ssh /sys/dns-resolver --self-test
 ping_external google.com
 expect_ping_error does-not-exist.motor.invalid NotFound
 
-udp_sockets="$(vm_ssh /bin/stats get 2 |
-  awk '$2 == "net.udp_sockets" { print $3 }')"
+udp_sockets="$(read_udp_socket_count)"
 [ "$udp_sockets" = "0" ] ||
   fail "DNS tests left $udp_sockets active UDP socket(s)"
 
@@ -191,20 +218,23 @@ done
   fail "dns-resolver did not become ready after restart"
 ping_external google.com
 
-udp_sockets="$(vm_ssh /bin/stats get 2 |
-  awk '$2 == "net.udp_sockets" { print $3 }')"
+udp_sockets="$(read_udp_socket_count)"
 [ "$udp_sockets" = "0" ] ||
   fail "restarted DNS service left $udp_sockets active UDP socket(s)"
 
-systest_output=""
-if systest_output="$(vm_ssh sys/tests/systest 2>&1)"; then
-  printf '%s\n' "$systest_output"
-else
-  systest_status="$?"
-  printf '%s\n' "$systest_output"
+# Let systest output flow to the console as it happens; tee keeps a copy so
+# the verdict can still be checked. pipefail makes the pipeline carry
+# systest's own status rather than tee's.
+SYSTEST_LOG=/tmp/full-test-systest.log
+systest_status=0
+set -o pipefail
+vm_ssh sys/tests/systest 2>&1 | tee "$SYSTEST_LOG" || systest_status="$?"
+set +o pipefail
+[ "$systest_status" -eq 0 ] ||
   fail "systest exited with status $systest_status"
-fi
 
+# $(...) drops trailing newlines, so this is the last non-empty line.
+systest_output="$(cat "$SYSTEST_LOG")"
 [ "${systest_output##*$'\n'}" = "PASS" ] ||
   fail "systest did not finish with PASS"
 

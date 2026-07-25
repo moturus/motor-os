@@ -64,15 +64,14 @@ pub unsafe extern "C" fn __emutls_get_address(control: *mut EmutlsControl) -> *m
     let mut index = control.index.load(Ordering::Acquire);
     if index == 0 {
         let candidate = NEXT_INDEX.fetch_add(1, Ordering::Relaxed);
-        index = match control.index.compare_exchange(
-            0,
-            candidate,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => candidate,
-            Err(winner) => winner, // lost the race; `candidate` becomes an unused gap
-        };
+        index =
+            match control
+                .index
+                .compare_exchange(0, candidate, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => candidate,
+                Err(winner) => winner, // lost the race; `candidate` becomes an unused gap
+            };
     }
 
     let key = emutls_key();
