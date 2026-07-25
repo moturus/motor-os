@@ -526,7 +526,7 @@ impl<'a, R: Read> TarReader<'a, R> {
                     "failed to persist extracted file `{}`: {error}",
                     output.display()
                 ))
-        })?;
+            })?;
         set_file_mode(&file, output, mode & 0o111 != 0)?;
         file.sync_all().map_err(|error| {
             Error::failure(format!(

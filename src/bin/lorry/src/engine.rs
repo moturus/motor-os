@@ -1415,7 +1415,7 @@ fn matching_cfgs(config: &Config, target: &TargetInfo) -> Result<Vec<String>> {
     target.cfg.matching_selectors(selectors)
 }
 
-fn check_rust_version(manifest: &Manifest, toolchain: &Toolchain) -> Result<()> {
+pub(crate) fn check_rust_version(manifest: &Manifest, toolchain: &Toolchain) -> Result<()> {
     let requested = manifest.metadata.rust_version.trim();
     if requested.is_empty() {
         return Ok(());

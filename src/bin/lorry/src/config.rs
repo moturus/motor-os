@@ -124,7 +124,7 @@ impl Default for VendorConfig {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkConfig {
-    pub helper: Option<PathBuf>,
+    pub curl: Option<PathBuf>,
     pub ca_bundle: Option<PathBuf>,
 }
 
@@ -608,9 +608,9 @@ fn merge_network(path: &Path, document: &Document, config: &mut Config) -> Resul
         return Ok(());
     };
     let table = require_table(path, document, item, "network")?;
-    reject_unknown_keys(path, document, table, "network", &["helper", "ca-bundle"])?;
-    if let Some(item) = table.get("helper") {
-        config.network.helper = Some(absolute_path(path, document, item, "network.helper")?);
+    reject_unknown_keys(path, document, table, "network", &["curl", "ca-bundle"])?;
+    if let Some(item) = table.get("curl") {
+        config.network.curl = Some(absolute_path(path, document, item, "network.curl")?);
     }
     if let Some(item) = table.get("ca-bundle") {
         config.network.ca_bundle = Some(absolute_path(path, document, item, "network.ca-bundle")?);
@@ -2011,9 +2011,12 @@ mod tests {
             format!(
                 "config-version = 1\ncargo-compat-version = \"1.97\"\n\
                  [toolchain]\nrustc = \"/base/rustc\"\n\
-                 [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n",
+                 [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n\
+                 [network]\ncurl = \"{}\"\nca-bundle = \"{}\"\n",
                 temp.0.join("system").display(),
                 temp.0.join("user").display(),
+                temp.0.join("curl").display(),
+                temp.0.join("ca.crt").display(),
             ),
         )
         .unwrap();
@@ -2058,6 +2061,8 @@ mod tests {
         assert!(config.repositories.system.is_some());
         assert!(config.repositories.user.is_some());
         assert!(config.repositories.local.is_some());
+        assert_eq!(config.network.curl, Some(temp.0.join("curl")));
+        assert_eq!(config.network.ca_bundle, Some(temp.0.join("ca.crt")));
         let target = config
             .target_options("x86_64-unknown-linux-musl", &[])
             .unwrap();

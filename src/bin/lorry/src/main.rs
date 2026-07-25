@@ -28,10 +28,11 @@ mod sparse;
 mod toml;
 mod toolchain;
 mod unit;
+mod vendor;
 mod vendor_lock;
 
 use cli::{Cli, Command};
-use diagnostic::{Error, Result};
+use diagnostic::Result;
 
 const VERSION: &str = "0.1.0";
 
@@ -62,7 +63,7 @@ where
             println!("lorry {VERSION}");
             Ok(0)
         }
-        Command::Vendor { .. } => Err(Error::unsupported("vendor", 1)),
+        Command::Vendor { accept_all } => vendor::execute(&cli, *accept_all),
         Command::Build(_) | Command::Run(_) | Command::Test(_) => engine::execute(&cli),
     }
 }
@@ -101,17 +102,5 @@ fn print_help(topic: Option<&str>) {
              vendor                      Vendor dependencies (Stage 2)\n  \
              help                        Show this help"
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unfinished_stage_two_commands_fail_at_the_boundary() {
-        let vendor = run(["vendor".to_owned()]).unwrap_err();
-        assert_eq!(vendor.exit_code(), 101);
-        assert!(vendor.to_string().contains("Stage 1"));
     }
 }

@@ -1,7 +1,7 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage 2 vendoring in progress — whole-file locking is complete;
-repository publication is paused for a Motor OS atomic no-replace rename API**
+Status: **Stage 2 vendoring in progress — atomic object publication and
+path-only vendor transactions are complete; direct curl acquisition is next**
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
@@ -117,29 +117,29 @@ It addresses two related problems:
 - Stage-1 Lorry's CLI parser is hand-written for its deliberately small command
   surface. Stage 2 replaces it with Clap's builder API using an existing
   unpatched Motor-tested crate graph; derive/proc-macro features stay disabled.
-- `lorry-fetch` is a separate sibling Cargo package at
-  `src/bin/lorry-fetch`, not another binary in the core package. Its
-  HTTP/TLS graph and future Git graph and lockfile are absent from core Lorry
-  builds.
-- Before Stage 2 closes, Stage-2 Lorry must build `lorry-fetch` on Linux and
-  native Motor, and the resulting helper must successfully populate a fresh
-  dependency repository used for a second helper build. The helper uses a
-  narrow blocking HTTP/1.1 implementation over `std::net` and Rustls rather
-  than curl/libcurl.
-- Stage-2 `lorry-fetch` pins `ring` 0.17.14 as its Rustls cryptography
+- HTTPS acquisition uses a curl-compatible command directly, with no
+  Lorry-specific helper, adapter executable, or private protocol. Linux uses
+  upstream curl 7.63.0 or newer. Motor OS supplies the independent
+  `src/bin/curl` package, installed as `/bin/curl`, which implements the
+  required curl CLI subset using blocking HTTP/1.1 over `std::net` and Rustls.
+  The exact invocation and stream contract is in `curl-interaction.md`.
+- Before Stage 2 closes, Stage-2 Lorry must build `src/bin/curl` on Linux and
+  native Motor, and Lorry must use the resulting executable directly to
+  populate a fresh dependency repository used for a second curl build.
+- Stage-2 Motor curl pins `ring` 0.17.14 as its Rustls cryptography
   provider. Cargo.toml explicitly path-patches to its stable logical Lorry
   artifact path, and Cargo.lock contains the corresponding path-package node.
   Lorry resolves the source through its repository layers. The system seed is
   derived from that exact crates.io archive with only the
   two Motor target-classification changes recorded in Round 27; its Git
   URL/commit remain verified seed provenance rather than a Cargo source. The
-  helper also enables `getrandom` 0.2.17's `custom` feature and registers a
+  curl package also enables `getrandom` 0.2.17's `custom` feature and registers a
   Motor-only callback to `moto_rt_fill_random_bytes`; it does not patch
   `getrandom`. AWS-LC remains a viable post-Stage-2 provider candidate, but
   generic Cargo `links` metadata forwarding is not added to Stage 2 merely to
   support it.
-- New Lorry code uses `MIT OR Apache-2.0`. Dependencies of Lorry and
-  `lorry-fetch` pass the same configurable admission machinery as other
+- New Lorry and Motor curl code uses `MIT OR Apache-2.0`. Dependencies of both
+  packages pass the same configurable admission machinery as other
   dependencies; first-party use does not create a policy exemption.
 - Initial user-facing commands include `lorry build`, `lorry run`, and
   `lorry test`. Each supports the default development profile and `--release`.
@@ -292,14 +292,12 @@ It addresses two related problems:
   can be vendored. Rounds 17 and 18 resolve its base criteria, trust model,
   defaults, and rule behavior. Round 28 resolves its native-tool configuration
   and authorization fields.
-- `lorry vendor` must run natively on Motor OS as well as Linux. The acquisition
-  implementation may use purpose-built networking/Git helpers shipped for
-  Motor, but cannot depend on Cargo.
-- Network and Git acquisition live in a separate `lorry-fetch` executable.
-  `lorry vendor` owns resolution, policy, approval, integrity checking, staging,
-  and repository commit; `lorry-fetch` is a narrow acquisition helper built
-  with blocking HTTP/1.1 over `std::net` and Rustls. General Git acquisition
-  and any selectively enabled `gix` functionality are post-Stage-2.
+- `lorry vendor` must run natively on Motor OS as well as Linux. It invokes the
+  platform's curl-compatible command directly and cannot depend on Cargo.
+  Lorry owns URL and redirect validation, resolution, policy, approval,
+  integrity checking, size limits, staging, and repository commit. Curl owns
+  only the requested HTTPS transfer. General Git acquisition and any
+  selectively enabled `gix` functionality are post-Stage-2.
 - A root manifest's local path dependencies remain local path dependencies and
   are built from the declared paths, matching Cargo. They are not copied into
   the dependency repository merely because they participate in the graph.
@@ -351,7 +349,7 @@ It addresses two related problems:
 - Stage 1 compiles and executes dependency-free Rust build scripts. Stage 2
   additionally supports approved dependency build scripts with transitive
   build-dependencies, native `links` packages, and the narrowly controlled
-  native toolchain needed by the selected `lorry-fetch` cryptography provider;
+  native toolchain needed by the selected Motor curl cryptography provider;
   no crate is special-cased. Root default features and features requested on
   dependencies are supported. CLI `--features`, `--all-features`, and
   `--no-default-features` are deferred because they change the offline
@@ -393,13 +391,13 @@ It addresses two related problems:
 - System configuration can mark security constraints as non-overridable. A
   user or repository layer that attempts to weaken one fails with a diagnostic
   naming both the attempted override and the system rule.
-- Motor's system CA certificates live under `/sys/cfg/ssl/`. Lorry's fetch
-  helper uses `/sys/cfg/ssl/ca-certificates.crt` by default.
+- Motor's system CA certificates live under `/sys/cfg/ssl/`. Lorry passes
+  `/sys/cfg/ssl/ca-certificates.crt` to curl by default.
   `[network].ca-bundle` may specify an absolute override path.
-- `lorry` and `lorry-fetch` are installed together under
-  `/sys/tools/rust/bin/` on Motor OS. Lorry finds the helper beside its own
-  executable by default, permits only an absolute configured override, and
-  verifies a compatible helper protocol version before acquisition.
+- Lorry is installed under `/sys/tools/rust/bin/` and Motor curl is installed
+  as the general utility `/bin/curl`. `[network].curl` may provide an absolute
+  override. On Linux, Lorry resolves `curl` through `PATH`; on Motor it defaults
+  to `/bin/curl`.
 
 ## Capability stages
 
@@ -416,8 +414,8 @@ The first three end-to-end milestones are:
    closes, stage-2 Lorry builds its own locked, policy-approved dependency
    graph and itself on Linux and native Motor. The final Stage-2 submilestone
    adds the narrowly controlled transitive build-dependency/native-tool subset
-   required by `lorry-fetch`, builds that helper on both hosts, and proves the
-   built helper by using it in a fresh-repository self-build cycle.
+   required by Motor curl, builds curl on both hosts, and proves the built
+   executable by using it in a fresh-repository self-build cycle.
 3. Build `src/bin/httpd-axum`, exercising a substantially more complicated
    third-party dependency graph and Motor OS dependency patches.
 
@@ -618,8 +616,9 @@ The design will be settled in this order:
 - The dependency repository path in `lorry.toml` is initially absolute.
 - Confirmation is per new package, with all-or-nothing transactional commit.
 - `lorry vendor --accept-all` accepts the complete policy-compliant tree.
-- Native Motor OS supports `lorry vendor`; no external Cargo/curl/git-command
-  assumption is allowed.
+- Native Motor OS supports `lorry vendor`; no Cargo or Git-command assumption
+  is allowed. The required curl-compatible command is a first-party Motor
+  utility.
 
 ### Resolved/superseded by rounds 19 and 20
 
@@ -644,14 +643,13 @@ The design will be settled in this order:
 - Repository retention is configurable rather than unconditionally keeping
   both archives and extracted trees.
 
-### Round 6: acquisition helper and repository configuration
+### Round 6: acquisition boundary and repository configuration
 
 ### Resolved in round 6
 
-- Acquisition is isolated in a separate `lorry-fetch` executable. Round 25
-  supersedes the initially proposed curl backend with a narrow Rustls-based
-  Stage-2 HTTPS implementation; Git support remains a future optional helper
-  capability.
+- This round's separate-`lorry-fetch` decision was superseded by Round 45.
+  HTTPS acquisition now uses a curl-compatible command directly; general Git
+  acquisition remains future work.
 - Repository retention uses `keep-artifacts` and `keep-sources`, both true by
   default and not both false.
 - Motor configuration layers are system, user, then repository-local.
@@ -669,8 +667,7 @@ The design will be settled in this order:
 - System security constraints may be made non-overridable.
 - Motor uses `/sys/cfg/ssl/ca-certificates.crt` with an absolute config
   override.
-- Motor installs both executables under `/sys/tools/rust/bin/`; helper
-  overrides are absolute and protocol-version checked.
+- Motor installs curl as `/bin/curl`; `[network].curl` overrides are absolute.
 
 ### Round 8: supported manifest subset
 
@@ -696,7 +693,7 @@ The design will be settled in this order:
   selected build-dependencies, dev-dependencies, git dependencies, proc macros,
   native `links` packages, or custom crate types. `libc` still requires
   compiling and running a dependency-free Rust build script. The final
-  `lorry-fetch` submilestone additionally exercises transitive
+  Motor curl submilestone additionally exercises transitive
   build-dependencies, native `links`, exact local path crates.io patches, and a
   policy-declared C-compiler/archiver subset; it still does not admit git
   sources, procedural macros, C++, or arbitrary custom crate types/tools.
@@ -837,7 +834,8 @@ layout.
   arbitrary count.
 - Stage 1 uses a hand-written CLI parser. Stage 2 replaces it with the
   exact, no-derive Clap builder graph in Round 36.
-- The fetch helper is a sibling package with an isolated dependency graph.
+- The Motor curl utility is a sibling package with an isolated dependency
+  graph. Lorry invokes its curl-compatible CLI directly.
 - Core self-buildability is now a stage-1 and stage-2 acceptance gate as
   specified in round 24.
 - Lorry is dual MIT/Apache-2.0 and its own dependencies receive no admission
@@ -990,7 +988,7 @@ configuration evidence, not a hard-coded package exception.
   assigned `OUT_DIR` and private temporary area, and restricts child process
   execution to Lorry-approved tools required by the supported build.
 - The base Stage-2 `libc` case requires only the selected rustc to be available
-  to the build script (`rustc --version`). The final `lorry-fetch` submilestone
+  to the build script (`rustc --version`). The final Motor curl submilestone
   additionally permits only the policy-declared C compiler and archiver
   identities fixed for `ring` 0.17.14; this does not imply a general PATH or
   arbitrary native-tool execution.
@@ -1054,7 +1052,7 @@ include-host = true
 
 [network]
 # Both optional absolute overrides.
-helper = "/absolute/path/to/lorry-fetch"
+curl = "/absolute/path/to/curl"
 ca-bundle = "/absolute/path/to/ca-certificates.crt"
 
 [test]
@@ -1150,7 +1148,7 @@ Schema semantics:
 Round 28 resolves the previously reopened native-build portion of this schema.
 No generic command allowlist or inherited PATH is added.
 
-### Round 19: resolved stage-2 repository and fetch-helper formats
+### Round 19: resolved stage-2 repository and acquisition formats
 
 #### Resolved repository format version 1
 
@@ -1216,27 +1214,22 @@ No generic command allowlist or inherited PATH is added.
   be unsafe. Decline and all failures before commit still add no objects.
   Garbage collection is deferred; stale staging is diagnosed and ignored.
 
-#### Resolved `lorry-fetch` protocol version 1
+#### Resolved direct curl interaction
 
-- `lorry-fetch --protocol-version` prints `1`. Lorry checks this before the
-  first network request.
-- Stage 2 exposes one operation: fetch one public HTTPS URL into a named,
-  nonexistent staging file, with an explicit CA-bundle path, byte limit, and
-  protocol version. Arguments are passed directly, never through a shell.
-- The helper performs certificate/hostname validation, permits at most five
-  HTTPS-to-HTTPS redirects, rejects protocol downgrade and authentication, and
-  creates the output file exclusively. It emits one bounded JSON result
-  containing status, final URL, selected cache headers, and received byte
-  count; diagnostic text is separate and bounded.
-- Lorry chooses and validates sparse-index/download URLs, validates the result
-  and final host against stage-2 crates.io rules, parses all content, hashes
-  archives, applies policy, and controls the staging/commit lifecycle.
-- The helper never interprets TOML, index records, archives, lockfiles, policy,
-  or repository state. Its Stage-2 backend is a narrow blocking HTTP/1.1 client
-  over `std::net` and Rustls with the pinned `ring` 0.17.14 provider and patch
-  boundary recorded in Round 27. HTTP/2, proxy support, authentication,
-  general-purpose HTTP-client behavior, alternative cryptography providers,
-  and gix/Git functionality are post-Stage-2.
+- Round 45 supersedes the former `lorry-fetch` protocol. Lorry invokes an
+  upstream or compatible curl command directly, never through a shell or
+  adapter.
+- One curl process performs one public HTTPS GET. Curl emits the response body
+  on stdout and a nonce-delimited status/final-URL/redirect/download-size
+  trailer on stderr using `--write-out`; Lorry drains both streams with bounds.
+- Curl does not follow redirects. Lorry validates each HTTPS redirect against
+  the Stage-2 crates.io URL rules and starts at most five additional requests.
+  It owns exclusive staging files, byte limits, status validation, parsing,
+  archive hashing, policy, and commit.
+- Ambient curl configuration, proxy, authentication, compression, and retry
+  behavior are disabled. The exact argument vector, environment, stream
+  grammar, error handling, Motor subset, and acceptance matrix are frozen in
+  `curl-interaction.md`.
 
 ### Round 20: resolved stage-2 resolution and vendoring state machine
 
@@ -1262,7 +1255,7 @@ No generic command allowlist or inherited PATH is added.
    inactive root features or other targets remain legal lock entries but are
    not downloaded.
 5. Re-evaluate effective policy from index/graph facts. Fetch remaining index
-   records and archives through `lorry-fetch` into staging, verify checksums and
+   records and archives through curl into Lorry-owned staging, verify checksums and
    safe extraction, inspect normalized manifests/licenses/build-script facts,
    calculate complete resource evidence, and apply post-fetch policy.
 6. Present one deterministic summary sorted by package identity, followed by
@@ -1293,7 +1286,7 @@ No generic command allowlist or inherited PATH is added.
   a previously vendored object without deleting it. Path-root policy is also
   rechecked.
 - Missing/corrupt objects fail; build commands never repair, resolve, rewrite,
-  or contact the helper.
+  or contact curl.
 - Stage 2 neither reads nor writes `Lorry.lock`. Root-manifest path patches and
   exact configured required vendored path patches are represented entirely by
   `Cargo.toml` and Cargo.lock. If `Lorry.lock` is present, Stage 2 rejects it
@@ -1545,19 +1538,18 @@ lorry help [COMMAND]
   dependency-free approved build scripts, but no capability stage 2 rejects.
   Its complete graph must satisfy the default-deny policy and be documented as
   part of Lorry's own dependency review.
-- An installed stage-2 Lorry, with `lorry-fetch` available only when vendoring
-  is needed, vendors its graph and builds the same revision on Linux and native
+- An installed stage-2 Lorry, with curl available only when vendoring is
+  needed, vendors its graph and builds the same revision on Linux and native
   Motor. A second self-build verifies cache/warm-build behavior, while final
   executables are still relinked as required by round 22.
-- An installed seed `lorry-fetch` first populates the helper's dependency
-  graph. Stage-2 Lorry then builds `lorry-fetch`; that produced helper
-  populates a second fresh repository from which Stage-2 Lorry builds the same
-  helper again. This is a Stage-2 Linux and native-Motor acceptance gate, not a
-  deferred claim about the helper.
+- An installed seed curl first populates curl's dependency graph. Stage-2 Lorry
+  then builds `src/bin/curl`; that produced executable directly populates a
+  second fresh repository from which Stage-2 Lorry builds curl again. This is
+  a Stage-2 Linux and native-Motor acceptance gate.
 
 ### Round 25: stage-2 fetch-helper and `russhd` audit
 
-#### Resolved direction
+#### Historical direction, superseded by Round 45
 
 - Using the Rust `curl` crate does not avoid that boundary: it delegates to
   `curl-sys`/libcurl and therefore introduces a native library/link/build
@@ -1565,12 +1557,11 @@ lorry help [COMMAND]
   system libcurl would make the Rust helper package easy to self-build, but
   would merely move the TLS implementation outside Lorry and would not prove
   that Lorry can build its own TLS graph.
-- The Stage-2 `lorry-fetch` backend is therefore a narrow blocking HTTP/1.1
-  client built directly on `std::net` and Rustls. HTTP/2, proxies,
-  authentication, and general-purpose HTTP client behavior remain outside
-  Stage 2. The versioned helper protocol and its redirect, certificate/
-  hostname validation, size, and bounded-output requirements are unchanged.
-- `lorry-fetch` self-building is the final Stage-2 acceptance gate after the
+- This round originally put the narrow blocking Rustls client in
+  `lorry-fetch`. Round 45 retains the independent TLS dependency graph and
+  self-build gate but moves the client to the general `src/bin/curl` utility;
+  Lorry now invokes its curl-compatible CLI directly.
+- Motor curl self-building is the final Stage-2 acceptance gate after the
   smaller `rush` and core-Lorry gates.
 - Stage 2 supports transitive `[build-dependencies]` and their host-unit graph,
   `package.links`, `cargo:rustc-link-lib`, `cargo:rustc-link-search`,
@@ -1585,14 +1576,14 @@ lorry help [COMMAND]
   required to stay within the finally approved native-tool allowlist. No
   provider or native build receives a policy exemption merely because Lorry
   needs it.
-- The bootstrap acceptance cycle is explicit: an installed seed helper
-  populates a fresh dependency repository; Stage-2 Lorry builds
-  `lorry-fetch`; the resulting helper populates another fresh repository; and
-  Stage-2 Lorry builds the same helper again. This runs on Linux and native
+- The bootstrap acceptance cycle is explicit: an installed seed curl
+  populates a fresh dependency repository; Stage-2 Lorry builds Motor curl;
+  the resulting executable populates another fresh repository; and Stage-2
+  Lorry builds the same curl package again. This runs on Linux and native
   Motor, with Cargo/Lorry release identity comparisons where the equivalent
   Cargo build uses the same sources, patches, and native toolchain.
 - The current `russhd` is not blocked by TLS. Even after adding the narrowly
-  required `lorry-fetch` mechanisms, it would still require host procedural
+  required Motor curl mechanisms, it would still require host procedural
   macro compilation/loading, a much larger dependency graph, general git patch
   sources, more build-script cases, and root dev-dependency handling. Adding
   all of that to stage 2 would erase most of the intended structural boundary
@@ -1627,7 +1618,7 @@ The provider evaluation used these agreed criteria:
   macros, general Git acquisition, or arbitrary build tools—unless a newly
   discovered requirement is brought back for an explicit design decision.
 - Provider selection fixes the exact local patch set, provider features,
-  native tool roles, and `lorry-fetch` lock graph. Round 27 applies these
+  native tool roles, and Motor curl lock graph. Round 27 applies these
   criteria and selects current crates.io `ring` 0.17.14 with a new minimal
   reviewed Motor patch, not the repository's stale 0.17.8 Git fork.
 
@@ -1662,7 +1653,7 @@ The provider evaluation used these agreed criteria:
 - Native Motor testing is a required gate:
   1. before Stage 1 closes;
   2. at the Stage-2 `rush` plus core-Lorry checkpoint;
-  3. at final Stage-2 `lorry-fetch` closure; and
+  3. at final Stage-2 Motor curl closure; and
   4. after changes to portability-sensitive compiler discovery/invocation,
      target handling, filesystem/repository behavior, sandboxing, networking/
      certificates, process execution, or native-tool handling.
@@ -1714,7 +1705,7 @@ belong to the ordered implementation/acceptance plan.
 
 This round records design-fixture results only. The fixtures live outside the
 repository and are not Lorry implementation. Versions below are the current
-released versions selected on 2026-07-19; the eventual helper lockfile fixes
+released versions selected on 2026-07-19; the eventual Motor curl lockfile fixes
 exact versions and checksums.
 
 #### Measured common boundary
@@ -1809,7 +1800,7 @@ output defaults.
   OS-random-backed target in `src/rand.rs`. With those changes it cross-
   compiles and links successfully using only the same C compiler and archiver.
   The obsolete no-system-headers change must not be carried forward.
-- `lorry-fetch` can enable `getrandom` 0.2.17's existing `custom` feature and,
+- Motor curl can enable `getrandom` 0.2.17's existing `custom` feature and,
   on Motor only, register a small callback to
   `moto_rt_fill_random_bytes`. This uses Motor's existing OS random abstraction
   without patching `getrandom`, using its RDRAND fallback, or adding another
@@ -1821,18 +1812,18 @@ output defaults.
 
 #### Resolved provider decision
 
-Stage 2 selects `ring` 0.17.14 for the `lorry-fetch` lock graph, using an exact
+Stage 2 selects `ring` 0.17.14 for the Motor curl lock graph, using an exact
 path patch to a system-vendored tree derived from the exact crates.io archive
 plus the two Motor changes above. Host tools acquire the pinned Git provenance
 and seed that tree into the system Lorry repository. The reasons are:
 
 1. It satisfies the complete cryptographic feature set needed by the narrow
-   HTTPS fetch helper and remains a first-party Rustls provider.
+   Motor curl HTTPS subset and remains a first-party Rustls provider.
 2. It uses the same native-tool classes as AWS-LC while producing a
    substantially smaller source, output, and compilation footprint.
 3. It fits the already-agreed Stage-2 build-script protocol, preserving the
    intentional Stage-2 boundary instead of adding generic `links` metadata
-   solely for the helper.
+   solely for Motor curl.
 4. The current Motor port is small and is based on the released crates.io
    archive with pregenerated assembly, rather than retaining the stale Git
    fork or its Perl/no-sysroot assumptions.
@@ -1960,12 +1951,12 @@ privileged boundary explicit. It does not introduce acquisition or copying for
 path packages, and it does not claim that Lorry can cryptographically prove
 how a reviewed patched tree was derived from an upstream archive.
 
-### Round 30: exact Stage-2 `lorry-fetch` dependency graph
+### Round 30: exact Stage-2 Motor curl dependency graph
 
 #### Resolved registry graph and patch source model
 
-The helper manifest pins these direct requirements rather than using floating
-requirements:
+The `src/bin/curl` manifest pins these direct requirements rather than using
+floating requirements:
 
 ```toml
 [dependencies]
@@ -1996,7 +1987,7 @@ selected non-root graph is:
 | `cc 1.3.0` | crates.io `c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8` | none | `MIT OR Apache-2.0` | host library used by `ring` build script |
 | `cfg-if 1.0.4` | crates.io `9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801` | none | `MIT OR Apache-2.0` | none |
 | `find-msvc-tools 0.1.9` | crates.io `5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582` | none | `MIT OR Apache-2.0` | host library; no process on supported targets |
-| `getrandom 0.2.17` | crates.io `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | `custom` | `MIT OR Apache-2.0` | Motor callback registered by helper |
+| `getrandom 0.2.17` | crates.io `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | `custom` | `MIT OR Apache-2.0` | Motor callback registered by curl |
 | `libc 0.2.186` | crates.io `68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66` | none | `MIT OR Apache-2.0` | dependency-free Rust build script; no native tool |
 | `once_cell 1.21.4` | crates.io `9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50` | `alloc`, `race`, `std` | `MIT OR Apache-2.0` | none |
 | `ring 0.17.14` | exact system-vendored path tree selected for all targets; Git URL/commit and crates.io archive `a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7` are seed provenance | `alloc`, `default`, `dev_urandom_fallback` | `Apache-2.0 AND ISC` | build script; C compiler and archiver |
@@ -2038,7 +2029,7 @@ vendoring-target set later selects them; then ordinary policy must admit them
 before fetching.
 
 Any version, checksum, selected-feature, patch-tree, license, build-script, or
-target-union change is a reviewed helper graph change. It is not silently
+target-union change is a reviewed curl graph change. It is not silently
 accepted merely because the dependency remains semver-compatible.
 
 ### Round 31: permanent `ring` patch layout and path-tree identity
@@ -2053,10 +2044,10 @@ repository and is not copied into the main Motor OS repository.
 
 - Host bootstrap tools, outside Lorry, acquire and verify the pinned `ring`
   Git source and seed it into a system Lorry dependency repository. Lorry and
-  `lorry-fetch` do not need a Git network client to bootstrap themselves.
+  Motor curl do not need a Git network client to bootstrap themselves.
 - Host tools seed the required system-vendored crates both into the host's
   Lorry environment and into the generated Motor OS guest image. A native
-  build must not depend on fetching its own TLS provider before `lorry-fetch`
+  build must not depend on fetching its own TLS provider before Motor curl
   exists.
 - The host seed contains the complete selected Stage-2 bootstrap graph,
   including the exact Git `ring` selected on both Linux and Motor. The
@@ -2066,8 +2057,8 @@ repository and is not copied into the main Motor OS repository.
   verified contents. Lorry re-verifies them before use; “system seeded” is not
   an integrity or policy bypass.
 - The system seed is distinct from the fresh writable repository used to prove
-  native `lorry vendor` and the second `lorry-fetch` self-build cycle.
-- `lorry-fetch/Cargo.toml` explicitly contains a `[patch.crates-io]` path entry
+  native `lorry vendor` and the second Motor curl self-build cycle.
+- `src/bin/curl/Cargo.toml` explicitly contains a `[patch.crates-io]` path entry
   naming the stable logical `ring` artifact path. Cargo.lock contains the
   resulting path-package entry. The system/base `lorry.toml` rule requires
   this path source and independently pins the seed's Git URL/commit
@@ -2207,7 +2198,7 @@ object plus the seeded-Git `ring` identity used throughout the Linux/Motor
 target union. The upstream crates.io `ring` archive is retained only as host
 provenance for the fork, not as a selected build object. The minimal
 fresh-fetch fixture contains only the seeded-Git `ring` object; all registry
-objects must then be obtained through `lorry-fetch` into its separate writable
+objects must then be obtained by Lorry invoking curl into its separate writable
 repository.
 
 ### Round 33: explicit required path-patch validation
@@ -2497,8 +2488,8 @@ toml_edit = { version = "=0.22.26", default-features = false,
 - Lorry writes Cargo.lock and its own metadata with small deterministic writers
   for the exact versioned formats in this plan. It does not enable a general
   TOML serializer merely to emit those closed schemas.
-- Sparse-index records, `lorry-fetch` results, and source manifests use
-  `serde_json` without derive. A small hand-written Serde visitor enforces
+- Sparse-index records and source manifests use `serde_json` without derive. A
+  small hand-written Serde visitor enforces
   duplicate-key rejection plus byte, nesting, string, collection, and
   node-count limits while constructing the bounded value/schema. Lorry either
   rejects or explicitly ignores only the forward-compatible fields named by
@@ -2574,7 +2565,7 @@ Any graph/feature/checksum change reopens this review.
 #### Closed seed set
 
 - The full Stage-2 production seed is the union of Round 36's 32 selected core
-  registry packages and Round 30's 14 selected `lorry-fetch` registry
+  registry packages and Round 30's 14 selected Motor curl registry
   packages. `cfg-if 1.0.4` is shared, so this is exactly 45 unique crates.io
   objects plus the one patched `ring` seeded-Git object.
 - Coverage-only inactive lock packages are not seeded. The checked-in
@@ -2582,7 +2573,7 @@ Any graph/feature/checksum change reopens this review.
   retained archive/source choice, and the Cargo.lock(s) that justify it.
   Changing that manifest is a reviewed dependency-graph change.
 - The minimal fresh-fetch acceptance seed contains only patched `ring`.
-  Installed Lorry and `lorry-fetch` executables then populate an empty
+  Installed Lorry and curl executables then populate an empty
   local/user repository with the selected registry graph under test.
 
 #### Resolved host tool
@@ -2904,32 +2895,32 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
      self-built executable and warm cache. The Cargo oracle lane separately
      checks clean release identity.
 
-7. **Implement vendoring and the narrow `lorry-fetch` helper.**
+7. **Implement vendoring and the Motor curl acquisition path.**
    - This step resumes only after external Gate 12 is satisfied. The first
      vendoring substage wires the project-scoped process-lifetime lock through
      `std::fs::File::lock` and verifies same-project exclusion and
      different-project independence on Linux and Motor OS. No temporary Motor
      OS lock implementation belongs in Lorry.
-   - Implement the version-1 helper protocol and blocking HTTPS client, then
-     the `lorry vendor` sparse-index/download state machine, per-package
+   - Implement the direct curl interaction in `curl-interaction.md` and the
+     `lorry vendor` sparse-index/download state machine, per-package
      confirmation, `--accept-all`, transaction/lock ordering, and all-or-none
      behavior. Network tests use a local deterministic TLS server for malformed
      HTTP, redirect, certificate, hostname, truncation, size, timeout, and
-     protocol-output cases; a minimal public crates.io fetch is a separate
+     stream/trailer cases; a minimal public crates.io fetch is a separate
      opt-in integration test.
-   - First exercise pure-registry fresh vendoring with an installed seed
-     helper. Then enable only the configured compiler/archiver roles, build
-     patched `ring` and `lorry-fetch`, run the Motor entropy and verified-HTTPS
+   - First exercise pure-registry fresh vendoring with an installed curl.
+     Then enable only the configured compiler/archiver roles, build patched
+     `ring` and Motor curl, run the Motor entropy and verified-HTTPS
      fixtures, and prove that all undeclared native process attempts fail.
-   - On Linux and Motor, use the built helper to populate a second fresh
-     writable repository from the minimal `ring`-only system seed. Build
-     `lorry-fetch` again solely from that repository plus the required system
+   - On Linux and Motor, use the built curl directly to populate a second fresh
+     writable repository from the minimal `ring`-only system seed. Build Motor
+     curl again solely from that repository plus the required system
      `ring`, and compare clean Cargo/Lorry and Linux-cross/native-Motor release
      executables.
 
 8. **Run final Stage-2 closure and freeze the supported surface.**
    - Run the complete unit/security/fixture suite, all Cargo 1.97/1.98 oracle
-     comparisons, `red`, `rush`, core self-build, helper self-build,
+     comparisons, `red`, `rush`, core self-build, curl self-build,
      cold/warm/corrupt-cache, full/fresh vendor, cross-target, and native-Motor
      matrices from pristine roots.
    - Run Round-26 smoke continuously and `--full` for closure, preserving the
@@ -3047,7 +3038,7 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
 
 #### Completed incremental patches
 
-- Lorry's Motor dependency pin follows the in-tree `moto-rt` 0.16.2.
+- Lorry's Motor dependency pin follows the in-tree `moto-rt` 0.16.3.
 - The project vendor lock, staged-lockfile fsync/close operation, lazy sparse
   catalog loading seam, multi-target resolution union, and resolution-derived
   lock preferences are implemented with focused tests.
@@ -3055,24 +3046,70 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
   format-1 layout. Downloaded crates can be checksum-verified, safely
   extracted beneath private transaction staging, rendered into canonical
   repository metadata, retained according to configuration, and fully
-  re-verified before publication. No staged object is published yet.
+  re-verified before publication.
+- Repository publication persists every staged file and directory, uses
+  Linux `renameat2(RENAME_NOREPLACE)` or Motor
+  `moto_rt::fs::move_noreplace`, and re-verifies either the newly published
+  object or an identical concurrent winner. Focused Linux coverage and the
+  native Motor two-process competing-publisher fixture pass.
+- `lorry vendor` now holds the project lock across the complete transaction,
+  re-resolves the configured target union, applies path policy before any
+  visible change, stages and persists `Cargo.lock` while hidden, and renames
+  it last. Dependency-free and path-only projects can create, verify, and
+  repair their lockfile without repository or network access.
+- The native smoke harness now builds its initial Stage-2 Linux and Motor
+  executables through the offline Cargo oracle, then performs all guest work
+  with staged Lorry alone. Cross artifacts use the exact Rust sysroot embedded
+  in the VM image. The standalone smoke gate and the debug and release
+  full-test paths with that gate enabled pass, including cross/native artifact
+  identity and all 66 native `red` tests.
 
-#### Current pause and remaining work
+#### Current checkpoint and remaining work
 
-- Repository objects are shared by different projects, so the project lock is
-  deliberately insufficient for publication. The design requires an atomic
-  directory rename that fails if the destination exists. Linux has
-  `renameat2(RENAME_NOREPLACE)`; Motor OS does not yet expose the corresponding
-  stable operation. Motor will add it separately rather than weakening Lorry
-  to a check-then-replace sequence or repository-wide cooperative lock.
-- Once that API and a native competing-publisher fixture are green, the next
-  patches publish and re-verify immutable objects, then wire the project lock,
-  staged `Cargo.lock`, and all-or-none commit ordering into `lorry vendor`.
-- Still to do in implementation item 7: the version-1 `lorry-fetch` helper,
+- Gate 13 is satisfied. The native debug and release full-test runs exercise
+  two competing publishers and prove that exactly one no-replace directory
+  move wins while the visible object contains that winner's data.
+- Registry graphs still stop before any lockfile or repository change with an
+  explicit curl-acquisition-pending diagnostic. The path-only transaction does
+  not perform network access.
+- Still to do in implementation item 7: direct curl process/stream handling,
   bounded sparse-index/archive acquisition, approval UI and `--accept-all`,
-  interrupted/concurrent transaction fixtures, configured native compiler and
-  archiver roles, patched `ring`/helper self-builds, and Linux/native-Motor
-  fresh-repository acceptance cycles.
+  registry-path interrupted/concurrent transaction fixtures, configured
+  native compiler and archiver roles, patched `ring`/curl self-builds, and
+  Linux/native-Motor fresh-repository acceptance cycles.
+
+### Round 45: direct curl acquisition and Motor curl utility
+
+#### Superseded helper design
+
+- The separate `src/bin/lorry-fetch` package and its private version-1 protocol
+  are removed. The package did only one public HTTPS GET, so a Lorry-specific
+  executable and result schema added a redundant interface.
+- This supersedes the helper placement decisions in Rounds 6, 13, 19, 24, and
+  25. It does not reopen Lorry's repository, policy, transaction, TLS-provider,
+  native-tool, or exact Stage-2 dependency-graph decisions.
+
+#### Resolved replacement
+
+- Lorry invokes curl directly on both platforms. Linux requires upstream curl
+  7.63.0 or newer. Motor supplies a general curl-compatible `/bin/curl` from
+  the independent `src/bin/curl` package; there is no adapter binary.
+- Lorry performs one request per curl process, owns redirect validation and
+  body staging, enforces all size and URL rules, and interprets a bounded
+  nonce-delimited `--write-out` trailer. Curl owns only HTTPS transport.
+  `curl-interaction.md` is the normative command, environment, stream, error,
+  security, and conformance contract.
+- The exact Round-30 Rustls graph, patched `ring` 0.17.14 provider, Motor
+  entropy callback, and compiler/archiver roles move from `lorry-fetch` to
+  `src/bin/curl`; they remain outside core Lorry.
+- Stage-2 closure builds curl on Linux and native Motor, uses the result
+  directly through Lorry to populate a second fresh repository, then rebuilds
+  curl from that repository. Thus Motor's network utility is itself buildable
+  by Stage-2 Lorry.
+- The bootstrap manifest's graph ID and lockfile path change from
+  `lorry-fetch` to `curl` when the reviewed curl Cargo.toml/Cargo.lock graph is
+  added. Until that implementation patch, the existing 45-object seed remains
+  the exact dependency inventory; only its eventual owning package changes.
 
 ## Stage-1/2 design closure and external start gates
 
@@ -3085,9 +3122,9 @@ reopens only the affected review and downstream gates.
 2. Stage-2 dependency-admission policy, defaults, rule semantics, inspection
    evidence, and treatment of local path dependencies/build scripts.
 3. Exact `lorry.toml`, repository, transaction, lockfile, sparse-index, and
-   `lorry-fetch` Stage-2 formats/protocols; selection and measured validation
-   of the Rustls cryptography provider; and the resulting native tool, patch,
-   feature, and helper-lock graph.
+   direct curl interaction; selection and measured validation of the Rustls
+   cryptography provider; and the resulting native tool, patch, feature, and
+   curl-lock graph.
 4. Exact package/unit graph, rustc command/environment, build-script protocol,
    run/test behavior, and Cargo-identity adapter for `red` and `rush`.
 5. Stage-2 content-addressed fingerprint/cache inputs, invalidation, generated
@@ -3128,16 +3165,17 @@ but each blocks the indicated Stage-2 work:
     specified in `docs/file-locking-plan.md`, and the native two-process
     exclusive-lock/release coverage is present. Lorry's process fixture also
     verifies same-project exclusion and different-project independence.
-13. Motor OS exposes a stable atomic no-replace directory rename operation and
-    a native competing-publisher test. This must be green before writable
-    repository objects become visible and item 7's commit state machine is
-    enabled.
+13. **Satisfied.** Motor OS exposes
+    `moto_rt::fs::move_noreplace`, Lorry uses it for atomic no-replace
+    directory publication, and the native two-process competing-publisher
+    fixture passes. Linux uses `renameat2(RENAME_NOREPLACE)` and has matching
+    focused coverage.
 
-Gates 9, 10, and 12 are green, and the checked-in Cargo-oracle inputs pass.
-Phase 0 and the cache/bundle portions of implementation item 6 are complete.
-The pre-publication portions of item 7 listed in Round 44 are implemented.
-Stage 2 is paused on Gate 13 before repository publication; Gate 11 remains
-required for the sandbox and final acceptance work described above.
+Gates 9, 10, 12, and 13 are green, and the checked-in Cargo-oracle inputs
+pass. Phase 0 and the cache/bundle portions of implementation item 6 are
+complete. Immutable object publication and the path-only vendor transaction
+from item 7 are implemented. Gate 11 remains required for the sandbox and
+final acceptance work described above.
 
 ### Design stop point
 
@@ -3145,11 +3183,12 @@ The Stage-1/2 product boundary, dependency graphs, formats, security policy,
 commands, Cargo-compatibility contract, portability model, bootstrap path,
 implementation order, and acceptance gates are now settled. Detailed
 Stage-3+ design remains intentionally frozen. The next Lorry implementation
-work is item 7 repository publication and resumes when Gate 13 is satisfied.
+work is item 7's direct curl process/stream layer and bounded registry
+acquisition loop.
 
 ## Deferred post-stage-2 design
 
 All stage-3 and later capability decisions, including the detailed
 `httpd-axum` and `russhd` graphs, general git acquisition, and proc macros are
-revisited only after stage 2 passes its acceptance gates. Fetch-helper
+revisited only after stage 2 passes its acceptance gates. Motor curl
 self-building and its `ring` 0.17.14 provider are Stage-2 requirements.

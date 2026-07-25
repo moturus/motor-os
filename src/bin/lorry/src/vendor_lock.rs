@@ -98,13 +98,13 @@ fn reject_link_or_non_file_if_present(path: &Path) -> Result<()> {
     }
 }
 
-fn verify_open_file(file: &File, path: &Path) -> Result<()> {
+fn verify_open_file(_file: &File, path: &Path) -> Result<()> {
     reject_link_or_non_file_if_present(path)?;
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
 
-        let opened = file.metadata().map_err(|error| {
+        let opened = _file.metadata().map_err(|error| {
             Error::failure(format!(
                 "failed to inspect opened project vendor lock `{}`: {error}",
                 path.display()

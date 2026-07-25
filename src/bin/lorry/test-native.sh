@@ -7,6 +7,7 @@ TESTS_DIR="$ROOT_DIR/src/tests"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
 MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
+MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
 REMOTE_BASE="/user/tmp/lorry"
 
 MODE="smoke"
@@ -316,26 +317,45 @@ configure_motor_linker() {
     cat >"$package/.cargo/config.toml" <<EOF
 [target.$MOTOR_TARGET]
 linker = "$MOTOR_LINKER"
+rustflags = ["--sysroot=$MOTOR_SYSROOT"]
 EOF
 }
 
 prepare_host_gate() {
+    local cargo
     local native_rustc
     local motor_rustc
     local rustup_home
 
-    echo "== Preparing clean Linux-to-Motor Stage 1 artifacts =="
+    echo "== Preparing clean Linux-to-Motor Lorry artifacts =="
+    cargo="$(rustup which cargo --toolchain nightly-2026-06-19)"
     native_rustc="$(rustup which rustc --toolchain nightly-2026-06-19)"
     motor_rustc="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
     rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
-    export RUSTUP_HOME="$rustup_home"
-    export HOME="$WORK/home"
-    export CARGO_HOME="$WORK/cargo-home"
-    mkdir -p "$HOME" "$CARGO_HOME"
     unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
     unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
     [ -x "$MOTOR_LINKER" ] ||
         fail "Motor cross-linker '$MOTOR_LINKER' is not executable"
+    [ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
+        fail "Motor image sysroot '$MOTOR_SYSROOT' is incomplete"
+
+    # Stage 2 has reviewed registry dependencies, so its initial host and
+    # cross-Motor test subjects are Cargo oracles. All guest work still uses
+    # only the staged Lorry executables.
+    RUSTC="$native_rustc" "$cargo" build \
+        --manifest-path "$SCRIPT_DIR/Cargo.toml" --locked --offline --release \
+        --target-dir "$WORK/cargo-lorry-host"
+    RUSTC="$motor_rustc" RUSTFLAGS="--sysroot=$MOTOR_SYSROOT" \
+        CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$MOTOR_LINKER" \
+        "$cargo" build --manifest-path "$SCRIPT_DIR/Cargo.toml" \
+        --locked --offline --release --target "$MOTOR_TARGET" \
+        --target-dir "$WORK/cargo-lorry-motor"
+    cp "$WORK/cargo-lorry-host/release/lorry" "$WORK/lorry-seed"
+
+    export RUSTUP_HOME="$rustup_home"
+    export HOME="$WORK/home"
+    export CARGO_HOME="$WORK/cargo-home"
+    mkdir -p "$HOME" "$CARGO_HOME"
 
     copy_package "$SCRIPT_DIR" "$HOST_STAGE/lorry-source"
     copy_package "$ROOT_DIR/src/bin/red" "$HOST_STAGE/red-source"
@@ -369,12 +389,6 @@ EOF
     configure_motor_linker "$HOST_STAGE/red-source"
     configure_motor_linker "$HOST_STAGE/simple-source"
 
-    "$native_rustc" --edition=2024 "$SCRIPT_DIR/src/main.rs" -o "$WORK/lorry-seed"
-    (
-        cd "$HOST_STAGE/lorry-source"
-        RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
-            --target "$MOTOR_TARGET"
-    )
     (
         cd "$HOST_STAGE/red-source"
         RUSTC="$motor_rustc" "$WORK/lorry-seed" build --release \
@@ -387,15 +401,14 @@ EOF
     )
 
     mkdir -p "$WORK/cross"
-    cp "$HOST_STAGE/lorry-source/target/lorry/$MOTOR_TARGET/release/lorry" \
-        "$WORK/cross/lorry"
+    cp "$WORK/cargo-lorry-motor/$MOTOR_TARGET/release/lorry" "$WORK/cross/lorry"
     cp "$HOST_STAGE/red-source/target/lorry/$MOTOR_TARGET/release/red" \
         "$WORK/cross/red"
-    cp "$HOST_STAGE/simple-source/target/lorry/$MOTOR_TARGET/release/stage1_native_run" \
-        "$WORK/cross/stage1_native_run"
+    cp "$HOST_STAGE/simple-source/target/lorry/$MOTOR_TARGET/release/stage1-native-run" \
+        "$WORK/cross/stage1-native-run"
     CROSS_LORRY="$WORK/cross/lorry"
     CROSS_RED="$WORK/cross/red"
-    CROSS_SIMPLE="$WORK/cross/stage1_native_run"
+    CROSS_SIMPLE="$WORK/cross/stage1-native-run"
 
     rm -rf "$HOST_STAGE/lorry-source/target"
     rm -rf "$HOST_STAGE/red-source/target"
@@ -405,6 +418,7 @@ EOF
     rm -rf "$HOST_STAGE/simple-source/.cargo"
     printf 'motor toolchain: %s\n' "$motor_rustc" >>"$COMMAND_LOG"
     printf 'motor linker: %s\n' "$MOTOR_LINKER" >>"$COMMAND_LOG"
+    printf 'motor image sysroot: %s\n' "$MOTOR_SYSROOT" >>"$COMMAND_LOG"
 }
 
 build_image() {
@@ -503,7 +517,7 @@ run_smoke_gate() {
     grep -Fx "native|two words" "$simple_output" >/dev/null ||
         fail "native run did not preserve its arguments"
     compare_artifact native-run \
-        "$simple_work/target/lorry/release/stage1_native_run" "$CROSS_SIMPLE"
+        "$simple_work/target/lorry/release/stage1-native-run" "$CROSS_SIMPLE"
 }
 
 run_full_gate() {

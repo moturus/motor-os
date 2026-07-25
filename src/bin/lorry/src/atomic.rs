@@ -255,27 +255,11 @@ impl AtomicDirectory {
             ));
         }
 
-        match fs::symlink_metadata(destination) {
-            Ok(_) => return Ok(false),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Error::failure(format!(
-                    "failed to inspect output `{}`: {error}",
-                    destination.display()
-                )));
-            }
+        let installed = move_no_replace(&self.path, destination)?;
+        if installed {
+            self.committed = true;
         }
-        match fs::rename(&self.path, destination) {
-            Ok(()) => {
-                self.committed = true;
-                Ok(true)
-            }
-            Err(_) if destination.exists() => Ok(false),
-            Err(error) => Err(Error::failure(format!(
-                "failed to atomically install output `{}`: {error}",
-                destination.display()
-            ))),
-        }
+        Ok(installed)
     }
 }
 
@@ -299,6 +283,70 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
     {
         fs::create_dir(path)
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn move_no_replace(source: &Path, destination: &Path) -> Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| Error::failure("atomic output source contains a NUL byte"))?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| Error::failure("atomic output destination contains a NUL byte"))?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        return Ok(false);
+    }
+    Err(Error::failure(format!(
+        "failed to atomically install output `{}`: {error}",
+        destination.display()
+    )))
+}
+
+#[cfg(target_os = "motor")]
+pub(crate) fn move_no_replace(source: &Path, destination: &Path) -> Result<bool> {
+    let source = source.to_str().ok_or_else(|| {
+        Error::failure(format!(
+            "atomic output source is not UTF-8: `{}`",
+            source.display()
+        ))
+    })?;
+    let destination_path = destination.to_str().ok_or_else(|| {
+        Error::failure(format!(
+            "atomic output destination is not UTF-8: `{}`",
+            destination.display()
+        ))
+    })?;
+    match moto_rt::fs::move_noreplace(source, destination_path) {
+        Ok(()) => Ok(true),
+        Err(moto_rt::Error::AlreadyInUse) => Ok(false),
+        Err(error) => Err(Error::failure(format!(
+            "failed to atomically install output `{}`: {error}",
+            destination.display()
+        ))),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "motor")))]
+pub(crate) fn move_no_replace(_source: &Path, destination: &Path) -> Result<bool> {
+    Err(Error::failure(format!(
+        "atomic no-replace output is unsupported on this platform: `{}`",
+        destination.display()
+    )))
 }
 
 fn unique_name(label: &str, role: &str) -> String {
@@ -376,6 +424,9 @@ fn set_private_file(_file: &File, _path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Child, Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(unique_name(label, "test"));
@@ -442,6 +493,101 @@ mod tests {
         assert_eq!(fs::read(destination.join("value")).unwrap(), b"first");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn competing_processes_publish_exactly_one_directory() {
+        let root = temp_root("competing-publish");
+        let start = root.join("start");
+        let (first, first_ready, first_result) = spawn_publisher(&root, &start, "first");
+        let (second, second_ready, second_result) = spawn_publisher(&root, &start, "second");
+        wait_for(&first_ready);
+        wait_for(&second_ready);
+        fs::write(&start, b"go").unwrap();
+        wait_for_child(first);
+        wait_for_child(second);
+
+        let first_result = fs::read_to_string(first_result).unwrap();
+        let second_result = fs::read_to_string(second_result).unwrap();
+        assert!(
+            matches!(
+                (first_result.as_str(), second_result.as_str()),
+                ("won", "lost") | ("lost", "won")
+            ),
+            "unexpected publisher results: {first_result:?}, {second_result:?}"
+        );
+        let published = fs::read_to_string(root.join("entry/value")).unwrap();
+        assert_eq!(
+            published,
+            if first_result == "won" {
+                "first"
+            } else {
+                "second"
+            }
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_replace_publish_child() {
+        let Some(root) = std::env::var_os("LORRY_ATOMIC_PUBLISH_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let value = std::env::var("LORRY_ATOMIC_PUBLISH_VALUE").unwrap();
+        let ready = PathBuf::from(std::env::var_os("LORRY_ATOMIC_PUBLISH_READY").unwrap());
+        let start = PathBuf::from(std::env::var_os("LORRY_ATOMIC_PUBLISH_START").unwrap());
+        let result = PathBuf::from(std::env::var_os("LORRY_ATOMIC_PUBLISH_RESULT").unwrap());
+
+        let staging = AtomicDirectory::new(&root, "entry").unwrap();
+        fs::write(staging.path().join("value"), &value).unwrap();
+        fs::write(ready, b"ready").unwrap();
+        wait_for(&start);
+        let outcome = if staging.commit_no_replace(&root.join("entry")).unwrap() {
+            "won"
+        } else {
+            "lost"
+        };
+        fs::write(result, outcome).unwrap();
+    }
+
+    fn spawn_publisher(root: &Path, start: &Path, value: &str) -> (Child, PathBuf, PathBuf) {
+        let ready = root.join(format!("{value}.ready"));
+        let result = root.join(format!("{value}.result"));
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "atomic::tests::no_replace_publish_child",
+                "--nocapture",
+            ])
+            .env("LORRY_ATOMIC_PUBLISH_ROOT", root)
+            .env("LORRY_ATOMIC_PUBLISH_VALUE", value)
+            .env("LORRY_ATOMIC_PUBLISH_READY", &ready)
+            .env("LORRY_ATOMIC_PUBLISH_START", start)
+            .env("LORRY_ATOMIC_PUBLISH_RESULT", &result)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        (child, ready, result)
+    }
+
+    fn wait_for(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_child(child: Child) {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

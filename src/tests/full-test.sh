@@ -221,7 +221,7 @@ out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
 "$WD/test-sftp.sh"
 
 # Lorry owns only its isolated native smoke deadline and reuses this VM.
-# "$ROOT_DIR/src/bin/lorry/test-native.sh" --reuse-running-vm
+"$ROOT_DIR/src/bin/lorry/test-native.sh" --reuse-running-vm
 
 vm_ssh sys/tests/mio-test
 

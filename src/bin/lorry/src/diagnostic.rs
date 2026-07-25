@@ -46,16 +46,6 @@ impl Error {
         }
     }
 
-    pub fn unsupported(subject: impl fmt::Display, stage: u8) -> Self {
-        Self {
-            kind: ErrorKind::Failure,
-            message: format!("`{subject}` is not supported in Lorry Stage {stage}"),
-            help: Some(format!(
-                "remove `{subject}` or use a Lorry stage that supports it"
-            )),
-        }
-    }
-
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
         self

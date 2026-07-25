@@ -7,6 +7,8 @@ ROOT_DIR="$(cd "$LORRY_DIR/../../.." && pwd)"
 RED_DIR="$ROOT_DIR/src/bin/red"
 MOTOR_TARGET="x86_64-unknown-motor"
 MOTOR_TOOLCHAIN="${LORRY_MOTOR_TOOLCHAIN:-dev-x86_64-unknown-motor}"
+MOTOR_LINKER="${LORRY_MOTOR_LINKER:-/home/posk/motor-dev/motor-sysroot/bin/motor-clang}"
+MOTOR_SYSROOT="${LORRY_MOTOR_SYSROOT:-$ROOT_DIR/img_files/generated/rustc/sys/tools/rust}"
 
 WORK="$(mktemp -d /tmp/lorry-stage1-linux-XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
@@ -39,21 +41,32 @@ expect_status() {
 }
 
 unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
+HOST_HOME="$HOME"
+HOST_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-export HOME="$WORK/home"
-export CARGO_HOME="$WORK/cargo-home"
-mkdir -p "$HOME" "$CARGO_HOME"
 
 NATIVE_RUSTC="$(rustup which rustc --toolchain nightly-2026-06-19)"
 MOTOR_RUSTC="$(rustup which rustc --toolchain "$MOTOR_TOOLCHAIN")"
 CARGO_197="$(rustup which cargo --toolchain stable)"
 CARGO_198="$(rustup which cargo --toolchain nightly-2026-06-19)"
 SEED="$WORK/lorry-seed"
+[ -x "$MOTOR_LINKER" ] ||
+    fail "Motor cross-linker '$MOTOR_LINKER' is not executable"
+[ -d "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" ] ||
+    fail "Motor image sysroot '$MOTOR_SYSROOT' is incomplete"
 
-echo "== Stage 1 unit and direct-rustc bootstrap =="
-cargo test --manifest-path "$LORRY_DIR/Cargo.toml" --locked
-rustc --edition=2024 "$LORRY_DIR/src/main.rs" -o "$SEED"
+echo "== Lorry unit and offline Cargo-oracle bootstrap =="
+CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" "$CARGO_198" test \
+    --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline
+CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" "$CARGO_198" build \
+    --manifest-path "$LORRY_DIR/Cargo.toml" --locked --offline --release \
+    --target-dir "$WORK/cargo-lorry-seed"
+cp "$WORK/cargo-lorry-seed/release/lorry" "$SEED"
 "$SEED" --version | grep -Fx "lorry 0.1.0" >/dev/null
+
+export HOME="$WORK/home"
+export CARGO_HOME="$WORK/cargo-home"
+mkdir -p "$HOME" "$CARGO_HOME"
 
 echo "== CLI, manifest, lock, and environment failures =="
 expect_status 1 "unknown option" "$SEED" build --jobs 2
@@ -116,16 +129,19 @@ echo "== Linux-to-Motor red build/test identity =="
 mkdir -p "$WORK/red/.cargo"
 cat >"$WORK/red/.cargo/config.toml" <<EOF
 [target.$MOTOR_TARGET]
+linker = "$MOTOR_LINKER"
 runner = "/bin/true"
+rustflags = ["--sysroot=$MOTOR_SYSROOT"]
 EOF
 (
     cd "$WORK/red"
     "$SEED" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
 )
-motor_expected="707cac65e1f0ed3c6d9a38ab52393965eb573fc758df0ccfb38a2b3f12bfe647"
+motor_expected="7c1c4e5dcd237776b82aba158460bc36a519bc53d7bffef2669923a560763b39"
 motor_lorry="$WORK/red/target/lorry/$MOTOR_TARGET/release/red"
-[ "$(sha256sum "$motor_lorry" | awk '{print $1}')" = "$motor_expected" ] ||
-    fail "cross-Motor red release artifact differs from the frozen oracle"
+motor_digest="$(sha256sum "$motor_lorry" | awk '{print $1}')"
+[ "$motor_digest" = "$motor_expected" ] ||
+    fail "cross-Motor red release digest $motor_digest differs from $motor_expected"
 
 for family in 197 198; do
     cargo_var="CARGO_$family"
@@ -144,11 +160,13 @@ done
     cd "$WORK/red"
     "$SEED" +"$MOTOR_TOOLCHAIN" test --release --target "$MOTOR_TARGET"
 )
-motor_test="$WORK/red/target/lorry/$MOTOR_TARGET/release/deps/red-d6ce5b974d464d9b"
+motor_test="$(find "$WORK/red/target/lorry/$MOTOR_TARGET/release/deps" \
+    -maxdepth 1 -type f -perm -111 -name 'red-*' | head -1)"
+[ -n "$motor_test" ] || fail "Lorry did not produce a cross-Motor test harness"
 motor_test_digest="$(sha256sum "$motor_test" | awk '{print $1}')"
-motor_test_expected="31baa390cf86af978633f5b882e4d308b20e3e42b06726a20d539d3cb7be1f7f"
+motor_test_expected="a668700222ade778b7a7792e2502159480c4f211d285ac01306dfb48b6e8dbf0"
 [ "$motor_test_digest" = "$motor_test_expected" ] ||
-    fail "cross-Motor red release-test artifact differs from the frozen oracle"
+    fail "cross-Motor red release-test digest $motor_test_digest differs from $motor_test_expected"
 (
     cd "$WORK/red"
     RUSTC="$MOTOR_RUSTC" "$CARGO_198" test --locked --release --no-run \
@@ -204,29 +222,34 @@ EOF
 )
 
 echo "== core self-build and second-generation red gate =="
-copy_package "$LORRY_DIR" "$WORK/lorry"
+LORRY_WORK="$WORK/source/src/bin/lorry"
+mkdir -p "$WORK/source/src/bin" "$WORK/source/src/sys/lib"
+copy_package "$LORRY_DIR" "$LORRY_WORK"
+copy_package "$ROOT_DIR/src/sys/lib/moto-rt" "$WORK/source/src/sys/lib/moto-rt"
 (
-    cd "$WORK/lorry"
-    RUSTC="$NATIVE_RUSTC" "$SEED" build --release
-    RUSTC="$NATIVE_RUSTC" "$CARGO_198" build --locked --release \
-        --target-dir "$WORK/cargo-lorry-native"
+    cd "$LORRY_WORK"
+    HOME="$HOST_HOME" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" \
+        "$SEED" --use-cargo-registry build --release
+    CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" "$CARGO_198" build \
+        --locked --release --target-dir "$WORK/cargo-lorry-native"
 )
-cmp "$WORK/lorry/target/lorry/release/lorry" \
+cmp "$LORRY_WORK/target/lorry/release/lorry" \
     "$WORK/cargo-lorry-native/release/lorry" ||
     fail "Cargo and Lorry core native release outputs differ"
-cp "$WORK/lorry/target/lorry/release/lorry" "$WORK/lorry-generation-1"
+cp "$LORRY_WORK/target/lorry/release/lorry" "$WORK/lorry-generation-1"
 (
-    cd "$WORK/lorry"
-    RUSTC="$NATIVE_RUSTC" "$WORK/lorry-generation-1" build --release
+    cd "$LORRY_WORK"
+    HOME="$HOST_HOME" CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$NATIVE_RUSTC" \
+        "$WORK/lorry-generation-1" --use-cargo-registry build --release
 )
-cmp "$WORK/lorry/target/lorry/release/lorry" \
+cmp "$LORRY_WORK/target/lorry/release/lorry" \
     "$WORK/cargo-lorry-native/release/lorry" ||
     fail "second-generation Lorry differs from Cargo oracle"
 
 copy_package "$RED_DIR" "$WORK/red-generation-2"
 (
     cd "$WORK/red-generation-2"
-    RUSTC="$NATIVE_RUSTC" "$WORK/lorry/target/lorry/release/lorry" build --release
+    RUSTC="$NATIVE_RUSTC" "$LORRY_WORK/target/lorry/release/lorry" build --release
 )
 generation_2_digest="$(
     sha256sum "$WORK/red-generation-2/target/lorry/release/red" | awk '{print $1}'
@@ -236,12 +259,15 @@ generation_2_digest="$(
 
 echo "== cross-Motor core self-build identity =="
 (
-    cd "$WORK/lorry"
-    "$SEED" +"$MOTOR_TOOLCHAIN" build --release --target "$MOTOR_TARGET"
-    RUSTC="$MOTOR_RUSTC" "$CARGO_198" build --locked --release \
-        --target "$MOTOR_TARGET" --target-dir "$WORK/cargo-lorry-motor"
+    cd "$LORRY_WORK"
+    HOME="$HOST_HOME" CARGO_HOME="$HOST_CARGO_HOME" \
+        "$SEED" +"$MOTOR_TOOLCHAIN" --use-cargo-registry build --release \
+        --target "$MOTOR_TARGET"
+    CARGO_HOME="$HOST_CARGO_HOME" RUSTC="$MOTOR_RUSTC" "$CARGO_198" build \
+        --locked --release --target "$MOTOR_TARGET" \
+        --target-dir "$WORK/cargo-lorry-motor"
 )
-cmp "$WORK/lorry/target/lorry/$MOTOR_TARGET/release/lorry" \
+cmp "$LORRY_WORK/target/lorry/$MOTOR_TARGET/release/lorry" \
     "$WORK/cargo-lorry-motor/$MOTOR_TARGET/release/lorry" ||
     fail "Cargo and Lorry core cross-Motor release outputs differ"
 

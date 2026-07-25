@@ -30,11 +30,11 @@ failures return 101, command-line usage errors return 1, and help/version
 return 0. Build output is isolated below `target/lorry`; Lorry never reads
 Cargo artifacts and deliberately rebuilds every Stage-1 unit.
 
-Stage 1 can be bootstrapped without Cargo:
-
-```sh
-rustc --edition=2024 src/main.rs -o /tmp/lorry
-```
+The historical dependency-free Stage-1 source supported a direct one-file
+`rustc` bootstrap. The current Stage-2 source has reviewed registry
+dependencies, so acceptance tests use an offline Cargo build as the initial
+oracle executable. Native Motor test phases remain Cargo-free and use only the
+staged Lorry executable.
 
 Run the fast unit suite and the complete Linux Stage-1 acceptance gate with:
 
@@ -50,7 +50,9 @@ The native Motor OS gate is:
 ```
 
 `test-native.sh --reuse-running-vm` runs the short smoke gate inside the VM
-owned by `src/tests/full-test.sh`.
+owned by `src/tests/full-test.sh`. Its Linux-to-Motor artifacts use the exact
+Rust sysroot copied into that VM image so cross/native byte comparisons cannot
+silently mix different installed standard libraries.
 
 Stage 2 supports locked registry and local-path dependency graphs, one root
 library and binary, and direct `tests/*.rs` integration targets. Ordinary

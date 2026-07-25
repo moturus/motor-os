@@ -10,7 +10,7 @@ use semver::Version;
 use toml_edit::{Item, Table};
 
 use crate::archive::{Limits as ArchiveLimits, extract_crate};
-use crate::atomic::AtomicDirectory;
+use crate::atomic::{AtomicDirectory, move_no_replace};
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, decode_hex, hex};
@@ -114,6 +114,12 @@ pub struct RepositoryTransaction {
 pub struct StagedRegistryObject {
     object: RegistryObject,
     manifest: Manifest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishedRegistryObject {
+    pub object: RegistryObject,
+    pub added: bool,
 }
 
 impl RepositorySet {
@@ -399,6 +405,57 @@ impl RepositoryTransaction {
     pub fn objects(&self) -> &[StagedRegistryObject] {
         &self.objects
     }
+
+    pub fn publish(self) -> Result<Vec<PublishedRegistryObject>> {
+        for staged in &self.objects {
+            persist_object_tree(&staged.object.root)?;
+            let verified = verify_registry_object(
+                self.writer.layer,
+                &staged.object.root,
+                staged.object.checksum,
+                self.writer.limits,
+                self.writer.archive_limits.max_compressed_bytes,
+            )?;
+            if verified != staged.object {
+                return Err(Error::failure(format!(
+                    "staged repository object `{}` changed before publication",
+                    staged.object.root.display()
+                )));
+            }
+
+            let destination = self.object_destination(&staged.object)?;
+            ensure_object_prefix(destination.parent().unwrap())?;
+            if entry_exists(&destination)? {
+                verify_matching_object(&self.writer, staged, &destination)?;
+            }
+        }
+
+        let mut published = Vec::with_capacity(self.objects.len());
+        for staged in &self.objects {
+            let destination = self.object_destination(&staged.object)?;
+            let added = move_no_replace(&staged.object.root, &destination)?;
+            if added {
+                sync_directory(destination.parent().unwrap())?;
+            }
+            let object = verify_matching_object(&self.writer, staged, &destination)?;
+            published.push(PublishedRegistryObject { object, added });
+        }
+        drop(self);
+        Ok(published)
+    }
+
+    fn object_destination(&self, object: &RegistryObject) -> Result<PathBuf> {
+        let checksum = hex(&object.checksum);
+        let prefix = checksum.get(..2).ok_or_else(|| {
+            Error::failure(format!("invalid staged repository checksum `{checksum}`"))
+        })?;
+        Ok(self
+            .writer
+            .root
+            .join("objects/crates-io/sha256")
+            .join(prefix)
+            .join(checksum))
+    }
 }
 
 impl StagedRegistryObject {
@@ -548,6 +605,89 @@ fn persist_repository_tree(root: &Path) -> Result<()> {
         sync_directory(&root.join(relative))?;
     }
     Ok(())
+}
+
+fn persist_object_tree(root: &Path) -> Result<()> {
+    require_real_directory(root, "staged repository object")?;
+    for entry in fs::read_dir(root).map_err(|error| {
+        Error::failure(format!(
+            "failed to read staged repository object `{}`: {error}",
+            root.display()
+        ))
+    })? {
+        let path = entry
+            .map_err(|error| {
+                Error::failure(format!(
+                    "failed to read staged repository object `{}`: {error}",
+                    root.display()
+                ))
+            })?
+            .path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect staged repository entry `{}`: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            persist_object_tree(&path)?;
+        } else if metadata.is_file() && !metadata.file_type().is_symlink() {
+            File::open(&path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| {
+                    Error::failure(format!(
+                        "failed to persist staged repository entry `{}`: {error}",
+                        path.display()
+                    ))
+                })?;
+        } else {
+            return Err(Error::failure(format!(
+                "staged repository entry `{}` is not a real file or directory",
+                path.display()
+            )));
+        }
+    }
+    sync_directory(root)
+}
+
+fn ensure_object_prefix(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => sync_directory(path.parent().unwrap())?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(Error::failure(format!(
+                "failed to create repository object prefix `{}`: {error}",
+                path.display()
+            )));
+        }
+    }
+    require_real_directory(path, "repository object prefix")
+}
+
+fn verify_matching_object(
+    writer: &RepositoryWriter,
+    staged: &StagedRegistryObject,
+    destination: &Path,
+) -> Result<RegistryObject> {
+    let object = verify_registry_object(
+        writer.layer,
+        destination,
+        staged.object.checksum,
+        writer.limits,
+        writer.archive_limits.max_compressed_bytes,
+    )?;
+    let mut expected = staged.object.clone();
+    expected.root = destination.to_owned();
+    if object != expected {
+        return Err(Error::failure(format!(
+            "repository object `{}` differs from the verified staged object",
+            destination.display()
+        ))
+        .with_help(
+            "fix or replace the corrupt object; Lorry never overwrites repository objects",
+        ));
+    }
+    Ok(object)
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
@@ -1609,6 +1749,33 @@ mod tests {
         gzip.finish().unwrap()
     }
 
+    fn stage_demo(repositories: &Repositories) -> (RepositoryTransaction, String) {
+        let writer = RepositoryWriter::open(
+            repositories,
+            crate::source_tree::DEFAULT_LIMITS,
+            archive_limits(),
+        )
+        .unwrap();
+        let mut transaction = writer.begin().unwrap();
+        let archive = transaction.path().join("demo.crate");
+        let bytes = crate_archive("demo", "1.2.3");
+        fs::write(&archive, &bytes).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(&bytes);
+        let checksum = hex(&digest.finish());
+        let record_bytes = format!(
+            "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
+             \"cksum\":\"{checksum}\",\"features\":{{}},\"yanked\":false}}\n"
+        );
+        let record = SparseRecord::parse(
+            Path::new("/fixture/index-record.json"),
+            record_bytes.as_bytes(),
+        )
+        .unwrap();
+        transaction.stage_registry(&record, &archive).unwrap();
+        (transaction, checksum)
+    }
+
     #[test]
     fn initializes_the_preferred_writable_repository_and_cleans_staging() {
         let root = TempDir::new("writer");
@@ -1646,38 +1813,75 @@ mod tests {
     fn stages_and_reverifies_a_downloaded_registry_object() {
         let root = TempDir::new("stage-registry");
         let repository = root.0.join("repository");
-        let writer = RepositoryWriter::open(
-            &Repositories {
-                local: Some(repository),
-                ..Repositories::default()
-            },
-            crate::source_tree::DEFAULT_LIMITS,
-            archive_limits(),
-        )
-        .unwrap();
-        let mut transaction = writer.begin().unwrap();
-        let archive = transaction.path().join("demo.crate");
-        let bytes = crate_archive("demo", "1.2.3");
-        fs::write(&archive, &bytes).unwrap();
-        let mut digest = Sha256::new();
-        digest.update(&bytes);
-        let checksum = hex(&digest.finish());
-        let record_bytes = format!(
-            "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
-             \"cksum\":\"{checksum}\",\"features\":{{}},\"yanked\":false}}\n"
-        );
-        let record = SparseRecord::parse(
-            Path::new("/fixture/index-record.json"),
-            record_bytes.as_bytes(),
-        )
-        .unwrap();
-
-        let staged = transaction.stage_registry(&record, &archive).unwrap();
+        let repositories = Repositories {
+            local: Some(repository),
+            ..Repositories::default()
+        };
+        let (transaction, _) = stage_demo(&repositories);
+        let staged = &transaction.objects()[0];
 
         assert_eq!(staged.object().name, "demo");
         assert_eq!(staged.manifest().metadata.license, "MIT OR Apache-2.0");
         assert!(staged.object().root.join("source/src/lib.rs").is_file());
         assert_eq!(transaction.objects().len(), 1);
+    }
+
+    #[test]
+    fn publishes_once_and_reuses_an_identical_registry_object() {
+        let root = TempDir::new("publish-registry");
+        let repository = root.0.join("repository");
+        let repositories = Repositories {
+            local: Some(repository.clone()),
+            ..Repositories::default()
+        };
+        let (transaction, checksum) = stage_demo(&repositories);
+        let published = transaction.publish().unwrap();
+        assert_eq!(published.len(), 1);
+        assert!(published[0].added);
+        assert_eq!(
+            published[0].object.root,
+            repository
+                .join("objects/crates-io/sha256")
+                .join(&checksum[..2])
+                .join(&checksum)
+        );
+        assert_eq!(
+            fs::read_dir(repository.join(".staging")).unwrap().count(),
+            0
+        );
+
+        let (transaction, repeated_checksum) = stage_demo(&repositories);
+        assert_eq!(repeated_checksum, checksum);
+        let reused = transaction.publish().unwrap();
+        assert_eq!(reused.len(), 1);
+        assert!(!reused[0].added);
+        assert_eq!(reused[0].object, published[0].object);
+    }
+
+    #[test]
+    fn refuses_a_different_object_at_the_same_immutable_address() {
+        let root = TempDir::new("publish-conflict");
+        let repository = root.0.join("repository");
+        let repositories = Repositories {
+            local: Some(repository.clone()),
+            ..Repositories::default()
+        };
+        let (transaction, _) = stage_demo(&repositories);
+        transaction.publish().unwrap();
+
+        let source_only = Repositories {
+            keep_artifacts: false,
+            ..repositories
+        };
+        let (transaction, _) = stage_demo(&source_only);
+        let staged = transaction.objects()[0].object.root.clone();
+        let error = transaction.publish().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the verified staged object")
+        );
+        assert!(!staged.exists());
     }
 
     #[test]
