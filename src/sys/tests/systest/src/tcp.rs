@@ -348,6 +348,8 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         assert!(stream.nodelay_async().await.unwrap());
         stream.set_nodelay_async(false).await.unwrap();
         assert!(!stream.nodelay_async().await.unwrap());
+        stream.set_ttl_async(43).await.unwrap();
+        assert_eq!(stream.ttl_async().await.unwrap(), 43);
     });
 
     drop(stream);
@@ -453,11 +455,25 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
 fn test_native_listener_drop_under_backpressure() {
     use std::future::Future;
 
+    struct DistinctWake;
+
+    impl std::task::Wake for DistinctWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
     let listener = NativeTcpListener::bind(
         &"127.0.0.1:0".parse().unwrap(),
         Arc::new(NoopNetEventListener),
     )
     .unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        listener.set_ttl_async(41).await.unwrap();
+        assert_eq!(listener.ttl_async().await.unwrap(), 41);
+        assert_eq!(
+            listener.set_ttl_async(u8::MAX as u32 + 1).await,
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+    });
     moto_io::net::channel::arm_listener_drop_backpressure_test(listener.handle());
 
     // Post an accept and cancel it. Its eventual response makes the channel
@@ -477,6 +493,21 @@ fn test_native_listener_drop_under_backpressure() {
             "channel runtime did not reach the listener-drop backpressure hook"
         );
         std::thread::yield_now();
+    }
+
+    // The held channel runtime cannot drain its now-full staging queue. Each
+    // TTL query therefore registers both an RPC response and a queue-space
+    // waiter. Cancelling must remove both before the next query is polled.
+    for _ in 0..128 {
+        let waker = std::task::Waker::from(Arc::new(DistinctWake));
+        let mut context = Context::from_waker(&waker);
+        let mut ttl = Box::pin(listener.ttl_async());
+        assert!(matches!(ttl.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(listener.channel_tx_waiter_count_for_test(), 1);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 1);
+        drop(ttl);
+        assert_eq!(listener.channel_tx_waiter_count_for_test(), 0);
+        assert_eq!(listener.channel_rpc_waiter_count_for_test(), 0);
     }
 
     // The channel runtime now owns the only remaining listener Arc and its

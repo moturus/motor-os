@@ -202,6 +202,18 @@ impl TcpListener {
         self.handle
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn channel_tx_waiter_count_for_test(&self) -> usize {
+        self.channel().tx_waiter_count()
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn channel_rpc_waiter_count_for_test(&self) -> usize {
+        self.channel().rpc_waiter_count()
+    }
+
     fn channel(&self) -> &super::channel::NetChannel {
         self.channel_reservation.channel()
     }
@@ -435,6 +447,38 @@ impl TcpListener {
 
         let waiter = RpcWaiter::Accept(self.me.clone(), sync_tx);
         channel.send_rpc_guaranteed(req, waiter);
+    }
+
+    /// Set the listener TTL without blocking the polling thread.
+    pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
+        if ttl > u8::MAX as u32 {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        req.payload.args_8_mut()[23] = ttl as u8;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the listener TTL without blocking the polling thread.
+    pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpListenerGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_8()[23] as u32)
+        } else {
+            Err(resp.status)
+        }
     }
 
     /// # Safety
@@ -1612,6 +1656,35 @@ impl TcpStream {
         let resp = self.channel().rpc(req).await;
         if resp.status().is_ok() {
             Ok(resp.payload.args_64()[0] != 0)
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Set the stream TTL without blocking the polling thread.
+    pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        req.payload.args_32_mut()[2] = ttl;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the stream TTL without blocking the polling thread.
+    pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_TTL;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_32()[0])
         } else {
             Err(resp.status)
         }

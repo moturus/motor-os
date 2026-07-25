@@ -1095,6 +1095,11 @@ impl NetChannel {
         self.tx_waiters.len()
     }
 
+    #[cfg(feature = "netdev")]
+    pub(super) fn rpc_waiter_count(&self) -> usize {
+        self.rpc_map.lock().len()
+    }
+
     pub(super) fn send_queue_is_full(&self) -> bool {
         self.send_queue.is_full()
     }
