@@ -3,6 +3,7 @@
 #![feature(random)]
 
 // mod channel_test;
+mod command_output;
 mod file_locking;
 mod fs;
 mod icmp;
@@ -640,6 +641,13 @@ fn main() {
         tcp::test_native_listener_drop_backpressure();
         return;
     }
+    if args.get(1).map(String::as_str) == Some("move-noreplace-child") {
+        fs::move_noreplace_child(&args);
+        return;
+    }
+    if command_output::is_child(&args) {
+        command_output::run_child(&args);
+    }
     if io_channel::is_spawn_read_child(&args) {
         return;
     }
@@ -705,6 +713,7 @@ fn main() {
 
     spawn_wait_kill::smoke_test();
     spawn_wait_kill::test_pid_kill();
+    command_output::run_test();
     test_oom();
     test_nx();
     test_writable_executable_elf_rejected();
