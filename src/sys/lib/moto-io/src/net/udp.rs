@@ -379,6 +379,35 @@ impl UdpSocket {
         self.nonblocking.store(val, Ordering::Release);
     }
 
+    /// Set the unicast TTL without blocking the polling thread.
+    pub async fn set_ttl_async(&self, ttl: u32) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        req.payload.args_32_mut()[2] = ttl;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the unicast TTL without blocking the polling thread.
+    pub async fn ttl_async(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_32()[0])
+        } else {
+            Err(resp.status)
+        }
+    }
+
     /// # Safety
     ///
     /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
@@ -408,9 +437,8 @@ impl UdpSocket {
                 }
                 moto_rt::net::SO_TTL => {
                     assert_eq!(len, 4);
-                    let _ttl = *(ptr as *const u32);
-                    // self.set_ttl(ttl)
-                    panic!("UDP: set_ttl() not implemented")
+                    let ttl = *(ptr as *const u32);
+                    self.set_ttl(ttl)
                 }
                 _ => panic!("unrecognized option {option}"),
             }
@@ -437,14 +465,13 @@ impl UdpSocket {
                 }
                 moto_rt::net::SO_TTL => {
                     assert_eq!(len, 4);
-                    panic!("UDP: ttl() not implemented")
-                    // match self.ttl() {
-                    //     Ok(ttl) => {
-                    //         *(ptr as *mut u32) = ttl;
-                    //         moto_rt::E_OK
-                    //     }
-                    //     Err(err) => err,
-                    // }
+                    match self.ttl() {
+                        Ok(ttl) => {
+                            *(ptr as *mut u32) = ttl;
+                            moto_rt::E_OK
+                        }
+                        Err(err) => err,
+                    }
                 }
                 moto_rt::net::SO_ERROR => {
                     assert_eq!(len, 2);
@@ -455,6 +482,28 @@ impl UdpSocket {
                 }
                 _ => panic!("unrecognized option {option}"),
             }
+        }
+    }
+
+    fn set_ttl(&self, ttl: u32) -> ErrorCode {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketSetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        req.payload.args_32_mut()[2] = ttl;
+        self.channel().send_receive(req).status
+    }
+
+    fn ttl(&self) -> Result<u32, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::UdpSocketGetOption as u16;
+        req.handle = self.handle;
+        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        let resp = self.channel().send_receive(req);
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_32()[0])
+        } else {
+            Err(resp.status)
         }
     }
 

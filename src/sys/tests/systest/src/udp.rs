@@ -67,6 +67,28 @@ fn test_udp_basic() {
     println!("-- test_udp_basic() PASS");
 }
 
+fn test_native_udp_ttl() {
+    let socket = NativeUdpSocket::bind(
+        &"127.0.0.1:0".parse().unwrap(),
+        Arc::new(NoopNetEventListener),
+    )
+    .unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        assert_eq!(socket.ttl_async().await.unwrap(), 64);
+        socket.set_ttl_async(37).await.unwrap();
+        assert_eq!(socket.ttl_async().await.unwrap(), 37);
+        assert_eq!(
+            socket.set_ttl_async(0).await,
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+        assert_eq!(
+            socket.set_ttl_async(u8::MAX as u32 + 1).await,
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+    });
+    println!("-- test_native_udp_ttl() PASS");
+}
+
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
@@ -364,6 +386,7 @@ fn test_udp_tx_progresses_after_page_free() {
 
 pub fn run_all_tests() {
     test_udp_basic();
+    test_native_udp_ttl();
     test_udp_large_packets();
     test_udp_double_bind();
     test_udp_connect();

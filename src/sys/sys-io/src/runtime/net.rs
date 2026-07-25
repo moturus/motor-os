@@ -460,6 +460,12 @@ impl NetRuntime {
             NetCmd::UdpSocketBindForRemote => {
                 socket::MotoSocket::udp_bind_for_remote(self, msg, &sender).await
             }
+            NetCmd::UdpSocketSetOption => {
+                socket::MotoSocket::udp_setsockopt(self, msg, &sender).await
+            }
+            NetCmd::UdpSocketGetOption => {
+                socket::MotoSocket::udp_getsockopt(self, msg, &sender).await
+            }
             NetCmd::UdpSocketTxRx => socket::MotoSocket::udp_tx(self, msg, &sender).await,
             NetCmd::UdpSocketDrop => socket::MotoSocket::udp_socket_drop(self, msg, &sender).await,
             NetCmd::IcmpEcho => icmp::echo(self, msg, &sender).await,
