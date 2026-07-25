@@ -640,6 +640,14 @@ struct PendingTxPage {
     filled: usize,
 }
 
+/// Which half of a TCP stream to shut down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}
+
 impl Drop for TcpStream {
     fn drop(&mut self) {
         let handle = self.handle.load(Ordering::Acquire);
@@ -1611,6 +1619,56 @@ impl TcpStream {
         }
 
         resp.status
+    }
+
+    /// Shut down one or both halves without blocking the polling thread.
+    ///
+    /// Cancellation before the request enters the channel leaves the stream
+    /// unchanged. Once queued, the local shutdown remains committed even if
+    /// the future is dropped, matching the request sys-io now owns.
+    pub async fn shutdown_async(&self, shutdown: Shutdown) -> Result<(), ErrorCode> {
+        let (read, write) = match shutdown {
+            Shutdown::Read => (true, false),
+            Shutdown::Write => (false, true),
+            Shutdown::Both => (true, true),
+        };
+        let mut option = 0_u64;
+        if read {
+            option |= api_net::TCP_OPTION_SHUT_RD;
+        }
+        if write {
+            option |= api_net::TCP_OPTION_SHUT_WR;
+        }
+
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = option;
+        let resp = self
+            .channel()
+            .rpc_after_send(req, || {
+                if read {
+                    self.rx_closed.store(true, Ordering::Release);
+                    // SHUT_RD is local and discards already-buffered data.
+                    // Complete it at the queue-ownership boundary so dropping
+                    // the response future cannot retain pages or lose EOF.
+                    super::channel::clear_rx_queue(&self.recv_queue, self.channel());
+                    self.set_tcp_state(TcpState::WriteOnly);
+                }
+                if write {
+                    // Every completed write queued its TX marker before this
+                    // request. The channel expands those markers in FIFO
+                    // order, so sys-io receives all committed bytes first.
+                    self.tx_closed.store(true, Ordering::Release);
+                }
+            })
+            .await;
+
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
     }
 
     fn set_linger(&self, dur: Option<Duration>) -> ErrorCode {

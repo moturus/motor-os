@@ -234,9 +234,11 @@ pub fn listener_drop_backpressure_test_is_done() -> bool {
 #[doc(hidden)]
 #[cfg(feature = "netdev")]
 pub fn arm_rpc_response_cancel_test() {
+    let state = RPC_CANCEL_TEST_STATE.load(Ordering::Acquire);
+    assert!(state == RPC_CANCEL_TEST_IDLE || state == RPC_CANCEL_TEST_DONE);
     RPC_CANCEL_TEST_STATE
         .compare_exchange(
-            RPC_CANCEL_TEST_IDLE,
+            state,
             RPC_CANCEL_TEST_ARMED,
             Ordering::Release,
             Ordering::Relaxed,
@@ -1318,7 +1320,21 @@ impl NetChannel {
     ///
     /// Cancellation before queueing removes the RPC-map entry. Once queued,
     /// response dispatch owns completion and tolerates a dropped receiver.
-    pub(super) async fn rpc(&self, mut req: io_channel::Msg) -> io_channel::Msg {
+    pub(super) async fn rpc(&self, req: io_channel::Msg) -> io_channel::Msg {
+        self.rpc_after_send(req, || {}).await
+    }
+
+    /// Send an ordinary request, run `after_send` once the staging queue owns
+    /// it, then await its response.
+    ///
+    /// There is no suspension point between the successful queue insertion
+    /// and `after_send`, so cancellation either leaves both untouched or
+    /// leaves the queued request and its local commit in place.
+    pub(super) async fn rpc_after_send(
+        &self,
+        mut req: io_channel::Msg,
+        after_send: impl FnOnce(),
+    ) -> io_channel::Msg {
         let (tx, rx) = moto_async::oneshot();
         req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
         assert!(
@@ -1335,6 +1351,7 @@ impl NetChannel {
         };
         self.send(req).await;
         registration.sent = true;
+        after_send();
 
         rx.await.expect("RPC sender dropped")
     }

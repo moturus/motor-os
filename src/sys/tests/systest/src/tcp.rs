@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use moto_io::net::readiness::{NetEventListener, Readiness};
-use moto_io::net::tcp::{TcpListener as NativeTcpListener, TcpStream as NativeTcpStream};
+use moto_io::net::tcp::{
+    Shutdown as NativeShutdown, TcpListener as NativeTcpListener, TcpStream as NativeTcpStream,
+};
 
 struct NoopNetEventListener;
 
@@ -304,7 +306,8 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
     let release_peer = Arc::new(AtomicBool::new(false));
     let peer_release = release_peer.clone();
     let peer = std::thread::spawn(move || {
-        let (_stream, _) = listener.accept().unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(&[0x5a]).unwrap();
         while !peer_release.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
@@ -366,12 +369,76 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         );
         stream.set_linger_async(None).await.unwrap();
         assert_eq!(stream.linger_async().await.unwrap(), None);
+        stream.readable().await;
     });
+    assert!(stream.has_rx_bytes());
+
+    moto_io::net::channel::arm_rpc_response_cancel_test();
+    let mut future = Box::pin(stream.shutdown_async(NativeShutdown::Read));
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::rpc_response_cancel_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not hold the shutdown response"
+        );
+        std::thread::yield_now();
+    }
+    assert!(!stream.has_rx_bytes());
+    let mut empty = [0_u8; 1];
+    assert_eq!(stream.try_read(&mut [&mut empty], false), Ok(0));
+    drop(future);
+    moto_io::net::channel::release_rpc_response_cancel_test();
+    while !moto_io::net::channel::rpc_response_cancel_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not finish the cancelled shutdown response"
+        );
+        std::thread::yield_now();
+    }
 
     drop(stream);
     release_peer.store(true, Ordering::Release);
     peer.join().unwrap();
     println!("test_cancelled_native_rpc_response_is_tolerated() PASS");
+}
+
+fn test_native_async_shutdown() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let expected = vec![0x5a_u8; 256 * 1024];
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).unwrap();
+        received
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+    moto_async::LocalRuntime::new().block_on(async {
+        let mut written = 0;
+        while written < expected.len() {
+            let bufs = [&expected[written..]];
+            let n = stream.write_future(&bufs).await.unwrap();
+            assert!(n > 0);
+            written += n;
+        }
+        stream.shutdown_async(NativeShutdown::Write).await.unwrap();
+        assert_eq!(
+            stream.try_write(&[b"after shutdown"]),
+            Err(moto_rt::E_NOT_CONNECTED)
+        );
+    });
+
+    drop(stream);
+    assert_eq!(peer.join().unwrap(), expected);
+    println!("test_native_async_shutdown() PASS");
 }
 
 /// A dropped native accept future must not strand the socket that sys-io
@@ -548,6 +615,7 @@ pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_rpc_response_is_tolerated();
+    test_native_async_shutdown();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }
