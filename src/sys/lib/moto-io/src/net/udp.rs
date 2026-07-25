@@ -4,9 +4,9 @@
 //! [`super::channel`] and emits readiness through an abstract
 //! [`crate::net::readiness::NetEventListener`], naming no vdso type.
 
+use super::channel::{ChannelReservation, NetChannel};
 use crate::net::readiness::{NetEventListener, Readiness};
 use crate::net::wait::{WaitSet, WaiterId};
-use super::channel::{ChannelReservation, NetChannel};
 use alloc::sync::{Arc, Weak};
 use core::net::SocketAddr;
 use core::sync::atomic::*;
@@ -57,6 +57,8 @@ impl Drop for UdpSocket {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::UdpSocketDrop as u16;
         req.handle = self.handle();
+
+        self.channel().udp_socket_dropped(self.handle());
 
         // Guaranteed delivery: never drop the message (sys-io would leak the
         // socket), never panic on a full send queue, and never deadlock when
@@ -145,22 +147,20 @@ impl UdpSocket {
             }
         }
 
-        let udp_socket = Arc::new_cyclic(|me| {
-            UdpSocket {
-                local_addr: socket_addr,
-                channel_reservation,
-                handle: resp.handle,
-                nonblocking: AtomicBool::new(false),
-                event_listener,
-                tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
-                peer_addr: Mutex::new(None),
-                rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
-                rx_timeout_ns: AtomicU64::new(u64::MAX),
-                tx_timeout_ns: AtomicU64::new(u64::MAX),
-                rx_waiters: WaitSet::new(),
-                tx_waiters: WaitSet::new(),
-                me: me.clone(),
-            }
+        let udp_socket = Arc::new_cyclic(|me| UdpSocket {
+            local_addr: socket_addr,
+            channel_reservation,
+            handle: resp.handle,
+            nonblocking: AtomicBool::new(false),
+            event_listener,
+            tx_queue: Mutex::new(UdpFragmentingQueue::new(resp.handle, subchannel_mask)),
+            peer_addr: Mutex::new(None),
+            rx_queue: Mutex::new(UdpDefragmentingQueue::new()),
+            rx_timeout_ns: AtomicU64::new(u64::MAX),
+            tx_timeout_ns: AtomicU64::new(u64::MAX),
+            rx_waiters: WaitSet::new(),
+            tx_waiters: WaitSet::new(),
+            me: me.clone(),
         });
         udp_socket.channel().udp_socket_created(&udp_socket);
         crate::net::channel::stats_udp_socket_created();
@@ -229,7 +229,11 @@ impl UdpSocket {
 
     /// The send future the veneer parks on and a native reactor awaits.
     /// Cancel-safe. Callers pre-check `MAX_UDP_PAYLOAD` via `try_send_to`.
-    pub fn send_to_future<'a, 'b>(&'a self, buf: &'b [u8], addr: &SocketAddr) -> UdpSendFuture<'a, 'b> {
+    pub fn send_to_future<'a, 'b>(
+        &'a self,
+        buf: &'b [u8],
+        addr: &SocketAddr,
+    ) -> UdpSendFuture<'a, 'b> {
         UdpSendFuture {
             socket: self,
             buf,
@@ -359,11 +363,16 @@ impl UdpSocket {
             }
             api_net::NetCmd::UdpSocketTxRxAck => {
                 self.raise_readiness(Readiness::WRITABLE);
-                self.try_tx();
-                self.wake_tx_waiters();
+                self.on_channel_tx_progress();
             }
             _ => panic!("Unexpected UDP cmd: {:?}", cmd),
         }
+    }
+
+    /// Re-drive queued datagrams and wake senders after channel TX progress.
+    pub(super) fn on_channel_tx_progress(&self) {
+        self.try_tx();
+        self.wake_tx_waiters();
     }
 
     fn set_nonblocking(&self, val: bool) {
@@ -532,6 +541,12 @@ impl UdpSocket {
         self.tx_waiters.len()
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "netdev")]
+    pub fn channel_udp_socket_count_for_test(&self) -> usize {
+        self.channel().udp_socket_count_for_test()
+    }
+
     /// Run a netdev test while this socket has no allocatable TX pages.
     #[doc(hidden)]
     #[cfg(feature = "netdev")]
@@ -544,6 +559,8 @@ impl UdpSocket {
             pages.push(page);
         }
         f();
+        drop(pages);
+        self.channel().wake_waiters_for_test();
     }
 }
 
@@ -680,8 +697,8 @@ impl core::future::Future for UdpReadable<'_> {
 
 /// Send-readiness future (design 5.4): resolves once `try_send_to` would not
 /// block. First flushes already-queued datagrams (`try_tx`), then reports
-/// TX-queue room; the tx waker fires from `process_incoming_msg` when sys-io
-/// drains the queue. Cancel-safe.
+/// TX-queue room; the tx waker fires when an acknowledgement or other channel
+/// progress may have made room. Cancel-safe.
 pub struct UdpWritable<'a> {
     socket: &'a UdpSocket,
     waiter_id: Option<WaiterId>,

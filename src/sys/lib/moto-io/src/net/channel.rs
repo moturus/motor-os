@@ -697,6 +697,20 @@ impl NetChannel {
         stream.claim_pending_tx()
     }
 
+    fn progress_udp_tx(&self) {
+        // Upgrade under the map lock, but invoke socket code after releasing it.
+        // Live entries are bounded by the channel's subchannel count.
+        let sockets: Vec<Arc<UdpSocket>> = self
+            .udp_sockets
+            .lock()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for socket in sockets {
+            socket.on_channel_tx_progress();
+        }
+    }
+
     /// Wake the channel's registered waiters. Runs after every pass of
     /// the IO thread (and, after the C2 flip, at every rx/tx task edge),
     /// so waiters registered against any progress event get re-checked.
@@ -719,6 +733,17 @@ impl NetChannel {
         // after every wake of this thread, including sys-io's page-freed
         // wake.
         self.wake_tx_wakers();
+        self.progress_udp_tx();
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn wake_waiters_for_test(&self) {
+        self.wake_waiters();
+    }
+
+    #[cfg(feature = "netdev")]
+    pub(super) fn udp_socket_count_for_test(&self) -> usize {
+        self.udp_sockets.lock().len()
     }
 
     /// Wake parked write futures, removing registrations before invoking
@@ -1111,6 +1136,11 @@ impl NetChannel {
         );
     }
 
+    pub fn udp_socket_dropped(&self, handle: u64) {
+        let socket = self.udp_sockets.lock().remove(&handle).unwrap();
+        assert_eq!(0, socket.strong_count());
+    }
+
     pub fn tcp_stream_dropped(&self, handle: u64) {
         let stream = self.tcp_streams.lock().remove(&handle).unwrap();
         assert_eq!(0, stream.strong_count());
@@ -1144,8 +1174,7 @@ impl NetChannel {
                 return;
             }
 
-            let waiter =
-                waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
+            let waiter = waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
             self.wait_can_send(waiter);
         }
     }
@@ -1185,7 +1214,11 @@ impl NetChannel {
 
     /// Nonblocking [`Self::send_rpc`]: on a full send queue the waiter
     /// is removed again and the caller gets `E_NOT_READY`.
-    pub(super) fn post_rpc(&self, req: io_channel::Msg, waiter: RpcWaiter) -> Result<(), ErrorCode> {
+    pub(super) fn post_rpc(
+        &self,
+        req: io_channel::Msg,
+        waiter: RpcWaiter,
+    ) -> Result<(), ErrorCode> {
         assert_ne!(0, req.id);
         assert!(self.rpc_map.lock().insert(req.id, waiter).is_none());
         if self.post_msg(req).is_ok() {
