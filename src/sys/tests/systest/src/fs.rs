@@ -123,8 +123,72 @@ fn move_noreplace_test() {
     assert!(!std::fs::exists(&source_dir).unwrap());
     assert!(std::fs::metadata(&target_dir).unwrap().is_dir());
 
+    competing_move_noreplace_test(&root);
     std::fs::remove_dir_all(&root).unwrap();
     println!("    ---- FS: move_noreplace_test PASS");
+}
+
+fn competing_move_noreplace_test(root: &std::path::Path) {
+    let target = root.join("published");
+    let start = root.join("publish-start");
+    let mut children = Vec::new();
+    for name in ["first", "second"] {
+        let source = root.join(format!("{name}-source"));
+        let ready = root.join(format!("{name}-ready"));
+        let result = root.join(format!("{name}-result"));
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("value"), name).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "move-noreplace-child",
+                source.to_str().unwrap(),
+                target.to_str().unwrap(),
+                ready.to_str().unwrap(),
+                start.to_str().unwrap(),
+                result.to_str().unwrap(),
+            ])
+            .spawn()
+            .unwrap();
+        children.push((name, child, ready, result));
+    }
+    for (_, _, ready, _) in &children {
+        while !ready.exists() {
+            std::thread::yield_now();
+        }
+    }
+    std::fs::write(&start, b"go").unwrap();
+
+    let mut winners = Vec::new();
+    for (name, mut child, _, result) in children {
+        assert!(child.wait().unwrap().success());
+        if std::fs::read_to_string(result).unwrap() == "won" {
+            winners.push(name);
+        }
+    }
+    assert_eq!(winners.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(target.join("value")).unwrap(),
+        winners[0]
+    );
+}
+
+pub fn move_noreplace_child(args: &[String]) {
+    assert_eq!(args.len(), 7);
+    let source = &args[2];
+    let target = &args[3];
+    let ready = &args[4];
+    let start = &args[5];
+    let result = &args[6];
+    std::fs::write(ready, b"ready").unwrap();
+    while !std::path::Path::new(start).exists() {
+        std::thread::yield_now();
+    }
+    let outcome = match moto_rt::fs::move_noreplace(source, target) {
+        Ok(()) => "won",
+        Err(moto_rt::Error::AlreadyInUse) => "lost",
+        Err(error) => panic!("competing move_noreplace failed: {error}"),
+    };
+    std::fs::write(result, outcome).unwrap();
 }
 
 fn copy_test() {
