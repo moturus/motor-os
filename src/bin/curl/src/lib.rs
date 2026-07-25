@@ -1,8 +1,14 @@
 mod error;
+mod http;
 mod options;
+mod url;
+mod write_out;
 
 pub use error::{CurlError, CurlResult};
+pub use http::{Response, receive_response, write_request};
 pub use options::{Action, Options};
+pub use url::HttpsUrl;
+pub use write_out::{TransferInfo, write_out};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
