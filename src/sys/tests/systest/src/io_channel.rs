@@ -104,6 +104,69 @@ fn test_ping_pong() {
     println!("----- io_channel::test_ping_pong PASS");
 }
 
+fn test_pipelined_queue_wakeups() {
+    const ROUNDS: u64 = 250;
+    const BATCH: u64 = moto_ipc::io_channel::QUEUE_SIZE * 2;
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waiter = server_started.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let server_done = done_tx.clone();
+
+    let server = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let listener = moto_ipc::io_channel::listen("systest_pipelined_wakeups");
+            server_started.store(true, Ordering::Release);
+            let (sender, mut receiver) = listener.await.unwrap();
+
+            for request_id in (0..ROUNDS * BATCH).map(|id| id * 2) {
+                let mut msg = receiver.recv().await.unwrap();
+                assert_eq!(msg.id, request_id);
+                msg.id += 1;
+                sender.send(msg).await.unwrap();
+            }
+        });
+        server_done.send(()).unwrap();
+    });
+
+    while !waiter.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+
+    let client_done = done_tx;
+    let client = std::thread::spawn(move || {
+        moto_async::LocalRuntime::new().block_on(async move {
+            let (sender, mut receiver) =
+                moto_ipc::io_channel::connect("systest_pipelined_wakeups").unwrap();
+
+            for round in 0..ROUNDS {
+                for index in 0..BATCH {
+                    let mut msg = moto_ipc::io_channel::Msg::new();
+                    msg.id = (round * BATCH + index) * 2;
+                    sender.send(msg).await.unwrap();
+                }
+                for index in 0..BATCH {
+                    let msg = receiver.recv().await.unwrap();
+                    assert_eq!(msg.id, (round * BATCH + index) * 2 + 1);
+                }
+            }
+        });
+        client_done.send(()).unwrap();
+    });
+
+    done_rx
+        .recv_timeout(DEADLINE)
+        .expect("pipelined io_channel endpoint stopped making progress");
+    done_rx
+        .recv_timeout(DEADLINE)
+        .expect("pipelined io_channel endpoint stopped making progress");
+    client.join().unwrap();
+    server.join().unwrap();
+
+    println!("----- io_channel::test_pipelined_queue_wakeups PASS");
+}
+
 fn test_page_alloc() {
     // We test that a waiter to allocate a page is properly woken when a page becomes available.
     let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -367,6 +430,7 @@ fn test_concurrent_spawn_reads() {
 pub fn run_all_tests() {
     basic_test();
     test_ping_pong();
+    test_pipelined_queue_wakeups();
     test_page_alloc();
     test_local_page_free_wakes_waiter();
     test_error_handler_on_double_free();
