@@ -486,9 +486,21 @@ impl RawChannel {
     fn set_server_waiting(&self, wait_type: WaitType) {
         self.server_waits
             .fetch_or(wait_type as u64, Ordering::AcqRel);
+        // Complete the wait publication before retrying the queue. This
+        // pairs with is_server_waiting() after the peer publishes progress.
+        //
+        // NOTE: we cannot drop this fence and make fetch_or above stronger,
+        // this will lead to a lost wakeup.
+        fence(Ordering::SeqCst);
     }
 
     fn is_server_waiting(&self, wait_type: WaitType) -> bool {
+        // The queue publication must become visible before we decide that
+        // the peer does not need a wake.
+        fence(Ordering::SeqCst);
+
+        // NOTE: we cannot drop this fence above and make load below stronger,
+        // this will lead to a lost wakeup.
         (self.server_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
     }
 
@@ -510,9 +522,13 @@ impl RawChannel {
     fn set_client_waiting(&self, wait_type: WaitType) {
         self.client_waits
             .fetch_or(wait_type as u64, Ordering::AcqRel);
+        // See set_server_waiting().
+        fence(Ordering::SeqCst);
     }
 
     fn is_client_waiting(&self, wait_type: WaitType) -> bool {
+        // See is_server_waiting().
+        fence(Ordering::SeqCst);
         (self.client_waits.load(Ordering::Acquire) & (wait_type as u64)) != 0
     }
 
