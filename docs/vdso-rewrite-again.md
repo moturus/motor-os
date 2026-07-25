@@ -3,6 +3,11 @@
 2026-07-23. This is a plan only. It does not propose an ABI change and it
 does not imply that the current code should be changed in one large step.
 
+Status update (2026-07-25): implementation is paused after the Stage 2 TCP
+teardown work while a performance regression is investigated. Sections 1
+through 6 continue to describe the target architecture; Section 7 records the
+work landed so far and the remaining implementation order.
+
 ## 1. Decisions and scope
 
 Two boundary decisions are settled for this pass:
@@ -52,10 +57,11 @@ compatibility policy moved with them:
 - Queue pressure can enter `send_msg`, `wait_can_send`, and
   `send_msg_guaranteed`, which park a caller thread. `send_receive` calls
   `block_on_sync` inside `moto-io`.
-- TCP listener bind, UDP bind, socket-option RPCs, shutdown, and parts of
-  connect/accept setup use those synchronous channel operations. An
-  `async fn` such as `TcpStream::connect` can therefore block its polling
-  thread before or during the await.
+- TCP listener bind, UDP bind, legacy socket-option methods, and parts of
+  connect/accept setup still use synchronous channel operations. Typed async
+  socket-option and TCP shutdown paths now exist, and TCP listener/stream
+  destruction has moved to the driver-owned teardown path, but UDP
+  destruction and some rollback/control paths still block.
 - Creating a channel happens while the global pool lock is held. A sys-io
   connection retry can stall every unrelated reservation, release, teardown,
   statistics call, and test hook.
@@ -65,12 +71,10 @@ compatibility policy moved with them:
 - Every socket constructor requires `Arc<dyn NetEventListener>`, and the vDSO
   later downcasts that trait object back to `EventSourceManaged`. This makes
   a vDSO adapter mandatory in the native API.
-- Read/write/readiness waits retain cloned wakers in vectors. Deduplicating
-  with `will_wake` prevents repeated registration by one stable bridge waker,
-  but dropping native futures with distinct wakers still retains executor
-  state until a later socket event.
-- `rt.vdso/src/net/blocking.rs` compensates for unresolved wake races with
-  500 ms and five-second recheck timers.
+- Read/write/readiness waits originally retained cloned wakers in vectors.
+  Stage 1 replaced those vectors with cancellation-aware registrations.
+- `rt.vdso/src/net/blocking.rs` still retains its 500 ms and five-second
+  recheck timers pending the Stage 6 cleanup.
 
 The result is async in naming and on much of the data path, but it is not an
 async library boundary.
@@ -490,7 +494,23 @@ land with their regression tests. The large ownership flip may require one
 explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
-### Stage 0: refresh gates
+Current status: paused before further refactoring. First investigate the
+observed performance regression and re-establish a trustworthy paired,
+same-host release `rnetbench` baseline. Do not resume Stage 2 until the
+regression is fixed, understood and accepted, or explicitly waived.
+
+| Stage | Status | Summary |
+|---|---|---|
+| 0: gates and baselines | Reopened | Functional gates have run repeatedly; the performance gate must be re-established because of the current regression. |
+| 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
+| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, and TCP listener/stream teardown have landed; remaining blocking and UDP teardown paths still need conversion. |
+| 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
+| 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
+| 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
+| 6: remove polling | Not started | Periodic vDSO rechecks remain. |
+| 7: cleanup | Not started | Compatibility and blocking internals remain. |
+
+### Stage 0: refresh gates - reopened
 
 - Record the exact starting commit and dirty-tree exclusions.
 - Run the targeted native cancellation/backpressure tests, systest network
@@ -500,34 +520,61 @@ small in logic.
   cross-day 2026-07 numbers.
 - Add no production behavior in this stage.
 
-### Stage 1: cancellation-aware wait registrations
+Functional gates were run repeatedly through the landed work. The
+same-host performance baseline/check remains open and is now the prerequisite
+for resuming the series.
 
-- Add the internal wait-registration/token primitive.
-- Convert TCP read/readiness, channel/TCP write, and UDP waiters one family at
-  a time.
-- Add quiet-socket cancellation storms using distinct wakers and assert that
-  registration counts return to zero immediately.
-- Keep the existing vDSO periodic rechecks until this stage's lost-wakeup
-  stress tests pass.
+### Stage 1: cancellation-aware wait registrations - complete
 
-Gate: targeted systest + mio-test + tokio-tests. There should be no data-path
-behavior or performance change.
+Landed:
 
-### Stage 2: async channel control plane
+1. Added the internal wait-registration/token primitive with removal on
+   future drop.
+2. Converted TCP RX/readiness, channel/TCP TX/readiness, and UDP RX/TX/
+   readiness waiters.
+3. Added cancellation and distinct-`Waker` regression tests that verify
+   registration counts return to zero.
+4. Fixed separately discovered pre-existing page-reclamation progress and
+   channel lost-wakeup defects before continuing.
 
-- Add async queue-room and RPC futures beside the old blocking helpers.
-- Convert bind and typed socket-option internals to those futures.
-- Make response dispatch tolerate cancelled ordinary RPC receivers.
-- Add the nonblocking driver-control/teardown queue.
-- Convert stream, listener, UDP, orphan, and cancelled-connect/accept cleanup
-  to teardown records; prove drop never parks under full staging/ring queues.
-- Delete the old blocking helpers once all internal callers have moved.
+The vDSO periodic rechecks intentionally remain until Stage 6.
+
+### Stage 2: async channel control plane - in progress
+
+Landed:
+
+1. Added async queue-room and RPC futures, including safe cancellation after
+   a request has been queued.
+2. Made response dispatch tolerate cancelled ordinary RPC receivers.
+3. Added typed async TCP TTL, `TCP_NODELAY`, `SO_LINGER`, and shutdown paths,
+   plus typed async UDP TTL support.
+4. Added the nonblocking teardown queue with reservation-owning records.
+5. Converted TCP listener and TCP stream destruction while preserving
+   ordering between already-queued per-handle messages and close.
+6. Added cancellation, full-staging, ordering, and teardown-progress tests
+   for the converted paths.
+
+Remaining after the performance pause:
+
+1. Convert TCP listener bind, UDP bind, and remaining control-plane callers
+   to async send/RPC paths.
+2. Convert UDP destruction to the teardown queue. Before implementation,
+   confirm the required disposition and ordering of queued UDP datagrams;
+   stop for guidance if the existing code does not make that contract
+   unambiguous.
+3. Convert orphan/late TCP connect and accept cleanup, plus remaining
+   guaranteed accept/control sends, to driver-owned async work.
+4. Move remaining consumers to typed async operations, then remove
+   `SyncWaiter`, `send_msg`, `send_receive`, `send_msg_guaranteed`, and their
+   condvar/backoff machinery after the last caller is gone.
+5. Re-run the full executor-liveness and reservation-accounting gates after
+   each conversion.
 
 Gate: explicit executor-liveness tests under saturated queues, existing
 connect/accept cancellation tests, listener-drop backpressure test, and the
 network suites.
 
-### Stage 3: introduce vDSO `Rt*` wrappers
+### Stage 3: introduce vDSO `Rt*` wrappers - not started
 
 - Add `RtTcpListener`, `RtTcpStream`, and `RtUdpSocket`.
 - Move nonblocking flags, read/write timeouts, raw option dispatch, concrete
@@ -541,7 +588,7 @@ network suites.
 Gate: focused duplicated-FD, socket-option, shutdown, timeout, poll
 registration, and nonblocking tests; then mio-test and tokio-tests.
 
-### Stage 4: prepare the driver/ownership split additively
+### Stage 4: prepare the driver/ownership split additively - not started
 
 - Change one channel's internals into a `NetClient`/`NetDriver` pair while a
   temporary compatibility host continues to back the existing global vDSO
@@ -561,7 +608,7 @@ Gate: build, native driver tests, and the existing vDSO network suites. At
 this intermediate point `moto-io` still contains the explicitly temporary
 compatibility thread/pool adapter.
 
-### Stage 5: flip ownership to `rt.vdso`
+### Stage 5: flip ownership to `rt.vdso` - not started
 
 - Switch vDSO socket construction to `NetPool` and explicit reservations.
 - Enable cancellation-aware reservation waiters and provisioning
@@ -593,7 +640,7 @@ churn/teardown, cold-start/provisioning tests, all listener mio tests,
 repeated tokio loopback tests, all network suites, and debug
 `full-test.sh`.
 
-### Stage 6: remove the wake-race safety polling
+### Stage 6: remove the wake-race safety polling - not started
 
 - Delete `block_on_recheck`, `TX_PARK_RECHECK`, and `RX_PARK_RECHECK`.
 - Drive action futures directly with the real vDSO deadlines.
@@ -603,7 +650,7 @@ repeated tokio loopback tests, all network suites, and debug
 Gate: network suites, at least five consecutive debug `full-test.sh` runs,
 and release `full-test.sh`.
 
-### Stage 7: cleanup and final gate
+### Stage 7: cleanup and final gate - not started
 
 - Make `moto-io::net::channel` private or narrow its public exports to
   `NetClient`, `NetDriver`, `Reservation`, sockets, futures, typed options,
