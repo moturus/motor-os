@@ -296,6 +296,66 @@ fn test_cancelled_native_io_waiters_are_removed() {
     println!("test_cancelled_native_io_waiters_are_removed() PASS");
 }
 
+fn test_cancelled_native_rpc_response_is_tolerated() {
+    use std::future::Future;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let release_peer = Arc::new(AtomicBool::new(false));
+    let peer_release = release_peer.clone();
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        while !peer_release.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    let stream = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpStream::connect(
+            &listener_addr,
+            None,
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
+
+    moto_io::net::channel::arm_rpc_response_cancel_test();
+    let mut future = Box::pin(stream.nodelay_async());
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !moto_io::net::channel::rpc_response_cancel_test_is_held() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not hold the RPC response"
+        );
+        std::thread::yield_now();
+    }
+    drop(future);
+    moto_io::net::channel::release_rpc_response_cancel_test();
+
+    while !moto_io::net::channel::rpc_response_cancel_test_is_done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "channel runtime did not finish the cancelled RPC response"
+        );
+        std::thread::yield_now();
+    }
+
+    moto_async::LocalRuntime::new().block_on(async {
+        stream.set_nodelay_async(true).await.unwrap();
+        assert!(stream.nodelay_async().await.unwrap());
+        stream.set_nodelay_async(false).await.unwrap();
+        assert!(!stream.nodelay_async().await.unwrap());
+    });
+
+    drop(stream);
+    release_peer.store(true, Ordering::Release);
+    peer.join().unwrap();
+    println!("test_cancelled_native_rpc_response_is_tolerated() PASS");
+}
+
 /// A dropped native accept future must not strand the socket that sys-io
 /// creates when its already-posted accept RPC later completes.
 fn test_cancelled_native_accept_closes_socket() {
@@ -440,6 +500,7 @@ fn test_native_listener_drop_under_backpressure() {
 pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
+    test_cancelled_native_rpc_response_is_tolerated();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
 }

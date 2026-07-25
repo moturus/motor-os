@@ -176,6 +176,21 @@ static LISTENER_DROP_TEST_HANDLE: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "netdev")]
 static LISTENER_DROP_TEST_STATE: AtomicU8 = AtomicU8::new(LISTENER_DROP_TEST_IDLE);
 
+// Hold one ordinary RPC response between map removal and oneshot delivery,
+// allowing systest to cancel the receiver at that exact ownership boundary.
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_IDLE: u8 = 0;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_ARMED: u8 = 1;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_HELD: u8 = 2;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_RELEASED: u8 = 3;
+#[cfg(feature = "netdev")]
+const RPC_CANCEL_TEST_DONE: u8 = 4;
+#[cfg(feature = "netdev")]
+static RPC_CANCEL_TEST_STATE: AtomicU8 = AtomicU8::new(RPC_CANCEL_TEST_IDLE);
+
 #[doc(hidden)]
 #[cfg(feature = "netdev")]
 pub fn arm_listener_drop_backpressure_test(handle: u64) {
@@ -214,6 +229,44 @@ pub fn release_listener_drop_backpressure_test() {
 #[cfg(feature = "netdev")]
 pub fn listener_drop_backpressure_test_is_done() -> bool {
     LISTENER_DROP_TEST_STATE.load(Ordering::Acquire) == LISTENER_DROP_TEST_DONE
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn arm_rpc_response_cancel_test() {
+    RPC_CANCEL_TEST_STATE
+        .compare_exchange(
+            RPC_CANCEL_TEST_IDLE,
+            RPC_CANCEL_TEST_ARMED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn rpc_response_cancel_test_is_held() -> bool {
+    RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_HELD
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn release_rpc_response_cancel_test() {
+    RPC_CANCEL_TEST_STATE
+        .compare_exchange(
+            RPC_CANCEL_TEST_HELD,
+            RPC_CANCEL_TEST_RELEASED,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .unwrap();
+}
+
+#[doc(hidden)]
+#[cfg(feature = "netdev")]
+pub fn rpc_response_cancel_test_is_done() -> bool {
+    RPC_CANCEL_TEST_STATE.load(Ordering::Acquire) == RPC_CANCEL_TEST_DONE
 }
 
 pub fn stats_tcp_listener_created() {
@@ -397,9 +450,9 @@ pub struct NetChannel {
     // Streams waiting for "can write" notification.
     write_waiters: Mutex<VecDeque<Weak<TcpStream>>>,
 
-    // Cancellation-aware registrations of parked TCP write futures. Drained
-    // on every channel pass (broad wake-and-recheck: progress may be a freed
-    // io_page or send-queue room).
+    // Cancellation-aware registrations of parked async sends and TCP write
+    // futures. Drained on every channel pass (broad wake-and-recheck:
+    // progress may be a freed io_page or send-queue room).
     tx_waiters: WaitSet,
 
     // The channel runtime's send-room notify (a leaked LocalNotify),
@@ -432,6 +485,60 @@ pub struct NetChannel {
     io_thread_wake_handle: AtomicU64,
 
     exiting: CachePadded<AtomicBool>,
+}
+
+/// Cancellation-aware wait to place one message in the staging queue.
+pub(super) struct SendFuture<'a> {
+    channel: &'a NetChannel,
+    msg: Option<io_channel::Msg>,
+    waiter_id: Option<WaiterId>,
+}
+
+impl Drop for SendFuture<'_> {
+    fn drop(&mut self) {
+        self.channel.remove_tx_waker(&mut self.waiter_id);
+    }
+}
+
+impl Future for SendFuture<'_> {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        loop {
+            let msg = this.msg.take().expect("polled SendFuture after completion");
+            match this.channel.post_msg(msg) {
+                Ok(()) => {
+                    this.channel.remove_tx_waker(&mut this.waiter_id);
+                    return Poll::Ready(());
+                }
+                Err(msg) => this.msg = Some(msg),
+            }
+
+            this.channel.add_tx_waker(&mut this.waiter_id, cx.waker());
+            if this.channel.send_queue_is_full() {
+                return Poll::Pending;
+            }
+        }
+    }
+}
+
+struct RpcRegistration<'a> {
+    channel: &'a NetChannel,
+    id: u64,
+    sent: bool,
+}
+
+impl Drop for RpcRegistration<'_> {
+    fn drop(&mut self) {
+        if !self.sent {
+            let removed = self.channel.rpc_map.lock().remove(&self.id);
+            debug_assert!(matches!(removed, Some(RpcWaiter::Response(_))));
+        }
+    }
 }
 
 impl Drop for NetChannel {
@@ -552,14 +659,28 @@ impl NetChannel {
             let waiter = self.rpc_map.lock().remove(&msg.id);
             match waiter {
                 Some(RpcWaiter::Response(tx)) => {
-                    // The send wakes the receiver — a caller thread
-                    // parked in block_on_sync.
-                    if tx.send(msg).is_err() {
-                        // Receivers are never dropped before completion
-                        // (block_on_sync polls to Ready; teardown is
-                        // stage E).
-                        panic!("RPC receiver gone for msg {}", msg.id);
+                    #[cfg(feature = "netdev")]
+                    if RPC_CANCEL_TEST_STATE
+                        .compare_exchange(
+                            RPC_CANCEL_TEST_ARMED,
+                            RPC_CANCEL_TEST_HELD,
+                            Ordering::Release,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        while RPC_CANCEL_TEST_STATE.load(Ordering::Acquire)
+                            != RPC_CANCEL_TEST_RELEASED
+                        {
+                            core::hint::spin_loop();
+                        }
+                        RPC_CANCEL_TEST_STATE.store(RPC_CANCEL_TEST_DONE, Ordering::Release);
                     }
+
+                    // An async caller may cancel after the request was sent.
+                    // The response still completes protocol ownership; only
+                    // delivery to the dropped receiver is skipped.
+                    let _ = tx.send(msg);
                 }
                 Some(RpcWaiter::Connect(stream, tx)) => {
                     if let Some(stream) = stream.upgrade() {
@@ -958,9 +1079,9 @@ impl NetChannel {
         self.write_waiters.lock().push_back(stream.weak());
     }
 
-    /// Register a write future's waker for the next channel pass. The
-    /// caller must re-check its condition after registering (the pass
-    /// that made room may already have drained the list).
+    /// Register an async sender's waker for the next channel pass. The caller
+    /// must re-check its condition after registering (the pass that made room
+    /// may already have drained the list).
     pub(super) fn add_tx_waker(&self, id: &mut Option<WaiterId>, waker: &core::task::Waker) {
         self.tx_waiters.register(id, waker);
     }
@@ -1177,6 +1298,40 @@ impl NetChannel {
             let waiter = waiter.get_or_insert_with(|| Arc::new(moto_async::SyncWaiter::new()));
             self.wait_can_send(waiter);
         }
+    }
+
+    /// Enqueue one message without parking the polling thread.
+    pub(super) fn send(&self, msg: io_channel::Msg) -> SendFuture<'_> {
+        SendFuture {
+            channel: self,
+            msg: Some(msg),
+            waiter_id: None,
+        }
+    }
+
+    /// Send an ordinary request and await its response without blocking.
+    ///
+    /// Cancellation before queueing removes the RPC-map entry. Once queued,
+    /// response dispatch owns completion and tolerates a dropped receiver.
+    pub(super) async fn rpc(&self, mut req: io_channel::Msg) -> io_channel::Msg {
+        let (tx, rx) = moto_async::oneshot();
+        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            self.rpc_map
+                .lock()
+                .insert(req.id, RpcWaiter::Response(tx))
+                .is_none()
+        );
+
+        let mut registration = RpcRegistration {
+            channel: self,
+            id: req.id,
+            sent: false,
+        };
+        self.send(req).await;
+        registration.sent = true;
+
+        rx.await.expect("RPC sender dropped")
     }
 
     /// Close a stream handle that sys-io created but no client-side stream

@@ -1588,6 +1588,35 @@ impl TcpStream {
         }
     }
 
+    /// Set `TCP_NODELAY` without blocking the polling thread.
+    pub async fn set_nodelay_async(&self, nodelay: bool) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
+        req.payload.args_64_mut()[1] = nodelay as u64;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read `TCP_NODELAY` without blocking the polling thread.
+    pub async fn nodelay_async(&self) -> Result<bool, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_NODELAY;
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(resp.payload.args_64()[0] != 0)
+        } else {
+            Err(resp.status)
+        }
+    }
+
     fn set_nodelay(&self, nodelay: u8) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
