@@ -1650,6 +1650,41 @@ impl TcpStream {
         }
     }
 
+    /// Set the stream's linger behavior without blocking the polling thread.
+    pub async fn set_linger_async(&self, duration: Option<Duration>) -> Result<(), ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamSetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+        if let Some(duration) = duration {
+            req.payload.args_32_mut()[2] = 1;
+            req.payload.args_32_mut()[3] = u32::try_from(duration.as_secs()).unwrap_or(u32::MAX);
+        }
+        let resp = self.channel().rpc(req).await;
+        if resp.status().is_ok() {
+            Ok(())
+        } else {
+            Err(resp.status)
+        }
+    }
+
+    /// Read the stream's linger behavior without blocking the polling thread.
+    pub async fn linger_async(&self) -> Result<Option<Duration>, ErrorCode> {
+        let mut req = io_channel::Msg::new();
+        req.command = api_net::NetCmd::TcpStreamGetOption as u16;
+        req.handle = self.handle();
+        req.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+        let resp = self.channel().rpc(req).await;
+        if !resp.status().is_ok() {
+            return Err(resp.status);
+        }
+        if resp.payload.args_32()[2] == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(Duration::from_secs(resp.payload.args_32()[3] as u64)))
+        }
+    }
+
     /// Set `TCP_NODELAY` without blocking the polling thread.
     pub async fn set_nodelay_async(&self, nodelay: bool) -> Result<(), ErrorCode> {
         let mut req = io_channel::Msg::new();

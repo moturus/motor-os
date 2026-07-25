@@ -350,6 +350,22 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         assert!(!stream.nodelay_async().await.unwrap());
         stream.set_ttl_async(43).await.unwrap();
         assert_eq!(stream.ttl_async().await.unwrap(), 43);
+        assert_eq!(stream.linger_async().await.unwrap(), None);
+        stream
+            .set_linger_async(Some(Duration::from_secs(7)))
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.linger_async().await.unwrap(),
+            Some(Duration::from_secs(7))
+        );
+        stream.set_linger_async(Some(Duration::MAX)).await.unwrap();
+        assert_eq!(
+            stream.linger_async().await.unwrap(),
+            Some(Duration::from_secs(u32::MAX as u64))
+        );
+        stream.set_linger_async(None).await.unwrap();
+        assert_eq!(stream.linger_async().await.unwrap(), None);
     });
 
     drop(stream);
