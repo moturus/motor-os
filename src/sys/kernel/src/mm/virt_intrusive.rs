@@ -398,12 +398,17 @@ impl VmemSegment {
                 };
 
                 // Map the frame.
-                self.address_space().page_table.map_page(
+                if let Err(err) = self.address_space().page_table.map_page(
                     frame.get().unwrap().start(),
                     start,
                     PageType::SmallPage,
                     page_options,
-                );
+                ) {
+                    page_mut.clear();
+                    self.address_space().page_allocator.free_page(page);
+                    self.clear();
+                    return Err(err);
+                }
 
                 // Store the frame in the page.
                 page_mut.frame = frame;
@@ -442,7 +447,7 @@ impl VmemSegment {
                 start + offset,
                 PageType::SmallPage,
                 options,
-            );
+            )?;
             offset += PAGE_SIZE_SMALL;
         }
 
@@ -520,9 +525,12 @@ impl VmemSegment {
         let phys_addr = page.frame.get().unwrap().start();
         let virt_addr = page.start;
         let page_type = PageType::SmallPage;
-        self.address_space()
-            .page_table
-            .map_page(phys_addr, virt_addr, page_type, mapping_options);
+        self.address_space().page_table.map_page(
+            phys_addr,
+            virt_addr,
+            page_type,
+            mapping_options,
+        )?;
         // No TLB flush: the PTE went from non-present to present, and x86
         // CPUs don't cache non-present translations (and every unmap path
         // flushes), so no CPU — including this one — holds a stale entry.
@@ -567,7 +575,8 @@ impl VmemSegment {
                 that_page.start,
                 PageType::SmallPage,
                 mapping_options,
-            );
+            )?;
+            that_page.mapping_options = mapping_options;
 
             self_cursor.move_next();
             other_cursor.move_next();

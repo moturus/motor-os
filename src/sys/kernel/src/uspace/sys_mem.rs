@@ -146,6 +146,10 @@ fn sys_map(
             log::debug!("sys_mem_impl: bad flags");
             return ResultBuilder::invalid_argument();
         }
+        if !mapping_options.contains(MappingOptions::READABLE) {
+            log::debug!("sys_mem_impl: writable-only custom mapping");
+            return ResultBuilder::invalid_argument();
+        }
 
         if virt_addr < moto_sys::CUSTOM_USERSPACE_REGION_START
             || (virt_addr + (num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2))
@@ -231,10 +235,21 @@ fn sys_map(
             log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
             return ResultBuilder::invalid_argument();
         }
-        // W^X: no user mapping may be writable and executable.
+        if !opts.contains(MappingOptions::READABLE) {
+            log::debug!("sys_mem_impl: shared mapping is not readable");
+            return ResultBuilder::invalid_argument();
+        }
+        // W^X is enforced per mapping. The writable loader alias can refer
+        // to the same frame as an executable target mapping.
         if opts.contains(MappingOptions::EXECUTABLE) && opts.contains(MappingOptions::WRITABLE) {
             log::debug!("sys_mem_impl: W+X mapping rejected");
             return ResultBuilder::invalid_argument();
+        }
+        let target_is_self =
+            core::ptr::eq(address_space, curr_thread.owner().address_space().as_ref());
+        if target_is_self && opts.contains(MappingOptions::EXECUTABLE) && !io_manager {
+            log::debug!("sys_mem_impl: self executable mapping w/o CAP_IO_MAN");
+            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
         }
 
         return match address_space.alloc_user_shared(

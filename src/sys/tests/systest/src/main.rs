@@ -246,6 +246,43 @@ fn test_lazy_memory_map_write() {
     println!("test_lazy_memory_map_write: done");
 }
 
+fn test_invalid_memory_map_options() {
+    use moto_sys::*;
+
+    for flags in [
+        SysMem::F_SHARE_SELF,
+        SysMem::F_SHARE_SELF | SysMem::F_WRITABLE,
+        SysMem::F_SHARE_SELF | SysMem::F_EXECUTABLE,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_EXECUTABLE,
+    ] {
+        assert_eq!(
+            SysMem::map2(
+                SysHandle::SELF,
+                flags,
+                u64::MAX,
+                u64::MAX,
+                sys_mem::PAGE_SIZE_SMALL,
+                1,
+            ),
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+    }
+
+    assert_eq!(
+        SysMem::map2(
+            SysHandle::SELF,
+            SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_EXECUTABLE,
+            u64::MAX,
+            u64::MAX,
+            sys_mem::PAGE_SIZE_SMALL,
+            1,
+        ),
+        Err(moto_rt::E_NOT_ALLOWED)
+    );
+
+    println!("test_invalid_memory_map_options PASS");
+}
+
 // First-touch fault throughput: maps a lazy region and writes one u64 per
 // page. Each touch takes the full uspace #PF path (preempt machinery, see
 // scheduler-work.md S6/S8), so ns/fault tracks kernel #PF-entry costs.
@@ -361,6 +398,44 @@ fn test_nx() {
     assert!(!status.success());
 
     println!("test_nx() PASS");
+}
+
+fn test_writable_executable_elf_rejected() {
+    let mut bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    assert_eq!(&bytes[..4], b"\x7fELF");
+    assert_eq!(bytes[4], 2); // ELFCLASS64
+    assert_eq!(bytes[5], 1); // ELFDATA2LSB
+
+    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    let mut modified = false;
+    for idx in 0..phnum {
+        let offset = phoff + idx * phentsize;
+        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let flags = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        if kind == 1 && flags & 1 != 0 {
+            bytes[offset + 4..offset + 8].copy_from_slice(&(flags | 2).to_le_bytes());
+            modified = true;
+            break;
+        }
+    }
+    assert!(modified, "current executable has no executable PT_LOAD");
+
+    let path = std::env::temp_dir().join("systest-writable-executable-elf");
+    std::fs::write(&path, bytes).unwrap();
+    let result = std::process::Command::new(&path)
+        .arg("test-native-net-cancellation")
+        .spawn();
+    std::fs::remove_file(path).unwrap();
+
+    if let Ok(mut child) = result {
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        panic!("loader accepted a writable executable PT_LOAD: {status}");
+    }
+
+    println!("test_writable_executable_elf_rejected PASS");
 }
 
 fn test_caps() {
@@ -595,6 +670,7 @@ fn main() {
 
     // Run the logging test first, as it sets the logger for everything.
     logging::run_all_tests();
+    test_invalid_memory_map_options();
     test_lazy_memory_map_read();
     test_lazy_memory_map_write();
     bench_page_faults();
@@ -631,6 +707,7 @@ fn main() {
     spawn_wait_kill::test_pid_kill();
     test_oom();
     test_nx();
+    test_writable_executable_elf_rejected();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     tcp::run_all_tests();

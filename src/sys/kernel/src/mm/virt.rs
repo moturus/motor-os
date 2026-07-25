@@ -112,7 +112,8 @@ pub unsafe fn map_page(phys_addr: u64, virt_addr: u64, kind: PageType, options: 
     KERNEL_ADDRESS_SPACE
         .base
         .page_table
-        .map_page(phys_addr, virt_addr, kind, options);
+        .map_page(phys_addr, virt_addr, kind, options)
+        .expect("invalid kernel mapping options");
 }
 
 pub fn get_kernel_static_page_mut() -> &'static mut moto_sys::KernelStaticPage {
@@ -388,7 +389,7 @@ impl VmemRegion {
                     virt_addr,
                     PageType::SmallPage,
                     mapping_options,
-                );
+                )?;
             }
 
             vmem_segment.set_frame(virt_addr, frame);
@@ -438,9 +439,8 @@ impl VmemRegion {
         }
 
         let mut seg = VmemSegment::new(memory_segment, self, mapping_options);
-        self.bytes_used.fetch_add(size, Ordering::Relaxed);
-
         seg.allocate_pages()?;
+        self.bytes_used.fetch_add(size, Ordering::Relaxed);
         segments.insert(seg);
 
         unsafe { self.address_space.get() }.mem_stats.add(num_pages);
@@ -741,20 +741,28 @@ impl UserAddressSpaceBase {
 
         const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
 
-        self.base.page_table.map_page(
-            KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
-            KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
-            PageType::SmallPage,
-            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
-        );
+        self.base
+            .page_table
+            .map_page(
+                KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
+                KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
+                PageType::SmallPage,
+                MappingOptions::READABLE
+                    | MappingOptions::USER_ACCESSIBLE
+                    | MappingOptions::DONT_ZERO,
+            )
+            .expect("invalid kernel-static-page mapping options");
 
         let phys_addr = super::phys::phys_allocate_frameless(PageType::SmallPage).unwrap();
-        self.base.page_table.map_page(
-            phys_addr,
-            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
-            PageType::SmallPage,
-            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
-        );
+        self.base
+            .page_table
+            .map_page(
+                phys_addr,
+                PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+                PageType::SmallPage,
+                MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
+            )
+            .expect("invalid process-static-page mapping options");
         self.process_static_page_phys_addr
             .store(phys_addr, Ordering::Relaxed);
     }
@@ -863,48 +871,74 @@ impl UserAddressSpaceBase {
         let ptr_here = self as *const _ as usize;
         let ptr_there = other as *const _ as usize;
         if ptr_here == ptr_there {
+            if addr_here == addr_there {
+                log::debug!("map_shared: source and destination are identical");
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            }
+
             // TODO: here we duplicate the mapping code below, as
             // we have only one mutex guard, not two. Can this be
             // easily refactored to avoid duplicate code?
             let here_in_normal = self.normal_memory.segment.contains(addr_here);
             let there_in_normal = self.normal_memory.segment.contains(addr_there);
 
-            // One lock when both segments live in the same region; both
-            // locks (normal first, then custom — keep this order fixed)
-            // when they don't, e.g. sys-io loading its own vdso: text at a
-            // fixed custom-region address, the write alias in the normal
-            // region.
-            let lock_a;
-            let lock_b;
-            let map_here_segment;
-            let map_there_segment;
             if here_in_normal == there_in_normal {
-                lock_a = if here_in_normal {
+                let lock = if here_in_normal {
                     self.normal_memory.used_segments.lock(line!())
                 } else {
                     self.custom_memory.used_segments.lock(line!())
                 };
-                map_here_segment = lock_a.get(&addr_here);
-                map_there_segment = lock_a.get(&addr_there);
-            } else {
-                lock_a = self.normal_memory.used_segments.lock(line!());
-                lock_b = self.custom_memory.used_segments.lock(line!());
-                if here_in_normal {
-                    map_here_segment = lock_a.get(&addr_here);
-                    map_there_segment = lock_b.get(&addr_there);
-                } else {
-                    map_here_segment = lock_b.get(&addr_here);
-                    map_there_segment = lock_a.get(&addr_there);
+                let Some(map_here_segment) = lock.get(&addr_here) else {
+                    log::debug!("map_shared: can't find the source segment");
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                };
+                let Some(map_there_segment) = lock.get(&addr_there) else {
+                    log::debug!("map_shared: can't find the destination segment");
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                };
+
+                if map_there_segment.segment().size != map_here_segment.segment().size {
+                    log::debug!(
+                        "map_shared: segment sizes don't match: to: {} from: {}",
+                        map_there_segment.segment().size,
+                        map_here_segment.segment().size,
+                    );
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
                 }
+
+                // TODO: add a SegmentMap helper for borrowing two distinct
+                // entries mutably, then remove this same-region cast.
+                let there_mut = unsafe {
+                    (map_there_segment as *const _ as usize as *mut VmemSegment)
+                        .as_mut()
+                        .unwrap_unchecked()
+                };
+
+                return map_here_segment.share_with(
+                    there_mut,
+                    mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
+                );
             }
 
-            if map_there_segment.is_none() || map_here_segment.is_none() {
-                log::debug!("map_shared: can't find the segments to map");
+            // Cross-region sharing has two independent collections, so the
+            // destination can be borrowed mutably without a cast. Keep the
+            // lock order fixed: normal, then custom.
+            let mut normal = self.normal_memory.used_segments.lock(line!());
+            let mut custom = self.custom_memory.used_segments.lock(line!());
+            let (map_here_segment, map_there_segment) = if here_in_normal {
+                (normal.get(&addr_here), custom.get_mut(&addr_there))
+            } else {
+                (custom.get(&addr_here), normal.get_mut(&addr_there))
+            };
+
+            let Some(map_here_segment) = map_here_segment else {
+                log::debug!("map_shared: can't find the source segment");
                 return Err(moto_rt::E_INVALID_ARGUMENT);
-            }
-
-            let map_there_segment = map_there_segment.unwrap();
-            let map_here_segment = map_here_segment.unwrap();
+            };
+            let Some(map_there_segment) = map_there_segment else {
+                log::debug!("map_shared: can't find the destination segment");
+                return Err(moto_rt::E_INVALID_ARGUMENT);
+            };
 
             if map_there_segment.segment().size != map_here_segment.segment().size {
                 log::debug!(
@@ -915,18 +949,8 @@ impl UserAddressSpaceBase {
                 return Err(moto_rt::E_INVALID_ARGUMENT);
             }
 
-            // Rust does not allow concurrent mutable access to elements of
-            // a collection, so we need to remove const "unsafely". This is
-            // actually safe, as everything is protected by the lock(s)
-            // taken above.
-            let there_mut = unsafe {
-                (map_there_segment as *const _ as usize as *mut VmemSegment)
-                    .as_mut()
-                    .unwrap_unchecked()
-            };
-
             return map_here_segment.share_with(
-                there_mut,
+                map_there_segment,
                 mapping_options | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
             );
         }

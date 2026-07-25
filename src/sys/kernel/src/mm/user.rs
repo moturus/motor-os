@@ -402,7 +402,7 @@ impl UserAddressSpace {
             virt_addr,
             crate::mm::PageType::MidPage,
             MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE,
-        );
+        )?;
 
         Ok(MemorySegment {
             start: virt_addr,

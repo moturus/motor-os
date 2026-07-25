@@ -38,8 +38,9 @@ impl SysMem {
     pub const F_SHARE_SELF: u32 = 0x10;
     pub const F_LAZY: u32 = 0x20; // Just a hint.
     pub const F_CUSTOM_USER: u32 = 0x40;
-    // Only valid with F_SHARE_SELF, applies to the target side (ELF text
-    // loading; the caller's side is always mapped R+W). W+X is rejected.
+    // Only valid with F_SHARE_SELF; applies to the target mapping, while the
+    // caller gets an R+W alias to the same frames. W+X is rejected per mapping.
+    // Targeting the caller's own address space requires CAP_IO_MANAGER.
     pub const F_EXECUTABLE: u32 = 0x80;
 
     // Bit flags for query.

@@ -278,6 +278,10 @@ impl elfloader::ElfLoader for Loader {
         load_headers: elfloader::LoadableHeaders<'_, '_>,
     ) -> Result<(), elfloader::ElfLoaderErr> {
         for header in load_headers {
+            if header.flags().is_write() && header.flags().is_execute() {
+                return Err(elfloader::ElfLoaderErr::UnsupportedElfFormat);
+            }
+
             let vaddr_start = header.virtual_addr() & !(moto_sys::sys_mem::PAGE_SIZE_SMALL - 1);
             let vaddr_end = moto_sys::align_up(
                 header.virtual_addr() + header.mem_size(),
@@ -295,7 +299,7 @@ impl elfloader::ElfLoader for Loader {
             if header.flags().is_write() {
                 flags |= moto_sys::SysMem::F_WRITABLE;
             }
-            if header.flags().is_execute() && !header.flags().is_write() {
+            if header.flags().is_execute() {
                 flags |= moto_sys::SysMem::F_EXECUTABLE;
             }
 

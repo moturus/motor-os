@@ -722,7 +722,7 @@ impl PageTable {
         virt_addr: u64,
         kind: PageType,
         options: MappingOptions,
-    ) {
+    ) -> Result<(), ErrorCode> {
         let mut options = options;
         let dont_zero =
             options.contains(MappingOptions::DONT_ZERO) || options.contains(MappingOptions::MMIO);
@@ -752,18 +752,19 @@ impl PageTable {
         } else if options == (MappingOptions::READABLE) {
             PTE::PRESENT | PTE::ACCESSED
         } else {
-            todo!(
-                "mapping options not implemented: 0x{:x} 0x{:x} {:?}",
+            log::error!(
+                "invalid mapping options: 0x{:x} 0x{:x} {:?}",
                 phys_addr,
                 virt_addr,
                 options
-            )
+            );
+            return Err(moto_rt::E_INVALID_ARGUMENT);
         };
 
         if user {
             pte_flags |= PTE::USER;
-            // W^X: user pages are NX unless explicitly mapped EXECUTABLE
-            // (ELF text segments only; the sys_mem API rejects W+X).
+            // Per-mapping W^X: user pages are NX unless explicitly mapped
+            // EXECUTABLE; the sys_mem API rejects a writable executable leaf.
             // Kernel leaves are left executable this round.
             if !executable {
                 pte_flags |= PTE::NX;
@@ -784,6 +785,8 @@ impl PageTable {
         if !dont_zero {
             zero_page(phys_addr + PAGING_DIRECT_MAP_OFFSET, kind);
         }
+
+        Ok(())
     }
 
     pub fn unmap_page(&self, phys_addr: u64, virt_addr: u64, kind: PageType) {
