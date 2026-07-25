@@ -863,6 +863,43 @@ fn test_tcp_loopback() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
+fn test_tcp_linger() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::scope(|scope| {
+        let accept = scope.spawn(move || listener.accept().unwrap().0);
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let peer = accept.join().unwrap();
+        let fd = client.as_raw_fd();
+
+        assert_eq!(moto_rt::net::linger(fd).unwrap(), None);
+
+        moto_rt::net::set_linger(fd, Some(Duration::ZERO)).unwrap();
+        assert_eq!(moto_rt::net::linger(fd).unwrap(), Some(Duration::ZERO));
+
+        moto_rt::net::set_linger(fd, Some(Duration::from_secs(7))).unwrap();
+        assert_eq!(
+            moto_rt::net::linger(fd).unwrap(),
+            Some(Duration::from_secs(7))
+        );
+
+        moto_rt::net::set_linger(fd, Some(Duration::from_secs(120))).unwrap();
+        assert_eq!(
+            moto_rt::net::linger(fd).unwrap(),
+            Some(Duration::from_secs(60))
+        );
+
+        moto_rt::net::set_linger(fd, None).unwrap();
+        assert_eq!(moto_rt::net::linger(fd).unwrap(), None);
+
+        drop(client);
+        drop(peer);
+    });
+    println!("test_tcp_linger() PASS");
+}
+
 pub fn test_zero_port_listen() {
     static HELLO: &[u8] = b"hello";
     static BYE: &[u8] = b"see you later";
@@ -1426,6 +1463,7 @@ pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
+    test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();
     test_write_timeout();

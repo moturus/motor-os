@@ -1056,6 +1056,16 @@ impl TcpStream {
                     let ttl = *(ptr as *const u32);
                     self.set_ttl(ttl)
                 }
+                moto_rt::net::SO_LINGER => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    let millis = *(ptr as *const u64);
+                    let duration = if millis == u64::MAX {
+                        None
+                    } else {
+                        Some(Duration::from_millis(millis))
+                    };
+                    self.set_linger(duration)
+                }
                 _ => panic!("unrecognized option {option}"),
             }
         }
@@ -1094,6 +1104,18 @@ impl TcpStream {
                     match self.ttl() {
                         Ok(ttl) => {
                             *(ptr as *mut u32) = ttl;
+                            moto_rt::E_OK
+                        }
+                        Err(err) => err,
+                    }
+                }
+                moto_rt::net::SO_LINGER => {
+                    assert_eq!(len, core::mem::size_of::<u64>());
+                    match self.linger() {
+                        Ok(duration) => {
+                            *(ptr as *mut u64) = duration
+                                .map(|duration| duration.as_millis() as u64)
+                                .unwrap_or(u64::MAX);
                             moto_rt::E_OK
                         }
                         Err(err) => err,
@@ -1595,9 +1617,6 @@ impl TcpStream {
         resp.status
     }
 
-    // SO_LINGER is implemented against sys-io but not yet wired to the
-    // setsockopt/getsockopt dispatch; kept for when the native API adds it.
-    #[allow(dead_code)]
     fn set_linger(&self, dur: Option<Duration>) -> ErrorCode {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamSetOption as u16;
@@ -1612,7 +1631,6 @@ impl TcpStream {
         self.channel().send_receive(req).status
     }
 
-    #[allow(dead_code)]
     fn linger(&self) -> Result<Option<Duration>, ErrorCode> {
         let mut req = io_channel::Msg::new();
         req.command = api_net::NetCmd::TcpStreamGetOption as u16;
