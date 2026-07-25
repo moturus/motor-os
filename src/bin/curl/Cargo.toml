@@ -1,0 +1,15 @@
+[package]
+name = "curl"
+description = "A small curl-compatible HTTPS client for Motor OS."
+authors = ["The Motor OS Project Developers"]
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+codegen-units = 1
