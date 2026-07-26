@@ -1,0 +1,136 @@
+use std::io::{BufReader, Read, Write};
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use curl::{CurlError, Options};
+use rustls::version::{TLS12, TLS13};
+use rustls::{ServerConfig, ServerConnection, Stream};
+
+const CERTIFICATE: &[u8] = include_bytes!("server-cert.pem");
+const PRIVATE_KEY: &[u8] = include_bytes!("server-key.pem");
+
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name)
+}
+
+fn server_config() -> Arc<ServerConfig> {
+    let certificates = rustls_pemfile::certs(&mut BufReader::new(CERTIFICATE))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let private_key = rustls_pemfile::private_key(&mut BufReader::new(PRIVATE_KEY))
+        .unwrap()
+        .unwrap();
+    let mut config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&TLS13, &TLS12])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(certificates, private_key)
+            .unwrap();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Arc::new(config)
+}
+
+fn serve(response: &'static [u8]) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut connection = ServerConnection::new(server_config()).unwrap();
+        let mut stream = Stream::new(&mut connection, &mut socket);
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while request.len() < 64 * 1024 {
+            if stream.read_exact(&mut byte).is_err() {
+                return;
+            }
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                stream.write_all(response).unwrap();
+                stream.flush().unwrap();
+                return;
+            }
+        }
+    });
+    (format!("https://{address}/object"), handle)
+}
+
+fn options(url: String) -> Options {
+    Options {
+        ca_cert: Some(fixture_path("test-ca.pem")),
+        url,
+        connect_timeout: Duration::from_secs(2),
+        max_time: Duration::from_secs(3),
+        speed_time: Duration::from_secs(2),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn transfers_a_verified_https_response() {
+    let (url, server) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+    let mut body = Vec::new();
+    let info = curl::transfer(&options(url.clone()), &mut body).unwrap();
+    server.join().unwrap();
+    assert_eq!(body, b"hello");
+    assert_eq!(info.response_code, 200);
+    assert_eq!(info.url_effective, url);
+    assert_eq!(info.size_download, 5);
+}
+
+#[test]
+fn binary_separates_body_and_write_out_trailer() {
+    let (url, server) = serve(
+        b"HTTP/1.1 302 Found\r\nContent-Length: 4\r\n\
+          Location: /next\r\n\r\nbody",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_curl"))
+        .args([
+            "--silent",
+            "--show-error",
+            "--cacert",
+            fixture_path("test-ca.pem").to_str().unwrap(),
+            "--write-out",
+            "%{stderr}\\nstatus=%{response_code}\\nurl=%{url_effective}\\nredirect=%{redirect_url}\\nsize=%{size_download}\\n",
+            "--url",
+            &url,
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"body");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "\nstatus=302\nurl={url}\nredirect=https://{}/next\nsize=4\n",
+            url.strip_prefix("https://")
+                .unwrap()
+                .split('/')
+                .next()
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn rejects_an_untrusted_server_certificate() {
+    let (url, server) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    let mut options = options(url);
+    options.ca_cert = Some(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../img_files/motor-os/sys/cfg/ssl/ssl-cert.pem"),
+    );
+    let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.code(), CurlError::CERTIFICATE);
+}
