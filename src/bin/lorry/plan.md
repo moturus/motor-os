@@ -1,7 +1,70 @@
 # Lorry Design and Implementation Plan
 
-Status: **Stage 2 vendoring in progress — the reviewed curl graph and
-composite ring seed are complete; direct curl acquisition is next**
+Status: **Stage 2 implementation in progress — the core build, cache, bundle,
+and registry-vendoring paths are implemented; Motor sandboxing and final curl
+closure remain**
+
+## Current Stage-2 checkpoint (2026-07-26)
+
+This is the authoritative resume point. The later round-by-round checkpoints
+are retained as history and may describe work that has since been completed.
+
+Already implemented:
+
+- Stage 1 is complete: dependency-free bootstrap, `build`, `run`, and `test`;
+  Linux, cross-Motor, and native-Motor self-build and Cargo identity gates.
+- Stage 2 parses and resolves the supported Cargo subset, validates lockfiles
+  and explicit path patches, applies target/features/policy, verifies layered
+  content-addressed repositories, and builds dependency, build-script, root,
+  and integration-test units.
+- Linux build-script isolation, the build cache, `rush` acceptance surface,
+  `--test`, `--no-run`, and the self-extracting test bundle are implemented.
+  The core Stage-2 Lorry self-build path works from the reviewed system seed.
+- Vendoring holds a project lock, downloads bounded sparse records and crate
+  archives through the configured curl executable, verifies and privately
+  stages them, presents inspection evidence, applies per-package approval or
+  `--accept-all`, and publishes immutable repository objects before committing
+  `Cargo.lock` last. Publication is atomic and no-replace on Linux and Motor.
+- Redirect trust uses initially empty persistent allow/deny lists. An unknown
+  HTTPS site is prompted independently of package approval and may be allowed
+  or denied for the current operation or persistently.
+- A fresh public crates.io run has populated a repository from the minimal
+  patched-`ring` seed, and a second warm run reused it without fetching.
+  Native compiler/archiver roles are target-specific; Linux defaults to Clang
+  and `ar`, and Lorry has built the reviewed patched `ring` and `src/bin/curl`
+  graph on Linux.
+- The independent Motor curl utility implements Lorry's required HTTPS/CLI
+  subset and has deterministic local TLS coverage. Lorry invokes it through
+  the same direct curl command/stream contract used with upstream Linux curl.
+
+Remaining before Stage 2 can close:
+
+1. Resolve the offline Cargo-oracle input gap for the curl lockfile. The
+   production 45-object seed intentionally contains the selected graph, while
+   Cargo also requires inactive target packages named by `Cargo.lock` (the
+   first missing package observed was `wasi`). Prefer an oracle-only complete
+   lockfile view unless a different trust-boundary change is reviewed; then
+   finish the same-tool Clang/`ar` Cargo-versus-Lorry Linux identity check.
+2. Finish item 7's Lorry-level deterministic TLS/error fixtures and registry
+   interruption, concurrent-publication, and all-or-none transaction fixtures.
+   Turn the already successful public crates.io acquisition into its planned
+   opt-in acceptance lane and prove undeclared native child tools are denied.
+3. Replace the explicit Motor build-script sandbox warning stub with enforced
+   isolation and pass the network, filesystem, environment, and child-process
+   denial fixtures. External Gate 11 remains mandatory.
+4. Complete curl closure: build patched `ring` and curl for cross-Motor and
+   native Motor, run Motor entropy and verified-HTTPS fixtures, use the
+   Lorry-built curl on both platforms to populate a second fresh repository,
+   and rebuild curl using only that repository plus the system `ring`.
+5. Run the final pristine debug/release, Cargo 1.97/1.98 identity,
+   cold/warm/corrupt-cache, fresh-vendor, cross/native, and `--full` matrices
+   (including the three-pass repository test rule), audit all pinned inputs and
+   native tools, document every rejected Cargo capability, and publish the
+   Stage-2 support matrix.
+
+Resume with item 1. It is the immediate blocker for the clean Linux curl
+identity comparison; do not broaden the production trust seed merely to make
+Cargo's oracle accept inactive lockfile entries without explicit review.
 
 This is a living document. Statements under **Agreed requirements** come from
 the project brief or later discussion. The round-by-round decision record
