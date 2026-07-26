@@ -5,14 +5,18 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 # Nothing here, and the goal is to keep it that way: rmux is std-only on both
-# platforms (plan.md §4.6). The one Motor-specific thing it needs is the
+# platforms (details.md §4.6). The one Motor-specific thing it needs is the
 # `MOTURUS_STDIO_IS_TERMINAL` env var, which is a string literal passed to
 # `Command::env`, not a dependency.
 #
-# A host-only `libc` will arrive with the test harness, which needs TIOCGWINSZ
-# and a pty to drive rmux over (§9.1) — as in rush, under
-# `[target.'cfg(unix)'.dependencies]`, never reaching the Motor build.
 [dependencies]
+
+# Host only, and never reaching the Motor build — as in rush. The host is the
+# platform with the things Motor OS does not have and rmux needs there: a pty
+# to give a pane's child (§3.1), TIOCGWINSZ to ask the console its size (§3.2),
+# and termios to put that console in raw mode, which on Motor it always is.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 panic = "abort"

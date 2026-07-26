@@ -4,9 +4,18 @@ A pure-Rust, dependency-free clone of the useful half of tmux, built to the
 defaults in `~/.tmux.conf`, in the manner of `red` and `rush`: raw ASCII over the
 console, minimal redraws, behavior checked against the Linux prototype.
 
-This document is the plan. It is meant to be cited from doc comments the way
-`rush`'s README is ("a Phase 3 limit", "§0.1"), and to be edited as the phases
-land.
+This document is the design, and the record of what was measured to arrive at
+it. `README.md` is the summary — what rmux is, how it is used, and what it does
+not do; this is the detail behind every line of it. Doc comments throughout the
+crate cite it by section ("details.md §3.1"), the way `rush`'s code cites its
+README, so a section here is the long answer to a comment there.
+
+It was written first as a plan, and it is left standing because the reasoning
+outlived the planning: §3 is the argument that a multiplexer needs no pty, §4.2
+is why the transport is loopback TCP, §9 is why conformance is measured against
+tmux rather than asserted, and §10 is what each phase actually cost — including
+the things that turned out not to be true. Everything in it is built, with the
+exceptions listed under §10's last entry.
 
 ---
 
@@ -125,7 +134,7 @@ default-shell     = "sh"       # what a pane runs; dash on Linux, rush on Motor 
 history-limit     = 9999999    # scrollback lines per pane (see §7.5)
 renumber-windows  = true
 aggressive-resize = true
-mode-keys         = "vi"       # "vi" or "emacs"; only "vi" is implemented
+mode-keys         = "vi"       # "vi" or "emacs"
 status            = true       # show the status line
 ```
 
@@ -249,6 +258,34 @@ Three mechanisms, in the order a pane will use them:
 3. **On resize**, update both, and let the pane discover it at its next probe.
    Panes are not notified; nothing on Motor can notify them.
 
+**What "at its next probe" cost, measured in M7 — and the fourth mechanism it
+forced.** A shell probes when it prints a prompt, so a pane resized *while a
+prompt is up* — which is what every split does to the pane it divides — kept the
+old width until the prompt after the next one. In rush the visible consequence
+was a stray `%`: `mark_partial_line` (`rush/src/term.rs:849`) is zsh's
+`PROMPT_SP` trick, writing a marker plus `cols-1` spaces so that a cursor
+already at column 0 fills the row exactly and the `\r` brings it back under the
+prompt. With a stale width those spaces overflow, the marker stays on screen and
+the prompt lands a row or two below it.
+
+4. **On resize, answer the question again — for a program that has asked it
+   before.** `ESC[6n` is how a program asks (mechanism 1), and a program that has
+   asked once has a parser for the answer by construction. So rmux re-answers,
+   unasked, with the pane's new size: rush takes it as an ordinary key and
+   updates its width immediately, and red turns it straight into a resize
+   (`red/src/main.rs:43`), which is what red otherwise polls for once a second.
+   This is the closest thing to a `SIGWINCH` that Motor can have, and it is built
+   out of a channel the program itself opened rather than invented.
+
+   **The guard is the whole safety of it.** A program that has never asked —
+   `cat`, a compiler — is sent nothing, because an unsolicited report reaching a
+   program with no parser for it is junk on the screen or junk in a file. Proved
+   by falsification: answering everybody breaks the test where a shell is sent
+   `stty size`, because the report lands in front of the command and the shell
+   runs neither. What remains is a pane whose shell has asked and which is now
+   running something that has not; it sees one echoed `^[[..R`, which is a better
+   trade than a stray mark after every split.
+
 #### The two idioms rmux must satisfy
 
 This is not theoretical: the two programs that will live in rmux's panes ask in
@@ -367,6 +404,30 @@ the only thing one process may do to another is terminate it. So:
 
 - `^C` in a pane is byte `0x03` written to that pane's stdin. rush interprets it
   (`term.rs:906`); arbitrary programs may not, and that is their business.
+- **Kill once, collect once.** `SysCpu::OP_KILL` aimed at a process that has
+  already been waited for **does not return** on Motor. rmux hit it by killing
+  every pane of a session that was ending, including one whose exit it had just
+  collected: the server stopped inside the syscall with the session
+  half-torn-down, the client waited on a server that would never speak again,
+  and the test suite stalled behind that. `mdbg` named it — the main thread in
+  syscall `1:4` while the pane's shell showed no live threads. A pane now
+  remembers that it has collected its child, and neither kills nor waits for it
+  twice (`pane::Pane::collected`). Worth fixing on the kernel side as well:
+  killing something that has already been reaped should be an error, not a wait.
+- **Terminate, then collect.** Killing is only half of it. On the host a child
+  nobody waited for is a zombie for as long as the server runs. On Motor the
+  same omission is worse in principle: process statistics live in a tree where a
+  child's entry keeps a *strong* reference to its parent's
+  (`kernel/src/xray/stats.rs:376`), so one entry that is never freed pins every
+  ancestor with it — a pane's shell would pin the server, the client that
+  started it, and the login shell above that, which is the shape of a five-deep
+  chain of `DEAD` entries seen once in the wild. That chain could **not** be
+  reproduced from a missing `wait`, on either the build that produced it or the
+  one after: Motor frees a dropped child's entry without a wait in every case
+  that could be constructed, so what pinned it is still unaccounted for and
+  probably lives in the kernel's teardown path. `Drop for Pane` closes rmux's
+  half regardless, and deliberately does not wait for the pane's *pumps*: a
+  grandchild holding the pipes open would make that a hang (§4.5).
 - Killing a pane is `Child::kill()` — unconditional, uncatchable.
 - `Child::id()` returns 0 on Motor and `std::process::id()` *panics*
   (`rush/src/sys/mod.rs:174`). rmux therefore keys panes by its own `PaneId`
@@ -438,9 +499,31 @@ close to deliver anything — the server's final `Exit` to a client, and a clien
 This is the same drain-before-close discipline `russhd` needs on its pipes
 (`local_session.rs:161-166`), in a second place.
 
-The port file needs a writable path. Motor's convention is `/sys/tmp` (a
-`static_dirs` entry in `src/imager/motor-os.yaml`); the Linux host uses
-`$TMPDIR`. One `sys::` constant.
+**Done, corrected after M6.** The discipline has *two* halves, and only one of
+them was built. The writer thread waits for the client to close before dropping
+the socket — but the server process exiting closes the socket under it, which
+discards the same write. `rmux; exit 5` therefore exited 5 about 99 times in 100
+and 1 the other time, the client having seen the connection go instead of the
+status. The server now waits for its client writers before it goes
+(`Server::say_goodbye`), and a client taken off the list keeps its writer thread
+until then, because the message that matters most is the `Exit` sent *as* the
+client is dropped. Falsified at 2/300 runs with the wait removed, 0/300 with it;
+pinned deterministically by two `server::tests`, since a 1-in-100 race is not
+something a test can be trusted to catch.
+
+**Also corrected: every question gets an answer.** `kill-session` was handled
+silently, and `client::ask` blocks on a reply — so the command hung whenever the
+server survived the kill (any other session still open). Killing the *last*
+session hid it: the server exits, and the socket closing looked like an answer.
+`ToClient::Done` is that answer now.
+
+The port file needs a writable path. Motor's convention is `/sys/tmp` and the
+Linux host uses `$TMPDIR` — one `sys::` function. **Correction, measured in
+M4:** `/sys/tmp` does *not* exist on the image. `static_dirs` in
+`src/imager/motor-os.yaml` names host directories to copy in, not directories
+to create, and git cannot track an empty one. `/sys` is writable, so rmux
+creates the directory on first use; that is one `mkdir` rather than a change to
+the image, and it keeps M4 an rmux-only patch.
 
 ### 4.3 What runs in a pane: `sh`
 
@@ -538,6 +621,14 @@ blasting output fills the ring and blocks in `write`, so the pumps must drain
 continuously and must never be stalled behind rendering. This is why the pumps
 are threads and the renderer is not on their path.
 
+**The same is true in the other direction, and M8 built it.** More than 2 KiB
+written *to* a pane whose program is not reading blocks the writer, and the
+writer of a paste (§7.6) is the event loop. So a pane's input has a thread of
+its own too: bytes go into a channel and the thread does the waiting. The host
+is the odd one out and in the more dangerous direction — its pty discards what
+will not fit and reports success — which is a lossy paste there and a
+documented divergence.
+
 **stdout and stderr are separate pipes**, where a pty would merge them into one
 stream. Both feed the same pane emulator, so interleaving at a byte level may
 differ from Linux under heavy concurrent output. Documented divergence.
@@ -545,6 +636,20 @@ differ from Linux under heavy concurrent output. Documented divergence.
 Take `russhd`'s drain-before-close discipline (`local_session.rs:161-166`): a
 dead child's pipes may still hold output, so a pane that exits must be drained
 before it is closed, or short commands lose all of it.
+
+**A timeout is not a clock.** Measured on Motor in M7: `Receiver::recv_timeout`
+reports a timeout *before* its duration is up. A condition variable is allowed
+to wake spuriously and this one does, so every wait with a deadline has to ask
+[`std::time::Instant`] whether the time is really up and go round again if it is
+not. What this cost, before it was understood: a 200 ms window for the console's
+size answer that ended after about 8 ms, so the first frame was painted at the
+fallback size and then again — the exact symptom being fixed. The same mistake
+in the other three waits would have been worse than the bugs they close: the
+escape-time flush would give up on a half-arrived arrow key and type an `Esc`
+and some junk into a pane; the client's "nothing answered" deadline would take
+a working session down at random; and the farewell would drop a connection with
+the exit code still unread. All four now measure against a clock, and
+`proto::timed_out` says so where a caller might be tempted otherwise.
 
 ### 4.6 Dependencies: none
 
@@ -567,7 +672,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"   # host only: TIOCGWINSZ, and the pty the tests drive
+libc = "0.2"   # host only: the pane's pty, TIOCGWINSZ, and termios
 
 [profile.release]
 panic = "abort"
@@ -576,8 +681,10 @@ strip = true
 codegen-units = 1
 ```
 
-`libc` is host-only and test-facing, exactly as in rush — it never reaches the
-Motor build.
+`libc` is host-only, exactly as in rush — it never reaches the Motor build. It
+buys the three things the host has and Motor does not: a pty to give a pane's
+child, the ioctls to ask and tell a terminal its size, and the termios to make
+a console raw (§10, M1).
 
 Note `panic = "abort"`: the `TerminalGuard`'s `Drop` will **not** run in release.
 The panic *hook* is what restores the console, as in red
@@ -595,7 +702,7 @@ the binary.
 | `sys/{mod,motor,unix}.rs` | The platform seam: `TermImpl::size()`, the is-terminal env key, the tmp path, the Enter encoding. `cfg(unix)`/`cfg(not(unix))`, per rush — **not** `target_os = "motor"` (Motor sets no target family; see `red/src/config.rs:38`). |
 | `ansi.rs` | The VT parser: bytes → `Action`. Pure. |
 | `grid.rs` | `Cell`, `Grid`, cursor, scroll region, alt screen, scrollback. Pure. |
-| `pane.rs` | A pane: the `sh` child (§4.3), pipes, `Grid`, `ansi` parser, `ESC[6n` answering (§3.2). No `cfg` — it spawns a bare `sh` and the platform resolves it. |
+| `pane.rs` | A pane: the `sh` child (§4.3), pipes, `Grid`, `ansi` parser, `ESC[6n` answering (§3.2). No `cfg` — it spawns a bare `sh` and the platform resolves it. Also holds `Event`, the one channel every byte source funnels into (§4.5), until `server.rs` arrives to own it. |
 | `layout.rs` | The split tree, geometry, directional selection, resize. |
 | `window.rs` | The window list, renumbering, `aggressive-resize`. |
 | `session.rs` | The session list (§7.3): naming, switching, the attached-client set. |
@@ -701,7 +808,7 @@ with two fixes:
   (`term.rs:589`).
 - **Use `Option<Frame>`, not a length check.** rush's formulation is better:
   `None` means "the screen is not ours to reason about, next paint is full"
-  (`term.rs:583-586`). Set it to `None` on `^L`, on resize, and after anything
+  (`term.rs:583-586`). Set it to `None` on a refresh, on resize, and after anything
   writes to the console behind the compositor's back.
 
 Absolute `ESC[{r};{c}H` positioning throughout. rush uses relative motion and
@@ -822,7 +929,8 @@ representation, so it does not care which side of the boundary a line is on.
 
 `mode-keys vi`, so: `prefix-[` enters, `q`/`Esc` leaves, `hjklwb0$`, `g`/`G`,
 `C-u`/`C-d`/`C-f`/`C-b`, `/` and `?` search with `n`/`N`, `Space` starts the
-selection, `Enter` copies it and exits. `prefix-]` pastes the top buffer into the
+selection, `Enter` copies it and exits. `mode-keys emacs` is the same commands
+under tmux's other table (M9). `prefix-]` pastes the top buffer into the
 active pane — as *input bytes*, exactly as if typed.
 
 Pasting as keystrokes is what tmux does and it is worth stating plainly: pasted
@@ -969,7 +1077,7 @@ the screen scraper. Running the case inside an outer `tmux new-session` lets
 `tmux capture-pane -p` return the grid the inner multiplexer painted, and
 `tmux list-panes -F '#{pane_left},#{pane_top},#{pane_width},#{pane_height}'`
 return its geometry — no hand-written reference emulator in the harness at all.
-Verified working against tmux 3.4 while writing this plan. Use it for geometry
+Verified working against tmux 3.4 before any of this was built. Use it for geometry
 assertions; use the replayed-grid path for content, since it is what the VM
 harness can also do.
 
@@ -982,8 +1090,8 @@ and flickers the whole way… so it is the bytes that have to be tested".
 
 Claims worth pinning: a keystroke echoed in a pane costs the bytes of that
 keystroke; moving between panes repaints no pane content; a status-line clock
-tick rewrites only the digits that changed; a full repaint happens only on resize
-and `^L`.
+tick rewrites only the digits that changed; a full repaint happens only on a
+resize and on `refresh-client`.
 
 ### 9.3 Pure unit tests
 
@@ -995,6 +1103,20 @@ no file I/O and tests are not at the mercy of the config file on the machine
 running them" (`editor.rs:121-124`).
 
 Test names are full sentences, per rush.
+
+**A test that starts a session must end it.** Learned the hard way: 827 rmux
+servers, each holding a live `sh`, accumulated on the development host over a few
+hundred runs of the host suite. Not a server bug — a session outliving its client
+is what a detach *is* (§7.3), so killing the client is exactly the wrong cleanup.
+`tests/host.rs` asks the server to end its sessions through the real
+`kill-session` (which is also what reaps the pane's shell, §3.6), and the server
+exits when the last one goes. Two consequences worth keeping:
+
+- **Cleanup runs from a destructor, so it must be bounded.** An rmux command that
+  hangs there hangs every test after it and the suite reports nothing at all.
+  Every command the teardown runs gets a deadline and a kill.
+- **A scratch directory is state too.** Each test gets one (`$TMPDIR`, so that
+  parallel tests do not meet on one port file) and each removes its own.
 
 ### 9.4 On the real thing
 
@@ -1033,7 +1155,7 @@ terminal, and it is the path that does not eat `C-a`.
 
 Each phase ends with something demonstrable and tested.
 
-**M0 — Spikes and scaffolding. Done.** The measurements this plan rests on, both
+**M0 — Spikes and scaffolding. Done.** The measurements everything else rests on, both
 cheap and both disqualifying if wrong:
 1. Orphan survival (§4.4) — detach is worthless without it. Measured: a plain
    orphan *is* reaped on Motor, which forced a new OS primitive — detached spawn,
@@ -1045,74 +1167,657 @@ Also landed: qemu `-echr` in a run-script variant (§9.4); the crate skeleton; t
 `sys::` seam; Makefile + `src/imager/motor-os.yaml` wiring; and the sys-tty `^C`
 patch (§3.5). Loopback TCP needed no spike — systest already proves it (§4.2). The
 two `spike-` subcommands were deleted once their answers were recorded above, per
-the plan; the crate is now a clean library seam over a placeholder `run`, ready
+plan; the crate is now a clean library seam over a placeholder `run`, ready
 for M1.
 
-**M1 — One pane, no UI.** Spawn `sh` (§4.3) on piped stdio with the is-terminal
-env var; pump bytes both ways; drain on exit. This is sys-tty reimplemented inside
-rmux, and it proves the whole pty-equivalent claim of §3.1 before anything is
-built on it. The milestone: an interactive rush, reached through rmux, that
-cannot tell the difference — including `is_terminal()`.
+**M1 — One pane, no UI. Done.** Spawn `sh` (§4.3) on piped stdio with the
+is-terminal env var; pump bytes both ways; drain on exit. This is sys-tty
+reimplemented inside rmux, and it proves the whole pty-equivalent claim of §3.1
+before anything is built on it. The milestone: an interactive rush, reached
+through rmux, that cannot tell the difference — including `is_terminal()`.
 
-**M2 — The emulator.** `ansi.rs` + `grid.rs`, pure, unit-tested on Linux. No
-rendering yet. Deferred wrap, scroll regions, alt screen, `ESC[6n`.
+**Verified on the VM, on both terminals** (§3.3 — they are two different ones):
+over SSH and on the serial console through sys-tty, `rmux` starts a pane whose
+rush prints its interactive prompt, runs commands, and fires the
+`ESC[999C ESC[6n` width probe of §3.2. rmux does not answer that probe yet —
+the bytes cross it and whatever is at the far end of rmux's *own* console
+answers, or nothing does and rush falls back to its 80-column default. Both are
+wrong once there is more than one pane, which is M3's job. Exiting the pane
+returns to the outer shell. The §4.3 spawn chain is confirmed in the kernel log
+exactly as predicted: `spawn /bin/rmux` → `spawn sh` → PATH finds `/bin/sh` →
+its `#!/bin/rush` shebang → `spawn /bin/rush`, with no shebang handling in rmux.
 
-**M3 — Rendering.** The compositor and frame diff, one full-screen pane. The
-milestone: **`red` runs inside rmux**, sized correctly, because rmux answers its
-`ESC[6n`. If red works, the emulator is real.
+Bytes cross in both directions **unexamined**, which is §8.1's rule rather than
+an M1 shortcut. Nothing re-encodes Enter yet (§3.4 — unnecessary while
+forwarding is verbatim, because sys-tty's CRLF simply passes through).
 
-**M4 — The split.** Server, client, transport, detach, attach, and the session
-list (§7.3) — sessions arrive with the server that holds them, not later. Design the seam
-from M1 (server core as a library, client thin) and implement it in-process
-first, so M4 moves a boundary rather than inventing one.
+**The host got its terminal too.** rmux is meant to run on Linux, not merely
+build there, and that needs the three things Motor does not have: a real pty
+for the pane (`isatty()` is a property of the descriptor here, so no
+environment variable can forge it), `TIOCGWINSZ` to ask the console its size
+and `TIOCSWINSZ` to tell the pane, and termios to put rmux's own console in raw
+mode — which on Motor it permanently is. All three live in `sys::unix` behind
+`spawn_pane`/`console_size`/`RawConsole`, so `pane.rs` has no `cfg` in it.
 
-**M5 — Config and input.** The default key tables (§2.1), the prefix,
-`send-prefix`, and `rmux.toml` (§2.2) on top of them. After this the defaults are
-compiled in rather than prose, and overridable.
+Two asymmetries survive the seam and are worth stating:
 
-**M6 — Windows and sessions.** Windows: new, next, previous, select, rename,
-kill, `renumber-windows`. Sessions: `new`/`attach`/`ls`/`kill-session`, `prefix-(`
-and `prefix-)`, `prefix-$`, and the `prefix-s` list (§7.3). Plus the status line,
-which is where the session name first becomes visible.
+- **A pty cannot be closed from rmux's end.** The master is one open file for
+  both directions, so dropping the writing half would take the reading half
+  with it and lose the child's last output. "No more input" is therefore a
+  closed pipe on Motor and a `^D` on the host — `sys::END_OF_INPUT`.
+- **A pty merges stdout and stderr**, where Motor's pipes keep two streams
+  (§4.5). The pane pumps however many it is handed.
 
-**M7 — Panes.** The split tree, borders, `|` and `-`, directional selection,
-resize, zoom, kill.
+The host's half is tested the way it has to be — over a pty, by
+`tests/host.rs`, which lifts rush's `Pty` (`tests/phase8.rs:37-174`) that §9.1
+earmarks for the conformance harness. Each mechanism test was **falsified**
+before being believed: disable raw mode, `TIOCSWINSZ`, or `setsid`/`TIOCSCTTY`
+in turn and exactly the corresponding test fails. Two of them did *not* fail
+the first time and were rewritten, which is the reason to bother:
 
-**M8 — Scrollback and copy mode.** Compact history (§7.5), vi copy mode, search,
-selection, paste buffers.
+- a pty **echoes what is typed whether or not the program ever reads it**, so a
+  needle that appears in the echoed line tests nothing. Needles now come only
+  from a command's output (`echo al""ive` echoes the quotes and prints
+  `alive`).
+- `^C` **flushes the input queue**, so sending it before the pane has
+  demonstrably started the command it is meant to interrupt tests nothing
+  either — the command it was supposed to kill never ran.
 
-**M9 — Conformance and polish.** The tmux corpus, the divergence list, the VM
-harness, byte-cost tests, `aggressive-resize` with two clients, the README.
+**M2 — The emulator. Done.** `ansi.rs` + `grid.rs`, pure, unit-tested on Linux.
+No rendering yet. Deferred wrap, scroll regions, alt screen, `ESC[6n`.
+
+The split between the two is sharper than §5.1 had to say: **`ansi.rs` emits
+syntax, `grid.rs` decides meaning.** An `Action` is a final byte and its
+parameters, nothing more. The reason is failure mode, not taste — a sequence
+rmux does not implement is then a grid that ignores it, never a parser that
+mis-frames the bytes after it. The parser allocates nothing and is incremental
+by construction (§8.3), and the grid never learns there is a pipe: `ESC[6n`
+comes back out as a `Reply` for the pane to write into its child's stdin.
+
+`ESC[999C ESC[6n` and `ESC[9999;9999H ESC[6n` — rush's probe and red's, verbatim
+— are pinned as tests against a grid of a known size, so §3.2's claim is now
+checked rather than argued.
+
+Simplifications made here, each deliberate and each a candidate for
+`DIVERGENCES` (§9.1) when the corpus lands:
+
+- Tab stops are fixed at every eighth column; `HTS`/`TBC` are not implemented.
+- No origin mode (`DECOM`, `?6`): `ESC[H` is the screen's home, never the
+  scroll region's.
+- `DSR 6` is the only status report answered. Device Attributes and `DSR 5` get
+  nothing, which §3.2 establishes is a terminal's prerogative.
+- `?47` and `?1047` are treated as `?1049`, so they save the cursor too.
+- `:` is parsed as `;` in a parameter list. rmux's vocabulary has no
+  sub-parameters, and the alternative is mis-framing an SGR that uses them.
+- OSC is parsed and dropped except `0`/`2`, the window title. That includes
+  `52`, the clipboard rmux deliberately does not have (§7.6).
+
+**M3 — Rendering. Done.** The compositor and frame diff, one full-screen pane.
+The milestone: **`red` runs inside rmux**, sized correctly, because rmux answers
+its `ESC[6n`. If red works, the emulator is real.
+
+**It works, on both terminals.** On the host and on the Motor serial console,
+red opens inside a pane, sizes itself to that pane rather than to a default,
+puts its status line on the pane's last row, and hands the shell's screen back
+when it quits — which exercises the pane's own `?1049` (§5.3), since red lives
+on the alternate screen. A pane's output is no longer relayed anywhere: it is
+parsed into that pane's grid, composited, and diffed.
+
+**The compositor knows what the console is *in*.** Every byte the console
+receives comes from `screen.rs`, so where its cursor sits and which SGR is in
+force are known rather than guessed, and a repaint states only what changed.
+That is what makes the byte-cost claims of §9.2 exact rather than approximate:
+**an echoed keystroke costs `ESC[{r};{c}H` and the character — seven bytes**,
+and one inside an already-styled run costs *one*, because neither the position
+nor the style needs restating. Those are pinned as equalities, so a regression
+shows up as the bytes it added. red's reset-prefixed invariant is kept (§6.1);
+what changed is that rmux may also rely on what it itself last sent, which is
+not a guess.
+
+**The size probe landed** (`keys.rs`), and with it §3.2's second mechanism. The
+platform is asked first; where it cannot say — always, on Motor — rmux sends
+red's `ESC[9999;9999H ESC[6n` and takes the answer with rush's discipline,
+never waiting for it. Until it arrives rmux runs at 24x80, which is a coherent
+pane rather than a correct one. The scanner that recognizes the answer is the
+first thing in `keys.rs`, and it is careful in two ways the next reader should
+not undo: the report must never reach the pane (a shell handed a stray
+`ESC[30;90R` prints it), and `ESC[1;2D` is `S-Left` and looks exactly like a
+report until its final byte, so what is held back has to be given back in
+order.
+
+One trap, found by a test that failed three runs in five: **the final frame is
+painted after the exit, not before it.** A pane's waiter reports the exit only
+once its output has been drained (§4.5), so the last thing a program printed is
+in the grid by then — and breaking out of the loop to leave without painting
+throws it away. It is the same loss the drain exists to prevent, one layer up.
+
+Two gaps M3 leaves, both deliberate:
+
+- **Nothing notices a console resize.** On Motor nothing can (§3.2). On the
+  host it would take a `SIGWINCH` handler, which is a signal, which is the one
+  thing the `sys::` seam has no shape for yet. rmux learns its size once.
+- **Nothing forces a repaint.** `Screen::invalidate` exists and a resize uses
+  it; binding a key to it needs the key tables, which are M5's. It ended up
+  waiting until M9, as `prefix r`.
+
+A resize *of a pane* does work, and clips rather than reflows — as tmux does,
+and because reflowing rewrites history a program still believes it addressed.
+
+**M4 — The split. Done.** Server, client, transport, detach, attach, and the
+session list (§7.3) — sessions arrive with the server that holds them, not
+later.
+
+**Verified on Motor, which is where it counts.** On the serial console: start
+`rmux`, set a shell variable, press `C-a d`, land back at the outer shell, run
+`rmux` again, and the variable is still there. That is the same shell process,
+still running, with nothing attached to it in between — detach and attach, over
+loopback TCP, with the server spawned detached and outliving the client that
+started it. M0's `CAP_SPAWN_DETACHED` exists for exactly this moment.
+
+The shape, and what each piece is for:
+
+- **The server owns everything and renders** (§4.1). The client relays
+  keystrokes one way and paints bytes the other, and holds no opinion about
+  either. **The prefix is therefore the server's business**: `C-a d` becomes a
+  detach there, not in the client. M4 recognizes that and `C-a C-a`
+  (`send-prefix`, §8.2); M5 replaces the pair with the real key tables on the
+  same seam.
+- **The frame diff is per client, not per session.** Two consoles are in two
+  different states, so each carries its own `Screen`. Sharing one would mean
+  sending a client the difference against a screen it never had.
+- **The client owns the console**, because raw mode, the alternate screen and
+  the size probe are properties of *this* terminal rather than of the session.
+  The probe's answer reaches the server as a `Resize`.
+- **A frame is length-prefixed** so a reader can skip a message it does not
+  understand rather than losing the stream, and `Frames` never assumes a
+  message arrives whole — TCP may split a write anywhere.
+
+Three traps, all measured:
+
+1. **`/sys/tmp` does not exist** (§4.2, corrected above), and neither does the
+   directory the *lock* file needs. Creating the lock therefore failed, and the
+   client read that failure as "another client is starting a server" and waited
+   ten seconds for one nobody was starting. A failed lock now means "start one"
+   unless the failure is specifically `AlreadyExists`.
+2. **Paint before ending a session.** A pane's exit is reported only once its
+   output has been drained (§4.5), so the last thing a program printed is in
+   the grid when `Exit` is about to go out — and removing the client first
+   throws it away. This is the *same* loss as M3's, one layer up, and it was
+   again a test that failed about a third of the time rather than always.
+3. **Tests need a server apiece.** A client attaches to whatever the port file
+   names, so parallel tests without a `$TMPDIR` each would share one session
+   and read each other's output.
+
+Deliberately left for later: the command surface — `new`, `attach`, `ls`,
+`kill-session` (§7.3) — is M6's, and `prefix-d` is hardcoded until M5 makes the
+tables real. The protocol already carries `List` and `Kill`, so M6 is wiring
+rather than design.
+
+**M5 — Config and input. Done.** The default key tables (§2.1), the prefix,
+`send-prefix`, and `rmux.toml` (§2.2) on top of them. After this the defaults
+are compiled in rather than prose, and overridable.
+
+`bindings::defaults()` **is** §2.1's table, as data — every line of that config
+plus the tmux defaults it is written against — and it is tested against that
+table entry by entry. §2.2's example config is tested to be a **no-op**, which
+is what it claims to be: if applying it changes anything, one of the two
+representations has drifted. Moving the prefix with an `rmux.toml` is checked
+end to end over a pty, both halves of it: `C-b d` detaches and `C-a` has become
+an ordinary byte.
+
+Input routes in three steps (§8.1, §8.2), and the order is the whole of it: a
+key equal to the prefix is **held** and reaches nobody; the key after it is
+looked up in the **prefix table**; anything else is looked up in the **root
+table** and, failing that, goes to the pane as the bytes it was made of.
+`send-prefix` is the one command that produces bytes rather than an action, and
+what it produces are the prefix's *own* bytes as they arrived — rmux never
+re-encodes a key, so there is nothing to get wrong.
+
+Two things worth knowing before they surprise someone:
+
+- **A bound key stops reaching the pane, even when what it names is not
+  implemented yet.** The config binds `M-Left` (§2.1), so it was rmux's key
+  from M5 on although `select-pane` did not arrive until M7. That is what tmux
+  does, and the alternative — leaving it out of the vocabulary — would make the
+  config file's own binding an error. A plain arrow is in neither table and still reaches the pane, which
+  is what rush's and red's line editing depend on, and both halves are tested.
+- **`Esc` is both a key and the start of every other one.** A decoder that
+  never gave up would strand red in a pane; one that never waited would turn
+  every arrow into an `Esc` followed by junk. A half-arrived sequence is held
+  for 50ms and then taken at face value — tmux spends its `escape-time` on the
+  same problem — and the server blocks rather than polls whenever nothing is
+  held.
+
+Config is **injected, not loaded** by the server core (§9.3): `Config::load` is
+the only thing that touches a disk and only `serve` calls it. A malformed entry
+is skipped and reported while the rest of the file still applies, because a
+typo in one binding must not cost a user their config; the complaints are
+carried rather than printed, since the server has no console of its own (§4.4)
+and where they belong is the status line, which is M6's. `mode-keys = "emacs"`
+is refused rather than accepted-and-ignored: only vi is implemented. (M9 built
+the emacs table, and the setting means what it says now.)
+
+**M6 — Windows and sessions. Done.** Windows: new, next, previous, select,
+rename, kill, `renumber-windows`. Sessions: `new`/`attach`/`ls`/`kill-session`,
+`prefix-(` and `prefix-)`, `prefix-$`, and the `prefix-s` list (§7.3). Plus the
+status line, which is where the session name first becomes visible.
+
+**A window number is a user-visible name, not an index.** `prefix 0`-`9`
+selects by it and the status line shows it, so killing window 1 of `0 1 2`
+leaves `0 2` and window 2 is *still* called 2 — unless `renumber-windows` is on,
+which the config sets, and then the list compacts. Both behaviours are one
+function apart, and confusing them means `prefix 2` silently selecting somebody
+else's shell. A new window takes the lowest free number, as tmux does.
+
+A window's name follows what runs in it — the pane's `OSC 0`/`2` title, which
+§5.2 was already collecting — until `prefix ,` takes it over for good. The flag
+that remembers a rename is the whole difference between a status line that
+tracks reality and one that argues with the user.
+
+`prefix ,`, `prefix $` and `prefix s` are **modes**: while one is up it owns
+every key, prefix included, and nothing reaches a pane. The prompt borrows the
+status row, as tmux's does; `prefix s` is the plain numbered menu §7.3 asks for,
+picked by digit or arrows, `Esc` cancelling — not `choose-tree` (§1.2).
+
+`aggressive-resize on` now means something: a session's window is sized to the
+smallest client *viewing* it, and a background window keeps its size until it
+comes to the front. With one client it is still a no-op, which is why the size
+lives on the client.
+
+Three things this milestone had to fix or add, each found rather than foreseen:
+
+1. **A pane can be killed now**, which meant moving the child handle out of the
+   waiter thread and into the pane (§3.6: terminate is the only thing one
+   process may do to another, and `Child::kill` needs a handle somebody holds).
+   The exit status is now learned when the pipes empty rather than when the
+   child dies; a grandchild holding them open delays both, and delayed either
+   way.
+2. **Input has to take effect in the order it was typed.** `prefix p` and the
+   command line typed after it arrive in one read, and delivering all the bytes
+   before applying the switch types them into the window the user just left.
+   Bytes and commands go into one ordered list rather than two buckets.
+3. **`ptsname` answers from a static buffer**, so two panes opening a pty at
+   once race on it and one gets a truncated `/dev/pts` — a directory, hence
+   `EISDIR`. The test suite found it by spawning panes from a thread apiece.
+   The comment that used to excuse it ("only the event loop spawns panes") was
+   not an invariant worth resting a data race on; there is a lock now.
+   Falsified: without it, 3 runs in 15 fail.
+
+And a fourth instance of the **paint-before-you-drop-the-grid** shape that M3
+and M4 each hit once: closing a window removes its grid, so the last thing the
+program printed has to be painted first. Three places now do this for the same
+reason, which is why the comment at each of them names the other two.
+
+One divergence to record: `prefix &` and `prefix x` kill outright, where tmux
+asks `kill-window? (y/n)` first. `confirm-before` is a command rmux does not
+have, and inventing a confirmation prompt for two bindings is not worth a mode.
+
+**M7 — Panes. Done.** The split tree, borders, `|` and `-`, directional
+selection, resize, zoom, kill. After this a window is a tree of splits with
+panes at the leaves (§7.1) rather than one pane wearing a window's name.
+
+**Geometry is a function of the tree, and a split remembers one number.** Ask
+`layout` for the boxes with the window's size and every one falls out of the
+shape of the tree. The exception is where each split puts its border: M7 stored
+nothing at all and halved at every split, which was right while
+`resize-pane -Z` — zoom — was the whole of the vocabulary, and wrong the moment
+M9 added the other four directions. A split now keeps its border in cells, as
+tmux's `layout_cell` does, and `Layout::refit` scales them when a window
+changes size. What that costs is an invariant, since a stored size can disagree
+with the window that owns it: the area a layout is asked about only ever
+changes through a `refit`, and `window.rs` has one place that does either.
+
+The tree holds `PaneId`s and no panes, which is what keeps it pure and its
+tests measured in microseconds (§9.3); `window.rs` owns the children and asks
+the tree where to put them. Two things fall out of that split of
+responsibilities and are worth knowing:
+
+- **A pane's screen is what its program is told the terminal is** (§3.2), so
+  the one place a pane learns how big it is — `Window::fit` — is where a split,
+  a kill, a zoom and a console resize all end. A pane whose grid is still the
+  whole window answers `ESC[6n` with a lie and draws outside its box.
+- **The child is told too, where it can be.** `sys::TellSize` is a third
+  asymmetry across the seam, beside merged output streams and `END_OF_INPUT`:
+  the host has `TIOCSWINSZ`, which sets the pty's size and sends a `SIGWINCH`;
+  Motor has no ioctl, no terminal-size call and no signals (§3.6), so the child
+  finds out at its next `ESC[6n` and nowhere else. Only when the size really
+  changed — every split and kill refits every pane, and a shell redraws its
+  prompt whenever it gets a `SIGWINCH`.
+- **A pane is born the size of its box**, not of its window. On the host either
+  would do, since the resize above corrects it a moment later; on Motor a pane's
+  `$COLUMNS`/`$LINES` are fixed when its child is spawned and nothing can change
+  them, so being born wrong is permanent.
+
+**Three things the host could not have caught, all found by driving the real
+thing on Motor** (§9.4, and the reason that step exists):
+
+1. **A pane must turn `\n` into a new line itself.** Motor has no line
+   discipline (§3.1) and a pane is a pipe, so nothing stands between a program's
+   `\n` and the pane's grid — where a pty's `ONLCR` has already done it on the
+   host. `printf 'aa\nbb\ncc\n'` came out as a staircase, each line starting
+   where the last one ended. `sys-tty` does this rewrite for the real console
+   (§3.3), so a pane must do it too: `sys::PANE_NEWLINE_MODE`, which is the
+   grid's LNM. Not a mode a program may change — turning it off on Motor would
+   be turning off what the platform's own terminal does unconditionally.
+2. **`$COLUMNS` beat the terminal's own answer in rush**, so a shell in a split
+   pane kept the width it was spawned with. Fixed in rush, separately: the
+   probe is authoritative and `$COLUMNS` is the fallback for a terminal that
+   never answers, because on Motor nothing can update it — it is a cache with no
+   invalidation. This is the fix that makes the pane a split *divides* correct;
+   rmux spawning the new pane at its box size only fixes the new one.
+3. **The stray `%` of §3.2**, which is what was left after both -- and what
+   forced §3.2's fourth mechanism: a pane answers the size question again, of its
+   own accord, for a program that has asked it before.
+
+**Two borders never share a cell.** A split's border spans only the pane it
+divides, and that pane never contains its parent's border — so what borders do
+is *meet*: a row border stops against a column border, and the cell it stopped
+against becomes the `+` that says so. ASCII `|`, `-`, `+` throughout, the
+intended divergence of §7.1.
+
+Three behaviours found rather than foreseen:
+
+1. **A killed pane has to leave the layout at once.** A pane is removed when
+   its output drains (§4.5), which is right for a program that exited — its
+   last output must be painted first. But `prefix x` kills a child, and the
+   keys typed in the milliseconds that follow went into a dead pty, because the
+   pane was still the one in front. It comes off the layout immediately now and
+   is dropped when it drains; asking the layout to close a pane it no longer
+   has is what makes the second step harmless.
+2. **A zoomed window needs to say so.** It looks exactly like a window with one
+   pane, so without tmux's `Z` on the status line a user has no way to tell
+   where the others went. The active pane's border is *not* highlighted — tmux
+   colours it, rmux does not, and what says which pane is in front is the
+   composited cursor (§3.2). Recorded as a divergence.
+3. **The pane in front is always on screen.** Whatever changes it unzooms, or
+   `Window::cursor` would be asking for the box of a pane that has none.
+
+**Not in this milestone, deliberately:** `resize-pane` in any direction but
+`-Z`. It is in neither §2.1's table nor the command vocabulary, and adding a
+binding for it would be inventing config the project is not built to. (M9
+found that the binding did not have to be invented — tmux binds it on the
+modified arrows — and built it.)
+
+**Tests learned something too, and it applies to every test after this one:
+the wire is not the picture.** The frame diff sends only the cells that changed
+(§6.3), so text already on screen in the right place is never sent — and a test
+waiting for those bytes is waiting on a race with whatever program last drew
+there. That was a real flake in M6's `prefix c` test (about one run in ten
+under load: a new window's prompt lands on the cells the old window's prompt
+was on). `tests/host.rs` now replays everything rmux writes into a `Grid` and
+asserts on *that*, which is what §9.1 says the conformance harness must do,
+with rmux's own emulator doing the replay.
+
+**M8 — Scrollback and copy mode. Done.** Compact history (§7.5), vi copy mode,
+search, selection, paste buffers. After this a pane remembers what it has
+printed, and the only way to read it — or to take anything out of it — is copy
+mode.
+
+**History is not made of grids.** A line that scrolls off the top stops being
+cells and becomes text plus a run-length list of styles, with its trailing
+blanks not stored at all (§7.5); an unstyled line, which is most of what a
+shell prints, keeps no style list either. That is what makes `history-limit
+9999999` a cap rather than a promise of gigabytes. The live screen stays
+`Cell`-based, and one accessor renders both — so copy mode walks
+`0..total_rows` and cannot tell which side of the boundary a row is on. The
+limit is enforced where the lines are made rather than where they are counted,
+and lowering it takes effect at once, because it is a memory bound and not a
+preference.
+
+**Only the whole screen scrolls into history**, which is tmux's rule
+(`grid_view_scroll_region_up`) and worth stating because the alternative looks
+right: a program with a scroll region is holding a header or a status line
+still and moving text *between* them, and those lines never left its screen.
+Putting them in the scrollback would interleave a redrawn pager with itself.
+The alt screen keeps no history at all (§5.3) — red lives there, and every
+repaint would otherwise become scrollback — and copy mode sees none while it
+is up, which is the same rule from the reading side: what is above a
+full-screen program's screen belongs to the screen *underneath* it, and
+showing it would put a shell's old output above red's window. It is still
+kept, and it comes back when the program gives the screen back.
+
+**Copy mode is a table, not a key handler.** `h` names `cursor-left` exactly as
+`|` names `split-window -h`, in tmux's own `send -X` vocabulary, and
+`[bind-copy]` rebinds it (§2.2). `mode-keys` is therefore data like everything
+else in §2.1 — it picks which table copy mode starts as, and nothing
+downstream of the table can tell which was picked — and a user translating a
+tmux config finds the words they already know.
+
+**Pasting is typing** (§7.6), and the one thing rmux re-encodes. Every other
+byte a pane receives is forwarded as it arrived (§8.1); a paste was never typed
+at a console, so there is nothing to forward and Enter has to be *made* — which
+is `\r` on the host and `CR LF` on Motor, sys-tty's own synthesis (§3.4),
+behind `sys::ENTER`. A pane that asked for bracketed paste gets the markers it
+asked for.
+
+**Writing to a pane has a thread now**, which §4.5 predicted in the abstract:
+"a paste will [fill the ring], and will need somewhere to block that is not the
+event loop". The measurement sharpened it into two different problems. On Motor
+the pipe is a 2 KiB ring that blocks its writer, so a paste into a program that
+is not reading would have stopped the server for as long as that program ran.
+On the host it does not block at all — a megabyte written at a `sleep` came
+back `Ok(())` at once, because a pty *discards* what will not fit in its input
+queue. So the channel keeps Motor's event loop moving, and large pastes on the
+host are lossy either way: a divergence to record rather than something this
+can fix. The test that pins it uses a writer known to block, because the test
+that used a real pane passed whether or not the thread was there.
+
+**Found by a test, and the fourth instance of a shape M6 named: what a key
+means depends on the state it is *reached* in, not the state it arrived in.**
+`prefix [` and the vi keys typed straight after it arrive in one read, and
+deciding what every key in that read meant before running any of them sent the
+motions to the shell — copy mode not being up yet when the bytes were looked
+at. The screen said so plainly: a search needle and a selection command typed at
+a prompt, and `sh: 2: ?COPYME: not found`. Deciding per key, as each is
+reached, is also less code than the list of pre-decided steps it replaces, and
+it keeps M6's own fix — bytes and commands still take effect in the order they
+were typed, because whatever is pending is written before a command runs.
+
+Divergences this milestone adds, each an entry for §9.1's list:
+
+- **A mode owns every key, the prefix included.** tmux leaves the prefix table
+  live in copy mode, so `C-a c` opens a window from there; rmux does not. It is
+  the rule its rename prompt has had since M6, and one rule is better than two:
+  `q` first, then the prefix.
+- **A word is a run of non-blanks.** No `next-word-end`, and no
+  `word-separators` option to make `-` or `_` a boundary.
+- **Search is case-sensitive and not incremental.** The needle is typed on the
+  status row and acted on at `Enter`; there is no highlighting of the matches
+  it did not go to. A search that finds nothing leaves the cursor where it was
+  and says so — on the message line, which M9 built for it.
+- **The indicator borrows the status row**, where tmux draws it in the pane's
+  top-right corner. That row is already chrome (§7.3) and a pane has no
+  corner to spare; the cost is that the session name and window list are not
+  visible while copy mode is up.
+- **The buffer stack is only reachable through `prefix ]`.** tmux's
+  `choose-buffer`, `list-buffers` and `copy-pipe` are not there, and neither is
+  a rectangle selection.
+
+**M9 — Conformance and polish. Done.** The tmux corpus, the divergence list,
+the VM harness, byte-cost tests, `aggressive-resize` with two clients, the
+message line, `refresh-client`, `resize-pane`, `mode-keys emacs`, the README.
+
+**The corpus states nothing.** `tests/conformance.rs` drives each case through
+both rmux and tmux and requires the two to paint the same picture (§9.1), with
+`tests/defaults.tmux.conf` — the checked-in copy of the file §2.1 declares
+rmux's defaults to *be* — as tmux's `-f`. Twenty-five cases over the emulator,
+the window list and the split tree, and they agree as written; the geometry
+lands where tmux puts it, border column included, which is the interesting part
+of §7.1 being derived from the tree rather than stored.
+
+Three things the comparison needed, each measured rather than assumed:
+
+- **tmux's paste heuristic.** A binding whose predecessor arrived less than a
+  millisecond earlier is forwarded verbatim, and a key script is one write, so
+  the prefix went to the shell. `assume-paste-time 0` turns it off. rmux has no
+  such heuristic — a bound key is rmux's however it arrived (§8.1).
+- **A login shell reads `/etc/profile`**, which is the host's and not the same
+  twice, so tmux gets `default-command` rather than `default-shell`.
+- **Typing at a shell that has not printed its prompt is a race, not a case.**
+  The echo comes from the pane's line discipline and the prompt from the shell,
+  and which lands first says nothing about the multiplexer. A case is therefore
+  a *script* whose chunks are sent only once the screen has stopped changing.
+
+The border style is folded out so that the rest of a split can be compared at
+all; `DIVERGENCES` compares unfolded, which is what keeps §7.1's ASCII borders
+pinned. It also now holds `prefix &` killing outright (M6), copy mode's
+indicator on the status row (M8), and a third found here: **a mode takes the
+keys that arrived with it** — `prefix :` and the command typed in the same read
+reach the prompt that key opened, where tmux's prompt is not up yet and the
+shell gets it.
+
+**`prefix :` runs a command.** Bound since M5 and inert since M5 — the
+dispatcher said "`command-prompt` is M9's" — which is worse than unbound,
+because a bound key does not reach the pane either. It opens a prompt on the
+status row now, and `Command::parse` (§2.2's, unchanged) turns the line into a
+command. Not a command *language*: a name and its flags.
+
+**The message line, which §2.2 promised in M5 and nothing built.** A malformed
+config entry was skipped correctly and reported to nobody — `serve()` dropped
+the complaints on the floor — and three more places had the same problem, each
+of them a command whose failure leaves the screen exactly as it was: a split
+with no room, a search that finds nothing, and now a `prefix :` line naming a
+command rmux does not have. All four say so on the status row, and the *next*
+key takes the row back. No timer: tmux's `display-time` means waking the server
+on a clock, which is the price §4.5 refuses for a status-line clock and refuses
+here for the same reason. The config's complaints go to the client that started
+the server and to no other — a client attaching an hour later has not touched
+that file. `Server::new` takes the complaints beside the config now, so the
+half of §2.2 that was dropped cannot be dropped silently again.
+
+The corpus cannot help with any of that: it drops the status row before
+comparing (the two status lines are not the same line), so nothing on the
+message line is comparable against tmux, and what pins it is a host test that
+reads the row off the replayed screen.
+
+**`refresh-client`, on `prefix r`.** The gap M3 left and every phase since
+walked past. It was left out because §2.1's table does not name it and
+inventing a binding is what M7 refused to do for `resize-pane` — but the
+binding did not have to be invented: `Bindings::defaults` is that table *plus
+the tmux defaults it is written against*, and `prefix r` is one of those
+(`tmux list-keys` says so). What is **not** bound is `C-l`, in rmux as in tmux:
+a shell clears its screen with it, `less` and `vi` redraw with it, and a
+multiplexer that took it would take it from every program in every pane. It is
+tested arriving in a pane.
+
+**`resize-pane`, in the four directions M7 left out** — and the same discovery
+as `refresh-client` above: tmux binds it on the prefix table's modified arrows
+(`C-`arrow by one cell, `M-`arrow by five), so no config had to be invented
+after all. It cost the one design decision M7 got to avoid. A layout that
+stores nothing cannot be resized, so a split now keeps its border in cells as
+tmux's `layout_cell` does, and `Layout::refit` scales every border when a
+window changes size — a split nobody has moved stays even, since an even split
+scaled is still even. The invariant that buys is written down in `layout.rs`:
+the area a layout is asked about only ever changes through a `refit`.
+
+**Which border moves is tmux's rule, and reading the source got it wrong.** The
+border moved is the one *after* the pane, and only when the pane is last along
+that axis the one before it — that part survived. What did not is the direction:
+`layout_resize_pane` negates its adjustment for a last pane, which reads as "a
+resize always widens the active pane". tmux does not do that. `C-Left` on the
+right-hand pane moves the border *left*, and the corpus said so — two of eight
+pane cases disagreeing, in exactly the two columns the rule predicts. The
+border follows the arrow, whichever side of it the pane is on. That is the
+whole reason a resize case is in the corpus rather than only in a unit test:
+the unit tests all agreed with each other and with the wrong rule.
+
+**`mode-keys emacs`**, which M5 named and refused. Both vocabularies are data,
+so the second one is a second table read off `tmux list-keys -T copy-mode`, and
+copy mode itself cannot tell which was chosen. `Config::parse` holds bindings
+back until the file has been read, so `[bind-copy]` overrides whichever table
+`mode-keys` picked wherever in the file that line sits. One byte had to be
+fixed for it: NUL decoded as `` C-` ``, a key nobody can type, where every
+terminal means `C-Space` by it and `Key::parse` reads that name — so emacs
+mode's `begin-selection` would have been unreachable.
+
+That closes §9.2's last claim. "A full repaint happens only on a resize and on
+`refresh-client`" is now whole: the resize half was already pinned, and the
+other half is two tests — the render after `prefix r` carries text that was
+already on screen, which the diff would otherwise never resend, and the same
+thing on the wire through the socket. There is a corpus case too, and it is the
+weakest of the three on purpose: the whole point of a redraw is that the
+picture does not change, so what tmux can judge is that rmux's redraw does not
+*damage* it.
+
+**What a paint costs, end to end.** `screen.rs` pinned §9.2's claims against a
+`Frame`; `tests/host.rs` now pins them on the wire, through the server, the
+socket and the client. A keystroke echoed in a pane costs **one byte** — not
+seven, because the console's cursor is already where the character goes (§6.1)
+— moving between panes repaints no pane content, and an idle multiplexer writes
+nothing at all, which is what having no clock buys. Falsified by forcing
+`Screen::draw` to repaint every frame: the first two fail and the third does
+not, which is the right shape. The measurement needed two things: a cost is
+only exact between two standstills, and the status line is reverse video, so a
+frame ending on it leaves the console in that style and the *next* cell in a
+pane pays five bytes rather than one. Whether the first keystroke pays that is a
+race with the shell's startup, and it failed once in five runs under load before
+the test measured from a style it had put the console in itself.
+
+**`aggressive-resize` finally means something**, because there are two clients
+to disagree: a window is sized to the smallest client watching it and grows back
+when that client detaches, and a window in the background keeps its size. The
+second is the half worth having — a resize clips rather than reflows, so columns
+taken off a background window are gone — and it is the half that falsifies, with
+`aggressive-resize = false` failing on exactly that.
+
+**On the real thing** (§9.4), `tests/vm-console-check.py` boots the image under
+qemu on a pty and drives rmux on the Motor console through sys-tty: eleven
+checks, three of which no host test can make — one keypress is one Enter although
+sys-tty sends CRLF (§3.4), a program's `\n` starts a new line although Motor has
+no line discipline (§3.1), and **a keystroke costs one byte on the console that
+cost is for** (§6.3). It uses `run-qemu-echr.sh`, since `-nographic` keeps
+`Ctrl-A` for qemu (§9.4). Two traps, both measured:
+
+1. **Use a release image.** A debug one logs sys-io's every TCP message to this
+   same console — and rmux's client and server talk over loopback TCP (§4.2), so
+   *using* rmux is what produces the flood. It lands on a composited screen the
+   frame diff will never repair, and it buries the byte costs: the keystroke
+   above measured 1 byte on release and 1893 on debug. Same shape as §3.5's `^C`
+   echo, and not something rmux can defend against.
+2. **A port file outlives its server.** The disk survives a reboot, and this
+   qemu is killed rather than shut down, so a removal that has not reached the
+   disk did not happen. The next client waits five seconds on a port nobody is
+   listening on, says so and removes it (§4.2) — right, and it makes the first
+   `rmux` of a run pay for the last one, so the harness clears the rendezvous
+   first.
+
+Not wired into `full-test.sh`, which already boots a VM of its own; rush's
+equivalent is standalone for the same reason.
 
 ---
 
-## 11. Risks
+## 11. The risks, and what became of them
 
-Ordered by how much they would hurt.
+Written before M1, ordered by how much they would have hurt. Kept because what
+happened to each is the shortest account of where the effort actually went.
 
 1. **The emulator is the long pole.** It is the one component with no prior art
-   in this repo (§5) and the one whose bugs are invisible until something draws a
-   box. Purity + the tmux oracle is the entire mitigation.
-2. **Orphans may not survive on Motor** (§4.4). Blocks M4 and only M4; everything
-   through M3 is unaffected, which is why the spike is in M0 and the split sits
-   in the middle rather than at the start. The `sys-init` precedent
-   (`main.rs:77-88`, spawn-and-never-wait) says it works; detach is worthless if
-   it does not.
+   in this repo (§5) and the one whose bugs are invisible until something draws
+   a box. Purity + the tmux oracle was the entire mitigation, and it was
+   enough: the corpus of §9.1 compares pictures against real tmux, and the
+   emulator is the half of rmux that has never needed a bug hunt.
+2. **Orphans may not survive on Motor** (§4.4). They do not — measured in M0,
+   which is what the spike was for. It cost a new OS primitive: detached spawn,
+   gated by `CAP_SPAWN_DETACHED`. Had it been found in M4, the fix would have
+   been the same and the discovery three phases later.
 3. **2 KiB pipes and 80-byte console reads** (§4.5, §6.3) make throughput
-   structurally tight. The design accounts for it; measurement will tell.
-4. **`history-limit 9999999`** is only survivable with compact history (§7.5). A
-   naive representation runs the VM out of memory, and it will do it slowly
-   enough to look like something else.
-5. **sys-tty and SSH are two different terminals** (§3.3). Anything tested on one
-   is untested on the other.
+   structurally tight. The design accounted for it and M9 measured the result:
+   a keystroke echoed in a pane costs one byte, on the host and on the Motor
+   console both. What was tight was never the pipe.
+4. **`history-limit 9999999`** is only survivable with compact history (§7.5),
+   built in M8: a line that scrolls off stops being cells and becomes text plus
+   style runs.
+5. **sys-tty and SSH are two different terminals** (§3.3). Still true, and it
+   is why M1 was verified on both and why `tests/vm-console-check.py` (§9.4)
+   drives the serial console specifically — the host tests are all the other
+   terminal.
 
 ---
 
-## 12. Open questions
+## 12. The decisions that shaped everything else
 
-None outstanding.
-
-**Settled:**
+Four questions that were open at the start. Each is answered here rather than
+in the section it affects, because each of them affects several.
 
 - *Multiple named sessions are in scope* (§7.3), not one implicit session with
   many windows. Sessions are the unit that survives a detach, which is the point
@@ -1120,7 +1825,6 @@ None outstanding.
 - *There is no host clipboard.* Copy/paste lives and dies inside rmux (§7.6):
   server-global paste buffers, no OSC 52, nothing forwarded to the terminal the
   user is sitting at.
-
 - *`rush` stays the default in `/sys/cfg/sys-tty.cfg`.* rmux is a program the user
   runs, exactly as tmux is on Linux — where the shell is what boots and the
   multiplexer is what you choose to start. rmux is therefore never in the boot

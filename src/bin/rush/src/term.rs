@@ -653,14 +653,28 @@ impl Term {
     }
 
     /// The terminal's width, from the best source that has one.
+    ///
+    /// The order matters, and `$COLUMNS` comes *last* of the three that can
+    /// answer. The terminal itself is authoritative: the platform's own call
+    /// where there is one, and otherwise whatever the terminal said when asked
+    /// ([`Term::probe_width`]). `$COLUMNS` is the fallback for a terminal that
+    /// never answers — a serial log with nothing on the other end — and not a
+    /// preference, because on Motor OS nothing can update it once a process has
+    /// started: no ioctl, no `SIGWINCH`, no way for a parent to reach into a
+    /// child's environment (`sys/mod.rs`). It is a cache with no invalidation.
+    ///
+    /// Measured, in an rmux pane: a shell in a pane split down to 39 columns had
+    /// `$COLUMNS=80` from the moment it was spawned, and preferring it painted
+    /// the prompt marker two rows away from the prompt. The pane answers `ESC[6n`
+    /// with its own width every time it is asked, which is the live answer.
     fn cols(&mut self) -> usize {
         if let Some(w) = self.term_impl.width().filter(|w| *w > 0) {
             return w;
         }
-        if let Some(w) = self.shell_cols {
+        if let Some(w) = self.probed_cols {
             return w;
         }
-        self.probed_cols.unwrap_or(DEFAULT_COLS)
+        self.shell_cols.unwrap_or(DEFAULT_COLS)
     }
 
     /// Ask the terminal how wide it is — **without waiting for the answer**.
@@ -1444,6 +1458,31 @@ mod tests {
 
     fn key(bytes: &[u8]) -> Key {
         read_key(&mut Fake::new(bytes), &mut false)
+    }
+
+    #[test]
+    fn the_terminals_own_answer_beats_columns_from_the_environment() {
+        // Where the platform cannot say how wide the terminal is -- Motor OS,
+        // always -- the terminal's answer to `ESC[6n` is the live one and
+        // `$COLUMNS` is a cache nothing can invalidate: no ioctl, no SIGWINCH,
+        // and no way to reach into a child's environment. Inside an rmux pane
+        // that cache is wrong from the moment a split happens.
+        let mut term = Term::new(true);
+        assert!(
+            term.term_impl.width().is_none(),
+            "the backend must not answer"
+        );
+
+        term.shell_cols = Some(80);
+        term.probed_cols = Some(39);
+        assert_eq!(term.cols(), 39);
+
+        // And it is still the fallback for a terminal that never answers, which
+        // is the case it exists for.
+        term.probed_cols = None;
+        assert_eq!(term.cols(), 80);
+        term.shell_cols = None;
+        assert_eq!(term.cols(), DEFAULT_COLS);
     }
 
     fn keys(bytes: &[u8]) -> Vec<Key> {

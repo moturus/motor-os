@@ -35,6 +35,14 @@ fi
 # The benchmark's deadline tests use deliberately stalled host TCP peers.
 cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
 
+# rmux's host-side tests: the parts that need no Motor OS at all run on Linux in
+# milliseconds, so they run before the VM is even booted.
+if [ "$BUILD" = "release" ]; then
+  (cd "$ROOT_DIR/src/bin/rmux" && cargo test --quiet --release)
+else
+  (cd "$ROOT_DIR/src/bin/rmux" && cargo test --quiet)
+fi
+
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.
 chmod 600 "$WD/test.key"
 
@@ -269,6 +277,69 @@ out="$(printf 'relay-smoke\n' | vm_ssh "/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
 out="$(vm_ssh "/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
+
+# rmux: a pane is a terminal to the program in it, without a pty (rmux/details.md
+# §3.1). The shell rmux spawns runs the command, and it prints its interactive
+# prompt -- which it does only when is_terminal() says it is on a terminal, and
+# which the non-interactive outer shell of an `ssh host cmd` never prints.
+# rmux renders rather than relays now, so the command's output arrives painted.
+out="$(printf 'echo $((21+21))\nexit\n' | vm_ssh /bin/rmux 2>&1)"
+case "$out" in
+  *42*) ;;
+  *) fail "rmux pane did not run the command: '$out'" ;;
+esac
+case "$out" in
+  *rush*) ;;
+  *) fail "rmux pane's shell did not see a terminal: '$out'" ;;
+esac
+# And it borrows the console rather than keeping it: in on the alternate
+# screen, out again on exit, so a session leaves the scrollback as it found it.
+case "$out" in
+  *$'\033'"[?1049h"*) ;;
+  *) fail "rmux did not take the alternate screen" ;;
+esac
+case "$out" in
+  *$'\033'"[?1049l"*) ;;
+  *) fail "rmux did not give the console back" ;;
+esac
+
+# rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,
+# §7.6). The motions and the compacted history are unit-tested on the host in
+# milliseconds; what only Motor can show is a pane *here* keeping what it has
+# printed, and `C-a [` reading it back through this console path.
+#
+# Thirty lines overflow the 23-row pane a console with no answer to the size
+# probe gives (§3.2), so the earliest of them are in the history and nowhere
+# else. The sleeps are the ordering: input comes down a pipe all at once, and a
+# key pressed before the shell has printed anything would open copy mode on an
+# empty buffer.
+#
+# **What is asserted is the indicator, not the picture.** The frame diff sends
+# only the cells that changed (§6.3), and copy mode's first view is often the
+# text already on screen -- so the screen saying nothing is correct, and a check
+# that grepped for a line would be reading the frame *after* copy mode ended.
+# tmux's `[above/total]` is exact: a total above zero is a pane that kept
+# history, and `above == total` is `g` having reached the oldest line of it.
+rmux_copy_mode_keys() {
+  printf 'for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do echo LINE$I; done\n'
+  sleep 5
+  # `C-a [` enters copy mode, `g` goes to the oldest line kept, `q` leaves.
+  printf '\001[g'
+  sleep 2
+  printf 'q'
+  sleep 1
+  printf 'exit\n'
+}
+out="$(rmux_copy_mode_keys | vm_ssh /bin/rmux 2>&1)"
+indicator="$(printf '%s' "$out" | grep -ao 'copy mode -- \[[0-9]*/[0-9]*\]' | tail -1)"
+[ -n "$indicator" ] || fail "rmux copy mode did not open: '$out'"
+counts="${indicator##*[}"
+above="${counts%%/*}"
+total="${counts%]}"
+total="${total##*/}"
+[ "$total" -gt 0 ] || fail "the pane kept no scrollback: '$indicator'"
+[ "$above" = "$total" ] ||
+  fail "copy mode did not reach the oldest line kept: '$indicator'"
 
 # SFTP integration test against the running VM (before the trap shuts it down).
 "$WD/test-sftp.sh"
