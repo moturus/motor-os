@@ -5,21 +5,25 @@ use std::path::Path;
 
 use semver::Version;
 
+use crate::archive::Limits as ArchiveLimits;
 use crate::atomic::AtomicFile;
 use crate::cli::{Cli, Verbosity};
 use crate::config::{Config, PolicyLimits};
+use crate::curl::{Client, sparse_url};
 use crate::diagnostic::{Error, Result};
 use crate::engine;
 use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::patch;
 use crate::policy::{self, PackageEvidence};
-use crate::repository::RepositorySet;
+use crate::redirect::TrustPolicy;
+use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
     self, Catalog, LockedPreference, Options, PackageKey, PackageSourceKey, Resolution,
     TargetSelection,
 };
 use crate::source_tree::Limits as TreeLimits;
+use crate::sparse;
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::vendor_lock::ProjectVendorLock;
 
@@ -44,7 +48,7 @@ pub fn execute(cli: &Cli, _accept_all: bool) -> Result<i32> {
         eprintln!("Locked {}", lock.path().display());
     }
     let manifest = Manifest::load_for_vendor(&initial_manifest.root)?;
-    let lock_bytes = prepare_path_only(&manifest, &config, &toolchain, &host, &targets)?;
+    let lock_bytes = prepare_networked(&manifest, &config, &toolchain, &host, &targets)?;
     let lock_path = manifest.root.join("Cargo.lock");
     let staged = stage_lockfile(&lock_path, &lock_bytes)?;
     let changed = staged.is_some();
@@ -88,6 +92,7 @@ fn vendor_targets(
         .collect()
 }
 
+#[cfg(test)]
 fn prepare_path_only(
     manifest: &Manifest,
     config: &Config,
@@ -95,19 +100,6 @@ fn prepare_path_only(
     host: &TargetInfo,
     targets: &[TargetInfo],
 ) -> Result<Vec<u8>> {
-    let repositories = RepositorySet::open(
-        &config.repositories,
-        repository_tree_limits(&config.policy.limits)?,
-        config.policy.limits.max_package_bytes,
-    )?;
-    let mut catalog = if manifest.lock.is_some() {
-        Catalog::from_locked_repository(manifest, &repositories)?
-    } else {
-        Catalog::default()
-    };
-    patch::configure(manifest, config, &repositories, &mut catalog)?;
-    let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
-    let options = resolver_options(manifest, config, toolchain)?;
     let locked_registry_names = manifest
         .lock
         .iter()
@@ -122,9 +114,66 @@ fn prepare_path_only(
             Err(fetch_pending(name))
         }
     };
-    let complete =
-        resolver::resolve_dynamic(manifest, &mut catalog, &options, &locked, &mut loader)?;
-    reject_registry_packages(&complete)?;
+    let (lock, selected) = prepare_with_loader(
+        manifest,
+        config,
+        toolchain,
+        host,
+        targets,
+        &mut loader,
+        &reject_registry_packages,
+    )?;
+    inspect_path_policy(config, &selected)?;
+    Ok(lock)
+}
+
+fn prepare_networked(
+    manifest: &Manifest,
+    config: &Config,
+    toolchain: &Toolchain,
+    host: &TargetInfo,
+    targets: &[TargetInfo],
+) -> Result<Vec<u8>> {
+    let mut acquisition = Acquisition::new(config);
+    let mut loader = |name: &str, catalog: &mut Catalog| acquisition.load_sparse(name, catalog);
+    let (lock, selected) = prepare_with_loader(
+        manifest,
+        config,
+        toolchain,
+        host,
+        targets,
+        &mut loader,
+        &|_| Ok(()),
+    )?;
+    reject_registry_packages(&selected)?;
+    inspect_path_policy(config, &selected)?;
+    Ok(lock)
+}
+
+fn prepare_with_loader(
+    manifest: &Manifest,
+    config: &Config,
+    toolchain: &Toolchain,
+    host: &TargetInfo,
+    targets: &[TargetInfo],
+    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+    after_complete: &dyn Fn(&Resolution) -> Result<()>,
+) -> Result<(Vec<u8>, Resolution)> {
+    let repositories = RepositorySet::open(
+        &config.repositories,
+        repository_tree_limits(&config.policy.limits)?,
+        config.policy.limits.max_package_bytes,
+    )?;
+    let mut catalog = if manifest.lock.is_some() {
+        Catalog::from_locked_repository(manifest, &repositories)?
+    } else {
+        Catalog::default()
+    };
+    patch::configure(manifest, config, &repositories, &mut catalog)?;
+    let locked = LockedPreference::from_lockfile(manifest.lock.as_ref())?;
+    let options = resolver_options(manifest, config, toolchain)?;
+    let complete = resolver::resolve_dynamic(manifest, &mut catalog, &options, &locked, loader)?;
+    after_complete(&complete)?;
 
     let selected_locked = LockedPreference::from_resolution(&complete);
     let mut selected = Vec::new();
@@ -140,12 +189,66 @@ fn prepare_path_only(
                 host_triple: &host.triple,
                 host_cfg: &host.cfg,
             },
-            &mut loader,
+            loader,
         )?);
     }
     let selected = resolver::merge_resolutions(selected)?;
-    inspect_path_policy(config, &selected)?;
-    lockfile::render(manifest, &complete)
+    Ok((lockfile::render(manifest, &complete)?, selected))
+}
+
+struct Acquisition<'a> {
+    config: &'a Config,
+    state: Option<AcquisitionState>,
+}
+
+struct AcquisitionState {
+    client: Client,
+    trust: TrustPolicy,
+    transaction: RepositoryTransaction,
+}
+
+impl<'a> Acquisition<'a> {
+    fn new(config: &'a Config) -> Self {
+        Self {
+            config,
+            state: None,
+        }
+    }
+
+    fn load_sparse(&mut self, name: &str, catalog: &mut Catalog) -> Result<()> {
+        let url = sparse_url(name)?;
+        let expected = name.to_ascii_lowercase();
+        let state = self.state()?;
+        let download = state.client.download(
+            &url,
+            &mut state.trust,
+            state.transaction.path(),
+            sparse::MAX_RESPONSE_BYTES,
+        )?;
+        for record in sparse::load_response(download.path(), &expected)? {
+            catalog.insert(record)?;
+        }
+        Ok(())
+    }
+
+    fn state(&mut self) -> Result<&mut AcquisitionState> {
+        if self.state.is_none() {
+            let client = Client::discover(&self.config.network)?;
+            let trust = TrustPolicy::load_default()?;
+            let tree = repository_tree_limits(&self.config.policy.limits)?;
+            let writer = RepositoryWriter::open(
+                &self.config.repositories,
+                tree,
+                ArchiveLimits::from_policy(&self.config.policy.limits),
+            )?;
+            self.state = Some(AcquisitionState {
+                client,
+                trust,
+                transaction: writer.begin()?,
+            });
+        }
+        Ok(self.state.as_mut().unwrap())
+    }
 }
 
 fn resolver_options(
@@ -190,12 +293,13 @@ fn reject_registry_packages(resolution: &Resolution) -> Result<()> {
         return Ok(());
     }
     Err(Error::failure(format!(
-        "crates.io acquisition is not enabled yet; the resolved graph requires {}",
+        "crates.io archive acquisition is not enabled yet; the resolved graph requires {}",
         packages.join(", ")
     ))
-    .with_help("the next Stage-2 increment adds direct curl acquisition"))
+    .with_help("sparse metadata was acquired; the next Stage-2 increment stages crate archives"))
 }
 
+#[cfg(test)]
 fn fetch_pending(name: &str) -> Error {
     Error::failure(format!(
         "sparse-index metadata for crates.io package `{name}` is unavailable because the \
@@ -306,6 +410,17 @@ mod tests {
             std::slice::from_ref(&target),
         )
         .unwrap();
+        assert_eq!(
+            prepare_networked(
+                &manifest,
+                &config,
+                &toolchain(),
+                &target,
+                std::slice::from_ref(&target),
+            )
+            .unwrap(),
+            bytes
+        );
 
         let lock_path = fixture.0.join("Cargo.lock");
         let staged = stage_lockfile(&lock_path, &bytes).unwrap().unwrap();
