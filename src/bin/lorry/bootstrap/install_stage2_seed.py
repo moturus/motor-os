@@ -590,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     try:
-        host_c_compiler = resolve_host_tool(args.host_c_compiler, "cc")
+        host_c_compiler = resolve_host_tool(args.host_c_compiler, "clang")
         host_archiver = resolve_host_tool(args.host_archiver, "ar")
         manifest = load_seed_manifest(args.manifest)
         seed_system_repository(
