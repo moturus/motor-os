@@ -9,9 +9,10 @@ use crate::archive::Limits as ArchiveLimits;
 use crate::atomic::AtomicFile;
 use crate::cli::{Cli, Verbosity};
 use crate::config::{Config, PolicyLimits};
-use crate::curl::{Client, sparse_url};
+use crate::curl::{Client, archive_url, sparse_url};
 use crate::diagnostic::{Error, Result};
 use crate::engine;
+use crate::hash::hex;
 use crate::lockfile;
 use crate::manifest::Manifest;
 use crate::patch;
@@ -20,7 +21,7 @@ use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
     self, Catalog, LockedPreference, Options, PackageKey, PackageSourceKey, Resolution,
-    TargetSelection,
+    ResolvedPackage, ResolvedSource, TargetSelection,
 };
 use crate::source_tree::Limits as TreeLimits;
 use crate::sparse;
@@ -198,6 +199,7 @@ fn prepare_with_loader(
 
 struct Acquisition<'a> {
     config: &'a Config,
+    records: BTreeMap<(String, Version), sparse::Record>,
     state: Option<AcquisitionState>,
 }
 
@@ -211,6 +213,7 @@ impl<'a> Acquisition<'a> {
     fn new(config: &'a Config) -> Self {
         Self {
             config,
+            records: BTreeMap::new(),
             state: None,
         }
     }
@@ -226,9 +229,68 @@ impl<'a> Acquisition<'a> {
             sparse::MAX_RESPONSE_BYTES,
         )?;
         for record in sparse::load_response(download.path(), &expected)? {
-            catalog.insert(record)?;
+            catalog.insert(record.clone())?;
+            let key = (record.name.clone(), record.version.clone());
+            if self.records.insert(key, record).is_some() {
+                return Err(Error::failure(format!(
+                    "sparse acquisition repeated package version `{name}`"
+                )));
+            }
         }
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn stage_selected(&mut self, resolution: &Resolution) -> Result<usize> {
+        let max_package_bytes = self.config.policy.limits.max_package_bytes;
+        self.stage_selected_with(resolution, |state, package, record| {
+            let url = archive_url(&package.key.name, &package.key.version)?;
+            let download = state.client.download(
+                &url,
+                &mut state.trust,
+                state.transaction.path(),
+                max_package_bytes,
+            )?;
+            state.transaction.stage_registry(record, download.path())?;
+            Ok(())
+        })
+    }
+
+    fn stage_selected_with(
+        &mut self,
+        resolution: &Resolution,
+        mut stage: impl FnMut(&mut AcquisitionState, &ResolvedPackage, &sparse::Record) -> Result<()>,
+    ) -> Result<usize> {
+        let repositories = RepositorySet::open(
+            &self.config.repositories,
+            repository_tree_limits(&self.config.policy.limits)?,
+            self.config.policy.limits.max_package_bytes,
+        )?;
+        let mut staged = 0;
+        for package in &resolution.packages {
+            let ResolvedSource::CratesIo { checksum } = package.source else {
+                continue;
+            };
+            if repositories.lookup_registry(&hex(&checksum))?.is_some() {
+                continue;
+            }
+            let key = (package.key.name.clone(), package.key.version.clone());
+            let record = self.records.get(&key).cloned().ok_or_else(|| {
+                Error::failure(format!(
+                    "resolved crates.io package `{} {}` has no acquired sparse index record",
+                    package.key.name, package.key.version
+                ))
+            })?;
+            if record.checksum != checksum {
+                return Err(Error::failure(format!(
+                    "acquired sparse index checksum changed for resolved package `{} {}`",
+                    package.key.name, package.key.version
+                )));
+            }
+            stage(self.state()?, package, &record)?;
+            staged += 1;
+        }
+        Ok(staged)
     }
 
     fn state(&mut self) -> Result<&mut AcquisitionState> {
@@ -341,7 +403,12 @@ fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
 mod tests {
     use super::*;
     use crate::config::CargoCompat;
+    use crate::hash::Sha256;
+    use crate::resolver::{CompileKind, PackageSourceKey};
     use crate::toolchain::CfgSet;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write as _;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -388,6 +455,67 @@ mod tests {
                 "target_arch=\"x86_64\"\ntarget_os=\"linux\"\ntarget_family=\"unix\"\nunix\n",
             )
             .unwrap(),
+        }
+    }
+
+    fn crate_archive(name: &str, version: &str) -> Vec<u8> {
+        fn octal(field: &mut [u8], value: u64) {
+            let text = format!("{value:0width$o}", width = field.len() - 1);
+            field[..text.len()].copy_from_slice(text.as_bytes());
+        }
+        fn append(tar: &mut Vec<u8>, path: &str, contents: &[u8]) {
+            let mut header = [0_u8; 512];
+            header[..path.len()].copy_from_slice(path.as_bytes());
+            octal(&mut header[100..108], 0o644);
+            octal(&mut header[124..136], contents.len() as u64);
+            header[148..156].fill(b' ');
+            header[156] = b'0';
+            header[257..263].copy_from_slice(b"ustar\0");
+            header[263..265].copy_from_slice(b"00");
+            let checksum = header.iter().map(|byte| *byte as u64).sum::<u64>();
+            header[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
+            tar.extend_from_slice(&header);
+            tar.extend_from_slice(contents);
+            tar.resize((tar.len() + 511) / 512 * 512, 0);
+        }
+
+        let root = format!("{name}-{version}");
+        let mut tar = Vec::new();
+        append(
+            &mut tar,
+            &format!("{root}/Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\
+                 edition = \"2021\"\nlicense = \"MIT\"\n"
+            )
+            .as_bytes(),
+        );
+        append(
+            &mut tar,
+            &format!("{root}/src/lib.rs"),
+            b"pub fn fixture() {}\n",
+        );
+        tar.resize(tar.len() + 1024, 0);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&tar).unwrap();
+        gzip.finish().unwrap()
+    }
+
+    fn registry_package(name: &str, version: &Version, checksum: [u8; 32]) -> ResolvedPackage {
+        ResolvedPackage {
+            key: PackageKey {
+                name: name.to_owned(),
+                version: version.clone(),
+                source: PackageSourceKey::CratesIo,
+            },
+            source: ResolvedSource::CratesIo { checksum },
+            local_manifest: None,
+            feature_sets: BTreeMap::new(),
+            compile_kinds: BTreeSet::from([CompileKind::Target]),
+            target_features: BTreeSet::new(),
+            host_features: BTreeSet::new(),
+            edges: Vec::new(),
+            lock_edges: Vec::new(),
         }
     }
 
@@ -501,5 +629,70 @@ mod tests {
         .unwrap_err();
         assert!(error.render().contains("curl acquisition"));
         assert!(!fixture.0.join("Cargo.lock").exists());
+    }
+
+    #[test]
+    fn stages_only_missing_selected_registry_archives() {
+        let fixture = Fixture::new("acquire");
+        let repository = fixture.0.join("repository");
+        let mut config = Config::default();
+        config.repositories.local = Some(repository);
+        let bytes = crate_archive("demo", "1.2.3");
+        let archive = fixture.0.join("demo.crate");
+        fs::write(&archive, &bytes).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(&bytes);
+        let checksum = digest.finish();
+        let version = Version::parse("1.2.3").unwrap();
+        let record = sparse::Record::parse(
+            Path::new("/demo-index"),
+            format!(
+                "{{\"name\":\"demo\",\"vers\":\"{version}\",\"deps\":[],\
+                 \"cksum\":\"{}\",\"features\":{{}},\"yanked\":false}}\n",
+                hex(&checksum)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let resolution = Resolution {
+            root_edges: Vec::new(),
+            packages: vec![registry_package("demo", &version, checksum)],
+        };
+        let mut acquisition = Acquisition::new(&config);
+        acquisition
+            .records
+            .insert(("demo".to_owned(), version.clone()), record.clone());
+
+        let staged = acquisition
+            .stage_selected_with(&resolution, |state, _, record| {
+                state.transaction.stage_registry(record, &archive)?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(staged, 1);
+        assert_eq!(
+            acquisition.state.as_ref().unwrap().transaction.objects()[0]
+                .object()
+                .name,
+            "demo"
+        );
+        acquisition
+            .state
+            .take()
+            .unwrap()
+            .transaction
+            .publish()
+            .unwrap();
+
+        let mut warm = Acquisition::new(&config);
+        warm.records.insert(("demo".to_owned(), version), record);
+        assert_eq!(
+            warm.stage_selected_with(&resolution, |_, _, _| {
+                panic!("an existing verified object must not be downloaded")
+            })
+            .unwrap(),
+            0
+        );
+        assert!(warm.state.is_none());
     }
 }
