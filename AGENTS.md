@@ -20,7 +20,8 @@ General guidelines:
 * Stop if any preexisting bug, including in test harness, is found and ask for guidance.
 * Make sure your tests are included in src/tests/full-test.sh either directly or transitively.
 * Make sure src/tests/full-test.sh passes consistently as both debug and release
-  builds/runs at least three times each before committing a patch.
+  builds/runs at least three times each before committing a patch. If this step fails, please make
+  a reasonable effort to root cause the failure, don't just stop.
 * Complexity is frowned upon, and is tolerated only when really needed.
 * On larger tasks, first create a plan in an *.md file in docs/plans/, ask for review, then proceed
   in incremental steps. Do not change any code during the planning step.
