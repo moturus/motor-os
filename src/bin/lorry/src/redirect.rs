@@ -270,7 +270,7 @@ impl TrustPolicy {
         Self::load(&default_trust_path()?)
     }
 
-    fn load(path: &Path) -> Result<Self> {
+    pub(crate) fn load(path: &Path) -> Result<Self> {
         Ok(Self {
             persistent: TrustStore::load(path)?,
             operation_allow: BTreeSet::new(),
@@ -384,7 +384,7 @@ fn default_trust_path() -> Result<PathBuf> {
     Ok(home.join(".config/lorry/redirect-sites.toml"))
 }
 
-fn redact_url(value: &str) -> String {
+pub(crate) fn redact_url(value: &str) -> String {
     match value.split_once('?') {
         Some((path, _)) => format!("{path}?[REDACTED]"),
         None => value.to_owned(),

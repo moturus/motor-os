@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -11,8 +12,10 @@ use semver::Version;
 
 use crate::config::NetworkConfig;
 use crate::diagnostic::{Error, Result};
+use crate::redirect::{HttpsUrl, TrustPolicy, redact_url};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
+const MAX_REDIRECTS: usize = 5;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(305);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +42,30 @@ impl Client {
             executable,
             ca_bundle,
         })
+    }
+
+    pub fn download(
+        &self,
+        url: &str,
+        trust: &mut TrustPolicy,
+        staging_parent: &Path,
+        max_body_bytes: u64,
+    ) -> Result<Download> {
+        download_with(
+            url,
+            trust,
+            staging_parent,
+            max_body_bytes,
+            |url, destination, limit| {
+                request(
+                    &self.executable,
+                    url,
+                    self.ca_bundle.as_deref(),
+                    destination,
+                    limit,
+                )
+            },
+        )
     }
 }
 
@@ -147,6 +174,149 @@ pub struct Metadata {
     pub effective_url: String,
     pub redirect_url: Option<String>,
     pub size: u64,
+}
+
+#[derive(Debug)]
+pub struct Download {
+    body: ResponseBody,
+    pub diagnostic: Vec<u8>,
+    pub metadata: Metadata,
+}
+
+impl Download {
+    pub fn path(&self) -> &Path {
+        &self.body.path
+    }
+}
+
+#[derive(Debug)]
+struct ResponseBody {
+    path: PathBuf,
+}
+
+impl ResponseBody {
+    fn create(parent: &Path) -> Result<(Self, File)> {
+        let metadata = fs::symlink_metadata(parent).map_err(|error| {
+            Error::failure(format!(
+                "failed to inspect curl staging directory `{}`: {error}",
+                parent.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(Error::failure(format!(
+                "curl staging path `{}` is not a real directory",
+                parent.display()
+            )));
+        }
+        for _ in 0..100 {
+            let path = parent.join(format!(".curl-response-{}", nonce()?));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(file) => {
+                    if let Err(error) = crate::atomic::set_private_file(&file, &path) {
+                        drop(file);
+                        let _ = fs::remove_file(&path);
+                        return Err(error);
+                    }
+                    return Ok((Self { path }, file));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(Error::failure(format!(
+                        "failed to create curl response staging `{}`: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        Err(Error::failure("could not allocate curl response staging"))
+    }
+}
+
+impl Drop for ResponseBody {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn download_with<F>(
+    initial_url: &str,
+    trust: &mut TrustPolicy,
+    staging_parent: &Path,
+    max_body_bytes: u64,
+    mut transfer: F,
+) -> Result<Download>
+where
+    F: FnMut(&str, File, u64) -> Result<(Vec<u8>, Metadata)>,
+{
+    if max_body_bytes == 0 {
+        return Err(Error::failure("curl response body limit must be nonzero"));
+    }
+    let mut current = HttpsUrl::parse(initial_url)?;
+    let mut seen = BTreeSet::from([current.request_url.clone()]);
+    let mut redirects = 0;
+    loop {
+        let (body, destination) = ResponseBody::create(staging_parent)?;
+        let (diagnostic, metadata) = transfer(&current.request_url, destination, max_body_bytes)?;
+        let effective = HttpsUrl::parse(&metadata.effective_url).map_err(|error| {
+            Error::failure(format!("curl reported an invalid effective URL: {error}"))
+        })?;
+        if effective.request_url != current.request_url
+            || metadata.effective_url != effective.request_url
+        {
+            return Err(Error::failure(format!(
+                "curl reported effective URL `{}`, expected `{}`",
+                redact_url(&metadata.effective_url),
+                redact_url(&current.request_url)
+            )));
+        }
+        if metadata.status == 200 {
+            if metadata.redirect_url.is_some() {
+                return Err(Error::failure(
+                    "curl reported a redirect URL for successful HTTP status 200",
+                ));
+            }
+            return Ok(Download {
+                body,
+                diagnostic,
+                metadata,
+            });
+        }
+        if !matches!(metadata.status, 301 | 302 | 303 | 307 | 308) {
+            return Err(Error::failure(format!(
+                "curl returned unsupported HTTP status {} for `{}`",
+                metadata.status,
+                redact_url(&current.request_url)
+            )));
+        }
+        let next = metadata.redirect_url.as_deref().ok_or_else(|| {
+            Error::failure(format!(
+                "curl returned redirect status {} without a redirect URL",
+                metadata.status
+            ))
+        })?;
+        let next = HttpsUrl::parse(next)?;
+        if redirects == MAX_REDIRECTS {
+            return Err(Error::failure(format!(
+                "curl response exceeded the {MAX_REDIRECTS}-redirect limit"
+            )));
+        }
+        if !seen.insert(next.request_url.clone()) {
+            return Err(Error::failure(format!(
+                "curl redirect loop reached `{}`",
+                redact_url(&next.request_url)
+            )));
+        }
+        trust.authorize(&current, &next)?;
+        redirects += 1;
+        current = next;
+    }
 }
 
 pub fn request(
@@ -530,6 +700,8 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 mod tests {
     use std::fs;
 
+    use crate::redirect::{Decision, TrustStore};
+
     use super::*;
 
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
@@ -545,6 +717,32 @@ mod tests {
              END-LORRY-CURL-1 {NONCE}\n"
         )
         .into_bytes()
+    }
+
+    fn root(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("lorry-curl-{label}-{}", nonce().unwrap()));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    fn policy(root: &Path, allowed: &[&str]) -> TrustPolicy {
+        let path = root.join("redirect-sites.toml");
+        let mut store = TrustStore::load(&path).unwrap();
+        for url in allowed {
+            store
+                .save(HttpsUrl::parse(url).unwrap().site, Decision::Allow)
+                .unwrap();
+        }
+        TrustPolicy::load(&path).unwrap()
+    }
+
+    fn metadata(status: u16, effective: &str, redirect: Option<&str>) -> Metadata {
+        Metadata {
+            status,
+            effective_url: effective.to_owned(),
+            redirect_url: redirect.map(str::to_owned),
+            size: 4,
+        }
     }
 
     #[test]
@@ -600,6 +798,104 @@ mod tests {
         );
         assert!(sparse_url("../bad").is_err());
         assert!(sparse_url("123").is_err());
+    }
+
+    #[test]
+    fn follows_only_approved_redirects_and_retains_only_the_final_body() {
+        let root = root("redirect");
+        let mut trust = policy(&root, &["https://one.example/", "https://two.example/"]);
+        let responses = [
+            (
+                "https://index.crates.io/start",
+                metadata(
+                    302,
+                    "https://index.crates.io/start",
+                    Some("https://one.example/a"),
+                ),
+            ),
+            (
+                "https://one.example/a",
+                metadata(307, "https://one.example/a", Some("https://two.example/b")),
+            ),
+            (
+                "https://two.example/b",
+                metadata(200, "https://two.example/b", None),
+            ),
+        ];
+        let mut call = 0;
+        let download = download_with(responses[0].0, &mut trust, &root, 32, |url, mut body, _| {
+            assert_eq!(url, responses[call].0);
+            body.write_all(if call == 2 { b"done" } else { b"skip" })
+                .unwrap();
+            let result = responses[call].1.clone();
+            call += 1;
+            Ok((Vec::new(), result))
+        })
+        .unwrap();
+        assert_eq!(fs::read(download.path()).unwrap(), b"done");
+        let path = download.path().to_owned();
+        drop(download);
+        assert!(!path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_redirect_loops_sixth_hops_and_effective_url_drift() {
+        let root = root("redirect-errors");
+        let mut trust = policy(&root, &["https://one.example/"]);
+        let mut call = 0;
+        let error = download_with(
+            "https://index.crates.io/start",
+            &mut trust,
+            &root,
+            32,
+            |url, _, _| {
+                call += 1;
+                let next = if call == 1 {
+                    "https://one.example/a"
+                } else {
+                    "https://index.crates.io/start"
+                };
+                Ok((Vec::new(), metadata(302, url, Some(next))))
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("loop"));
+
+        let mut trust = policy(&root, &["https://hop.example/"]);
+        call = 0;
+        let error = download_with(
+            "https://index.crates.io/start",
+            &mut trust,
+            &root,
+            32,
+            |url, _, _| {
+                call += 1;
+                let next = format!("https://hop.example/{call}");
+                Ok((Vec::new(), metadata(308, url, Some(&next))))
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("5-redirect limit"));
+        assert_eq!(call, 6);
+
+        let mut trust = policy(&root, &[]);
+        let error = download_with(
+            "https://index.crates.io/start?secret",
+            &mut trust,
+            &root,
+            32,
+            |_, _, _| {
+                Ok((
+                    Vec::new(),
+                    metadata(200, "https://index.crates.io/other?secret", None),
+                ))
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("effective URL"));
+        assert!(!error.to_string().contains("secret"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(not(target_os = "motor"))]

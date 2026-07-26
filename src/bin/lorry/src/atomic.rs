@@ -393,7 +393,7 @@ fn set_private(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn set_private_file(_file: &File, _path: &Path) -> Result<()> {
+pub(crate) fn set_private_file(_file: &File, _path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
