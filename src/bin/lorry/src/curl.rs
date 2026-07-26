@@ -100,7 +100,7 @@ fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 
 fn executable(path: &Path, description: &str) -> Result<PathBuf> {
     let path = regular_file(path, description)?;
-    let metadata = fs::metadata(&path).map_err(|error| {
+    let _metadata = fs::metadata(&path).map_err(|error| {
         Error::failure(format!(
             "failed to inspect {description} `{}`: {error}",
             path.display()
@@ -109,7 +109,7 @@ fn executable(path: &Path, description: &str) -> Result<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
+        if _metadata.permissions().mode() & 0o111 == 0 {
             return Err(Error::failure(format!(
                 "{description} `{}` is not executable",
                 path.display()
