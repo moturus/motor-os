@@ -5,7 +5,7 @@ use std::path::Path;
 
 use semver::Version;
 
-use crate::archive::Limits as ArchiveLimits;
+use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::AtomicFile;
 use crate::cli::{Cli, Verbosity};
 use crate::config::{Config, PolicyLimits};
@@ -200,6 +200,8 @@ fn prepare_with_loader(
 struct Acquisition<'a> {
     config: &'a Config,
     records: BTreeMap<(String, Version), sparse::Record>,
+    #[allow(dead_code)]
+    inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
 }
 
@@ -214,6 +216,7 @@ impl<'a> Acquisition<'a> {
         Self {
             config,
             records: BTreeMap::new(),
+            inspections: Vec::new(),
             state: None,
         }
     }
@@ -254,6 +257,69 @@ impl<'a> Acquisition<'a> {
             state.transaction.stage_registry(record, download.path())?;
             Ok(())
         })
+    }
+
+    #[allow(dead_code)]
+    fn evidence(
+        &mut self,
+        resolution: &Resolution,
+    ) -> Result<BTreeMap<PackageKey, PackageEvidence>> {
+        let repositories = RepositorySet::open(
+            &self.config.repositories,
+            repository_tree_limits(&self.config.policy.limits)?,
+            self.config.policy.limits.max_package_bytes,
+        )?;
+        let mut evidence = BTreeMap::new();
+        for package in &resolution.packages {
+            let package_evidence = match &package.source {
+                ResolvedSource::Path { .. } => PackageEvidence::from_path(package)?,
+                ResolvedSource::CratesIo { checksum } => {
+                    let staged = self.state.as_ref().and_then(|state| {
+                        state
+                            .transaction
+                            .objects()
+                            .iter()
+                            .find(|object| object.object().checksum == *checksum)
+                    });
+                    if let Some(staged) = staged {
+                        PackageEvidence::from_registry(
+                            package,
+                            staged.object(),
+                            staged.manifest(),
+                            true,
+                        )?
+                    } else {
+                        let object = repositories.lookup_registry(&hex(checksum))?.ok_or_else(
+                            || {
+                                Error::failure(format!(
+                                    "selected crates.io package `{} {}` was not staged or present",
+                                    package.key.name, package.key.version
+                                ))
+                            },
+                        )?;
+                        let source = if object.retained_source {
+                            object.root.join("source")
+                        } else {
+                            let extracted = extract_crate(
+                                &object.root.join("package.crate"),
+                                object.checksum,
+                                &env::temp_dir(),
+                                &object.name,
+                                &object.version,
+                                ArchiveLimits::from_policy(&self.config.policy.limits),
+                            )?;
+                            let source = extracted.path().to_owned();
+                            self.inspections.push(extracted);
+                            source
+                        };
+                        let manifest = Manifest::load_path_dependency(&source)?;
+                        PackageEvidence::from_registry(package, &object, &manifest, false)?
+                    }
+                }
+            };
+            evidence.insert(package.key.clone(), package_evidence);
+        }
+        Ok(evidence)
     }
 
     fn stage_selected_with(
@@ -402,9 +468,9 @@ fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CargoCompat;
+    use crate::config::{CargoCompat, PolicyDefault};
     use crate::hash::Sha256;
-    use crate::resolver::{CompileKind, PackageSourceKey};
+    use crate::resolver::{CompileKind, FeatureContext, PackageSourceKey, ResolvedEdge};
     use crate::toolchain::CfgSet;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -637,6 +703,8 @@ mod tests {
         let repository = fixture.0.join("repository");
         let mut config = Config::default();
         config.repositories.local = Some(repository);
+        config.repositories.keep_sources = false;
+        config.policy.default = PolicyDefault::Allow;
         let bytes = crate_archive("demo", "1.2.3");
         let archive = fixture.0.join("demo.crate");
         fs::write(&archive, &bytes).unwrap();
@@ -654,9 +722,17 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
+        let package = registry_package("demo", &version, checksum);
         let resolution = Resolution {
-            root_edges: Vec::new(),
-            packages: vec![registry_package("demo", &version, checksum)],
+            root_edges: vec![ResolvedEdge {
+                dependency_index: 0,
+                alias: "demo".to_owned(),
+                kind: sparse::DependencyKind::Normal,
+                compile_kind: CompileKind::Target,
+                context: FeatureContext::Unified,
+                package: package.key.clone(),
+            }],
+            packages: vec![package],
         };
         let mut acquisition = Acquisition::new(&config);
         acquisition
@@ -676,6 +752,10 @@ mod tests {
                 .name,
             "demo"
         );
+        let evidence = acquisition.evidence(&resolution).unwrap();
+        let preflight = policy::preflight(&config.policy, &resolution).unwrap();
+        policy::inspect(&preflight, &resolution, &evidence).unwrap();
+        assert!(evidence[&resolution.packages[0].key].newly_acquired);
         acquisition
             .state
             .take()
@@ -694,5 +774,9 @@ mod tests {
             0
         );
         assert!(warm.state.is_none());
+        let evidence = warm.evidence(&resolution).unwrap();
+        assert!(!evidence[&resolution.packages[0].key].newly_acquired);
+        assert_eq!(warm.inspections.len(), 1);
+        assert!(warm.inspections[0].path().is_dir());
     }
 }
