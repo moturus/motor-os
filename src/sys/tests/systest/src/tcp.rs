@@ -1149,6 +1149,25 @@ fn test_tcp_loopback() {
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
+/// The listener TTL option through the POSIX ABI: the only caller of the
+/// listener's remote option RPCs outside the native tests.
+fn test_tcp_listener_ttl() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let fd = listener.as_raw_fd();
+
+    moto_rt::net::set_ttl(fd, 41).unwrap();
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
+    assert_eq!(
+        moto_rt::net::set_ttl(fd, u8::MAX as u32 + 1),
+        Err(moto_rt::Error::InvalidArgument)
+    );
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 41);
+
+    println!("test_tcp_listener_ttl() PASS");
+}
+
 fn test_tcp_linger() {
     use std::os::fd::AsRawFd;
 
@@ -1755,6 +1774,7 @@ pub fn run_all_tests() {
     test_ipv6();
     test_zero_port_listen();
     test_tcp_loopback();
+    test_tcp_listener_ttl();
     test_tcp_linger();
     test_peek();
     test_read_timeout_early_data();

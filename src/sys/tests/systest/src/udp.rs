@@ -90,6 +90,26 @@ fn test_native_udp_ttl() {
     println!("-- test_native_udp_ttl() PASS");
 }
 
+/// The UDP TTL option through the POSIX ABI, which reaches the same remote
+/// RPCs as [`test_native_udp_ttl`] but through the blocking bridge.
+fn test_posix_udp_ttl() {
+    use std::os::fd::AsRawFd;
+
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let fd = socket.as_raw_fd();
+
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 64);
+    moto_rt::net::set_ttl(fd, 37).unwrap();
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 37);
+    assert_eq!(
+        moto_rt::net::set_ttl(fd, u8::MAX as u32 + 1),
+        Err(moto_rt::Error::InvalidArgument)
+    );
+    assert_eq!(moto_rt::net::ttl(fd).unwrap(), 37);
+
+    println!("-- test_posix_udp_ttl() PASS");
+}
+
 fn test_udp_large_packets() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let a2 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:5678").unwrap();
@@ -392,6 +412,7 @@ fn test_udp_tx_progresses_after_page_free() {
 pub fn run_all_tests() {
     test_udp_basic();
     test_native_udp_ttl();
+    test_posix_udp_ttl();
     test_udp_large_packets();
     test_udp_double_bind();
     test_udp_connect();

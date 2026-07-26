@@ -1668,16 +1668,6 @@ impl NetChannel {
         }
     }
 
-    // Send message and wait for response.
-    pub fn send_receive(&self, mut req: io_channel::Msg) -> io_channel::Msg {
-        let (tx, rx) = moto_async::oneshot();
-        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
-        self.send_rpc(req, RpcWaiter::Response(tx));
-
-        // Completes without a syscall if the response already arrived.
-        moto_async::block_on_sync(rx).expect("RPC sender dropped")
-    }
-
     pub fn new_req_id(&self) -> u64 {
         self.next_msg_id.fetch_add(1, Ordering::Relaxed)
     }

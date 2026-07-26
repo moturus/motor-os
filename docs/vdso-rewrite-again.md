@@ -3,10 +3,11 @@
 2026-07-23. This is a plan only. It does not propose an ABI change and it
 does not imply that the current code should be changed in one large step.
 
-Status update (2026-07-25): implementation is paused after the Stage 2 TCP
-teardown work while a performance regression is investigated. Sections 1
-through 6 continue to describe the target architecture; Section 7 records the
-work landed so far and the remaining implementation order.
+Status update (2026-07-26): Stage 2 resumed on explicit instruction with the
+Stage 0 same-host performance baseline still outstanding; that gate is
+deferred, not satisfied. Sections 1 through 6 continue to describe the target
+architecture; Section 7 records the work landed so far and the remaining
+implementation order.
 
 ## 1. Decisions and scope
 
@@ -55,13 +56,11 @@ compatibility policy moved with them:
 - The same file exposes the vDSO TLS-cleanup workaround
   `set_thread_exit_hook`.
 - Queue pressure can enter `send_msg`, `wait_can_send`, and
-  `send_msg_guaranteed`, which park a caller thread. `send_receive` calls
-  `block_on_sync` inside `moto-io`.
-- TCP listener bind, UDP bind, legacy socket-option methods, and parts of
-  connect/accept setup still use synchronous channel operations. Typed async
-  socket-option and TCP shutdown paths now exist, and TCP listener/stream
-  destruction has moved to the driver-owned teardown path, but UDP
-  destruction and some rollback/control paths still block.
+  `send_msg_guaranteed`, which park a caller thread.
+- Parts of connect/accept setup still use synchronous channel operations.
+  Bind, the typed socket options, TCP shutdown, and TCP listener/stream
+  destruction are async, but UDP destruction and some rollback/control paths
+  still block.
 - Creating a channel happens while the global pool lock is held. A sys-io
   connection retry can stall every unrelated reservation, release, teardown,
   statistics call, and test hook.
@@ -494,16 +493,17 @@ land with their regression tests. The large ownership flip may require one
 explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
-Current status: paused before further refactoring. First investigate the
-observed performance regression and re-establish a trustworthy paired,
-same-host release `rnetbench` baseline. Do not resume Stage 2 until the
-regression is fixed, understood and accepted, or explicitly waived.
+Current status: Stage 2 is being finished under an explicit instruction to
+proceed. The paired, same-host release `rnetbench` baseline that Stage 0
+calls for has still not been re-established, so the performance regression
+remains uninvestigated and each landed step is covered by functional gates
+only.
 
 | Stage | Status | Summary |
 |---|---|---|
 | 0: gates and baselines | Reopened | Functional gates have run repeatedly; the performance gate must be re-established because of the current regression. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
-| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, and TCP listener/stream teardown have landed; remaining blocking and UDP teardown paths still need conversion. |
+| 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, and TCP listener/stream teardown have landed; UDP teardown and connect/accept rollback still block. |
 | 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
 | 4: additive driver split | Not started | `NetDriver` has not yet been split out. |
 | 5: ownership flip | Not started | Runtime-owned driver tasks are not yet the default. |
@@ -553,21 +553,26 @@ Landed:
    ordering between already-queued per-handle messages and close.
 6. Added cancellation, full-staging, ordering, and teardown-progress tests
    for the converted paths.
+7. Converted TCP listener bind and UDP bind to the async RPC path. A bind
+   whose future is cancelled after its request was queued rolls back through
+   an RAII record that carries the reservation, so the listener/socket
+   sys-io created for it is closed on the teardown queue.
+8. Routed the POSIX `setsockopt`/`getsockopt` dispatch through the typed
+   async option and shutdown methods, deleting the duplicate blocking option
+   methods and `send_receive`. The raw-pointer dispatch itself still lives in
+   `moto-io` and moves to the `Rt*` wrappers in Stage 3.
 
-Remaining after the performance pause:
+Remaining:
 
-1. Convert TCP listener bind, UDP bind, and remaining control-plane callers
-   to async send/RPC paths.
-2. Convert UDP destruction to the teardown queue. Before implementation,
+1. Convert UDP destruction to the teardown queue. Before implementation,
    confirm the required disposition and ordering of queued UDP datagrams;
    stop for guidance if the existing code does not make that contract
    unambiguous.
-3. Convert orphan/late TCP connect and accept cleanup, plus remaining
+2. Convert orphan/late TCP connect and accept cleanup, plus remaining
    guaranteed accept/control sends, to driver-owned async work.
-4. Move remaining consumers to typed async operations, then remove
-   `SyncWaiter`, `send_msg`, `send_receive`, `send_msg_guaranteed`, and their
-   condvar/backoff machinery after the last caller is gone.
-5. Re-run the full executor-liveness and reservation-accounting gates after
+3. Remove `SyncWaiter`, `send_msg`, `send_rpc`, `send_msg_guaranteed`, and
+   their condvar/backoff machinery after the last caller is gone.
+4. Re-run the full executor-liveness and reservation-accounting gates after
    each conversion.
 
 Gate: explicit executor-liveness tests under saturated queues, existing

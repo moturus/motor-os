@@ -415,100 +415,76 @@ impl UdpSocket {
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` readable bytes holding the value for `option`.
-    pub unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        unsafe {
-            match option {
-                moto_rt::net::SO_NONBLOCKING => {
-                    assert_eq!(len, 1);
-                    let nonblocking = *(ptr as *const u8);
-                    if nonblocking > 1 {
-                        return moto_rt::E_INVALID_ARGUMENT;
-                    }
-                    self.set_nonblocking(nonblocking == 1);
-                    moto_rt::E_OK
+    /// `ptr` must be valid for `len` readable bytes holding the value for
+    /// `option` until the returned future completes.
+    pub async unsafe fn setsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_NONBLOCKING => {
+                assert_eq!(len, 1);
+                let nonblocking = unsafe { *(ptr as *const u8) };
+                if nonblocking > 1 {
+                    return moto_rt::E_INVALID_ARGUMENT;
                 }
-                moto_rt::net::SO_RCVTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = *(ptr as *const u64);
-                    self.set_read_timeout(timeout);
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SNDTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = *(ptr as *const u64);
-                    self.set_write_timeout(timeout);
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_TTL => {
-                    assert_eq!(len, 4);
-                    let ttl = *(ptr as *const u32);
-                    self.set_ttl(ttl)
-                }
-                _ => panic!("unrecognized option {option}"),
+                self.set_nonblocking(nonblocking == 1);
+                moto_rt::E_OK
             }
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = unsafe { *(ptr as *const u64) };
+                self.set_read_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = unsafe { *(ptr as *const u64) };
+                self.set_write_timeout(timeout);
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                let ttl = unsafe { *(ptr as *const u32) };
+                super::into_error_code(self.set_ttl_async(ttl).await)
+            }
+            _ => panic!("unrecognized option {option}"),
         }
     }
 
     /// # Safety
     ///
-    /// `ptr` must be valid for `len` writable bytes to receive `option`'s value.
-    pub unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
-        unsafe {
-            match option {
-                moto_rt::net::SO_RCVTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = self.read_timeout();
-                    *(ptr as *mut u64) = timeout;
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_SNDTIMEO => {
-                    assert_eq!(len, core::mem::size_of::<u64>());
-                    let timeout = self.write_timeout();
-                    *(ptr as *mut u64) = timeout;
-                    moto_rt::E_OK
-                }
-                moto_rt::net::SO_TTL => {
-                    assert_eq!(len, 4);
-                    match self.ttl() {
-                        Ok(ttl) => {
-                            *(ptr as *mut u32) = ttl;
-                            moto_rt::E_OK
-                        }
-                        Err(err) => err,
-                    }
-                }
-                moto_rt::net::SO_ERROR => {
-                    assert_eq!(len, 2);
-                    // let err = self.take_error();
-                    // *(ptr as *mut u16) = err;
-                    *(ptr as *mut u16) = moto_rt::E_OK;
-                    moto_rt::E_OK
-                }
-                _ => panic!("unrecognized option {option}"),
+    /// `ptr` must be valid for `len` writable bytes to receive `option`'s
+    /// value until the returned future completes.
+    pub async unsafe fn getsockopt(&self, option: u64, ptr: usize, len: usize) -> ErrorCode {
+        match option {
+            moto_rt::net::SO_RCVTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.read_timeout();
+                unsafe { *(ptr as *mut u64) = timeout };
+                moto_rt::E_OK
             }
-        }
-    }
-
-    fn set_ttl(&self, ttl: u32) -> ErrorCode {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::UdpSocketSetOption as u16;
-        req.handle = self.handle;
-        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
-        req.payload.args_32_mut()[2] = ttl;
-        self.channel().send_receive(req).status
-    }
-
-    fn ttl(&self) -> Result<u32, ErrorCode> {
-        let mut req = io_channel::Msg::new();
-        req.command = api_net::NetCmd::UdpSocketGetOption as u16;
-        req.handle = self.handle;
-        req.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
-        let resp = self.channel().send_receive(req);
-        if resp.status().is_ok() {
-            Ok(resp.payload.args_32()[0])
-        } else {
-            Err(resp.status)
+            moto_rt::net::SO_SNDTIMEO => {
+                assert_eq!(len, core::mem::size_of::<u64>());
+                let timeout = self.write_timeout();
+                unsafe { *(ptr as *mut u64) = timeout };
+                moto_rt::E_OK
+            }
+            moto_rt::net::SO_TTL => {
+                assert_eq!(len, 4);
+                match self.ttl_async().await {
+                    Ok(ttl) => {
+                        unsafe { *(ptr as *mut u32) = ttl };
+                        moto_rt::E_OK
+                    }
+                    Err(err) => err,
+                }
+            }
+            moto_rt::net::SO_ERROR => {
+                assert_eq!(len, 2);
+                // let err = self.take_error();
+                // *(ptr as *mut u16) = err;
+                unsafe { *(ptr as *mut u16) = moto_rt::E_OK };
+                moto_rt::E_OK
+            }
+            _ => panic!("unrecognized option {option}"),
         }
     }
 
