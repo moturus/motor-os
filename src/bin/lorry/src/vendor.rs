@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use semver::Version;
@@ -20,15 +21,15 @@ use crate::policy::{self, PackageEvidence};
 use crate::redirect::TrustPolicy;
 use crate::repository::{RepositorySet, RepositoryTransaction, RepositoryWriter};
 use crate::resolver::{
-    self, Catalog, LockedPreference, Options, PackageKey, PackageSourceKey, Resolution,
-    ResolvedPackage, ResolvedSource, TargetSelection,
+    self, Catalog, LockedPreference, Options, PackageKey, Resolution, ResolvedPackage,
+    ResolvedSource, TargetSelection,
 };
 use crate::source_tree::Limits as TreeLimits;
 use crate::sparse;
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::vendor_lock::ProjectVendorLock;
 
-pub fn execute(cli: &Cli, _accept_all: bool) -> Result<i32> {
+pub fn execute(cli: &Cli, accept_all: bool) -> Result<i32> {
     if cli.use_cargo_registry {
         return Err(Error::usage(
             "`--use-cargo-registry` cannot be combined with `vendor`",
@@ -49,14 +50,7 @@ pub fn execute(cli: &Cli, _accept_all: bool) -> Result<i32> {
         eprintln!("Locked {}", lock.path().display());
     }
     let manifest = Manifest::load_for_vendor(&initial_manifest.root)?;
-    let lock_bytes = prepare_networked(&manifest, &config, &toolchain, &host, &targets)?;
-    let lock_path = manifest.root.join("Cargo.lock");
-    let staged = stage_lockfile(&lock_path, &lock_bytes)?;
-    let changed = staged.is_some();
-    if let Some(staged) = staged {
-        staged.commit()?;
-    }
-    Manifest::load(&manifest.root)?;
+    let changed = prepare_networked(&manifest, &config, &toolchain, &host, &targets, accept_all)?;
 
     if cli.verbosity != Verbosity::Quiet {
         eprintln!(
@@ -134,7 +128,8 @@ fn prepare_networked(
     toolchain: &Toolchain,
     host: &TargetInfo,
     targets: &[TargetInfo],
-) -> Result<Vec<u8>> {
+    accept_all: bool,
+) -> Result<bool> {
     let mut acquisition = Acquisition::new(config);
     let mut loader = |name: &str, catalog: &mut Catalog| acquisition.load_sparse(name, catalog);
     let (lock, selected) = prepare_with_loader(
@@ -146,9 +141,29 @@ fn prepare_networked(
         &mut loader,
         &|_| Ok(()),
     )?;
-    reject_registry_packages(&selected)?;
-    inspect_path_policy(config, &selected)?;
-    Ok(lock)
+    let preflight = policy::preflight(&config.policy, &selected)?;
+    let missing = acquisition.missing_selected(&selected)?;
+    require_approval_mode(missing, accept_all, io::stdin().is_terminal())?;
+    acquisition.stage_selected(&selected)?;
+    let evidence = acquisition.evidence(&selected)?;
+    policy::inspect(&preflight, &selected, &evidence)?;
+
+    let stdin = io::stdin();
+    approve_new_packages(
+        &selected,
+        &evidence,
+        accept_all,
+        &mut stdin.lock(),
+        &mut io::stderr().lock(),
+    )?;
+    let staged_lock = stage_lockfile(&manifest.root.join("Cargo.lock"), &lock)?;
+    acquisition.publish()?;
+    let changed = staged_lock.is_some();
+    if let Some(staged_lock) = staged_lock {
+        staged_lock.commit()?;
+    }
+    Manifest::load(&manifest.root)?;
+    Ok(changed)
 }
 
 fn prepare_with_loader(
@@ -200,7 +215,6 @@ fn prepare_with_loader(
 struct Acquisition<'a> {
     config: &'a Config,
     records: BTreeMap<(String, Version), sparse::Record>,
-    #[allow(dead_code)]
     inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
 }
@@ -243,7 +257,6 @@ impl<'a> Acquisition<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn stage_selected(&mut self, resolution: &Resolution) -> Result<usize> {
         let max_package_bytes = self.config.policy.limits.max_package_bytes;
         self.stage_selected_with(resolution, |state, package, record| {
@@ -259,7 +272,24 @@ impl<'a> Acquisition<'a> {
         })
     }
 
-    #[allow(dead_code)]
+    fn missing_selected(&self, resolution: &Resolution) -> Result<usize> {
+        let repositories = RepositorySet::open(
+            &self.config.repositories,
+            repository_tree_limits(&self.config.policy.limits)?,
+            self.config.policy.limits.max_package_bytes,
+        )?;
+        let mut missing = 0;
+        for package in &resolution.packages {
+            let ResolvedSource::CratesIo { checksum } = package.source else {
+                continue;
+            };
+            if repositories.lookup_registry(&hex(&checksum))?.is_none() {
+                missing += 1;
+            }
+        }
+        Ok(missing)
+    }
+
     fn evidence(
         &mut self,
         resolution: &Resolution,
@@ -322,6 +352,13 @@ impl<'a> Acquisition<'a> {
         Ok(evidence)
     }
 
+    fn publish(self) -> Result<()> {
+        if let Some(state) = self.state {
+            state.transaction.publish()?;
+        }
+        Ok(())
+    }
+
     fn stage_selected_with(
         &mut self,
         resolution: &Resolution,
@@ -379,6 +416,113 @@ impl<'a> Acquisition<'a> {
     }
 }
 
+fn require_approval_mode(missing: usize, accept_all: bool, terminal: bool) -> Result<()> {
+    if missing == 0 || accept_all || terminal {
+        return Ok(());
+    }
+    Err(Error::failure(format!(
+        "{missing} new package{} require approval, but no interactive terminal is available",
+        if missing == 1 { "" } else { "s" }
+    ))
+    .with_help("rerun `lorry vendor --accept-all` to approve every policy-compliant package"))
+}
+
+fn approve_new_packages(
+    resolution: &Resolution,
+    evidence: &BTreeMap<PackageKey, PackageEvidence>,
+    accept_all: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    let mut packages = Vec::new();
+    for package in &resolution.packages {
+        let package_evidence = evidence.get(&package.key).ok_or_else(|| {
+            Error::failure(format!(
+                "package approval has no evidence for `{} {}`",
+                package.key.name, package.key.version
+            ))
+        })?;
+        if package_evidence.newly_acquired {
+            packages.push(package);
+        }
+    }
+    packages.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+    if packages.is_empty() {
+        return Ok(());
+    }
+    writeln!(output, "New crates.io packages ({}):", packages.len())
+        .map_err(|error| Error::failure(format!("failed to write vendor summary: {error}")))?;
+    for package in &packages {
+        let package_evidence = &evidence[&package.key];
+        let ResolvedSource::CratesIo { checksum } = package.source else {
+            return Err(Error::failure(
+                "new package approval contains a non-registry package",
+            ));
+        };
+        let archive_bytes = package_evidence.archive_bytes.ok_or_else(|| {
+            Error::failure(format!(
+                "new package `{} {}` has no archive size",
+                package.key.name, package.key.version
+            ))
+        })?;
+        let dependencies = package
+            .edges
+            .iter()
+            .filter(|edge| {
+                evidence
+                    .get(&edge.package)
+                    .is_some_and(|value| value.newly_acquired)
+            })
+            .map(|edge| format!("{} {}", edge.package.name, edge.package.version))
+            .collect::<BTreeSet<_>>();
+        writeln!(
+            output,
+            "  {} {}: source=crates.io checksum={} license={} build-script={} \
+             archive-bytes={} extracted-bytes={} new-dependencies={}",
+            package.key.name,
+            package.key.version,
+            hex(&checksum),
+            package_evidence.license,
+            if package_evidence.build_script {
+                "yes"
+            } else {
+                "no"
+            },
+            archive_bytes,
+            package_evidence.extracted_bytes,
+            if dependencies.is_empty() {
+                "none".to_owned()
+            } else {
+                dependencies.into_iter().collect::<Vec<_>>().join(", ")
+            }
+        )
+        .map_err(|error| Error::failure(format!("failed to write vendor summary: {error}")))?;
+    }
+    if accept_all {
+        return Ok(());
+    }
+    for package in packages {
+        write!(
+            output,
+            "Approve {} {}? [y/N]: ",
+            package.key.name, package.key.version
+        )
+        .and_then(|()| output.flush())
+        .map_err(|error| Error::failure(format!("failed to write vendor prompt: {error}")))?;
+        let mut response = String::new();
+        std::io::Read::take(&mut *input, 65)
+            .read_line(&mut response)
+            .map_err(|error| Error::failure(format!("failed to read package approval: {error}")))?;
+        if !matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            return Err(Error::failure(format!(
+                "approval declined for package `{} {}`",
+                package.key.name, package.key.version
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn resolver_options(
     manifest: &Manifest,
     config: &Config,
@@ -399,6 +543,7 @@ fn resolver_options(
     })
 }
 
+#[cfg(test)]
 fn inspect_path_policy(config: &Config, resolution: &Resolution) -> Result<()> {
     let preflight = policy::preflight(&config.policy, resolution)?;
     let evidence = resolution
@@ -410,11 +555,12 @@ fn inspect_path_policy(config: &Config, resolution: &Resolution) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn reject_registry_packages(resolution: &Resolution) -> Result<()> {
     let packages = resolution
         .packages
         .iter()
-        .filter(|package| package.key.source == PackageSourceKey::CratesIo)
+        .filter(|package| package.key.source == crate::resolver::PackageSourceKey::CratesIo)
         .map(|package| format!("{} {}", package.key.name, package.key.version))
         .collect::<Vec<_>>();
     if packages.is_empty() {
@@ -474,7 +620,6 @@ mod tests {
     use crate::toolchain::CfgSet;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::io::Write as _;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -604,24 +749,32 @@ mod tests {
             std::slice::from_ref(&target),
         )
         .unwrap();
-        assert_eq!(
+        let lock_path = fixture.0.join("Cargo.lock");
+        assert!(!lock_path.exists());
+        assert!(
             prepare_networked(
                 &manifest,
                 &config,
                 &toolchain(),
                 &target,
                 std::slice::from_ref(&target),
+                true,
             )
-            .unwrap(),
-            bytes
+            .unwrap()
         );
-
-        let lock_path = fixture.0.join("Cargo.lock");
-        let staged = stage_lockfile(&lock_path, &bytes).unwrap().unwrap();
-        assert!(!lock_path.exists());
-        staged.commit().unwrap();
-        Manifest::load(&fixture.0).unwrap();
-        assert!(stage_lockfile(&lock_path, &bytes).unwrap().is_none());
+        assert_eq!(fs::read(&lock_path).unwrap(), bytes);
+        let locked = fixture.manifest();
+        assert!(
+            !prepare_networked(
+                &locked,
+                &config,
+                &toolchain(),
+                &target,
+                std::slice::from_ref(&target),
+                true,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -738,6 +891,7 @@ mod tests {
         acquisition
             .records
             .insert(("demo".to_owned(), version.clone()), record.clone());
+        assert!(require_approval_mode(1, false, false).is_err());
 
         let staged = acquisition
             .stage_selected_with(&resolution, |state, _, record| {
@@ -756,13 +910,20 @@ mod tests {
         let preflight = policy::preflight(&config.policy, &resolution).unwrap();
         policy::inspect(&preflight, &resolution, &evidence).unwrap();
         assert!(evidence[&resolution.packages[0].key].newly_acquired);
-        acquisition
-            .state
-            .take()
-            .unwrap()
-            .transaction
-            .publish()
-            .unwrap();
+        let mut output = Vec::new();
+        approve_new_packages(
+            &resolution,
+            &evidence,
+            false,
+            &mut std::io::Cursor::new(b"yes\n"),
+            &mut output,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("source=crates.io"));
+        assert!(output.contains("license=MIT"));
+        assert!(output.contains("Approve demo 1.2.3?"));
+        acquisition.publish().unwrap();
 
         let mut warm = Acquisition::new(&config);
         warm.records.insert(("demo".to_owned(), version), record);
@@ -778,5 +939,15 @@ mod tests {
         assert!(!evidence[&resolution.packages[0].key].newly_acquired);
         assert_eq!(warm.inspections.len(), 1);
         assert!(warm.inspections[0].path().is_dir());
+        let mut output = Vec::new();
+        approve_new_packages(
+            &resolution,
+            &evidence,
+            false,
+            &mut std::io::Cursor::new(b""),
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.is_empty());
     }
 }
