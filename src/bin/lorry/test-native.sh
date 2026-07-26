@@ -630,6 +630,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "== Running Stage 2 seed fixture tests =="
+(
+    cd "$SCRIPT_DIR/bootstrap"
+    python3 -m unittest discover -s tests -p 'test_*.py' -v
+)
+
 build_image
 prepare_host_gate
 start_vm

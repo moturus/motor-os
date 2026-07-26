@@ -1842,11 +1842,14 @@ checks must pass after the external SFTP/`cp -r`/`rm -r` gate is available.
 
 #### Resolved direction
 
-- Native tools are configured per target triple and are never discovered from
-  ambient `PATH`, `CC`, `CFLAGS`, `AR`, or `ARFLAGS`. A build requiring a
-  native tool fails before its build script runs if the selected target has no
-  complete matching configuration. The diagnostic names the missing target
-  and `lorry.toml` keys.
+- Native tools are configured per target triple and are never discovered by
+  Lorry from ambient `PATH`, `CC`, `CFLAGS`, `AR`, or `ARFLAGS`. The host seed
+  installer resolves Cargo's clean-environment `cc` and `ar` defaults once,
+  canonicalizes their absolute paths, and writes them to a new Linux
+  configuration; explicit absolute installer arguments can select another
+  pair. A build requiring a native tool fails before its build script runs if
+  the selected target has no complete matching configuration. The diagnostic
+  names the missing target and `lorry.toml` keys.
 - Stage 2 has exactly two native-tool roles: `c-compiler` and `archiver`.
   A matching dependency-admission rule must explicitly grant each role with
   `native-tools = ["c-compiler", "archiver"]`; `allow-build-script = true`

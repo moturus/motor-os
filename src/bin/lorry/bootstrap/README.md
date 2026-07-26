@@ -23,8 +23,11 @@ canonical repository below `build/lorry/stage2/`, independently copy and
 re-verify it in the Linux host and Motor image locations, and install the
 corresponding configurations. A missing Linux configuration is created. An
 existing one is never merged or overwritten and must already name the expected
-system repository. The generated Motor configuration is build-owned and is
-replaced atomically.
+system repository and native tools. By default the installer resolves Cargo's
+clean-environment `cc` and `ar` defaults once, canonicalizes their absolute
+paths, and records them in the Linux configuration. Use `--host-c-compiler`
+and `--host-archiver` to select another absolute pair. The generated Motor
+configuration is build-owned and is replaced atomically.
 
 Pass an unused absolute path with `--cargo-oracle-view` to materialize Cargo's
 directory-source representation of the verified registry objects plus the

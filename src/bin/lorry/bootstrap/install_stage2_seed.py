@@ -46,6 +46,25 @@ DEFAULT_MOTOR_CONFIG = (
     / "img_files/generated/rustc/sys/tools/rust/cfg/lorry.toml"
 )
 MOTOR_SYSTEM_REPOSITORY = Path("/sys/tools/rust/lorry/vendor")
+LINUX_TARGET = "x86_64-unknown-linux-gnu"
+
+
+def resolve_host_tool(requested: Path | None, default_program: str) -> Path:
+    if requested is None:
+        found = shutil.which(default_program)
+        if found is None:
+            raise ValueError(
+                f"Cargo-compatible host tool `{default_program}` was not found"
+            )
+        requested = Path(found)
+    elif not requested.is_absolute():
+        raise ValueError(f"host tool path must be absolute: {requested}")
+
+    resolved = requested.resolve(strict=True)
+    metadata = resolved.stat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o111 == 0:
+        raise ValueError(f"host tool is not a regular executable file: {resolved}")
+    return resolved
 
 
 def selected_registry(manifest: SeedManifest, mode: str):
@@ -255,6 +274,8 @@ def render_system_config(
     system_repository: Path,
     user_repository: Path | None,
     motor: bool,
+    host_c_compiler: Path | None = None,
+    host_archiver: Path | None = None,
 ) -> bytes:
     template = (BOOTSTRAP / "system-lorry.toml.in").read_text(encoding="utf-8")
     user_line = (
@@ -277,6 +298,20 @@ program = "/sys/tools/llvm/bin/llvm"
 prefix-args = ["ar"]
 flags = []
 """
+    else:
+        if host_c_compiler is None or host_archiver is None:
+            raise ValueError("Linux system config requires host native tools")
+        output += f"""
+[native-tools."{LINUX_TARGET}".c-compiler]
+program = {toml_string(str(host_c_compiler))}
+prefix-args = []
+flags = []
+
+[native-tools."{LINUX_TARGET}".archiver]
+program = {toml_string(str(host_archiver))}
+prefix-args = []
+flags = []
+"""
     output += render_registry_policy(manifest)
     if len(manifest.seeded_git) != 1:
         raise ValueError("Stage 2 system config requires exactly one seeded-Git rule")
@@ -296,7 +331,12 @@ locked = [
     return encoded
 
 
-def validate_host_config(path: Path, expected_system_repository: Path) -> None:
+def validate_host_config(
+    path: Path,
+    expected_system_repository: Path,
+    expected_c_compiler: Path,
+    expected_archiver: Path,
+) -> None:
     with path.open("rb") as source:
         value = tomllib.load(source)
     try:
@@ -311,6 +351,22 @@ def validate_host_config(path: Path, expected_system_repository: Path) -> None:
             f"{path} names repositories.system = {toml_string(str(actual))}; "
             f"expected {toml_string(str(expected_system_repository))}"
         )
+    for role, expected in (
+        ("c-compiler", expected_c_compiler),
+        ("archiver", expected_archiver),
+    ):
+        try:
+            actual = value["native-tools"][LINUX_TARGET][role]["program"]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                f"{path} must define native-tools.{LINUX_TARGET}.{role}.program = "
+                f"{toml_string(str(expected))}"
+            ) from error
+        if actual != str(expected):
+            raise ValueError(
+                f"{path} names native-tools.{LINUX_TARGET}.{role}.program = "
+                f"{toml_string(str(actual))}; expected {toml_string(str(expected))}"
+            )
 
 
 def write_new_host_config(path: Path, contents: bytes) -> None:
@@ -356,15 +412,24 @@ def install_configs(
     host_repository: Path,
     host_user_repository: Path,
     motor_config: Path,
+    host_c_compiler: Path,
+    host_archiver: Path,
 ) -> None:
     host_contents = render_system_config(
         manifest,
         system_repository=host_repository,
         user_repository=host_user_repository,
         motor=False,
+        host_c_compiler=host_c_compiler,
+        host_archiver=host_archiver,
     )
     write_new_host_config(host_config, host_contents)
-    validate_host_config(host_config, host_repository)
+    validate_host_config(
+        host_config,
+        host_repository,
+        host_c_compiler,
+        host_archiver,
+    )
     motor_contents = render_system_config(
         manifest,
         system_repository=MOTOR_SYSTEM_REPOSITORY,
@@ -505,6 +570,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=("full", "minimal"), default="full")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--cargo-oracle-view", type=Path)
+    parser.add_argument("--host-c-compiler", type=Path)
+    parser.add_argument("--host-archiver", type=Path)
     return parser.parse_args(argv)
 
 
@@ -513,6 +580,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     try:
+        host_c_compiler = resolve_host_tool(args.host_c_compiler, "cc")
+        host_archiver = resolve_host_tool(args.host_archiver, "ar")
         manifest = load_seed_manifest(args.manifest)
         seed_system_repository(
             manifest,
@@ -548,6 +617,8 @@ def main(argv: list[str] | None = None) -> int:
             host_repository=args.host_repository,
             host_user_repository=args.host_user_repository,
             motor_config=args.motor_config,
+            host_c_compiler=host_c_compiler,
+            host_archiver=host_archiver,
         )
         if args.cargo_oracle_view is not None:
             materialize_cargo_oracle_view(

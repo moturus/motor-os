@@ -18,6 +18,7 @@ from install_stage2_seed import (  # noqa: E402
     materialize_cargo_oracle_view,
     render_system_config,
     repository_fingerprint,
+    resolve_host_tool,
 )
 from seed_system_repository import (  # noqa: E402
     SeedManifest,
@@ -31,6 +32,17 @@ from test_seed_system_repository import (  # noqa: E402
 
 
 class InstallStage2SeedTests(unittest.TestCase):
+    def prepare_host_tools(self, root: Path) -> tuple[Path, Path]:
+        tools = root / "tools"
+        tools.mkdir()
+        compiler = tools / "cc"
+        archiver = tools / "ar"
+        compiler.write_bytes(b"compiler")
+        archiver.write_bytes(b"archiver")
+        compiler.chmod(0o755)
+        archiver.chmod(0o755)
+        return compiler.resolve(), archiver.resolve()
+
     def test_repository_is_independently_copied_and_reverified(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -99,6 +111,7 @@ class InstallStage2SeedTests(unittest.TestCase):
             user_repository = root / "home/.config/lorry/vendor"
             host_config = root / "home/.config/lorry/lorry.toml"
             motor_config = root / "image/sys/tools/rust/cfg/lorry.toml"
+            compiler, archiver = self.prepare_host_tools(root)
 
             install_configs(
                 manifest,
@@ -106,6 +119,8 @@ class InstallStage2SeedTests(unittest.TestCase):
                 host_repository=host_repository,
                 host_user_repository=user_repository,
                 motor_config=motor_config,
+                host_c_compiler=compiler,
+                host_archiver=archiver,
             )
 
             with host_config.open("rb") as source:
@@ -120,6 +135,18 @@ class InstallStage2SeedTests(unittest.TestCase):
                 motor["repositories"]["system"], str(MOTOR_SYSTEM_REPOSITORY)
             )
             self.assertNotIn("user", motor["repositories"])
+            self.assertEqual(
+                host["native-tools"]["x86_64-unknown-linux-gnu"]["c-compiler"][
+                    "program"
+                ],
+                str(compiler),
+            )
+            self.assertEqual(
+                host["native-tools"]["x86_64-unknown-linux-gnu"]["archiver"][
+                    "program"
+                ],
+                str(archiver),
+            )
             self.assertEqual(len(host["policy"]["rules"]), 46)
             self.assertEqual(
                 {
@@ -159,6 +186,8 @@ class InstallStage2SeedTests(unittest.TestCase):
                     host_repository=host_repository,
                     host_user_repository=user_repository,
                     motor_config=motor_config,
+                    host_c_compiler=compiler,
+                    host_archiver=archiver,
                 )
             self.assertEqual(motor_config.read_bytes(), original_motor)
             self.assertEqual(
@@ -168,20 +197,35 @@ class InstallStage2SeedTests(unittest.TestCase):
 
     def test_rendered_config_is_valid_toml(self) -> None:
         manifest = load_seed_manifest(BOOTSTRAP / "stage2-seed.toml")
-        rendered = render_system_config(
-            manifest,
-            system_repository=Path("/system/vendor"),
-            user_repository=Path("/user/vendor"),
-            motor=False,
-        )
-        value = tomllib.loads(rendered.decode("utf-8"))
-        self.assertEqual(value["config-version"], 1)
-        self.assertEqual(
-            value["required-patches"]["crates-io"]["ring-0_17_14"][
-                "source-tree-sha256"
-            ],
-            manifest.seeded_git[0].source_tree_sha256,
-        )
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler, archiver = self.prepare_host_tools(Path(temporary))
+            rendered = render_system_config(
+                manifest,
+                system_repository=Path("/system/vendor"),
+                user_repository=Path("/user/vendor"),
+                motor=False,
+                host_c_compiler=compiler,
+                host_archiver=archiver,
+            )
+            value = tomllib.loads(rendered.decode("utf-8"))
+            self.assertEqual(value["config-version"], 1)
+            self.assertEqual(
+                value["required-patches"]["crates-io"]["ring-0_17_14"][
+                    "source-tree-sha256"
+                ],
+                manifest.seeded_git[0].source_tree_sha256,
+            )
+
+    def test_host_tool_resolution_is_absolute_and_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            compiler, _ = self.prepare_host_tools(root)
+            self.assertEqual(resolve_host_tool(compiler, "cc"), compiler)
+            with self.assertRaisesRegex(ValueError, "must be absolute"):
+                resolve_host_tool(Path("relative/cc"), "cc")
+            compiler.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "regular executable"):
+                resolve_host_tool(compiler, "cc")
 
 
 if __name__ == "__main__":
