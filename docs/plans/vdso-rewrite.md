@@ -3,11 +3,53 @@
 2026-07-23. This is a plan only. It does not propose an ABI change and it
 does not imply that the current code should be changed in one large step.
 
-Status update (2026-07-26): Stage 2 resumed on explicit instruction with the
-Stage 0 same-host performance baseline still outstanding; that gate is
-deferred, not satisfied. Sections 1 through 6 continue to describe the target
-architecture; Section 7 records the work landed so far and the remaining
-implementation order.
+Status update (2026-07-26): the Stage 0 same-host sample has been recorded at
+`ab81c861`, and the default-RX gap against the older numbers has been
+attributed (Section 10). A three-point A/B shows the pre-rewrite tree
+measuring the same ~164 MiB/s on this host, so the gap is a rig change, not a
+code regression, and the 2026-07-19/21 figures are retired as gates.
+
+This document is self-contained. Section 0 summarizes what is left, Sections 1
+through 6 describe the target architecture, Section 7 records the work landed
+and the remaining implementation order, and Section 10 holds the performance
+gate and its reference numbers.
+
+## 0. Remaining work
+
+Stages 0 and 1 are complete -- the two cheapest. Stage 2 is roughly 70% done.
+Stages 3 through 7 have not started.
+
+| Stage | State | Items left | Est. patches | Risk |
+|---|---|---|---|---|
+| 2: async control plane | ~70% done | 3 (+ gates) | 4-5 | low; design settled |
+| 3: `rt.vdso` wrappers | not started | 5 | 4-6 | medium; wide but mechanical |
+| 4: additive driver split | not started | 6 | 6-8 | high; new architecture |
+| 5: ownership flip | not started | 11 | 5-8 | highest; flagged in Stage 5 |
+| 6: remove polling | not started | 3 | 2 | low logic, flake-sensitive gate |
+| 7: cleanup | not started | 5 | 2-3 | low |
+
+**Roughly 25-35 patches** at the 100-300 loc size AGENTS.md calls for. Stage
+2's three remaining items are about 4-5 patches: UDP TX to markers, UDP
+destruction to the teardown queue, orphan/late TCP connect and accept cleanup,
+then the deletion patch that removes `SyncWaiter`, `send_msg`, `send_rpc`, and
+`send_msg_guaranteed` once the last caller is gone.
+
+Three things make the raw patch count misleading:
+
+- **The remaining stages are the expensive ones.** Stages 4 and 5 are more
+  than half the work and carry nearly all the design risk. Their estimates are
+  the softest, because the plan describes them at bullet granularity and their
+  real shape will not be clear until Stage 3 lands. They should be re-scoped
+  then rather than trusted now.
+- **Gating is a material fraction of the cost.** Every patch needs three debug
+  and three release `full-test.sh` runs. Stage 6's gate is five consecutive
+  debug runs, and the recorded flake baseline was 8 green in 10, so that gate
+  may need reruns on an unchanged tree. Stage 5's gate lists nine suites.
+- **Section 8 adds coverage beyond the stage bullets** -- seventeen regression
+  areas, some of which land with their stages and some of which are extra.
+
+Stage 2 finishes in about one working session. Stages 3 and 6-7 are tractable
+and mostly mechanical. Stages 4-5 are the actual project.
 
 ## 1. Decisions and scope
 
@@ -34,10 +76,11 @@ The intended definition of a "purely async" `moto-io` API is:
   deferred wake folding.
 
 This pass covers the `moto-io`/`rt.vdso` network boundary and the network
-findings in `vdso-rewrite-review.md`: hidden threads, blocking control paths,
+findings of the preceding review: hidden threads, blocking control paths,
 global-lock stalls, cancellation-retained wakers, periodic lost-wakeup
 polling, and the mandatory vDSO-shaped readiness listener. It preserves the
-connect/accept ownership fixes already made after that review.
+connect/accept ownership fixes already made after that review. Section 2
+records the state of each finding.
 
 The stdio `SysHandleFuture` leak, the TLB watchdog, and the soak-harness
 cleanup findings are separate work. The general `SysHandleFuture`
@@ -494,14 +537,14 @@ explicitly flagged mechanical commit, but preparation should keep that commit
 small in logic.
 
 Current status: Stage 2 is being finished under an explicit instruction to
-proceed. The paired, same-host release `rnetbench` baseline that Stage 0
-calls for has still not been re-established, so the performance regression
-remains uninvestigated and each landed step is covered by functional gates
-only.
+proceed. The same-host reference sample now exists at `ab81c861` and the
+default-RX gap against the older numbers has been attributed to the rig, not
+to code, so the performance gate is closed and later stages compare against
+`ab81c861`.
 
 | Stage | Status | Summary |
 |---|---|---|
-| 0: gates and baselines | Reopened | Functional gates have run repeatedly; the performance gate must be re-established because of the current regression. |
+| 0: gates and baselines | Complete | Same-host sample recorded at `ab81c861`; the default-RX gap was A/B'd against the pre-rewrite tree and attributed to the rig, retiring the 2026-07-19/21 numbers as gates. |
 | 1: cancellation-aware waiters | Complete | TCP and UDP read/write/readiness waiters use removable token registrations. |
 | 2: async control plane | In progress | Async RPCs, typed TCP/UDP options, TCP shutdown, TCP/UDP bind, the POSIX option bridge, and TCP listener/stream teardown have landed; UDP teardown and connect/accept rollback still block. |
 | 3: `rt.vdso` wrappers | Not started | POSIX-facing blocking wrappers still need to own all blocking behavior. |
@@ -510,19 +553,25 @@ only.
 | 6: remove polling | Not started | Periodic vDSO rechecks remain. |
 | 7: cleanup | Not started | Compatibility and blocking internals remain. |
 
-### Stage 0: refresh gates - reopened
+### Stage 0: refresh gates - complete
 
 - Record the exact starting commit and dirty-tree exclusions.
 - Run the targeted native cancellation/backpressure tests, systest network
   suite, mio-test, tokio-tests, and one debug `full-test.sh`.
 - Record a same-host release rnetbench sample using the methodology in
-  `vdso-rewrite-baselines.md`. Do not compare a later stage only against the
-  cross-day 2026-07 numbers.
+  Section 10. Do not compare a later stage only against cross-day numbers.
 - Add no production behavior in this stage.
 
-Functional gates were run repeatedly through the landed work. The
-same-host performance baseline/check remains open and is now the prerequisite
-for resuming the series.
+Functional gates were run repeatedly through the landed work. The same-host
+sample was recorded at `ab81c861` on 2026-07-26 and is the comparison point
+for every later stage. Default RX measured ~164 MiB/s against 473-525
+historically, so a three-point A/B was run against `d81ca60d` (pre-series)
+and `c898d4b5` (pre-rewrite, the tree the 525 was taken on). Both reproduce
+~164 on this host, attributing the gap to the rig and clearing the series.
+The older figures are retired as gates. The investigation also found that the
+virtio-net driver negotiates no receive-side segment coalescing (`GUEST_TSO4/6`
+and `MRG_RXBUF` are absent, though `GUEST_CSUM` is present), which is a
+standing optimization opportunity outside this plan.
 
 ### Stage 1: cancellation-aware wait registrations - complete
 
@@ -664,9 +713,10 @@ and release `full-test.sh`.
   hooks, unused dependencies, and stale design references.
 - Add a source-level guard that `moto-io` networking does not use
   `SysCpu::spawn`, `block_on_sync`, `SyncWaiter`, or thread sleep.
-- Update `vdso-rewrite-design.md` after implementation so it no longer says
-  `moto-io` owns channel runtime threads or a global channel registry.
-- Record code-size and paired same-host release rnetbench results.
+- Update Sections 2 and 3 of this document after implementation so they
+  describe the delivered ownership rather than the pre-refactor boundary.
+- Record code-size and paired same-host release rnetbench results in
+  Section 10.
 
 Final gate: full untrimmed systest, mio-test, tokio-tests, repeated debug
 `full-test.sh`, release `full-test.sh`, channel leak assertions, and paired
@@ -719,6 +769,77 @@ The refactor is done when all of the following are true:
    POSIX state, and poll compatibility.
 6. The vDSO ABI and observable std/mio/tokio behavior remain unchanged.
 7. The fixed data-path architecture remains intact, and paired same-host
-   rnetbench stays within the existing rewrite kill criteria: no sustained
+   rnetbench stays within the kill criteria in Section 10: no sustained
    throughput loss over 5% and no sustained RR regression over roughly
    5 microseconds after tuning.
+
+## 10. Performance gate
+
+### Methodology
+
+`rnetbench --server -p 40000` on-image at `/sys/tests/rnetbench`; the client
+on the host as `rnetbench --client 192.168.4.2:40000 [-b 65536]`, default
+`-t 5`. Each client run reports TCP RR, then client->server (**Motor RX**),
+then server->client (**Motor TX**). The default buffer is 1KB-average random
+writes with NODELAY, which stresses per-message cost; `-b 65536` measures the
+pipe instead.
+
+A run's RR is the host-steal gauge: distrust the throughput of any run whose
+RR is far out of band. Debug-build throughput is additionally logging-bound
+(per-packet console output), so compare debug only against debug.
+
+Only same-host, back-to-back numbers count. Build both sides, bench them in
+one sitting, and never gate on a figure recorded on another day -- the
+attribution below is what happens when that rule is broken.
+
+### Reference: release at `ab81c861`, 2026-07-26
+
+Three rounds, medians. The default-RX figure was confirmed over 8 samples
+spanning 145.7-167.7 MiB/s.
+
+| Metric | Value |
+|---|---|
+| RR default / bulk | 58.8 / 57.4 usec |
+| default RX / TX | 163.6 / 328.3 MiB/s |
+| bulk RX / TX | 678.9 / 1356.4 MiB/s |
+
+**Kill criteria:** no sustained throughput loss over 5% and no sustained RR
+regression over roughly 5 microseconds after tuning.
+
+### Why the older numbers were retired
+
+Baselines recorded 2026-07-19 and 2026-07-21 put default RX at 473-525 MiB/s.
+The `ab81c861` sample measured 164, apparently a threefold regression -- while
+RR halved and bulk TX doubled, which no code change produces. A three-point
+A/B settled it:
+
+| Commit | def RX | RR | What it is |
+|---|---|---|---|
+| `c898d4b5` | 164.1 | 56.6 | pre-rewrite; the tree the 525 was taken on |
+| `d81ca60d` | 164.9 | 56.3 | last commit before this series |
+| `ab81c861` | 163.6 | 58.8 | HEAD at the time |
+
+The tree that once measured 525 measures 164 on this host, so the gap is the
+rig, not the code, and the series is clear. The host client binary was held
+constant across all three runs, which is a valid control: `do_throughput_write`
+is unchanged between `c898d4b5` and HEAD.
+
+### Standing finding: no receive-side coalescing
+
+The investigation found that the virtio-net driver negotiates `CSUM`,
+`GUEST_CSUM`, `MTU`, `MAC`, `STATUS`, `HOST_TSO4`, and `HOST_TSO6`. Receive
+*checksum* offload is therefore present, but receive *segment coalescing* is
+not: `GUEST_TSO4/6` and `MRG_RXBUF` have no constants in the repo. Measured on
+`moto-tap`, the guest receives 509 B/pkt on the default run while sending
+4372 B/pkt, so RX is packet-rate bound and its throughput tracks
+bytes-per-packet.
+
+This is long-standing, not a regression, and it is why default RX is low in
+absolute terms. It is outside this plan; see
+`docs/plans/virtio-rx-coalescing.md`.
+
+### Environment caveats
+
+The host cpufreq governor is `powersave`, and `run-qemu.sh` is untracked, so
+the VM configuration behind any historical number cannot be recovered or
+diffed. Committing `run-qemu.sh` would make future A/Bs auditable.
