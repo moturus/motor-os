@@ -31,7 +31,9 @@ configuration is build-owned and is replaced atomically.
 
 Pass an unused absolute path with `--cargo-oracle-view` to materialize Cargo's
 directory-source representation of the verified registry objects plus the
-pinned `ring` source. The generated `.cargo/config.toml` makes that view usable
+pinned `ring` source. The generated `.cargo/config.toml` forces Cargo's
+target-specific compiler, compiler flags, archiver, and archiver flags to the
+same values as Lorry's generated Linux configuration. It makes that view usable
 for host-side bootstrap-oracle checks; it is not the repository format consumed
 by Lorry itself.
 

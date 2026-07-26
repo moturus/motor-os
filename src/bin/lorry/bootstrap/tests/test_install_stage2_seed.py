@@ -53,6 +53,7 @@ class InstallStage2SeedTests(unittest.TestCase):
             generated = root / "generated"
             host = root / "host"
             image = root / "image"
+            compiler, archiver = self.prepare_host_tools(root)
 
             seed_system_repository(
                 manifest,
@@ -79,6 +80,8 @@ class InstallStage2SeedTests(unittest.TestCase):
                 oracle,
                 manifest,
                 "full",
+                host_c_compiler=compiler,
+                host_archiver=archiver,
             )
             checksum = json.loads(
                 (oracle / "registry/demo-1.2.3/.cargo-checksum.json").read_bytes()
@@ -95,12 +98,25 @@ class InstallStage2SeedTests(unittest.TestCase):
                 cargo_config["source"]["lorry-stage2-seed"]["directory"],
                 str(oracle / "registry"),
             )
+            self.assertEqual(
+                cargo_config["env"]["CC_x86_64_unknown_linux_gnu"]["value"],
+                str(compiler),
+            )
+            self.assertTrue(
+                cargo_config["env"]["CC_x86_64_unknown_linux_gnu"]["force"]
+            )
+            self.assertEqual(
+                cargo_config["env"]["AR_x86_64_unknown_linux_gnu"]["value"],
+                str(archiver),
+            )
             with self.assertRaises(FileExistsError):
                 materialize_cargo_oracle_view(
                     generated,
                     oracle,
                     manifest,
                     "full",
+                    host_c_compiler=compiler,
+                    host_archiver=archiver,
                 )
 
     def test_configs_are_closed_generated_and_non_overwriting(self) -> None:

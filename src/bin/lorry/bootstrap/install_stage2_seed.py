@@ -475,6 +475,9 @@ def materialize_cargo_oracle_view(
     destination: Path,
     manifest: SeedManifest,
     mode: str,
+    *,
+    host_c_compiler: Path,
+    host_archiver: Path,
 ) -> None:
     verify_seed_repository(repository, manifest, mode)
     if not destination.is_absolute():
@@ -524,6 +527,13 @@ def materialize_cargo_oracle_view(
         write_exclusive(
             cargo_config,
             (
+                "[env]\n"
+                f'CC_x86_64_unknown_linux_gnu = {{ value = '
+                f"{toml_string(str(host_c_compiler))}, force = true }}\n"
+                'CFLAGS_x86_64_unknown_linux_gnu = { value = "", force = true }\n'
+                f'AR_x86_64_unknown_linux_gnu = {{ value = '
+                f"{toml_string(str(host_archiver))}, force = true }}\n"
+                'ARFLAGS_x86_64_unknown_linux_gnu = { value = "", force = true }\n\n'
                 '[source.crates-io]\n'
                 'replace-with = "lorry-stage2-seed"\n\n'
                 '[source.lorry-stage2-seed]\n'
@@ -626,6 +636,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.cargo_oracle_view,
                 manifest,
                 args.mode,
+                host_c_compiler=host_c_compiler,
+                host_archiver=host_archiver,
             )
         print(f"Stage 2 {args.mode} seed: {host_fingerprint}")
     except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
