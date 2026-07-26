@@ -1,13 +1,17 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use semver::{Version, VersionReq};
 
 use crate::diagnostic::{Error, Result};
 use crate::hash::decode_hex;
-use crate::json::Value;
+use crate::json::{DOCUMENT_LIMITS, Value};
+
+pub const MAX_RESPONSE_BYTES: u64 = DOCUMENT_LIMITS.max_bytes as u64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DependencyKind {
@@ -176,6 +180,63 @@ impl Record {
             exact_bytes: bytes.to_vec(),
         })
     }
+}
+
+pub fn parse_response(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<Vec<Record>> {
+    validate_package_name(path, expected_name)?;
+    if bytes.is_empty() {
+        return Err(invalid(path, "sparse index response is empty"));
+    }
+    if bytes.len() > DOCUMENT_LIMITS.max_bytes {
+        return Err(invalid(
+            path,
+            format!(
+                "sparse index response exceeds the {}-byte limit",
+                DOCUMENT_LIMITS.max_bytes
+            ),
+        ));
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err(invalid(
+            path,
+            "sparse index response is not newline-terminated",
+        ));
+    }
+    let mut records = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let record = Record::parse(path, line)?;
+        if record.name != expected_name {
+            return Err(invalid(
+                path,
+                format!(
+                    "sparse index response for `{expected_name}` contains package `{}`",
+                    record.name
+                ),
+            ));
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+pub fn load_response(path: &Path, expected_name: &str) -> Result<Vec<Record>> {
+    let mut file = File::open(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to open sparse index response `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::failure(format!(
+                "failed to read sparse index response `{}`: {error}",
+                path.display()
+            ))
+        })?;
+    parse_response(path, expected_name, &bytes)
 }
 
 fn parse_dependencies(path: &Path, values: &[Value]) -> Result<Vec<Dependency>> {
@@ -674,6 +735,48 @@ mod tests {
             "{{\"name\":\"demo\",\"vers\":\"1.2.3\",\"deps\":[],\
              \"cksum\":\"{CHECKSUM}\",\"features\":{{}},\"yanked\":false{extra}}}\n"
         )
+    }
+
+    #[test]
+    fn parses_a_complete_sparse_response_for_one_package() {
+        let first = basic("");
+        let second = first.replace("\"1.2.3\"", "\"2.0.0\"");
+        let records = parse_response(
+            Path::new("/fixture/de/mo/demo"),
+            "demo",
+            format!("{first}{second}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].version, Version::parse("1.2.3").unwrap());
+        assert_eq!(records[1].version, Version::parse("2.0.0").unwrap());
+        assert_eq!(MAX_RESPONSE_BYTES, 16 * 1024 * 1024);
+
+        let path =
+            std::env::temp_dir().join(format!("lorry-sparse-response-{}.json", std::process::id()));
+        fs::write(&path, format!("{first}{second}")).unwrap();
+        assert_eq!(load_response(&path, "demo").unwrap(), records);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_truncated_mismatched_and_oversized_sparse_responses() {
+        let path = Path::new("/fixture/de/mo/demo");
+        assert!(parse_response(path, "demo", b"").is_err());
+        assert!(parse_response(path, "demo", basic("").trim_end().as_bytes()).is_err());
+        assert!(
+            parse_response(path, "other", basic("").as_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("contains package `demo`")
+        );
+        let oversized = vec![b' '; DOCUMENT_LIMITS.max_bytes + 1];
+        assert!(
+            parse_response(path, "demo", &oversized)
+                .unwrap_err()
+                .to_string()
+                .contains("byte limit")
+        );
     }
 
     #[test]
