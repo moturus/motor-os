@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 use toml_edit::{Item, Table};
 
-use crate::archive::{Limits as ArchiveLimits, extract_crate};
+use crate::archive::{ExtractedArchive, Limits as ArchiveLimits, extract_crate};
 use crate::atomic::{AtomicDirectory, move_no_replace};
 use crate::config::Repositories;
 use crate::diagnostic::{Error, Result};
@@ -115,6 +115,8 @@ pub struct RepositoryTransaction {
 pub struct StagedRegistryObject {
     object: RegistryObject,
     manifest: Manifest,
+    #[allow(dead_code)]
+    inspection: Option<ExtractedArchive>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -342,10 +344,24 @@ impl RepositoryTransaction {
                 ))
             })?
             .len();
+        let extraction_parent = if self.writer.keep_sources {
+            object_path.clone()
+        } else {
+            let inspections = self.staging.path().join("inspections");
+            if !inspections.exists() {
+                fs::create_dir(&inspections).map_err(|error| {
+                    Error::failure(format!(
+                        "failed to create inspection staging `{}`: {error}",
+                        inspections.display()
+                    ))
+                })?;
+            }
+            inspections
+        };
         let extracted = extract_crate(
             archive,
             record.checksum,
-            &object_path,
+            &extraction_parent,
             &record.name,
             &record.version,
             self.writer.archive_limits,
@@ -385,13 +401,19 @@ impl RepositoryTransaction {
         if self.writer.keep_artifacts {
             copy_new(archive, &object_path.join("package.crate"))?;
         }
-        if self.writer.keep_sources {
+        let (manifest, inspection) = if self.writer.keep_sources {
             write_new(
                 &object_path.join("source-manifest.json"),
                 &tree.manifest_bytes(),
             )?;
             extracted.commit(&object_path.join("source"))?;
-        }
+            (
+                Manifest::load_path_dependency(&object_path.join("source"))?,
+                None,
+            )
+        } else {
+            (manifest, Some(extracted))
+        };
         let object = verify_registry_object(
             self.writer.layer,
             &object_path,
@@ -399,7 +421,11 @@ impl RepositoryTransaction {
             self.writer.limits,
             self.writer.archive_limits.max_compressed_bytes,
         )?;
-        self.objects.push(StagedRegistryObject { object, manifest });
+        self.objects.push(StagedRegistryObject {
+            object,
+            manifest,
+            inspection,
+        });
         Ok(self.objects.last().unwrap())
     }
 
@@ -1875,8 +1901,33 @@ mod tests {
 
         assert_eq!(staged.object().name, "demo");
         assert_eq!(staged.manifest().metadata.license, "MIT OR Apache-2.0");
+        assert!(staged.manifest().root.is_dir());
+        assert!(staged.manifest().path.is_file());
         assert!(staged.object().root.join("source/src/lib.rs").is_file());
         assert_eq!(transaction.objects().len(), 1);
+    }
+
+    #[test]
+    fn retains_a_private_inspection_tree_without_publishing_sources() {
+        let root = TempDir::new("stage-registry-inspection");
+        let repository = root.0.join("repository");
+        let repositories = Repositories {
+            local: Some(repository),
+            keep_sources: false,
+            ..Repositories::default()
+        };
+        let (transaction, _) = stage_demo(&repositories);
+        let staged = &transaction.objects()[0];
+        let inspection_root = staged.manifest().root.clone();
+
+        assert!(inspection_root.is_dir());
+        assert!(staged.manifest().path.is_file());
+        assert!(!inspection_root.starts_with(&staged.object().root));
+        assert!(!staged.object().root.join("source").exists());
+        assert!(!staged.object().retained_source);
+
+        drop(transaction);
+        assert!(!inspection_root.exists());
     }
 
     #[test]
