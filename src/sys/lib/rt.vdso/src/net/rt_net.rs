@@ -151,22 +151,29 @@ pub unsafe extern "C" fn dns_lookup(
 pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
     if proto == moto_rt::net::PROTO_UDP {
         let addr = unsafe { (*addr).into() };
-        let udp_socket = match moto_io::net::udp::UdpSocket::bind(&addr, new_event_source()) {
+        let udp_socket = match moto_async::block_on_sync(moto_io::net::udp::UdpSocket::bind(
+            &addr,
+            new_event_source(),
+        )) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_UDP_FOR_REMOTE {
         let addr = unsafe { (*addr).into() };
-        let udp_socket =
-            match moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()) {
-                Ok(socket) => socket,
-                Err(err) => return -(err as RtFd),
-            };
+        let udp_socket = match moto_async::block_on_sync(
+            moto_io::net::udp::UdpSocket::bind_for_remote(&addr, new_event_source()),
+        ) {
+            Ok(socket) => socket,
+            Err(err) => return -(err as RtFd),
+        };
         posix::push_file(udp_socket)
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
-        let listener = match moto_io::net::tcp::TcpListener::bind(&addr, new_event_source()) {
+        let listener = match moto_async::block_on_sync(moto_io::net::tcp::TcpListener::bind(
+            &addr,
+            new_event_source(),
+        )) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
         };

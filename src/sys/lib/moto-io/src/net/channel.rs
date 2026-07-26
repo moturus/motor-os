@@ -139,6 +139,55 @@ pub(super) enum RpcWaiter {
         Weak<TcpListener>,
         Option<moto_async::oneshot::Sender<super::tcp::PendingAccept>>,
     ),
+    /// TcpListener/UdpSocket bind completion. The reservation rides in the
+    /// waiter so a bind future cancelled after its request was queued still
+    /// has the channel slot needed to roll the new handle back.
+    Bind {
+        reservation: ChannelReservation,
+        drop_command: u16,
+        tx: moto_async::oneshot::Sender<PendingBind>,
+    },
+}
+
+/// A bind response whose handle is not owned by a socket object yet.
+///
+/// Holding it keeps the rollback armed: unless the awaiting bind commits it
+/// with [`PendingBind::into_result`], dropping it closes the handle sys-io
+/// created. This covers both a receiver that went away before delivery and a
+/// bind future cancelled after the response landed (design 5.5).
+pub(super) struct PendingBind {
+    reservation: Option<ChannelReservation>,
+    drop_command: u16,
+    resp: io_channel::Msg,
+}
+
+impl PendingBind {
+    /// Commit a successful bind: the caller takes over the handle and the
+    /// reservation, disarming the rollback. On a failed bind nothing was
+    /// created, so dropping the error case is enough.
+    pub(super) fn into_result(
+        mut self,
+    ) -> Result<(ChannelReservation, io_channel::Msg), ErrorCode> {
+        self.resp.status()?;
+        Ok((self.reservation.take().unwrap(), self.resp))
+    }
+}
+
+impl Drop for PendingBind {
+    fn drop(&mut self) {
+        let Some(reservation) = self.reservation.take() else {
+            return; // Committed by into_result().
+        };
+        if self.resp.status().is_err() {
+            return; // sys-io created nothing to roll back.
+        }
+
+        let mut msg = io_channel::Msg::new();
+        msg.command = self.drop_command;
+        msg.handle = self.resp.handle;
+        let channel = reservation.channel().clone();
+        channel.enqueue_teardown(reservation, msg);
+    }
 }
 
 static NET: Mutex<NetRuntime> = Mutex::new(NetRuntime {
@@ -616,7 +665,10 @@ impl Drop for RpcRegistration<'_> {
     fn drop(&mut self) {
         if !self.sent {
             let removed = self.channel.rpc_map.lock().remove(&self.id);
-            debug_assert!(matches!(removed, Some(RpcWaiter::Response(_))));
+            debug_assert!(matches!(
+                removed,
+                Some(RpcWaiter::Response(_) | RpcWaiter::Bind { .. })
+            ));
         }
     }
 }
@@ -787,6 +839,20 @@ impl NetChannel {
                         // before sys-io returned the accepted stream.
                         self.close_tcp_stream(msg.handle);
                     }
+                }
+                Some(RpcWaiter::Bind {
+                    reservation,
+                    drop_command,
+                    tx,
+                }) => {
+                    let pending = PendingBind {
+                        reservation: Some(reservation),
+                        drop_command,
+                        resp: msg,
+                    };
+                    // A cancelled bind leaves no receiver; dropping the
+                    // undelivered PendingBind rolls the new handle back.
+                    let _ = tx.send(pending);
                 }
                 None => panic!("unexpected msg"),
             }
@@ -1511,6 +1577,45 @@ impl NetChannel {
         after_send();
 
         rx.await.expect("RPC sender dropped")
+    }
+
+    /// Create a listener/socket handle without blocking the polling thread.
+    ///
+    /// `reservation` moves into the RPC map, so cancellation before the send
+    /// releases it with nothing created, and cancellation after the send still
+    /// leaves the response dispatch a channel slot to close the new handle on.
+    pub(super) async fn rpc_bind(
+        &self,
+        mut req: io_channel::Msg,
+        reservation: ChannelReservation,
+        drop_command: u16,
+    ) -> PendingBind {
+        debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
+        let (tx, rx) = moto_async::oneshot();
+        req.id = self.next_msg_id.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            self.rpc_map
+                .lock()
+                .insert(
+                    req.id,
+                    RpcWaiter::Bind {
+                        reservation,
+                        drop_command,
+                        tx,
+                    },
+                )
+                .is_none()
+        );
+
+        let mut registration = RpcRegistration {
+            channel: self,
+            id: req.id,
+            sent: false,
+        };
+        self.send(req).await;
+        registration.sent = true;
+
+        rx.await.expect("bind RPC sender dropped")
     }
 
     /// Close a stream handle that sys-io created but no client-side stream

@@ -221,7 +221,7 @@ impl TcpListener {
         self.channel_reservation.as_ref().unwrap().channel()
     }
 
-    pub fn bind(
+    pub async fn bind(
         socket_addr: &SocketAddr,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<TcpListener>, ErrorCode> {
@@ -233,10 +233,15 @@ impl TcpListener {
 
         let req = api_net::bind_tcp_listener_request(&socket_addr, None);
         let channel_reservation = super::channel::reserve_channel();
-        let resp = channel_reservation.channel().send_receive(req);
-        if resp.status().is_err() {
-            return Err(resp.status);
-        }
+        let channel = channel_reservation.channel().clone();
+        let (channel_reservation, resp) = channel
+            .rpc_bind(
+                req,
+                channel_reservation,
+                api_net::NetCmd::TcpListenerDrop as u16,
+            )
+            .await
+            .into_result()?;
 
         if socket_addr.port() == 0 {
             let actual_addr = api_net::get_socket_addr(&resp.payload);

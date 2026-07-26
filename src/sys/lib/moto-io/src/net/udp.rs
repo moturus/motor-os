@@ -94,7 +94,7 @@ impl UdpSocket {
         *self.peer_addr.lock()
     }
 
-    pub fn bind(
+    pub async fn bind(
         socket_addr: &SocketAddr,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
@@ -102,20 +102,20 @@ impl UdpSocket {
             // crate::moto_log!("we don't currently allow binding to 0.0.0.0:0");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(socket_addr, false, event_listener)
+        Self::bind_inner(socket_addr, false, event_listener).await
     }
 
-    pub fn bind_for_remote(
+    pub async fn bind_for_remote(
         remote_addr: &SocketAddr,
         event_listener: Arc<dyn NetEventListener>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         if remote_addr.ip().is_unspecified() {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-        Self::bind_inner(remote_addr, true, event_listener)
+        Self::bind_inner(remote_addr, true, event_listener).await
     }
 
-    fn bind_inner(
+    async fn bind_inner(
         requested_addr: &SocketAddr,
         select_route: bool,
         event_listener: Arc<dyn NetEventListener>,
@@ -131,10 +131,15 @@ impl UdpSocket {
         } else {
             api_net::bind_udp_socket_request(requested_addr, channel_reservation.subchannel_idx())
         };
-        let resp = channel_reservation.channel().send_receive(req);
-        if resp.status().is_err() {
-            return Err(resp.status);
-        }
+        let channel = channel_reservation.channel().clone();
+        let (channel_reservation, resp) = channel
+            .rpc_bind(
+                req,
+                channel_reservation,
+                api_net::NetCmd::UdpSocketDrop as u16,
+            )
+            .await
+            .into_result()?;
 
         let socket_addr = api_net::get_socket_addr(&resp.payload);
         assert_ne!(0, socket_addr.port());

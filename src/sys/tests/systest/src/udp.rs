@@ -68,12 +68,13 @@ fn test_udp_basic() {
 }
 
 fn test_native_udp_ttl() {
-    let socket = NativeUdpSocket::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
+        let socket = NativeUdpSocket::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        )
+        .await
+        .unwrap();
         assert_eq!(socket.ttl_async().await.unwrap(), 64);
         socket.set_ttl_async(37).await.unwrap();
         assert_eq!(socket.ttl_async().await.unwrap(), 37);
@@ -244,7 +245,9 @@ fn test_cancelled_native_io_waiters_are_removed() {
     }
 
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
-    let socket = NativeUdpSocket::bind(&addr, Arc::new(NoopNetEventListener)).unwrap();
+    let socket = moto_async::LocalRuntime::new()
+        .block_on(NativeUdpSocket::bind(&addr, Arc::new(NoopNetEventListener)))
+        .unwrap();
 
     for _ in 0..128 {
         let waker = Waker::from(Arc::new(DistinctWake(AtomicUsize::new(0))));
@@ -324,11 +327,12 @@ fn test_udp_tx_progresses_after_page_free() {
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
     let destination = receiver.local_addr().unwrap();
-    let queued_socket = NativeUdpSocket::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let queued_socket = moto_async::LocalRuntime::new()
+        .block_on(NativeUdpSocket::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
 
     let first = [0x5a];
     queued_socket.with_tx_pages_exhausted_for_test(|| {
@@ -345,11 +349,12 @@ fn test_udp_tx_progresses_after_page_free() {
     let waker = Waker::from(wake_count.clone());
     let mut cx = Context::from_waker(&waker);
     let pending = [0xa5];
-    let socket = NativeUdpSocket::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let socket = moto_async::LocalRuntime::new()
+        .block_on(NativeUdpSocket::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     assert_eq!(socket.channel_udp_socket_count_for_test(), 2);
     drop(queued_socket);
     let deadline = std::time::Instant::now() + Duration::from_secs(1);

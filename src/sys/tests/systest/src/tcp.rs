@@ -175,11 +175,12 @@ fn test_cancelled_native_connect_closes_socket() {
     const CONNECTIONS: usize = 4;
 
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let keeper = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let keeper = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
 
@@ -525,11 +526,12 @@ fn test_cancelled_native_accept_closes_socket() {
     use std::future::Future;
 
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let listener = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let listener = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
 
     // The first poll posts an accept RPC. Dropping while it is pending is the
@@ -573,11 +575,12 @@ fn test_delivered_then_cancelled_native_accept_closes_socket() {
         }
     }
 
-    let listener = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let listener = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     let make_listener = || Arc::new(NoopNetEventListener) as Arc<dyn NetEventListener>;
 
     let mut accept = Box::pin(listener.accept(&make_listener));
@@ -621,11 +624,12 @@ fn test_native_listener_drop_under_backpressure() {
         fn wake(self: Arc<Self>) {}
     }
 
-    let listener = NativeTcpListener::bind(
-        &"127.0.0.1:0".parse().unwrap(),
-        Arc::new(NoopNetEventListener),
-    )
-    .unwrap();
+    let listener = moto_async::LocalRuntime::new()
+        .block_on(NativeTcpListener::bind(
+            &"127.0.0.1:0".parse().unwrap(),
+            Arc::new(NoopNetEventListener),
+        ))
+        .unwrap();
     moto_async::LocalRuntime::new().block_on(async {
         listener.set_ttl_async(41).await.unwrap();
         assert_eq!(listener.ttl_async().await.unwrap(), 41);
@@ -705,6 +709,107 @@ fn test_native_listener_drop_under_backpressure() {
     println!("test_native_listener_drop_under_backpressure() PASS");
 }
 
+/// Bind the same address until it is free, or fail once the cancelled bind's
+/// rollback is clearly not coming. A stranded listener holds the port forever,
+/// so this converges only if the rollback really closed the handle.
+fn wait_for_bind_to_succeed(addr: SocketAddr) -> Arc<NativeTcpListener> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let result = moto_async::LocalRuntime::new().block_on(NativeTcpListener::bind(
+            &addr,
+            Arc::new(NoopNetEventListener),
+        ));
+        match result {
+            Ok(listener) => return listener,
+            Err(err) => assert!(
+                err == moto_rt::E_ALREADY_IN_USE && std::time::Instant::now() < deadline,
+                "cancelled bind never released {addr}: {err}"
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A native bind future cancelled after its request reached the staging queue
+/// must not strand the listener sys-io then creates: the address it took has
+/// to come back. Uses a fixed port so the leak is directly observable.
+fn test_cancelled_native_bind_releases_addr() {
+    use std::future::Future;
+
+    let addr: SocketAddr = "127.0.0.1:3342".parse().unwrap();
+    let total_before = read_sys_io_metric("net.total_tcp_sockets");
+
+    // The first poll reserves a channel and queues the bind request, so the
+    // drop below is the post-send cancellation this covers.
+    let mut bind = Box::pin(NativeTcpListener::bind(
+        &addr,
+        Arc::new(NoopNetEventListener),
+    ));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+    drop(bind);
+
+    // The queued request still reaches sys-io, which creates the listening
+    // socket. Checking the monotonic total rather than a live gauge keeps this
+    // from racing the rollback, and it is what makes the rebind below mean
+    // something: without it the test would also pass if nothing was created.
+    wait_for_sys_io_metric("net.total_tcp_sockets", |value| value > total_before);
+
+    let listener = wait_for_bind_to_succeed(addr);
+    assert_eq!(*listener.socket_addr(), addr);
+    drop(listener);
+    println!("test_cancelled_native_bind_releases_addr() PASS");
+}
+
+/// Cancellation after the bind response reached the one-shot but before the
+/// future consumed it must release the address too. This rolls back from the
+/// caller's thread rather than from response dispatch.
+fn test_delivered_then_cancelled_native_bind_releases_addr() {
+    use std::future::Future;
+
+    struct WakeFlag(AtomicBool);
+
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let addr: SocketAddr = "127.0.0.1:3343".parse().unwrap();
+
+    let mut bind = Box::pin(NativeTcpListener::bind(
+        &addr,
+        Arc::new(NoopNetEventListener),
+    ));
+    let wake_flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+    let waker = std::task::Waker::from(wake_flag.clone());
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(bind.as_mut().poll(&mut context), Poll::Pending));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !wake_flag.0.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "bind response was not delivered to the waiting future"
+        );
+        std::thread::yield_now();
+    }
+
+    // Do not poll the woken future: dropping it must drop the successful
+    // PendingBind still sitting in the one-shot, which closes the listener.
+    drop(bind);
+
+    let listener = wait_for_bind_to_succeed(addr);
+    assert_eq!(*listener.socket_addr(), addr);
+    drop(listener);
+    println!("test_delivered_then_cancelled_native_bind_releases_addr() PASS");
+}
+
 pub fn test_native_net_cancellation() {
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
@@ -713,6 +818,8 @@ pub fn test_native_net_cancellation() {
     test_native_stream_drop_under_backpressure();
     test_cancelled_native_accept_closes_socket();
     test_delivered_then_cancelled_native_accept_closes_socket();
+    test_cancelled_native_bind_releases_addr();
+    test_delivered_then_cancelled_native_bind_releases_addr();
 }
 
 pub fn test_native_listener_drop_backpressure() {
