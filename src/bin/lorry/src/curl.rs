@@ -1,16 +1,145 @@
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use semver::Version;
+
+use crate::config::NetworkConfig;
 use crate::diagnostic::{Error, Result};
 
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(305);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Client {
+    pub executable: PathBuf,
+    pub ca_bundle: Option<PathBuf>,
+}
+
+impl Client {
+    pub fn discover(config: &NetworkConfig) -> Result<Self> {
+        let executable = match &config.curl {
+            Some(path) => executable(path, "configured curl")?,
+            None => default_executable()?,
+        };
+        let ca_bundle = match &config.ca_bundle {
+            Some(path) => Some(regular_file(path, "configured CA bundle")?),
+            None if cfg!(target_os = "motor") => Some(regular_file(
+                Path::new("/sys/cfg/ssl/ca-certificates.crt"),
+                "Motor system CA bundle",
+            )?),
+            None => None,
+        };
+        Ok(Self {
+            executable,
+            ca_bundle,
+        })
+    }
+}
+
+pub fn sparse_url(name: &str) -> Result<String> {
+    let name = canonical_name(name)?;
+    let path = match name.len() {
+        1 => format!("1/{name}"),
+        2 => format!("2/{name}"),
+        3 => format!("3/{}/{name}", &name[..1]),
+        _ => format!("{}/{}/{name}", &name[..2], &name[2..4]),
+    };
+    Ok(format!("https://index.crates.io/{path}"))
+}
+
+pub fn archive_url(name: &str, version: &Version) -> Result<String> {
+    let name = canonical_name(name)?;
+    Ok(format!(
+        "https://static.crates.io/crates/{name}/{name}-{version}.crate"
+    ))
+}
+
+fn canonical_name(name: &str) -> Result<String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !name.bytes().any(|byte| byte.is_ascii_alphabetic())
+    {
+        return Err(Error::failure(format!(
+            "cannot construct a crates.io URL for invalid package name `{name}`"
+        )));
+    }
+    Ok(name.to_ascii_lowercase())
+}
+
+#[cfg(target_os = "motor")]
+fn default_executable() -> Result<PathBuf> {
+    executable(Path::new("/bin/curl"), "Motor curl")
+}
+
+#[cfg(not(target_os = "motor"))]
+fn default_executable() -> Result<PathBuf> {
+    let path = std::env::var_os("PATH")
+        .and_then(|path| find_in_path("curl", &path))
+        .ok_or_else(|| {
+            Error::failure("curl was not found in PATH")
+                .with_help("install curl 7.63.0 or newer, or configure `network.curl`")
+        })?;
+    executable(&path, "curl from PATH")
+}
+
+#[cfg(not(target_os = "motor"))]
+fn find_in_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| executable(candidate, "PATH candidate").is_ok())
+}
+
+fn executable(path: &Path, description: &str) -> Result<PathBuf> {
+    let path = regular_file(path, description)?;
+    let metadata = fs::metadata(&path).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect {description} `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(Error::failure(format!(
+                "{description} `{}` is not executable",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
+}
+
+fn regular_file(path: &Path, description: &str) -> Result<PathBuf> {
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        Error::failure(format!(
+            "failed to resolve {description} `{}`: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect {description} `{}`: {error}",
+            canonical.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(Error::failure(format!(
+            "{description} `{}` is not a regular file",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
@@ -451,6 +580,52 @@ mod tests {
             .unwrap();
         assert!(write_out.starts_with("%{stderr}\nLORRY-CURL-1"));
         assert!(write_out.ends_with(&format!("END-LORRY-CURL-1 {NONCE}\n")));
+    }
+
+    #[test]
+    fn constructs_only_canonical_crates_io_urls() {
+        assert_eq!(sparse_url("A").unwrap(), "https://index.crates.io/1/a");
+        assert_eq!(sparse_url("BC").unwrap(), "https://index.crates.io/2/bc");
+        assert_eq!(
+            sparse_url("AbC").unwrap(),
+            "https://index.crates.io/3/a/abc"
+        );
+        assert_eq!(
+            sparse_url("Serde_JSON").unwrap(),
+            "https://index.crates.io/se/rd/serde_json"
+        );
+        assert_eq!(
+            archive_url("Serde", &Version::parse("1.2.3-alpha.1").unwrap()).unwrap(),
+            "https://static.crates.io/crates/serde/serde-1.2.3-alpha.1.crate"
+        );
+        assert!(sparse_url("../bad").is_err());
+        assert!(sparse_url("123").is_err());
+    }
+
+    #[cfg(not(target_os = "motor"))]
+    #[test]
+    fn discovers_absolute_executable_and_ca_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("lorry-curl-discovery-{}", nonce().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let program = root.join("curl");
+        let ca = root.join("ca.pem");
+        fs::write(&program, b"fixture").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&ca, b"fixture").unwrap();
+        let client = Client::discover(&NetworkConfig {
+            curl: Some(program.clone()),
+            ca_bundle: Some(ca.clone()),
+        })
+        .unwrap();
+        assert_eq!(client.executable, fs::canonicalize(program).unwrap());
+        assert_eq!(client.ca_bundle, Some(fs::canonicalize(ca).unwrap()));
+        assert_eq!(
+            find_in_path("curl", root.as_os_str()),
+            Some(client.executable)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
