@@ -9,6 +9,13 @@ attributed (Section 10). A three-point A/B shows the pre-rewrite tree
 measuring the same ~164 MiB/s on this host, so the gap is a rig change, not a
 code regression, and the 2026-07-19/21 figures are retired as gates.
 
+Review update (2026-07-26): the plan was reviewed and stands, with two
+changes. First, `docs/plans/virtio-rx-coalescing.md` is now sequenced between
+Stage 2 and Stage 3 (rationale in Section 0). Second, the Stage 6 gate is
+restated in comparative form, because its five-consecutive-greens form would
+fail about two times in three on an unchanged tree given the recorded 8-in-10
+flake baseline.
+
 This document is self-contained. Section 0 summarizes what is left, Sections 1
 through 6 describe the target architecture, Section 7 records the work landed
 and the remaining implementation order, and Section 10 holds the performance
@@ -41,15 +48,47 @@ Three things make the raw patch count misleading:
   the softest, because the plan describes them at bullet granularity and their
   real shape will not be clear until Stage 3 lands. They should be re-scoped
   then rather than trusted now.
-- **Gating is a material fraction of the cost.** Every patch needs three debug
-  and three release `full-test.sh` runs. Stage 6's gate is five consecutive
-  debug runs, and the recorded flake baseline was 8 green in 10, so that gate
-  may need reruns on an unchanged tree. Stage 5's gate lists nine suites.
+- **Gating is a material fraction of the cost.** AGENTS.md requires three
+  debug and three release `full-test.sh` runs per patch; across 25-35 patches
+  that is 150-200 full-test runs, and it will dominate wall-clock for the
+  mechanical Stage 3 patches. A per-reviewed-group relaxation for that stage
+  would cut this substantially and is worth asking for explicitly; it is not
+  assumed here. Stage 6's gate is stated comparatively (see Stage 6) because
+  five consecutive greens against the 8-in-10 flake baseline would fail
+  roughly two times in three on a good tree. Stage 5's gate lists nine
+  suites.
 - **Section 8 adds coverage beyond the stage bullets** -- seventeen regression
   areas, some of which land with their stages and some of which are extra.
 
 Stage 2 finishes in about one working session. Stages 3 and 6-7 are tractable
 and mostly mechanical. Stages 4-5 are the actual project.
+
+### Sequencing against the coalescing plan
+
+Interleave, do not serialize. Finish Stage 2 first -- it is one session from
+its deletion checkpoint, and parking the tree with `SyncWaiter` and the async
+paths coexisting is the worst available state. Then land
+`docs/plans/virtio-rx-coalescing.md` Steps 0-2 before starting Stage 3, for
+three reasons:
+
+- The performance gate's default-RX axis is currently blind. Section 10's own
+  finding is that default RX is packet-rate bound in the virtio driver, below
+  every layer Stages 3-5 touch. A per-message RX regression introduced by the
+  rewrite could hide behind that bottleneck and surface only when coalescing
+  later removes it, misattributed to the coalescing change. Landing
+  coalescing first makes the RX axis measure the code the risky stages churn.
+- The coalescing work is small (~250 loc across its Steps 0-2) against this
+  series' remaining 20-30 patches, and it touches no file this series
+  touches.
+- A new reference sample is needed after coalescing anyway, and Section 10's
+  paired same-host methodology makes re-baselining routine.
+
+If the coalescing experiment shows large frames do not reach the guest, that
+plan is shelved after ~200 loc and this series continues with nothing lost.
+
+The first patch when work resumes should commit `run-qemu.sh` (Section 10):
+every measurement either plan produces depends on it, and the unexplained
+525-to-164 rig drift shows the rig can move again.
 
 ## 1. Decisions and scope
 
@@ -540,7 +579,9 @@ Current status: Stage 2 is being finished under an explicit instruction to
 proceed. The same-host reference sample now exists at `ab81c861` and the
 default-RX gap against the older numbers has been attributed to the rig, not
 to code, so the performance gate is closed and later stages compare against
-`ab81c861`.
+`ab81c861`. Per Section 0, the virtio receive-coalescing plan's Steps 0-2 are
+sequenced between Stage 2 and Stage 3; if they land, a fresh same-host
+reference sample replaces `ab81c861` as the comparison point.
 
 | Stage | Status | Summary |
 |---|---|---|
@@ -701,8 +742,14 @@ repeated tokio loopback tests, all network suites, and debug
 - Run timeout storms concurrently with active TCP and UDP traffic and assert
   both progress and zero retained wait registrations.
 
-Gate: network suites, at least five consecutive debug `full-test.sh` runs,
-and release `full-test.sh`.
+Gate: network suites and release `full-test.sh`. The debug gate is
+comparative rather than consecutive: against the recorded 8-in-10 flake
+baseline, five consecutive greens pass with probability 0.8^5 ~ 33% on an
+unchanged tree, so that form cannot distinguish this change from the
+baseline. Instead, run ten debug `full-test.sh` runs; the pass rate must be
+no worse than the flake baseline and no failure signature may be new. Better
+still, burn the known flakes down before entering this stage and restore the
+consecutive-greens form against a clean baseline.
 
 ### Stage 7: cleanup and final gate - not started
 
@@ -824,6 +871,13 @@ rig, not the code, and the series is clear. The host client binary was held
 constant across all three runs, which is a valid control: `do_throughput_write`
 is unchanged between `c898d4b5` and HEAD.
 
+What changed on the rig was attributed but never identified -- governor,
+host kernel, and tap configuration are all candidates. The paired same-host
+rule makes the gate robust to this, but an unexplained 3x drift can recur
+mid-series: treat an out-of-band RR reading as a stop signal for that
+sitting, and commit `run-qemu.sh` before any further tuning so at least the
+VM half of the rig is diffable.
+
 ### Standing finding: no receive-side coalescing
 
 The investigation found that the virtio-net driver negotiates `CSUM`,
@@ -835,11 +889,12 @@ not: `GUEST_TSO4/6` and `MRG_RXBUF` have no constants in the repo. Measured on
 bytes-per-packet.
 
 This is long-standing, not a regression, and it is why default RX is low in
-absolute terms. It is outside this plan; see
-`docs/plans/virtio-rx-coalescing.md`.
+absolute terms. It is outside this plan but is now sequenced between Stage 2
+and Stage 3 of it (Section 0); see `docs/plans/virtio-rx-coalescing.md`.
 
 ### Environment caveats
 
 The host cpufreq governor is `powersave`, and `run-qemu.sh` is untracked, so
 the VM configuration behind any historical number cannot be recovered or
-diffed. Committing `run-qemu.sh` would make future A/Bs auditable.
+diffed. Committing `run-qemu.sh` is the first patch of the resumed work
+(Section 0): every measurement either plan produces depends on it.
