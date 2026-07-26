@@ -102,7 +102,7 @@ fn prepare_path_only(
         .filter(|package| package.source.is_some())
         .map(|package| package.name.clone())
         .collect::<BTreeSet<_>>();
-    let mut loader = |name: &str, _catalog: &mut Catalog| {
+    let mut loader = |name: &str, _requirement: &semver::VersionReq, _catalog: &mut Catalog| {
         if locked_registry_names.contains(name) {
             Ok(())
         } else {
@@ -130,8 +130,10 @@ fn prepare_networked(
     targets: &[TargetInfo],
     accept_all: bool,
 ) -> Result<bool> {
-    let mut acquisition = Acquisition::new(config);
-    let mut loader = |name: &str, catalog: &mut Catalog| acquisition.load_sparse(name, catalog);
+    let mut acquisition = Acquisition::new(config, manifest)?;
+    let mut loader = |name: &str, requirement: &semver::VersionReq, catalog: &mut Catalog| {
+        acquisition.load_sparse(name, requirement, catalog)
+    };
     let (lock, selected) = prepare_with_loader(
         manifest,
         config,
@@ -172,7 +174,7 @@ fn prepare_with_loader(
     toolchain: &Toolchain,
     host: &TargetInfo,
     targets: &[TargetInfo],
-    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+    loader: &mut dyn FnMut(&str, &semver::VersionReq, &mut Catalog) -> Result<()>,
     after_complete: &dyn Fn(&Resolution) -> Result<()>,
 ) -> Result<(Vec<u8>, Resolution)> {
     let repositories = RepositorySet::open(
@@ -215,6 +217,7 @@ fn prepare_with_loader(
 struct Acquisition<'a> {
     config: &'a Config,
     records: BTreeMap<(String, Version), sparse::Record>,
+    fetched: BTreeSet<String>,
     inspections: Vec<ExtractedArchive>,
     state: Option<AcquisitionState>,
 }
@@ -226,18 +229,75 @@ struct AcquisitionState {
 }
 
 impl<'a> Acquisition<'a> {
-    fn new(config: &'a Config) -> Self {
-        Self {
+    fn new(config: &'a Config, manifest: &Manifest) -> Result<Self> {
+        let repositories = RepositorySet::open(
+            &config.repositories,
+            repository_tree_limits(&config.policy.limits)?,
+            config.policy.limits.max_package_bytes,
+        )?;
+        let mut records = BTreeMap::new();
+        for package in manifest.lock.iter().flat_map(|lock| &lock.packages) {
+            let (Some(_source), Some(checksum)) = (&package.source, &package.checksum) else {
+                continue;
+            };
+            let Some(object) = repositories.lookup_registry(checksum)? else {
+                continue;
+            };
+            let locked_version = Version::parse(&package.version.original).map_err(|error| {
+                Error::failure(format!(
+                    "locked package has invalid version `{} {}`: {error}",
+                    package.name, package.version.original
+                ))
+            })?;
+            if object.name != package.name || object.version != locked_version {
+                return Err(Error::failure(format!(
+                    "repository object `{checksum}` does not match locked package `{} {}`",
+                    package.name, package.version.original
+                )));
+            }
+            let key = (object.name.clone(), object.version.clone());
+            if let Some(existing) = records.insert(key, object.index.clone())
+                && existing != object.index
+            {
+                return Err(Error::failure(format!(
+                    "repositories disagree about locked package `{} {}`",
+                    package.name, package.version.original
+                )));
+            }
+        }
+        Ok(Self {
             config,
-            records: BTreeMap::new(),
+            records,
+            fetched: BTreeSet::new(),
             inspections: Vec::new(),
             state: None,
-        }
+        })
     }
 
-    fn load_sparse(&mut self, name: &str, catalog: &mut Catalog) -> Result<()> {
-        let url = sparse_url(name)?;
+    fn load_sparse(
+        &mut self,
+        name: &str,
+        requirement: &semver::VersionReq,
+        catalog: &mut Catalog,
+    ) -> Result<()> {
         let expected = name.to_ascii_lowercase();
+        for record in self
+            .records
+            .iter()
+            .filter(|((name, _), _)| name == &expected)
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>()
+        {
+            if !catalog.contains_registry(&record.name, &record.version) {
+                catalog.insert(record)?;
+            }
+        }
+        if self.fetched.contains(&expected)
+            || catalog.contains_crates_io_candidate(&expected, requirement)
+        {
+            return Ok(());
+        }
+        let url = sparse_url(&expected)?;
         let state = self.state()?;
         let download = state.client.download(
             &url,
@@ -246,14 +306,20 @@ impl<'a> Acquisition<'a> {
             sparse::MAX_RESPONSE_BYTES,
         )?;
         for record in sparse::load_response(download.path(), &expected)? {
-            catalog.insert(record.clone())?;
             let key = (record.name.clone(), record.version.clone());
-            if self.records.insert(key, record).is_some() {
-                return Err(Error::failure(format!(
-                    "sparse acquisition repeated package version `{name}`"
-                )));
+            if let Some(existing) = self.records.get(&key) {
+                if existing != &record {
+                    return Err(Error::failure(format!(
+                        "sparse acquisition changed package version `{} {}`",
+                        record.name, record.version
+                    )));
+                }
+            } else {
+                catalog.insert(record.clone())?;
+                self.records.insert(key, record);
             }
         }
+        self.fetched.insert(expected);
         Ok(())
     }
 
@@ -865,6 +931,26 @@ mod tests {
         digest.update(&bytes);
         let checksum = digest.finish();
         let version = Version::parse("1.2.3").unwrap();
+        fs::write(
+            fixture.0.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\ndemo = \"1\"\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.0.join("Cargo.lock"),
+            format!(
+                "version = 4\n\
+                 [[package]]\nname = \"demo\"\nversion = \"{version}\"\n\
+                 source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+                 checksum = \"{}\"\n\
+                 [[package]]\nname = \"root\"\nversion = \"0.1.0\"\n\
+                 dependencies = [\"demo\"]\n",
+                hex(&checksum)
+            ),
+        )
+        .unwrap();
+        let manifest = fixture.manifest();
         let record = sparse::Record::parse(
             Path::new("/demo-index"),
             format!(
@@ -887,10 +973,21 @@ mod tests {
             }],
             packages: vec![package],
         };
-        let mut acquisition = Acquisition::new(&config);
+        let mut acquisition = Acquisition::new(&config, &manifest).unwrap();
         acquisition
             .records
             .insert(("demo".to_owned(), version.clone()), record.clone());
+        acquisition.fetched.insert("demo".to_owned());
+        let requirement = semver::VersionReq::parse("^1").unwrap();
+        let mut catalog = Catalog::default();
+        acquisition
+            .load_sparse("demo", &requirement, &mut catalog)
+            .unwrap();
+        acquisition
+            .load_sparse("demo", &requirement, &mut catalog)
+            .unwrap();
+        assert!(catalog.contains_registry("demo", &version));
+        assert!(acquisition.state.is_none());
         assert!(require_approval_mode(1, false, false).is_err());
 
         let staged = acquisition
@@ -925,8 +1022,15 @@ mod tests {
         assert!(output.contains("Approve demo 1.2.3?"));
         acquisition.publish().unwrap();
 
-        let mut warm = Acquisition::new(&config);
-        warm.records.insert(("demo".to_owned(), version), record);
+        let mut warm = Acquisition::new(&config, &manifest).unwrap();
+        assert_eq!(
+            warm.records.get(&("demo".to_owned(), version)),
+            Some(&record)
+        );
+        let mut catalog = Catalog::default();
+        warm.load_sparse("demo", &requirement, &mut catalog)
+            .unwrap();
+        assert!(warm.state.is_none());
         assert_eq!(
             warm.stage_selected_with(&resolution, |_, _, _| {
                 panic!("an existing verified object must not be downloaded")

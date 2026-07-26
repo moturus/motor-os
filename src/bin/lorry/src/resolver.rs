@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
-use semver::Version;
+use semver::{Version, VersionReq};
 
 use crate::cargo_registry::CargoRegistry;
 use crate::config::IncompatibleRustVersions;
@@ -90,6 +90,20 @@ impl Catalog {
         self.records(name).iter().any(|candidate| {
             matches!(candidate.source, ResolvedSource::CratesIo { .. })
                 && candidate.record.version == *version
+        })
+    }
+
+    pub fn contains_crates_io_candidate(&self, name: &str, requirement: &VersionReq) -> bool {
+        self.records(name).iter().any(|candidate| {
+            requirement.matches(&candidate.version)
+                && matches!(
+                    candidate.source,
+                    ResolvedSource::CratesIo { .. }
+                        | ResolvedSource::Path {
+                            patched_crates_io: true,
+                            ..
+                        }
+                )
         })
     }
 
@@ -716,7 +730,7 @@ pub fn resolve(
         options,
         locked,
         Scope::Complete,
-        &mut |_, _| Ok(()),
+        &mut |_, _, _| Ok(()),
     )
 }
 
@@ -734,7 +748,7 @@ pub fn resolve_selected(
         options,
         locked,
         Scope::Selected(selection),
-        &mut |_, _| Ok(()),
+        &mut |_, _, _| Ok(()),
     )
 }
 
@@ -743,7 +757,7 @@ pub fn resolve_dynamic(
     catalog: &mut Catalog,
     options: &Options,
     locked: &[LockedPreference],
-    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
     resolve_with_scope(manifest, catalog, options, locked, Scope::Complete, loader)
 }
@@ -754,7 +768,7 @@ pub fn resolve_selected_dynamic(
     options: &Options,
     locked: &[LockedPreference],
     selection: TargetSelection<'_>,
-    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
     resolve_with_scope(
         manifest,
@@ -772,7 +786,7 @@ fn resolve_with_scope(
     options: &Options,
     locked: &[LockedPreference],
     scope: Scope<'_>,
-    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> Result<Resolution> {
     validate_locked_checksums(catalog, locked)?;
     let requirements = root_requirements(manifest, matches!(scope, Scope::Complete))?;
@@ -1217,14 +1231,18 @@ fn solve(
     options: &Options,
     locked: &[LockedPreference],
     scope: Scope<'_>,
-    loader: &mut dyn FnMut(&str, &mut Catalog) -> Result<()>,
+    loader: &mut dyn FnMut(&str, &VersionReq, &mut Catalog) -> Result<()>,
 ) -> std::result::Result<State, Failure> {
     let Some(mut event) = queue.pop_front() else {
         return Ok(state);
     };
     if event.dependency.source == RequirementSource::CratesIo {
-        loader(&event.dependency.package, catalog)
-            .map_err(|error| Failure::new(error.to_string()))?;
+        loader(
+            &event.dependency.package,
+            &event.dependency.requirement,
+            catalog,
+        )
+        .map_err(|error| Failure::new(error.to_string()))?;
     }
     catalog
         .prepare(&mut event.dependency)
@@ -2042,7 +2060,7 @@ mod tests {
         let root = manifest("a = \"1\"", "", "2");
         let mut catalog = Catalog::default();
         let mut loaded = Vec::new();
-        let mut loader = |name: &str, catalog: &mut Catalog| {
+        let mut loader = |name: &str, _requirement: &VersionReq, catalog: &mut Catalog| {
             loaded.push(name.to_owned());
             match name {
                 "a" => catalog.insert(record(
