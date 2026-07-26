@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io;
 
 pub type CurlResult<T> = Result<T, CurlError>;
 
@@ -41,6 +42,22 @@ impl CurlError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    pub(crate) fn from_io(error: io::Error, default_code: u8, context: &str) -> Self {
+        let code = match error.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Self::TIMEOUT,
+            _ => error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<rustls::Error>())
+                .map_or(default_code, |error| match error {
+                    rustls::Error::InvalidCertificate(_)
+                    | rustls::Error::NoCertificatesPresented
+                    | rustls::Error::UnsupportedNameType => Self::CERTIFICATE,
+                    _ => Self::TLS_CONNECT,
+                }),
+        };
+        Self::new(code, format!("{context}: {error}"))
+    }
 }
 
 impl fmt::Display for CurlError {
@@ -50,3 +67,35 @@ impl fmt::Display for CurlError {
 }
 
 impl std::error::Error for CurlError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_timeouts_certificate_failures_and_ordinary_io() {
+        let timeout = CurlError::from_io(
+            io::Error::from(io::ErrorKind::TimedOut),
+            CurlError::RECEIVE,
+            "read",
+        );
+        assert_eq!(timeout.code(), CurlError::TIMEOUT);
+
+        let certificate = CurlError::from_io(
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+            ),
+            CurlError::TLS_CONNECT,
+            "handshake",
+        );
+        assert_eq!(certificate.code(), CurlError::CERTIFICATE);
+
+        let ordinary = CurlError::from_io(
+            io::Error::from(io::ErrorKind::BrokenPipe),
+            CurlError::LOCAL_WRITE,
+            "write",
+        );
+        assert_eq!(ordinary.code(), CurlError::LOCAL_WRITE);
+    }
+}

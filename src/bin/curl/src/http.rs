@@ -20,12 +20,9 @@ pub fn write_request(stream: &mut impl Write, url: &HttpsUrl, user_agent: &str) 
         url.authority(),
         user_agent
     );
-    stream.write_all(request.as_bytes()).map_err(|error| {
-        CurlError::new(
-            CurlError::SEND,
-            format!("failed sending HTTP request: {error}"),
-        )
-    })
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| CurlError::from_io(error, CurlError::SEND, "failed sending HTTP request"))
 }
 
 pub fn receive_response(
@@ -75,7 +72,7 @@ fn read_head(reader: &mut impl BufRead) -> CurlResult<Head> {
     let mut consumed = 0;
     if reader
         .fill_buf()
-        .map_err(|error| receive_error(format!("failed reading response: {error}")))?
+        .map_err(|error| CurlError::from_io(error, CurlError::RECEIVE, "failed reading response"))?
         .is_empty()
     {
         return Err(CurlError::new(
@@ -137,9 +134,9 @@ fn read_head(reader: &mut impl BufRead) -> CurlResult<Head> {
 
 fn read_line(reader: &mut impl BufRead, consumed: &mut usize) -> CurlResult<Vec<u8>> {
     let mut line = Vec::new();
-    let count = reader
-        .read_until(b'\n', &mut line)
-        .map_err(|error| receive_error(format!("failed reading response: {error}")))?;
+    let count = reader.read_until(b'\n', &mut line).map_err(|error| {
+        CurlError::from_io(error, CurlError::RECEIVE, "failed reading response")
+    })?;
     if count == 0 {
         return Err(receive_error("response ended before the header block"));
     }
@@ -203,9 +200,9 @@ fn copy_exact(
     let mut buffer = [0; 16 * 1024];
     while remaining != 0 {
         let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap();
-        let count = reader
-            .read(&mut buffer[..wanted])
-            .map_err(|error| receive_error(format!("failed reading response body: {error}")))?;
+        let count = reader.read(&mut buffer[..wanted]).map_err(|error| {
+            CurlError::from_io(error, CurlError::RECEIVE, "failed reading response body")
+        })?;
         if count == 0 {
             return Err(receive_error("response body ended before Content-Length"));
         }
@@ -219,9 +216,9 @@ fn copy_to_end(reader: &mut impl Read, output: &mut impl Write) -> CurlResult<u6
     let mut total = 0_u64;
     let mut buffer = [0; 16 * 1024];
     loop {
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|error| receive_error(format!("failed reading response body: {error}")))?;
+        let count = reader.read(&mut buffer).map_err(|error| {
+            CurlError::from_io(error, CurlError::RECEIVE, "failed reading response body")
+        })?;
         if count == 0 {
             return Ok(total);
         }
@@ -249,9 +246,9 @@ fn copy_chunked(reader: &mut impl BufRead, output: &mut impl Write) -> CurlResul
         }
         copy_exact(reader, output, size)?;
         let mut ending = [0; 2];
-        reader
-            .read_exact(&mut ending)
-            .map_err(|error| receive_error(format!("failed reading chunk ending: {error}")))?;
+        reader.read_exact(&mut ending).map_err(|error| {
+            CurlError::from_io(error, CurlError::RECEIVE, "failed reading chunk ending")
+        })?;
         if ending != *b"\r\n" {
             return Err(receive_error("invalid chunk ending"));
         }
@@ -278,9 +275,10 @@ fn read_trailers(reader: &mut impl BufRead) -> CurlResult<()> {
 
 fn write_body(output: &mut impl Write, bytes: &[u8]) -> CurlResult<()> {
     output.write_all(bytes).map_err(|error| {
-        CurlError::new(
+        CurlError::from_io(
+            error,
             CurlError::LOCAL_WRITE,
-            format!("failed writing response body: {error}"),
+            "failed writing response body",
         )
     })
 }
