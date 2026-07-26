@@ -301,18 +301,24 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
     }
     let captured = capture(&mut command, options.timeout, options.max_output_bytes)?;
     if !captured.status.success() {
+        let stdout = String::from_utf8_lossy(&captured.stdout);
         let stderr = String::from_utf8_lossy(&captured.stderr);
         return Err(Error::failure(format!(
-            "build script `{}` failed{}{}",
+            "build script `{}` failed{}{}{}",
             options.executable.display(),
             captured.status.code().map_or_else(
                 || " after being terminated by a signal".to_owned(),
                 |code| { format!(" with status {code}") }
             ),
+            if stdout.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; stdout: {}", stdout.trim())
+            },
             if stderr.trim().is_empty() {
                 String::new()
             } else {
-                format!(": {}", stderr.trim())
+                format!("; stderr: {}", stderr.trim())
             }
         )));
     }
@@ -506,7 +512,7 @@ pub fn parse(stdout: &[u8], options: &ParseOptions<'_>) -> Result<Output> {
                 "rerun-if-changed",
             )?),
             "rerun-if-env-changed" => {
-                validate_environment_name(value, "rerun-if-env-changed")?;
+                validate_rerun_environment_name(value)?;
                 Directive::RerunIfEnvChanged {
                     name: value.to_owned(),
                     value: options.environment.get(value).cloned(),
@@ -623,6 +629,20 @@ fn validate_environment_name(name: &str, directive: &str) -> Result<()> {
     if !valid {
         return Err(Error::failure(format!(
             "build-script {directive} has invalid environment name `{name}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_rerun_environment_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| matches!(byte, b'_' | b'-' | b'.') || byte.is_ascii_alphanumeric())
+        && !name.as_bytes()[0].is_ascii_digit();
+    if !valid {
+        return Err(Error::failure(format!(
+            "build-script rerun-if-env-changed has invalid environment name `{name}`"
         )));
     }
     Ok(())
@@ -764,6 +784,7 @@ mod tests {
         let fixture = Fixture::new();
         let output = parse(
             b"cargo:rerun-if-env-changed=TARGET\n\
+              cargo:rerun-if-env-changed=CC_x86_64-unknown.linux-gnu\n\
               cargo:rerun-if-env-changed=RUST_LIBC_UNSTABLE_FREEBSD_VERSION\n",
             &fixture.options(),
         )
@@ -774,6 +795,10 @@ mod tests {
                 Directive::RerunIfEnvChanged {
                     name: "TARGET".to_owned(),
                     value: Some("x86_64-unknown-linux-gnu".into()),
+                },
+                Directive::RerunIfEnvChanged {
+                    name: "CC_x86_64-unknown.linux-gnu".to_owned(),
+                    value: None,
                 },
                 Directive::RerunIfEnvChanged {
                     name: "RUST_LIBC_UNSTABLE_FREEBSD_VERSION".to_owned(),
@@ -964,7 +989,13 @@ mod tests {
                 ("TMPDIR".to_owned(), temp.clone().into_os_string()),
             ]);
             let mut read_only = Vec::new();
-            for path in ["/lib", "/lib64", "/usr/lib", "/etc/ld.so.cache"] {
+            for path in [
+                "/lib",
+                "/lib64",
+                "/usr/include",
+                "/usr/lib",
+                "/etc/ld.so.cache",
+            ] {
                 if Path::new(path).exists() {
                     read_only.push(PathBuf::from(path));
                 }
@@ -1056,12 +1087,11 @@ mod tests {
         );
 
         let failure = RunFixture::new("failure");
-        assert!(
-            run(&failure.options(Duration::from_secs(5), 64 * 1024))
-                .unwrap_err()
-                .to_string()
-                .contains("failed with status")
-        );
+        let error = run(&failure.options(Duration::from_secs(5), 64 * 1024))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failed with status"));
+        assert!(error.contains("failure stdout"));
     }
 
     #[cfg(target_os = "linux")]
@@ -1096,7 +1126,10 @@ mod tests {
             }
             "timeout" => std::thread::sleep(Duration::from_secs(5)),
             "excess-output" => println!("{}", "x".repeat(4096)),
-            "failure" => panic!("requested build-script failure"),
+            "failure" => {
+                println!("failure stdout");
+                panic!("requested build-script failure");
+            }
             _ => panic!("unknown build-script child action {action}"),
         }
     }

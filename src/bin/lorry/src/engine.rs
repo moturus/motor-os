@@ -374,6 +374,8 @@ fn build(build: Build<'_>) -> Result<BuildArtifacts> {
         build_script_output_bytes: build.config.policy.limits.build_script_output_bytes,
         out_dir_limits: source_limits,
         cache: Some(&cache),
+        admission: &prepared.admission,
+        native_tools: &build.config.native_tools,
     };
     let selected_integration =
         build.test && (build.test_name.is_some() || !build.manifest.integration_tests.is_empty());

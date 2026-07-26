@@ -16,6 +16,7 @@ mod identity;
 mod json;
 mod lockfile;
 mod manifest;
+mod native_tool;
 mod offline;
 mod patch;
 mod policy;

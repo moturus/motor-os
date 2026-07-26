@@ -14,6 +14,8 @@ use crate::compile::{
 use crate::diagnostic::{Error, Result};
 use crate::hash::sha256_file;
 use crate::manifest::Manifest;
+use crate::native_tool;
+use crate::policy::Admission;
 use crate::process::RustcCommand;
 use crate::resolver::{CompileKind, PackageKey};
 use crate::sandbox::Executable;
@@ -38,6 +40,9 @@ pub struct Options<'a> {
     pub build_script_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
     pub cache: Option<&'a BuildCache>,
+    pub admission: &'a Admission,
+    pub native_tools:
+        &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,7 +181,7 @@ fn execute_inner(
                     CompileKind::Host => options.host,
                     CompileKind::Target => options.target,
                 };
-                let environment = build_script::environment(
+                let mut environment = build_script::environment(
                     manifest,
                     &planned.unit,
                     &planned.settings,
@@ -193,7 +198,28 @@ fn execute_inner(
                         primary_package: false,
                     },
                 )?;
+                let admission = options
+                    .admission
+                    .packages
+                    .get(&key.package)
+                    .ok_or_else(|| {
+                        Error::failure(format!(
+                            "dependency execution has no policy admission for `{} {}`",
+                            key.package.name, key.package.version
+                        ))
+                    })?;
+                let native = native_tool::project(
+                    options.native_tools,
+                    &admission.native_tools,
+                    &target.triple,
+                )?;
+                environment.extend(native.environment);
                 let read_only = sandbox_inputs(manifests, options);
+                let mut executables = vec![Executable {
+                    path: options.toolchain.rustc.clone(),
+                    argument_prefix: Vec::new(),
+                }];
+                executables.extend(native.executables);
                 let build_output = build_script::run(&RunOptions {
                     executable,
                     arguments: &[],
@@ -202,10 +228,7 @@ fn execute_inner(
                     out_dir: &out_dir,
                     temp_dir: &temp_dir,
                     read_only: &read_only,
-                    executables: &[Executable {
-                        path: options.toolchain.rustc.clone(),
-                        argument_prefix: Vec::new(),
-                    }],
+                    executables: &executables,
                     timeout: options.build_script_timeout,
                     max_output_bytes: options.build_script_output_bytes,
                     out_dir_limits: options.out_dir_limits,
@@ -619,6 +642,7 @@ fn sandbox_inputs(
         "/dev/null",
         "/lib",
         "/lib64",
+        "/usr/include",
         "/usr/lib",
         "/etc/ld.so.cache",
     ] {
@@ -660,6 +684,7 @@ mod tests {
     use super::*;
     use crate::config::{CargoCompat, Config};
     use crate::manifest::ReleaseProfile;
+    use crate::policy::PackageAdmission;
     use crate::resolver::{PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource};
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::unit::{PlanOptions, dependency_units, plan_dependency_units};
@@ -774,7 +799,16 @@ mod tests {
                 lock_edges: Vec::new(),
             }],
         };
-        let manifests = BTreeMap::from([(key, manifest)]);
+        let manifests = BTreeMap::from([(key.clone(), manifest)]);
+        let admission = Admission {
+            packages: BTreeMap::from([(
+                key,
+                PackageAdmission {
+                    matching_allow_rules: Vec::new(),
+                    native_tools: BTreeSet::new(),
+                },
+            )]),
+        };
         let graph = dependency_units(&resolution, &manifests).unwrap();
         let (toolchain, target) = actual_toolchain();
         let plan = plan_dependency_units(
@@ -813,6 +847,8 @@ mod tests {
                 build_script_output_bytes: 64 * 1024,
                 out_dir_limits: DEFAULT_LIMITS,
                 cache: None,
+                admission: &admission,
+                native_tools: &BTreeMap::new(),
             },
         )
         .unwrap();
