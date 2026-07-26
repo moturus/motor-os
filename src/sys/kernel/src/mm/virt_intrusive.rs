@@ -517,6 +517,7 @@ impl VmemSegment {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
+        let lazy_options = page.mapping_options;
         page.frame = super::phys::allocate_frame(PageType::SmallPage)?;
         page.mapping_options.remove(MappingOptions::LAZY);
         page.mapping_options.remove(MappingOptions::GUARD);
@@ -525,12 +526,21 @@ impl VmemSegment {
         let phys_addr = page.frame.get().unwrap().start();
         let virt_addr = page.start;
         let page_type = PageType::SmallPage;
-        self.address_space().page_table.map_page(
+        if let Err(err) = self.address_space().page_table.map_page(
             phys_addr,
             virt_addr,
             page_type,
             mapping_options,
-        )?;
+        ) {
+            // Roll back: a non-null frame with LAZY stripped but no PTE
+            // installed would satisfy the concurrent-fault shortcut above,
+            // so retries of the faulting access would refault forever.
+            // Dropping the frame frees it.
+            let page = self.find_page_mut(pf_addr).unwrap();
+            page.frame = SlabArc::null();
+            page.mapping_options = lazy_options;
+            return Err(err);
+        }
         // No TLB flush: the PTE went from non-present to present, and x86
         // CPUs don't cache non-present translations (and every unmap path
         // flushes), so no CPU — including this one — holds a stale entry.
