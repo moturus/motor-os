@@ -126,6 +126,12 @@ impl NetRuntime {
                 .clone();
             let name = this.inner.borrow().devices[device_idx].name().to_owned();
 
+            // The timer armed for poll_delay(), kept across iterations. Under
+            // load the notify branch below wins nearly every time, so arming a
+            // fresh timer per iteration would queue -- and immediately cancel
+            // -- ~80K timers/sec.
+            let mut timer: Option<moto_async::Sleep> = None;
+
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
                 let activity = this.inner.borrow_mut().devices[device_idx].poll();
@@ -138,9 +144,28 @@ impl NetRuntime {
                         if let Some(delay) = delay {
                             use futures::FutureExt;
 
+                            // Re-arm only when the armed timer has fired, or
+                            // would now fire too late: waking early just costs
+                            // one extra poll() of an idle device, whereas
+                            // waking late stalls it. Since poll_delay() is
+                            // measured from now, an unchanged delay moves the
+                            // deadline *later* every iteration, which is
+                            // exactly the case this keeps out of the queue.
+                            let now = moto_async::Instant::now();
+                            let deadline = now + delay;
+                            let reusable = timer.as_ref().is_some_and(|armed| {
+                                armed.deadline() > now && armed.deadline() <= deadline
+                            });
+                            if !reusable {
+                                timer = Some(moto_async::sleep_until(deadline));
+                            }
+
+                            // Dropping the select! only drops the borrow, so
+                            // the timer stays armed for the next iteration.
+                            let armed = timer.as_mut().unwrap();
                             futures::select! {
                             _ = notify.notified().fuse() => (),
-                            _ = moto_async::sleep(delay).fuse() => (),
+                            _ = armed.fuse() => (),
                             }
                         } else {
                             notify.notified().await;

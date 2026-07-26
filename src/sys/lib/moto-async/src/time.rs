@@ -26,6 +26,13 @@ impl Sleep {
             timer: None,
         }
     }
+
+    /// When this future completes. Lets a caller that keeps one `Sleep` armed
+    /// across loop iterations decide whether it still covers the deadline it
+    /// now needs, instead of dropping it and queueing another timer.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
 }
 
 impl Future for Sleep {

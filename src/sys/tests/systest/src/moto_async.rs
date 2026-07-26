@@ -936,6 +936,46 @@ fn test_cancelled_timers_do_not_accumulate() {
     });
 }
 
+fn test_sleep_reused_across_selects() {
+    // sys-io's device task keeps one armed Sleep across loop iterations and
+    // re-polls it from a fresh `select!` each time, so that a hot loop does
+    // not queue a timer per iteration. That rests on two properties of Sleep:
+    // losing a `select!` must not disarm it, and re-polling it must reuse the
+    // queued timer rather than adding another.
+    const NOTIFIES: u32 = 100;
+
+    moto_async::LocalRuntime::new().block_on(async {
+        let notify = moto_async::LocalNotify::default();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut sleep = moto_async::sleep_until(deadline);
+        let queued = moto_async::timer_queue_len();
+
+        let mut notified = 0;
+        loop {
+            // Once the notifies are spent, only the timer can complete.
+            if notified < NOTIFIES {
+                notify.notify_one();
+            }
+            let mut fired = false;
+            futures::select! {
+                _ = notify.notified().fuse() => notified += 1,
+                _ = (&mut sleep).fuse() => fired = true,
+            }
+            if fired {
+                break;
+            }
+            assert!(
+                moto_async::timer_queue_len() <= queued + 1,
+                "re-polling the armed Sleep queued another timer"
+            );
+        }
+
+        assert_eq!(notified, NOTIFIES);
+        assert!(Instant::now() >= deadline, "the reused timer fired early");
+        println!("----- moto_async::test_sleep_reused_across_selects PASS");
+    });
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -968,6 +1008,7 @@ pub fn run_all_tests() {
     test_wake_on_sleep_fold();
     test_wake_on_sleep_poll_resume();
     test_cancelled_timers_do_not_accumulate();
+    test_sleep_reused_across_selects();
 
     println!("moto_async all PASS");
 }
