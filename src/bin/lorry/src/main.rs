@@ -7,6 +7,8 @@ mod cargo_registry;
 mod cli;
 mod compile;
 mod config;
+#[allow(dead_code)]
+mod curl;
 mod dependency;
 mod diagnostic;
 mod engine;
