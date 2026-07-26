@@ -1,7 +1,16 @@
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::diagnostic::{Error, Result};
+
+const MAX_STDERR_BYTES: u64 = 64 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(305);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
@@ -9,6 +18,49 @@ pub struct Metadata {
     pub effective_url: String,
     pub redirect_url: Option<String>,
     pub size: u64,
+}
+
+pub fn request(
+    executable: &Path,
+    url: &str,
+    ca_bundle: Option<&Path>,
+    destination: File,
+    max_body_bytes: u64,
+) -> Result<(Vec<u8>, Metadata)> {
+    if max_body_bytes == 0 {
+        return Err(Error::failure("curl response body limit must be nonzero"));
+    }
+    let nonce = nonce()?;
+    let arguments = arguments(url, &nonce, ca_bundle, env!("CARGO_PKG_VERSION"))?;
+    let mut command = Command::new(executable);
+    command
+        .args(arguments)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let captured = capture(&mut command, destination, max_body_bytes, REQUEST_TIMEOUT)?;
+    let parsed = parse_trailer(&captured.stderr, &nonce, captured.body_size);
+    if !captured.status.success() {
+        let diagnostic = parsed.map(|value| value.0).unwrap_or(captured.stderr);
+        let diagnostic = String::from_utf8_lossy(&diagnostic);
+        return Err(Error::failure(format!(
+            "curl `{}` failed{}{}",
+            executable.display(),
+            captured
+                .status
+                .code()
+                .map_or_else(String::new, |code| format!(" with status {code}")),
+            if diagnostic.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", diagnostic.trim())
+            }
+        )));
+    }
+    let (diagnostic, metadata) = parsed?;
+    Ok((diagnostic, metadata))
 }
 
 pub fn arguments(
@@ -183,8 +235,172 @@ fn validate_nonce(nonce: &str) -> Result<()> {
     Ok(())
 }
 
+struct Captured {
+    status: ExitStatus,
+    stderr: Vec<u8>,
+    body_size: u64,
+}
+
+fn capture(
+    command: &mut Command,
+    destination: File,
+    max_body_bytes: u64,
+    timeout: Duration,
+) -> Result<Captured> {
+    let mut child = command.spawn().map_err(|error| {
+        Error::failure(format!(
+            "failed to start curl `{}`: {error}",
+            Path::new(command.get_program()).display()
+        ))
+    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::failure("curl stdout pipe was not created"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::failure("curl stderr pipe was not created"))?;
+    let body_exceeded = Arc::new(AtomicBool::new(false));
+    let stderr_exceeded = Arc::new(AtomicBool::new(false));
+    let body_thread = copy_body(stdout, destination, body_exceeded.clone(), max_body_bytes);
+    let stderr_thread = capture_stderr(stderr, stderr_exceeded.clone());
+    let started = Instant::now();
+    let status = loop {
+        let failure = if body_exceeded.load(Ordering::Acquire) {
+            Some(format!(
+                "curl response body exceeded the {max_body_bytes}-byte limit"
+            ))
+        } else if stderr_exceeded.load(Ordering::Acquire) {
+            Some(format!(
+                "curl stderr exceeded the {MAX_STDERR_BYTES}-byte limit"
+            ))
+        } else if started.elapsed() >= timeout {
+            Some(format!(
+                "curl process did not exit within {} seconds",
+                timeout.as_secs()
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = failure {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = body_thread.join();
+            let _ = stderr_thread.join();
+            return Err(Error::failure(message));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = body_thread.join();
+                let _ = stderr_thread.join();
+                return Err(Error::failure(format!(
+                    "failed while waiting for curl: {error}"
+                )));
+            }
+        }
+    };
+    let body_size = body_thread
+        .join()
+        .map_err(|_| Error::failure("curl body capture thread panicked"))?
+        .map_err(|error| Error::failure(format!("failed to stage curl response: {error}")))?;
+    let stderr = stderr_thread
+        .join()
+        .map_err(|_| Error::failure("curl stderr capture thread panicked"))?
+        .map_err(|error| Error::failure(format!("failed to read curl stderr: {error}")))?;
+    if body_exceeded.load(Ordering::Acquire) {
+        return Err(Error::failure(format!(
+            "curl response body exceeded the {max_body_bytes}-byte limit"
+        )));
+    }
+    if stderr_exceeded.load(Ordering::Acquire) {
+        return Err(Error::failure(format!(
+            "curl stderr exceeded the {MAX_STDERR_BYTES}-byte limit"
+        )));
+    }
+    Ok(Captured {
+        status,
+        stderr,
+        body_size,
+    })
+}
+
+fn copy_body(
+    mut source: impl Read + Send + 'static,
+    mut destination: File,
+    exceeded: Arc<AtomicBool>,
+    limit: u64,
+) -> std::thread::JoinHandle<std::io::Result<u64>> {
+    std::thread::spawn(move || {
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                destination.flush()?;
+                return Ok(total);
+            }
+            let available = limit.saturating_sub(total) as usize;
+            destination.write_all(&buffer[..count.min(available)])?;
+            total = total.saturating_add(count as u64);
+            if count > available {
+                exceeded.store(true, Ordering::Release);
+                return Ok(total);
+            }
+        }
+    })
+}
+
+fn capture_stderr(
+    source: impl Read + Send + 'static,
+    exceeded: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        source
+            .take(MAX_STDERR_BYTES + 1)
+            .read_to_end(&mut captured)?;
+        if captured.len() as u64 > MAX_STDERR_BYTES {
+            captured.truncate(MAX_STDERR_BYTES as usize);
+            exceeded.store(true, Ordering::Release);
+        }
+        Ok(captured)
+    })
+}
+
+fn nonce() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    fill_random(&mut bytes)?;
+    let mut nonce = String::with_capacity(32);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        nonce.push(HEX[(byte >> 4) as usize] as char);
+        nonce.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    Ok(nonce)
+}
+
+#[cfg(target_os = "motor")]
+fn fill_random(bytes: &mut [u8]) -> Result<()> {
+    moto_rt::fill_random_bytes(bytes);
+    Ok(())
+}
+
+#[cfg(not(target_os = "motor"))]
+fn fill_random(bytes: &mut [u8]) -> Result<()> {
+    File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(bytes))
+        .map_err(|error| Error::failure(format!("failed to obtain curl control nonce: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
@@ -204,6 +420,7 @@ mod tests {
 
     #[test]
     fn renders_the_exact_bounded_request_surface() {
+        validate_nonce(&nonce().unwrap()).unwrap();
         let arguments = arguments(
             "https://index.crates.io/config.json",
             NONCE,
@@ -268,5 +485,86 @@ mod tests {
             .unwrap()
             .replace("url=https://", "url=https://bad\u{7f}");
         assert!(parse_trailer(malformed.as_bytes(), NONCE, 17).is_err());
+    }
+
+    #[test]
+    fn capture_child() {
+        let Ok(action) = std::env::var("LORRY_CURL_CAPTURE_CHILD") else {
+            return;
+        };
+        assert_eq!(std::env::var("LC_ALL").as_deref(), Ok("C"));
+        assert!(std::env::var_os("HOME").is_none());
+        if action == "stall" {
+            std::thread::sleep(Duration::from_secs(10));
+            return;
+        }
+        let mut output: Box<dyn Write> = match action.as_str() {
+            "pipes" | "body-limit" => Box::new(std::io::stdout()),
+            "stderr-limit" => Box::new(std::io::stderr()),
+            _ => panic!("unknown capture-child action"),
+        };
+        let iterations = if action == "pipes" { 6_000 } else { 100_000 };
+        for _ in 0..iterations {
+            output.write_all(b"12345678").unwrap();
+            if action == "pipes" {
+                std::io::stderr().write_all(b"abcdefgh").unwrap();
+            }
+        }
+    }
+
+    fn child(action: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "curl::tests::capture_child", "--nocapture"])
+            .env_clear()
+            .env("LC_ALL", "C")
+            .env("LORRY_CURL_CAPTURE_CHILD", action)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn destination() -> (std::path::PathBuf, File) {
+        let path = std::env::temp_dir().join(format!("lorry-curl-capture-{}", nonce().unwrap()));
+        let file = File::create(&path).unwrap();
+        (path, file)
+    }
+
+    #[test]
+    fn concurrently_drains_body_and_diagnostic_pipes() {
+        let (path, file) = destination();
+        let captured = capture(
+            &mut child("pipes"),
+            file,
+            60 * 1024,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(captured.status.success());
+        assert!(captured.body_size >= 48_000);
+        assert!(captured.stderr.len() >= 48_000);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminates_children_on_limits_and_timeout() {
+        for (action, body_limit, timeout, expected) in [
+            ("body-limit", 64, Duration::from_secs(10), "body exceeded"),
+            (
+                "stderr-limit",
+                1024,
+                Duration::from_secs(10),
+                "stderr exceeded",
+            ),
+            ("stall", 1024, Duration::from_millis(20), "did not exit"),
+        ] {
+            let (path, file) = destination();
+            let error = capture(&mut child(action), file, body_limit, timeout)
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+            fs::remove_file(path).unwrap();
+        }
     }
 }
