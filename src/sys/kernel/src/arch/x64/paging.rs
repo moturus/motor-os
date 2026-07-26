@@ -775,15 +775,17 @@ impl PageTable {
             pte_flags |= PTE::HUGE;
         }
 
+        // Initialize the frame before publishing the PTE. Otherwise another
+        // CPU can write through the new mapping while zero_page() erases it.
+        if !dont_zero {
+            zero_page(phys_addr + PAGING_DIRECT_MAP_OFFSET, kind);
+        }
+
         unsafe {
             self.inst
                 .get()
                 .lock(3)
                 .map_page(phys_addr, virt_addr, kind, pte_flags);
-        }
-
-        if !dont_zero {
-            zero_page(phys_addr + PAGING_DIRECT_MAP_OFFSET, kind);
         }
 
         Ok(())
