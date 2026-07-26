@@ -38,6 +38,10 @@ fn server_config() -> Arc<ServerConfig> {
 }
 
 fn serve(response: &'static [u8]) -> (String, JoinHandle<()>) {
+    serve_after(response, Duration::ZERO)
+}
+
+fn serve_after(response: &'static [u8], delay: Duration) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
@@ -55,8 +59,11 @@ fn serve(response: &'static [u8]) -> (String, JoinHandle<()>) {
             }
             request.push(byte[0]);
             if request.ends_with(b"\r\n\r\n") {
-                stream.write_all(response).unwrap();
-                stream.flush().unwrap();
+                std::thread::sleep(delay);
+                if stream.write_all(response).is_ok() {
+                    stream.conn.send_close_notify();
+                    let _ = stream.flush();
+                }
                 return;
             }
         }
@@ -133,4 +140,91 @@ fn rejects_an_untrusted_server_certificate() {
     let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
     server.join().unwrap();
     assert_eq!(error.code(), CurlError::CERTIFICATE);
+}
+
+#[test]
+fn transfers_chunked_and_close_delimited_responses() {
+    for (response, expected) in [
+        (
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+              3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n"
+                .as_slice(),
+            b"abcde".as_slice(),
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil close".as_slice(),
+            b"until close".as_slice(),
+        ),
+    ] {
+        let (url, server) = serve(response);
+        let mut body = Vec::new();
+        let info = curl::transfer(&options(url), &mut body).unwrap();
+        server.join().unwrap();
+        assert_eq!(body, expected);
+        assert_eq!(info.size_download, expected.len() as u64);
+    }
+}
+
+#[test]
+fn rejects_malformed_and_truncated_https_responses() {
+    for response in [
+        b"NOT HTTP\r\n\r\n".as_slice(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".as_slice(),
+    ] {
+        let (url, server) = serve(response);
+        let error = curl::transfer(&options(url), &mut Vec::new()).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.code(), CurlError::RECEIVE);
+    }
+}
+
+#[test]
+fn enforces_the_total_transfer_timeout() {
+    let (url, server) = serve_after(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+        Duration::from_secs(2),
+    );
+    let mut options = options(url);
+    options.max_time = Duration::from_secs(1);
+    let error = curl::transfer(&options, &mut Vec::new()).unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.code(), CurlError::TIMEOUT);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn matches_upstream_curl_for_supported_success_output() {
+    fn run(program: &str, url: &str) -> std::process::Output {
+        Command::new(program)
+            .args([
+                "--disable",
+                "--silent",
+                "--show-error",
+                "--http1.1",
+                "--cacert",
+                fixture_path("test-ca.pem").to_str().unwrap(),
+                "--output",
+                "-",
+                "--write-out",
+                "\\n%{response_code}|%{redirect_url}|%{size_download}",
+                "--url",
+                url,
+            ])
+            .output()
+            .unwrap()
+    }
+
+    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    let (upstream_url, upstream_server) = serve(response);
+    let upstream = run("curl", &upstream_url);
+    upstream_server.join().unwrap();
+
+    let (motor_url, motor_server) = serve(response);
+    let motor = run(env!("CARGO_BIN_EXE_curl"), &motor_url);
+    motor_server.join().unwrap();
+
+    assert!(upstream.status.success(), "{upstream:?}");
+    assert!(motor.status.success(), "{motor:?}");
+    assert_eq!(motor.stdout, upstream.stdout);
+    assert_eq!(motor.stderr, upstream.stderr);
 }
