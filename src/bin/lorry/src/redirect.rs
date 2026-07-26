@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -121,6 +122,7 @@ impl TrustStore {
     }
 
     pub fn save(&mut self, site: Site, decision: Decision) -> Result<()> {
+        ensure_store_parent(&self.path)?;
         let _lock = TrustLock::acquire(&self.path)?;
         let mut latest = Self::load(&self.path)?;
         let (selected, opposite) = match decision {
@@ -153,6 +155,31 @@ impl TrustStore {
         output.push_str("]\n");
         output.into_bytes()
     }
+}
+
+fn ensure_store_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::failure("redirect trust file has no parent directory"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::failure(format!(
+            "failed to create redirect trust directory `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+    let metadata = fs::symlink_metadata(parent).map_err(|error| {
+        Error::failure(format!(
+            "failed to inspect redirect trust directory `{}`: {error}",
+            parent.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::failure(format!(
+            "redirect trust directory `{}` is not a real directory",
+            parent.display()
+        )));
+    }
+    Ok(())
 }
 
 fn site_list(path: &Path, document: &Document, key: &str) -> Result<BTreeSet<Site>> {
@@ -230,6 +257,142 @@ impl TrustLock {
         })?;
         Ok(Self { file })
     }
+}
+
+pub struct TrustPolicy {
+    persistent: TrustStore,
+    operation_allow: BTreeSet<Site>,
+    operation_deny: BTreeSet<Site>,
+}
+
+impl TrustPolicy {
+    pub fn load_default() -> Result<Self> {
+        Self::load(&default_trust_path()?)
+    }
+
+    fn load(path: &Path) -> Result<Self> {
+        Ok(Self {
+            persistent: TrustStore::load(path)?,
+            operation_allow: BTreeSet::new(),
+            operation_deny: BTreeSet::new(),
+        })
+    }
+
+    pub fn authorize(&mut self, source: &HttpsUrl, destination: &HttpsUrl) -> Result<()> {
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        let mut output = io::stderr().lock();
+        self.authorize_with_io(
+            source,
+            destination,
+            stdin.is_terminal(),
+            &mut input,
+            &mut output,
+        )
+    }
+
+    fn authorize_with_io<R: BufRead, W: Write>(
+        &mut self,
+        source: &HttpsUrl,
+        destination: &HttpsUrl,
+        terminal: bool,
+        input: &mut R,
+        output: &mut W,
+    ) -> Result<()> {
+        let site = &destination.site;
+        match self
+            .persistent
+            .decision(site)
+            .or_else(|| self.operation_decision(site))
+        {
+            Some(Decision::Allow) => return Ok(()),
+            Some(Decision::Deny) => return Err(denied(site)),
+            None => {}
+        }
+        if !terminal {
+            return Err(Error::failure(format!(
+                "redirect to unknown site `{site}` requires an interactive decision"
+            ))
+            .with_help("rerun Lorry from a terminal to allow or deny the redirect site"));
+        }
+        writeln!(
+            output,
+            "Lorry was redirected:\n  from: {}\n  to:   {}\n\
+             [1] allow for this operation\n\
+             [2] allow always\n\
+             [3] deny for this operation\n\
+             [4] deny always",
+            redact_url(&source.request_url),
+            redact_url(&destination.request_url)
+        )
+        .and_then(|()| {
+            write!(output, "Redirect decision [3]: ")?;
+            output.flush()
+        })
+        .map_err(|error| Error::failure(format!("failed to write redirect prompt: {error}")))?;
+
+        let mut response = String::new();
+        input
+            .by_ref()
+            .take(65)
+            .read_line(&mut response)
+            .map_err(|error| {
+                Error::failure(format!("failed to read redirect decision: {error}"))
+            })?;
+        match response.trim() {
+            "1" => {
+                self.operation_allow.insert(site.clone());
+                Ok(())
+            }
+            "2" => self
+                .persistent
+                .save(site.clone(), Decision::Allow)
+                .map(|()| ()),
+            "4" => {
+                self.persistent.save(site.clone(), Decision::Deny)?;
+                Err(denied(site))
+            }
+            _ => {
+                self.operation_deny.insert(site.clone());
+                Err(denied(site))
+            }
+        }
+    }
+
+    fn operation_decision(&self, site: &Site) -> Option<Decision> {
+        if self.operation_allow.contains(site) {
+            Some(Decision::Allow)
+        } else if self.operation_deny.contains(site) {
+            Some(Decision::Deny)
+        } else {
+            None
+        }
+    }
+}
+
+fn default_trust_path() -> Result<PathBuf> {
+    if cfg!(target_os = "motor") {
+        return Ok(PathBuf::from("/user/cfg/lorry-redirect-sites.toml"));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| Error::failure("HOME is required to locate redirect trust decisions"))?;
+    let home = PathBuf::from(home);
+    if !home.is_absolute() {
+        return Err(Error::failure("HOME must be an absolute path")
+            .with_help("set HOME to the absolute path of the current user's home directory"));
+    }
+    Ok(home.join(".config/lorry/redirect-sites.toml"))
+}
+
+fn redact_url(value: &str) -> String {
+    match value.split_once('?') {
+        Some((path, _)) => format!("{path}?[REDACTED]"),
+        None => value.to_owned(),
+    }
+}
+
+fn denied(site: &Site) -> Error {
+    Error::failure(format!("redirect to site `{site}` was denied"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -471,5 +634,126 @@ mod tests {
             let site = HttpsUrl::parse(&format!("https://{name}/")).unwrap().site;
             assert_eq!(store.decision(&site), Some(Decision::Allow));
         }
+    }
+
+    #[test]
+    fn operation_and_persistent_prompt_choices_have_distinct_lifetimes() {
+        let fixture = Fixture::new();
+        let source = HttpsUrl::parse("https://source.example/archive?token=secret").unwrap();
+        let once = HttpsUrl::parse("https://once.example/object?credential=secret").unwrap();
+        let always = HttpsUrl::parse("https://always.example/object").unwrap();
+        let mut policy = TrustPolicy::load(&fixture.path()).unwrap();
+        let mut output = Vec::new();
+
+        policy
+            .authorize_with_io(
+                &source,
+                &once,
+                true,
+                &mut io::Cursor::new(b"1\n"),
+                &mut output,
+            )
+            .unwrap();
+        let prompt = String::from_utf8(output.clone()).unwrap();
+        assert!(prompt.contains("source.example/archive?[REDACTED]"));
+        assert!(prompt.contains("once.example/object?[REDACTED]"));
+        assert!(!prompt.contains("secret"));
+        output.clear();
+        policy
+            .authorize_with_io(&source, &once, false, &mut io::empty(), &mut output)
+            .unwrap();
+        assert!(output.is_empty());
+        assert_eq!(
+            TrustStore::load(&fixture.path())
+                .unwrap()
+                .decision(&once.site),
+            None
+        );
+
+        policy
+            .authorize_with_io(
+                &source,
+                &always,
+                true,
+                &mut io::Cursor::new(b"2\n"),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(
+            TrustStore::load(&fixture.path())
+                .unwrap()
+                .decision(&always.site),
+            Some(Decision::Allow)
+        );
+    }
+
+    #[test]
+    fn prompt_denials_are_safe_and_noninteractive_unknown_sites_fail() {
+        let fixture = Fixture::new();
+        let source = HttpsUrl::parse("https://source.example/").unwrap();
+        let once = HttpsUrl::parse("https://once.example/").unwrap();
+        let always = HttpsUrl::parse("https://always.example/").unwrap();
+        let mut policy = TrustPolicy::load(&fixture.path()).unwrap();
+        let mut output = Vec::new();
+
+        let error = policy
+            .authorize_with_io(
+                &source,
+                &once,
+                true,
+                &mut io::Cursor::new(b"invalid\n"),
+                &mut output,
+            )
+            .unwrap_err();
+        assert!(error.render().contains("was denied"));
+        output.clear();
+        assert!(
+            policy
+                .authorize_with_io(
+                    &source,
+                    &once,
+                    true,
+                    &mut io::Cursor::new(b"1\n"),
+                    &mut output,
+                )
+                .is_err()
+        );
+        assert!(output.is_empty());
+
+        assert!(
+            policy
+                .authorize_with_io(
+                    &source,
+                    &always,
+                    true,
+                    &mut io::Cursor::new(b"4\n"),
+                    &mut output,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            TrustStore::load(&fixture.path())
+                .unwrap()
+                .decision(&always.site),
+            Some(Decision::Deny)
+        );
+        let unknown = HttpsUrl::parse("https://unknown.example/").unwrap();
+        let error = policy
+            .authorize_with_io(&source, &unknown, false, &mut io::empty(), &mut output)
+            .unwrap_err();
+        assert!(error.render().contains("rerun Lorry from a terminal"));
+    }
+
+    #[test]
+    fn saving_first_decision_creates_the_trust_directory() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("new/lorry/redirect-sites.toml");
+        let site = HttpsUrl::parse("https://allowed.example/").unwrap().site;
+        let mut store = TrustStore::load(&path).unwrap();
+        store.save(site.clone(), Decision::Allow).unwrap();
+        assert_eq!(
+            TrustStore::load(&path).unwrap().decision(&site),
+            Some(Decision::Allow)
+        );
     }
 }
