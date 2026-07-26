@@ -84,6 +84,39 @@ There is no automatic retry. A failed request fails the transaction, which the
 user may restart. This keeps error reporting and transaction behavior
 unambiguous.
 
+## Redirect trust
+
+The canonical `index.crates.io` and `static.crates.io` request URLs are initial
+destinations, not redirect approvals. Redirect trust is recorded separately as
+HTTPS sites. A site is a lowercase host plus a non-default port when present;
+HTTPS port 443 is canonicalized away. User information, non-HTTPS schemes,
+fragments, malformed hosts, and malformed ports are rejected before trust is
+consulted.
+
+Persistent redirect decisions live in a dedicated user state file, never in a
+repository-controlled `lorry.toml`:
+
+- Linux: `$HOME/.config/lorry/redirect-sites.toml`
+- Motor OS: `/user/cfg/lorry-redirect-sites.toml`
+
+The versioned file contains sorted `allow` and `deny` site lists. Both lists
+are initially empty. Conflicting or malformed entries are a hard error. Lorry
+locks the file, merges with the latest contents, and replaces it atomically
+when an `always` decision is saved.
+
+For an unknown redirect site, Lorry shows the redacted source and destination
+URLs and accepts exactly one of four decisions: allow for this operation,
+allow always, deny for this operation, or deny always. Operation decisions
+remain in memory only. An allow applies to redirect URLs on that HTTPS site;
+download limits, index parsing, archive checksums, policy, and transaction
+rules still apply. A deny fails the transaction.
+
+Redirect trust is independent of package approval. `lorry vendor --accept-all`
+does not approve unknown redirect sites. If prompting is required without a
+controlling terminal, Lorry fails before starting the redirected request and
+explains how to make an interactive decision. EOF or invalid input defaults to
+deny for the operation.
+
 ## Streams and control trailer
 
 Curl's stdout contains only the response body. Lorry reads it incrementally
@@ -130,9 +163,10 @@ separately and discarded.
 - HTTP 301, 302, 303, 307, and 308 may be followed only when the trailer
   contains one valid redirect URL. Other 3xx responses fail.
 - Redirects are followed with another GET, up to five hops. Every hop must be
-  HTTPS, contain no user information, and satisfy the Stage-2 crates.io
-  host/path rules before curl sees it. Protocol downgrade, authentication, a
-  redirect loop, a sixth redirect, or an unapproved host fails.
+  a valid HTTPS URL without user information or a fragment. Its canonical site
+  must be allowed for the current operation or in the persistent allowlist.
+  Protocol downgrade, authentication, a redirect loop, a sixth redirect, or a
+  denied site fails before curl sees the new URL.
 - Other HTTP statuses fail with a diagnostic that names the status and redacts
   URL query data.
 

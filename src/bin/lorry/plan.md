@@ -2904,8 +2904,11 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
    - Implement the direct curl interaction in `curl-interaction.md` and the
      `lorry vendor` sparse-index/download state machine, per-package
      confirmation, `--accept-all`, transaction/lock ordering, and all-or-none
-     behavior. Network tests use a local deterministic TLS server for malformed
-     HTTP, redirect, certificate, hostname, truncation, size, timeout, and
+     behavior. Redirect sites use initially empty persistent allow/deny lists;
+     an unknown site requires an operation-scoped or persistent allow/deny
+     choice, independently of `--accept-all`. Network tests use a local
+     deterministic TLS server for malformed HTTP, redirect trust and
+     persistence, certificate, hostname, truncation, size, timeout, and
      stream/trailer cases; a minimal public crates.io fetch is a separate
      opt-in integration test.
    - First exercise pure-registry fresh vendoring with an installed curl.
@@ -3099,6 +3102,10 @@ Cargo invocations occur only in explicitly labelled oracle lanes.
   nonce-delimited `--write-out` trailer. Curl owns only HTTPS transport.
   `curl-interaction.md` is the normative command, environment, stream, error,
   security, and conformance contract.
+- Redirect trust is keyed by canonical HTTPS site. Initially empty persistent
+  user allow/deny lists are stored outside repository-controlled configuration.
+  Unknown sites require an explicit allow/deny plus operation/always choice;
+  `--accept-all` applies only to package approval.
 - The exact Round-30 Rustls graph, patched `ring` 0.17.14 provider, Motor
   entropy callback, and compiler/archiver roles move from `lorry-fetch` to
   `src/bin/curl`; they remain outside core Lorry.

@@ -23,6 +23,8 @@ mod offline;
 mod patch;
 mod policy;
 mod process;
+#[allow(dead_code)]
+mod redirect;
 mod repository;
 mod resolver;
 mod sandbox;
