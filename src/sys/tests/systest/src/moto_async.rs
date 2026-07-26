@@ -897,6 +897,45 @@ fn test_wake_on_sleep_poll_resume() {
     println!("----- moto_async::test_wake_on_sleep_poll_resume PASS");
 }
 
+fn test_cancelled_timers_do_not_accumulate() {
+    // Regression test: a `select!` whose timer branch always loses (the
+    // shape of sys-io's device task) used to leave one cancelled entry per
+    // iteration in the timer queue, because only the *front* of the heap
+    // can be purged cheaply and typical deadlines are seconds away. The
+    // heap grew into the hundreds of thousands of entries, and sifting
+    // through the resulting multi-megabyte array cost most of a CPU core.
+    const ITERATIONS: usize = 100_000;
+
+    moto_async::LocalRuntime::new().block_on(async {
+        // A live timer with the earliest deadline, so every cancelled timer
+        // below queues *behind* it: purging the front of the queue can never
+        // reach them, which is exactly the case that used to leak.
+        let mut live = Box::pin(moto_async::sleep(Duration::from_secs(30)));
+        std::future::poll_fn(|cx| {
+            assert!(live.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let notify = moto_async::LocalNotify::default();
+        let mut peak = 0;
+        for _ in 0..ITERATIONS {
+            notify.notify_one();
+            futures::select! {
+                _ = notify.notified().fuse() => (),
+                _ = moto_async::sleep(Duration::from_secs(60)).fuse() => {
+                    panic!("the 60-second timer branch cannot win")
+                }
+            }
+            peak = peak.max(moto_async::timer_queue_len());
+        }
+
+        // Bounded by the compaction threshold, not by ITERATIONS.
+        assert!(peak < 1000, "timer queue grew to {peak} entries");
+        println!("----- moto_async::test_cancelled_timers_do_not_accumulate PASS (peak {peak})");
+    });
+}
+
 pub fn run_all_tests() {
     test_basic();
     test_timeout();
@@ -928,6 +967,7 @@ pub fn run_all_tests() {
     test_for_each_concurrent();
     test_wake_on_sleep_fold();
     test_wake_on_sleep_poll_resume();
+    test_cancelled_timers_do_not_accumulate();
 
     println!("moto_async all PASS");
 }

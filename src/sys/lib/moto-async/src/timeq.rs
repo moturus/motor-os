@@ -22,12 +22,17 @@ compile_error!("Only Motor OS targets supported.");
 #[derive(Clone)]
 pub(crate) struct Timer {
     alive: Rc<Cell<bool>>,
+    // Shared with the owning queue: cancelling bumps it so the queue knows how
+    // much of itself is garbage and when to compact.
+    cancelled: Rc<Cell<usize>>,
 }
 
 impl Timer {
     /// Cancel the timer so it is skipped (does not fire) once its deadline passes.
     pub(crate) fn cancel(&self) {
-        self.alive.set(false);
+        if self.alive.replace(false) {
+            self.cancelled.set(self.cancelled.get() + 1);
+        }
     }
 }
 
@@ -66,6 +71,10 @@ pub struct TimeQ<T> {
     // BinaryHeap is a max heap, we need a min heap.
     inner: BinaryHeap<core::cmp::Reverse<QueueEntry<T>>>,
     next_seq: u64,
+    // Queued entries already cancelled. Only the front of a heap can be
+    // purged cheaply, so cancelled entries behind it stay until their
+    // deadline surfaces them; see [`Self::compact`].
+    cancelled: Rc<Cell<usize>>,
 }
 
 impl<T> Default for TimeQ<T> {
@@ -73,14 +82,33 @@ impl<T> Default for TimeQ<T> {
         Self {
             inner: BinaryHeap::new(),
             next_seq: 0,
+            cancelled: Rc::new(Cell::new(0)),
         }
     }
 }
 
 impl<T> TimeQ<T> {
+    /// Compact once garbage dominates: a timer cancelled deep in the heap is
+    /// only reached when its deadline comes due, and typical deadlines are
+    /// seconds away, so without this a hot `select!` loop (the sys-io device
+    /// task creates ~90K cancelled timers/sec) grows the heap into the
+    /// hundreds of thousands. That cost is not the wasted memory but the
+    /// cache behavior: every push and pop then sifts through a multi-megabyte
+    /// array, and draining the backlog burned most of a core in sys-io.
+    /// Rebuilding is O(n) but happens at most once per n/2 cancellations.
+    fn compact(&mut self) {
+        const MIN_ENTRIES: usize = 64;
+        if self.inner.len() < MIN_ENTRIES || self.cancelled.get() * 2 < self.inner.len() {
+            return;
+        }
+        self.inner.retain(|entry| entry.0.alive.get());
+        self.cancelled.set(0);
+    }
+
     /// Queue a timer firing at `at`, returning a handle to cancel it (e.g. from
     /// the registering future's `Drop`).
     pub fn add_at(&mut self, at: Instant, what: T) -> Timer {
+        self.compact();
         let alive = Rc::new(Cell::new(true));
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -90,7 +118,10 @@ impl<T> TimeQ<T> {
             what,
             alive: alive.clone(),
         }));
-        Timer { alive }
+        Timer {
+            alive,
+            cancelled: self.cancelled.clone(),
+        }
     }
 
     /// Deadline of the earliest still-live timer. Cancelled timers at the front
@@ -113,7 +144,13 @@ impl<T> TimeQ<T> {
                 return Some(entry.what);
             }
             // Cancelled and due: drop it and keep looking.
+            self.uncount_cancelled();
         }
+    }
+
+    /// Queued entries, cancelled-but-not-yet-compacted ones included.
+    pub fn len(&self) -> usize {
+        self.inner.len()
     }
 
     /// Drop cancelled timers from the front of the queue.
@@ -123,7 +160,14 @@ impl<T> TimeQ<T> {
                 break;
             }
             self.inner.pop();
+            self.uncount_cancelled();
         }
+    }
+
+    /// A cancelled entry just left the queue, so it is no longer garbage the
+    /// compaction pass would remove.
+    fn uncount_cancelled(&mut self) {
+        self.cancelled.set(self.cancelled.get().saturating_sub(1));
     }
 }
 

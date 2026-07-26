@@ -117,6 +117,14 @@ pub fn wake_counters() -> (u64, u64) {
     )
 }
 
+/// Entries queued in the current runtime's timer queue, cancelled-but-not-yet-
+/// compacted ones included. Diagnostic: lets a caller assert that a hot
+/// register/cancel loop does not grow the queue without bound.
+/// Must be called within a LocalRuntime context.
+pub fn timer_queue_len() -> usize {
+    LocalRuntimeInner::current().timeq.borrow().len()
+}
+
 // This is the waker to use cross-threads.
 // The local waker is just a pointer to TaskId.
 struct MotoWaker {
