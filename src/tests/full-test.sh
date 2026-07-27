@@ -28,8 +28,10 @@ IMG_DIR="$WD/../../vm_images/$BUILD"
 # Build everything before running the tests.
 if [ "$BUILD" = "release" ]; then
   make -C "$ROOT_DIR" all BUILD=release -j"$(nproc)"
+  (cd "$ROOT_DIR/src/imager" && cargo test --release)
 else
   make -C "$ROOT_DIR" all -j"$(nproc)"
+  (cd "$ROOT_DIR/src/imager" && cargo test)
 fi
 
 # A fresh checkout leaves the key group-readable; ssh then silently ignores it.

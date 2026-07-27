@@ -13,6 +13,7 @@
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -22,6 +23,16 @@ use std::io::{self, Seek, SeekFrom};
 mod util;
 
 const SECTOR_SIZE: u32 = 512;
+
+fn image_file_permissions(source: &Path) -> io::Result<[async_fs::AccessPermissions; 3]> {
+    let executable = fs::metadata(source)?.permissions().mode() & 0o111 != 0;
+    let access = if executable {
+        async_fs::AccessPermissions::Rwx
+    } else {
+        async_fs::AccessPermissions::Rw
+    };
+    Ok([access; 3])
+}
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -53,6 +64,8 @@ async fn create_motorfs_partition_async(
         let target_path = Path::new(dst);
         let parent = target_path.parent().unwrap();
         let filename = target_path.file_name().unwrap().to_str().unwrap();
+        let permissions = image_file_permissions(src)
+            .unwrap_or_else(|err| panic!("Error reading permissions for file '{src:?}': {err:?}."));
 
         let parent_id = util::motor_fs_create_dir_all(&mut fs, parent)
             .await
@@ -63,7 +76,7 @@ async fn create_motorfs_partition_async(
                 parent_id,
                 async_fs::EntryKind::File,
                 filename,
-                [async_fs::AccessPermissions::Rwx; 3],
+                permissions,
             )
             .await
             .unwrap();
@@ -413,4 +426,24 @@ fn main() {
     );
 
     println!("Motor OS {deb_rel} image built successfully in {img_dir:?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_files_preserve_the_host_executable_bit() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let executable = std::env::current_exe().unwrap();
+
+        assert_eq!(
+            image_file_permissions(&source).unwrap(),
+            [async_fs::AccessPermissions::Rw; 3]
+        );
+        assert_eq!(
+            image_file_permissions(&executable).unwrap(),
+            [async_fs::AccessPermissions::Rwx; 3]
+        );
+    }
 }
