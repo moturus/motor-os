@@ -146,6 +146,54 @@ impl TcpListener {
         Ok(())
     }
 
+    async fn unregister_and_drop(runtime: &super::NetRuntime, tcp_listener: Rc<RefCell<Self>>) {
+        let (listener_id, remote_handle) = {
+            let listener = tcp_listener.borrow();
+            (listener.listener_id, listener.client_sender.remote_handle())
+        };
+
+        // Unregister the listener BEFORE dropping its sockets — same ordering
+        // as on_connection_done(): a listening socket leaving the Listen state
+        // respawns a replacement via its weak listener ref (socket/tcp.rs), so
+        // the listener must be unreachable first (removed from the maps AND
+        // this function's Rc dropped below), or the drained sets repopulate.
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            inner.tcp_listeners.remove(&listener_id);
+            if let Some(client) = inner.clients.get_mut(&remote_handle) {
+                client.tcp_listeners.remove(&listener_id);
+            }
+        }
+
+        let socket_ids = {
+            let mut listener = tcp_listener.borrow_mut();
+
+            listener.pending_accepts.clear();
+            let mut socket_ids = Vec::with_capacity(
+                listener.pending_sockets.len() + listener.listening_sockets.len(),
+            );
+
+            for entry in listener.pending_sockets.drain(..) {
+                socket_ids.push(entry.0);
+            }
+            socket_ids.extend(listener.listening_sockets.drain());
+            socket_ids
+        };
+
+        // Prevent replenish tasks from upgrading their weak listener refs.
+        drop(tcp_listener);
+
+        for socket_id in socket_ids {
+            // Socket teardown is asynchronous and can cascade-remove another
+            // socket already listed here.
+            let maybe_socket = runtime.inner.borrow().sockets.get(&socket_id).cloned();
+            let Some(moto_socket) = maybe_socket else {
+                continue;
+            };
+            MotoSocket::drop_tcp_socket(moto_socket).await;
+        }
+    }
+
     pub(super) fn add_listening_socket(&mut self, socket_id: u64) {
         self.listening_sockets.insert(socket_id);
     }
@@ -312,7 +360,7 @@ impl TcpListener {
 
         // Create TcpListener object.
         let listener_id = runtime_mut.next_socket_id();
-        let mut listener = Rc::new(RefCell::new(TcpListener {
+        let listener = Rc::new(RefCell::new(TcpListener {
             listener_id,
             runtime: runtime.clone(),
             socket_addr,
@@ -346,7 +394,10 @@ impl TcpListener {
         );
 
         // Start listening.
-        Self::spawn_listening_sockets(listener, num_listeners).await;
+        if let Err(err) = Self::spawn_listening_sockets(listener.clone(), num_listeners).await {
+            Self::unregister_and_drop(runtime, listener).await;
+            return Err(err);
+        }
 
         resp.handle = listener_id;
         resp.status = moto_rt::E_OK;
@@ -519,56 +570,7 @@ impl TcpListener {
             }
         }
 
-        // Unregister the listener BEFORE dropping its sockets — same ordering
-        // as on_connection_done(): a listening socket leaving the Listen state
-        // respawns a replacement via its weak listener ref (socket/tcp.rs), so
-        // the listener must be unreachable first (removed from the maps AND
-        // this function's Rc dropped below), or the drained sets repopulate:
-        // a zombie listener that keeps accepting SYNs after close(), and a
-        // failed Drop assert when it is finally dropped.
-        let remote_handle = tcp_listener.borrow().client_sender.remote_handle();
-        {
-            let mut inner = runtime.inner.borrow_mut();
-            inner.tcp_listeners.remove(&listener_id);
-            if let Some(client) = inner.clients.get_mut(&remote_handle) {
-                client.tcp_listeners.remove(&listener_id);
-            }
-        }
-
-        let mut socket_ids = {
-            let mut listener = tcp_listener.borrow_mut();
-
-            listener.pending_accepts.clear();
-            let mut socket_ids = Vec::with_capacity(
-                listener.pending_sockets.len() + listener.listening_sockets.len(),
-            );
-
-            for entry in listener.pending_sockets.drain(..) {
-                socket_ids.push(entry.0);
-            }
-            for id in listener.listening_sockets.drain() {
-                socket_ids.push(id);
-            }
-
-            socket_ids
-        };
-
-        // Drop our Rc so the listening sockets' replenish tasks can no longer
-        // upgrade their weak refs while the sockets below are dropped.
-        drop(tcp_listener);
-
-        for socket_id in socket_ids {
-            // Dropping one socket is async and may cascade-remove others (a
-            // listening socket's replenish task, a lingering peer), and the
-            // connection-close path (on_connection_done) can be draining the
-            // same sockets concurrently -- so a listed socket may already be
-            // gone. Skip it rather than unwrapping None (mirrors net.rs).
-            let maybe_socket = runtime.inner.borrow().sockets.get(&socket_id).cloned();
-            let Some(moto_socket) = maybe_socket else {
-                continue;
-            };
-            super::socket::MotoSocket::drop_tcp_socket(moto_socket).await;
-        }
+        Self::unregister_and_drop(runtime, tcp_listener).await;
 
         Ok(())
     }

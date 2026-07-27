@@ -133,7 +133,15 @@ full suites. Listener binds now reject conflicts after wildcard resolution,
 and ephemeral listener allocation skips ports held by fixed listeners on the
 same concrete endpoint. Its raw regression and exact source state passed three
 consecutive debug and three consecutive release full suites. Transactional
-listener pool creation and unusual-state tests remain open.
+listener pool creation is now complete: creation failures are propagated
+after shared unregister-first cleanup removes both ownership records and
+tears down any partial socket pool. The current non-yielding creation loop
+does not expose a deterministic public partial-failure trigger, so the shared
+primitive is covered through existing cancelled-bind and listener-drop tests
+rather than production failure injection. The remaining unusual-state tests
+remain open. The exact rollback source state passed focused debug/release
+builds and clippy plus three consecutive debug and three consecutive release
+full suites without retries or tolerated failures.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
@@ -575,7 +583,9 @@ client-disconnect/control-task race described above. Its narrow dispatch guard
 and regression are complete. The monotonic stats correction, stale-accept
 handoff, fallible socket registration/setup rollback, and resolved listener
 conflict correction are also complete; transactional listener pool creation
-and the remaining unusual-state tests remain.
+is also complete, using the explicit-drop cleanup primitive for rollback. The
+exact source state passed three consecutive debug and three consecutive
+release full suites; the remaining unusual-state tests remain.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,

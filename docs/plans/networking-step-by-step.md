@@ -16,7 +16,7 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 Overall state: **in progress**.
 
-Current step: **1 -- make listener registration and pool creation transactional**.
+Current step: **1 -- complete the remaining unusual-state tests**.
 
 Completed:
 
@@ -138,14 +138,32 @@ Completed:
   runs. There were no retries or tolerated failures; all six conflict
   regressions passed, and all six flush stress tests completed 4,000
   iterations per worker.
+- Made listener pool creation transactional. A creation error is now
+  propagated after removing the listener from both runtime ownership maps,
+  draining its pending and listening sockets, dropping the final strong
+  listener reference, and asynchronously tearing down any partial pool.
+- Factored that unregister-first ordering into the cleanup primitive also used
+  by an explicit listener drop. This prevents a listening socket's replenish
+  task from upgrading its weak reference and recreating a zombie listener.
+  The change adds no boot work and no packet-path work.
+- A direct partial-pool failure is not currently driveable through the public
+  protocol: the single-threaded creation loop does not yield, and its only
+  recoverable error requires the already-validated client to disappear.
+  With maintainer approval, the existing deterministic cancelled-bind and
+  listener-drop tests exercise the shared cleanup path; no production
+  failure-injection hook or artificial yield was added.
+- The exact listener-pool rollback source state passed formatting,
+  Motor-target debug and release builds, debug and release clippy, and three
+  consecutive ordinary debug plus three consecutive ordinary release
+  `full-test.sh` runs. There were no retries or tolerated failures; both
+  cancelled-bind cleanup tests passed in all six runs, and all six flush
+  stress tests completed 4,000 iterations per worker.
 
 Current work:
 
-- Make TCP listener registration and its multi-socket listening pool
-  transactional so a later creation failure cannot leave a partial listener.
-- Add deterministic coverage for the listener rollback path without
-  introducing a production failure-injection hook.
-- Then continue the remaining unusual-state tests in Step 1.
+- Stop after committing the transactional listener-pool fix, as requested.
+- On resumption, continue the simultaneous-open, batched-close, and remaining
+  abnormal-state tests in Step 1.
 - Stop for review if the audit exposes ambiguous ownership or teardown
   ordering.
 
@@ -286,7 +304,7 @@ also rejects stale destination clients without losing an established socket.
 Socket registration and TCP/UDP setup rollback are also fallible and
 transactional. Resolved listener endpoint conflicts and ephemeral listener
 port collisions are corrected. Listener registration and partial pool
-creation are next before the remaining unusual-state tests.
+creation are now transactional; the remaining unusual-state tests are next.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
@@ -310,7 +328,10 @@ regressions passed, and all six flush stress tests completed 4 x 4,000
 operations. The listener-conflict patch passed the same focused checks and
 three consecutive debug plus three consecutive release full suites. All six
 resolved-conflict regressions passed, and all six flush stress tests completed
-4 x 4,000 operations.
+4 x 4,000 operations. The listener-pool rollback patch passed the same
+focused checks and three consecutive debug plus three consecutive release
+full suites. Both shared-cleanup regressions passed in all six runs, and all
+six flush stress tests completed 4 x 4,000 operations.
 
 ## Step 2 -- finish the vDSO async control plane
 
