@@ -114,9 +114,13 @@ TCP state; it treats `SynSent`/`SynReceived` as pending,
 reachable-abort audit then found a separate client-disconnect race: the
 connection loop can remove `ClientConnection` before an already spawned
 resource-creation task is first polled, after which listener/socket
-registration unwraps the missing client and aborts sys-io. That newly found
-preexisting defect is paused at the decision gate in
-`networking-step-by-step.md`; unusual-state tests remain open.
+registration unwraps the missing client and aborts sys-io. The first staged
+fix now rejects queued control tasks after client teardown and has a
+synchronized raw-channel regression. Its exact source state passed three
+consecutive debug and three consecutive release full suites. A separately
+discovered monotonic `net.total_clients` accounting bug is the next small
+patch; fallible resource registration follows as defense in depth, and
+unusual-state tests remain open.
 
 At audit time, `SI/socket/tcp.rs:544` panicked on
 `State::Listen | State::SynReceived`, and `:553-558` plus `:576-588` contained
@@ -554,8 +558,9 @@ message; convert to errors. Add the first sys-io test that drives
 `MotoSocket` through unusual state sequences, including simultaneous open.
 Do this first and independently of everything else. ~150-250 loc. Status: the
 connect-task state classification is complete; the broader audit found the
-client-disconnect/control-task race described above, and unusual-state tests
-remain.
+client-disconnect/control-task race described above. Its narrow dispatch guard
+and regression are complete; the monotonic stats correction, fallible
+registration, and unusual-state tests remain.
 
 **Step 2 -- feature trim (P1).** `default-features = false` in
 `sys-io/Cargo.toml:32` plus an explicit list: `medium-ethernet`, `proto-ipv4`,

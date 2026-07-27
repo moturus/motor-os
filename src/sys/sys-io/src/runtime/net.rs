@@ -286,7 +286,21 @@ impl NetRuntime {
                     let this = self.clone();
                     let ticket_tx = ticket_tx.clone();
                     moto_async::LocalRuntime::spawn(async move {
-                        this.on_msg(msg, sender).await;
+                        let remote_handle = sender.remote_handle();
+                        let client_is_active = this
+                            .inner
+                            .borrow()
+                            .clients
+                            .get(&remote_handle)
+                            .is_some_and(|client| !client.shutting_down);
+                        if client_is_active {
+                            this.on_msg(msg, sender).await;
+                        } else {
+                            log::debug!(
+                                "Dropping queued NET control message for closed connection 0x{:x}.",
+                                remote_handle.as_u64()
+                            );
+                        }
                         let _ = ticket_tx.send(()).await;
                     });
                 }

@@ -810,7 +810,30 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
     println!("test_delivered_then_cancelled_native_bind_releases_addr() PASS");
 }
 
+/// A control message may be dequeued and spawned immediately before sys-io
+/// observes that its raw channel closed. The unpolled task must not create a
+/// socket after connection teardown removed its client bookkeeping.
+fn test_disconnect_discards_queued_control() {
+    let clients_before = read_sys_io_metric("net.active_clients");
+    let sockets_before = read_sys_io_metric("net.udp_sockets");
+    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    wait_for_sys_io_metric("net.active_clients", |value| value > clients_before);
+    let addr = "127.0.0.1:0".parse().unwrap();
+
+    connection
+        .send(moto_sys_io::api_net::bind_udp_socket_request(&addr, 0))
+        .unwrap();
+    drop(connection);
+
+    wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
+    wait_for_sys_io_metric("net.udp_sockets", |value| value == sockets_before);
+    println!("test_disconnect_discards_queued_control() PASS");
+}
+
 pub fn test_native_net_cancellation() {
+    // Run this first, while test_channel_teardown's assert-empty guarantee
+    // still provides stable baselines for the global sys-io gauges.
+    test_disconnect_discards_queued_control();
     test_cancelled_native_connect_closes_socket();
     test_cancelled_native_io_waiters_are_removed();
     test_cancelled_native_rpc_response_is_tolerated();

@@ -153,11 +153,16 @@ read_udp_socket_count() {
 }
 
 DNS_RESOLVER_SSH_PID=""
+VMM_PID=""
 
 # cleanup routine
 stop_vmm() {
   set +e
-  vm_ssh shutdown
+  if [ -n "$VMM_PID" ] && kill -0 "$VMM_PID" 2>/dev/null; then
+    vm_ssh shutdown
+    wait "$VMM_PID"
+  fi
+  VMM_PID=""
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
     kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
     wait "$DNS_RESOLVER_SSH_PID"
@@ -176,14 +181,29 @@ echo ""
 # FULL_TEST_QEMU_ARGS: optional extra qemu args (e.g. a monitor socket
 # for hang forensics); run-qemu.sh passes "$@" through to qemu.
 "$IMG_DIR/run-qemu.sh" ${FULL_TEST_QEMU_ARGS:-} &> /tmp/full-test.log &
+VMM_PID="$!"
 
 # A refused connection returns immediately, so OpenSSH's ConnectionAttempts
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
 # 600-second harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /bin/echo " "; do
+  if ! kill -0 "$VMM_PID" 2>/dev/null; then
+    vmm_status=0
+    wait "$VMM_PID" || vmm_status="$?"
+    VMM_PID=""
+    cat /tmp/full-test.log >&2
+    fail "QEMU exited before SSH became ready (status $vmm_status)"
+  fi
   sleep 1
 done
+if ! kill -0 "$VMM_PID" 2>/dev/null; then
+  vmm_status=0
+  wait "$VMM_PID" || vmm_status="$?"
+  VMM_PID=""
+  cat /tmp/full-test.log >&2
+  fail "SSH reached a VM after this run's QEMU exited (status $vmm_status)"
+fi
 
 vm_ssh /bin/ping -c 1 127.0.0.1
 vm_ssh /bin/ping -c 1 localhost

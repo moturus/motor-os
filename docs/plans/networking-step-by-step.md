@@ -14,11 +14,9 @@ commit changes one of its facts, decisions, measurements, or remaining work.
 
 ## Current status
 
-Overall state: **paused for guidance at a newly found preexisting-defect
-gate**.
+Overall state: **in progress**.
 
-Current step: **1 -- harden the sys-io client-disconnect/control-task
-ordering found by the reachable-abort audit**.
+Current step: **1 -- correct monotonic `net.total_clients` accounting**.
 
 Completed:
 
@@ -62,27 +60,38 @@ Completed:
   and the UDP receive, TCP accept-state, and buffer-consumption unwraps/asserts
   likewise have local invariants. They should still be made non-fatal in later
   small patches, but are not the next client-triggerable abort.
+- Hardened spawned control-task dispatch against the client-disconnect race.
+  A queued task is rejected at entry when its client is missing or already
+  `shutting_down`. The guard is only on the control-task path, adds no boot
+  work, and adds no lookup to the inline TCP TX/RX-ack fast path.
+- Added a raw-channel regression that waits for sys-io to account for its
+  connection, queues a UDP bind, immediately disconnects, and verifies that
+  both active-client and live-UDP-socket gauges return to their stable
+  baselines.
+- Hardened `full-test.sh` to track the launched QEMU PID, reject SSH success
+  after that process exits, and wait for QEMU during cleanup. A negative run
+  with an invalid QEMU argument now fails instead of attaching to a stale VM.
+- Applied the approved bounded external-transient policy to negative DNS
+  self-test queries. Only `TemporaryFailure`, `TimedOut`, and `Busy` are
+  retried to the existing 30-second deadline; terminal results return
+  immediately and must still be `NotFound`.
+- The exact disconnect/harness/DNS source state passed formatting, focused
+  debug and release builds, debug and release clippy, and three consecutive
+  ordinary debug plus three consecutive ordinary release `full-test.sh` runs.
+  There were no retries or tolerated failures; all six disconnect regressions
+  passed, and all six flush stress tests completed 4,000 iterations per
+  worker.
 
-Blocked:
+Next patch:
 
-- A valid control message is spawned without awaiting the task. The connection
-  loop can then observe client disconnect and remove its `ClientConnection`
-  before that task is first polled. A queued TCP connect, TCP listener bind, or
-  UDP bind subsequently registers its resource through an unconditional
-  client-map `unwrap()`, aborting sys-io. One client can therefore take down
-  all networking by sending a valid resource-creation request and immediately
-  disconnecting.
-- The recommended narrow patch rejects an `on_msg` task at entry when its
-  client is missing or already `shutting_down`. Resource-creating handlers
-  register before their first suspension, so a task that started before
-  teardown remains visible to teardown, while a task first polled afterward
-  creates nothing. Add a deterministic raw-channel regression that queues
-  resource-creation messages, disconnects, and proves sys-io remains live
-  without leaked resources.
-- Decision gate: confirm whether to implement that narrow dispatch guard, or
-  instead make every listener/socket registration fallible and explicitly
-  roll back its partially created smoltcp/device resources. The latter is
-  broader defense in depth but is not a 100-300 line state-group patch.
+- Correct the separately discovered `net.total_clients` bug in its own small
+  patch: accept currently assigns `active_clients + 1` instead of incrementing
+  the monotonic total. Add a regression that performs sequential raw
+  connections and proves the counter advances once per accepted client and
+  never falls on disconnect.
+- Then make listener/socket registration fallible and explicitly roll back
+  partially created smoltcp/device resources as a separate defense-in-depth
+  patch.
 
 Unresolved investigation finding:
 
@@ -174,6 +183,17 @@ Initial audit complete:
    narrow fix is committed with this status update, but causality is
    deliberately not claimed. A virtio change would be speculative without a
    live recurrence.
+7. The disconnect-patch gate reproduced the stale-VM harness defect without a
+   monitor: a previous VM still held `moto-tap`, the new QEMU exited, and
+   `full-test.sh` connected to the old VM and ran its old `systest`. That run
+   is discarded. Guidance approved fixing the harness by checking the
+   launched process and waiting for it during cleanup before restarting the
+   gate.
+8. The next restarted gate received no upstream response for a negative DNS
+   query, so the resolver correctly returned transient `TimedOut` while its
+   self-test incorrectly required immediate `NotFound`. Guidance approved
+   applying the self-test's existing bounded external-failure policy to these
+   negative queries. That failed run is also discarded.
 
 The performance-record portion moves to measurement Step 7 so it does not
 delay the remotely triggerable security fix. At Step 7, add or document a
@@ -189,7 +209,8 @@ benchmark manifest containing at least:
 Decision gate: a preexisting test-harness or product bug requires user
 guidance before its fix is implemented. Guidance was received to investigate
 the stall and prepare, but not commit, a fix; review then authorized committing
-the Parker fix and continuing with Step 1. The unexplained stall remains
+the Parker fix and continuing with Step 1. Later guidance authorized the
+stale-VM harness and DNS self-test fixes above. The unexplained stall remains
 documented for live capture if it recurs.
 
 ## Step 1 -- remove the sys-io P0 panic surface
@@ -203,15 +224,19 @@ Execute core networking Step 1 as small state-group patches:
 
 Do not combine this with moving the fork or tuning the data path.
 
-Status: substep 1 is complete. Substep 2 found the client-disconnect race
-above and is paused at its decision gate.
+Status: substep 1 and the first substep 2 hardening patch are complete. The
+next small patch corrects `net.total_clients`; fallible resource registration
+then provides defense in depth before the remaining unusual-state tests.
 
 Gate: run the ordinary AGENTS.md checks without retries or tolerated failures.
 The historical negative-DNS/russhd empty-output signature must not recur.
-Current gate result: focused debug/release builds and clippy checks pass with
-only preexisting warnings. The exact source state containing the Parker fix
-and prepared TCP patch passed three ordinary debug and three ordinary release
-full suites without retries or tolerated failures.
+Current gate result: formatting, focused debug/release builds, and
+debug/release clippy pass with only preexisting warnings. After correcting the
+approved harness and DNS self-test defects, the exact disconnect-patch source
+state passed three consecutive ordinary debug and three consecutive ordinary
+release full suites without retries or tolerated failures. All six
+disconnect regressions passed, and all six `concurrent_flush_stress_test`
+runs completed 4 x 4,000 operations.
 
 ## Step 2 -- finish the vDSO async control plane
 
