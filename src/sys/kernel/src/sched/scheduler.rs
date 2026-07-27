@@ -57,7 +57,10 @@ static GLOBAL_QUEUE_LENGTH: AtomicU32 = AtomicU32::new(0);
 // sched_loop local) so the timer-IRQ fast path can tell when the BSP owes a
 // housekeeping pass and must enter its sched loop instead of fast-returning.
 static LAST_SYSTEM_TIME_UPDATE: AtomicU64 = AtomicU64::new(0);
-const SYSTEM_TIME_UPDATE_TSC: u64 = 1_000_000_000;
+const SYSTEM_TIME_UPDATE_INTERVAL: core::time::Duration = core::time::Duration::from_secs(1);
+
+#[cfg(debug_assertions)]
+const WATCHDOG_STALL_INTERVAL: core::time::Duration = core::time::Duration::from_secs(10);
 
 /*
 pub enum Priority {
@@ -274,8 +277,8 @@ impl Scheduler {
 
     #[cfg(debug_assertions)]
     fn alive(&self) {
-        let now = crate::arch::time::Instant::now().as_u64();
-        self.last_alive_check.store(now, Ordering::Release);
+        let now = crate::arch::time::Instant::now();
+        self.last_alive_check.store(now.as_u64(), Ordering::Release);
 
         let mut check = |cpu: uCpus, scheduler: &Scheduler| -> bool {
             if scheduler.idle.load(Ordering::Acquire) {
@@ -284,9 +287,11 @@ impl Scheduler {
                 return false;
             }
             let last_check = scheduler.last_alive_check.load(Ordering::Acquire);
-            if now > (last_check + 10_000_000_000) && !scheduler.dying() {
+            let stalled = now > Instant::from_u64(last_check) + WATCHDOG_STALL_INTERVAL;
+            if stalled && !scheduler.dying() {
                 log::error!(
-                    "CPU {cpu} dead: now: {now}; last check: {last_check}; idle: {} OOPS.",
+                    "CPU {cpu} dead: now: {}; last check: {last_check}; idle: {} OOPS.",
+                    now.as_u64(),
                     scheduler.idle.load(Ordering::Acquire)
                 );
                 crate::xray::tracing::dump();
@@ -354,11 +359,10 @@ impl Scheduler {
 
             if self.cpu == 0 {
                 // TODO: should we do this more often? less often?
-                let now_tsc = crate::arch::time::Instant::now().as_u64();
-                if now_tsc - LAST_SYSTEM_TIME_UPDATE.load(Ordering::Relaxed)
-                    > SYSTEM_TIME_UPDATE_TSC
-                {
-                    LAST_SYSTEM_TIME_UPDATE.store(now_tsc, Ordering::Relaxed);
+                let now = crate::arch::time::Instant::now();
+                let last = Instant::from_u64(LAST_SYSTEM_TIME_UPDATE.load(Ordering::Relaxed));
+                if now > last + SYSTEM_TIME_UPDATE_INTERVAL {
+                    LAST_SYSTEM_TIME_UPDATE.store(now.as_u64(), Ordering::Relaxed);
                     update_system_time();
                 }
             }
@@ -749,8 +753,9 @@ pub fn timer_irq_fast_path_ok() -> bool {
     }
     // The BSP updates system time from its sched loop about once a second;
     // don't starve that (or, in debug builds, the watchdog's alive() scan).
+    let last_system_update = Instant::from_u64(LAST_SYSTEM_TIME_UPDATE.load(Ordering::Relaxed));
     if scheduler.cpu == 0
-        && now - LAST_SYSTEM_TIME_UPDATE.load(Ordering::Relaxed) > 3 * SYSTEM_TIME_UPDATE_TSC
+        && Instant::from_u64(now) > last_system_update + 3 * SYSTEM_TIME_UPDATE_INTERVAL
     {
         return false;
     }

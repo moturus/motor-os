@@ -32,6 +32,10 @@ three-pass debug/release `src/tests/full-test.sh` requirements in `AGENTS.md`.
   `test` commands.
 - Closed Linux-native, Linux-to-Motor, and native-Motor `red`, self-build, and
   Cargo 1.97/1.98 identity gates.
+- Closed Motor prerequisites exposed by the full native Lorry workload:
+  sys-io propagates storage-full errors, generated data partitions are 2 GiB,
+  and scheduler watchdog/system-time intervals use calibrated durations
+  instead of assuming a one-gigahertz TSC.
 
 ### Stage-2 foundations and build path
 

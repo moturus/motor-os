@@ -20,6 +20,60 @@ Each new committed patch must update both `plan.md` and
 `plan.md` concise and current; put test output, investigation notes,
 temporary blockers, measurements, and other disposable detail here.
 
+## Native self-build workload investigation (2026-07-27)
+
+The full Motor-native gate copied `src/bin/lorry` to a standalone directory,
+so its `../../sys/lib/moto-rt` manifest dependency resolved outside the staged
+tree and failed with `NotFound`. The pending harness patch stages a minimal tree
+containing both `src/bin/lorry` and `src/sys/lib/moto-rt`, and clones that
+tree for each native self-build generation. This preserves the reviewed
+manifest path without rewriting package inputs.
+
+The first debug `--full` validation passed repository and path resolution and
+began the first native Lorry build, then the guest kernel declared CPU 3 dead
+and panicked from `src/sys/kernel/src/sched/scheduler.rs:288`. SSH consequently
+failed with status 255. Evidence is retained under
+`target/lorry/native-tests/stage1-20260727T175610Z-71169`; the QEMU log shows
+the watchdog panic at guest time 529 seconds while rustc was producing
+`serde_core` build-script metadata.
+
+The first complete native generation then exposed an oracle-boundary error:
+Cargo's Linux-to-Motor output contains Cargo-registry absolute source paths,
+while the native Lorry build presents repository sources through a different
+physical repository. The native identity requirement compares Linux-hosted
+Lorry cross output with native-Motor Lorry output, so the pending harness
+patch keeps the Cargo cross build only as the bootstrap and produces the
+expected artifact with hosted Lorry. It also uses the system configuration
+through its normal host layer instead of copying it into a project-owned
+configuration layer.
+
+The large compile first filled the former 512 MiB data partition. Sys-io now
+maps `std::io::ErrorKind::StorageFull` to `moto_rt::Error::StorageFull`
+(`bf058e27`), and generated data partitions are now 2 GiB (`1393cf0e`). The
+next full run had no storage error but reproduced the scheduler watchdog on
+CPU 1 at guest time 516 seconds; evidence is under
+`target/lorry/native-tests/stage1-20260727T215139Z-128178`.
+
+The watchdog called its threshold ten seconds but compared raw TSC values
+against a fixed 10,000,000,000 ticks. On the 2.3 GHz validation host that is
+about 4.3 seconds. The scheduler fix expresses both that threshold and its
+one-second system-time interval as calibrated `Duration` values.
+
+With that fix, the first native Lorry generation completed without a
+watchdog or storage failure. The run reached the corrected identity oracle and
+showed the next remapping requirement: hosted Lorry embeds
+`/home/posk/.config/lorry/system/vendor/...` registry source paths, while
+native Lorry embeds `/sys/tools/rust/lorry/vendor/...`. Evidence is under
+`target/lorry/native-tests/stage1-20260727T223005Z-136169`. Ordinary immutable
+registry sources therefore need the same host-independent source presentation
+principle as required patches, with a distinct stable logical namespace.
+
+The scheduler patch passed `src/tests/full-test.sh` three consecutive times
+with the debug image and `src/tests/full-test.sh --release` three consecutive
+times with the release image. Every run included the native Lorry smoke gate.
+The earlier full native run also exercised the debug watchdog through an
+entire first-generation Lorry release build.
+
 ## Legacy combined design and implementation record
 
 The remainder of this file is preserved from the former monolithic
