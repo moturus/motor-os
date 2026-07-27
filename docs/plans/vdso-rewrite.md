@@ -9,12 +9,11 @@ attributed (Section 10). A three-point A/B shows the pre-rewrite tree
 measuring the same ~164 MiB/s on this host, so the gap is a rig change, not a
 code regression, and the 2026-07-19/21 figures are retired as gates.
 
-Review update (2026-07-26): the plan was reviewed and stands, with two
-changes. First, `docs/plans/virtio-rx-coalescing.md` is now sequenced between
-Stage 2 and Stage 3 (rationale in Section 0). Second, the Stage 6 gate is
-restated in comparative form, because its five-consecutive-greens form would
-fail about two times in three on an unchanged tree given the recorded 8-in-10
-flake baseline.
+Review update (2026-07-26): the receive-coalescing work is sequenced between
+Stages 2 and 3. A later cross-plan review rejected Stage 6's statistical
+flake gate: the known debug failures must be fixed before that stage, after
+which the ordinary AGENTS.md gate applies. See
+`docs/plans/networking-step-by-step.md`.
 
 This document is self-contained. Section 0 summarizes what is left, Sections 1
 through 6 describe the target architecture, Section 7 records the work landed
@@ -53,10 +52,9 @@ Three things make the raw patch count misleading:
   that is 150-200 full-test runs, and it will dominate wall-clock for the
   mechanical Stage 3 patches. A per-reviewed-group relaxation for that stage
   would cut this substantially and is worth asking for explicitly; it is not
-  assumed here. Stage 6's gate is stated comparatively (see Stage 6) because
-  five consecutive greens against the 8-in-10 flake baseline would fail
-  roughly two times in three on a good tree. Stage 5's gate lists nine
-  suites.
+  assumed here. The known Stage 6 debug flakes must be fixed before that stage;
+  they cannot be handled with a statistical acceptance rule. Stage 5's gate
+  lists nine suites.
 - **Section 8 adds coverage beyond the stage bullets** -- seventeen regression
   areas, some of which land with their stages and some of which are extra.
 
@@ -86,9 +84,10 @@ three reasons:
 If the coalescing experiment shows large frames do not reach the guest, that
 plan is shelved after ~200 loc and this series continues with nothing lost.
 
-The first patch when work resumes should commit `run-qemu.sh` (Section 10):
-every measurement either plan produces depends on it, and the unexplained
-525-to-164 rig drift shows the rig can move again.
+`src/vm_scripts/run-qemu.sh` is already tracked and copied into each generated
+image. Before further measurement, record the complete benchmark manifest
+described by `docs/plans/networking-step-by-step.md`; the unexplained
+525-to-164 rig drift shows that tracking the VM script alone is insufficient.
 
 ## 1. Decisions and scope
 
@@ -742,14 +741,11 @@ repeated tokio loopback tests, all network suites, and debug
 - Run timeout storms concurrently with active TCP and UDP traffic and assert
   both progress and zero retained wait registrations.
 
-Gate: network suites and release `full-test.sh`. The debug gate is
-comparative rather than consecutive: against the recorded 8-in-10 flake
-baseline, five consecutive greens pass with probability 0.8^5 ~ 33% on an
-unchanged tree, so that form cannot distinguish this change from the
-baseline. Instead, run ten debug `full-test.sh` runs; the pass rate must be
-no worse than the flake baseline and no failure signature may be new. Better
-still, burn the known flakes down before entering this stage and restore the
-consecutive-greens form against a clean baseline.
+Gate: the known debug `full-test.sh` flakes must be diagnosed and fixed before
+this stage begins. Then run the network suites and the ordinary AGENTS.md
+gate: at least three consistently passing debug and three consistently
+passing release `full-test.sh` runs. A comparative pass percentage is not an
+acceptable substitute.
 
 ### Stage 7: cleanup and final gate - not started
 
@@ -874,9 +870,8 @@ is unchanged between `c898d4b5` and HEAD.
 What changed on the rig was attributed but never identified -- governor,
 host kernel, and tap configuration are all candidates. The paired same-host
 rule makes the gate robust to this, but an unexplained 3x drift can recur
-mid-series: treat an out-of-band RR reading as a stop signal for that
-sitting, and commit `run-qemu.sh` before any further tuning so at least the
-VM half of the rig is diffable.
+mid-series: treat an out-of-band RR reading as a stop signal for that sitting,
+and record the benchmark manifest before further tuning.
 
 ### Standing finding: no receive-side coalescing
 
@@ -894,7 +889,8 @@ and Stage 3 of it (Section 0); see `docs/plans/virtio-rx-coalescing.md`.
 
 ### Environment caveats
 
-The host cpufreq governor is `powersave`, and `run-qemu.sh` is untracked, so
-the VM configuration behind any historical number cannot be recovered or
-diffed. Committing `run-qemu.sh` is the first patch of the resumed work
-(Section 0): every measurement either plan produces depends on it.
+The host cpufreq governor is `powersave`. The source
+`src/vm_scripts/run-qemu.sh` is tracked, but historical measurements did not
+record enough host state to recover the rig. The benchmark manifest in
+`docs/plans/networking-step-by-step.md` is required before further
+measurements.

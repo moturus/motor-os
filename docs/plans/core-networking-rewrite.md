@@ -6,6 +6,8 @@ Fourth of the networking plans. `virtio-rx-coalescing.md` raises the receive
 packet-rate ceiling, `tcp-receive-window.md` raises the single-stream window,
 `vdso-rewrite.md` fixes the client-side async boundary. This one covers the
 stack itself: the `moturus/smoltcp` fork and the sys-io code that drives it.
+The authoritative cross-plan execution order and status are in
+`docs/plans/networking-step-by-step.md`.
 
 All findings below were verified against the tree at `d6bcf1de` and the fork
 checkout at `d2ff65b`. Citations are `file:line`; `SM/` is the fork's `src/`,
@@ -574,6 +576,13 @@ first hypothesis. Add a sys-io harness that drives `MotoSocket` state
 transitions. This gates any later architectural work: rewriting demux without
 a fuzzer is how correct-looking stacks ship wrong.
 
+**Missing safety steps -- required before Step 6.** The P2/P3 and ARP
+findings above need explicit implementation patches; regression bullets alone
+do not schedule them. `docs/plans/networking-step-by-step.md` Step 6 orders
+packet-facing arithmetic and short-write fixes, per-packet virtio checksum
+metadata, ISN/port generation, RFC 5961 and PAWS, ARP hardening, and listen
+hardening. Move the fuzz harness ahead of those fork behavior changes.
+
 **Step 6 -- measure, then re-scope.** With Steps 1-5 landed and the other
 three networking plans' work in place, re-run the benchmark set including
 long-RTT and lossy paths, and profile a many-connection server. Only then
@@ -653,7 +662,8 @@ directly -- both change socket buffer allocation -- and they should be done
 together or in a deliberate order, not concurrently.
 
 Step 6's measurement should be the same sitting that re-baselines the other
-plans, on a committed `run-qemu.sh`.
+plans, using the benchmark manifest in
+`docs/plans/networking-step-by-step.md`.
 
 ## Gates
 

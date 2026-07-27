@@ -22,7 +22,10 @@ Completed:
 
 - Reviewed the four companion plans together and checked their central claims
   against the current tree.
-- Established the dependency order in this document.
+- Committed this authoritative execution order as `5e66e52a`.
+- Corrected the companion plans' window-scale, socket-lifecycle,
+  receive-checksum, flaky-gate, benchmark-script, and missing-safety-step
+  statements.
 
 Next:
 

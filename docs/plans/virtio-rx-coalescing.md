@@ -241,17 +241,20 @@ init, and add RX packet-size distribution counters to `NetStats`. Boot, and
 record what the device offers, what the ring depth actually is, and what
 the current RX size histogram looks like. The feature word makes every VMM
 answer "what can be negotiated here?" at boot, which is how the portability
-section's per-VMM claims get verified. This decides A vs B and gives the
-before/after evidence. ~50 loc.
+section's per-VMM claims get verified. This gives the before evidence and
+determines whether Option A can be attempted; Steps 0 and 1 together decide
+whether it works well enough to keep. ~50 loc.
 
-**Step 1 -- Option A, if step 0 supports it.** Define the `GUEST_TSO4/6`
-constants and ack them where offered (the spec requires `GUEST_CSUM`,
-already negotiated); expose a `guest_tso()` accessor; add run-splitting to
-`post_read`; correct `rxq_sz()` for the new chain length; size RX buffers at
->= 65550 in `device.rs`. Negotiation is conditional per the portability
-section: TSO4 and TSO6 are acked independently, and a device offering
-neither gets today's behavior bit-for-bit. Negotiation and buffer sizing
-**must land in the same patch** -- acking guest TSO while still posting
+**Step 1 -- Option A, if step 0 supports it.** This depends on correct
+per-packet handling of the RX header's checksum flags; globally trusting every
+frame merely because `GUEST_CSUM` was negotiated is not sufficient. Define the
+`GUEST_TSO4/6` constants and ack them where offered (the spec requires
+`GUEST_CSUM`, already negotiated); expose a `guest_tso()` accessor; add
+run-splitting to `post_read`; correct `rxq_sz()` for the new chain length;
+size RX buffers at >= 65550 in `device.rs`. Negotiation is conditional per
+the portability section: TSO4 and TSO6 are acked independently, and a device
+offering neither gets today's behavior bit-for-bit. Negotiation and buffer
+sizing **must land in the same patch** -- acking guest TSO while still posting
 2048-byte buffers is a spec violation that would drop or corrupt traffic.
 ~150-200 loc.
 
@@ -283,11 +286,12 @@ when it is reached.
   it. Step 0 exists to resolve it first.
 - **Whether ring depth 14 is workable** for small-packet bursts is genuinely
   uncertain and is the main reason this plan does not simply commit to A.
-- **`run-qemu.sh` is untracked**, so any `rx_queue_size` change there is
-  invisible to git and unreproducible. It should be committed before being
-  used as a tuning knob, otherwise the measurements it produces cannot be
-  audited -- the same defect that made the historical baselines
-  irreproducible.
+- **The generated image's `run-qemu.sh` is ignored, but its source is
+  tracked** at `src/vm_scripts/run-qemu.sh` and copied by the build. Any
+  `rx_queue_size` change belongs in that source. Reproducibility also requires
+  the host/VM benchmark manifest described in
+  `docs/plans/networking-step-by-step.md`; the script alone does not capture
+  the host state behind the historical drift.
 - **Scope.** This is virtio-net and sys-io work. It is independent of the
   `moto-io`/`rt.vdso` refactor series and touches no file that series
   touches. It is now sequenced between that series' Stages 2 and 3 (see

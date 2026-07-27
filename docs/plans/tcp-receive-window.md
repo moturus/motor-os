@@ -43,7 +43,7 @@ reference, fix in passing.)
 **Window scaling already works.** The smoltcp fork sets
 `remote_win_shift = rx_cap_log2 - 16` at socket construction and reset
 (fork `src/socket/tcp.rs:594, 909`) and advertises it in the SYN
-(`:2501-2505`). A 128KB buffer yields shift 1. The advertised window is
+(`:2501-2505`). A 128KB buffer yields shift 2. The advertised window is
 capped by the RX buffer, and a larger buffer automatically yields a larger
 shift and window: **no fork change is needed for larger fixed windows.**
 
@@ -88,15 +88,15 @@ application, bounded by constraint 3: a modest bump (e.g. 512KB) buys
 ~17 MiB/s at 30 ms for +768KB per socket, and no plausible default reaches
 100 MiB/s at WAN RTTs.
 
-**Option B: per-socket sizing, plumbed end to end.** A size hint in the
-bind/connect requests; typed async `set_recv_buffer_size` /
-`set_send_buffer_size` staged before bind/connect in `moto-io`;
-`SO_RCVBUF`/`SO_SNDBUF` in the vDSO option dispatch, staged in the wrapper
-and applied at connect, inherited from the listener by accepted sockets. A
-set after connect stores and reports the value but does not resize --
-POSIX-tolerable and roughly what Linux does with the scale already fixed.
-Reaches socket2/mio/libc and native callers; does not help unmodified
-applications on default paths.
+**Option B: per-socket sizing, plumbed end to end.** This option needs a
+boundary redesign before implementation. Motor's current outbound
+`tcp_connect(addr, timeout, nonblocking)` returns an FD only after connection
+setup starts, so no vDSO wrapper exists on which socket2/mio/libc can stage
+`SO_RCVBUF`/`SO_SNDBUF` before the SYN. A native builder, a new vDSO ABI, or
+growable rings could solve that, but choosing among them is a separate design
+decision. Listener inheritance, post-connect behavior, and requested versus
+effective `getsockopt` values must be defined in that design; silently
+reporting a size that was not applied is not acceptable.
 
 **Option C: receive autotuning in the fork.** Linux-style dynamic buffer
 growth from measured delivery rate. The durable answer for arbitrary RTTs
@@ -123,19 +123,21 @@ claim, records the before-curve, and probes constraint 5 (loss recovery at
 RTT) before any code is written. ~0 loc; the netem command lines land in
 this document.
 
-**Step 1 -- raise the default.** Proposal: 512KB RX / 512KB TX, i.e. 1MB
-per socket instead of 256KB, confirmed against Step 0's curve. If the
-per-socket memory budget is not obviously acceptable, stop and ask for
-guidance per AGENTS.md rather than guessing. Re-run the netem curve and
-record both in this document. ~10 loc plus tests.
+**Step 1 -- raise the default, after listen-path hardening.** Proposal: 512KB
+RX / 512KB TX, i.e. 1MB per socket instead of 256KB, confirmed against Step
+0's curve and executed only after `core-networking-rewrite.md` Step 4 has
+bounded half-open sockets and removed their eager full-buffer commitment. If
+the per-socket memory budget is not obviously acceptable, stop and ask for
+guidance per AGENTS.md rather than guessing. Re-run the netem curve and record
+both in this document. ~10 loc plus tests.
 
-**Step 2 -- per-socket sizing (Option B).** Size hint in bind/connect
-requests; sys-io honors it in `create_tcp_socket` with a sane clamp
-(floor today's 128KB? cap at a few MB -- decide during implementation);
-typed async native methods; `SO_RCVBUF`/`SO_SNDBUF` in the option dispatch;
-listener inheritance; `getsockopt` reporting. 2-4 patches. This step
+**Step 2 -- redesign and implement per-socket sizing (Option B).** First
+resolve the outbound pre-connect API, listener timing, post-connect behavior,
+requested/effective reporting, and exact RX/TX clamp semantics in a reviewed
+plan. Then implement the chosen design in small end-to-end patches. This step
 touches the option paths the `moto-io`/`rt.vdso` series is churning, so it
-lands after that series' Stage 3 wrappers exist (see Sequencing).
+lands after that series' Stage 3 wrappers exist and after core networking Step
+4 (see Sequencing).
 
 **Step 3 -- autotuning (Option C).** Explicitly deferred. Reopen only with
 evidence that fixed defaults plus per-socket sizing are insufficient for a
@@ -172,13 +174,11 @@ first, after which a larger cap costs nothing per half-open socket.
 
 ## Sequencing
 
-Steps 0-1 touch only `sys-io/src/runtime/net/socket/tcp.rs` plus host-side
-rig commands -- no overlap with either the `moto-io`/`rt.vdso` series or
-the virtio coalescing plan -- and can land in the same sitting as the
-coalescing measurements. Step 2 waits for the vDSO series' Stage 3 (`Rt*`
-wrappers own the option dispatch it extends). Committing `run-qemu.sh`
-first applies here too: the netem curves join the same auditable-rig
-regime as the other plans' benchmarks.
+Step 0 can run in the same sitting as the coalescing measurements. Step 1
+waits for core networking Step 4; Step 2 waits for both that step and the vDSO
+series' Stage 3. `src/vm_scripts/run-qemu.sh` is already tracked; the netem
+curves use the benchmark manifest required by
+`docs/plans/networking-step-by-step.md`.
 
 ## Gates
 
